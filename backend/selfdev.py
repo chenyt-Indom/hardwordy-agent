@@ -276,7 +276,14 @@ def list_tree(rel: str = "", depth: int = 2) -> dict:
             "more": len(lines) > 400}
 
 
-def read(rel: str) -> dict:
+def read(rel: str, start: int = 0, end: int = 0) -> dict:
+    """读源码。**支持按行取**（2026-11-08 改）。
+
+    ⚠️ 为什么必须分页：`backend/main.py` 有 340KB / 7000+ 行，
+    整份返回会把模型的上下文一次灌满 —— 实测本地 8B 读完就再也写不动了
+    （思考 5000 字、只调 read/tree，就是不落笔）。
+    现在默认最多给 200 行，并告诉它总行数和怎么翻页。
+    """
     try:
         r = safe_rel(rel)
     except PathError as e:
@@ -284,16 +291,56 @@ def read(rel: str) -> dict:
     p = os.path.join(project_root(), r)
     if not os.path.isfile(p):
         return {"ok": False, "error": "文件不存在：%s" % r}
-    if os.path.getsize(p) > MAX_READ:
-        return {"ok": False,
-                "error": "文件太大（>%dKB），请只读需要的部分" % (MAX_READ // 1024)}
     try:
         with open(p, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
+            all_lines = f.read().splitlines()
     except OSError as e:
         return {"ok": False, "error": "读取失败：%s" % e}
-    return {"ok": True, "rel": r, "path": p, "text": text,
-            "chars": len(text), "lines": text.count("\n") + 1}
+    total = len(all_lines)
+    if start or end:
+        s0 = max(1, int(start or 1))
+        e0 = min(total, int(end or (s0 + 199)))
+    else:
+        s0, e0 = 1, min(total, 200)
+    chunk = all_lines[s0 - 1:e0]
+    # 带行号：模型才能说出"加在第 X 行附近"，patch 也更容易对准
+    text = "\n".join("%5d| %s" % (i, ln) for i, ln in enumerate(chunk, s0))
+    body = ("【%s】共 %d 行，本次给你第 %d~%d 行\n```\n%s\n```" %
+            (r, total, s0, e0, text))
+    if e0 < total:
+        body += ("\n（后面还有 %d 行。要看继续用 start=%d，或先用 "
+                 "selfdev_grep 搜关键字再精准定位）" % (total - e0, e0 + 1))
+    return {"ok": True, "rel": r, "path": p, "text": body, "total_lines": total,
+            "start": s0, "end": e0, "truncated": e0 < total}
+
+
+def grep(rel: str, pattern: str, limit: int = 40) -> dict:
+    """在文件里搜关键字 → 返回行号 + 那一行（给模型定位用）。
+
+    比"整份读完再找"快一个数量级，也是小模型唯一可行的改码路径。
+    """
+    try:
+        r = safe_rel(rel)
+    except PathError as e:
+        return {"ok": False, "error": str(e)}
+    p = os.path.join(project_root(), r)
+    if not os.path.isfile(p):
+        return {"ok": False, "error": "文件不存在：%s" % r}
+    try:
+        lines = open(p, "r", encoding="utf-8", errors="replace").read().splitlines()
+    except OSError as e:
+        return {"ok": False, "error": "读取失败：%s" % e}
+    hits = []
+    for i, ln in enumerate(lines, 1):
+        if pattern and pattern in ln:
+            hits.append("%5d| %s" % (i, ln[:200]))
+            if len(hits) >= limit:
+                break
+    if not hits:
+        return {"ok": True, "text": "没搜到「%s」（共 %d 行）" % (pattern, len(lines))}
+    return {"ok": True,
+            "text": "在 %s 里搜到 %d 处「%s」：\n```\n%s\n```"
+                    % (r, len(hits), pattern, "\n".join(hits))}
 
 
 # ---------------------------------------------------------------- 校验
@@ -442,6 +489,49 @@ def write(rel: str, content: str, note: str = "") -> dict:
             added=d["added"], removed=d["removed"])
     return {"ok": True, "rel": r, "path": p, "chars": len(content), "backup": bak,
             "diff": d, "is_new": not before}
+
+
+def insert_after(rel: str, anchor: str, text: str, note: str = "") -> dict:
+    """在**某一行之后**插入一段文本（只要给"那一行里的一句"，不用复述整段）。
+
+    为什么加它（2026-11-08 实测）：`patch` 要求 `find` 和原文**一字不差**，
+    让本地 8B 复述 30 行几乎不可能 —— 它读了 8 分钟也没敢下手。
+    这个工具只要一句**唯一的锚点**（比如「每一轮先判一句」），
+    模型的工作量从"抄写"降到"指认"，小模型才有可能把活干完。
+    """
+    got = read(rel, start=1, end=0)
+    if not got.get("ok"):
+        return got
+    # read 返回的是带行号的展示文本，这里重新取原文
+    p = os.path.join(project_root(), safe_rel(rel))
+    try:
+        lines = open(p, "r", encoding="utf-8").read().splitlines()
+    except OSError as e:
+        return {"ok": False, "error": "读取失败：%s" % e}
+
+    a = (anchor or "").strip()
+    if not a:
+        return {"ok": False, "error": "anchor 不能为空"}
+    hits = [i for i, ln in enumerate(lines) if a in ln]
+    if not hits:
+        return {"ok": False, "error": "没找到包含「%s」的行" % a[:60]}
+    if len(hits) > 1:
+        return {"ok": False,
+                "error": "「%s」出现在 %d 行里，请给更长的锚点（第 %s 行）"
+                         % (a[:40], len(hits), "、".join(str(h + 1) for h in hits[:8]))}
+
+    idx = hits[0]
+    # 缩进跟随锚点行，插入内容才不会破坏结构。
+    # ⚠️ 先**去掉模型自带的公共缩进**：模型经常把整段代码带着缩进传来，
+    #   直接再补一次就变成 8 空格 → Python 报 unexpected indent
+    #   （我自己第一版就踩了，实测报错「第 4 行 unexpected indent」）。
+    raw = text.splitlines()
+    pads = [len(ln) - len(ln.lstrip()) for ln in raw if ln.strip()]
+    cut = min(pads) if pads else 0
+    indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+    block = [indent + ln[cut:] if ln.strip() else ln for ln in raw]
+    new_lines = lines[:idx + 1] + block + lines[idx + 1:]
+    return write(rel, "\n".join(new_lines) + "\n", note or ("insert_after: " + a[:40]))
 
 
 def patch(rel: str, find: str, replace: str, note: str = "") -> dict:

@@ -1451,11 +1451,24 @@ def _selfdev_schemas() -> list:
                           "description": "展开几层，1~4，默认 2"}},
                 "required": []}}},
         {"type": "function", "function": {
+            "name": "selfdev_grep",
+            "description": ("在源码文件里**搜关键字**，返回行号 + 那一行。"
+                            "改代码前**先用它定位**，再去读那几十行 —— 比整份读完快十倍，"
+                            "也不会把上下文灌满。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "相对路径"},
+                "pattern": {"type": "string",
+                            "description": "要找的文字（原样匹配，如「每一轮先判一句」）"}},
+                "required": ["rel", "pattern"]}}},
+        {"type": "function", "function": {
             "name": "selfdev_read",
-            "description": "读本应用源码文件的**完整内容**（改之前必须先读，别凭记忆改）。",
+            "description": ("读源码文件，**按行分页**（默认只给前 200 行，带行号）。"
+                            "大文件务必配合 start/end，或用 selfdev_grep 先定位。"),
             "parameters": {"type": "object", "properties": {
                 "rel": {"type": "string",
-                        "description": "相对项目根的路径，如 backend/tools.py"}},
+                        "description": "相对项目根的路径，如 backend/tools.py"},
+                "start": {"type": "integer", "description": "起始行（1 开始，可空）"},
+                "end": {"type": "integer", "description": "结束行（可空）"}},
                 "required": ["rel"]}}},
         {"type": "function", "function": {
             "name": "selfdev_write",
@@ -1467,6 +1480,19 @@ def _selfdev_schemas() -> list:
                 "content": {"type": "string", "description": "完整的文件内容"},
                 "note": {"type": "string", "description": "这次改了什么（留痕用）"}},
                 "required": ["rel", "content"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_insert_after",
+            "description": ("**在某一行之后插入一段内容**（改代码最省事的方式）。"
+                            "只要给「那一行里独有的一句」当锚点，不用复述整段原文 —— "
+                            "比 selfdev_patch 容易得多，适合小模型。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "相对路径"},
+                "anchor": {"type": "string",
+                           "description": "锚点：那一行里独有的文字（必须只命中一行）"},
+                "text": {"type": "string",
+                         "description": "要插入的内容（多行用 \\n，缩进会自动跟随锚点行）"},
+                "note": {"type": "string", "description": "改动说明"}},
+                "required": ["rel", "anchor", "text"]}}},
         {"type": "function", "function": {
             "name": "selfdev_patch",
             "description": ("**精确替换**源码里的某一段（最安全的改法）。"
@@ -1598,12 +1624,22 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             return ("项目根：%s\n（只列可改写的文件；data/models 等运行期目录不列）\n"
                     % r["root"] + "\n".join(r["files"])
                     + ("\n…（还有更多，用 rel 缩小范围）" if r.get("more") else ""))
+        if name == "selfdev_grep":
+            r = _sd.grep(str(a.get("rel") or ""), str(a.get("pattern") or ""))
+            return r.get("text") if r.get("ok") else ("搜索失败：%s" % r.get("error"))
         if name == "selfdev_read":
-            r = _sd.read(str(a.get("rel") or ""))
+            try:
+                st = int(a.get("start") or 0)
+            except Exception:
+                st = 0
+            try:
+                en = int(a.get("end") or 0)
+            except Exception:
+                en = 0
+            r = _sd.read(str(a.get("rel") or ""), start=st, end=en)
             if not r.get("ok"):
                 return "读取失败：%s" % r.get("error")
-            return ("【%s】%d 行 / %d 字\n```\n%s\n```"
-                    % (r["rel"], r["lines"], r["chars"], r["text"]))
+            return r["text"]
         if name == "selfdev_write":
             r = _sd.write(str(a.get("rel") or ""), str(a.get("content") or ""),
                           str(a.get("note") or ""))
@@ -1614,6 +1650,18 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             return ("已写入 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
                     "记得改完调 selfdev_restart 生效。"
                     % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
+        if name == "selfdev_insert_after":
+            r = _sd.insert_after(str(a.get("rel") or ""),
+                                 str(a.get("anchor") or ""),
+                                 str(a.get("text") or ""),
+                                 str(a.get("note") or ""))
+            if not r.get("ok"):
+                return "插入失败：%s" % r.get("error")
+            _selfdev_ui(ui_events, "insert", r)
+            d = r.get("diff") or {}
+            return ("已在 %s 插入一段（+%d −%d 行）。详情已作为卡片展示给用户。\n"
+                    "改完调 selfdev_restart 生效。"
+                    % (r["rel"], d.get("added", 0), d.get("removed", 0)))
         if name == "selfdev_patch":
             r = _sd.patch(str(a.get("rel") or ""), str(a.get("find") or ""),
                           str(a.get("replace") or ""), str(a.get("note") or ""))
