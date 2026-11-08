@@ -1517,6 +1517,25 @@
     return "";
   }
 
+  // 把"本机路径"读成附件（后端 /api/local-file）
+  async function addImageFromPath(path) {
+    try {
+      const rr = await fetch("/api/local-file", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: path }),
+      });
+      const r = await rr.json();
+      if (!r.ok) { showToast(r.error || "读取失败", "warn"); return; }
+      if (images.indexOf(r.dataurl) >= 0) { showToast("这张图已经在附件里了", "warn"); return; }
+      images.push(r.dataurl);
+      renderAttachments();
+      showToast("已添加：" + r.name, "ok");
+    } catch (err) {
+      showToast("读取失败：" + err.message, "err");
+    }
+  }
+
   function onDropFiles(files) {
     let list = files ? [...files] : [];
     if (!list.length) {
