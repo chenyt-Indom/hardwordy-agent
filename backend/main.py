@@ -6192,6 +6192,8 @@ async def chat_deepseek(req: ChatRequest,
                 for kind, val in deepseek_client.chat_stream_with_tools(
                         clean, model, x_deepseek_key, tool_schemas, executor,
                         temperature=min(1.3, max(0.0, temp)),
+                        # 采样参数跟本地通道保持一致（之前 top_p 完全没传）
+                        top_p=min(1.0, max(0.01, float(cfg.get("top_p") or 0.95))),
                         # ★ 2026-11-08 修：**原来没传 max_tokens**，用的是函数默认 4096。
                         #   开了 thinking 之后推理 token 也吃这个额度 → 正文被截在半句
                         #   （用户报「思考过程有了，但输出被限制了」）。

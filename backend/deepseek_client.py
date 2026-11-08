@@ -317,6 +317,7 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                            tools: list[dict], tool_executor,
                            max_rounds: int = 8,
                            temperature: float = 0.7, max_tokens: int = 8192,
+                           top_p: float | None = None,
                            thinking: bool | None = None,
                            reasoning_effort: str | None = None,
                            system_prompt: str | None = None,
@@ -381,6 +382,9 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
             "messages": msgs,
             "stream": True,
             "temperature": temperature,
+            # ★ 2026-11-08：top_p 之前**完全没传** —— 前端那条采样滑杆对云端是死的。
+            #   现在显式带上；None 表示"由模型默认"，不塞空值（有的网关会报错）。
+            **({"top_p": top_p} if top_p is not None else {}),
             "max_tokens": max_tokens,
             "thinking": {"type": "enabled" if thinking else "disabled"},
         }
