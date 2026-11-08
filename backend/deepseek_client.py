@@ -139,6 +139,49 @@ class DeepSeekError(RuntimeError):
     """DeepSeek 调用失败。message 已脱敏。"""
 
 
+def vision_chat(prompt: str, image_b64: str, model: str, api_key: str,
+                max_tokens: int = 900, timeout: tuple = (15, 180)) -> str:
+    """**看图**：把图片按 OpenAI 多模态格式发给模型，返回文字回答。
+
+    2026-11-08 实测：DeepSeek（deepseek-chat / deepseek-flash）**接受 image_url**
+    并能正确描述截图内容（问"顶栏有没有控件重叠"，回答与截图一致）。
+    所以不需要绕道本地视觉模型 —— 直接把图给它看，反馈质量更好。
+    """
+    if not api_key:
+        raise DeepSeekError("缺少 API Key")
+    # ⚠️ 前端传的是**内部 id**（deepseek-flash），官方 API 只认 wire_model（deepseek-chat）。
+    #   不映射的话这里会 400 model_not_found，然后静默回退本地视觉模型 —— 踩过。
+    _conf = next((m for m in MODELS if m["id"] == model), None)
+    wire = (_conf or {}).get("wire_model") or model or "deepseek-chat"
+    body = {
+        "model": wire,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt or "描述这张图片"},
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64," + image_b64}},
+        ]}],
+    }
+    try:
+        r = _session().post(f"{BASE}/chat/completions", json=body,
+                            headers={"Authorization": f"Bearer {api_key}",
+                                     "Content-Type": "application/json"},
+                            timeout=timeout, proxies=NO_PROXY_MAP)
+    except requests.RequestException as e:
+        raise DeepSeekError("看图请求失败：%s" % scrub(e)) from None
+    if r.status_code != 200:
+        raise DeepSeekError("看图返回 %s：%s" % (r.status_code, scrub((r.text or "")[:200])))
+    try:
+        d = r.json()
+    except Exception:
+        raise DeepSeekError("看图返回的不是 JSON") from None
+    msg = ((d.get("choices") or [{}])[0]).get("message") or {}
+    txt = str(msg.get("content") or "").strip()
+    if not txt:
+        raise DeepSeekError("模型没有返回内容")
+    return txt
+
+
 def chat_stream(messages: list[dict], model: str, api_key: str,
                 temperature: float = 0.7, max_tokens: int = 8192,
                 thinking: bool | None = None,

@@ -1317,6 +1317,9 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                    if s["function"]["name"] != "web_image_search"]
     # 上传到代码托管平台：属于"对外发布"，始终暴露但执行前必须问用户
     schemas.append(_GITHUB_PUSH_SCHEMA)
+    # ---------- 「眼睛」：截图 / 看图（2026-11-08）----------
+    schemas.extend(_vision_schemas())
+
     # ---------- 定时任务（长期自动化）----------
     # 常驻能力：用户说「每天早上帮我…」「每两小时盯一下…」就要用它。
     schemas.extend(_schedule_schemas())
@@ -1352,6 +1355,70 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                    if (s.get("function", {}).get("name") not in _drop
                        and not s.get("function", {}).get("name", "").startswith("workspace_"))]
     return schemas
+
+
+# ---------- 「眼睛」：截图 / 看图 ----------
+def _vision_schemas() -> list:
+    return [
+        {"type": "function", "function": {
+            "name": "look_at_screen",
+            "description": ("**截图看当前界面**：无头浏览器截一张图 → 交给模型自己看。\n"
+                            "改完前端 / 样式 / 排版后**必须**调它自查：有没有重叠、错位、"
+                            "被裁切、横向挤压、文字看不清。返回的是它对画面的描述，"
+                            "你据此再决定要不要微调。"),
+            "parameters": {"type": "object", "properties": {
+                "question": {"type": "string", "description": "重点看什么（可空）"},
+                "width": {"type": "integer", "description": "视口宽，默认 1280"},
+                "height": {"type": "integer", "description": "视口高，默认 900"}},
+                "required": []}}},
+        {"type": "function", "function": {
+            "name": "look_at_image",
+            "description": ("看**一张已有的图片**（生成的图、截图、幻灯片预览等），"
+                            "判断成品质量：构图 / 文字 / 留白 / 是否糊 / 是否跑偏。"),
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "图片路径（绝对路径或项目内相对路径）"},
+                "question": {"type": "string", "description": "想问什么（可空）"}},
+                "required": ["path"]}}},
+    ]
+
+
+def _do_vision(name: str, arguments: dict, context: dict = None) -> str:
+    from . import vision as V
+    a = arguments or {}
+    ctx = context or {}
+    key = str(ctx.get("ds_key") or "")
+    model = str(ctx.get("model") or "") or "deepseek-flash"
+    try:
+        if name == "look_at_screen":
+            shot = V.screenshot(width=int(a.get("width") or 1280),
+                                height=int(a.get("height") or 900))
+            if not shot.get("ok"):
+                return "截图失败：%s" % shot.get("error")
+            d = V.describe(shot["path"], str(a.get("question") or ""),
+                           ds_key=key, model=model)
+            if not d.get("ok"):
+                return "截图成功（%s），但看不了：%s" % (shot["path"], d.get("error"))
+            return ("[当前界面截图 %s | %s]\n%s" %
+                    (shot["path"], d.get("model"), d.get("text")))
+        if name == "look_at_image":
+            raw = str(a.get("path") or "").strip()
+            if not raw:
+                return "要我看哪张图？给个路径。"
+            path = raw
+            if not os.path.isabs(path):
+                from . import selfdev as _sd
+                try:
+                    path = os.path.join(_sd.project_root(), raw.lstrip("/"))
+                except Exception:
+                    pass
+            d = V.describe(path, str(a.get("question") or ""),
+                           ds_key=key, model=model)
+            if not d.get("ok"):
+                return "看不了这张图：%s" % d.get("error")
+            return "[%s | %s]\n%s" % (path, d.get("model"), d.get("text"))
+    except Exception as e:                            # noqa: BLE001
+        return "看图工具出错：%s: %s" % (type(e).__name__, e)
+    return "未知的看图工具：%s" % name
 
 
 # ---------- 定时 / 长期自动化任务 ----------
@@ -2086,6 +2153,10 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
         return _do_schedule(name, arguments)
     if name == "cancel_schedule":
         return _do_schedule(name, arguments)
+    if name == "look_at_screen":
+        return _do_vision(name, arguments, context)
+    if name == "look_at_image":
+        return _do_vision(name, arguments, context)
     if name.startswith("selfdev_"):
         return _do_selfdev(name, arguments, context, ui_events)
     if name == "workspace_list":
