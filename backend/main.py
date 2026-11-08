@@ -6122,7 +6122,10 @@ async def chat_deepseek(req: ChatRequest,
     messages = req.messages or []
     session = req.session_id or ""
 
-    # 只保留 role/content：Ollama 的额外字段（images 等）DeepSeek 不认
+    # 只保留 role/content（Ollama 的额外字段 DeepSeek 不认）。
+    # ⚠️ 但 **图片是认的** —— 2026-11-08 之前这里把 images 一起丢了，
+    #    所以用户拖图问云端模型，模型回答"我看不到图片"。
+    #    实测 DeepSeek 接受 image_url（content 用数组形式），见 vision_chat()。
     clean: list[dict] = []
     for m in messages:
         content = m.get("content")
@@ -6130,6 +6133,22 @@ async def chat_deepseek(req: ChatRequest,
             continue
         clean.append({"role": str(m.get("role") or "user"),
                       "content": str(content)})
+
+    # 把本轮图片挂到最后一条 user 消息上（数组 content，OpenAI 多模态格式）
+    _imgs = [x for x in (req.images_b64 or []) if isinstance(x, str) and len(x) > 100]
+    _img_ok = model in ("deepseek-flash", "deepseek-flash-think")   # v4-pro 只支持文本
+    if _imgs and _img_ok and clean:
+        for i in range(len(clean) - 1, -1, -1):
+            if clean[i].get("role") == "user":
+                _parts = [{"type": "text", "text": str(clean[i].get("content") or "")}]
+                for b64 in _imgs[:4]:                 # 一次最多 4 张，别把额度烧光
+                    _parts.append({"type": "image_url",
+                                   "image_url": {"url": "data:image/png;base64," + b64}})
+                clean[i]["content"] = _parts
+                logger.info("云端通道附带 %d 张图片（model=%s）", len(_parts) - 1, model)
+                break
+    elif _imgs and not _img_ok:
+        logger.warning("当前云模型 %s 不支持图片输入，已忽略 %d 张图", model, len(_imgs))
 
     last_user = next((str(m.get("content") or "") for m in reversed(clean)
                       if m.get("role") == "user"), "")
@@ -7195,6 +7214,51 @@ def library_download(rel: str):
 def library_open_folder():
     """在资源管理器里打开生成文库目录（容器里由宿主机小助手代劳）。"""
     return _open_folder_impl(doclib.ensure_dir())
+
+
+    @app.post("/api/doclib/open_file")
+    def library_open_file(body: dict):
+        """用本机默认程序**直接打开**生成文库里的一个文件。
+
+        用户反馈（2026-11-08）：产物卡片上只有一个「下载」按钮，想看 Word / PPT
+        还得自己去文件夹里一层层翻 —— 希望"双击就能打开"。
+
+        所以这里直接交给系统：Windows `os.startfile`、macOS `open`、
+        Linux `xdg-open`（等同于在资源管理器里双击那个文件）。
+        容器里调不起宿主机的程序，改由宿主机小助手在资源管理器里选中该文件。
+        """
+        rel = str((body or {}).get("rel") or "").strip()
+        if not rel:
+            raise HTTPException(400, "缺少文件路径 rel")
+        try:
+            path = doclib.file_path(rel)          # 内部会校验越界
+        except Exception as e:
+            raise HTTPException(400, f"路径不合法：{e}")
+        if not os.path.isfile(path):
+            raise HTTPException(404, "文件不存在（可能已被删除或改名）")
+
+        if _is_container():
+            if _host_agent_alive() and _request_host_open(path):
+                return {"ok": True, "opened": False, "via": "host-agent",
+                        "host_path": _host_path(path),
+                        "detail": "运行在容器里，已请宿主机在资源管理器中选中这个文件"}
+            return {"ok": True, "opened": False, "host_path": _host_path(path),
+                    "detail": "运行在容器里，无法直接调用宿主机的程序"}
+
+        try:
+            import subprocess
+            if os.name == "nt":
+                os.startfile(path)                # 等同双击
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+            return {"ok": True, "opened": True, "path": path}
+        except FileNotFoundError:
+            return {"ok": True, "opened": False, "path": path,
+                    "detail": "系统里没找到能打开这个文件的程序"}
+        except Exception as e:
+            raise HTTPException(500, f"打开文件失败：{e}")
 
 
 @app.post("/api/code/run")
