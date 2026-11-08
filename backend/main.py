@@ -33,7 +33,7 @@ import datetime
 import logging
 import threading
 from . import (config, ollama_client, deepseek_client, cloud_image, image_models,
-               selfdev, scheduler, model_manager, selftest, memory, kb,
+               selfdev, scheduler, perf, model_manager, selftest, memory, kb,
                file_tools, video, web_tools,
                t2i, tools, voice, sessions, image_library, doclib, docx_write,
                workspace)
@@ -4146,6 +4146,13 @@ async def chat(req: ChatRequest,
     _AUTO_OK["on"] = False
     _AUTO_OK["hits"] = 0
     cfg = config.load_config()
+    # ★ 性能档位/上下文在这里落到本次请求（用户要求：参数量不低于此，且可无极调）
+    try:
+        _pf = perf.get()
+        cfg["max_tokens"] = max(int(cfg.get("max_tokens") or 0), _pf["max_tokens"])
+        cfg["num_ctx"] = _pf["num_ctx"]
+    except Exception:
+        logger.warning("性能档位读取失败（按原配置继续）", exc_info=True)
     model = req.model or cfg["default_model"]
     if str(model).strip().lower() in ("", "auto"):
         model = cfg["default_model"]          # 前端传 "auto" 时按配置走
@@ -5726,6 +5733,68 @@ def code_model_set(body: dict):
     return {"ok": True, "model": m, "msg": "代码模型已切换"}
 
 
+# ---------------- 完全访问 / 性能档位 / 版本 diff ----------------
+@app.get("/api/selfdev/fullaccess")
+def fullaccess_get():
+    cfg = config.load_config() or {}
+    return {"ok": True, "on": bool(cfg.get("self_dev_full_access"))}
+
+
+@app.post("/api/selfdev/fullaccess")
+def fullaccess_set(body: dict):
+    """开关「完全访问」：关着只能改 frontend/，开着才能改 backend/*.py。"""
+    on = bool((body or {}).get("on"))
+    cfg = config.load_config() or {}
+    cfg["self_dev_full_access"] = on
+    config.save_config(cfg)
+    selfdev.journal("fullaccess", "-", on=on)
+    return {"ok": True, "on": on,
+            "msg": ("已开启完全访问：模型可以改 backend/*.py 等核心代码"
+                    if on else "已关闭完全访问：只能改 frontend/ 与新建文件")}
+
+
+@app.get("/api/perf")
+def perf_get():
+    return {"ok": True, **perf.get()}
+
+
+@app.post("/api/perf")
+def perf_set(body: dict):
+    b = body or {}
+    try:
+        ctx = int(b.get("num_ctx")) if b.get("num_ctx") is not None else -1
+    except Exception:
+        ctx = -1
+    try:
+        mt = int(b.get("max_tokens") or 0)
+    except Exception:
+        mt = 0
+    return perf.set(str(b.get("profile") or ""), num_ctx=ctx, max_tokens=mt)
+
+
+@app.get("/api/selfdev/diff")
+def selfdev_diff(batch: str = "", rel: str = ""):
+    """给版本历史用：某批次里某个文件「备份 vs 现在」的差异。"""
+    if not batch or not rel:
+        return {"ok": False, "error": "需要 batch 和 rel"}
+    items = [x for x in selfdev.list_backups(600)
+             if x["batch"] == batch and x["rel"] == rel]
+    if not items:
+        return {"ok": False, "error": "找不到这个备份"}
+    bak = items[0]["path"]
+    try:
+        before = open(bak, "r", encoding="utf-8", errors="replace").read()
+    except OSError as e:
+        return {"ok": False, "error": "读备份失败：%s" % e}
+    cur_path = os.path.join(selfdev.project_root(), rel)
+    try:
+        after = open(cur_path, "r", encoding="utf-8", errors="replace").read()
+    except OSError:
+        after = ""
+    d = selfdev.make_diff(before, after, rel)
+    return {"ok": True, **d, "rel": rel, "batch": batch}
+
+
 # ---------------- 自开发（改自己的源码）----------------
 @app.get("/api/selfdev/status")
 def selfdev_status():
@@ -6127,7 +6196,8 @@ async def chat_deepseek(req: ChatRequest,
                         #   开了 thinking 之后推理 token 也吃这个额度 → 正文被截在半句
                         #   （用户报「思考过程有了，但输出被限制了」）。
                         #   现在跟随全局配置（16384），并配 client 侧的截断续写。
-                        max_tokens=int(cfg.get("max_tokens") or 8192),
+                        max_tokens=max(int(cfg.get("max_tokens") or 8192),
+                                       (perf.get() or {}).get("max_tokens", 0)),
                         system_prompt=sys_prompt,
                         # 轮次上限跟主通道用同一份配置（用户要求放到最多）
                         max_rounds=max(1, min(int(cfg.get("max_tool_rounds") or 60), 200)),

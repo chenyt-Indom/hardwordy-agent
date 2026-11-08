@@ -2150,3 +2150,13 @@ body.topbar-collapsed .top-bar.tools-bar { padding: 4px 16px 8px; }
 .msg.bot > * { max-width: 100%; min-width: 0; }
 /* 气泡本身不能因此变成满宽（单条消息还是要有"对话感"） */
 .msg.bot > .bubble { align-self: flex-start; }
+
+/* 版本改动的 diff 展开（2026-11-08） */
+.sd-batch-diff { padding: 4px 0 8px; }
+.sd-diff-hd {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  color: #cfd6e2;
+  margin: 8px 0 4px;
+}
+.sd-batch-diff .sd-pre { border: 1px solid #2a323e; }

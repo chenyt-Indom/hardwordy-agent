@@ -221,6 +221,18 @@ def safe_rel(rel: str) -> str:
         raise PathError("「%s」是运行期数据/二进制目录，禁止模型改写" % first)
     if r in PROTECTED:
         raise PathError("「%s」是回撤机制自身，禁止模型改写（改坏了就退不回来了）" % r)
+    # ★ 完全访问开关（2026-11-08 用户要求，类比 WorkBuddy 的权限模式）
+    #   关：只允许改 frontend/ 和新建文件（保护后端核心，默认）
+    #   开：允许改 backend/*.py 等核心代码 —— 自我迭代改后端必须开这个
+    if r.startswith("backend/"):
+        try:
+            _full = bool((config.load_config() or {}).get("self_dev_full_access"))
+        except Exception:
+            _full = False
+        if not _full:
+            raise PathError(
+                "改 backend/ 需要先打开「完全访问」开关"
+                "（顶栏 🛠 自开发 面板里）。当前只能改 frontend/ 或新建文件。")
     ext = os.path.splitext(full)[1].lower()
     if ext in DENY_EXT:
         raise PathError("这个扩展名（%s）是二进制/日志，不能直接写" % ext)

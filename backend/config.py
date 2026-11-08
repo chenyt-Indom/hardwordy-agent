@@ -262,6 +262,14 @@ DEFAULT_CONFIG = {
     # ⚠️ 打开后模型可以直接读写本项目的 backend/frontend 文件并重启自己。
     #    默认关闭：这是个"能把自己改坏"的能力，必须用户明确打开。
     "self_dev_enabled": False,
+    # ★ 完全访问（2026-11-08 用户要求，类比 WorkBuddy 的权限开关）
+    #   OFF：只能改 frontend/ 与新建文件（默认，最安全）
+    #   ON ：允许改 backend/*.py 等核心源码（危险，但自我迭代改后端需要）
+    "self_dev_full_access": False,
+    # ★ 性能档位：fast / medium / high / ultra（映射见 backend/perf.py）
+    "perf_profile": "medium",
+    # 上下文长度：可无极调节（4k~128k），留 0 = 跟随档位
+    "num_ctx_override": 0,
     # 允许改写的根目录（留空 = 本项目根）
     "self_dev_root": "",
     "image_api_base": "https://xingpan.site/v1",

@@ -134,6 +134,12 @@ class OllamaClient:
         # ⚠️ **必须显式给 keep_alive**：Ollama 默认只保活 5 分钟，超时就卸载模型。
         # 不给的话，用户隔几分钟再发消息就要重新加载（实测冷启动 4.5 秒起步），
         # 体感就是"发出去半天没反应"。值走配置（model_keep_alive，默认 30m）。
+        # ★ 上下文长度走性能档位（用户要求可无极调节）；读不到就退回配置
+        try:
+            from . import perf as _perf
+            _ctx = int(_perf.get()["num_ctx"])
+        except Exception:
+            _ctx = None
         try:
             _ka = (config.load_config() or {}).get("model_keep_alive")
         except Exception:
@@ -141,10 +147,13 @@ class OllamaClient:
         if _ka:
             payload["keep_alive"] = _ka
         if params:
-            try:
-                fixed_ctx = int(config.load_config().get("num_ctx") or 8192)
-            except Exception:
-                fixed_ctx = int(params.get("num_ctx") or 8192)
+            # 优先级：性能档位（用户可在界面上无极调节）> 配置 > 调用方传入
+            fixed_ctx = _ctx
+            if not fixed_ctx:
+                try:
+                    fixed_ctx = int(config.load_config().get("num_ctx") or 8192)
+                except Exception:
+                    fixed_ctx = int(params.get("num_ctx") or 8192)
             payload["options"] = {
                 "temperature": params.get("temperature"),
                 "num_ctx": fixed_ctx,

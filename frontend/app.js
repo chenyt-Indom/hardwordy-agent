@@ -4499,6 +4499,16 @@
         '    </div>',
         '    <button id="sdToggle" style="flex:0 0 auto;padding:7px 14px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#c8c8d0;cursor:pointer"></button>',
         '    <button id="sdDemo" type="button" title="用顶栏选定的代码模型真跑一次写文件，验证自我迭代能力（只写 dev_note.md，不碰源码）" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid #2a4a6a;background:transparent;color:#5aa9ff;cursor:pointer;white-space:nowrap">🧪 试一次迭代</button>',
+        '    <button id="sdFull" type="button" title="完全访问：允许模型改写 backend/ 核心代码（风险自负）" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#9a9aa2;cursor:pointer;white-space:nowrap">🔓 完全访问·关</button>',
+        '  </div>',
+        '  <div id="sdPerf" style="margin-top:12px;padding:10px 12px;border:1px solid #2f3a4a;border-radius:10px;background:rgba(30,34,42,.5)">',
+        '    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px;color:#cfd6e2">',
+        '      <span>性能</span><select id="sdProfile" style="padding:3px 8px;border-radius:6px;border:1px solid #3a4353;background:#1e2229;color:#d6dde8;font-size:12px"></select>',
+        '      <span style="color:#8f8f99">输出上限 <b id="sdOut">—</b></span>',
+        '      <span style="color:#8f8f99;margin-left:auto">上下文 <b id="sdCtxVal">—</b></span>',
+        '    </div>',
+        '    <input id="sdCtx" type="range" min="4096" max="131072" step="1024" style="width:100%;margin-top:8px;accent-color:#4f8bf9">',
+        '    <div style="font-size:11px;color:#6f7787;margin-top:4px">上下文越大越能装长内容，但更吃显存、更慢；「跟随档位」= 不单独指定。</div>',
         '  </div>',
         '  <div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">版本历史（每次改动前自动备份，点「回撤」整批还原）</div>',
         '  <div id="sdHist"></div>',
@@ -4525,8 +4535,75 @@
       };
       applyState();
 
+      // ---- 性能档位 / 上下文（无极调节）----
+      (() => {
+        const sel = mask.querySelector("#sdProfile");
+        const ctx = mask.querySelector("#sdCtx");
+        const ctxVal = mask.querySelector("#sdCtxVal");
+        const outEl = mask.querySelector("#sdOut");
+        const paint = (d) => {
+          sel.innerHTML = (d.profiles || []).map((p) =>
+            '<option value="' + p.id + '">' + p.name + '</option>').join("");
+          sel.value = d.profile;
+          ctx.value = d.num_ctx;
+          ctxVal.textContent = d.num_ctx + (d.override > 0 ? "" : "（跟随档位）");
+          outEl.textContent = d.max_tokens;
+        };
+        (async () => {
+          try { paint(await (await fetch("/api/perf")).json()); } catch (e) {}
+        })();
+        const post = async (body, okMsg) => {
+          try {
+            const r = await (await fetch("/api/perf", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body) })).json();
+            if (r.ok) { paint(r); toast(okMsg, "ok"); }
+            else toast(r.error || "设置失败", "err");
+          } catch (e) { toast("设置失败：" + e.message, "err"); }
+        };
+        sel.onchange = () => post({ profile: sel.value }, "性能档位 → " + sel.options[sel.selectedIndex].text);
+        ctx.oninput = () => { ctxVal.textContent = ctx.value + "（自定义）"; };
+        ctx.onchange = () => post({ num_ctx: parseInt(ctx.value, 10) }, "上下文 → " + ctx.value);
+      })();
+
       // ---- 用当前代码模型真跑一次迭代（只写 dev_note.md，零风险）----
       const demoBtn = mask.querySelector("#sdDemo");
+      // ---- 完全访问开关（后端接口已就绪）----
+      const faBtn = mask.querySelector("#sdFull");
+      let faOn = false;
+      const faPaint = () => {
+        faBtn.textContent = faOn ? "🔓 完全访问·开" : "🔓 完全访问·关";
+        faBtn.style.color = faOn ? "#f0b34a" : "#9a9aa2";
+        faBtn.style.borderColor = faOn ? "#7a5a20" : "#3a3a42";
+      };
+      const toast = (m, k) => {
+        try {
+          if (typeof showToast === "function") showToast(m, k || "ok");
+          else if (window.showToast) window.showToast(m, k || "ok");
+        } catch (e) {}
+      };
+      (async () => {
+        try { const d = await (await fetch("/api/selfdev/fullaccess")).json(); faOn = !!d.on; }
+        catch (e) { /* ignore */ }
+        faPaint();
+      })();
+      faBtn.onclick = async () => {
+        const tip = faOn
+          ? "关闭「完全访问」后，模型只能改 frontend/，改 backend/ 会被拒绝。\n\n确定关闭吗？"
+          : "打开「完全访问」＝允许模型改写后端核心代码（backend/），改坏了应用可能起不来。\n\n风险自负，确定打开吗？";
+        if (!confirm(tip)) return;
+        faBtn.disabled = true;
+        try {
+          const r = await (await fetch("/api/selfdev/fullaccess", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ on: !faOn }) })).json();
+          if (r.ok) {
+            faOn = !!r.on; faPaint();
+            toast(r.msg || (faOn ? "完全访问已开启" : "完全访问已关闭"));
+          } else toast("切换失败", "err");
+        } catch (e) { toast("切换失败：" + e.message, "err"); }
+        faBtn.disabled = false;
+      };
       if (demoBtn) demoBtn.onclick = async () => {
         demoBtn.disabled = true;
         demoBtn.textContent = "迭代中…";
@@ -4597,12 +4674,40 @@
             files.replace(/"/g, "&quot;") + '">' + files + '</div>' +
             '</div></div>' +
             '<button data-batch="' + b.batch + '" style="flex:0 0 auto;padding:5px 10px;border-radius:7px;border:1px solid #4a3a3a;background:transparent;color:#e0a0a0;cursor:pointer;font-size:12px">回撤</button>' +
-            '</div>';
+            '<button data-diff="' + b.batch + '" data-files="' +
+            (b.files || []).map((f) => f.rel).join(",").replace(/"/g, "&quot;") +
+            '" style="flex:0 0 auto;padding:5px 10px;border-radius:7px;border:1px solid #3a4a5a;background:transparent;color:#8ab6e0;cursor:pointer;font-size:12px">看改动</button>' +
+            '</div>' +
+            '<div class="sd-batch-diff" data-for="' + b.batch + '" hidden></div>';
         }).join("");
       };
       render(hist);
 
       list.onclick = async (ev) => {
+        const db = ev.target.closest("button[data-diff]");
+        if (db) {
+          const box = list.querySelector('[data-for="' + db.dataset.diff + '"]');
+          if (!box) return;
+          if (!box.hidden) { box.hidden = true; db.textContent = "看改动"; return; }
+          db.disabled = true; db.textContent = "读取…";
+          const rels = String(db.dataset.files || "").split(",").filter(Boolean);
+          let html = "";
+          for (const rel of rels) {
+            try {
+              const d = await (await fetch("/api/selfdev/diff?batch=" + encodeURIComponent(db.dataset.diff)
+                + "&rel=" + encodeURIComponent(rel))).json();
+              if (!d.ok) { html += '<div class="sd-diff-hd">' + rel + "（" + (d.error || "读不到") + "）</div>"; continue; }
+              html += '<div class="sd-diff-hd">' + rel
+                + ' <span style="color:#5fd08a">+' + d.added + '</span> <span style="color:#e07a7a">−' + d.removed + "</span></div>"
+                + '<pre class="sd-pre" style="max-height:220px">' + String(d.diff || "")
+                    .replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</pre>";
+            } catch (e) { html += '<div class="sd-diff-hd">' + rel + "（失败）</div>"; }
+          }
+          box.innerHTML = html || '<div class="sd-diff-hd">没有可显示的内容</div>';
+          box.hidden = false;
+          db.disabled = false; db.textContent = "收起改动";
+          return;
+        }
         const t = ev.target.closest("button[data-batch]");
         if (!t) return;
         const batch = t.dataset.batch;
