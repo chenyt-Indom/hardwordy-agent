@@ -461,6 +461,44 @@ GET  /api/model/installed    已安装模型清单（含体积）
   - 本地：Ollama `/api/show` 的 `context_length`（qwen3-vl 实测 **262144**）
   - 云端：DeepSeek `/models` 的 `context_window`（V4.1 = **1048576**）与 `max_output_tokens`（**393216**）
 
+## 部署到自己的服务器（Linux）
+
+除了 Windows 打包版，同一套源码可以直接跑在 Linux 上（**不需要 GPU、不需要 Ollama**，走云端模型即可）：
+
+```bash
+# 1) 传代码 + 虚拟环境
+rsync -av --exclude 'dist*' --exclude 'models' --exclude 'vendor' --exclude '.git' \
+      ./ user@host:/opt/multimodal/
+cd /opt/multimodal && python3 -m venv .venv
+.venv/bin/pip install fastapi 'uvicorn[standard]' requests pillow python-multipart numpy \
+      opencv-python-headless xlsxwriter python-docx python-pptx
+
+# 2) Key 放进环境变量文件（600 权限，不进 git、不进 config.json）
+sudo install -m 600 /dev/stdin /etc/multimodal.env <<< 'DEEPSEEK_API_KEY=sk-...'
+```
+
+systemd 单元的关键三行：
+
+```ini
+EnvironmentFile=-/etc/multimodal.env
+Environment=MM_DISABLE_SELFDEV=1        # 公网部署务必打开
+ExecStart=/opt/multimodal/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 5000
+```
+
+- **`MM_DISABLE_SELFDEV=1` 会把「自我迭代」整块锁掉**：`selfdev.read/write` 直接拒绝、工具层统一拦截、前端自动隐藏 🛠 与 🔓 入口。理由很直接——`/api/selfdev/*` 能改服务器源码、重启服务，公网无鉴权时等于把 shell 挂出去。
+- Key 的取值顺序是 **请求头 > 环境变量**：所以同一个服务既能给"自己填 Key"的人用，也能给"服务器统一托管 Key"的场景用。
+- nginx 反代务必加 `proxy_buffering off`，否则流式会被攒成一坨再吐。
+
+## 手机端
+
+同一套前端做了窄屏适配（≤768px），电脑和手机共用一个地址：
+
+- 侧栏变抽屉、默认收起（点左上角 ☰ 打开）
+- 顶栏默认收起，点「▸ 展开」才拉开；每行控件横向滑动，不再折成半屏
+- 气泡占满宽度，输入框/图标按钮按屏收紧
+- **思考过程默认展开并逐字刷新**（桌面端仍默认折叠，点标题展开；手机端超 500 字自动折回）
+- **微信内置浏览器（X5）会缓冲 `fetch` 的流式响应** → 检测到 `MicroMessenger` UA 时改走 `XHR.onprogress` 增量读取；连 `resp.body` 都没有的内核则整段读取后回填，至少保证内容出得来
+
 ## 已知限制
 
 - **本地文生图不可用**：需要 torch（~9 GB）+ Stable Diffusion 权重，两者都不在发布包里。
@@ -468,6 +506,8 @@ GET  /api/model/installed    已安装模型清单（含体积）
   → **云端绘图可用**（🎨 图片 → 云端模型）。
 - **轻量版**（194.8 MB）不含 code-server 与抠图模型，对应功能不可用；要完整体验请下全量版。
 - **本地 8B 做不了自我迭代**：能对话、能看图，但改代码会卡在"只读不写"，需切 DeepSeek。
+- **微信内置浏览器的流式仍可能被缓冲**：已用 XHR 绕过大部分情况，但如果发现"整段才出现"，
+  换手机自带浏览器 / Chrome 打开同一地址即可（标准 `fetch` 流式）。
 
 ## 快速开始
 
