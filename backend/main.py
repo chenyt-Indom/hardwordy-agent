@@ -5727,6 +5727,48 @@ def selfdev_restart():
     return selfdev.restart()
 
 
+@app.post("/api/selfdev/demo")
+def selfdev_demo(x_deepseek_key: str = Header(default="")):
+    """用**当前选定的代码模型**做一次无害的自我迭代演示。
+
+    为什么加它：用户想验证「DeepSeek 能不能自己改这个应用」，但 DeepSeek 的 Key
+    只存在浏览器里（服务端从来不存）。所以由前端带上 Key 调到这个接口 ——
+    既不需要把 Key 交给我，又能真跑一遍"模型写代码 → 护栏校验 → 落盘"。
+
+    演示只写一个 `dev_note.md`（说明文件），**不碰任何源码**，零风险。
+    """
+    from . import tools as _T
+    cfg = config.load_config() or {}
+    ctx = {"ds_key": x_deepseek_key, "images": [], "last_image": None,
+           "mask": None, "shown_images": [], "ask_mode": "quick",
+           "session": "", "user_text": "", "image_key": ""}
+    kind, pick = _T.code_model_pick(cfg, ctx)
+    who = ("DeepSeek " + pick) if kind == "cloud" else ("本地 " + (pick or "默认"))
+    # ⚠️ 用户**明确选了云端**但没 Key 时，不要静默退回本地 ——
+    #   那样他会以为"DeepSeek 迭代成功了"，其实跑的是本地小模型。
+    _choice = str(cfg.get("code_model_choice") or "")
+    if _choice.startswith("deepseek") and not x_deepseek_key:
+        return {"ok": False, "who": "DeepSeek " + _choice,
+                "error": "你选的是 " + _choice + "，但没填 DeepSeek Key。"
+                         "点顶栏 🔑 DeepSeek 填一次（只存浏览器）再点这个按钮。"}
+    instr = ("写一份简短的 Markdown 说明：这个应用刚完成一次自我迭代演示。"
+             "包含：① 这次用了哪个模型 ② 迭代能力包含哪些工具 ③ 一句话结论。"
+             "要求 15 行以内，用 Markdown 标题和列表。")
+    try:
+        code = _T._code_gen_text(instr, cfg, ctx, max_tokens=1200)
+    except Exception as e:                            # noqa: BLE001
+        return {"ok": False, "who": who, "error": "%s: %s" % (type(e).__name__, e)}
+    text = _T._strip_code_fence(code or "").strip()
+    if not text:
+        return {"ok": False, "who": who, "error": "模型没有输出内容"}
+    r = selfdev.write("dev_note.md", text, note="自我迭代演示")
+    if not r.get("ok"):
+        return {"ok": False, "who": who, "error": r.get("error")}
+    return {"ok": True, "who": who, "rel": "dev_note.md",
+            "chars": r.get("chars"), "preview": text[:300],
+            "path": r.get("path")}
+
+
 @app.get("/api/selfdev/backups")
 def selfdev_backups():
     """历史改动快照：按**迭代批次**聚合，带时间与"这次改了什么"。

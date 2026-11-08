@@ -122,6 +122,15 @@ class OllamaClient:
         也不会再踩这个坑。num_predict / temperature 仍可按调用区分。
         """
         payload = {"model": model, "messages": messages, "stream": stream}
+        # ⚠️ 2026-11-08：`think` 是**顶层字段**（不是 options 里的），
+        #   调用方传 params["think"]=False 时要从 options 里摘出来放顶层。
+        #   为什么需要：qwen3-vl 会先思考，200 token 的额度全被思考吃掉，
+        #   content 变成空字符串（实测 done_reason=length、thinking 316 字、content ''）。
+        _think = None
+        if isinstance(params, dict) and "think" in params:
+            params = dict(params)
+            _think = params.pop("think")
+            payload["think"] = bool(_think)
         # ⚠️ **必须显式给 keep_alive**：Ollama 默认只保活 5 分钟，超时就卸载模型。
         # 不给的话，用户隔几分钟再发消息就要重新加载（实测冷启动 4.5 秒起步），
         # 体感就是"发出去半天没反应"。值走配置（model_keep_alive，默认 30m）。

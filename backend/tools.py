@@ -5388,13 +5388,13 @@ def _strip_code_fence(text: str) -> str:
 # 用户可选的代码模型（2026-11-08）
 # 值形如 "deepseek-flash" / "deepseek-v4-pro" / "local:qwen3-vl:8b" / "auto"
 CODE_MODEL_CHOICES = [
-    {"id": "auto", "name": "自动（有 DeepSeek Key 就用 V4.1）"},
-    {"id": "deepseek-flash", "name": "DeepSeek V4.1 Flash（推荐）"},
-    {"id": "deepseek-flash-think", "name": "DeepSeek V4.1（思考）"},
-    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"},
-    {"id": "local:qwen3-vl:8b", "name": "本地 Qwen3-VL 8B"},
-    {"id": "local:qwen3-vl:30b", "name": "本地 Qwen3-VL 30B"},
-    {"id": "local:qwen3-coder:30b", "name": "本地 Qwen3-Coder 30B"},
+    {"id": "auto", "name": "⌨ 自动（有 Key 用 V4.1）"},
+    {"id": "deepseek-flash", "name": "☁ DS V4.1"},
+    {"id": "deepseek-flash-think", "name": "☁ DS V4.1（思考）"},
+    {"id": "deepseek-v4-pro", "name": "☁ DS V4 Pro"},
+    {"id": "local:qwen3-vl:8b", "name": "💻 本地 8B"},
+    {"id": "local:qwen3-vl:30b", "name": "💻 本地 30B"},
+    {"id": "local:qwen3-coder:30b", "name": "💻 本地 Coder 30B"},
 ]
 
 
@@ -5452,10 +5452,14 @@ def _code_gen_text(prompt: str, cfg: dict, context: dict,
                or (have[0] if have else use))
     if not use:
         raise RuntimeError("没有可用的本地模型")
+    # ⚠️ 代码生成**关掉思考**：实测 qwen3-vl 先思考，max_tokens=1200 时
+    #   思考就把它吃光 → content 为空、done_reason=length。
+    #   写代码不需要思维链，直接出活更快更稳。
     resp = _main.client.chat([{"role": "user", "content": prompt}],
                              model=use, stream=False,
                              params={"temperature": temperature,
-                                     "max_tokens": max_tokens,
+                                     "max_tokens": max(4096, int(max_tokens or 0)),
+                                     "think": False,
                                      "num_ctx": int(cfg.get("num_ctx") or 8192)})
     data = resp.json() if hasattr(resp, "json") else resp
     return str(((data.get("message") or {}).get("content")) or "")

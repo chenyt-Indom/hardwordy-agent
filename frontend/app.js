@@ -4306,8 +4306,13 @@
         const r = await (await fetch("/api/code/model", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model: sel.value }) })).json();
-        showToast(r.ok ? ("代码模型 → " + (sel.options[sel.selectedIndex] || {}).text)
-                       : (r.msg || "切换失败"), r.ok ? "ok" : "err");
+        if (r.ok) {
+          const isDS = String(sel.value).indexOf("deepseek") === 0;
+          const hasKey = !!localStorage.getItem("ds_api_key");
+          showToast("代码模型 → " + (sel.options[sel.selectedIndex] || {}).text
+                    + (isDS && !hasKey ? "（还没填 Key，会退回本地）" : ""),
+                    isDS && !hasKey ? "warn" : "ok");
+        } else showToast(r.msg || "切换失败", "err");
       } catch (e) { showToast("切换失败：" + e.message, "err"); }
       load();
     };
@@ -4481,6 +4486,7 @@
         '        打开后模型能读写本应用源码并重启自己。改坏了用下面的历史回撤。</div>',
         '    </div>',
         '    <button id="sdToggle" style="flex:0 0 auto;padding:7px 14px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#c8c8d0;cursor:pointer"></button>',
+        '    <button id="sdDemo" type="button" title="用顶栏选定的代码模型真跑一次写文件，验证自我迭代能力（只写 dev_note.md，不碰源码）" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid #2a4a6a;background:transparent;color:#5aa9ff;cursor:pointer;white-space:nowrap">🧪 试一次迭代</button>',
         '  </div>',
         '  <div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">版本历史（每次改动前自动备份，点「回撤」整批还原）</div>',
         '  <div id="sdHist"></div>',
@@ -4506,6 +4512,32 @@
         tgEl.textContent = on ? "关闭自开发" : "打开自开发";
       };
       applyState();
+
+      // ---- 用当前代码模型真跑一次迭代（只写 dev_note.md，零风险）----
+      const demoBtn = mask.querySelector("#sdDemo");
+      if (demoBtn) demoBtn.onclick = async () => {
+        demoBtn.disabled = true;
+        demoBtn.textContent = "迭代中…";
+        try {
+          const r = await (await fetch("/api/selfdev/demo", {
+            method: "POST",
+            headers: { "X-DeepSeek-Key": localStorage.getItem("ds_api_key") || "" },
+          })).json();
+          if (r.ok) {
+            say("✅ 迭代成功｜模型：" + r.who + "｜写入 " + r.rel
+                + "（" + r.chars + " 字）\n" + (r.preview || "").slice(0, 120),
+                "#7bd88f");
+            demoBtn.textContent = "🧪 再试一次";
+          } else {
+            say("❌ 迭代失败｜模型：" + (r.who || "?") + "｜" + (r.error || ""), "#e06c6c");
+            demoBtn.textContent = "🧪 试一次迭代";
+          }
+        } catch (e) {
+          say("❌ " + e.message, "#e06c6c");
+          demoBtn.textContent = "🧪 试一次迭代";
+        }
+        demoBtn.disabled = false;
+      };
 
       tgEl.onclick = async () => {
         if (!on) {
