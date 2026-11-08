@@ -7830,6 +7830,47 @@ def kb_save(body: UploadBody):
     return {"ok": True, "document": doc}
 
 
+@app.post("/api/local-file")
+def local_file(body: dict):
+    """把**本机路径**读成图片附件（2026-11-09）。
+
+    为什么需要：用户在资源管理器里 Ctrl+C 一张图，再到应用里 Ctrl+V，
+    浏览器拿到的是 `file:///C:/...jpg` 这样的**路径文本**，不是文件内容 ——
+    网页没权限读本地文件，于是只能提示"无法传输"。
+    本应用本来就在同一台机器上跑，由后端按路径读出来再回给前端即可。
+    """
+    raw = str((body or {}).get("path") or "").strip().strip('"')
+    if not raw:
+        return {"ok": False, "error": "路径为空"}
+    # file:///C:/x.png  →  C:/x.png
+    if raw.lower().startswith("file:///"):
+        raw = raw[8:]
+        try:
+            from urllib.parse import unquote
+            raw = unquote(raw)
+        except Exception:
+            pass
+    raw = raw.replace("/", os.sep)
+    if not os.path.isfile(raw):
+        return {"ok": False, "error": "文件不存在：%s" % raw}
+    ext = os.path.splitext(raw)[1].lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
+        return {"ok": False,
+                "error": "只支持图片（png/jpg/webp/gif/bmp）：%s" % os.path.basename(raw)}
+    try:
+        size = os.path.getsize(raw)
+        if size > 25 * 1024 * 1024:
+            return {"ok": False, "error": "图片太大（%.1fMB），请压到 25MB 以内" % (size / 1048576)}
+        data = open(raw, "rb").read()
+    except OSError as e:
+        return {"ok": False, "error": "读取失败：%s" % e}
+    import base64 as _b64
+    mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}[ext]
+    return {"ok": True, "name": os.path.basename(raw),
+            "dataurl": "data:%s;base64,%s" % (mime, _b64.b64encode(data).decode())}
+
+
 @app.post("/api/kb/upload")
 async def kb_upload(file: UploadFile):
     """上传文档到知识库。

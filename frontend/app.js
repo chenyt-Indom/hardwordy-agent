@@ -193,6 +193,11 @@
   }
 
   function dlGroup(label, url) {
+  // 产物卡片接管（见 artifacts.js）：正文显示成小胶囊，卡片由 flush() 追加
+  if (window.__Artifacts) {
+    const _chip = window.__Artifacts.chip(label, url);
+    if (_chip) return _chip;
+  }
     let rel = "";
     if (url.indexOf("/api/doclib/download") === 0) {
       const m = url.match(/[?&]rel=([^&]+)/);
@@ -285,6 +290,8 @@
   }
 
   function renderAnswerLinks(bubble, text) {
+  // 产物卡片：先开启收集，正文里的文件链接变成胶囊，最后 flush 出卡片
+  if (window.__Artifacts) window.__Artifacts.begin();
     // 结构化渲染（标题/列表/粗体/行内代码/链接），下载链接仍然渲染成按钮
     let html = mdToHtml(stripToolLeak(text));
     // 裸路径也要变按钮（模型常写「下载链接：/api/...」，前面是全角冒号；
@@ -293,6 +300,8 @@
       /(^|[\s（(【\[:：,，、>])(\/api\/(?:doclib\/download|ws\/zip)[^\s<)）】\]，。；：、"'']*)/g,
       (_, pre, url) => `${pre}${dlGroup("点击下载", fixApiUrl(url))}`);
     bubble.innerHTML = html;
+    // 追加可折叠的产物卡片（默认收起）
+    if (window.__Artifacts) window.__Artifacts.flush(bubble);
   }
 
   // 跳到「生成文库」并把这个文件选中、闪一下（列表长的时候也能一眼找到）
@@ -1480,6 +1489,34 @@
     renderAttachments();
   }
 
+  // 从剪贴板里找出"本机图片路径"（2026-11-09）
+  // 不用正则：路径里反斜杠太多，跨层转义容易出错（已经被坑过一次）。
+  const IMG_EXT = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"];
+  function looksLikeImage(p) {
+    const q = String(p || "").toLowerCase().replace(/\s+$/, "");
+    return IMG_EXT.some((e) => q.endsWith(e));
+  }
+  function extractLocalPath(text, cb) {
+    let t = String(text || "").trim().replace(/^"+|"+$/g, "");
+    if (!t) {
+      try {
+        const html = (cb && cb.getData && cb.getData("text/html")) || "";
+        const m = String(html).match(/src=["']([^"']+)["']/i);
+        t = m ? m[1] : "";
+      } catch (err) { t = ""; }
+    }
+    if (!t) return "";
+    const low = t.toLowerCase();
+    if (low.startsWith("file:///")) {
+      let p = decodeURI(t.slice(8));
+      if (looksLikeImage(p)) return p;
+      return "";
+    }
+    if (/^[a-zA-Z]:/.test(t) && t.length > 3 && looksLikeImage(t)) return t;
+    if (t.startsWith("\\\\") && looksLikeImage(t)) return t;
+    return "";
+  }
+
   function onDropFiles(files) {
     let list = files ? [...files] : [];
     if (!list.length) {
@@ -1601,10 +1638,17 @@
     if (files.length) {
       e.preventDefault();
       onDropFiles(files);
-    } else if (text && /^file:\/\/\/.+\.\w{1,6}$/i.test(text.trim())) {
-      // 从资源管理器"复制文件"拿到的是路径，浏览器读不了 → 如实告知，别装作成功
-      e.preventDefault();
-      showToast("读到的是文件路径，浏览器打不开。请用输入框左边的 📎 选择文件，或直接把文件拖进来。", "warn");
+    } else {
+      // 从资源管理器复制文件后粘贴，剪贴板里是**路径文本**，网页读不了。
+      // 但本应用和文件在同一台机器上 —— 让后端按路径读（2026-11-09 用户报"无法传输文件"）。
+      const lp = extractLocalPath(text, e.clipboardData);
+      if (lp) {
+        e.preventDefault();
+        addImageFromPath(lp);
+      } else if (text && text.length < 40 && /[\\/]/.test(text)) {
+        // 像路径但读不了：说清楚怎么绕
+        showToast("没认出这个路径的图片。可以用 📎 选文件，或把图片直接拖进来。", "warn");
+      }
     }
   });
 
@@ -1803,6 +1847,12 @@
     }
     list.querySelectorAll(".dl-item").forEach((el) => {
       el.onclick = () => openDoclibFile(el.dataset.rel);
+      // 双击：用本机默认程序直接打开（Word/PPT/Excel 双击即开，不用去文件夹里翻）
+      el.ondblclick = () => {
+        if (window.__Artifacts && window.__Artifacts.openWithSystem) {
+          window.__Artifacts.openWithSystem(el.dataset.rel);
+        }
+      };
     });
   }
 
@@ -3239,6 +3289,8 @@
     }
 
     const renderAnswerWithCode = (bubble, text, userText) => {
+    // 这条路径也走 mdToHtml，产物链接同样收集起来
+    if (window.__Artifacts) window.__Artifacts.begin();
       text = stripToolLeak(text);          // 先摘掉泄漏的工具调用（见 stripToolLeak）
       const parts = [];
       const re = /```([a-zA-Z0-9_+#.-]*)[ \t]*\n([\s\S]*?)```/g;
