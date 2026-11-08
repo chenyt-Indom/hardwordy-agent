@@ -325,6 +325,9 @@
       <!-- 自开发（2026-11-08）：让模型能改本应用自己的源码并重启 -->
       <button type="button" class="pill pill-btn" id="selfDevBtn"
               title="自开发：模型可读写本应用源码 / 重启 / 回撤历史（点开面板）">🛠 自开发</button>
+              <!-- 顶栏收起/展开（2026-11-08）：第二行里一个小按钮，收起时两行只剩这一行 + 这一个按钮 -->
+              <button type="button" class="pill pill-btn" id="topbarToggle"
+                      title="收起 / 展开上方能力开关（状态会记住，刷新后保持）">▾ 收起</button>
       <!-- 自开发面板（2026-11-08）：点开 🛠 后里面才有回撤历史 -->
 
       <!-- 模型**全自动选择**，这里不放选择器。
@@ -414,6 +417,28 @@
 
   <!-- 地图组件（Leaflet）**放在本地**，不依赖外网 CDN —— 断网也能画 -->
   <script src="/static/lib/leaflet/leaflet.js"></script>
+  <script>
+  /* 顶栏收起/展开：状态存 localStorage.topbar_collapsed（'1' 收起 / '0' 展开） */
+  (function () {
+    var KEY = 'topbar_collapsed';
+    var on = false;
+    try { on = localStorage.getItem(KEY) === '1'; } catch (e) {}
+    function paint(collapsed) {
+      document.body.classList.toggle('topbar-collapsed', collapsed);
+      var b = document.getElementById('topbarToggle');
+      if (b) b.textContent = collapsed ? '▸ 展开' : '▾ 收起';
+    }
+    paint(on);
+    var btn = document.getElementById('topbarToggle');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        var now = !document.body.classList.contains('topbar-collapsed');
+        try { localStorage.setItem(KEY, now ? '1' : '0'); } catch (e) {}
+        paint(now);
+      });
+    }
+  })();
+  </script>
   <script src="/static/app.js"></script>
 </body>
 </html>

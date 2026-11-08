@@ -1968,6 +1968,20 @@ select.pill-select option {
 }
 .confirm-remember input { width: 14px !important; height: 14px; margin: 0; accent-color: var(--accent); }
 .confirm-remember:hover { color: var(--text); }
+/* ================= 顶栏收起 / 展开（2026-11-08）=================
+   只靠 body.topbar-collapsed 这一个 class：
+     · 第一行能力开关整行隐藏；
+     · 第二行只留 #topbarToggle，其余控件隐藏 → 两行收成一行。
+   纯新增规则，不改任何既有 .top-bar 的 flex 骨架。 */
+body.topbar-collapsed #topBar {
+  display: none;
+}
+body.topbar-collapsed .top-bar.tools-bar > *:not(#topbarToggle) {
+  display: none;
+}
+body.topbar-collapsed .top-bar.tools-bar {
+  padding: 4px 16px 8px;
+}
 
 /* ================= 定时任务面板（2026-11-08）================= */
 .badge-mini {
