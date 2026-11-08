@@ -3587,7 +3587,7 @@
       const _prov = _msEl ? _msEl.value : "auto";
       const _isDS = _prov.indexOf("deepseek") === 0;
       const _dsKey = _isDS ? (localStorage.getItem("ds_api_key") || "") : "";
-      if (_isDS && !_dsKey) {
+      if (_isDS && !_dsKey && !window.__dsEnv) {
         showToast("请先点右上角 🔑 DeepSeek 填入 API Key", "warn");
         streaming = false;
         return;
@@ -4519,6 +4519,18 @@
 
     load();
     setInterval(load, 15000);
+  })();
+
+  // ================== 服务器是否已配好 Key（2026-11-09）==================
+  // 服务器版把 Key 放在 /etc/multimodal.env 里 —— 浏览器就不用再填一次。
+  (() => {
+    fetch("/api/ds/env").then((r) => r.json()).then((d) => {
+      window.__dsEnv = !!(d && d.has_key);
+      if (window.__dsEnv) {
+        const b = document.querySelector("#dsKeyBtn");
+        if (b) { b.textContent = "🔑 已配置"; b.title = "服务器环境变量里已有 Key，本机不用再填"; }
+      }
+    }).catch(() => {});
   })();
 
   // ================== Key 状态探针（2026-11-08）==================

@@ -90,6 +90,20 @@ def _load_last_image() -> None:
         logger.warning("读取上次的图片失败（不影响使用）", exc_info=True)
 
 
+def _env_ds_key() -> str:
+    """服务器自用：Key 放环境变量（/etc/multimodal.env，权限 600）。
+
+    为什么不写进 config.json：那个文件会随打包/同步到处跑，容易泄露；
+    systemd EnvironmentFile 只在服务进程环境里，`systemctl show` 也看不到值。
+    """
+    return str(os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+
+
+def _ds_key(header_key: str = "") -> str:
+    """请求头里的 Key 优先（用户在浏览器填的），没有再退回服务器环境变量。"""
+    return (header_key or "").strip() or _env_ds_key()
+
+
 def _remember_image(images: list) -> None:
     """记住本轮图片，供下一轮引用（**同时落盘**，重启后还能接着微改）。"""
     if images:
@@ -5296,7 +5310,7 @@ async def chat(req: ChatRequest,
                    "image_key": x_image_key,
                    # 前端 🎨 里选的模型名（不同 Key/分组能用的模型不一样，必须可换）
                    "image_model": x_image_model,
-                   "ds_key": x_deepseek_key,
+                   "ds_key": _ds_key(x_deepseek_key),
                    # 危险操作（删文件、起进程、联网…）先问用户，批准了再执行
                    # ask：材料不足时弹出问答框向用户追问细节
                    **_dict_ui_channel(_make_ui_channel(loop, live_ui))}
@@ -5607,7 +5621,7 @@ def deepseek_models():
 @app.post("/api/deepseek/check")
 def deepseek_check(x_deepseek_key: str = Header(default="")):
     """校验 Key 并顺便查余额（GET /user/balance）。Key 只在本次请求用。"""
-    return deepseek_client.check_key(x_deepseek_key)
+    return deepseek_client.check_key(_ds_key(x_deepseek_key))
 
 
 @app.post("/api/image/check")
@@ -5697,6 +5711,12 @@ def image_status():
 _DS_SEEN = {"has_key": None, "at": ""}
 
 
+@app.get("/api/ds/env")
+def ds_env():
+    """服务器有没有配好 Key（只返回布尔，不回传 Key 本身）。"""
+    return {"ok": True, "has_key": bool(_env_ds_key())}
+
+
 @app.post("/api/ds/seen")
 def ds_seen(body: dict):
     _DS_SEEN["has_key"] = bool((body or {}).get("has_key"))
@@ -5763,7 +5783,7 @@ def fullaccess_set(body: dict):
 @app.post("/api/perf/cloud")
 def perf_cloud(x_deepseek_key: str = Header(default="")):
     """用浏览器里的 Key 读云模型真实参数（型号/上下文/输出/模态/推理档）。"""
-    return perf.detect_cloud(x_deepseek_key)
+    return perf.detect_cloud(_ds_key(x_deepseek_key))
 
 
 @app.get("/api/perf")
@@ -5898,7 +5918,7 @@ def selfdev_demo(x_deepseek_key: str = Header(default="")):
     """
     from . import tools as _T
     cfg = config.load_config() or {}
-    ctx = {"ds_key": x_deepseek_key, "images": [], "last_image": None,
+    ctx = {"ds_key": _ds_key(x_deepseek_key), "images": [], "last_image": None,
            "mask": None, "shown_images": [], "ask_mode": "quick",
            "session": "", "user_text": "", "image_key": ""}
     kind, pick = _T.code_model_pick(cfg, ctx)
@@ -6167,6 +6187,7 @@ async def chat_deepseek(req: ChatRequest,
     """
     _AUTO_OK["on"] = False          # 同上：云通道也一轮一清
     _AUTO_OK["hits"] = 0
+    x_deepseek_key = _ds_key(x_deepseek_key)      # 没带 Key 就用服务器环境变量
     model = req.model or "deepseek-flash"
     messages = req.messages or []
     session = req.session_id or ""
