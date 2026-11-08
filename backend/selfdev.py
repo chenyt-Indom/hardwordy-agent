@@ -509,6 +509,15 @@ def insert_after(rel: str, anchor: str, text: str, note: str = "") -> dict:
     except OSError as e:
         return {"ok": False, "error": "读取失败：%s" % e}
 
+    # ⚠️ 2026-11-08 实测：模型（DeepSeek V4.1）会把换行写成**字面量 `\n`**
+    #   （两个字符），插进 Python 源码后报 "unexpected character after line
+    #   continuation character"。这里提前拦住并给一句它能听懂的话，
+    #   别让它对着一句晦涩的语法错误瞎猜。
+    if "\\n" in text and "\n" not in text:
+        return {"ok": False,
+                "error": "你传的 text 里是**字面量 \\n**（反斜杠+n 两个字符），不是换行。"
+                         "请传真正的换行（JSON 里就是 \\n 转义），或者干脆写成多行。"}
+
     a = (anchor or "").strip()
     if not a:
         return {"ok": False, "error": "anchor 不能为空"}

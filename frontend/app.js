@@ -4440,6 +4440,18 @@
     setInterval(load, 15000);
   })();
 
+  // ================== Key 状态探针（2026-11-08）==================
+  // 只上报"有没有 Key"这个布尔值，**不上报 Key 本身**。
+  // 用途：用户说"我明明填了"，服务端就能确认浏览器里到底有没有。
+  (() => {
+    const report = () => fetch("/api/ds/seen", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ has_key: !!localStorage.getItem("ds_api_key") }),
+    }).catch(() => {});
+    report();
+    window.addEventListener("focus", report);
+  })();
+
   // ================== 自开发面板（2026-11-08）==================
   // 用户要求：① 回撤要收进「🛠 自开发」里，点开才出现；
   //          ② 每个版本要标明**更新内容 + 日期**；

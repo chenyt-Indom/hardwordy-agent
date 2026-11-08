@@ -4412,6 +4412,11 @@ async def chat(req: ChatRequest,
         "或者用 ask_user 问一句「你是指刚才那张图，还是新的一件事？」。\n"
         "- 长期记忆与知识库检索到的东西同理：**只在与本轮问题确实相关时才用**，"
         "不相关就别往回答里塞（塞了只会显得答非所问）。\n"
+        # ★ 2026-11-08 由 DeepSeek V4.1 自我迭代插入（AI 改的，人只调整了位置）
+        "\n【做完的事，不要再做一遍】\n"
+        "- 动手前先看上文：这件事是不是已经做完并有结果了？\n"
+        "- 用户只是打招呼/追问/确认时，不要再执行一遍，直接引用上次结果；\n"
+        "- 只有明确要求重做（重做/再画一张/重新写/换版本）才重新执行。\n"
         "- 如果你觉得用户这句话是在指**更早**聊过的东西（不在你能看到的最近几轮里）："
         "先去**记忆**（在用户消息里）或**历史摘要**里找，再决定；"
         "实在找不到就别硬猜，用 ask_user 问一句「你是指之前聊的 XX 吗？」。\n")
@@ -5658,6 +5663,25 @@ def image_cancel():
 @app.get("/api/image/status")
 def image_status():
     return image_models.status()
+
+
+# ---------------- DeepSeek Key 状态探针 ----------------
+# 用户问「我明明填了 Key」时，服务端没法验证（Key 从不落盘）。
+# 这个接口只收**布尔值**（有没有 Key），不接收 Key 本身 ——
+# 用来给用户/我确认"浏览器的 localStorage 里到底有没有"。
+_DS_SEEN = {"has_key": None, "at": ""}
+
+
+@app.post("/api/ds/seen")
+def ds_seen(body: dict):
+    _DS_SEEN["has_key"] = bool((body or {}).get("has_key"))
+    _DS_SEEN["at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    return {"ok": True, **_DS_SEEN}
+
+
+@app.get("/api/ds/seen")
+def ds_seen_get():
+    return {"ok": True, **_DS_SEEN}
 
 
 # ---------------- 代码模型选择 ----------------
