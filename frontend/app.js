@@ -3908,6 +3908,28 @@
             if (_mc) {
               try { answer += JSON.parse('"' + _mc[1] + '"'); } catch (e3) { answer += _mc[1]; }
             }
+            // 2026-11-09 再兜一层：**字符串被切断**（JSON 停在半个字中间、没有收尾引号）。
+            // 上面两个正则都要求有结尾引号，这种残片会整体匹配失败 → 最后 1~2 个字就没了。
+            // 这里退化成"能读多少读多少"，半个转义序列（末尾是 \）先丢掉再解码。
+            if (!_mt && !_mc) {
+              const _mt2 = _seg.match(/"text"\s*:\s*"([\s\S]*)$/);
+              const _mc2 = _seg.match(/"content"\s*:\s*"([\s\S]*)$/);
+              const _m2 = _mt2 || _mc2;
+              if (_m2) {
+                let _raw = _m2[1];
+                if (/\\$/.test(_raw)) _raw = _raw.slice(0, -1);
+                let _dec = "";
+                try { _dec = JSON.parse('"' + _raw + '"'); }
+                catch (e4) {
+                  _dec = _raw.replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+                }
+                if (_dec) {
+                  if (_mt2) { if (_dec.length > answer.length) answer = _dec; }
+                  else { answer += _dec; }
+                  try { console.warn("[stream] 尾部残片已抢救", _dec.length, "字"); } catch (e5) {}
+                }
+              }
+            }
           }
         }
         buf = "";
@@ -3922,6 +3944,17 @@
         answerBubble.classList.add("empty-answer");
         answer = "";
       }
+      // 收尾一致性校验（2026-11-09）：渲染结果和收到的原文不一致时用纯文本兜底，
+      // 宁可少一点样式，也不能少字。（有代码卡片时不比对，结构本来就不同）
+      try {
+        const _shown = (answerBubble.innerText || "").replace(/\s+/g, "");
+        const _want = String(answer || "").replace(/\s+/g, "");
+        if (_want && _shown && _shown.length < _want.length && !answerBubble.querySelector(".code-card")) {
+          console.warn("[stream] 显示比收到短，已用纯文本兜底：", _shown.length, "→", _want.length);
+          answerBubble.textContent = answer;
+        }
+      } catch (e) { /* 兜底失败不影响主流程 */ }
+      window.__lastAnswerLen = (answer || "").length;   // 诊断用（只有长度，无内容）
       if (answer) history.push({ role: "assistant", content: answer });
       // 检索来源：渲染成回答下方的可伸缩列表（默认折叠，点标题展开）
       if (sourcesData && sourcesData.items && sourcesData.items.length) {
