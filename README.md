@@ -15,6 +15,32 @@
 
 ---
 
+## 下载
+
+| 版本 | 体积 | 说明 |
+|------|------|------|
+| **[Windows x64 免安装版](https://github.com/chenyt-Indom/local-multimodal/releases/latest)** | **204 MB** | 解压即用。**不含 AI 模型**（由 Ollama 单独下载） |
+| 源码 | — | 见下方「快速开始」 |
+
+**装法（3 步）**
+
+```powershell
+# 1. 装 Ollama：https://ollama.com/download/windows
+
+# 2. 下模型（18GB 主力 / 6GB 轻量）
+ollama pull qwen3-vl:30b
+# 或 ollama pull qwen3-vl:8b
+
+# 3. 解压 zip → 双击 本地多模态助手.exe
+```
+
+详细说明见包内 **`INSTALL.md`**。
+
+> **轻量版不含文生图**（需要 torch + Stable Diffusion 约 10 GB）。
+> 其余功能全有：对话 / 图片理解 / 知识库 / 记忆 / 文件工具 / 联网 / 地图 / 语音 / **DeepSeek 双通道**。
+
+---
+
 ## 这是什么
 
 一个**完全跑在自己机器上、全程不联网**的 AI 助手。
