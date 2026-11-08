@@ -2,7 +2,7 @@
 
 **可私有化部署的本地 AI Agent —— 数据不出内网，边际成本趋近于零**
 
-39 个工具编排 · 分层记忆 · 双协议工具调用 · 3.5 万行 · 断网可用
+55 个工具编排 · 分层记忆 · 双协议工具调用 · **能改自己源码的自我迭代** · 断网可用
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)
@@ -19,8 +19,13 @@
 
 | 版本 | 体积 | 说明 |
 |------|------|------|
-| **[Windows x64 免安装版](https://github.com/chenyt-Indom/local-multimodal/releases/latest)** | **204 MB** | 解压即用。**不含 AI 模型**（由 Ollama 单独下载） |
+| **[全量版](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.08.3/LocalMultimodalAssistant-Full-Windows-x64.zip)** | **2.14 GB**（解压 3.2 GB） | 含**内置 VS Code**（code-server）与**抠图模型**（BiRefNet ×2）。解压后双击 `一键启动.bat` |
+| **[轻量版](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.08.3/LocalMultimodalAssistant-Windows-x64.zip)** | **194.8 MB** | 只有程序本体，体积小；开发台与抠图不可用 |
 | 源码 | — | 见下方「快速开始」 |
+
+> 两个包**都不含** AI 对话模型权重（由 Ollama 单独下载，18 GB / 6 GB）。
+> 也**都不含**本地文生图（torch ~9 GB + SD 权重）——本地绘图在当前机器上不可用，
+> 云端绘图正常。详见「已知限制」。
 
 **装法（3 步）**
 
@@ -31,7 +36,7 @@
 ollama pull qwen3-vl:30b
 # 或 ollama pull qwen3-vl:8b
 
-# 3. 解压 zip → 双击 本地多模态助手.exe
+# 3. 解压 zip → 双击 一键启动.bat（会自动查 Ollama、等端口、开浏览器）
 ```
 
 详细说明见包内 **`INSTALL.md`**。
@@ -47,7 +52,7 @@ ollama pull qwen3-vl:30b
 
 它不是"套壳调用某个云 API"——模型权重在本地，语音识别在本地，图片生成在本地，**断网之后功能一个不少**。
 
-但它真正的看点不止是"离线"，而是它是**一套完整的 Agent 系统**：39 个工具、双协议工具调用、分层记忆、知识库检索、工作区管理、并行执行调度。这些东西拼在一起，代码量到了 3.5 万行。
+但它真正的看点不止是"离线"，而是它是**一套完整的 Agent 系统**：55 个工具、双协议工具调用、分层记忆、知识库检索、工作区管理、并行执行调度。这些东西拼在一起，代码量到了 3.5 万行。
 
 如果你只有 30 秒：直接看 [技术难点](#技术难点) 那一节。
 
@@ -423,6 +428,46 @@ GET  /api/model/installed    已安装模型清单（含体积）
 </details>
 
 ---
+
+## 自我迭代（让模型改自己的源码）
+
+这是整套系统里最"危险也最有意思"的部分：模型可以**读自己的源码、改、重启自己**，改坏了能一键回退。
+
+- **工具**：`selfdev_tree / grep / read(分页) / insert_after(锚点插入) / patch / write / apply(整文件重写) / restart / backups / rollback`
+- **护栏**（都在后端，模型绕不过去）：
+  - 语法校验：Python 写盘前 `ast.parse`、前端 `node --check`，不通过直接拒绝
+  - 落盘前自动备份 + 改动日志，每次改动都是一个可回退的「版本」
+  - 禁止改回撤机制自身；`data/` 等用户数据禁写
+  - **🔓 完全访问开关**：关着只能改 `frontend/` 与新建文件，打开才允许动 `backend/*.py`
+- **版本历史**：界面上每条版本可「看改动」，展开是逐文件 `+/-` diff（默认收起），也能整批「回撤」
+- **看得见成果**：改完前端会**自动**截图，交给多模态模型看，把「哪里重叠 / 被裁切 / 横向挤压」作为工具结果回传，模型据此继续微调
+
+> 实测：DeepSeek V4.1 能独立完成「grep 定位 → 读片段 → 锚点插入 → 自检 → 重启」全流程；
+> 本地 8B 只能读到、落不了笔（会长时间打转）。所以自我迭代建议用云端代码模型。
+
+## 性能与上下文（自动探测，不写死）
+
+顶栏第三行直接可调，**日常聊天就生效**（不藏在自开发面板里）：
+
+| 档位 | 输出上限 | 上下文 |
+|------|---------|--------|
+| 快速 | 8192 | 16k |
+| 中等（默认） | 16384 | 40k |
+| 高 | 32768 | 64k |
+| 极高 | 65536 | 128k |
+
+- **上下文可无极调节**：滑块 4k ~ 1M，默认跟随档位；输出下限 8192（不允许更低）
+- **上限不是写死的**，启动时自动读当前模型的真实能力：
+  - 本地：Ollama `/api/show` 的 `context_length`（qwen3-vl 实测 **262144**）
+  - 云端：DeepSeek `/models` 的 `context_window`（V4.1 = **1048576**）与 `max_output_tokens`（**393216**）
+
+## 已知限制
+
+- **本地文生图不可用**：需要 torch（~9 GB）+ Stable Diffusion 权重，两者都不在发布包里。
+  开发机上 torch 的 `shm.dll` 还会被系统策略拦截（`PermissionError`），且本机没有任何 SD 权重文件。
+  → **云端绘图可用**（🎨 图片 → 云端模型）。
+- **轻量版**（194.8 MB）不含 code-server 与抠图模型，对应功能不可用；要完整体验请下全量版。
+- **本地 8B 做不了自我迭代**：能对话、能看图，但改代码会卡在"只读不写"，需切 DeepSeek。
 
 ## 快速开始
 
