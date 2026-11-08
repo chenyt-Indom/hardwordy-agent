@@ -183,8 +183,61 @@ def _voice_watchdog(main_mod) -> None:
             fails += 1
 
 
+def _already_running() -> bool:
+    """已经有实例在跑吗（端口上的 /api/health 能通且是本应用的应答）。
+
+    ⚠️ 为什么必须判（2026-11-08 实测踩到）：
+      重复启动时第二个进程 bind 失败，但 `_wait_until_up()` 会**连上第一个实例**
+      并返回 True —— 于是第二个进程一直挂着不退，成了僵尸：
+        · 用户以为开了两个窗口，其实只有一个能用；
+        · 它持有旧代码、旧线程（实测还锁着模型目录，导致"卸载模型"报拒绝访问）。
+      所以：发现已在运行 → 本实例直接退出，把注意力交给已经跑着的那个。
+    """
+    import json
+    import urllib.request
+    try:
+        req = urllib.request.Request(URL.rstrip("/") + "/api/health")
+        with urllib.request.urlopen(req, timeout=2) as r:
+            d = json.loads(r.read().decode("utf-8", "ignore"))
+        return isinstance(d, dict) and "online" in d
+    except Exception:
+        return False
+
+
+def _wait_port_free(timeout: float = 40.0) -> bool:
+    """等 8000 端口空出来（自开发重启时用：旧进程还没退干净，新进程别急着 bind）。"""
+    import socket
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            # ⚠️ 这里**不能设 SO_REUSEADDR**（2026-11-08 实测踩坑）：
+            #   Windows 上带 SO_REUSEADDR 的 bind 会**"成功"抢占**已被监听的端口，
+            #   于是探测永远返回 True → 新进程立刻去 bind → 必然失败 → 启动即退出。
+            #   去掉它，bind 才会在端口被占用时如实抛 WSAEADDRINUSE。
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
+                sk.bind((HOST, PORT))
+            return True
+        except OSError:
+            time.sleep(0.4)
+    return False
+
+
 def main() -> None:
     config.load_config()
+    if os.environ.get("MM_WAIT_PORT") == "1":
+        _wait_port_free()
+    # 自开发触发的重启：新进程起来时旧进程可能还占着端口，别把自己挡回去
+    if os.environ.get("MM_SKIP_ALREADY_CHECK") != "1" and _already_running():
+        print("[run] 已有实例在运行（%s），本实例退出。" % URL)
+        # ⚠️ 只 print 的话，从桌面快捷方式启动（没有控制台）会表现为
+        #   "双击了没反应"。这里把已经跑着的界面打开到默认浏览器，
+        #   用户至少能立刻看到窗口。
+        try:
+            import webbrowser
+            webbrowser.open(URL)
+        except Exception:
+            pass
+        return
     # log_level="info" → 打开 **access log**（每个请求一行，含状态码）。
     # 原来用 "warning"，后端一个字都不记请求 —— 排查"界面第一次打开某项是空的/
     # 灰的"这类问题时，完全看不到前端到底发没发请求、请求是成功还是失败，

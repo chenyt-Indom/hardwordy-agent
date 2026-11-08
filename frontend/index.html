@@ -6,6 +6,21 @@
   <title>本地多模态助手</title>
   <link rel="stylesheet" href="/static/lib/leaflet/leaflet.css" />
   <link rel="stylesheet" href="/static/style.css" />
+  <!-- 主题预置（2026-11-08）：在样式表之后、body 渲染之前就把 data-theme 定好，
+       否则浅色用户每次刷新都会先闪一下深色。逻辑与 app.js 的 applyTheme() 一致。 -->
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('ui_theme');
+        var theme = (saved === 'light' || saved === 'dark')
+          ? saved
+          : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
 </head>
 <body>
   <!-- 侧边栏：状态 + 文段式记忆库 -->
@@ -72,6 +87,36 @@
     </div>
 
     <!-- 知识库：把 .txt/.md 丢进文件夹即可被检索，无需导入 -->
+    <!-- 定时任务（2026-11-08）：长期自动化，到点自己跑，结果写回会话 -->
+    <section class="panel schedpanel">
+      <div class="sec-head">
+        <span class="fold" id="schedFold">▾</span>
+        <span>⏰ 定时任务</span>
+        <span class="badge-mini" id="schedBadge">0</span>
+      </div>
+      <div class="sched-body" id="schedBody">
+        <div class="list" id="schedList"></div>
+        <details class="sched-new">
+          <summary>＋ 新建定时任务</summary>
+          <div class="sched-form">
+            <input id="schedName" placeholder="任务名（如：每日AI新闻）">
+            <textarea id="schedPrompt" rows="2"
+                      placeholder="到点要做什么（写清楚，它到时候不会再来问你）"></textarea>
+            <div class="sched-row">
+              <select id="schedType">
+                <option value="daily">每天</option>
+                <option value="every">每隔</option>
+              </select>
+              <input id="schedTime" placeholder="09:00" value="09:00" title="每天几点（HH:MM）">
+              <input id="schedEvery" type="number" min="1" value="60" hidden title="每隔多少分钟">
+              <button class="btn sm" id="schedAdd">添加</button>
+            </div>
+            <p class="hint">定时任务用<b>本机模型</b>执行，不会弹任何对话框；结果写回当前会话。</p>
+          </div>
+        </details>
+      </div>
+    </section>
+
     <section class="panel kbpanel" id="kbPanel">
       <div class="sec-head">
         <h2>📚 知识库</h2>
@@ -191,6 +236,8 @@
         </div>
       </div>
     </section>
+
+
   </aside>
 
   <!-- 主聊天区 -->
@@ -198,6 +245,9 @@
     <header class="chat-header">
       <button class="icon-btn" id="toggleSidebar">☰</button>
       <h2>智能体对话</h2>
+      <!-- 主题切换（2026-11-08）：深色 ⇄ 浅色，点一下立刻切，选择存 localStorage。
+           图标由 app.js 的 applyTheme() 更新（深色显示 ☀️＝点它变亮，浅色显示 🌙＝点它变暗）。 -->
+      <button class="theme-btn" id="themeBtn" title="切换深色 / 浅色主题">🌙</button>
       <span class="privacy">🤖 自主规划 · 调用工具 · 完全本地</span>
       <!-- 计算设备徽标：点一下即可切换 CPU / GPU，切换后会做真实校验 -->
       <div class="device-wrap">
@@ -228,32 +278,55 @@
 
     <!-- 顶部正中：能力开关（极简，仅开关，无复杂输入） -->
     <div class="top-bar" id="topBar">
-      <label class="pill" data-cfg="memory_enabled"><i class="sw"></i>长期记忆</label>
+      <label class="pill" data-cfg="memory_enabled"><i class="sw"></i>记忆</label>
       <label class="pill" data-cfg="rag_enabled"><i class="sw"></i>知识库</label>
       <label class="pill" data-cfg="web_enabled" title="开着：搜索/网页/地图都联网查；关掉：全部走本地，地图只能用内置的常用地名表（没有底图、不显示地图缓存）"><i class="sw"></i>联网</label>
-      <button type="button" class="pill pill-btn" id="amapKeyBtn" title="填高德开放平台的 key —— 填了地图能搜到全国的小店、有真实评分和实时路况。不填也能用，只是退回 OpenStreetMap（数据弱一些）" onclick="window.__showAmapKey&&window.__showAmapKey()">高德 key</button>
-      <label class="pill" data-cfg="auto_memorize"><i class="sw"></i>自动记忆</label>
-      <label class="pill" data-cfg="code_auto_route" title="写代码时自动换用专用代码模型（非思考型，更稳更快）。具体用哪个、多少参数、多大体积，看左侧状态栏那行模型信息 —— 那里是从本机现读的，没下载时会自动回退到默认模型"><i class="sw"></i>专用模型</label>
-      <label class="pill" data-cfg="code_exec_enabled" title="让模型在本机真跑 Python 把结果算出来（默认关闭；开启后模型写的代码会在你电脑上执行）"><i class="sw"></i>本地算代码</label>
+      <button type="button" class="pill pill-btn" id="amapKeyBtn" title="填高德开放平台的 key —— 填了地图能搜到全国的小店、有真实评分和实时路况。不填也能用，只是退回 OpenStreetMap（数据弱一些）" onclick="window.__showAmapKey&&window.__showAmapKey()">高德</button>
+      <label class="pill" data-cfg="auto_memorize"><i class="sw"></i>自动记</label>
+      <label class="pill" data-cfg="code_auto_route" title="写代码时自动换用专用代码模型（非思考型，更稳更快）。具体用哪个、多少参数、多大体积，看左侧状态栏那行模型信息 —— 那里是从本机现读的，没下载时会自动回退到默认模型"><i class="sw"></i>专用</label>
+      <label class="pill" data-cfg="code_exec_enabled" title="让模型在本机真跑 Python 把结果算出来（默认关闭；开启后模型写的代码会在你电脑上执行）"><i class="sw"></i>跑代码</label>
       <!-- 询问方式：**一个按钮**，按钮上直接显示当前选的是哪种，点开可切换。
            ⚠️ 故意**不加 data-cfg** —— 那条规则会把 .pill[data-cfg] 当成布尔开关处理
            （`p.onclick` 被覆盖成 toggle + saveToggles），二选一的控件套进去会互相打架。
            这里由 app.js 的 showAskModePicker() 单独接管。
            用户 2026-09-22：原来是「快速询问 / 深度询问」两个按钮并排，
            要求合并成一个「询问方式」按钮，并在按钮里显示当前选择。 -->
-      <button type="button" class="pill pill-btn askmode-btn" id="askModeBtn"
-              title="模型在动手前会问你多少问题：快速了解 = 只问最关键的几条；深度询问 = 分多轮把关键信息问透。点这里切换（下一次提问生效）。">询问方式：快速</button>
+      
+    </div>
+    <!-- 第二行：模型 / 密钥 / 自开发（和上面的"能力开关"分开，避免挤成一条竖列） -->
+    <div class="top-bar tools-bar">
       <!-- 模型选择（2026-11-08 新增）：本地 30B / DeepSeek。
            之前移除过手动选择（用户嫌麻烦），但接入 DeepSeek 后必须手动指定
            provider，否则不知道该往哪个后端发。默认仍是「自动（本地）」。 -->
+<button type="button" class="pill pill-btn askmode-btn" id="askModeBtn"
+              title="模型在动手前会问你多少问题：快速了解 = 只问最关键的几条；深度询问 = 分多轮把关键信息问透。点这里切换（下一次提问生效）。">快速问</button>
       <select id="modelSelect" class="pill pill-select" title="选择本轮对话用哪个模型">
-        <option value="auto">🖥 本地 30B（自动）</option>
-        <option value="deepseek-flash">⚡ DeepSeek V4.1 Flash</option>
-        <option value="deepseek-flash-think">🧠 DeepSeek V4.1（思考）</option>
-        <option value="deepseek-v4-pro">🔮 DeepSeek V4 Pro</option>
+        <option value="auto">🖥 本地·自动</option>
+        <option value="qwen3-vl:30b">🖥 本地 30B</option>
+        <option value="qwen3-vl:8b">🖥 本地 8B</option>
+        <option value="deepseek-flash">⚡ DS V4.1</option>
+        <option value="deepseek-flash-think">🧠 DS V4.1 思考</option>
+        <option value="deepseek-v4-pro">🔮 DS V4 Pro</option>
       </select>
       <button type="button" class="pill pill-btn" id="dsKeyBtn"
-              title="设置 DeepSeek API Key（只存本标签页 sessionStorage，关掉浏览器即清空；不写磁盘、不进日志）">🔑 DeepSeek</button>
+              title="设置 DeepSeek API Key（只存本机浏览器 localStorage，重启后仍在；不写磁盘文件、不进日志）">🔑 DeepSeek</button>
+      <!-- 绘图模型切换（2026-11-08）：和上面 LLM 下拉一个思路，云/本地都能选 -->
+      <select id="imgModelSelect" class="pill pill-select" title="选择绘图用哪个模型（云端 API / 本地权重）">
+        <option value="cloud">☁️ 云端（当前配置）</option>
+      </select>
+      <!-- 云端图片 Key + 本地模型管理 -->
+      <button type="button" class="pill pill-btn" id="imgKeyBtn"
+              title="图片 Key / 模型管理（云端 Key、本地模型下载与卸载）">🎨 图片</button>
+      <!-- 代码模型（2026-11-08）：代码生成 + 自我迭代都走它 -->
+      <select id="codeModelSelect" class="pill pill-select"
+              title="写代码 / 自我迭代用哪个模型（你在 LLM 下拉里选的是聊天模型，这个是代码模型）">
+        <option value="auto">⌨ 代码·自动</option>
+      </select>
+      <!-- 自开发（2026-11-08）：让模型能改本应用自己的源码并重启 -->
+      <button type="button" class="pill pill-btn" id="selfDevBtn"
+              title="自开发：模型可读写本应用源码 / 重启 / 回撤历史（点开面板）">🛠 自开发</button>
+      <!-- 自开发面板（2026-11-08）：点开 🛠 后里面才有回撤历史 -->
+
       <!-- 模型**全自动选择**，这里不放选择器。
            一度加过"手动指定模型"的下拉，用户试用后反馈：
            "算了，我还是想要自动选择，手动太麻烦了" —— 于是移除。

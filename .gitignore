@@ -74,3 +74,12 @@ _qa_out/
 
 # 运行期日志（t2i 计时/异常），不进版本库
 logs/
+
+# 打包工作目录与历史产物（2026-11-08）
+build/本地多模态助手*/
+build/*_old/
+dist_old_*/
+dist_old*/
+*.bak
+*.bak_*
+tools_dev/

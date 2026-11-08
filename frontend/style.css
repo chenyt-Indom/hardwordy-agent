@@ -1,7 +1,20 @@
 /* 本地多模态助手 —— 样式 */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* ============================================================
+   主题系统（2026-11-08 新增）
+   ------------------------------------------------------------
+   原来是「只有一套深色」，用户嫌深色难看、要求「深色 + 浅色两套，
+   可以来回自主切换」。做法：
+     · 所有颜色都收进 CSS 变量，下面 :root 是**深色**（默认，保持原样）；
+     · html[data-theme="light"] 覆盖成**浅色**；
+     · 切换按钮在顶栏（🌙 / ☀️），选择存 localStorage，刷新/重启都记得；
+     · 没选过时跟随系统 prefers-color-scheme。
+   新增样式时**只用 var(--xxx)**，不要写死颜色，否则切到浅色会瞎。
+   ============================================================ */
 :root {
+  color-scheme: dark;
+
   --bg: #0f1115;
   --panel: #171a21;
   --panel2: #1f2430;
@@ -11,7 +24,90 @@
   --accent: #4f8bf9;
   --green: #34c77b;
   --danger: #e5534b;
+
+  /* —— 以下为「浅色模式」需要区分、原来写死在规则里的颜色，统一提成变量 —— */
+  --btn-bg: #2a3040;            /* 普通按钮底 */
+  --btn-bg-hover: #333c52;
+  --accent-hover: #3f7cf0;
+  --hover-bg: #2a3040;          /* 图标按钮 hover */
+  --think-bg: #12141a;          /* 思考过程面板底 */
+  --chip-bg: #17233d;           /* 工具调用小条底 */
+  --chip-border: #2a3a63;
+  --gen-label-bg: #1a2440;      /* 生成图标签底 */
+  --meta-fg: #5f6b80;           /* 极淡说明文字 */
+  --overlay: rgba(0, 0, 0, .78);/* 灯箱遮罩 */
+  --shadow: rgba(0, 0, 0, .6);
+  --lb-cap: #dfe5f0;
+  --tag-pin-bg: #3d3;
+  --tag-pin-fg: #000;
+  --tag-auto-bg: #3a4d8a;
+  --tag-auto-fg: #cdd7f5;
+  --danger-soft: rgba(229, 83, 75, .12);
+  --warn: #f0b95c;
+  --warn-border: #8a6120;
+  --warn-bg: rgba(138, 97, 32, .12);
+  --scrollbar: #2a3040;
+  --scrollbar-hover: #3a4256;
 }
+
+/* ---------- 浅色模式 ---------- */
+html[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f5f7fb;
+  --panel: #ffffff;
+  --panel2: #f0f3f9;
+  --border: #dbe1ec;
+  --text: #1c2330;
+  --muted: #667085;
+  --accent: #2f6fe4;
+  --green: #1f9d5b;
+  --danger: #d93a32;
+
+  --btn-bg: #e6ebf4;
+  --btn-bg-hover: #d8e0ee;
+  --accent-hover: #2560cc;
+  --hover-bg: #e6ebf4;
+  --think-bg: #f7f9fd;
+  --chip-bg: #e8f0ff;
+  --chip-border: #c3d6f7;
+  --gen-label-bg: #e8f0ff;
+  --meta-fg: #8b93a3;
+  --overlay: rgba(20, 26, 38, .55);
+  --shadow: rgba(20, 26, 38, .22);
+  --lb-cap: #f2f5fb;
+  --tag-pin-bg: #1f9d5b;
+  --tag-pin-fg: #fff;
+  --tag-auto-bg: #dbe6ff;
+  --tag-auto-fg: #2b4a8a;
+  --danger-soft: rgba(217, 58, 50, .1);
+  --warn: #a86a12;
+  --warn-border: #e0b877;
+  --warn-bg: rgba(224, 184, 119, .18);
+  --scrollbar: #cbd4e3;
+  --scrollbar-hover: #b3bfd3;
+}
+
+/* 主题切换的过渡：只给底色/文字色，避免整页元素一起动导致卡顿 */
+body, .sidebar, .panel, .chat-header, .composer, .bubble, .btn, .icon-btn,
+.status-card, .media-card, .think-body, .think-hdr, .tool-chip, .input-row textarea {
+  transition: background-color .18s ease, color .18s ease, border-color .18s ease;
+}
+
+/* 滚动条（深色下太亮、浅色下太暗都不好看） */
+* { scrollbar-color: var(--scrollbar) transparent; scrollbar-width: thin; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 顶栏的主题切换按钮 ---------- */
+.theme-btn {
+  border: 1px solid var(--border); background: var(--panel2); color: var(--text);
+  border-radius: 8px; cursor: pointer; font-size: 15px; line-height: 1;
+  padding: 8px 10px; flex-shrink: 0;
+}
+.theme-btn:hover { background: var(--hover-bg); border-color: var(--accent); }
 
 html, body { height: 100%; }
 body {
@@ -70,12 +166,12 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 
 .btn {
   width: 100%; margin-top: 10px; padding: 9px; border: none; border-radius: 8px;
-  background: #2a3040; color: var(--text); cursor: pointer; font-size: 14px;
+  background: var(--btn-bg); color: var(--text); cursor: pointer; font-size: 14px;
   transition: background .15s;
 }
-.btn:hover { background: #333c52; }
-.btn.primary { background: var(--accent); }
-.btn.primary:hover { background: #3f7cf0; }
+.btn:hover { background: var(--btn-bg-hover); }
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-hover); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ---------- 主区 ---------- */
@@ -121,7 +217,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .btn.ghost { background: transparent; border: 1px solid var(--border); }
 .btn.ghost:hover { background: var(--panel2); }
 .btn.danger { color: var(--danger); }
-.btn.danger:hover { background: rgba(229,83,75,.12); }
+.btn.danger:hover { background: var(--danger-soft); }
 
 .mini-toolbar { display: flex; gap: 6px; margin-top: 10px; }
 
@@ -140,8 +236,8 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   color: var(--muted); font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .mem-item .tag { background: var(--panel2); border-radius: 4px; padding: 1px 6px; font-size: 11px; }
-.mem-item .tag.pin { background: #3d3; color: #000; }
-.mem-item .tag.auto { background: #3a4d8a; color: #cdd7f5; }
+.mem-item .tag.pin { background: var(--tag-pin-bg); color: var(--tag-pin-fg); }
+.mem-item .tag.auto { background: var(--tag-auto-bg); color: var(--tag-auto-fg); }
 .mem-item.disabled .txt { color: var(--muted); text-decoration: line-through; }
 
 .kb-item .name { font-weight: 600; margin-bottom: 4px; }
@@ -168,7 +264,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   border-radius: 8px; cursor: pointer; font-size: 16px; line-height: 1;
   padding: 8px 10px;
 }
-.icon-btn:hover { background: #2a3040; }
+.icon-btn:hover { background: var(--hover-bg); }
 
 .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
 .msg { display: flex; gap: 10px; }
@@ -182,9 +278,9 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .msg .bubble.thinking { color: var(--muted); }
 /* 模型没输出正文（多为思考吃光输出配额）：给个醒目的提示，别留空气泡 */
 .msg .bubble.empty-answer {
-  color: var(--warn, #f0b95c);
-  border-color: #8a6120;
-  background: rgba(138, 97, 32, .12);
+  color: var(--warn);
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
   font-size: 13px;
 }
 
@@ -200,7 +296,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .think-body {
   display: none; /* 默认折叠 */
   max-width: 70%; margin-top: 6px; padding: 10px 12px; color: var(--muted);
-  background: #12141a; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--think-bg); border: 1px solid var(--border); border-radius: 10px;
   font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word;
   max-height: 260px; overflow: auto;
 }
@@ -208,7 +304,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 /* ---------- 工具调用过程（横向小条） ---------- */
 .tool-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0; }
 .tool-chip {
-  font-size: 11px; color: var(--accent); background: #17233d; border: 1px solid #2a3a63;
+  font-size: 11px; color: var(--accent); background: var(--chip-bg); border: 1px solid var(--chip-border);
   border-radius: 999px; padding: 3px 10px;
 }
 
@@ -223,23 +319,23 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .media-card img { width: 100%; display: block; }
 .media-cap { font-size: 11px; color: var(--muted); padding: 6px 8px; word-break: break-all; }
 .media-card.gen .gen-label {
-  color: var(--text); background: #1a2440; font-size: 12px; border-bottom: 1px solid #2a3a63;
+  color: var(--text); background: var(--gen-label-bg); font-size: 12px; border-bottom: 1px solid var(--chip-border);
 }
 .media-card img { cursor: zoom-in; }
-.media-meta { font-size: 10px; color: #5f6b80; padding: 0 8px 6px; }
+.media-meta { font-size: 10px; color: var(--meta-fg); padding: 0 8px 6px; }
 
 /* ---------- 大图灯箱 ---------- */
 .lightbox {
-  position: fixed; inset: 0; z-index: 999; background: rgba(0,0,0,.78);
+  position: fixed; inset: 0; z-index: 999; background: var(--overlay);
   display: flex; align-items: center; justify-content: center; cursor: zoom-out; padding: 24px;
 }
 .lb-box { position: relative; max-width: min(92vw, 900px); max-height: 90vh; }
 .lb-box img {
   max-width: 100%; max-height: 82vh; border-radius: 8px; display: block;
-  box-shadow: 0 10px 40px rgba(0,0,0,.6);
+  box-shadow: 0 10px 40px var(--shadow);
 }
 .lb-cap {
-  color: #dfe5f0; font-size: 12px; margin-top: 10px; text-align: center;
+  color: var(--lb-cap); font-size: 12px; margin-top: 10px; text-align: center;
   word-break: break-word; line-height: 1.5; padding: 0 12px;
 }
 .lb-close, .lb-dl {
@@ -1707,3 +1803,263 @@ select.pill-select option {
   width: 100%;
   line-height: 1.5;
 }
+
+/* ================= 自开发改动卡片（2026-11-08）=================
+   用户要求：「改了哪个文件、改了什么可以点开查看详细内容，但不撑坏页面」。
+   所以：默认只显示一行摘要；展开后 diff 在**固定最大高度**的容器里滚动，
+   绝不把聊天流越撑越长。 */
+.sd-card {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #2f3a4a;
+  border-radius: 10px;
+  background: rgba(30, 34, 42, 0.72);
+  margin: 6px 0;
+  overflow: hidden;
+}
+.sd-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.sd-head .sd-rel {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  color: #cfd6e2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.sd-badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(90, 169, 255, .14);
+  color: #7ec0ff;
+  border: 1px solid rgba(90, 169, 255, .3);
+}
+.sd-stat { flex: 0 0 auto; font-size: 11.5px; font-family: ui-monospace, monospace; }
+.sd-add { color: #5fd08a; }
+.sd-del { color: #e07a7a; }
+.sd-toggle {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 7px;
+  border: 1px solid #3a4353;
+  background: transparent;
+  color: #9aa4b2;
+  cursor: pointer;
+}
+.sd-toggle:hover { color: #d6dde8; border-color: #4d5a6e; }
+.sd-body {
+  border-top: 1px solid #2a323e;
+  padding: 8px 10px 10px;
+}
+.sd-pre {
+  max-height: 320px;          /* ← 关键：固定上限 + 内部滚动，不撑页面 */
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #12151a;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre;
+  color: #b9c2cf;
+}
+.sd-pre .l-add { color: #6fd996; }
+.sd-pre .l-del { color: #e58a8a; }
+.sd-pre .l-hdr { color: #7e8b9c; }
+.sd-foot {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 7px;
+  font-size: 11.5px;
+  color: #8b94a3;
+  flex-wrap: wrap;
+}
+.sd-foot button {
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  border: 1px solid #4a3a3a;
+  background: transparent;
+  color: #e0a0a0;
+  cursor: pointer;
+}
+.sd-foot button:hover { border-color: #6a4a4a; color: #ffb3b3; }
+.sd-batch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid #2a2a31;
+  font-size: 12.5px;
+}
+.sd-batch .sd-b-time {
+  font-family: ui-monospace, monospace;
+  color: #cfd6e2;
+  flex: 0 0 auto;
+}
+.sd-batch .sd-b-files {
+  flex: 1;
+  min-width: 0;
+  color: #8b94a3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ================= 顶栏控件宽度修正（2026-11-08，真 bug）=================
+   现象：顶栏变成一根竖直的长条 —— 每个下拉各占一整行，聊天区被挤成一条缝。
+   根因：文件开头有一条**全局** `select, input[type=number] { width: 100% }`
+        （那是给侧栏设置面板用的）。后来顶栏加了 `select.pill-select`
+        （模型 / 图片模型 / 代码模型三个下拉），它继承了 width:100%，
+        在 flex-wrap 的 `.top-bar` 里每个都占满一整行 —— 于是全被顶到下一行，
+        控件一多就堆成竖排，下面的消息区被压到几乎没有高度。
+   ⚠️ 这是"加控件时没检查继承宽度"导致的挤压，不是模型改坏的。
+   修法：顶栏里的一切控件一律 `width:auto`，并允许轻微收缩 + 超长省略号。
+   ⚠️ 以后往顶栏加控件，不需要再单独写宽度 —— 这条兜底会管住。 */
+.top-bar > * {
+  width: auto !important;      /* 压掉全局 select{width:100%} */
+  max-width: 186px;            /* 再长就用省略号，别把一行吃满 */
+  flex: 0 1 auto;              /* 放不下时可以缩一点，但不许占满整行 */
+  min-width: 0;
+}
+.top-bar > select,
+.top-bar > button,
+.top-bar > label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 第二行工具条（模型 / 密钥 / 自开发）—— 2026-11-08
+   顶栏控件太多时会被全局 select{width:100%} 挤成竖列；这里把"能力开关"和
+   "模型&工具"分成两行，每行都能横向排开，聊天区高度不再被吃掉。 */
+.top-bar.tools-bar {
+  padding-top: 0;
+  border-top: none;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* 「本次任务不再询问」勾选框（2026-11-08） */
+.confirm-remember {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 0 2px;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.confirm-remember input { width: 14px !important; height: 14px; margin: 0; accent-color: var(--accent); }
+.confirm-remember:hover { color: var(--text); }
+
+/* ================= 定时任务面板（2026-11-08）================= */
+.badge-mini {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.sched-item {
+  border-top: 1px solid var(--border);
+  padding: 7px 10px 8px;
+}
+.sched-hd { font-size: 12.5px; color: var(--text); }
+.sched-meta { font-size: 11px; color: var(--muted); line-height: 1.7; margin-top: 2px; }
+.sched-prev {
+  font-size: 11px; color: var(--muted); opacity: .78; margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sched-acts { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.sched-acts button {
+  font-size: 11px; padding: 3px 8px; border-radius: 6px;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--muted); cursor: pointer;
+}
+.sched-acts button:hover { color: var(--text); border-color: var(--accent); }
+.sched-new { margin: 8px 10px 4px; }
+.sched-new summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.sched-form { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
+.sched-form input, .sched-form textarea, .sched-form select {
+  width: 100%; box-sizing: border-box; padding: 6px 8px;
+  border-radius: 7px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--text); font-size: 12px;
+  font-family: inherit;
+}
+.sched-form textarea { resize: vertical; }
+.sched-row { display: flex; gap: 6px; align-items: center; }
+.sched-row input, .sched-row select { width: auto; flex: 1 1 auto; min-width: 0; }
+.sched-row .btn { flex: 0 0 auto; width: auto; margin: 0; }
+
+/* ================= 代码折叠 + Markdown 排版（2026-11-08）=================
+   用户要求：① 代码不要整段摊开，折叠可展开；② 总结要结构化、好看。 */
+.code-card.collapsed .code-body { display: none; }
+.code-card.collapsed .code-out { display: none; }
+.code-card { max-width: 100%; }
+.code-body {
+  max-height: 460px;          /* 展开也不许无限长，内部滚动 */
+  overflow: auto;
+}
+.code-toggle { flex: 0 0 auto; }
+
+/* ---- 回答里的 Markdown ---- */
+.bubble .md-h {
+  margin: 12px 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.4;
+}
+.bubble .md-h:first-child { margin-top: 2px; }
+.bubble .md-p { margin: 5px 0; line-height: 1.75; }
+.bubble .md-gap { height: 7px; }
+.bubble .md-ul,
+.bubble .md-ol { margin: 5px 0 5px 20px; padding: 0; }
+.bubble .md-ul li,
+.bubble .md-ol li { margin: 3px 0; line-height: 1.75; }
+.bubble .md-ul li::marker { color: var(--accent); }
+.bubble .md-quote {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--panel2);
+  border-radius: 0 6px 6px 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.bubble .md-hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+.bubble .md-code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: #9fd0ff;
+}
+.bubble .md-text b { color: var(--text); font-weight: 600; }
+.bubble a { color: var(--accent); text-decoration: none; }
+.bubble a:hover { text-decoration: underline; }

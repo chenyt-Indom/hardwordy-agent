@@ -60,6 +60,11 @@ def _dir_datas(src_root, dst_root, skip_suffixes=()):
 
 all_datas += _dir_datas(os.path.join(root, "frontend"), "frontend")
 
+# 独立回滚脚本要跟着发行包走（应用起不来时用户双击它就能退版本）
+_rp = os.path.join(root, "restore.py")
+if os.path.isfile(_rp):
+    all_datas.append((_rp, "."))
+
 # —— 语音识别模型（离线唤醒词 + 流式识别）——
 # 模型体积较大（int8 版约 24MB、fp32 版约 53MB），为把主包控制在 GitHub
 # 单文件 100MB 限制内，模型不随主包分发，而是作为独立的 asr-model 发布包提供。
@@ -78,6 +83,11 @@ all_hidden += [
     "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on", "uvicorn.lifespan.off",
     "fastapi", "pydantic", "websockets", "multipart", "python_multipart",
     "clr", "pythonnet",
+]
+# 2026-11-08 新增的模块：显式列出，避免 PyInstaller 漏收
+all_hidden += [
+    "backend.cloud_image", "backend.image_models",
+    "backend.scheduler", "backend.selfdev",
 ]
 all_hidden += collect_submodules("uvicorn", filter=lambda n: True)
 

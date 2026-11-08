@@ -101,9 +101,13 @@ MODELS = [
     {
         "id": "deepseek-flash",
         "name": "DeepSeek V4.1 Flash",
-        "desc": "V4.1 Flash，响应快、便宜，默认不思考",
-        "thinking": False,
-        "effort": None,
+        # ⚠️ 2026-11-08 改：原来默认不思考 → 前端**看不到任何思考过程**，
+        #   用户以为"DeepSeek 不支持流式思考"。其实 V4.1 支持，只是没打开。
+        #   现在默认开启（effort=medium），思考会以 reasoning_content 流式推给前端。
+        #   想省钱/要更快，可以把这里改回 False（或选别的模型）。
+        "desc": "V4.1 Flash，默认开启思考（可见思考过程），响应快、便宜",
+        "thinking": True,
+        "effort": "medium",
     },
     {
         "id": "deepseek-flash-think",
@@ -266,7 +270,8 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                            temperature: float = 0.7, max_tokens: int = 4096,
                            thinking: bool | None = None,
                            reasoning_effort: str | None = None,
-                           system_prompt: str | None = None):
+                           system_prompt: str | None = None,
+                           guard=None):
     """**带工具调用**的流式对话（2026-11-08 新增）。
 
     为什么需要它
@@ -285,13 +290,19 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                     由调用方注入（一般是 tools.dispatch 的包装），
                     这样本模块不依赖 tools.py，方便单测。
     max_rounds : 最多几轮工具调用（防死循环）。默认 8。
+    guard : callable(used: set[str], final_text: str) -> str | None，可选。
+            **「光嘴上说说」的兜底**：模型准备收官时调一次，返回非空字符串
+            就把这段话当成用户消息再推给它，要求真正动手（只兜一次）。
+            主通道（/api/chat）早就有这套兜底，DeepSeek 通道原来没有 ——
+            用户实测「让它做 Excel，它把表格写在正文里就算完事」。
 
-    产出（元组，和 chat_stream 相比多了两种 kind）
+    产出（元组，和 chat_stream 相比多了几种 kind）
     ----
     ("content",    text)           正文增量
     ("thinking",   text)           思维链增量
     ("tool_start", name)           开始执行某个工具（前端据此弹工具卡片）
     ("tool_result", (name, ok, text))  工具执行完毕（ok=False 表示抛异常）
+    ("note",       text)           过程提示（如「还没看到文件产出，我让它真做出来」）
     """
     if not api_key:
         raise DeepSeekError("缺少 API Key")
@@ -310,6 +321,9 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
     if system_prompt:
         msgs.append({"role": "system", "content": system_prompt})
     msgs.extend(messages)
+
+    used: set[str] = set()      # 本会话真正调用过的工具（guard 要用）
+    guard_used = False          # 兜底只放一次，避免和模型死磕
 
     for rnd in range(max_rounds):
         body: dict = {
@@ -434,8 +448,23 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
             except Exception:
                 pass
 
-        # 这一轮没有工具调用 → 对话结束
+        # 这一轮没有工具调用 → 本该对话结束
         if not tool_calls:
+            # ★ 「光嘴上说说」兜底（2026-11-08）：
+            #   用户要文件/图片，模型却把内容写在正文里就收工 —— 代码层退回一轮。
+            #   只在**确实写了正文**（说明它自认为答完了）且没兜过时才触发。
+            if guard is not None and not guard_used and content_buf:
+                try:
+                    tip = guard(used, "".join(content_buf))
+                except Exception:                 # noqa: BLE001
+                    tip = None
+                if tip:
+                    guard_used = True
+                    msgs.append({"role": "assistant",
+                                 "content": "".join(content_buf) or "（无正文）"})
+                    msgs.append({"role": "user", "content": tip})
+                    yield ("note", "还没看到成品产出，我让它真正做出来。")
+                    continue
             return
 
         # 把 assistant 的 tool_calls 消息补进历史（协议要求）
@@ -459,6 +488,7 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
         # 逐个执行，结果以 role=tool 回填
         for tc in assistant_calls:
             name = tc["function"]["name"]
+            used.add(name)
             yield ("tool_start", name)
             try:
                 args = json.loads(tc["function"]["arguments"] or "{}")

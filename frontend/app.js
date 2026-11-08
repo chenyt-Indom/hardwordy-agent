@@ -234,18 +234,57 @@
     return s.replace(/\n{3,}/g, "\n\n").trim();
   }
 
+  // ---------------- 轻量 Markdown → HTML（2026-11-08）----------------
+  // 用户的反馈：「解决完问题的总结不够结构化和美观」。
+  // 之前回复是 textContent + <br>，所以 `### 标题`、`- 列表`、`**重点**` 全是原样字符。
+  // 这里做一层**受控**的渲染：先 escapeHtml（防注入），再套少量块级/行内语法。
+  // 刻意不引第三方库：只支持对话里真正会用到的几种，出错面小。
+  function mdToHtml(text) {
+    const raw = String(text == null ? "" : text);
+    let esc = escapeHtml(raw);
+    // 行内：`code` / **粗** / *斜* / [文字](链接)
+    const inline = (s) => s
+      .replace(/`([^`\n]{1,120})`/g, '<code class="md-code">$1</code>')
+      .replace(/\*\*([^*\n]{1,80})\*\*/g, "<b>$1</b>")
+      .replace(/(^|[^*])\*([^*\n]{1,60})\*(?!\*)/g, "$1<i>$2</i>")
+      .replace(/\[([^\]\n]{1,60})\]\(([^)\s]+)\)/g, (m, label, url) => {
+        if (url.indexOf("/api/") === 0) return dlGroup(label, fixApiUrl(url));
+        return '<a href="' + url + '" target="_blank" rel="noopener">' + label + "</a>";
+      });
+
+    const lines = esc.split(/\r?\n/);
+    const out = [];
+    let list = "";
+    const closeList = () => { if (list) { out.push("</" + list + ">"); list = ""; } };
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) { closeList(); out.push('<div class="md-gap"></div>'); continue; }
+      let m = /^(#{1,4})\s+(.*)$/.exec(t);
+      if (m) { closeList(); const lv = Math.min(5, m[1].length + 2); out.push('<h' + lv + ' class="md-h">' + inline(m[2]) + '</h' + lv + '>'); continue; }
+      if (/^([-*_]{3,})$/.test(t)) { closeList(); out.push('<hr class="md-hr">'); continue; }
+      m = /^[-*•]\s+(.*)$/.exec(t);
+      if (m) { if (list !== "ul") { closeList(); out.push('<ul class="md-ul">'); list = "ul"; } out.push("<li>" + inline(m[1]) + "</li>"); continue; }
+      m = /^(\d+)[.、)]\s+(.*)$/.exec(t);
+      if (m) { if (list !== "ol") { closeList(); out.push('<ol class="md-ol">'); list = "ol"; } out.push("<li>" + inline(m[2]) + "</li>"); continue; }
+      // ⚠️ 这里是**转义之后**的文本，行首的 > 已经变成 &gt;，要按转义后的形式匹配
+      m = /^(?:>|&gt;)\s?(.*)$/.exec(t);
+      if (m) { closeList(); out.push('<blockquote class="md-quote">' + inline(m[1]) + "</blockquote>"); continue; }
+      closeList();
+      out.push('<p class="md-p">' + inline(t) + "</p>");
+    }
+    closeList();
+    return out.join("");
+  }
+
   function renderAnswerLinks(bubble, text) {
-    const esc = escapeHtml(stripToolLeak(text));
-    let html = esc.replace(/\[([^\]]{1,40})\]\((\/api\/[^\s)]+)\)/g,
-      (_, label, url) => dlGroup(label, fixApiUrl(url)));
-    // 裸路径也要变按钮。⚠️ 前面那个字符类别只写「空格和半角括号」——
-    // 模型很爱写成「下载链接：/api/…」这种**全角冒号**开头的（实测踩到，
-    // 结果链接没渲染成按钮，用户只能看到一长串路径）。
-    // 同理尾部要挡住中文标点，否则会把句号、逗号一起吞进 URL 里。
+    // 结构化渲染（标题/列表/粗体/行内代码/链接），下载链接仍然渲染成按钮
+    let html = mdToHtml(stripToolLeak(text));
+    // 裸路径也要变按钮（模型常写「下载链接：/api/...」，前面是全角冒号；
+    // 尾部要挡住中文标点，否则会把句号逗号一起吞进 URL）
     html = html.replace(
       /(^|[\s（(【\[:：,，、>])(\/api\/(?:doclib\/download|ws\/zip)[^\s<)）】\]，。；：、"'']*)/g,
       (_, pre, url) => `${pre}${dlGroup("点击下载", fixApiUrl(url))}`);
-    bubble.innerHTML = html.replace(/\n/g, "<br>");
+    bubble.innerHTML = html;
   }
 
   // 跳到「生成文库」并把这个文件选中、闪一下（列表长的时候也能一眼找到）
@@ -1083,41 +1122,78 @@
 
   async function refreshHealth() {
     try {
-      const d = await api("/api/health");
+      // ★ 2026-11-08：状态卡片**跟随前端当前选用的模型**，不再固定显示 config 的默认值。
+      //   用户要求：「选用什么模型就显示什么模型的状态，检验也是一样」。
+      const selEl = document.querySelector("#modelSelect");
+      const prov = selEl ? selEl.value : "auto";
+      const isDS = prov.indexOf("deepseek") === 0;
       const dot = $("#statusDot"), t = $("#statusTitle"), det = $("#statusDetail");
+      const mi = $("#modelInfo");
+      const bs = $("#brandSub");
+
+      if (isDS) {
+        // ===== DeepSeek 云端模式：不查本地 Ollama（没意义）=====
+        const saved = localStorage.getItem("ds_api_key") || "";
+        let label = "DeepSeek";
+        try { label = selEl.options[selEl.selectedIndex].text.replace(/^\S+\s*/, ""); } catch {}
+        dot.className = "dot" + (saved ? " on" : " off");
+        t.textContent = saved ? "DeepSeek 云端模式" : "DeepSeek 未配置 Key";
+        det.textContent = saved ? "不占显存 · 走云端 API" : "点右上角 🔑 填入 API Key";
+        if (mi) {
+          mi.textContent = "当前 " + label + (saved
+            ? "　|　工具调度：function calling（41 个工具）"
+            : "（缺 Key，无法调用）");
+          mi.title = mi.textContent;
+        }
+        if (bs) bs.textContent = "DeepSeek 智能体 · 云端推理";
+        return;
+      }
+
+      // ===== 本地模式（原有逻辑）=====
+      const d = await api("/api/health");
+
+      // 本地模式可能指定了具体模型（modelSelect 的值就是模型名）
+      const wantModel = prov === "auto" ? "" : prov;
+      const inst = Array.isArray(d.installed) ? d.installed : [];
+      const has = (n) => !!n && (inst.indexOf(n) >= 0 || inst.indexOf(n + ":latest") >= 0);
+      // ⚠️ 不能用 d.model === wantModel 判断：d.model 是 config 的默认模型，
+      //    下拉选了 8B 时两者不等，会被误判成"模型未下载"。要查**已安装清单**。
+      const ready = wantModel ? (d.online && has(wantModel)) : !!d.model_ready;
+      const shown = wantModel || d.model || "默认模型";
+
       if (d.online) {
-        dot.className = "dot" + (d.model_ready ? " on" : " off");
-        t.textContent = d.model_ready ? "模型就绪（离线）" : "Ollama 在线，模型未下载";
-        det.textContent = d.model_ready ? "智能体已就绪" : "请下载模型";
+        dot.className = "dot" + (ready ? " on" : " off");
+        t.textContent = ready ? "模型就绪（离线）" : "Ollama 在线，模型未下载";
+        det.textContent = ready ? shown + " · 智能体已就绪" : "缺少 " + shown + "，请下载";
       } else {
         dot.className = "dot off";
         t.textContent = "Ollama 未运行";
         det.textContent = "请先启动 ollama serve";
       }
-      // ---- 模型信息那一行（用户能一眼确认自己到底在用哪个模型）----
-      const mi = $("#modelInfo");
+
       if (mi) {
         // ⚠️ 区分两种"没有信息"：**连不上** vs **真的没下载**。
-        //    连不上时写"（未下载）"是错的 —— 模型明明装着，只是没启动 Ollama。
         const online = d.online !== false;
         const bits = [];
-        const main = fmtModel(d.model_info);
-        if (main) bits.push("对话 " + main);
-        else if (d.model) bits.push("对话 " + d.model + (online ? "（未下载）" : ""));
+        if (wantModel) {
+          // 用户在下拉里明确选了模型 —— 状态只讲这一个
+          bits.push("已选 " + wantModel + (ready ? "" : (online ? "（未下载）" : "（Ollama 未运行）")));
+        } else {
+          const main = fmtModel(d.model_info);
+          if (main) bits.push("对话 " + main);
+          else if (d.model) bits.push("对话 " + d.model + (online ? "（未下载）" : ""));
+        }
         if (d.code_model) {
-          // 就绪标记以 code_model_ready 为准（它是后端明确的结论），
-          // 有它就一定有 code_model_info
           if (d.code_model_ready) bits.push("代码 " + fmtModel(d.code_model_info));
           else bits.push("代码 " + d.code_model + (online ? "（未下载，暂用默认模型）" : ""));
         }
         mi.textContent = bits.join("　|　");
         mi.title = bits.join("\n");
       }
-      // ---- 左上角那句"XX 智能体"也按实际模型推导（原来写死 Qwen，换模型就说错了）----
-      const bs = $("#brandSub");
+
       if (bs) {
-        const nm = String(d.model || "").toLowerCase();
-        const fam = String((d.model_info && d.model_info.family) || "").toLowerCase();
+        const nm = String(wantModel || d.model || "").toLowerCase();
+        const fam = String((wantModel ? "" : (d.model_info && d.model_info.family)) || "").toLowerCase();
         let brand = "";
         for (const k of Object.keys(MODEL_BRANDS)) {
           if (nm.includes(k) || fam.includes(k)) { brand = MODEL_BRANDS[k]; break; }
@@ -1169,7 +1245,7 @@
   let askMode = "quick";                       // 当前选择（唯一事实来源）
 
   function askModeLabel() {
-    return "询问方式：" + (ASK_MODES[askMode] || ASK_MODES.quick).name;
+    return (askMode === "deep" ? "深度问" : "快速问");
   }
   function setAskMode(mode) {
     askMode = ASK_MODES[mode] ? mode : "quick";
@@ -1314,6 +1390,45 @@
   // 模型**全自动选择** —— 一律走后端的按轮路由，前端不做手动指定。
   // （曾经加过手动下拉，用户反馈"手动太麻烦了"，已移除。
   //   后端的 ChatRequest.model 覆盖能力保留着，随时能再挂上来。）
+
+  // ---------- 主题切换（2026-11-08） ----------
+  // 用户要求：「深色太难看，改成深色 + 白色两种模式可以来回自主切换」。
+  // 颜色全在 style.css 的 :root / html[data-theme="light"] 里，这里只负责切属性 + 记住选择。
+  // 首屏那份内联脚本（index.html <head>）用的是同一个 key，所以刷新不会闪。
+  const THEME_KEY = "ui_theme";
+  function applyTheme(theme) {
+    const t = theme === "light" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", t);
+    const btn = $("#themeBtn");
+    if (btn) {
+      // 图标表示「点一下会变成什么」：深色时显示 ☀️，浅色时显示 🌙
+      btn.textContent = t === "light" ? "🌙" : "☀️";
+      btn.title = t === "light" ? "当前：浅色 —— 点击切到深色" : "当前：深色 —— 点击切到浅色";
+    }
+    try { localStorage.setItem(THEME_KEY, t); } catch (e) {}
+  }
+  function currentTheme() {
+    return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+  }
+  // 初始化：沿用 <head> 里已经定好的值（它已经处理过 localStorage 与系统偏好）
+  applyTheme(currentTheme());
+  const themeBtnEl = $("#themeBtn");
+  if (themeBtnEl) {
+    themeBtnEl.onclick = () => {
+      applyTheme(currentTheme() === "light" ? "dark" : "light");
+    };
+  }
+  // 用户没手动选过时，跟随系统主题变化
+  try {
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const onSysChange = (e) => {
+      let saved = null;
+      try { saved = localStorage.getItem(THEME_KEY); } catch (err) {}
+      if (!saved) applyTheme(e.matches ? "light" : "dark");
+    };
+    if (mq.addEventListener) mq.addEventListener("change", onSysChange);
+    else if (mq.addListener) mq.addListener(onSysChange);
+  } catch (e) {}
 
   // ---------- 事件 ----------
   $("#toggleSidebar").onclick = () => $("#sidebar").classList.toggle("hidden");
@@ -2681,6 +2796,87 @@
 
     // ---------- 代码卡片：模型跑了什么代码、结果怎样，都能直接看、直接改、直接重跑 ----------
     // 模型在回答里贴的代码块也会用它渲染（见 renderAnswerWithCode）。
+    // ---- 自开发改动卡片（2026-11-08）----
+    // 用户要求：改了哪个文件、改了什么要能点开看详情，但**不许把页面撑变形**。
+    // 做法：默认只显示一行摘要；展开后 diff 在 max-height 320px 的容器里滚动。
+    const makeSelfdevCard = (ui) => {
+      const wrap = document.createElement("div");
+      wrap.className = "sd-card";
+      const actName = ui.act === "apply" ? "代码模型重写"
+        : (ui.act === "patch" ? "局部替换" : "写入");
+      const rel = String(ui.rel || "");
+      const add = ui.added || 0;
+      const del = ui.removed || 0;
+
+      const head = document.createElement("div");
+      head.className = "sd-head";
+      head.innerHTML =
+        '<span class="sd-badge">🛠 ' + actName + '</span>' +
+        '<span class="sd-rel" title="' + rel.replace(/"/g, "&quot;") + '">' + rel + '</span>' +
+        '<span class="sd-stat"><span class="sd-add">+' + add +
+        '</span> <span class="sd-del">−' + del + '</span></span>' +
+        '<button class="sd-toggle" type="button">详情 ▾</button>';
+      wrap.appendChild(head);
+
+      const body = document.createElement("div");
+      body.className = "sd-body";
+      body.hidden = true;
+      const pre = document.createElement("pre");
+      pre.className = "sd-pre";
+      // 给 diff 上色（只做行首判断，不解析内容）
+      const diffText = String(ui.diff || "（没有差异内容）");
+      pre.innerHTML = diffText.split("\n").map((ln) => {
+        const esc = ln.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+        if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("@@"))
+          return '<span class="l-hdr">' + esc + "</span>";
+        if (ln.startsWith("+")) return '<span class="l-add">' + esc + "</span>";
+        if (ln.startsWith("-")) return '<span class="l-del">' + esc + "</span>";
+        return esc;
+      }).join("\n");
+      body.appendChild(pre);
+
+      const foot = document.createElement("div");
+      foot.className = "sd-foot";
+      foot.innerHTML =
+        (ui.who ? '<span>模型：' + ui.who + '</span>' : "") +
+        (ui.backup ? '<span>备份：' + ui.backup + '</span>' : "") +
+        (ui.is_new ? '<span>（新文件，无改前版本）</span>' : "");
+      if (ui.backup) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "↩ 回撤这个文件";
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try {
+            const r = await (await fetch("/api/selfdev/rollback", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ rel: rel, backup: ui.backup }) })).json();
+            if (r.ok) {
+              btn.textContent = "✅ 已回撤";
+              showToast("已回撤 " + rel + "（刷新后生效）", "ok");
+            } else {
+              btn.textContent = "↩ 回撤这个文件";
+              btn.disabled = false;
+              showToast("回撤失败：" + (r.error || r.msg || ""), "err");
+            }
+          } catch (e) {
+            btn.disabled = false;
+            showToast("回撤失败：" + e.message, "err");
+          }
+        };
+        foot.appendChild(btn);
+      }
+      body.appendChild(foot);
+      wrap.appendChild(body);
+
+      const tg = head.querySelector(".sd-toggle");
+      tg.onclick = () => {
+        body.hidden = !body.hidden;
+        tg.textContent = body.hidden ? "详情 ▾" : "收起 ▴";
+      };
+      return wrap;
+    };
+
     const makeCodeCard = (ui, title) => {
       const card = document.createElement("div");
       card.className = "code-card";
@@ -2716,6 +2912,24 @@
       const stdinSend = card.querySelector(".code-stdin-send");
       let current = ui.code || "";
       codeEl.textContent = current;
+
+      // ★ 长代码**默认折叠**（用户要求：不要把整段代码摊在聊天里）
+      //   短代码（≤12 行且 ≤700 字）照旧直接显示，免得为三五行还要点一下。
+      const _lines = current.split("\n").length;
+      let _collapsed = (_lines > 12 || current.length > 700);
+      const _tg = document.createElement("button");
+      _tg.className = "btn sm ghost code-toggle";
+      _tg.type = "button";
+      const _syncTg = () => {
+        card.classList.toggle("collapsed", _collapsed);
+        _tg.textContent = _collapsed
+          ? "▸ 展开代码（" + _lines + " 行 / " + current.length + " 字）"
+          : "▾ 收起代码";
+      };
+      _tg.onclick = () => { _collapsed = !_collapsed; _syncTg(); };
+      const _btns = card.querySelector(".code-btns");
+      if (_btns) _btns.prepend(_tg);
+      _syncTg();
 
       const paintOut = (r) => {
         const bits = [];
@@ -2984,7 +3198,7 @@
           if (!p.v.trim()) return;
           const d = document.createElement("div");
           d.className = "md-text";
-          d.textContent = p.v;
+          d.innerHTML = mdToHtml(p.v);      // ← 结构化，而不是原样贴
           bubble.appendChild(d);
         } else if (p.t === "raw") {
           const d = document.createElement("div");
@@ -3010,16 +3224,25 @@
         `<div class="confirm-reason">${escapeHtml(ui.reason || "模型请求执行一段有风险的代码")}</div>` +
         '<pre class="confirm-code"><code></code></pre>' +
         '<div class="confirm-tip">批准后会在本机真实执行（临时目录、有运行时限）。不确定就别点允许。</div>' +
+        // 「本次任务不再询问」：只对这一轮对话生效（后端每轮清零），不是永久授权
+        '<label class="confirm-remember"><input type="checkbox" id="cfRemember">' +
+        '<span>本次任务不再询问（本轮剩余操作自动确认）</span></label>' +
         '<div class="confirm-btns"><button class="btn ghost" data-act="deny">拒绝</button>' +
         '<button class="btn primary" data-act="allow">允许执行</button></div></div>';
       layer.querySelector("code").textContent = ui.code || "";
       document.body.appendChild(layer);
       const answer = async (allow) => {
+        const remember = !!(layer.querySelector("#cfRemember") || {}).checked;
         layer.querySelectorAll("button").forEach((b) => { b.disabled = true; });
         try {
-          await api("/api/tool/confirm", {
-            method: "POST", body: JSON.stringify({ id: ui.id, allow }) });
-          showToast(allow ? "已允许执行" : "已拒绝", allow ? "ok" : "");
+          const r = await api("/api/tool/confirm", {
+            method: "POST",
+            body: JSON.stringify({ id: ui.id, allow, remember }) });
+          showToast(
+            allow
+              ? (remember ? "已允许，本轮后续操作不再询问" : "已允许执行")
+              : "已拒绝",
+            allow ? "ok" : "");
         } catch (e) {
           showToast("回复失败：" + String(e.message || e), "warn");
         } finally {
@@ -3113,19 +3336,25 @@
           ui.source ? `<a href="${ui.source}" target="_blank" rel="noopener">来源页</a> · ` : ""}${
           ui.device ? "🖥 " + ui.device + " " : ""}${ui.cost_s ? "⏱ " + ui.cost_s + "s" : ""}${
           ui.size ? " · " + ui.size : ""}</div>
-        <div class="media-actions"><button class="btn sm ghost lib-save">⭐ 保存到图库</button>
+        <div class="media-actions">${
+          (ui.saved && ui.saved.id)
+            ? `<span class="badge gen" title="${(ui.saved.path || "").replace(/"/g, "&quot;")}">✅ 已存图库</span>`
+            : `<button class="btn sm ghost lib-save">⭐ 保存到图库</button>`}
           <button class="btn sm ghost mask-pick" title="在这张图上涂一下，之后只改涂过的地方（比整图微改准得多）">✂️ 涂抹选区</button></div>`;
       card.querySelector("img").onclick = (e) => {
         e.stopPropagation();
         showLightbox(mime, b64, badge + (caption ? "：" + caption : ""));
       };
+      if (ui.saved && ui.saved.id && typeof loadLibrary === "function") {
+        setTimeout(loadLibrary, 30);
+      }
       const pick = card.querySelector(".mask-pick");
       if (pick) pick.onclick = (e) => {
         e.stopPropagation();
         openMaskEditor("data:" + mime + ";base64," + b64);
       };
       const btn = card.querySelector(".lib-save");
-      btn.onclick = async (e) => {
+      if (btn) btn.onclick = async (e) => {
         e.stopPropagation();
         btn.disabled = true;
         btn.textContent = "保存中…";
@@ -3158,11 +3387,18 @@
     };
     const finishThinking = () => {
       stopThinking();                            // 结束播放，一次性补齐剩余思考
+      // ⚠️ 2026-11-08：原来无论什么模型都显示「未输出思考」，
+      //   用户看到会以为坏了。其实**本地 qwen3-vl 不是推理模型，压根没有思考链**，
+      //   只有 DeepSeek V4.1（已默认开思考）/ 推理模型才会有。
+      const _isDSNow = String(_prov || "").indexOf("deepseek") === 0;
       thinkStatus.textContent = thinking
         ? "🧠 思考过程（" + thinking.length + " 字）"
-        : "🧠 未输出思考";
+        : (_isDSNow ? "🧠 本次没有思考内容" : "🧠 本地模型不输出思考链");
       if (thinking) thinkBody.textContent = thinking;
-      else thinkBody.textContent = "（无思考输出）";
+      else thinkBody.textContent = _isDSNow
+        ? "（这次模型没有输出思考内容 —— 可能问题太简单，或该模型未开思考）"
+        : "（本地 " + (_prov || "模型") + " 不是推理模型，没有思考过程。"
+          + "想看思考过程请在顶栏把聊天模型切到 DeepSeek V4.1）";
       thinkBody.style.display = "none";   // 完成后保持折叠
       thinkArrow.textContent = "▸";
     };
@@ -3205,12 +3441,12 @@
     _armStall();
     try {
       // ── 模型路由（2026-11-08 新增）─────────────────────────────
-      // 本地 30B 走 /api/chat（带工具/记忆/RAG），DeepSeek 走 /api/chat/deepseek
-      // （纯对话，无工具）。Key 放请求头，不进 body、不进 URL。
+      // 本地模型走 /api/chat（带工具/记忆/RAG），DeepSeek 走 /api/chat/deepseek
+      // （同样带工具：41 个全量 schema，见 _ds_tools）。Key 放请求头，不进 body、不进 URL。
       const _msEl = document.querySelector("#modelSelect");
       const _prov = _msEl ? _msEl.value : "auto";
       const _isDS = _prov.indexOf("deepseek") === 0;
-      const _dsKey = _isDS ? (sessionStorage.getItem("ds_api_key") || "") : "";
+      const _dsKey = _isDS ? (localStorage.getItem("ds_api_key") || "") : "";
       if (_isDS && !_dsKey) {
         showToast("请先点右上角 🔑 DeepSeek 填入 API Key", "warn");
         streaming = false;
@@ -3218,7 +3454,14 @@
       }
       const _chatUrl = _isDS ? "/api/chat/deepseek" : "/api/chat";
       const _hdrs = { "Content-Type": "application/json" };
-      if (_isDS) _hdrs["X-DeepSeek-Key"] = _dsKey;
+      // 两个 Key 都带上（都在请求头，不进 body/URL/日志）：
+      //   · DeepSeek Key —— 云端对话要用；**本地模式也要**，因为代码生成走 V4.1
+      //   · 图片 Key   —— 文生图/微改要用（两条通道都可能调 generate_image）
+      if (_dsKey) _hdrs["X-DeepSeek-Key"] = _dsKey;
+      const _imgKey = localStorage.getItem("img_api_key") || "";
+      if (_imgKey) _hdrs["X-Image-Key"] = _imgKey;
+      const _imgModel = localStorage.getItem("img_api_model") || "";
+      if (_imgModel) _hdrs["X-Image-Model"] = _imgModel;
 
       const _payload = {
         messages: history, images_b64: mediaB64,
@@ -3231,12 +3474,16 @@
         stream: true, session_id: sessionId,
       };
       if (_isDS) {
-        // DeepSeek 不认图片/选区/文档/工具：一律去掉，只发纯文本多轮
+        // DeepSeek 是纯文本协议（不吃图片/选区），但**工具是支持的**：
+        // 后端会把 tools schema 一起发过去、执行完再回填，和本地通道一致。
         _payload.model = _prov;
         _payload.images_b64 = null;
         _payload.mask_b64 = null;
         _payload.docs = null;
         _payload.studio = false;
+      } else if (_prov && _prov !== "auto") {
+        // 本地模式指定了具体模型（下拉里选了 30B 或 8B）
+        _payload.model = _prov;
       }
 
       const resp = await fetch(_chatUrl, { method: "POST", headers: _hdrs,
@@ -3303,6 +3550,11 @@
             else if (obj.ui.type === "map") {
               // 地图卡片：地点/路线已经算好，这里把它画出来
               makeMapCard(obj.ui);
+            }
+            else if (obj.ui.type === "selfdev") {
+              // 模型改了应用源码：给一张**可折叠**的改动卡片（默认收起，不撑页面）
+              answerWrap.appendChild(makeSelfdevCard(obj.ui));
+              messagesEl.scrollTop = messagesEl.scrollHeight;
             }
             else if (obj.ui.type === "code") {
               answerWrap.appendChild(makeCodeCard(obj.ui));
@@ -3846,34 +4098,40 @@
 
   // ================== DeepSeek 接入（2026-11-08）==================
   // 模型选择 + API Key 管理。
-  // ⚠️ Key 只存 sessionStorage：关掉标签页即清空，不写磁盘、不进日志、不进 URL。
+  // ⚠️ Key 存 localStorage（**不写磁盘文件、不进日志、不进 URL**）。
+  //   2026-11-08 从 sessionStorage 改为 localStorage：用户要求「每次退出重启
+  //   需要保存 apikey 以及上次模型的使用状态」，关掉浏览器不能再丢。
   (() => {
     const sel = document.querySelector("#modelSelect");
     const btn = document.querySelector("#dsKeyBtn");
     if (!sel || !btn) return;
 
-    const saved = sessionStorage.getItem("chat_provider");
+    const saved = localStorage.getItem("chat_provider");
     if (saved) sel.value = saved;
 
     sel.addEventListener("change", () => {
-      sessionStorage.setItem("chat_provider", sel.value);
+      localStorage.setItem("chat_provider", sel.value);
       const isDS = sel.value.indexOf("deepseek") === 0;
-      if (isDS && !sessionStorage.getItem("ds_api_key")) {
+      if (isDS && !localStorage.getItem("ds_api_key")) {
         showToast("已切到 DeepSeek，请点 🔑 填入 API Key", "warn");
       } else {
         showToast("本轮使用：" + sel.options[sel.selectedIndex].text, "ok");
       }
+      // 状态卡片 / 自检面板都必须**立刻**跟着切过来（用户要求：
+      // 「选用什么模型就显示什么模型的状态，检验也是一样」）
+      if (typeof refreshHealth === "function") refreshHealth();
+      window.dispatchEvent(new CustomEvent("model-changed", { detail: sel.value }));
     });
 
     btn.addEventListener("click", () => {
-      const old = sessionStorage.getItem("ds_api_key") || "";
+      const old = localStorage.getItem("ds_api_key") || "";
       const mask = document.createElement("div");
       mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:center;justify-content:center";
       mask.innerHTML = [
         '<div style="background:#1e1e22;color:#e8e8ea;border-radius:12px;padding:22px;width:min(480px,92vw);box-shadow:0 20px 60px rgba(0,0,0,.5)">',
         '  <h3 style="margin:0 0 6px;font-size:16px">🔑 DeepSeek API Key</h3>',
         '  <p style="margin:0 0 14px;font-size:12.5px;line-height:1.6;color:#9a9aa2">',
-        '    只保存在<b>本标签页</b>（sessionStorage），关掉浏览器即清空。<br>不写磁盘文件、不写日志、不进 URL。',
+        '    只保存在<b>本机浏览器</b>（localStorage），关掉浏览器也不会丢。<br>不写磁盘文件、不写日志、不进 URL。',
         '  </p>',
         '  <input id="dsKeyIn" type="password" placeholder="sk-..." style="width:100%;box-sizing:border-box;padding:9px 11px;border-radius:8px;border:1px solid #3a3a42;background:#141416;color:#e8e8ea;font-size:13px;font-family:monospace">',
         '  <div style="display:flex;gap:14px;margin:12px 0 4px;font-size:12.5px;flex-wrap:wrap">',
@@ -3905,7 +4163,7 @@
       };
       mask.querySelector("#dsKeyCancel").onclick = close;
       mask.querySelector("#dsKeyClear").onclick = () => {
-        sessionStorage.removeItem("ds_api_key");
+        localStorage.removeItem("ds_api_key");
         inp.value = "";
         msg.style.color = "#7bd88f";
         msg.textContent = "已清除本页保存的 Key";
@@ -3920,7 +4178,7 @@
             method: "POST", headers: { "X-DeepSeek-Key": v } });
           const d = await r.json();
           if (d.ok) {
-            sessionStorage.setItem("ds_api_key", v);
+            localStorage.setItem("ds_api_key", v);
             msg.style.color = "#7bd88f";
             msg.textContent = "✅ 可用" + (d.balance ? "，余额 " + d.balance + " " + d.currency : "");
             setTimeout(close, 900);
@@ -3935,6 +4193,752 @@
       };
       mask.addEventListener("click", (e) => { if (e.target === mask) close(); });
     });
+  })();
+
+  // ================== 代码模型下拉（2026-11-08）==================
+  // 用户要求：「代码生成与自我迭代用有用户自主切换的模型，一般用 DeepSeek V4.1」。
+  // 和聊天模型（#modelSelect）分开：聊天用哪个 ≠ 写代码用哪个。
+  (() => {
+    const sel = document.querySelector("#codeModelSelect");
+    if (!sel) return;
+
+    const shortName = (c) => String(c.name || c.id)
+      .replace("（推荐）", "")
+      .replace("本地 ", "")
+      .replace("DeepSeek ", "DS ")
+      .replace("自动（有 DeepSeek Key 就用 V4.1）", "自动")
+      .replace("DeepSeek V4.1 Flash", "DS V4.1")
+      .replace("DeepSeek V4.1", "DS V4.1")
+      .replace("DeepSeek V4 Pro", "DS V4 Pro")
+      .replace("本机", "本地");
+
+    async function load() {
+      try {
+        const d = await (await fetch("/api/code/models")).json();
+        const haveKey = !!localStorage.getItem("ds_api_key");
+        const inst = Array.isArray(d.installed) ? d.installed : [];
+        sel.innerHTML = "";
+        for (const c of d.choices) {
+          const o = document.createElement("option");
+          o.value = c.id;
+          const isLocal = c.id.indexOf("local:") === 0;
+          const lm = isLocal ? c.id.slice(6) : "";
+          const okLocal = !isLocal || inst.indexOf(lm) >= 0;
+          // 顶栏空间有限：auto 直接叫「自动」，其余用 shortName 压一压
+          o.textContent = (isLocal ? "💻 " : "☁ ")
+            + (c.id === "auto" ? "自动" : shortName(c))
+            + (isLocal && !okLocal ? "（未下载）"
+               : (!isLocal && c.id !== "auto" && !haveKey ? "（缺Key）" : ""));
+          if (isLocal && !okLocal) o.disabled = true;
+          sel.appendChild(o);
+        }
+        sel.value = d.current || "auto";
+        sel.title = "写代码/自我迭代用：" + (sel.options[sel.selectedIndex] || {}).text
+          + "\n（聊天用哪个模型是右边那个下拉，两者独立）";
+      } catch (e) { /* ignore */ }
+    }
+
+    sel.onchange = async () => {
+      try {
+        const r = await (await fetch("/api/code/model", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: sel.value }) })).json();
+        showToast(r.ok ? ("代码模型 → " + (sel.options[sel.selectedIndex] || {}).text)
+                       : (r.msg || "切换失败"), r.ok ? "ok" : "err");
+      } catch (e) { showToast("切换失败：" + e.message, "err"); }
+      load();
+    };
+
+    load();
+  })();
+
+  // ================== 定时任务面板（2026-11-08）==================
+  // 用户要求：「智能体能够实现长期自动化或定时化任务」。
+  // 后端调度线程每 20 秒检查一次到期任务，结果写回会话；这里只做管理界面。
+  (() => {
+    const list = document.querySelector("#schedList");
+    const badge = document.querySelector("#schedBadge");
+    const fold = document.querySelector("#schedFold");
+    const body = document.querySelector("#schedBody");
+    if (!list) return;
+
+    fold.onclick = () => {
+      body.hidden = !body.hidden;
+      fold.textContent = body.hidden ? "▸" : "▾";
+    };
+
+    const typeSel = document.querySelector("#schedType");
+    const timeIn = document.querySelector("#schedTime");
+    const everyIn = document.querySelector("#schedEvery");
+    if (typeSel) {
+      typeSel.onchange = () => {
+        const daily = typeSel.value === "daily";
+        timeIn.hidden = !daily;
+        everyIn.hidden = daily;
+      };
+    }
+
+    async function load() {
+      try {
+        const d = await (await fetch("/api/schedule")).json();
+        const jobs = d.jobs || [];
+        if (badge) badge.textContent = String(jobs.length);
+        if (!jobs.length) {
+          list.innerHTML = '<div class="hint" style="padding:6px 10px">还没有定时任务。展开下面的「＋ 新建」加一个，或者在对话里直接说「每天早上九点帮我总结XX」。</div>';
+          return;
+        }
+        list.innerHTML = jobs.map((j) => {
+          const st = j.running ? "⏳" : (j.enabled ? "🟢" : "⏸️");
+          const last = j.last_run
+            ? ("上次 " + j.last_run.slice(5, 16) + " " + (j.last_status || ""))
+            : "还没跑过";
+          return '<div class="sched-item" data-id="' + j.id + '">' +
+            '<div class="sched-hd">' + st + ' <b>' + (j.name || "") + '</b></div>' +
+            '<div class="sched-meta">' + (j.period || "") + ' · 下次 ' + (j.next_human || "-") +
+            ' · ' + last + '</div>' +
+            (j.last_preview ? '<div class="sched-prev">' + String(j.last_preview).replace(/</g, "&lt;").slice(0, 80) + '…</div>' : "") +
+            '<div class="sched-acts">' +
+            '<button data-act="run">立即运行</button>' +
+            '<button data-act="toggle">' + (j.enabled ? "暂停" : "启用") + '</button>' +
+            '<button data-act="del">删除</button>' +
+            '</div></div>';
+        }).join("");
+      } catch (e) { /* ignore */ }
+    }
+
+    list.onclick = async (ev) => {
+      const b = ev.target.closest("button[data-act]");
+      if (!b) return;
+      const box = b.closest(".sched-item");
+      const id = box.dataset.id;
+      const act = b.dataset.act;
+      b.disabled = true;
+      try {
+        if (act === "run") {
+          b.textContent = "运行中…";
+          const r = await (await fetch("/api/schedule/run", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id }) })).json();
+          showToast(r.ok ? "已跑完，结果写回当前会话" : ("失败：" + (r.error || "")),
+                    r.ok ? "ok" : "err");
+          if (r.ok && typeof loadSessions === "function") loadSessions();
+        } else if (act === "toggle") {
+          const cur = b.textContent === "暂停";
+          await fetch("/api/schedule/toggle", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id, enabled: !cur }) });
+        } else if (act === "del") {
+          if (!confirm("删除这个定时任务？")) { b.disabled = false; return; }
+          await fetch("/api/schedule/delete", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id }) });
+        }
+      } catch (e) { showToast("操作失败：" + e.message, "err"); }
+      b.disabled = false;
+      load();
+    };
+
+    const addBtn = document.querySelector("#schedAdd");
+    if (addBtn) {
+      addBtn.onclick = async () => {
+        const name = (document.querySelector("#schedName").value || "").trim();
+        const prompt = (document.querySelector("#schedPrompt").value || "").trim();
+        if (!prompt) { showToast("先写清楚到点要做什么", "warn"); return; }
+        const daily = (typeSel.value === "daily");
+        const body2 = {
+          name: name || prompt.slice(0, 16),
+          prompt,
+          session: (typeof sessionId !== "undefined" ? sessionId : ""),
+        };
+        if (daily) body2.at_time = (timeIn.value || "09:00").trim();
+        else body2.every_minutes = parseInt(everyIn.value || "60", 10) || 60;
+        addBtn.disabled = true;
+        try {
+          const r = await (await fetch("/api/schedule", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body2) })).json();
+          if (r.ok) {
+            showToast("已添加定时任务", "ok");
+            document.querySelector("#schedName").value = "";
+            document.querySelector("#schedPrompt").value = "";
+            load();
+          } else showToast(r.error || "添加失败", "err");
+        } catch (e) { showToast("添加失败：" + e.message, "err"); }
+        addBtn.disabled = false;
+      };
+    }
+
+    load();
+    setInterval(load, 15000);
+  })();
+
+  // ================== 自开发面板（2026-11-08）==================
+  // 用户要求：① 回撤要收进「🛠 自开发」里，点开才出现；
+  //          ② 每个版本要标明**更新内容 + 日期**；
+  //          ③ 回撤能力本身必须活到最后（不能因为某次自我迭代出错就退不回去）。
+  // 第 ③ 点靠后端：备份镜像到项目外 + 独立 restore.py（应用起不来也能跑）。
+  (() => {
+    const btn = document.querySelector("#selfDevBtn");
+    if (!btn) return;
+    let on = false;
+
+    const paint = () => {
+      btn.classList.toggle("on", on);
+      btn.textContent = on ? "🛠 自开发·开" : "🛠 自开发";
+    };
+    (async () => {
+      try {
+        const d = await (await fetch("/api/selfdev/status")).json();
+        on = !!d.enabled;
+        paint();
+      } catch (e) { /* ignore */ }
+    })();
+
+    const fmtRel = (rel) => String(rel || "").split("/").pop();
+
+    btn.addEventListener("click", async () => {
+      let st = { enabled: on, mirror: "" };
+      let hist = { batches: [], restore: "" };
+      try {
+        st = await (await fetch("/api/selfdev/status")).json();
+        hist = await (await fetch("/api/selfdev/backups")).json();
+        on = !!st.enabled;
+        paint();
+      } catch (e) { /* ignore */ }
+
+      const mask = document.createElement("div");
+      mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px";
+      mask.innerHTML = [
+        '<div style="background:#1e1e22;color:#e8e8ea;border-radius:14px;padding:20px 22px;width:min(640px,96vw);max-height:86vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.55)">',
+        '  <h3 style="margin:0 0 10px;font-size:16px">🛠 自开发</h3>',
+        '  <div style="display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid #2f3a4a;border-radius:10px;background:rgba(30,34,42,.6)">',
+        '    <div style="flex:1;min-width:0">',
+        '      <div style="font-size:13px">状态：<b id="sdState"></b></div>',
+        '      <div style="font-size:11.5px;color:#8f8f99;margin-top:3px;line-height:1.6">',
+        '        打开后模型能读写本应用源码并重启自己。改坏了用下面的历史回撤。</div>',
+        '    </div>',
+        '    <button id="sdToggle" style="flex:0 0 auto;padding:7px 14px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#c8c8d0;cursor:pointer"></button>',
+        '  </div>',
+        '  <div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">版本历史（每次改动前自动备份，点「回撤」整批还原）</div>',
+        '  <div id="sdHist"></div>',
+        '  <div id="sdMsg" style="font-size:12.5px;min-height:18px;color:#f0b34a;margin-top:8px"></div>',
+        '  <div id="sdFoot" style="font-size:11px;color:#6f7787;line-height:1.7;margin-top:10px;border-top:1px solid #2a323e;padding-top:8px;word-break:break-all"></div>',
+        '  <div style="display:flex;justify-content:flex-end;margin-top:10px">',
+        '    <button id="sdClose" style="padding:7px 16px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#c8c8d0;cursor:pointer">关闭</button>',
+        '  </div>',
+        '</div>',
+      ].join("\n");
+      document.body.appendChild(mask);
+
+      const close = () => mask.remove();
+      const stateEl = mask.querySelector("#sdState");
+      const tgEl = mask.querySelector("#sdToggle");
+      const list = mask.querySelector("#sdHist");
+      const msg = mask.querySelector("#sdMsg");
+      const say = (t, c) => { msg.style.color = c || "#f0b34a"; msg.textContent = t; };
+
+      const applyState = () => {
+        stateEl.textContent = on ? "已开启" : "已关闭";
+        stateEl.style.color = on ? "#7bd88f" : "#9a9aa2";
+        tgEl.textContent = on ? "关闭自开发" : "打开自开发";
+      };
+      applyState();
+
+      tgEl.onclick = async () => {
+        if (!on) {
+          if (!confirm(
+            "打开「自开发」后，模型将能够：\n" +
+            "· 读/改本应用的源码（backend/、frontend/）\n" +
+            "· 重启应用让改动生效\n\n" +
+            "⚠️ 每次改动前都会自动备份（本机 + 项目外各一份），改坏了可以回撤。\n\n确定打开吗？"
+          )) return;
+        }
+        try {
+          const r = await (await fetch("/api/selfdev/toggle", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ on: !on }) })).json();
+          if (r.ok) {
+            on = !!r.enabled;
+            applyState();
+            paint();
+            say(r.msg || "", on ? "#7bd88f" : "#9a9aa2");
+          } else say("切换失败", "#e06c6c");
+        } catch (e) { say("切换失败：" + e.message, "#e06c6c"); }
+      };
+
+      // ---- 版本历史：日期 + 更新内容 + 文件 + ±行数 ----
+      const render = (data) => {
+        const bs = data.batches || [];
+        if (!bs.length) {
+          list.innerHTML = '<div style="font-size:12.5px;color:#8f8f99;padding:6px 0">还没有改动记录。模型改过一次源码后，这里会出现版本。</div>';
+          return;
+        }
+        list.innerHTML = bs.map((b) => {
+          const notes = (b.notes || []).filter(Boolean);
+          const title = notes.length ? notes.join("；") : "（这次没写说明）";
+          const files = (b.files || []).map((f) => f.rel).join("、");
+          const names = (b.files || []).length === 1
+            ? fmtRel(files) : (b.files || []).length + " 个文件";
+          return '<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid #2a2a31">' +
+            '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:12.5px;color:#cfd6e2">' + title + '</div>' +
+            '<div style="font-size:11.5px;color:#828b99;margin-top:3px;line-height:1.6">' +
+            '<span style="font-family:ui-monospace,monospace">' + (b.ts || b.batch) + '</span> · ' +
+            names + ' · <span style="color:#5fd08a">+' + (b.added || 0) + '</span> ' +
+            '<span style="color:#e07a7a">−' + (b.removed || 0) + '</span>' +
+            '<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' +
+            files.replace(/"/g, "&quot;") + '">' + files + '</div>' +
+            '</div></div>' +
+            '<button data-batch="' + b.batch + '" style="flex:0 0 auto;padding:5px 10px;border-radius:7px;border:1px solid #4a3a3a;background:transparent;color:#e0a0a0;cursor:pointer;font-size:12px">回撤</button>' +
+            '</div>';
+        }).join("");
+      };
+      render(hist);
+
+      list.onclick = async (ev) => {
+        const t = ev.target.closest("button[data-batch]");
+        if (!t) return;
+        const batch = t.dataset.batch;
+        if (!confirm("回撤到「" + batch + "」这次改动之前吗？\n这一批改过的文件都会被还原，之后需要重启应用。")) return;
+        t.disabled = true; t.textContent = "回撤中…";
+        try {
+          const r = await (await fetch("/api/selfdev/rollback_batch", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ batch: batch }) })).json();
+          if (r.ok) {
+            t.textContent = "✅ 已回撤";
+            say("✅ " + (r.msg || "已回撤") + "（重启应用后生效）", "#7bd88f");
+          } else {
+            t.disabled = false; t.textContent = "回撤";
+            say("❌ " + (r.error || r.msg || "回撤失败"), "#e06c6c");
+          }
+        } catch (e) {
+          t.disabled = false; t.textContent = "回撤";
+          say("❌ " + e.message, "#e06c6c");
+        }
+      };
+
+      // ---- 兜底说明：应用起不来时怎么退 ----
+      const foot = mask.querySelector("#sdFoot");
+      const mirror = hist.mirror || st.mirror || "";
+      foot.innerHTML =
+        "🛟 <b>最后一道保险</b>：备份同时存在项目外（" + (mirror || "本机") + "），"
+        + "并附带独立脚本 restore.py。<br>"
+        + "万一某次自我迭代把应用改到起不来，直接双击桌面上的 "
+        + "<b>「回滚到上一版.bat」</b> 就能退回（不依赖应用本身）。";
+
+      mask.querySelector("#sdClose").onclick = close;
+      mask.addEventListener("click", (e) => { if (e.target === mask) close(); });
+    });
+  })();
+
+  // ================== 绘图模型：云端 / 本地，可切换、可下载卸载（2026-11-08）==================
+  // 用户要求：「可以切换生成和微改图片的模型，就像 LLM 可以切换本地和云端那样，
+  //           然后图片模型也一样支持下载和卸载。」
+  (() => {
+    const btn = document.querySelector("#imgKeyBtn");
+    const sel = document.querySelector("#imgModelSelect");
+    if (!btn || !sel) return;
+
+    let lastData = null;
+
+    const paintBtn = () => {
+      const has = !!localStorage.getItem("img_api_key");
+      const backend = localStorage.getItem("img_backend") || "cloud";
+      btn.classList.toggle("on", has || backend === "local");
+      btn.title = has || backend === "local"
+        ? "图片模型 / Key 已配置（点此修改）"
+        : "还没配图片 API Key —— 点这里填，否则画不了图";
+    };
+    paintBtn();
+
+    // ---------- 顶栏下拉：云端 + 本地（已装/未装都列出来）----------
+    function renderSelect(d) {
+      lastData = d;
+      const backend = d.backend || "cloud";
+      localStorage.setItem("img_backend", backend);
+      const cur = d.cloud.model || "";
+      // 以**后端配置为准**同步一次：配置里换了模型（比如在设置里改），
+      // 前端 localStorage 别再拿旧名字去覆盖（否则后端改了也不生效）。
+      if (cur) localStorage.setItem("img_api_model", cur);
+      const _ed = d.cloud.model_edit || "";
+      if (_ed) localStorage.setItem("img_api_model_edit", _ed);
+      sel.innerHTML = "";
+      const oc = document.createElement("option");
+      oc.value = "cloud";
+      oc.textContent = "☁️ 云端";
+      oc.title = "云端模型：" + cur;
+      sel.appendChild(oc);
+      (d.local || []).forEach((m) => {
+        const o = document.createElement("option");
+        o.value = "local:" + m.id;
+        o.textContent = (m.installed ? "💾 本地 · " : "⬇ 本地 · ") + m.name +
+          (m.installed ? "" : "（未下载）");
+        o.disabled = !m.installed;
+        sel.appendChild(o);
+      });
+      // 回显当前选择
+      const cfgLocal = (d.local || []).find((m) => m.current && m.role === "gen");
+      if (backend === "local" && cfgLocal) sel.value = "local:" + cfgLocal.id;
+      else sel.value = "cloud";
+      paintBtn();
+    }
+
+    async function loadModels() {
+      try {
+        const d = await (await fetch("/api/image/models")).json();
+        renderSelect(d);
+        autoHeal(d);
+        return d;
+      } catch (e) { return null; }
+    }
+
+    // 自动修「503 没有可用通道」：用你浏览器里的 Key 问服务商有哪些图片模型，
+    // 如果当前选的**不在清单里**，就自动切到第一个能用的（并把结果告诉你）。
+    // 这是"充了钱还是 503"的唯一解法 —— 那是分组没这个模型的通道，不是余额问题。
+    let _healBusy = false;
+    async function autoHeal(d) {
+      const key = localStorage.getItem("img_api_key") || "";
+      if (!key || _healBusy) return;
+      if ((d && d.backend) === "local") return;
+      const cur = (d && d.cloud && d.cloud.model) || "";
+      if (!cur) return;
+      _healBusy = true;
+      try {
+        const r = await (await fetch("/api/image/discover", {
+          method: "POST", headers: { "X-Image-Key": key } })).json();
+        const cands = r.candidates || [];
+        if (!cands.length) {
+          // 清单拿到了但一个图片模型都没有 → 这是**分组权限问题**，必须让用户知道，
+          // 否则他只会反复看到 503、以为充钱没生效。（每次打开只提示一次）
+          if (r.ok && (r.models || []).length && !sessionStorage.getItem("img_nopic_warned")) {
+            sessionStorage.setItem("img_nopic_warned", "1");
+            showToast("你的图片 Key 只能用这几个模型："
+                      + (r.models || []).slice(0, 3).join("、")
+                      + " —— 里面没有能画图的，需要换分组/换服务商的 Key", "warn");
+          }
+          return;
+        }
+        if (cands.indexOf(cur) >= 0) return;       // 现在这个能用，不动
+        const pick = cands[0];
+        const sel2 = await (await fetch("/api/image/select", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ backend: "cloud", model: pick, role: "gen" }) })).json();
+        if (sel2.ok) {
+          localStorage.setItem("img_api_model", pick);
+          showToast("原来的图片模型没有可用通道，已自动切换到 " + pick, "ok");
+          const d2 = await (await fetch("/api/image/models")).json();
+          renderSelect(d2);
+        }
+      } catch (e) { /* 静默 */ }
+      finally { _healBusy = false; }
+    }
+
+    sel.onchange = async () => {
+      const v = sel.value;
+      try {
+        if (v === "cloud") {
+          const r = await (await fetch("/api/image/select", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ backend: "cloud" }) })).json();
+          showToast(r.ok ? "已切到云端绘图" : (r.msg || "切换失败"), r.ok ? "ok" : "err");
+        } else {
+          const id = v.replace("local:", "");
+          const r = await (await fetch("/api/image/select", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ backend: "local", model: id }) })).json();
+          showToast(r.ok ? (r.msg || "已切到本地绘制") : (r.msg || "切换失败"),
+                    r.ok ? "ok" : "err");
+        }
+      } catch (e) { showToast("切换失败：" + e.message, "err"); }
+      loadModels();
+      if (typeof refreshHealth === "function") refreshHealth();
+    };
+
+    // ---------- 🎨 面板：Key + 云端模型名 + 本地模型管理 ----------
+    btn.addEventListener("click", async () => {
+      const oldKey = localStorage.getItem("img_api_key") || "";
+      const d = lastData || (await loadModels()) ||
+        { cloud: { model: "gpt-image-2.5-flare", base: "https://xingpan.site/v1" }, local: [] };
+
+      const mask = document.createElement("div");
+      mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px";
+      mask.innerHTML = [
+        '<div style="background:#1e1e22;color:#e8e8ea;border-radius:14px;padding:20px 22px;width:min(560px,96vw);max-height:90vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.55)">',
+        '  <h3 style="margin:0 0 4px;font-size:16px">🎨 绘图模型</h3>',
+        '  <p style="margin:0 0 14px;font-size:12px;line-height:1.7;color:#8f8f99">',
+        '    云端 = 按张计费、不吃显卡；本地 = 要下载权重、画图时占满显存。<br>',
+        '    服务：<b style="color:#c8c8d0">' + d.cloud.base + '</b>',
+        '  </p>',
+
+        '  <div style="font-size:12.5px;color:#9a9aa2;margin-bottom:6px">① 云端 API Key</div>',
+        '  <input id="imgKeyIn" type="password" placeholder="sk-...（xingpan.site 的 Key）" style="width:100%;box-sizing:border-box;padding:9px 11px;border-radius:8px;border:1px solid #3a3a42;background:#141416;color:#e8e8ea;font-size:13px;font-family:monospace">',
+
+        '  <div style="font-size:12.5px;color:#9a9aa2;margin:12px 0 6px">② 云端模型名（生成 / 微改，不同分组能用的不一样）</div>',
+        '  <div style="display:flex;gap:8px">',
+        '    <input id="imgModelIn" list="imgModelList" placeholder="gpt-image-2.5-flare" style="flex:1;padding:8px 10px;border-radius:8px;border:1px solid #3a3a42;background:#141416;color:#e8e8ea;font-size:12.5px;font-family:monospace">',
+        '    <datalist id="imgModelList"></datalist>',
+        '    <button id="imgModelListBtn" type="button" style="padding:7px 11px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#c8c8d0;cursor:pointer;white-space:nowrap">列出可用</button>',
+        '    <button id="imgAutoBtn" type="button" style="padding:7px 11px;border-radius:8px;border:1px solid #2a4a6a;background:transparent;color:#5aa9ff;cursor:pointer;white-space:nowrap">自动选</button>',
+        '  </div>',
+        '  <div style="display:flex;gap:8px;margin-top:8px">',
+        '    <input id="imgModelEditIn" list="imgModelList" placeholder="微改模型（留空＝同上）" style="flex:1;padding:8px 10px;border-radius:8px;border:1px solid #3a3a42;background:#141416;color:#e8e8ea;font-size:12.5px;font-family:monospace">',
+        '  </div>',
+
+        '  <div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">③ 本地模型（下载后可在顶栏切换）</div>',
+        '  <div id="imgLocalList"></div>',
+
+        '  <div id="imgTryBox" style="margin-top:10px"></div>',
+        '  <div id="imgKeyMsg" style="font-size:12.5px;min-height:18px;color:#f0b34a;margin-top:10px"></div>',
+        '  <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">',
+        '    <a href="https://xingpan.site" target="_blank" rel="noopener" style="color:#5aa9ff;font-size:12.5px;margin-right:auto;align-self:center">打开服务商</a>',
+        '    <button id="imgTryBtn" style="padding:7px 14px;border-radius:8px;border:1px solid #2a4a6a;background:transparent;color:#5aa9ff;cursor:pointer">🧪 试画一张</button>',
+        '    <button id="imgKeyCancel" style="padding:7px 14px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#c8c8d0;cursor:pointer">关闭</button>',
+        '    <button id="imgKeySave" style="padding:7px 16px;border-radius:8px;border:none;background:#3b82f6;color:#fff;cursor:pointer;font-weight:600">保存</button>',
+        '  </div>',
+        '</div>'
+      ].join("\n");
+      document.body.appendChild(mask);
+
+      const inp = mask.querySelector("#imgKeyIn");
+      const modelIn = mask.querySelector("#imgModelIn");
+      const modelEditIn = mask.querySelector("#imgModelEditIn");
+      const modelList = mask.querySelector("#imgModelList");
+      const localBox = mask.querySelector("#imgLocalList");
+      const msg = mask.querySelector("#imgKeyMsg");
+      const close = () => mask.remove();
+      inp.value = oldKey;
+      modelIn.value = d.cloud.model || "";
+      modelEditIn.value = d.cloud.model_edit || "";
+
+      const say = (t, c) => { msg.style.color = c || "#f0b34a"; msg.textContent = t; };
+
+      // ---- 本地模型列表（下载 / 卸载 / 进度）----
+      function renderLocal(data) {
+        const list = (data && data.local) || [];
+        const st = (data && data.status) || {};
+        localBox.innerHTML = list.map((m) => {
+          const pulling = st.status === "pulling" && st.model === m.id;
+          const bar = pulling
+            ? '<div style="margin-top:6px"><div style="height:6px;background:#2a2a31;border-radius:3px;overflow:hidden">' +
+              '<div style="height:100%;width:' + (st.pct || 0) + '%;background:#3b82f6"></div></div>' +
+              '<div style="font-size:11px;color:#8f8f99;margin-top:3px">' + (st.pct || 0) + '% · ' +
+              (st.speed ? (st.speed / 1048576).toFixed(1) + ' MB/s' : '…') +
+              (st.eta ? ' · 剩 ' + Math.round(st.eta / 60) + ' 分' : '') + '</div></div>'
+            : '';
+          const act = m.installed
+            ? '<button data-act="rm" data-id="' + m.id + '" style="padding:5px 10px;border-radius:7px;border:1px solid #5a2a2a;background:transparent;color:#e06c6c;cursor:pointer;font-size:12px">🗑 卸载</button>'
+            : (pulling
+              ? '<button data-act="stop" style="padding:5px 10px;border-radius:7px;border:1px solid #3a3a42;background:transparent;color:#c8c8d0;cursor:pointer;font-size:12px">停止</button>'
+              : '<button data-act="dl" data-id="' + m.id + '" style="padding:5px 10px;border-radius:7px;border:1px solid #2a4a6a;background:transparent;color:#5aa9ff;cursor:pointer;font-size:12px">⬇ 下载</button>');
+          return '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #2a2a31">' +
+            '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px">' + (m.installed ? '💾 ' : '') + m.name +
+            (m.current ? ' <span style="color:#7bd88f;font-size:11px">当前</span>' : '') + '</div>' +
+            '<div style="font-size:11.5px;color:#8f8f99">' + m.note + ' · ' +
+            (m.installed ? m.size_gb + ' GB' : '约 ' + m.expect_gb + ' GB') + '</div>' +
+            bar + '</div>' + act + '</div>';
+        }).join("") || '<div style="font-size:12px;color:#8f8f99">（没有本地模型）</div>';
+      }
+      renderLocal(d);
+
+      localBox.onclick = async (ev) => {
+        const b = ev.target.closest("button");
+        if (!b) return;
+        const act = b.dataset.act;
+        b.disabled = true;
+        try {
+          if (act === "dl") {
+            const r = await (await fetch("/api/image/pull", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: b.dataset.id }) })).json();
+            say(r.msg || (r.ok ? "开始下载" : "下载失败"), r.ok ? "#f0b34a" : "#e06c6c");
+            watch();
+          } else if (act === "stop") {
+            await fetch("/api/image/cancel", { method: "POST" });
+            say("已请求停止（已下部分保留）", "#f0b34a");
+            setTimeout(refresh, 1200);
+          } else if (act === "rm") {
+            if (!confirm("确定卸载这个本地模型吗？\n重装要重新下载好几 GB。")) { b.disabled = false; return; }
+            const r = await (await fetch("/api/image/remove", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: b.dataset.id }) })).json();
+            say(r.msg || (r.ok ? "已卸载" : "卸载失败"), r.ok ? "#7bd88f" : "#e06c6c");
+            refresh();
+          }
+        } catch (e) { say("操作失败：" + e.message, "#e06c6c"); }
+        b.disabled = false;
+      };
+
+      let timer = null;
+      async function refresh() {
+        const d2 = await (await fetch("/api/image/models")).json();
+        renderLocal(d2);
+        renderSelect(d2);
+      }
+      function watch() {
+        if (timer) clearInterval(timer);
+        timer = setInterval(async () => {
+          const st = await (await fetch("/api/image/status")).json();
+          if (st.status !== "pulling") {
+            clearInterval(timer); timer = null;
+            await refresh();
+            if (st.status === "done") say("✅ 下载完成", "#7bd88f");
+            else if (st.status === "error") say("❌ " + (st.msg || "下载失败"), "#e06c6c");
+            return;
+          }
+          await refresh();
+        }, 1000);
+      }
+      // 打开时如果正在下载，接着显示进度
+      fetch("/api/image/status").then((r) => r.json()).then((st) => {
+        if (st.status === "pulling") watch();
+      });
+      mask.addEventListener("click", (e) => {
+        if (e.target === mask) { if (timer) clearInterval(timer); close(); }
+      });
+
+      // ---- 自动选一个**真的能用**的图片模型 ----
+      mask.querySelector("#imgAutoBtn").onclick = async () => {
+        const k = inp.value.trim();
+        if (!k) { say("先填 Key", "#e06c6c"); return; }
+        say("正在问服务商有哪些模型可用…");
+        try {
+          const r = await (await fetch("/api/image/discover", {
+            method: "POST", headers: { "X-Image-Key": k } })).json();
+          if (!r.ok) { say("❌ " + (r.msg || "拿不到模型清单"), "#e06c6c"); return; }
+          const c = r.candidates || [];
+          if (!c.length) {
+            say("❌ 你这个分组里**没有任何图片模型** —— 这是分组权限问题，"
+                + "换分组或找服务商开通，充钱解决不了", "#e06c6c");
+            return;
+          }
+          modelIn.value = c[0];
+          localStorage.setItem("img_api_model", c[0]);
+          await fetch("/api/image/select", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ backend: "cloud", model: c[0], role: "gen" }) });
+          say("✅ 已切到 " + c[0] + "（共 " + c.length + " 个图片模型可用：" 
+              + c.slice(0, 4).join("、") + "）", "#7bd88f");
+          await loadModels();
+        } catch (e) { say("❌ " + e.message, "#e06c6c"); }
+      };
+
+      // ---- 试画一张：一键自证 Key + 模型 + 保存路径 ----
+      const tryBox = mask.querySelector("#imgTryBox");
+      mask.querySelector("#imgTryBtn").onclick = async (e) => {
+        const k = inp.value.trim();
+        const mm = modelIn.value.trim();
+        if (!k) { say("先填 Key 再试画", "#e06c6c"); return; }
+        e.target.disabled = true;
+        tryBox.innerHTML = "";
+        say("正在试画（约 10~40 秒，按张计费）…");
+        const t0 = Date.now();
+        try {
+          const r = await fetch("/api/t2i/generate", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Image-Key": k,
+              "X-Image-Model": mm,
+            },
+            body: JSON.stringify({
+              prompt: "a red fox sitting in an autumn forest, golden hour backlight, "
+                    + "photorealistic, 35mm photograph, detailed fur",
+              width: 1024, height: 1024,
+            }),
+          });
+          const d = await r.json();
+          const secs = ((Date.now() - t0) / 1000).toFixed(1);
+          if (d.ok) {
+            const sv = d.saved || {};
+            tryBox.innerHTML =
+              '<img src="data:image/png;base64,' + d.b64 + '" '
+              + 'style="width:100%;border-radius:10px;display:block">'
+              + '<div style="font-size:11.5px;color:#8f8f99;margin-top:6px;line-height:1.6">'
+              + '模型 ' + (d.model || "") + ' · ' + (d.size || "") + ' · ' + secs + ' 秒<br>'
+              + (sv.path
+                  ? '✅ 已存图库：<span style="color:#7bd88f">' + sv.path + '</span>'
+                  : '⚠️ 图出来了但没存进图库（看后端日志）')
+              + '</div>';
+            say("✅ 云端出图成功，这条链路是通的", "#7bd88f");
+          } else {
+            tryBox.innerHTML = "";
+            say("❌ " + (d.error || "生成失败") + (d.hint ? "｜" + d.hint : ""), "#e06c6c");
+          }
+        } catch (err) {
+          say("❌ " + err.message, "#e06c6c");
+        } finally {
+          e.target.disabled = false;
+        }
+      };
+
+      // ---- 列出可用云端模型 ----
+      mask.querySelector("#imgModelListBtn").onclick = async () => {
+        const k = inp.value.trim();
+        if (!k) { say("先填 Key 再列模型", "#e06c6c"); return; }
+        say("正在拉取模型清单…");
+        try {
+          const r = await (await fetch("/api/image/check", {
+            method: "POST", headers: { "X-Image-Key": k } })).json();
+          if (!r.ok) { say("❌ " + (r.msg || "拉取失败"), "#e06c6c"); return; }
+          const all = r.models || [];
+          const guess = all.filter((n) => /image|dall|flux|sd|mj|midjourney|seedream|kolors/i.test(n));
+          const use = guess.length ? guess : all;
+          modelList.innerHTML = use.map((n) => '<option value="' + n + '"></option>').join("");
+          say("✅ 共 " + all.length + " 个模型" + (guess.length ? "（" + guess.length + " 个图片相关）" : "") +
+              "，点输入框右侧箭头选", "#7bd88f");
+        } catch (e) { say("❌ " + e.message, "#e06c6c"); }
+      };
+
+      // ---- 保存 ----
+      mask.querySelector("#imgKeyCancel").onclick = () => {
+        if (timer) clearInterval(timer);
+        close();
+      };
+      mask.querySelector("#imgKeySave").onclick = async () => {
+        const v = inp.value.trim();
+        const mMain = modelIn.value.trim();
+        const mEdit = modelEditIn.value.trim();
+        if (v) {
+          say("正在校验 Key…");
+          try {
+            const r = await (await fetch("/api/image/check", {
+              method: "POST", headers: { "X-Image-Key": v } })).json();
+            if (!r.ok) { say("❌ " + (r.msg || "Key 无效"), "#e06c6c"); return; }
+            localStorage.setItem("img_api_key", v);
+          } catch (e) { say("❌ 校验失败：" + e.message, "#e06c6c"); return; }
+        }
+        if (mEdit) localStorage.setItem("img_api_model_edit", mEdit);
+        else localStorage.removeItem("img_api_model_edit");
+        // 云端模型名写进后端配置（不同 Key 用不同模型）
+        try {
+          if (mMain) {
+            await fetch("/api/image/select", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ backend: "cloud", model: mMain, role: "gen" }) });
+          }
+          if (mEdit) {
+            await fetch("/api/image/select", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ backend: "cloud", model: mEdit, role: "inpaint" }) });
+          }
+        } catch (e) { /* ignore */ }
+        localStorage.setItem("img_backend", "cloud");
+        say("✅ 已保存", "#7bd88f");
+        paintBtn();
+        await loadModels();
+        setTimeout(close, 700);
+      };
+    });
+
+    loadModels();
+    // 有下载在跑时，顶栏也定期刷新一下状态
+    setInterval(() => {
+      fetch("/api/image/status").then((r) => r.json()).then((st) => {
+        if (st.status === "pulling") loadModels();
+      }).catch(() => {});
+    }, 3000);
   })();
 
   // ================== 模型下载管理（2026-11-08）==================
@@ -4165,6 +5169,8 @@
   // ================== 启动自检（2026-11-08）==================
   // 用户要求「每次启动全部验证并报告状态」。后端启动时已跑过一次，
   // 这里读缓存（毫秒级）；右键可现场重跑（约 5-10 秒）。
+  // ★ 2026-11-08 追加：自检**跟随当前选用的模型** —— 用 30B 就查 30B 下没下载，
+  //   用 DeepSeek 就只查云端通道（本地 Ollama/本地模型那两项标 ⚪ 不计分）。
   (() => {
     const btn = document.querySelector("#btnSelftest");
     const sum = document.querySelector("#stSummary");
@@ -4173,20 +5179,38 @@
 
     let busy = false;
 
+    function curModel() {
+      const el = document.querySelector("#modelSelect");
+      return el ? el.value : "auto";
+    }
+
+    function modelLabel(m) {
+      const el = document.querySelector("#modelSelect");
+      if (!el || !m || m === "auto") return "跟随配置";
+      for (const o of el.options) if (o.value === m) return o.text.replace(/^\S+\s*/, "");
+      return m;
+    }
+
     async function load(rerun) {
       if (busy) return;
       busy = true;
-      sum.textContent = "🔄 自检中…";
+      const m = curModel();
+      sum.textContent = "🔄 自检中…（" + modelLabel(m) + "）";
       try {
-        const r = await fetch("/api/selftest" + (rerun ? "?run=1" : ""));
+        const q = "?model=" + encodeURIComponent(m) + (rerun ? "&run=1" : "");
+        const r = await fetch("/api/selftest" + q);
         const d = await r.json();
-        const ok = d.ok_count || 0, total = d.total || 0;
-        sum.textContent = (total && ok === total ? "✅" : "⚠️") + " 自检 " + ok + "/" + total;
+        // 期间用户又切了模型 → 结果作废，重来
+        if (curModel() !== m) { busy = false; return load(rerun); }
+        const ok = d.ok_count || 0, total = d.total || 0, sk = d.skipped || 0;
+        const good = total > 0 && ok === total;
+        sum.textContent = (good ? "✅" : "⚠️") + " 自检 " + ok + "/" + total +
+                          " · " + modelLabel(d.model || m) + (sk ? "（⚪" + sk + " 项不参与）" : "");
         det.innerHTML = (d.items || []).map((it) =>
-          "<div class=\"st-row\"><span>" + (it.ok ? "✅" : "❌") + "</span>" +
+          "<div class=\"st-row\"><span>" + (it.skip ? "⚪" : (it.ok ? "✅" : "❌")) + "</span>" +
           "<b>" + it.label + "</b>" +
           "<span class=\"st-det\">" + String(it.detail || "").replace(/</g, "&lt;") + "</span>" +
-          (!it.ok && it.hint ? "<div class=\"st-hint\">→ " + String(it.hint).replace(/</g, "&lt;") + "</div>" : "") +
+          (!it.ok && !it.skip && it.hint ? "<div class=\"st-hint\">→ " + String(it.hint).replace(/</g, "&lt;") + "</div>" : "") +
           "</div>").join("");
       } catch (e) {
         sum.textContent = "⚠️ 自检失败";
@@ -4198,6 +5222,13 @@
 
     btn.onclick = () => { det.hidden = !det.hidden; };
     btn.oncontextmenu = (e) => { e.preventDefault(); det.hidden = false; load(true); };
+    btn.title = "左键展开/收起详情；右键现场重跑（约 5-10 秒）";
+
+    // 切模型 → 立即按新模型重查（缓存按模型分开，切回旧模型是毫秒级）
+    window.addEventListener("model-changed", () => {
+      det.hidden = false;
+      load(false);
+    });
 
     load(false);
     setInterval(() => load(false), 60000);

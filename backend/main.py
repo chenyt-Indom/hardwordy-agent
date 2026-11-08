@@ -32,7 +32,8 @@ import asyncio
 import datetime
 import logging
 import threading
-from . import (config, ollama_client, deepseek_client, model_manager, selftest, memory, kb,
+from . import (config, ollama_client, deepseek_client, cloud_image, image_models,
+               selfdev, scheduler, model_manager, selftest, memory, kb,
                file_tools, video, web_tools,
                t2i, tools, voice, sessions, image_library, doclib, docx_write,
                workspace)
@@ -931,6 +932,15 @@ def _llm_extract(prompt: str, model: str, cfg: dict,
     背景：Ollama 一次只跑一个请求，提炼动辄 85~250 秒 ——
     不打断的话，用户这时发消息会**一直卡到提炼跑完**。
     """
+    # ★ 2026-11-08：模型没下载时别硬撞 404（后台会刷一屏
+    #   `model 'qwen3-vl:30b' not found`，记忆提炼静默失败）。
+    try:
+        _have = _installed_models()
+        if _have and model not in _have:
+            model = (next((n for n in _have if "qwen3-vl" in n), "")
+                     or _have[0])
+    except Exception:
+        pass
     params = dict(cfg)
     params["temperature"] = 0.2
     params["max_tokens"] = budget
@@ -1333,6 +1343,8 @@ FRONTEND_DIR = config.res("frontend")
 class ToolConfirmRequest(BaseModel):
     id: str
     allow: bool = False
+    # 勾了「本次任务不再询问」→ 本轮剩余的危险操作全部自动批准
+    remember: bool = False
 
 
 class ToolAnswerRequest(BaseModel):
@@ -1528,21 +1540,28 @@ def _open_folder_impl(target: str) -> dict:
 
 # ---------- 健康 / 配置 ----------
 @app.get("/api/selftest")
-def api_selftest(run: int = 0):
+def api_selftest(run: int = 0, model: str = ""):
     """启动自检：所有能力的状态（含修复提示）。
 
-    · `GET /api/selftest`        → 读缓存（启动时后台已跑过一次，毫秒级返回）
-    · `GET /api/selftest?run=1`  → 现场重跑（约 5-10 秒，会真的探一次网络）
+    · `GET /api/selftest`                → 读缓存（启动时后台已跑过一次，毫秒级返回）
+    · `GET /api/selftest?run=1`          → 现场重跑（约 5-10 秒，会真的探一次网络）
+    · `GET /api/selftest?model=xxx`      → **按当前选用的模型**检测（缓存按模型分开存）
 
-    检测项：Ollama 服务 / 本地模型 / GPU 显存 / 文生图 / 图片微改 /
+    `model` 传界面下拉里的值：本地模型查它是否已下载；`deepseek-*` 则跳过
+    本地 Ollama/本地模型项、只查云端通道 —— 用户的原话：「选用什么模型就
+    显示什么模型的状态，检验也是一样」。
+
+    检测项：Ollama 服务 / 当前模型 / GPU 显存 / 文生图 / 图片微改 /
            Office 文档 / 文件读写 / 图像处理 / 联网 / DeepSeek API / 语音输入
-    每项都带 `hint`：失败时直接告诉用户怎么修。
+    每项都带 `hint`：失败时直接告诉用户怎么修。`skip=True` 表示本项与当前
+    选用的模型无关（⚪），不计入 ok/total。
     """
+    mdl = (model or "").strip()
     if run:
-        return {"ok": True, **selftest.run_all()}
-    r = selftest.get()
+        return {"ok": True, **selftest.run_all(mdl)}
+    r = selftest.get(mdl)
     if not r.get("total"):
-        return {"ok": True, **selftest.run_all()}
+        return {"ok": True, **selftest.run_all(mdl)}
     return {"ok": True, **r}
 
 
@@ -1668,7 +1687,12 @@ def model_installed():
 
 
 # ---------- 对话 ----------
-MAX_TOOL_ROUNDS = 10  # 单次对话内最多连续调用工具轮次，防止死循环
+# 单次对话内最多连续调用工具轮次（默认值；真正生效的取 config.max_tool_rounds）。
+# ⚠️ 2026-11-08 用户反馈「8 次不够」：写代码/做项目这类活天生是
+#   「一轮写一个文件 + 一轮跑一次」，10 轮根本不够用，任务做到一半就被掐断。
+#   现在默认放到 60 轮，同时加一道**时间预算**（max_tool_seconds，默认 20 分钟）——
+#   光靠轮次防死循环不可靠：一轮可能很快，也可能很慢。
+MAX_TOOL_ROUNDS = 60
 
 # Ollama 解析"模型写出来的工具调用"失败时，会把 Go 的 JSON 错误塞进流里。
 # ⚠️ 用户看到的是一句英文，比如
@@ -3418,6 +3442,11 @@ def _dict_ui_channel(pair) -> dict:
 _ui_pending: dict = {}
 _ui_lock = threading.Lock()
 
+# 「本次任务不再询问」= 本轮对话内所有危险操作自动批准（2026-11-08 用户要求）
+# ⚠️ 作用域刻意做成**一轮对话**：用户勾选时想的是"这一个任务别烦我"，
+#    不是"以后永远别问"。所以每轮 chat 开始时都会重置。
+_AUTO_OK = {"on": False, "hits": 0}
+
 
 # 用户明确要"一个文件"的说法。
 # 命中它却没看到 library 工具被调用 → 大概率是模型"虚假完成"，需要兜底。
@@ -3630,6 +3659,10 @@ def _make_ui_channel(loop, live_ui, timeout: float = 900.0):
                 _ui_pending.pop(cid, None)
 
     def confirm(payload: dict) -> bool:
+        if _AUTO_OK["on"]:
+            # 勾了"本次任务不再询问" → 直接批准，不弹框、不阻塞
+            _AUTO_OK["hits"] += 1
+            return True
         item = _request("confirm", payload)
         return bool(item and item.get("allow"))
 
@@ -3688,6 +3721,34 @@ class _SystemPrompt:
             # 现在把时间挪到**最后一条用户消息的末尾**（见 _attach_live_ctx），
             # 它排在「系统提示 + 工具定义」之后，大段稳定前缀就能被缓存复用。
             "你是本地多模态助手，像一位能干的项目助理。你的所有处理都在用户本机完成，注意保护隐私。",
+            # ★ 2026-11-08 用户要求：「所有调动都必须有 LLM 打头阵，由 LLM 决策调度、
+            #   有规划地完成任务」。这段是**稳定的固定文本**（不随时间变），
+            #   放在最前面不会破坏 Ollama 的前缀缓存。
+            "\n【工作方式：先理解 → 再规划 → 后执行 → 最后如实汇报】\n"
+            "1) **先理解**：先弄清用户这句话真正要的是什么（成品？信息？改一版？）。"
+            "关键前提缺失或有歧义 → **先调用 ask_user 问清**，不要自己猜着做。\n"
+            "2) **再规划**：动手前先在脑子里列出步骤（1…2…3…），想清楚每步用哪个工具。"
+            "需要多个产物就分步做，不要一口气乱调。\n"
+            "3) **后执行**：每一步都**真的调用对应工具**，拿到真实结果再往下走。"
+            "工具报错就换参数/换工具重试一次；**绝不**把没发生的事写成已经发生。\n"
+            "4) **最后汇报**：做了什么、产物在哪（文件路径 / 图片已在界面上）、"
+            "哪些没做成以及**真实原因**。\n"
+            "⚠️ 你的每一个动作都必须是「想清楚 → 调工具 → 看结果」这个循环，"
+            "禁止跳过工具直接编结果；也禁止只描述「我打算怎么做」就收工。\n"
+            # ★ 2026-11-08 用户要求：「解决问题之后的总结要美观、结构化」。
+            #   模板写死在这里（稳定文本，不破坏缓存）；前端已支持 Markdown 渲染。
+            "\n【收尾必须结构化 —— 用户明确要求】\n"
+            "活干完后，**最后一段回复**按这个模板写（用 Markdown 标题和列表，不要大段散文）：\n"
+            "### ✅ 做完了什么\n"
+            "（一两句话，说结果，不说过程）\n"
+            "### 📋 关键点\n"
+            "- 每条一行，最多 5 条；能带数字/路径就带上\n"
+            "### 📁 产物 / 改动\n"
+            "- 文件路径或图片在哪（没有就写「无」）\n"
+            "### 👉 你需要做什么\n"
+            "- 需要用户操作的步骤；没有就写「不需要，可以直接用」\n"
+            "⚠️ 正文里**不要贴大段代码/日志**（超过 10 行就该调工具落盘或让界面折叠显示）；\n"
+            "⚠️ 不要重复工具已经展示过的内容；⚠️ 不确定的事不要写进总结。\n",
             # 告诉模型时间去哪儿找（这句本身是稳定的，不会破坏缓存）
             "需要知道「现在几点/今天几号」时，看**用户消息末尾附的「当前时间」**，"
             "或调用 get_time 工具；不要凭训练数据猜日期。",
@@ -3888,6 +3949,45 @@ class _SystemPrompt:
                 "【本轮没有任何工具】工具清单已被移除。不要调用工具、不要描述工具，"
                 "更**不要声称**自己调用了工具、保存了文件或运行了代码 —— 那些你做不到。"
                 "需要用户动手的，直接告诉他点哪里（如「点卡片上的 ▶ 运行」）。")
+        # ---------- 自开发模式（用户打开后才会走到这里）----------
+        try:
+            if (config.load_config() or {}).get("self_dev_enabled"):
+                parts.append(
+                    "\n【自开发模式已打开 —— 你可以改**这个应用自己的源码**】\n"
+                    "可用的工具：selfdev_tree（看目录）、selfdev_read（读文件）、"
+                    "selfdev_patch（精确替换，**首选**）、"
+                    "**selfdev_apply（把\"改成什么样\"交给用户选定的代码模型去写，"
+                    "逻辑大改/整段重写时用它）**、selfdev_write（整份覆盖）、"
+                    "selfdev_run（跑 .py 验证）、selfdev_restart（重启生效）。\n"
+                    "改自己代码的**标准流程**，一步都不能跳：\n"
+                    "  1) selfdev_read 先读原文（绝不允许凭记忆改）；\n"
+                    "  2) selfdev_patch 改最少的几行（find 要和原文一字不差）；\n"
+                    "  3) 写完如果需要验证，用 selfdev_run 或让用户看效果；\n"
+                    "  4) **最后必须调 selfdev_restart**，否则改动不生效 —— "
+                    "它会先试 import 一遍 backend.main，导入失败会**拒绝重启**并把错误告诉你，"
+                    "那就回去修。\n"
+                    "⚠️ 不许碰 data/、models/、sessions/、image_library/ 这些运行期目录"
+                    "（工具会直接拒绝，那是用户的数据不是代码）。\n"
+                    "⚠️ 改前端（frontend/*.js|css|html）不需要重启后端，但要让用户 Ctrl+F5 刷新。\n"
+                    "⚠️ 每次改动都要在回答里说清：改了哪个文件、改了什么、为什么。\n"
+                    "\n【前端改动纪律 —— 用户明确要求「保持页面简洁，不要改太多把页面撑变形」】\n"
+                    "· **只许往现有结构里加小控件**，禁止动布局骨架：\n"
+                    "  ✗ 不许改顶栏/输入区/消息区的宽高、flex 策略、position；\n"
+                    "  ✗ 不许新增大块面板、整行工具条、多个并排按钮；\n"
+                    "  ✗ 不许写大段内联 style（超过 3 个属性就要落到 style.css 的 class 里）；\n"
+                    "  ✗ 不许给 body/主容器加固定高度或 overflow:hidden。\n"
+                    "· **一次只加一个可见控件**（一个按钮 / 一个下拉 / 一个入口），"
+                    "加完立刻停手，不要顺手再加两三个。\n"
+                    "· 单次前端改动控制在 **80 行以内**；超了说明你在重写而不是在加功能，"
+                    "拆成几次做，每次做完让用户看一眼。\n"
+                    "· 要展示长内容（diff、日志、代码）**必须**用可折叠容器："
+                    "默认收起 + `max-height` + `overflow:auto`，参考现有的 `.sd-card`。\n"
+                    "· 顶栏控件总数**不超过 8 个**（现在已接近上限）—— 再加就塞进既有面板里，"
+                    "不要往顶栏硬塞。\n"
+                    "· 改完让用户 Ctrl+F5，并自查三条：顶栏是否还在一行、输入框是否还在底部、"
+                    "消息区是否还能正常滚动。")
+        except Exception:
+            pass
         return "\n\n".join(p for p in parts if p)
 
 
@@ -4013,22 +4113,46 @@ def _ollama_loaded_models() -> set:
 
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest,
+               x_image_key: str = Header(default=""),
+               x_image_model: str = Header(default=""),
+               x_deepseek_key: str = Header(default="")):
     # ⚠️⚠️ 2026-10-17：**开跑前先把绘图引擎放掉**（如果它还占着）。
     #   用户报的现象：画完图切回大模型，「加载很久没反应」。
     #   实测根因有两条：① unload() 之前会 `pipe.to("cpu")`，把 6.9GB 权重搬进
     #   系统内存后还不回去（已修，见 t2i.unload 注释）；② 生图/微改的**失败分支
     #   会提前 return、跳过 unload**，SDXL 就一直占着约 16GB 提交内存。
     #   这里兜最后一道：有残留就释放（正常情况是空操作，耗时 <1ms）。
+    #   ⚠️ 2026-11-08：本地 SD 已下线，这段只剩"清理历史残留"，保留无害。
     try:
         if t2i.any_loaded():
             logger.info("[chat] 检测到绘图引擎仍占着内存，先释放再对话")
             t2i.unload()
     except Exception:
         logger.warning("对话前释放绘图引擎失败（不影响对话）", exc_info=True)
+    # 新一轮对话 → 清掉上一轮的"自动确认"，避免跨任务生效
+    _AUTO_OK["on"] = False
+    _AUTO_OK["hits"] = 0
     cfg = config.load_config()
     model = req.model or cfg["default_model"]
+    if str(model).strip().lower() in ("", "auto"):
+        model = cfg["default_model"]          # 前端传 "auto" 时按配置走
     model_note = ""
+    # ★ 2026-11-08：**模型没下载就别硬撞 404**。
+    #   本机 default_model 是 qwen3-vl:30b（18GB，还没下），选「跟随配置」时
+    #   每条消息都会返回 `404 model not found` —— 用户看到的就是"发出去没反应/报错"。
+    #   这里自动退到**已装**的同门模型，并明确告诉用户退到了哪个（不偷偷换）。
+    try:
+        _have = _installed_models()
+        if _have and model not in _have:
+            _alt = (next((n for n in _have if "qwen3-vl" in n), "")
+                    or _have[0])
+            if _alt and _alt != model:
+                model_note = ("%s 还没下载（或已删除），这次先用 %s 跑；"
+                              "下载完在下拉里选它即可。" % (model, _alt))
+                model = _alt
+    except Exception:
+        pass
     images = list(req.images_b64 or [])
     _remember_image(images)          # 记住本轮图片，供后续「把这张图改成…」直接引用
     # ⚠️ 发给模型的那份要**压到长边 ≤1024**：图片是按像素折算 token 的，
@@ -4646,6 +4770,20 @@ async def chat(req: ChatRequest):
         _MAX_TOOLPARSE_RETRIES = 4
         # 「办公产物没生成」只兜一次（见下面 break 前那段）。
         _office_nudge_done = False
+        # 「要图却没画」也只兜一次（同样的道理：模型常把画面写成文字就收工）
+        _img_nudge_done = False
+        _ask_nudge_done = False      # 深度询问兜底只放一次
+        # 轮次/时间预算（用户要求把调度次数放宽到最多）
+        try:
+            _max_rounds = int(cfg.get("max_tool_rounds") or MAX_TOOL_ROUNDS)
+        except Exception:
+            _max_rounds = MAX_TOOL_ROUNDS
+        _max_rounds = max(1, min(_max_rounds, 200))
+        try:
+            _budget_s = float(cfg.get("max_tool_seconds") or 1200)
+        except Exception:
+            _budget_s = 1200.0
+        _t_start = time.time()
         gen_params = dict(cfg)
 
         # 【完整性兜底】整次生成共用一份"预览过哪些文件、当时写进了哪个项目"的记录。
@@ -4655,7 +4793,16 @@ async def chat(req: ChatRequest):
         # 「提示词超出窗口」只自动重试一次（见下面 _is_context_err 分支）——
         # 再砍就什么都没了，第二次还失败就如实告诉用户。
         _ctx_trimmed = False
-        for _round in range(MAX_TOOL_ROUNDS):
+        for _round in range(_max_rounds):
+            # ★ 时间预算：轮次管不住"一轮很慢"的情况（读大文件、跑长脚本），
+            #   所以再加一道墙钟上限。超了就收尾，但**不做静默退出**。
+            if _round > 0 and (time.time() - _t_start) > _budget_s:
+                logger.warning("[rounds] 超过时间预算 %.0f 秒（第 %d 轮），转入收尾",
+                               _budget_s, _round)
+                yield json.dumps({"note": (
+                    "这一轮已经跑了 %.0f 分钟（时间上限），我让它先把进度交代清楚。"
+                    "接着做就回一句「继续」。" % (_budget_s / 60.0))}) + "\n"
+                break
             # 工具调用中间轮不再重复附图片
             attach_images = model_images if _round == 0 else None
             # ⚠️ 每轮发请求前**再核一次预算**：整轮开始前只裁过一次历史，
@@ -5024,7 +5171,7 @@ async def chat(req: ChatRequest):
                 if (office_mode and not _office_nudge_done
                         and round_msg["content"].strip()
                         and not (used_tools & _OFFICE_MAKER_TOOLS)
-                        and _round + 1 < MAX_TOOL_ROUNDS):
+                        and _round + 1 < _max_rounds):
                     _office_nudge_done = True
                     logger.warning("[office] 本轮未产出文件（已用工具=%s），退回一轮要求生成",
                                    sorted(used_tools))
@@ -5039,6 +5186,48 @@ async def chat(req: ChatRequest):
                         "整轮全废）—— 先做封面 + 2~3 项，剩下的用 **edit_office** "
                         "**每次补 1~2 项**，分几次调用。"
                         "不要复述内容、不要再问用户、也不要解释，直接开始生成。")})
+                    continue
+                # ⚠️⚠️ 【深度询问 的代码层兜底】（2026-11-08）
+                #   用户开了「深度问」，但模型**一个 ask_user 都没调**就开工，
+                #   最后在正文里写「你选一个」——用户看到的就不是弹框而是普通文字。
+                #   提示词里写死了"必须弹框"，8B 仍然会漏，所以这里兜一轮。
+                if (str(cfg.get("ask_mode") or "").lower() == "deep"
+                        and not _ask_nudge_done
+                        and "ask_user" not in used_tools
+                        and _looks_like_task(last_user)
+                        and round_msg["content"].strip()
+                        and _round + 1 < _max_rounds):
+                    _ask_nudge_done = True
+                    logger.warning("[ask] 深度模式但本轮没调用 ask_user，退回一轮")
+                    yield json.dumps({"note": (
+                        "现在是深度询问模式，我让它先把关键问题问清楚。")}) + "\n"
+                    working.append({"role": "user", "content": (
+                        "（系统提示）当前是**深度询问**模式，用户明确要求"
+                        "「动手前把信息问透」。你刚才**没有调用 ask_user**，"
+                        "而是直接开始做/在正文里问 —— 这不符合他的设置。\n"
+                        "现在**立刻调用 ask_user**：一次给 **5~7 个**关键问题"
+                        "（用途/受众、范围与篇幅、风格或口径、硬性约束、交付形式、参考样例…），"
+                        "每个都要能改变你怎么做。**不要**在正文里写问句，也不要把问题写成一串文字。\n"
+                        "拿到答复后接着把活做完，不要再停。")})
+                    continue
+
+                # ⚠️⚠️ 【要图却没画 的最后一道兜底】（2026-11-08）
+                #   用户说「画一只狐狸」「来张壁纸」，模型有时只写一段画面描述就收工。
+                #   提示词里写了「只有调用工具才算完成」，但 8B 会漏。
+                #   这里代码层兜一次：本轮没调用任何出图工具 → 退回一轮逼它真的画。
+                if (not _img_nudge_done and round_msg["content"].strip()
+                        and any(_k in (last_user or "") for _k in _IMG_HINTS)
+                        and not (used_tools & _IMG_MAKER_TOOLS)
+                        and _round + 1 < _max_rounds):
+                    _img_nudge_done = True
+                    logger.warning("[image] 本轮未产出图片（已用工具=%s），退回一轮",
+                                   sorted(used_tools))
+                    yield json.dumps({"note": "还没看到图片，我让它真正画出来。"}) + "\n"
+                    working.append({"role": "user", "content": (
+                        "（系统提示）用户要的是**看得见的图片**，你刚才只写了文字描述。"
+                        "现在**立即调用工具**：AI 创作 → generate_image（prompt 写清主体/风格/构图，"
+                        "aspect 按用途给 9:16 / 16:9 / 1:1）；要现成真实照片 → web_image_search。"
+                        "不要复述、不要再问、也不要解释，直接调用。")})
                     continue
                 break  # 本轮无工具调用，得到最终答复
 
@@ -5068,6 +5257,15 @@ async def chat(req: ChatRequest):
                    # 询问模式（快速/深度）—— 弹框顶部会据此显示不同提示
                    "ask_mode": str(cfg.get("ask_mode") or "quick"),
                    "session": session,
+                   # ★ 用户这一轮的**原话**：画图闸门要靠它判断"风格/画幅说了没有"
+                   #   （不能拿模型写的英文 prompt 反推 —— 它会自己补上 photorealistic）
+                   "user_text": last_user,
+                   # ★ 云端图片 Key / DeepSeek Key：由前端放请求头带上来，
+                   #   只在本轮工具调用期间用，不落盘、不进日志（见 cloud_image 的约定）
+                   "image_key": x_image_key,
+                   # 前端 🎨 里选的模型名（不同 Key/分组能用的模型不一样，必须可换）
+                   "image_model": x_image_model,
+                   "ds_key": x_deepseek_key,
                    # 危险操作（删文件、起进程、联网…）先问用户，批准了再执行
                    # ask：材料不足时弹出问答框向用户追问细节
                    **_dict_ui_channel(_make_ui_channel(loop, live_ui))}
@@ -5236,10 +5434,11 @@ async def chat(req: ChatRequest):
             #   模型那边一个字都没交代，前端只能兜一句通用的"没有输出内容"。
             #   ⇒ 这里补一个**收尾轮**：不带工具，要它用文字把进度交代清楚。
             #     产物都已落盘、会话历史也在，用户回一句「继续」就能接着做。
-            logger.warning("[rounds] 工具轮次用满 %d 轮，转入收尾总结", MAX_TOOL_ROUNDS)
+            logger.warning("[rounds] 工具轮次用满 %d 轮，转入收尾总结", _max_rounds)
             yield json.dumps({"note": (
-                "已经连续用了 %d 轮工具（单轮上限），我让它先把已完成的部分交代清楚。"
-                "想接着做，回一句「继续」就行。" % MAX_TOOL_ROUNDS)}) + "\n"
+                "已经连续用了 %d 轮工具（单轮上限，可在 config 里改 max_tool_rounds），"
+                "我让它先把已完成的部分交代清楚。想接着做，回一句「继续」就行。"
+                % _max_rounds)}) + "\n"
             try:
                 _wrap_params = dict(gen_params)
                 _wrap_params["max_tokens"] = min(
@@ -5380,6 +5579,265 @@ def deepseek_check(x_deepseek_key: str = Header(default="")):
     return deepseek_client.check_key(x_deepseek_key)
 
 
+@app.post("/api/image/check")
+def image_check(x_image_key: str = Header(default="")):
+    """校验云端图片 Key（GET /models，不花钱）。Key 只在本次请求用。"""
+    return cloud_image.check_key(x_image_key, config.load_config() or {})
+
+
+@app.get("/api/image/models")
+def image_models_list():
+    """图片模型总清单：云端（当前配置的）+ 本地（含是否已装、占用多少）。"""
+    cfg = config.load_config() or {}
+    return {"ok": True,
+            "backend": str(cfg.get("image_backend") or "cloud"),
+            "cloud": {
+                "model": str(cfg.get("image_api_model") or cloud_image.DEFAULT_MODEL),
+                "model_edit": str(cfg.get("image_api_model_edit") or ""),
+                "base": str(cfg.get("image_api_base") or cloud_image.DEFAULT_BASE),
+                "default": cloud_image.DEFAULT_MODEL,
+            },
+            "local": image_models.list_local(),
+            "status": image_models.status(),
+            "models_dir": image_models.base_dir()}
+
+
+@app.post("/api/image/select")
+def image_select(body: dict):
+    """切换绘图模型。
+
+    body = {"backend": "cloud"|"local", "model": "xxx", "role": "gen"|"inpaint"}
+      · cloud：model 就是服务商的模型 id（不同 Key/分组能用的不一样）
+      · local：model 是注册表里的本地 id（必须已下载）
+    """
+    b = body or {}
+    backend = str(b.get("backend") or "cloud").lower()
+    model = str(b.get("model") or "").strip()
+    role = str(b.get("role") or "gen").lower()
+    cfg = config.load_config() or {}
+    if backend == "local":
+        r = image_models.apply_local(model)
+        if not r.get("ok"):
+            return r
+        cfg = config.load_config() or {}
+        cfg["image_backend"] = "local"
+        config.save_config(cfg)
+        return {"ok": True, "backend": "local", "model": model, "msg": r.get("msg")}
+    cfg["image_backend"] = "cloud"
+    if not model:
+        # 只切后端、不换模型名（前端顶栏下拉就是这么用的）
+        config.save_config(cfg)
+        return {"ok": True, "backend": "cloud",
+                "model": str(cfg.get("image_api_model") or ""),
+                "msg": "已切到云端绘图"}
+    if role == "inpaint":
+        cfg["image_api_model_edit"] = model
+    else:
+        cfg["image_api_model"] = model
+    config.save_config(cfg)
+    return {"ok": True, "backend": "cloud", "model": model, "role": role,
+            "msg": "已切到云端 " + model}
+
+
+@app.post("/api/image/pull")
+def image_pull(body: dict):
+    return image_models.pull(str((body or {}).get("id") or ""))
+
+
+@app.post("/api/image/remove")
+def image_remove(body: dict):
+    return image_models.remove(str((body or {}).get("id") or ""))
+
+
+@app.post("/api/image/cancel")
+def image_cancel():
+    return image_models.cancel()
+
+
+@app.get("/api/image/status")
+def image_status():
+    return image_models.status()
+
+
+# ---------------- 代码模型选择 ----------------
+@app.get("/api/code/models")
+def code_models():
+    """可选的代码模型清单 + 当前选择 + 本机已装（本地项要标灰用）。"""
+    cfg = config.load_config() or {}
+    try:
+        have = _installed_models()
+    except Exception:
+        have = []
+    return {"ok": True,
+            "current": str(cfg.get("code_model_choice") or "auto"),
+            "choices": tools.CODE_MODEL_CHOICES,
+            "installed": have,
+            "has_ds_key": None}     # Key 在前端，前端自己判断
+
+
+@app.post("/api/code/model")
+def code_model_set(body: dict):
+    """切换代码模型（代码生成 + 自我迭代都跟着变）。"""
+    m = str((body or {}).get("model") or "").strip()
+    if not m:
+        return {"ok": False, "msg": "模型不能为空"}
+    valid = {c["id"] for c in tools.CODE_MODEL_CHOICES}
+    if m not in valid:
+        return {"ok": False, "msg": "未知的代码模型：" + m}
+    cfg = config.load_config() or {}
+    cfg["code_model_choice"] = m
+    config.save_config(cfg)
+    return {"ok": True, "model": m, "msg": "代码模型已切换"}
+
+
+# ---------------- 自开发（改自己的源码）----------------
+@app.get("/api/selfdev/status")
+def selfdev_status():
+    cfg = config.load_config() or {}
+    return {"ok": True,
+            "enabled": bool(cfg.get("self_dev_enabled")),
+            "root": selfdev.project_root(),
+            "mirror": selfdev.mirror_dir(),
+            "journal": selfdev.recent_journal(20)}
+
+
+@app.post("/api/selfdev/toggle")
+def selfdev_toggle(body: dict):
+    """打开/关闭自开发。开关状态写进 config，重启后仍生效。"""
+    on = bool((body or {}).get("on"))
+    cfg = config.load_config() or {}
+    cfg["self_dev_enabled"] = on
+    config.save_config(cfg)
+    selfdev.journal("toggle", "-", on=on)
+    return {"ok": True, "enabled": on,
+            "msg": ("自开发已打开：模型现在能读写本项目源码并重启应用"
+                    if on else "自开发已关闭")}
+
+
+@app.post("/api/selfdev/verify")
+def selfdev_verify():
+    """试导入一次 backend.main（改完代码后可以先点这个自检）。"""
+    return selfdev.verify_import()
+
+
+@app.post("/api/selfdev/restart")
+def selfdev_restart():
+    """重启应用（内部会先试导入，导入失败就拒绝）。"""
+    return selfdev.restart()
+
+
+@app.get("/api/selfdev/backups")
+def selfdev_backups():
+    """历史改动快照：按**迭代批次**聚合，带时间与"这次改了什么"。
+
+    前端 🛠 面板里显示「版本更新内容 + 日期」，就靠这里的 ts/notes/added/removed。
+    """
+    return {"ok": True,
+            "batches": selfdev.list_batches(20),
+            "files": selfdev.list_backups(80),
+            "mirror": selfdev.mirror_dir(),
+            "restore": os.path.join(selfdev.mirror_dir(), "restore.py")}
+
+
+@app.post("/api/selfdev/rollback_batch")
+def selfdev_rollback_batch(body: dict):
+    """整批回撤（回到某一次迭代之前）。"""
+    batch = str((body or {}).get("batch") or "").strip()
+    if not batch:
+        return {"ok": False, "error": "缺少 batch"}
+    return selfdev.rollback_batch(batch)
+
+
+@app.post("/api/selfdev/rollback")
+def selfdev_rollback(body: dict):
+    try:
+        return selfdev.rollback(str((body or {}).get("rel") or ""),
+                                str((body or {}).get("backup") or ""))
+    except Exception as e:                            # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+# ---------------- 定时 / 长期自动化任务 ----------------
+@app.get("/api/schedule")
+def schedule_list():
+    return {"ok": True, "jobs": scheduler.list_jobs(),
+            "status": scheduler.status()}
+
+
+@app.post("/api/schedule")
+def schedule_add(body: dict):
+    b = body or {}
+    return scheduler.add(
+        str(b.get("name") or ""),
+        str(b.get("prompt") or ""),
+        every_minutes=int(b.get("every_minutes") or 0),
+        at_time=str(b.get("at_time") or ""),
+        session=str(b.get("session") or ""),
+        model=str(b.get("model") or ""))
+
+
+@app.post("/api/schedule/toggle")
+def schedule_toggle(body: dict):
+    b = body or {}
+    return scheduler.update(str(b.get("id") or ""),
+                            enabled=bool(b.get("enabled")))
+
+
+@app.post("/api/schedule/run")
+def schedule_run(body: dict):
+    """立即跑一次（会真的调模型 + 工具，可能要一两分钟）。"""
+    return scheduler.run_now(str((body or {}).get("id") or ""))
+
+
+@app.post("/api/schedule/delete")
+def schedule_delete(body: dict):
+    return scheduler.remove(str((body or {}).get("id") or ""))
+
+
+@app.post("/api/image/discover")
+def image_discover(x_image_key: str = Header(default="")):
+    """用这个 Key 问服务商**哪些模型能用**，并挑出可能能画图的候选。
+
+    🎨 面板的「自动选择可用模型」就是靠它 —— 用户充了钱还是 503 时，
+    说明分组里没有那个模型的通道，这时候唯一出路是换模型。
+    """
+    cfg = config.load_config() or {}
+    names = cloud_image.list_models(x_image_key, cfg)
+    cands = cloud_image.image_candidates(x_image_key, cfg)
+    # 诊断用：**不记 Key**，只记"能拿到几个模型、当前选的那个在不在里面"。
+    # 用户报「充了钱还是 503」时，这一行就能区分是"分组没权限"还是"模型名写错"。
+    try:
+        cur = str(cfg.get("image_api_model") or "")
+        logger.info("[image] discover: 共 %d 个模型 %s；图片候选 %s；当前「%s」%s",
+                    len(names), names[:12], cands[:6] or "无", cur,
+                    "在清单里" if cur in cands else "不在清单里")
+    except Exception:
+        pass
+    msg = "拿不到模型清单（Key 无效 / 网络不通）"
+    if names:
+        if cands:
+            msg = "共 %d 个模型，其中 %d 个能画图" % (len(names), len(cands))
+        else:
+            msg = ("你这个 Key 只能用 %d 个模型（%s），**里面没有任何图片模型** —— "
+                   "这是分组权限问题，充钱解决不了" %
+                   (len(names), "、".join(names[:5])))
+    return {"ok": bool(names),
+            "count": len(names),
+            "current": str(cfg.get("image_api_model") or ""),
+            "candidates": cands,
+            "models": names[:20],
+            "msg": msg}
+
+
+@app.get("/api/image/meta")
+def image_meta():
+    """给前端显示当前用的是哪个图片服务/模型（不含 Key）。"""
+    cfg = config.load_config() or {}
+    return {"ok": True,
+            "base": cfg.get("image_api_base") or cloud_image.DEFAULT_BASE,
+            "model": cfg.get("image_api_model") or cloud_image.DEFAULT_MODEL}
+
+
 # DeepSeek 专用的精简工具集（2026-11-08 实测定位）
 # ---------------------------------------------------------------
 # 问题：这台机器访问 api.deepseek.com 时被解析到腾讯 EdgeOne CDN，
@@ -5397,6 +5855,70 @@ _DS_CORE_TOOLS = {
     "generate_image", "edit_image", "web_image_search", "save_image_to_library",
     "make_pptx", "make_docx", "ask_user",
 }
+
+# 能"真产出图片"的工具
+_IMG_MAKER_TOOLS = {"generate_image", "edit_image", "compose_images",
+                    "cutout_image", "composite_image"}
+# 「这句话是在派活，不是在闲聊/提问」——用来决定要不要强制走深度询问
+_TASK_VERBS = (
+    "帮我", "给我", "替我", "做个", "做一个", "做成", "做一份", "弄个", "出个",
+    "生成", "写一个", "写个", "写份", "来一", "来张", "来段",
+    "画一", "画个", "画张", "出图", "绘图", "配图", "配个",
+    "改", "修改", "调整", "补充", "换成", "换个", "去掉", "删掉",
+    "设计", "整理", "制作", "翻译", "总结", "分析", "优化", "重构", "美化",
+    "排版", "简化", "加个", "加一个", "加上", "做个表", "做表", "做成表",
+    "ppt", "PPT", "文档", "表格",
+)
+
+
+def _looks_like_task(text: str) -> bool:
+    t = (text or "").strip()
+    if len(t) < 3:
+        return False
+    return any(v in t for v in _TASK_VERBS)
+
+
+_IMG_HINTS = ("画一张", "画个", "画幅", "画张", "生成一张", "生成图片", "生成一张图",
+              "帮我画", "出图", "来张图", "来一张图", "做一张图", "配图", "画出来")
+
+
+def _ds_guard_factory(last_user: str):
+    """DeepSeek 通道的「光嘴上说说」兜底（2026-11-08 新增）。
+
+    为什么需要：主通道（/api/chat）早就有代码层兜底 —— 模型把内容写在正文里
+    就算完事时，退回一轮明确要求它去生成（见 `_OFFICE_MAKER_TOOLS` 那段）。
+    DeepSeek 通道走的是另一套循环（deepseek_client.chat_stream_with_tools），
+    **原来完全没有这道保险**，所以用户实测「让 DeepSeek 做个 Excel，
+    它把表格写在正文里，一个文件都没有」。
+
+    返回 None 表示不用兜；返回字符串则作为下一轮的用户消息推回去（只兜一次）。
+    """
+    office = _is_office_task(last_user) and not _is_code_task(last_user)
+    want_file = _wants_file(last_user)
+    want_img = any(k in (last_user or "") for k in _IMG_HINTS)
+
+    def guard(used: set, text: str):
+        if office and not (used & _OFFICE_MAKER_TOOLS):
+            return (
+                "（系统提示）你刚才只把内容写在回复里了，**但用户要的是一个能点开的文件**。"
+                "现在**立即调用生成工具把它做出来**：演示稿 → make_pptx；"
+                "文档 → make_docx；表格 → make_xlsx。"
+                "⚠️ 单个工具调用的内容不要超过 4 页/4 项（超长 JSON 会被写坏、整轮全废）—— "
+                "先做封面 + 2~3 项，剩下的用 edit_office 每次补 1~2 项，分几次调用。"
+                "不要复述内容、不要再问用户、也不要解释，直接开始生成。")
+        if want_img and not (used & _IMG_MAKER_TOOLS):
+            return (
+                "（系统提示）用户要的是**真实产出的图片**，不是你用文字描述画面。"
+                "现在**立即调用工具**：要 AI 创作 → generate_image（prompt 用英文描述）；"
+                "要现成的真实照片 → web_image_search。做完再用一句话说明。")
+        if want_file and not used:
+            return (
+                "（系统提示）用户要的是**落到文件上的成品**。现在立即调用对应工具"
+                "（write_file / make_docx / make_xlsx / make_pptx）把文件真正写出来，"
+                "再告诉用户文件路径。不要只在回复里贴内容。")
+        return None
+
+    return guard
 
 
 def _ds_tools(cfg: dict) -> list:
@@ -5419,7 +5941,10 @@ def _ds_tools(cfg: dict) -> list:
 
 
 @app.post("/api/chat/deepseek")
-async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="")):
+async def chat_deepseek(req: ChatRequest,
+                        x_deepseek_key: str = Header(default=""),
+                        x_image_key: str = Header(default=""),
+                        x_image_model: str = Header(default="")):
     """DeepSeek 流式对话（**带工具调用**）。输出格式与 /api/chat 一致。
 
     2026-11-08 补：原来是纯对话，用户反馈「接入 API 的模型无法调度其他工具」。
@@ -5438,6 +5963,8 @@ async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="
               / deepseek-flash-think（同模型开 thinking，effort=medium）
               / deepseek-v4-pro（V4 Pro，thinking + effort=high）
     """
+    _AUTO_OK["on"] = False          # 同上：云通道也一轮一清
+    _AUTO_OK["hits"] = 0
     model = req.model or "deepseek-flash"
     messages = req.messages or []
     session = req.session_id or ""
@@ -5501,6 +6028,12 @@ async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="
                     "shown_images": [],
                     "ask_mode": str(cfg.get("ask_mode") or "quick"),
                     "session": session,
+                    # 画图闸门用（见 tools._img_ask_gate）：判断用户原话里说没说风格/画幅
+                    "user_text": last_user,
+                    # 云端图片 Key + DeepSeek Key（本轮生效，不落盘）
+                    "image_key": x_image_key,
+                    "image_model": x_image_model,
+                    "ds_key": x_deepseek_key,
                     # 问用户 / 危险操作确认 两条通道（复用主通道的实现）
                     **_dict_ui_channel(_make_ui_channel(loop, _UIAdapter())),
                 }
@@ -5512,7 +6045,11 @@ async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="
                 for kind, val in deepseek_client.chat_stream_with_tools(
                         clean, model, x_deepseek_key, tool_schemas, executor,
                         temperature=min(1.3, max(0.0, temp)),
-                        system_prompt=sys_prompt):
+                        system_prompt=sys_prompt,
+                        # 轮次上限跟主通道用同一份配置（用户要求放到最多）
+                        max_rounds=max(1, min(int(cfg.get("max_tool_rounds") or 60), 200)),
+                        # ★ 「光嘴上说说」兜底：要文件/图片却只写正文时退回一轮
+                        guard=_ds_guard_factory(last_user)):
                     # 先把上一轮工具产生的 UI 事件排出去
                     while ui_events:
                         q.put(("ui", ui_events.pop(0)))
@@ -5544,6 +6081,8 @@ async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="
                 yield json.dumps({"tool_start": {"name": val}}) + "\n"
             elif kind == "tool_result":
                 pass          # 结果交给模型总结，前端不需要原文
+            elif kind == "note":
+                yield json.dumps({"note": val}) + "\n"
             elif kind == "ui":
                 yield json.dumps({"ui": val}) + "\n"
             elif kind == "error":
@@ -5567,7 +6106,11 @@ def tool_confirm(req: ToolConfirmRequest):
                             detail="这个确认请求已经失效或超时了，请让模型重新发起")
     item["allow"] = bool(req.allow)
     item["event"].set()
-    return {"ok": True, "allow": bool(req.allow)}
+    if req.remember and req.allow:
+        _AUTO_OK["on"] = True
+        logger.info("[confirm] 用户勾选「本次任务不再询问」，本轮后续自动批准")
+    return {"ok": True, "allow": bool(req.allow),
+            "auto": bool(_AUTO_OK["on"])}
 
 
 @app.post("/api/tool/answer")
@@ -6198,7 +6741,24 @@ def _warmup_on_start():
     #   用户要求：「每次启动都得全部验证所有东西并报告状态，确保无论隔多长时间都没问题」。
     #   后台跑一遍（5-10 秒），结果缓存供 /api/selftest 查询；不阻塞服务起来，
     #   也不受 warmup_on_start 开关影响。
-    threading.Thread(target=selftest.run_all, daemon=True).start()
+    #   按 config 里的默认模型预热一份缓存（前端若切到别的模型，会各自再跑一份）。
+    def _selftest_boot() -> None:
+        try:
+            _m = str((config.load_config() or {}).get("default_model") or "")
+        except Exception:
+            _m = ""
+        try:
+            selftest.run_all(_m)
+        except Exception:                            # noqa: BLE001
+            pass
+
+    threading.Thread(target=_selftest_boot, daemon=True).start()
+
+    # ★ 定时任务调度线程（2026-11-08）：每 20 秒看一次有没有到期的任务
+    try:
+        scheduler.start()
+    except Exception:
+        logger.warning("定时任务调度没起来（不影响其它功能）", exc_info=True)
 
     try:
         cfg = config.load_config() or {}
@@ -7186,60 +7746,73 @@ class T2IBody(BaseModel):
 
 
 @app.post("/api/t2i/generate")
-def t2i_generate(body: T2IBody):
-    result = t2i.generate(body.prompt, body.negative_prompt, body.steps,
-                          body.width, body.height, hd=body.hd)
-    return result
+def t2i_generate(body: T2IBody, x_image_key: str = Header(default=""),
+                 x_image_model: str = Header(default="")):
+    """独立的文生图接口（对话之外直接调）。**2026-11-08 起走云端。**
+
+    本地 SDXL 已整体下线：不再吃 12GB 显存、不用等 50 秒加载流水线。
+    """
+    cfg = config.load_config() or {}
+    aspect = ""
+    if body.width and body.height:
+        aspect = "16:9" if body.width > body.height else (
+            "9:16" if body.height > body.width else "1:1")
+    try:
+        imgs = cloud_image.generate(body.prompt, x_image_key,
+                                    aspect=aspect, cfg=cfg,
+                                    model=x_image_model)
+    except cloud_image.CloudImageError as e:
+        return {"ok": False, "error": str(e),
+                "hint": "点右上角 🎨 填图片 API Key，或检查余额"}
+    # 顺手存进图库（和对话里生成的行为一致，方便"试画"后直接在图库看到）
+    saved = {}
+    try:
+        saved = tools._autosave_image(imgs[0], body.prompt or "试画", "gen",
+                                      "AI 生成（云端·试画）")
+    except Exception:
+        saved = {}
+    return {"ok": True, "b64": imgs[0], "images": imgs,
+            "model": x_image_model or cfg.get("image_api_model")
+                     or cloud_image.DEFAULT_MODEL,
+            "device": "cloud", "provider": "cloud",
+            "size": cloud_image.size_for(aspect), "saved": saved}
 
 
 @app.get("/api/t2i/capability")
 def t2i_capability():
-    """文生图能力探测：是否可用、是否支持高清放大、跑在什么设备上。
+    """绘图能力：现在**全部走云端**，不再探测本机显卡。
 
-    注意：文生图与图片微改共用同一个 torch 环境，设备是同一种，
-    因此这里的 device 对两者都适用。
+    保留这个接口是为了前端「能力徽章」不用改结构 —— 它照旧读 kind/gpu/note。
     """
-    dev = t2i.device_info()
-    return {"ok": True, "hd_available": t2i.available_upscale(),
-            "device": dev["device"], "kind": dev["kind"], "gpu": dev["gpu"],
-            "torch": dev["torch"], "note": dev["note"],
-            "forced": dev.get("forced", "auto"),
-            "can_gpu": dev.get("can_gpu", False),
-            "reason": dev.get("reason", "")}
+    cfg = config.load_config() or {}
+    return {"ok": True, "hd_available": True,
+            "device": "cloud", "kind": "cloud", "gpu": "",
+            "torch": "", "forced": "cloud", "can_gpu": False,
+            "provider": "cloud",
+            "base": cfg.get("image_api_base") or cloud_image.DEFAULT_BASE,
+            "model": cfg.get("image_api_model") or cloud_image.DEFAULT_MODEL,
+            "note": "云端出图：不占本机显存，按张计费",
+            "reason": "本地 SDXL 已下线（2026-11-08）"}
 
 
 @app.post("/api/t2i/device")
 def t2i_set_device(body: dict):
-    """切换绘图设备（CPU / GPU）。
-
-    切换会**先校验设备能否真的运算**，再把绘图引擎实际加载到目标设备上；
-    两步都通过才算成功。失败时保持原状并返回当前模式与具体原因 ——
-    绝不"假装切换成功"、等到绘图时才报错。
-    """
-    mode = (body or {}).get("mode", "")
-    result = t2i.set_device(mode)
-    if not result.get("ok"):
-        # 失败也返回 200：这是"操作结果"而不是接口错误，
-        # 前端需要结构化的 reason 才能把原因讲清楚。
-        return {"ok": False, "mode": result.get("mode", "cpu"),
-                "device": result.get("device", "cpu"),
-                "gpu": result.get("gpu"), "torch": result.get("torch"),
-                "reason": result.get("reason") or "切换失败",
-                "verified": False,
-                "forced": result.get("mode", "cpu"),
-                "requested": result.get("requested", mode)}
-    return {"ok": True, "mode": result["kind"], "device": result["device"],
-            "gpu": result["gpu"], "torch": result["torch"],
-            "note": result.get("verify_note") or result.get("note") or "",
-            "verified": bool(result.get("verified")),
-            "forced": result.get("forced", mode),
-            "requested": result.get("requested", mode)}
+    """设备切换 —— 云端模式下没有意义，保留接口只为不报错。"""
+    return {"ok": True, "mode": "cloud", "device": "cloud", "gpu": "",
+            "torch": "", "verified": True, "forced": "cloud",
+            "requested": "cloud",
+            "note": "绘图已改走云端 API，不需要选择 CPU/GPU"}
 
 
 @app.post("/api/t2i/unload")
 def t2i_unload():
-    t2i.unload()
-    return {"ok": True}
+    """云端模式没有本地绘图引擎要卸载；保留接口兼容旧前端。"""
+    try:
+        if t2i.any_loaded():
+            t2i.unload()
+    except Exception:
+        pass
+    return {"ok": True, "device": "cloud"}
 
 
 # ---------- 多会话管理 ----------

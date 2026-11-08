@@ -852,7 +852,7 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
             "type": "function",
             "function": {
                 "name": "generate_image",
-                "description": "根据描述生成图片（文生图）。prompt 必须是详细具体的**英文**描述，生成后直接展示给用户。\n"
+                "description": "根据描述生成图片（文生图，**走云端 API**，不占本机显存）。prompt 中文/英文都可以，越具体越像；生成后直接展示给用户。\n"
                                "⚠️ 用户只说了主体、没说风格/用途/氛围/尺寸时（例如「画一只狐狸」），"
                                "**先调 ask_user 问一轮再画** —— 画一次要几十秒，风格选错就得重画；"
                                "用户已经说清风格与用途时直接画，不要再问。\n"
@@ -876,29 +876,20 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                     "type": "object",
                     "properties": {
                         "prompt": {"type": "string",
-                                   "description": "详细的**英文**图片描述（必须英文！中文会被底模"
-                                                  "截断成 77 token 以内，画出来完全对不上）。"
+                                   "description": "详细的图片描述（**中文或英文都行**，云端模型懂中文）。"
                                                   "要写全：主体+动作、场景、光线、镜头、风格"
-                                                  "（写实类务必带 photorealistic / 35mm photograph）"},
+                                                  "（写实类带上 photorealistic / 35mm photograph 更稳）"},
                         "negative_prompt": {"type": "string",
-                                            "description": "英文负面描述。写实类建议：" 
-                                                           "cartoon, anime, illustration, painting, 3d render, "
-                                                           "plastic, oversaturated, blurry, deformed, extra limbs"},
-                        "size": {"type": "integer", "enum": [512, 768],
-                                 "description": ("图片边长档位，默认 512。"
-                                                 "512=常规，768=更细（要写实/要印出来用）。"
-                                                 "⚠️ 换了 SDXL 系底模后基础分辨率固定按"
-                                                 "其**原生 1024 档**出图（喂 512 会糊），"
-                                                 "此时这个参数不再改变分辨率 —— "
-                                                 "要更大更细请用 hd=true。")},
+                                            "description": "不想要的东西（会转成 Avoid: ...）。"
+                                                           "写实类建议：cartoon, anime, illustration, "
+                                                           "painting, 3d render, blurry, deformed"},
+                        "n": {"type": "integer",
+                              "description": "生成几张（1~4，默认 1）。用户说「多来几张/给几个方案」时填 2~4"},
                         "aspect": {"type": "string",
                                    "enum": ["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"],
-                                   "description": ("画幅比例，默认 1:1。用户说「竖版/海报/手机壁纸」用 9:16 或 2:3；说「横版/宽屏/PPT 配图/Banner」用 16:9 或 3:2。像素面积与方形一致，耗时不变。")},
-                        "hd": {"type": "boolean",
-                               "description": "是否出高清成品（默认 false）。"
-                                              "用户要「高清/高分辨率/画质好点/能放大看/要写实细节」时设为 true ——"
-                                              "会先放大一档**做细节精修**（真正长细节）再超分，"
-                                              "512→2048，多花约 30 秒（实测 37.9s），但清晰度和质感明显更好"},
+                                   "description": ("画幅比例，默认 1:1。用户说「竖版/海报/手机壁纸」用 9:16 或 2:3；"
+                                                   "说「横版/宽屏/PPT 配图/Banner」用 16:9 或 3:2。"
+                                                   "云端按这档自动选 1024x1024 / 1024x1536 / 1536x1024。")},
                     },
                     "required": ["prompt"],
                 },
@@ -1326,6 +1317,19 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                    if s["function"]["name"] != "web_image_search"]
     # 上传到代码托管平台：属于"对外发布"，始终暴露但执行前必须问用户
     schemas.append(_GITHUB_PUSH_SCHEMA)
+    # ---------- 定时任务（长期自动化）----------
+    # 常驻能力：用户说「每天早上帮我…」「每两小时盯一下…」就要用它。
+    schemas.extend(_schedule_schemas())
+
+    # ---------- 自开发工具（改自己的源码）----------
+    # 只有用户在界面上打开「🛠 自开发」才给。关着时模型连这些工具都看不到，
+    # 自然不会去碰 backend/frontend。
+    try:
+        if (config.load_config() or {}).get("self_dev_enabled"):
+            schemas.extend(_selfdev_schemas())
+    except Exception:
+        pass
+
     if office:
         # 只留"能产出办公文件"的那几个（见函数开头 office 的说明）。
         # 放在最后统一过滤：前面的 web/kb/code_exec 开关逻辑照旧，
@@ -1348,6 +1352,294 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                    if (s.get("function", {}).get("name") not in _drop
                        and not s.get("function", {}).get("name", "").startswith("workspace_"))]
     return schemas
+
+
+# ---------- 定时 / 长期自动化任务 ----------
+def _schedule_schemas() -> list:
+    return [
+        {"type": "function", "function": {
+            "name": "schedule_task",
+            "description": ("创建一个**定时任务**（长期自动化）：到点它会自己跑一遍，"
+                            "结果写回当前会话。适用于「每天早上九点帮我总结XX」"
+                            "「每两小时检查一下XX」这类需求。\n"
+                            "⚠️ 定时任务用**本机模型**执行（云端 Key 只在你浏览器里，"
+                            "半夜没人给它）；也**不会弹任何对话框**（没人点），"
+                            "所以任务描述要写成**自包含**的一句话，别指望它到时候再问你。"),
+            "parameters": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "任务名（短一点，好认）"},
+                "prompt": {"type": "string",
+                           "description": "到点要执行的内容（要自包含，写清做什么、输出什么）"},
+                "every_minutes": {"type": "integer",
+                                  "description": "每隔多少分钟跑一次（与 at_time 二选一）"},
+                "at_time": {"type": "string",
+                            "description": "每天几点跑，格式 HH:MM（如 09:00）"}},
+                "required": ["name", "prompt"]}}},
+        {"type": "function", "function": {
+            "name": "list_schedules",
+            "description": "列出所有定时任务（含下次运行时间、上次结果）。用户问「我有哪些定时任务」时用。",
+            "parameters": {"type": "object", "properties": {}, "required": []}}},
+        {"type": "function", "function": {
+            "name": "cancel_schedule",
+            "description": "按名字或 id 删除一个定时任务。",
+            "parameters": {"type": "object", "properties": {
+                "name_or_id": {"type": "string", "description": "任务名或 id"}},
+                "required": ["name_or_id"]}}},
+    ]
+
+
+def _do_schedule(name: str, arguments: dict) -> str:
+    from . import scheduler as _sch
+    a = arguments or {}
+    try:
+        if name == "schedule_task":
+            every = a.get("every_minutes") or 0
+            try:
+                every = int(every)
+            except Exception:
+                every = 0
+            r = _sch.add(str(a.get("name") or ""), str(a.get("prompt") or ""),
+                         every_minutes=every, at_time=str(a.get("at_time") or ""))
+            if not r.get("ok"):
+                return "创建失败：%s" % r.get("error")
+            j = r["job"]
+            return ("已创建定时任务「%s」：%s，下次 %s。"
+                    "到点会自动执行并把结果写回这个会话（界面左侧「定时任务」面板能看到）。"
+                    % (j["name"], _sch.describe(j),
+                       time.strftime("%m-%d %H:%M", time.localtime(float(j["next_run"])))))
+        if name == "list_schedules":
+            jobs = _sch.list_jobs()
+            if not jobs:
+                return "现在没有任何定时任务。"
+            lines = ["现有 %d 个定时任务：" % len(jobs)]
+            for j in jobs:
+                lines.append("- %s（%s，%s）下次 %s｜上次 %s %s"
+                             % (j.get("name"), j.get("period"),
+                                "启用" if j.get("enabled") else "已暂停",
+                                j.get("next_human"),
+                                j.get("last_run") or "从未",
+                                (j.get("last_status") or "")[:40]))
+            return "\n".join(lines)
+        if name == "cancel_schedule":
+            key = str(a.get("name_or_id") or "").strip()
+            if not key:
+                return "要删哪个？给个名字或 id。"
+            jobs = _sch.list_jobs()
+            hit = next((j for j in jobs if j["id"] == key), None) or \
+                next((j for j in jobs if j.get("name") == key), None)
+            if not hit:
+                return "没找到叫「%s」的定时任务。" % key
+            r = _sch.remove(hit["id"])
+            return "已删除定时任务「%s」。" % hit.get("name") if r.get("ok") \
+                else "删除失败：%s" % r.get("error")
+    except Exception as e:                            # noqa: BLE001
+        return "定时任务工具出错：%s: %s" % (type(e).__name__, e)
+    return "未知的定时任务工具：%s" % name
+
+
+# ---------- 自开发：让模型改自己的源码 ----------
+def _selfdev_schemas() -> list:
+    """6 个自开发工具。**只在 self_dev_enabled 时暴露**（见 make_schemas）。"""
+    return [
+        {"type": "function", "function": {
+            "name": "selfdev_tree",
+            "description": ("列出**本应用自己的源码**目录（backend/ frontend/ …）。"
+                            "要改自己的代码前先看这个，别瞎猜路径。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string",
+                        "description": "子目录（可空；如 backend 或 frontend）"},
+                "depth": {"type": "integer",
+                          "description": "展开几层，1~4，默认 2"}},
+                "required": []}}},
+        {"type": "function", "function": {
+            "name": "selfdev_read",
+            "description": "读本应用源码文件的**完整内容**（改之前必须先读，别凭记忆改）。",
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string",
+                        "description": "相对项目根的路径，如 backend/tools.py"}},
+                "required": ["rel"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_write",
+            "description": ("**整份覆盖**写一个源码文件（会先自动备份）。"
+                            "⚠️ 只适合新建文件或整文件重写；改几行请用 selfdev_patch。"
+                            "⚠️ Python 文件会先做语法校验，不通过**不会写盘**。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "相对路径"},
+                "content": {"type": "string", "description": "完整的文件内容"},
+                "note": {"type": "string", "description": "这次改了什么（留痕用）"}},
+                "required": ["rel", "content"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_patch",
+            "description": ("**精确替换**源码里的某一段（最安全的改法）。"
+                            "find 必须和文件里的原文**一字不差**（含缩进换行），"
+                            "且只能命中一处；命中 0 处或多处都会被拒绝。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "相对路径"},
+                "find": {"type": "string", "description": "要被替换的原文"},
+                "replace": {"type": "string", "description": "替换成什么"},
+                "note": {"type": "string", "description": "改动说明"}},
+                "required": ["rel", "find", "replace"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_apply",
+            "description": ("把「改什么」交给**当前选定的代码模型**去写，再落到文件上。"
+                            "改整段逻辑/大改时用它；只改几行仍优先 selfdev_patch。"
+                            "会自动：读现有内容 → 代码模型重写 → 语法校验 → 备份 → 写盘。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "要改的文件（相对路径）"},
+                "instruction": {"type": "string",
+                                "description": "要改成什么样（写清楚，代码模型看不到聊天记录）"},
+                "note": {"type": "string", "description": "改动说明（留痕用）"}},
+                "required": ["rel", "instruction"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_run",
+            "description": ("在项目根目录跑一个 .py（验证自己刚写的东西）。"
+                            "返回真实 stdout/stderr。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "要跑的 .py 相对路径"},
+                "args": {"type": "string", "description": "命令行参数（可空）"}},
+                "required": ["rel"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_restart",
+            "description": ("**重启本应用**让改动生效。会先试 import 一遍 "
+                            "backend.main —— 导入失败就**拒绝重启**并告诉你错在哪。"
+                            "改完代码后必须调它，否则改动不生效。"),
+            "parameters": {"type": "object", "properties": {
+                "reason": {"type": "string", "description": "为什么重启（留痕用）"}},
+                "required": []}}},
+    ]
+
+
+def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
+    """把"改了哪个文件、改了什么"作为**可折叠卡片**推给前端。
+
+    ⚠️ 关键：**不要把代码正文塞进聊天流**（用户明确要求"不要导致页面变形"）。
+    这里只推结构化的差异数据，前端默认折叠成一行摘要，点开才看 diff，
+    并且容器有固定最大高度 + 内部滚动。
+    """
+    if not isinstance(ui_events, list):
+        return
+    d = (r or {}).get("diff") or {}
+    ui_events.append({
+        "type": "selfdev",
+        "act": act,
+        "rel": r.get("rel") or "",
+        "added": d.get("added") or 0,
+        "removed": d.get("removed") or 0,
+        "diff": (d.get("diff") or "")[:20000],
+        "backup": os.path.basename(r.get("backup") or ""),
+        "who": who,
+        "is_new": bool(r.get("is_new")),
+    })
+
+
+def _do_selfdev(name: str, arguments: dict, context: dict = None,
+                ui_events: list = None) -> str:
+    """执行自开发工具。统一在这里兜异常，返回给模型的永远是文本。"""
+    from . import selfdev as _sd
+    if not _sd.enabled():
+        return ("自开发模式没打开。请让用户点顶栏「🛠 自开发」打开后再试 —— "
+                "没有这个开关我不会去改应用自己的代码。")
+    a = arguments or {}
+    try:
+        if name == "selfdev_apply":
+            # ★ 把"写代码"这件事交给**用户选定的代码模型**（默认 DeepSeek V4.1），
+            #   而不是让当前对话模型自己写 —— 大改用代码模型质量更稳，
+            #   也符合用户"代码生成用能自主切换的模型"的要求。
+            rel = str(a.get("rel") or "")
+            inst = str(a.get("instruction") or "").strip()
+            if not inst:
+                return "说明要改什么（instruction 不能为空）。"
+            cur = _sd.read(rel)
+            old = cur.get("text") if cur.get("ok") else ""
+            cfg = config.load_config() or {}
+            parts = [
+                "你是资深程序员。请修改下面这个文件的**完整内容**。",
+                "只输出改后的整份文件（可以带一个代码块），不要解释、不要写用法说明。",
+                "目标文件：%s" % rel,
+                "要求：%s" % inst,
+            ]
+            if rel.startswith("frontend/") or rel.endswith((".js", ".css", ".html")):
+                # 用户明确要求：前端改动要"保持页面简洁、别把页面撑变形"
+                parts.append(
+                    "⚠️ 前端改动纪律：只做**最小改动**（尽量 80 行以内）；"
+                    "只用现有 class / 现有容器，不要改布局骨架（顶栏/输入区/消息区的"
+                    "宽高与 flex）；不要写大段内联 style；新增可见控件一次最多一个；"
+                    "长内容必须用可折叠容器（默认收起 + max-height + overflow:auto）。")
+            if old:
+                parts.append("这是它**当前的内容**，在此基础上改：\n```\n%s\n```" % old[:12000])
+            else:
+                parts.append("这是新文件，按上面的要求从零写。")
+            try:
+                code = _code_gen_text("\n\n".join(parts), cfg, context,
+                                      max_tokens=int(cfg.get("code_max_tokens") or 8192))
+            except Exception as e:                    # noqa: BLE001
+                return ("代码模型调用失败：%s: %s。请把原因原样转告用户"
+                        "（很可能是没填 DeepSeek Key，或本地模型没装）"
+                        % (type(e).__name__, e))
+            code2 = _strip_code_fence(code or "").strip()
+            if not code2:
+                return "代码模型没有输出内容（可能被截断）。换个说法或换个代码模型再试。"
+            r = _sd.write(rel, code2, str(a.get("note") or inst))
+            if not r.get("ok"):
+                return "写入被拒绝：%s" % r.get("error")
+            _kind, _pick = code_model_pick(cfg, context)
+            who = ("DeepSeek " + _pick) if _kind == "cloud" else ("本地 " + (_pick or "默认"))
+            _selfdev_ui(ui_events, "apply", r, who)
+            d = r.get("diff") or {}
+            return ("已用 %s 重写 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
+                    "改完调 selfdev_restart 生效。"
+                    % (who, r["rel"], d.get("added", 0), d.get("removed", 0),
+                       r["chars"]))
+
+        if name == "selfdev_tree":
+            r = _sd.list_tree(str(a.get("rel") or ""),
+                              int(a.get("depth") or 2))
+            if not r.get("ok"):
+                return "列目录失败：%s" % r.get("error")
+            return ("项目根：%s\n（只列可改写的文件；data/models 等运行期目录不列）\n"
+                    % r["root"] + "\n".join(r["files"])
+                    + ("\n…（还有更多，用 rel 缩小范围）" if r.get("more") else ""))
+        if name == "selfdev_read":
+            r = _sd.read(str(a.get("rel") or ""))
+            if not r.get("ok"):
+                return "读取失败：%s" % r.get("error")
+            return ("【%s】%d 行 / %d 字\n```\n%s\n```"
+                    % (r["rel"], r["lines"], r["chars"], r["text"]))
+        if name == "selfdev_write":
+            r = _sd.write(str(a.get("rel") or ""), str(a.get("content") or ""),
+                          str(a.get("note") or ""))
+            if not r.get("ok"):
+                return "写入被拒绝：%s" % r.get("error")
+            _selfdev_ui(ui_events, "write", r)
+            d = r.get("diff") or {}
+            return ("已写入 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
+                    "记得改完调 selfdev_restart 生效。"
+                    % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
+        if name == "selfdev_patch":
+            r = _sd.patch(str(a.get("rel") or ""), str(a.get("find") or ""),
+                          str(a.get("replace") or ""), str(a.get("note") or ""))
+            if not r.get("ok"):
+                return "替换失败：%s" % r.get("error")
+            _selfdev_ui(ui_events, "patch", r)
+            d = r.get("diff") or {}
+            return ("已修改 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
+                    "改完调 selfdev_restart 生效。"
+                    % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
+        if name == "selfdev_run":
+            r = _sd.run_py(str(a.get("rel") or ""), str(a.get("args") or ""))
+            if not r.get("ok") and r.get("error"):
+                return "运行失败：%s" % r["error"]
+            return ("【运行 %s】退出码 %s，耗时 %ss\n标准输出：\n%s\n标准错误：\n%s"
+                    % (a.get("rel"), r.get("code"), r.get("cost_s"),
+                       (r.get("out") or "").strip()[-1500:] or "（空）",
+                       (r.get("err") or "").strip()[-1500:] or "（空）"))
+        if name == "selfdev_restart":
+            r = _sd.restart()
+            if not r.get("ok"):
+                return "重启被拒绝：%s" % r.get("error")
+            return r.get("msg") or "正在重启"
+    except Exception as e:                        # noqa: BLE001
+        return "自开发工具出错：%s: %s" % (type(e).__name__, e)
+    return "未知的自开发工具：%s" % name
 
 
 # ---------- 本地代码执行（"离线计算"）：受「本地算代码」开关控制 ----------
@@ -1737,6 +2029,17 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
             _v = arguments.get(_k)
             if isinstance(_v, str) and "%" in _v:
                 arguments[_k] = _fix_filename(_v)
+    # ⚠️ 这里刻意写成三个**显式相等判断**，不用 `name in (...)`：
+    #   自检里的「工具调度」审计只认 `name == "x"` 和 `name.startswith("x")`，
+    #   用元组成员判断会让它误报"没有实现"（实测踩到）。
+    if name == "schedule_task":
+        return _do_schedule(name, arguments)
+    if name == "list_schedules":
+        return _do_schedule(name, arguments)
+    if name == "cancel_schedule":
+        return _do_schedule(name, arguments)
+    if name.startswith("selfdev_"):
+        return _do_selfdev(name, arguments, context, ui_events)
     if name == "workspace_list":
         return _do_workspace_list()
     if name == "workspace_read":
@@ -1788,7 +2091,10 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
     if name == "save_image_to_library":
         return _do_save_image_to_library(arguments, context)
     if name == "generate_image":
-        return _do_generate_image(arguments, ui_events)
+        _gate = _img_ask_gate(arguments, context)
+        if _gate is not None:
+            return _gate
+        return _do_generate_image(arguments, ui_events, context)
     if name == "edit_image":
         return _do_edit_image(arguments, ui_events, context)
     if name == "compose_images":
@@ -2350,6 +2656,39 @@ def _needs_en(text) -> bool:
     return len(_CJK_RE.findall(str(text or ""))) >= 4
 
 
+# 翻译用模型的选择结果（缓存 2 分钟，避免每次生图都去问一遍 /api/tags）
+_TRANS_MODEL = {"ts": 0.0, "name": ""}
+
+
+def _translate_model(cfg: dict) -> str:
+    """挑一个**真装了**的模型做中译英。
+
+    ⚠️ 2026-11-08 修：原来直接用 `cfg["default_model"]`，而它现在是
+    `qwen3-vl:30b`（18GB，用户没下）→ 翻译请求 404 → 中文提示词原样送进 CLIP
+    → 中文被截断、画面跑偏。这里改成"配置里有就用，没有就退到已装的 qwen3-vl"。
+    """
+    now = time.time()
+    if _TRANS_MODEL["name"] and now - _TRANS_MODEL["ts"] < 120:
+        return _TRANS_MODEL["name"]
+    want = str((cfg or {}).get("default_model") or "")
+    url = str((cfg or {}).get("ollama_url") or "http://127.0.0.1:11434").rstrip("/")
+    pick = want
+    try:
+        import urllib.request
+        with urllib.request.urlopen(url + "/api/tags", timeout=5) as r:
+            have = [str(m.get("name") or "") for m in
+                    (json.loads(r.read().decode("utf-8", "ignore")).get("models") or [])]
+        if want and (want in have or (want + ":latest") in have):
+            pick = want
+        else:
+            pick = (next((n for n in have if "qwen3-vl" in n), "")
+                    or (have[0] if have else want))
+    except Exception:
+        pass
+    _TRANS_MODEL.update({"ts": now, "name": pick})
+    return pick
+
+
 def _to_english(text: str, cfg: dict, timeout: float = 30.0) -> str:
     """用本机对话模型把中文画面描述翻成英文提示词。**任何失败都原样返回**，
     绝不因为翻译失败就把用户的请求搞挂。"""
@@ -2361,7 +2700,7 @@ def _to_english(text: str, cfg: dict, timeout: float = 30.0) -> str:
         import urllib.request
         url = str(cfg.get("ollama_url") or "http://127.0.0.1:11434").rstrip("/") + "/api/chat"
         body = {
-            "model": cfg.get("default_model"),
+            "model": _translate_model(cfg),
             "stream": False,
             "options": {"temperature": 0.2, "num_predict": 220},
             "messages": [
@@ -2387,190 +2726,483 @@ def _to_english(text: str, cfg: dict, timeout: float = 30.0) -> str:
     return s
 
 
-def _do_generate_image(arguments, ui_events):
+# ================= 画图前「必须先问」的代码级闸门（2026-11-08）=================
+# 用户实测：输入「生成一张狐狸的图片」，模型**直接开画**，一句都没问。
+# 提示词里其实早写了「画图是个例外，宁问勿猜」（见 main.py 的 _ask_rules），
+# 但那是**软约束** —— 8B 和云端模型都可能不理。画一张几十秒，风格选错就得重画，
+# 所以这里在**工具层**硬拦一道：细节不全就先弹问答框，拿到答复再画。
+#
+# 判据用的是**用户原话**（context["user_text"]），不是模型写的英文 prompt ——
+# 因为模型即使只听到"狐狸"，也会自作主张写成 "a photorealistic fox, 85mm…"，
+# 从 prompt 反推"它问过风格了"就会永远不成立。
+_IMG_STYLE_WORDS = (
+    "写实", "真实", "照片", "摄影", "实拍", "卡通", "动漫", "二次元", "插画", "绘画",
+    "水彩", "油画", "国风", "水墨", "像素", "赛博", "3d", "立体", "素描", "线稿",
+    "扁平", "简笔", "厚涂", "cg", "手绘", "涂鸦", "朋克", "复古", "极简",
+)
+_IMG_SHAPE_WORDS = (
+    "竖版", "竖屏", "横版", "横屏", "方形", "方图", "宽屏", "长图", "壁纸", "海报",
+    "头像", "封面", "9:16", "16:9", "4:3", "3:4", "1:1", "21:9", "比例", "分辨率",
+    "高清", "4k", "8k",
+)
+_IMG_USE_WORDS = (
+    "做", "用于", "用来", "当成", "当作", "配图", "宣传", "广告", "ppt", "演示",
+    "文档", "店铺", "详情页", "banner", "朋友圈", "公众号", "小红书", "课件", "绘本",
+)
+
+# 用户答选项 → 直接拼进英文提示词（自己映射，不依赖翻译，稳定且快）
+_IMG_STYLE_MAP = {
+    "写实摄影": "photorealistic, professional photography, natural light, 85mm lens",
+    "日系插画": "japanese anime illustration, soft colors, clean lineart",
+    "3d 渲染": "3d render, octane, soft studio lighting, pixar style",
+    "水彩手绘": "watercolor painting, hand drawn, textured paper",
+    "油画质感": "oil painting, thick brush strokes, canvas texture",
+}
+_IMG_SHAPE_MAP = {
+    "手机壁纸": ("9:16", "vertical composition, mobile wallpaper"),
+    "电脑桌面": ("16:9", "horizontal composition, desktop wallpaper"),
+    "方图": ("1:1", "square composition"),
+    "海报/竖版": ("2:3", "poster layout, vertical"),
+    "横版配图": ("16:9", "wide banner composition"),
+}
+
+
+def _img_missing_dims(user_text: str, arguments: dict) -> list:
+    """这句话里还缺哪些关键维度（风格 / 画幅用途）。
+
+    空列表 = 用户已经说清了，可以直接画。
+    """
+    t = str(user_text or "").strip()
+    if not t:
+        return []
+    low = t.lower()
+    miss = []
+    if not any(w in low for w in _IMG_STYLE_WORDS):
+        miss.append("style")
+    has_shape = (any(w in low for w in _IMG_SHAPE_WORDS)
+                 or bool(str((arguments or {}).get("aspect") or "").strip())
+                 or bool(str((arguments or {}).get("size") or "").strip()))
+    has_use = any(w in low for w in _IMG_USE_WORDS)
+    if not (has_shape or has_use):
+        miss.append("shape")
+    return miss
+
+
+def _img_ask_gate(arguments: dict, context: dict):
+    """画图前的硬闸门。返回 None = 放行；返回字符串 = 先别画。
+
+    设计取舍：
+      · 只有**能弹框**（context["ask"] 可调用）时才问 —— 没有界面通道就放行，
+        不能因为拦不到人就把功能卡死；
+      · 每轮只问一次（context["img_asked"]），问完不再纠缠；
+      · 用户跳过/一条没填 → 按最合理的默认继续画，不让他白等。
+    """
+    if not isinstance(arguments, dict):
+        return None
+    ctx = context or {}
+    if ctx.get("img_asked"):
+        return None
+    user_text = str(ctx.get("user_text") or "")
+    miss = _img_missing_dims(user_text, arguments)
+    if not miss:
+        return None
+    ask = ctx.get("ask")
+    if not callable(ask):
+        return None
+    if not str(arguments.get("prompt") or "").strip():
+        return None                      # 连 prompt 都没有，交给原逻辑报错
+
+    qs = []
+    if "style" in miss:
+        qs.append({"header": "风格",
+                   "question": "这张图想要什么风格？（选错就要重画一遍）",
+                   "options": list(_IMG_STYLE_MAP.keys())})
+    if "shape" in miss:
+        qs.append({"header": "画幅/用途",
+                   "question": "用在哪？我按这个定画幅比例。",
+                   "options": list(_IMG_SHAPE_MAP.keys())})
+    qs.append({"header": "细节",
+               "question": "画面里还想要什么？（不填就按我的理解画）",
+               "options": []})
+
+    ctx["img_asked"] = True              # 只问一次
+    answers = ask({"questions": qs,
+                   "hint": "🎨 画一张要几十秒，先确认这两点，画出来才不返工。"})
+    if not answers:
+        return None                      # 关了弹框 → 按默认画
+
+    bits, aspect = [], ""
+    for a in answers:
+        if not isinstance(a, dict):
+            continue
+        ans = str(a.get("answer") or "").strip()
+        if not ans:
+            continue
+        key = ans.replace(" ", "").lower()
+        hit_style = next((v for k, v in _IMG_STYLE_MAP.items()
+                          if k.replace(" ", "").lower() == key), "")
+        hit_shape = next(((v[0], v[1]) for k, v in _IMG_SHAPE_MAP.items()
+                          if k.replace(" ", "").lower() == key), None)
+        if hit_style:
+            bits.append(hit_style)
+        elif hit_shape:
+            aspect, extra = hit_shape[0], hit_shape[1]
+            bits.append(extra)
+        else:
+            bits.append(ans)             # 自由填的细节，原样拼（后面会被翻成英文）
+    if not bits:
+        return None
+    arguments["prompt"] = (str(arguments.get("prompt") or "").strip().rstrip(",")
+                           + ", " + ", ".join(bits))
+    if aspect and not str(arguments.get("aspect") or "").strip():
+        arguments["aspect"] = aspect
+    return None
+
+
+def _region_mask_b64(image_b64: str, regions: list, area: str = "") -> str:
+    """把「矩形区域 / area 关键词」画成一张黑白蒙版（白=要改的地方）。
+
+    云端 /images/edits 只认**蒙版**，不认矩形坐标 —— 所以这里在本地把坐标
+    画成 PNG 蒙版再发过去。PIL 画几个方块，毫秒级，不占显存。
+    """
+    import base64 as _b64
+    from PIL import Image, ImageDraw
+
+    raw = image_b64.split(",", 1)[1] if image_b64.startswith("data:") else image_b64
+    base = Image.open(io.BytesIO(_b64.b64decode(raw))).convert("RGB")
+    w, h = base.size
+    mask = Image.new("L", (w, h), 0)
+    d = ImageDraw.Draw(mask)
+
+    boxes = []
+    for r in (regions or []):
+        try:
+            if isinstance(r, dict):
+                r = r.get("box") or r.get("region") or r
+            if isinstance(r, (list, tuple)) and len(r) == 4:
+                boxes.append([float(x) for x in r])
+        except Exception:
+            continue
+    a = (area or "").strip().lower()
+    if not boxes and a:
+        preset = {
+            "face": (0.30, 0.08, 0.70, 0.42),
+            "torso": (0.22, 0.34, 0.78, 0.80),
+            "upper-third": (0.0, 0.0, 1.0, 0.34),
+            "upper": (0.0, 0.0, 1.0, 0.34),
+            "center": (0.25, 0.25, 0.75, 0.75),
+            "background": None,      # 背景交给模型自己判断，用整图重绘更好
+        }.get(a)
+        if preset:
+            boxes.append(list(preset))
+    if not boxes:
+        return ""
+    for x0, y0, x1, y1 in boxes:
+        d.rectangle([int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)], fill=255)
+    buf = io.BytesIO()
+    mask.save(buf, format="PNG")
+    return _b64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _autosave_image(b64: str, prompt: str, origin: str, extra: str = "") -> dict:
+    """生成/微改完**自动存进图片库**，返回 {id, path, w, h}。
+
+    ⚠️ 2026-11-08 为什么加：原来生成的图只以 base64 推给前端，
+    **磁盘上什么都没落** —— 关掉页面就没了，用户点"保存到图库"才有文件。
+    用户明确要求"保存路径要正常"，所以改成后端直接落盘（图库 = data/image_library/）。
+    """
+    try:
+        from . import image_library as _lib
+        meta = _lib.save_image(
+            b64,
+            name=(prompt or "").strip()[:30] or "AI 图片",
+            source=(extra or ("AI 生成" if origin == "gen" else "AI 微改"))[:200],
+            origin=origin)
+        if not meta.get("ok") is False and meta.get("id"):
+            return {"id": meta["id"],
+                    "path": _lib.get_path(meta["id"]) or "",
+                    "w": meta.get("w") or 0, "h": meta.get("h") or 0,
+                    "size": meta.get("size") or 0}
+    except Exception:
+        pass
+    return {}
+
+
+def _gen_local(arguments, ui_events):
+    """本地权重出图（SDXL / SDXL-Turbo / SD-Turbo 都走这里）。
+
+    ⚠️ 2026-11-08：这是**可选后端**。默认仍走云端（不占显存、不用下载）；
+    用户在 🎨 里显式选了本地模型才会进来。选之前会先把对话模型从显存请出去，
+    否则 12GB 卡装不下两套。
+    """
     prompt = (arguments.get("prompt") or "").strip()
-    if not prompt:
-        return "错误：未提供图片描述（prompt）。"
-    # ⚠️ 风格加成按**用户原话 + 模型写的英文 prompt**一起判（见 _STYLE_PRESETS 说明）：
-    #    要"写实"就加摄影系正向词、排掉 cartoon/3d；要"卡通"就别再硬塞"professional photography"。
+    cfg = config.load_config() or {}
     style_pos, style_neg = _style_for(prompt)
-    # ⚠️ 中文提示词会被 CLIP 截断（见 _CJK_RE 的说明）→ 翻成英文再画。
-    #    放在 _style_for **之后**：风格判定要认中文原话（"写实/卡通"这些词）。
-    _cfg_now = config.load_config() or {}
-    prompt = _to_english(prompt, _cfg_now)
+    # 本地是 CLIP 文本编码器，中文会被截断 → 必须翻英文
+    prompt_en = _to_english(prompt, cfg)
     user_neg = (arguments.get("negative_prompt") or "").strip()
     if _needs_en(user_neg):
-        user_neg = _to_english(user_neg, _cfg_now)
+        user_neg = _to_english(user_neg, cfg)
     negative = ", ".join(x for x in (user_neg, style_neg or _IMAGE_NEG_DEFAULT) if x)
     try:
-        size = int(arguments.get("size") or 512)
+        size = int(arguments.get("size") or 1024)
     except Exception:
-        size = 512
+        size = 1024
     hd = bool(arguments.get("hd"))
     width, height = _img_wh(size, arguments.get("aspect"))
-    boosted = ", ".join(x for x in (prompt, style_pos or _IMAGE_PROMPT_NEUTRAL) if x)
-    t2i.unload()  # 确保显存空闲
+    boosted = ", ".join(x for x in (prompt_en, style_pos or _IMAGE_PROMPT_NEUTRAL) if x)
+
+    t2i.unload()                     # 先把对话模型请出显存
     start = time.time()
-    # ⚠️ 步数**不能写死 4** —— 那是给 sd-turbo（蒸馏版）的。SDXL 要 28 步，
-    #    写死 4 会得到一张糊图。交给 t2i 按模型代际决定（见 t2i.base_steps）。
     result = t2i.generate(boosted, negative_prompt=negative,
                           steps=t2i.base_steps(),
                           width=width, height=height, hd=hd)
     cost = time.time() - start
     if not result.get("ok"):
-        return (f"图片生成失败：{result.get('error')}。"
-                f"请把冒号后的具体原因**原样**转告用户，不要改写成笼统说法。")
-    # 把图片作为副作用发给前端展示；只把简短文本回给模型，避免占用上下文
+        return ("图片生成失败（本地）：%s。请把冒号后的原因**原样**转告用户。"
+                % result.get("error"))
+    _saved = _autosave_image(result["b64"], prompt, "gen", "AI 生成（本地）")
     _ui(ui_events, {"type": "image", "mime": "image/png", "b64": result["b64"],
                     "prompt": prompt, "device": result.get("device"),
                     "model": result.get("model"), "cost_s": round(cost, 1),
-                    "size": result.get("size"),
-                    "origin": "gen"})     # ← 前端据此标注「AI 生成」
-    # ★★ 图片已经交给前端了，**在这里（请求线程）把 SDXL 从显存里放掉**。
-    #    为什么必须在这里、而不是画完由后台预热线程顺手放：
-    #      · 12GB 卡装不下 SDXL(11.5GB) + 30B(9.7GB)，共存时两边都被挤进共享内存；
-    #      · 实测后果：画完图后的**第一条消息等 397.5 秒**（另一轮 161.8s、27.9s）；
-    #      · 而在后台线程里调 `t2i.unload()` 会**和后端卡死**撞上
-    #        （跨线程竞态：请求线程可能正在用同一份管道，实测 `/api/config` 都超时）。
-    #    ⇒ 释放动作跟着生成走（都在请求线程），预热线程只负责把对话模型热回来。
-    #    代价：下一张图要重载 SD（约 10 秒），与 hd 分支早就接受的取舍一致。
+                    "size": result.get("size"), "origin": "gen",
+                    "saved": _saved})
+    try:
+        t2i.unload()                 # 画完立刻放掉，别让它占着显卡
+    except Exception:
+        pass
+    return ("已生成图片（本地 %s，%s，%.1f 秒），已展示给用户。"
+            % (result.get("model") or "", result.get("size") or "", cost))
+
+
+def _do_generate_image(arguments, ui_events, context=None):
+    """文生图 —— 按配置走**云端 API** 或**本地权重**。"""
+    from . import cloud_image
+
+    prompt = (arguments.get("prompt") or "").strip()
+    if not prompt:
+        return "错误：未提供图片描述（prompt）。"
+    ctx = context or {}
+    key = str(ctx.get("image_key") or "")
+    cfg = config.load_config() or {}
+    if str(cfg.get("image_backend") or "cloud").lower() == "local":
+        return _gen_local(arguments, ui_events)
+
+    # ⚠️ 云端模型（gpt-image 系）**天生懂中文**，不再翻英文 ——
+    #    原来那句 _to_english 是为了绕开 CLIP 的中文截断，现在没那个问题了，
+    #    少一次本机模型调用（以前还会因为默认模型没下载而失败）。
+    style_pos, _style_neg = _style_for(prompt)
+    boosted = ", ".join(x for x in (prompt, style_pos) if x)
+    neg_words = (arguments.get("negative_prompt") or "").strip()
+    avoid = ", ".join(x for x in (neg_words, "low quality, blurry, watermark, deformed") if x)
+    if avoid:
+        boosted += ". Avoid: " + avoid
+
+    aspect = str(arguments.get("aspect") or "")
+    size = str(arguments.get("size") or "")
+    try:
+        n = int(arguments.get("n") or 1)
+    except Exception:
+        n = 1
+
+    start = time.time()
+    try:
+        imgs = cloud_image.generate(boosted, key, size=size, aspect=aspect, n=n,
+                                    cfg=cfg, model=str(ctx.get("image_model") or ""))
+    except cloud_image.CloudImageError as e:
+        return ("图片生成失败：%s。请把冒号后的原因**原样**转告用户。"
+                "如果里面包含「没有可用通道 / no available channel」，说明是"
+                "**他这个 Key 的分组没有该模型的通道**（充钱解决不了），"
+                "让他打开右上角 🎨 点「自动选」挑一个该分组真能用的模型；"
+                "如果是 401/403 就让他重填 Key；402 才是余额问题。"
+                "不要改写成「暂时无法使用」这种笼统说法。" % str(e))
+
+    cost = time.time() - start
+    _paths = []
+    for b64 in imgs:
+        _saved = _autosave_image(b64, prompt, "gen", "AI 生成（云端）")
+        if _saved.get("path"):
+            _paths.append(_saved["path"])
+        _ui(ui_events, {"type": "image", "mime": "image/png", "b64": b64,
+                        "prompt": prompt, "device": "cloud",
+                        "model": cfg.get("image_api_model") or "",
+                        "cost_s": round(cost, 1),
+                        "size": cloud_image.size_for(aspect, size),
+                        "origin": "gen", "saved": _saved})
+    return ("已生成 %d 张图片（云端，%.1f 秒，尺寸 %s），已经展示给用户。"
+            "若用户还想调整，直接按新描述重画即可（不用他再做什么）。"
+            % (len(imgs), cost, cloud_image.size_for(aspect, size)))
+
+
+def _edit_local(arguments, ui_events, context):
+    """本地权重微改：有蒙版/区域走 inpaint（只改圈内），否则走 img2img。"""
+    import base64 as _b64
+    prompt = (arguments.get("prompt") or "").strip()
+    ctx = context or {}
+    cfg = config.load_config() or {}
+    style_pos, style_neg = _style_for(prompt)
+    prompt_en = _to_english(prompt, cfg)
+    negative = ", ".join(x for x in (
+        (arguments.get("negative_prompt") or "").strip(),
+        style_neg) if x) or _IMAGE_NEG_DEFAULT
+
+    # 底图：source 路径 或 本轮那张
+    init = None
+    src = (arguments.get("source") or "").strip()
+    if src:
+        if not os.path.isfile(src):
+            return f"错误：source 不是有效图片路径：{src}"
+        init = src
+    else:
+        imgs = ctx.get("images") or ([ctx["last_image"]] if ctx.get("last_image") else [])
+        if imgs:
+            raw = imgs[0]
+            if isinstance(raw, bytes):
+                init = raw
+            else:
+                s_ = str(raw)
+                try:
+                    init = _b64.b64decode(s_.split(",", 1)[1] if s_.startswith("data:") else s_)
+                except Exception:
+                    init = None
+    if init is None:
+        return "错误：无法确定要修改的图片（请把图拖进对话，或用 source 给路径）。"
+
+    mask = str(arguments.get("mask") or ctx.get("mask") or "")
+    if mask.startswith("data:"):
+        mask = mask.split(",", 1)[1]
+    regions = arguments.get("regions") or []
+    if isinstance(regions, dict):
+        regions = [regions]
+    area = str(arguments.get("area") or "").strip()
+    try:
+        strength = float(arguments.get("strength") or 0.0)
+    except Exception:
+        strength = 0.0
+
+    t2i.unload()
+    start = time.time()
+    if mask or regions or area:
+        if not t2i.inpaint_ready():
+            return ("错误：本地没装「局部重绘」模型（%s）。请让用户去 🎨 里下载 "
+                    "SDXL Inpaint，或切到云端微改。" % t2i.inpaint_model_dir())
+        st = strength if strength >= 0.5 else 0.85
+        r = t2i.inpaint(init, ", ".join([prompt_en, style_pos]).strip(", "),
+                        mask=(mask or None), regions=(regions or None), area=area,
+                        negative_prompt=negative, steps=t2i.base_steps(), strength=st)
+        how = "按指定区域重绘（圈外不动）"
+    else:
+        keep = "keep the original composition, lighting and everything else unchanged"
+        boosted = ", ".join(x for x in (prompt_en, keep, style_pos) if x)
+        st = strength or 0.5
+        r = t2i.edit_image(init, boosted, negative_prompt=negative,
+                           steps=t2i.base_steps(), strength=st)
+        how = "整图重绘"
+    cost = time.time() - start
+    if not r.get("ok"):
+        return "图片微改失败（本地）：%s。请把原因**原样**转告用户。" % r.get("error")
+    _saved_e = _autosave_image(r["b64"], prompt, "edit", "AI 微改（本地）")
+    _ui(ui_events, {"type": "image", "mime": "image/png", "b64": r["b64"],
+                    "prompt": prompt, "device": r.get("device"),
+                    "model": r.get("model"), "cost_s": round(cost, 1),
+                    "origin": "edit", "saved": _saved_e})
     try:
         t2i.unload()
     except Exception:
         pass
-    real_size = result.get("size") or ("%d x %d" % (width, height))
-    extra = f"（{result['hd_note']}）" if (hd and result.get("hd_note")) else ""
-    style_note = "（已按「%s」风格加强）" % style_pos.split(",")[0] if style_pos else ""
-    return (f"已生成图片（{real_size}，{result.get('device')}，用 {round(cost,1)} 秒）"
-            f"{extra}{style_note}。"
-            f"生成的图片已经展示给用户。若用户想调整，可再次明确修改描述。")
+    return "已%s（本地，%.1f 秒），已展示给用户。" % (how, cost)
 
 
 def _do_edit_image(arguments, ui_events, context):
-    """图片微改（图生图）：拿到一张参考图 + 修改描述，产出新图。"""
+    """图片微改 —— 按配置走**云端 /images/edits** 或**本地权重**。"""
     import base64 as _b64
+    from . import cloud_image
+
     prompt = (arguments.get("prompt") or "").strip()
     if not prompt:
         return "错误：未提供修改描述（prompt）。"
-    negative = (arguments.get("negative_prompt") or "").strip() or \
-        "low quality, blurry, watermark, distorted, deformed"
-    # ⚠️ 同文生图：中文描述会被 CLIP 截断 → 先兜一道翻译
-    _cfg_now = config.load_config() or {}
-    prompt = _to_english(prompt, _cfg_now)
-    if _needs_en(negative):
-        negative = _to_english(negative, _cfg_now)
-    # ⚠️ 默认 0.45（原 0.6）：SD-Turbo 在 0.6 上**整幅重画**的成分太高，
-    #    用户报的"微改歪曲原图"与此有关。0.45 只改该改的地方，其余基本保持。
-    #    幅度要变大时由模型传 strength（见工具描述里的档位）。
-    strength = max(0.0, min(1.0, float(arguments.get("strength") or 0.5)))
-    # ⚠️ 步数不能写死 4（那是 sd-turbo 的档）；SDXL 要 28 步
-    steps = int(arguments.get("steps") or t2i.base_steps())
+    ctx = context or {}
+    cfg = config.load_config() or {}
+    if str(cfg.get("image_backend") or "cloud").lower() == "local":
+        return _edit_local(arguments, ui_events, context)
+    key = str(ctx.get("image_key") or "")
     source = (arguments.get("source") or "").strip()
 
-    # 1) 解析参考图：优先用 source 路径；否则用本轮对话拖入的那张图
-    init_image = None
+    # ---------- 1) 找到底图，统一成 base64 ----------
+    img_b64 = ""
     if source:
         if not os.path.isfile(source):
             return f"错误：source 不是有效图片路径：{source}"
-        init_image = source  # edit_image 支持路径
+        try:
+            with open(source, "rb") as f:
+                img_b64 = _b64.b64encode(f.read()).decode("ascii")
+        except Exception as e:                       # noqa: BLE001
+            return f"错误：读取底图失败（{type(e).__name__}）。"
     else:
-        imgs = (context or {}).get("images") or []
+        imgs = ctx.get("images") or []
         if not imgs:
-            # ⚠️ 2026-10-17：没拿到图时**退一步用「上一张图」**。
-            #   模型既然已经决定调 edit_image，就说明它要改的是上一张，
-            #   这个意图是明确的（不会造成"把旧图接到别的话题"的串扰）。
-            #   不加这一步，用户说「再改一下」「改改看」这类不含指代词的短句
-            #   就会被要求重新上传 —— 用户原话：「我不想重新上传」。
-            _last = (context or {}).get("last_image")
+            _last = ctx.get("last_image")
             if _last:
                 imgs = [_last]
         if imgs:
             raw = imgs[0]
-            if isinstance(raw, str) and "," in raw and raw.startswith("data:"):
-                raw = raw.split(",", 1)[1]
-            try:
-                init_image = _b64.b64decode(raw)
-            except Exception:
-                init_image = None
-    if init_image is None:
+            if isinstance(raw, bytes):
+                img_b64 = _b64.b64encode(raw).decode("ascii")
+            else:
+                s = str(raw)
+                img_b64 = s.split(",", 1)[1] if s.startswith("data:") else s
+    if not img_b64:
         return ("错误：无法确定要修改的图片。请把要改的图片拖入对话（作为本轮附件）后再让我微改，"
                 "或通过 source 指定本地图片路径。")
 
-    # 1.5) ★ 精确微改：给了蒙版 / 区域就走**局部重绘**（圈外像素原样保留）
-    #    ⚠️ 实测：纯图生图（无蒙版）**做不到精确改元素** ——「换衣服颜色」「加眼镜」
-    #    在 0.45/0.60/0.85 全都没生效。所以只要用户要的是"只改某处"，就必须走这条路。
-    _mask = arguments.get("mask") or (context or {}).get("mask") or ""
-    _regions = arguments.get("regions") or []
-    if isinstance(_regions, dict):
-        _regions = [_regions]
-    _area = str(arguments.get("area") or "").strip()
-    if _mask or _regions or _area:
-        if not t2i.inpaint_ready():
-            return ("错误：这次是**精确微改**（只改指定区域），需要「局部重绘」模型，"
-                    "但它还没装好（目录 %s）。请把这句话**原样**转告用户，"
-                    "并说明装上后就能做到「只换衣服颜色、别的一律不动」。"
-                    % t2i.inpaint_model_dir())
-        _style_pos2, _style_neg2 = _style_for(prompt)
-        _keep2 = "keep everything outside the edited area exactly unchanged"
-        _boost2 = ", ".join(x for x in (prompt, _keep2, _style_pos2) if x)
-        _neg2 = ", ".join(x for x in (negative, _style_neg2) if x)
-        # 重绘的幅度档跟 img2img 不一样：蒙版内要真改得动，0.85 起步
-        _st2 = float(arguments.get("strength") or 0.0)
-        if _st2 < 0.5:
-            _st2 = 0.85
-        t2i.unload()
-        _start2 = time.time()
-        _r2 = t2i.inpaint(init_image, _boost2, mask=(_mask or None),
-                          regions=(_regions or None), area=_area,
-                          negative_prompt=_neg2, steps=t2i.base_steps(),
-                          strength=_st2)
-        _cost2 = time.time() - _start2
-        if not _r2.get("ok"):
-            return ("局部重绘失败：%s。请把冒号后的具体原因**原样**转告用户。"
-                    % _r2.get("error"))
-        _ui(ui_events, {"type": "image", "mime": "image/png", "b64": _r2["b64"],
-                        "prompt": "局部重绘：" + prompt, "device": _r2.get("device"),
-                        "model": _r2.get("model"), "cost_s": round(_cost2, 1),
-                        "origin": "edit"})
-        _mr = _r2.get("mask_ratio")
-        _warn = ""
-        if _mr is not None and _mr < 0.01:
-            _warn = "（⚠️ 圈选区域太小了，画面几乎没变 —— 建议把区域放大一点再来一次）"
-        elif _mr is not None and _mr > 0.9:
-            _warn = "（ℹ️ 这次区域几乎是整张图，等效于重新画一版）"
-        return ("已按**指定区域**重绘（圈外像素原样保留，用 %.1f 秒%s）%s。"
-                "图片已展示给用户。若还要调整，直接说新的要求即可，不用重新涂抹。"
-                % (_cost2, "，区域占比 %.0f%%" % (_mr * 100) if _mr is not None else "",
-                   _warn))
+    # ---------- 2) 蒙版：用户涂抹的 / 模型给的 regions/area ----------
+    mask_b64 = str(arguments.get("mask") or ctx.get("mask") or "")
+    if mask_b64.startswith("data:"):
+        mask_b64 = mask_b64.split(",", 1)[1]
+    regions = arguments.get("regions") or []
+    if isinstance(regions, dict):
+        regions = [regions]
+    area = str(arguments.get("area") or "").strip()
+    if not mask_b64 and (regions or area):
+        try:
+            mask_b64 = _region_mask_b64(img_b64, regions, area)
+        except Exception:                            # noqa: BLE001
+            mask_b64 = ""
 
-    # 2) 提示措辞：**第一位是"别动原图"** —— 用户报"微改歪曲原图"，
-    #    除了分辨率那条（已在 t2i 里修），措辞上也要把"保持构图/光线/其余不变"说死。
-    #    ⚠️ 注意别再追加通用摄影加成：微改的底图可能是插画，硬加"professional photography"
-    #    会把它往照片方向拽（那就是"没按用户要求改"）。
-    style_pos, style_neg = _style_for(prompt)
-    keep = "keep the original composition, lighting and everything else unchanged"
+    style_pos, _style_neg = _style_for(prompt)
+    keep = ("keep the original composition, lighting and everything else unchanged"
+            if not mask_b64 else
+            "only change the masked area, keep everything outside the mask pixel-identical")
     boosted = ", ".join(x for x in (prompt, keep, style_pos) if x)
-    negative = ", ".join(x for x in (negative, style_neg) if x)
-    t2i.unload()
+
     start = time.time()
-    result = t2i.edit_image(init_image, boosted, negative_prompt=negative,
-                            steps=steps, strength=strength)
+    try:
+        # 微改可以单独指定模型（有的服务商 edits 只对某几个模型开放）
+        _edit_model = (str(cfg.get("image_api_model_edit") or "").strip()
+                       or str(ctx.get("image_model") or ""))
+        imgs = cloud_image.edit(boosted, key, img_b64, mask_b64=mask_b64,
+                                size=str(arguments.get("size") or ""),
+                                cfg=cfg, model=_edit_model)
+    except cloud_image.CloudImageError as e:
+        return ("图片微改失败：%s。请把原因**原样**转告用户（不要笼统化）。"
+                "若是「没有可用通道」→ 分组没开该模型，让他去 🎨 点「自动选」；"
+                "401/403 → 重填 Key；402 → 余额不足。" % str(e))
+
     cost = time.time() - start
-    if not result.get("ok"):
-        return (f"图片微改失败：{result.get('error')}。"
-                f"请把冒号后的具体原因**原样**转告用户，不要改写成「暂时无法使用」这类"
-                f"笼统说法 —— 用户需要看到真实原因才能判断问题在哪。")
-    _ui(ui_events, {"type": "image", "mime": "image/png", "b64": result["b64"],
-                    "prompt": "微改：" + prompt, "device": result.get("device"),
-                    "model": result.get("model"), "cost_s": round(cost, 1),
-                    "origin": "edit"})   # ← 前端据此标「AI 微改」（原来没标，显示成"图片"）
-    _hint = ""
-    if strength >= 0.6:
-        _hint = ("\n⚠️ 提醒：这次是**整图重绘**（没给区域），实测「换颜色/加某个物件」这类"
-                 "精确改动**可能看不出来**。若用户要的是「只改某处、别的一律不动」，"
-                 "**改用 regions / area 再试一次**（能真改到，圈外也不动）。")
-    return (f"已根据修改要求生成新图（用 {round(cost,1)} 秒）。原图已按描述微改并展示给用户。"
-            f"若还要继续调整，**直接说明新的修改点即可**，不用再拖一次图。{_hint}")
+    for b64 in imgs:
+        _saved_e = _autosave_image(
+            b64, prompt, "edit",
+            "AI 微改（云端）" + ("·局部重绘" if mask_b64 else ""))
+        _ui(ui_events, {"type": "image", "mime": "image/png", "b64": b64,
+                        "prompt": ("局部重绘：" if mask_b64 else "微改：") + prompt,
+                        "device": "cloud",
+                        "model": cfg.get("image_api_model") or "",
+                        "cost_s": round(cost, 1), "origin": "edit",
+                        "saved": _saved_e})
+    how = "按**指定区域**重绘（圈外不动）" if mask_b64 else "整图重绘"
+    return ("已%s（云端，%.1f 秒），新图已展示给用户。"
+            "若还要继续调整，直接说新的修改点即可，不用再拖一次图。"
+            % (how, cost))
 
 
 def _do_compose_images(arguments, ui_events, context):
@@ -2621,10 +3253,11 @@ def _do_compose_images(arguments, ui_events, context):
                 "（一次可以拖多张），或用 sources 给出本地路径。" % _hint)
 
     layout = str(arguments.get("layout") or "horizontal").strip().lower()
+    # 2026-11-08：本地 SD 已下线，拼接不再依赖它的原生边长（原来读 t2i.native_side）
     try:
-        size = int(arguments.get("size") or t2i.native_side())
+        size = int(arguments.get("size") or 1024)
     except Exception:
-        size = t2i.native_side()
+        size = 1024
     try:
         gap = max(0, int(arguments.get("gap") or 0))
     except Exception:
@@ -2652,23 +3285,24 @@ def _do_compose_images(arguments, ui_events, context):
         harm = 0.0
     harm = max(0.0, min(0.45, harm))       # 硬上限：再大就是把整张重画了
     if harm > 0:
-        _cfg_now = config.load_config() or {}
-        pr = str(arguments.get("prompt") or "").strip()
-        if not pr:
-            pr = ("a single seamless photograph, consistent lighting, color grading "
-                  "and white balance, natural blending between parts, high quality")
-        elif _needs_en(pr):
-            pr = _to_english(pr, _cfg_now)
-        t2i.unload()
+        # 2026-11-08：统一风格改走**云端 edits**（本地 SD 已下线）
+        from . import cloud_image
+        pr = str(arguments.get("prompt") or "").strip() or (
+            "make it look like a single seamless photograph: consistent lighting, "
+            "color grading and white balance, natural blending between parts, high quality")
         t0 = time.time()
-        e = t2i.edit_image(out, pr, strength=harm,
-                           steps=t2i.base_steps())
-        if e.get("ok"):
+        try:
+            _buf0 = io.BytesIO()
+            out.save(_buf0, format="PNG")
+            _one = cloud_image.edit(
+                pr, str((context or {}).get("image_key") or ""),
+                _b64.b64encode(_buf0.getvalue()).decode("ascii"),
+                cfg=config.load_config() or {})
             from PIL import Image
-            out = Image.open(io.BytesIO(_b64.b64decode(e["b64"]))).convert("RGB")
-            note += "；已按 harmonize=%.2f 统一风格（%.0f 秒）" % (harm, time.time() - t0)
-        else:
-            note += "；统一风格这步没做成（%s），**已保留未重绘的拼接版**" % e.get("error")
+            out = Image.open(io.BytesIO(_b64.b64decode(_one[0]))).convert("RGB")
+            note += "；已按 harmonize=%.2f 统一风格（云端，%.0f 秒）" % (harm, time.time() - t0)
+        except Exception as _e:                       # noqa: BLE001
+            note += "；统一风格这步没做成（%s），**已保留未重绘的拼接版**" % _e
 
     # ---- 落盘：进生成文库（可下载）+ 图片库（可在「图片库」面板看到）----
     buf = io.BytesIO()
@@ -4703,6 +5337,82 @@ def _strip_code_fence(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+# 用户可选的代码模型（2026-11-08）
+# 值形如 "deepseek-flash" / "deepseek-v4-pro" / "local:qwen3-vl:8b" / "auto"
+CODE_MODEL_CHOICES = [
+    {"id": "auto", "name": "自动（有 DeepSeek Key 就用 V4.1）"},
+    {"id": "deepseek-flash", "name": "DeepSeek V4.1 Flash（推荐）"},
+    {"id": "deepseek-flash-think", "name": "DeepSeek V4.1（思考）"},
+    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"},
+    {"id": "local:qwen3-vl:8b", "name": "本地 Qwen3-VL 8B"},
+    {"id": "local:qwen3-vl:30b", "name": "本地 Qwen3-VL 30B"},
+    {"id": "local:qwen3-coder:30b", "name": "本地 Qwen3-Coder 30B"},
+]
+
+
+def code_model_pick(cfg: dict, context: dict = None) -> tuple:
+    """决定这次用哪个模型写代码。
+
+    返回 (kind, model)：
+      · ("cloud", "deepseek-flash")  → 走 DeepSeek API（用户选了云端且带了 Key）
+      · ("local", "qwen3-vl:8b")     → 走本机 Ollama（model 为空 = 交给调用方兜底）
+    """
+    cfg = cfg or {}
+    ctx = context or {}
+    has_key = bool(str(ctx.get("ds_key") or "").strip())
+    choice = str(cfg.get("code_model_choice") or "auto").strip()
+
+    if choice.startswith("local:"):
+        return "local", choice.split(":", 1)[1]
+    if choice.startswith("deepseek"):
+        if has_key:
+            return "cloud", choice
+        # 选了云端但没填 Key：退回本地已装模型，调用方会如实说明
+        return "local", ""
+    # auto：有 Key 走 V4.1，否则本地
+    if has_key:
+        return "cloud", str(cfg.get("code_model_ds") or "deepseek-flash")
+    return "local", ""
+
+
+def _code_gen_text(prompt: str, cfg: dict, context: dict,
+                   max_tokens: int = 8192, temperature: float = 0.2) -> str:
+    """用**选中的代码模型**生成一段文本（代码）。返回正文，失败抛异常。"""
+    kind, model = code_model_pick(cfg, context)
+    if kind == "cloud":
+        from . import deepseek_client as _ds
+        buf = []
+        for k, piece in _ds.chat_stream(
+                [{"role": "user", "content": prompt}],
+                model or "deepseek-flash",
+                str((context or {}).get("ds_key") or ""),
+                temperature=temperature, max_tokens=max_tokens,
+                thinking=False):
+            if k == "content" and piece:
+                buf.append(piece)
+        return "".join(buf)
+
+    # 本地：挑一个已装的
+    from . import main as _main
+    try:
+        have = _main._installed_models()
+    except Exception:
+        have = []
+    use = model or str(cfg.get("code_model") or "").strip()
+    if have and use not in have:
+        use = (next((n for n in have if "qwen3-vl" in n), "")
+               or (have[0] if have else use))
+    if not use:
+        raise RuntimeError("没有可用的本地模型")
+    resp = _main.client.chat([{"role": "user", "content": prompt}],
+                             model=use, stream=False,
+                             params={"temperature": temperature,
+                                     "max_tokens": max_tokens,
+                                     "num_ctx": int(cfg.get("num_ctx") or 8192)})
+    data = resp.json() if hasattr(resp, "json") else resp
+    return str(((data.get("message") or {}).get("content")) or "")
+
+
 def _do_write_code(arguments, ui_events=None, context=None) -> str:
     """把"要写什么"交给**专用代码模型**，由它写出代码并直接落盘。
 
@@ -4738,7 +5448,19 @@ def _do_write_code(arguments, ui_events=None, context=None) -> str:
         return "写代码失败：%s" % e
 
     cfg = _config.load_config()
-    model = str(cfg.get("code_model") or "").strip() or cfg.get("default_model")
+    # ★ 2026-11-08：用**用户在界面上选的**代码模型（默认 DeepSeek V4.1）。
+    _ctx = context or {}
+    ds_key = str(_ctx.get("ds_key") or "").strip()
+    _kind, _pick = code_model_pick(cfg, _ctx)
+    use_ds = (_kind == "cloud")
+    ds_model = _pick or "deepseek-flash"
+    if str(cfg.get("code_model_choice") or "").startswith("deepseek") and not ds_key:
+        _fallback_note = ("（⚠️ 你选的是 %s，但没填 DeepSeek Key，这次用本地 %s 写的）"
+                          % (cfg.get("code_model_choice"), "%s"))
+    else:
+        _fallback_note = ""
+    model = ("" if use_ds else _pick) or str(cfg.get("code_model") or "").strip() \
+        or cfg.get("default_model")
     # ⚠️ 必须用 main._installed_models()（它把 /api/tags 的**字典列表**转成了名字列表）。
     # 直接 `model not in client.list_models()` 会因为拿字典跟字符串比而**永远不相等**，
     # 于是模型被悄悄换成默认模型（思考型）—— 输出额度全烧在思考上，最后一个字都没有，
@@ -4748,7 +5470,15 @@ def _do_write_code(arguments, ui_events=None, context=None) -> str:
     except Exception:
         installed = []
     if installed and model not in installed:
-        model = cfg.get("default_model")
+        # ⚠️ 2026-11-08 修：原来直接退回 default_model，而它可能**根本没下载**
+        #    （本机 default_model=qwen3-vl:30b 未下）→ 返回 404，
+        #    用户看到的就是"写代码失败（调用代码模型出错）"。
+        #    改成：优先退到已装的 qwen3-vl，再不行用列表里第一个。
+        _fallback = str(cfg.get("default_model") or "")
+        if _fallback not in installed:
+            _fallback = (next((n for n in installed if "qwen3-vl" in n), "")
+                         or (installed[0] if installed else _fallback))
+        model = _fallback
 
     # 改已有文件 → 把原内容一并给代码模型，让它"在真实内容上改"
     old = ""
@@ -4783,6 +5513,29 @@ def _do_write_code(arguments, ui_events=None, context=None) -> str:
         """
         nonlocal wrote_any, last_t, last_n
         got, reason = "", ""
+        if use_ds:
+            # ---- 云端：DeepSeek V4.1（不开思考，写代码要的是稳定输出）----
+            from . import deepseek_client as _ds
+            for kind, piece in _ds.chat_stream(
+                    msgs, ds_model, ds_key,
+                    temperature=float(cfg.get("code_temperature") or 0.2),
+                    max_tokens=int(cfg.get("code_max_tokens") or 8192),
+                    thinking=False):
+                if kind != "content" or not piece:
+                    continue
+                got += piece
+                _whole = buf + got
+                now = time.time()
+                if now - last_t >= 0.30 or len(_whole) - last_n >= 60:
+                    prev = _strip_code_fence(_whole)
+                    if prev:
+                        try:
+                            _ws.stream_write(rel, prev)
+                            wrote_any = True
+                        except Exception:
+                            pass
+                    last_t, last_n = now, len(_whole)
+            return got, "stop"
         resp = _main.client.chat(msgs, model=model, stream=True, params=params)
         for raw in resp.iter_lines():
             if not raw:
@@ -4874,8 +5627,11 @@ def _do_write_code(arguments, ui_events=None, context=None) -> str:
         ui_events.append({"type": "workspace", "act": "write", "rel": rel,
                           "chars": len(code), "project": _ws.active_project()})
     head = code.splitlines()[0][:60] if code.splitlines() else ""
-    out = ("已把代码写进 %s（%d 字，模型=%s）。首行：%s%s\n"
-           % (rel, len(code), model, head, _trunc_note))
+    _used = ("DeepSeek " + ds_model) if use_ds else model
+    if _fallback_note:
+        _fallback_note = _fallback_note % model
+    out = ("已把代码写进 %s（%d 字，模型=%s）。首行：%s%s%s\n"
+           % (rel, len(code), _used, head, _trunc_note, _fallback_note))
     # 【为什么把"跑一遍"并进来】两个模型在 12GB 显存里**装不下**，
     # 每调一次代码模型就会把大脑挤出去、下一轮大脑得**重新加载**（十几秒起）。
     # 原流程是 write_code → 大脑 → workspace_run → 大脑 ——
@@ -5345,7 +6101,11 @@ def _do_ask_user(arguments, context=None):
     # ⚠️⚠️ **下限只管第一轮**（g["calls"] == 0）。第二、三轮是"追问"，
     #    问 1~3 个才正常 —— 实测第一版没加这个条件时，模型第二轮想追问 2 个被驳回，
     #    结果那一轮**根本没弹出来**（用户少问了一轮，越修越糟）。
-    if deep and g["calls"] == 0 and len(norm) < ASK_DEEP_MIN and g["rejected"] < 2:
+    # ⚠️ 2026-11-08：拒绝次数从 2 降到 1。
+    #   原来模型问 3 个也被驳回两次，两轮下来它干脆放弃 ask_user、
+    #   改成在正文里写「你选一个」——用户就再也看不到弹框了（实测）。
+    #   现在只驳一次：第二次它给多少就问多少，宁可问得少也不要问不出来。
+    if deep and g["calls"] == 0 and len(norm) < ASK_DEEP_MIN and g["rejected"] < 1:
         g["rejected"] += 1
         return ("⚠️ 现在是**深度询问**模式，用户明确要求第一轮就把信息问透："
                 "一次**至少 %d 个**关键问题（5~7 个最佳，覆盖：用途/受众、范围与篇幅、"

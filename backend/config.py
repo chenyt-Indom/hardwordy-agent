@@ -109,7 +109,7 @@ DEFAULT_CONFIG = {
     #
     # ⚠️ 速度实情：12GB 显存装不下 18.3GB 的 Q4_K_M，约 9GB 落在内存里跑，
     #   实测 12~14 tok/s、首字 2.4s。**think=false 关不掉思考**（旧模型也实测无效）。
-    "default_model": "qwen3-vl-think:30b",
+    "default_model": "qwen3-vl:30b",
     # 推理参数
     "temperature": 0.6,
     # ---------- 采样：专门用来压「思考打转」（复读）----------
@@ -248,6 +248,40 @@ DEFAULT_CONFIG = {
     # 本地权重目录（离线用）。留空 = 自动探测（打包目录 / 源码本机路径）。
     # 下载好的放这儿，之后就不联网。
     "sd_model_dir": "",
+    # ---------- 云端图片 API（2026-11-08 起：文生图/微改都走这里）----------
+    # 为什么换成云端：本地 SDXL 要 6.5GB 权重 + 吃满 12GB 显存，画一张要 50 秒
+    # 加载流水线，还和 30B 对话模型抢显卡。云端出图质量更高、不占显存。
+    # 走 OpenAI 兼容协议（/images/generations、/images/edits），Key 由前端填，
+    # **不写进这里**（这里只放地址和模型名）。
+    # 单次对话最多连续调用工具多少轮（用户 2026-11-08：「8 次不够，放宽到最多」）
+    # 写代码/搭项目是"一轮一个文件 + 一轮跑一次"，本来就要几十轮。
+    "max_tool_rounds": 60,
+    # 单轮对话的墙钟上限（秒）。轮次再多也不许无限跑；超了就收尾交代进度。
+    "max_tool_seconds": 1200,
+    # ---------- 自开发（让应用能改自己的源码）----------
+    # ⚠️ 打开后模型可以直接读写本项目的 backend/frontend 文件并重启自己。
+    #    默认关闭：这是个"能把自己改坏"的能力，必须用户明确打开。
+    "self_dev_enabled": False,
+    # 允许改写的根目录（留空 = 本项目根）
+    "self_dev_root": "",
+    "image_api_base": "https://xingpan.site/v1",
+    "image_api_model": "gpt-image-2.5-flare",
+    # 微改用的云端模型（留空 = 跟生成用同一个）
+    "image_api_model_edit": "",
+    # 绘图后端：cloud=云端 API（默认，不占显存）；local=本地权重（要下载，吃显存）
+    "image_backend": "cloud",
+    # 本地图片权重的托管目录（留空 = 自动：沿用 E://本地多模态助手-Docker//models）
+    "image_models_dir": "",
+    # 下本地权重用的 HF 镜像（本机直连 huggingface.co 不通）
+    "hf_endpoint": "https://hf-mirror.com",
+    # 代码生成交给谁：local=本地 code_model；deepseek=直接用 DeepSeek V4.1。
+    # 用户 2026-11-08 要求「代码生成改用 deepseek V4.1」。
+    "code_backend": "deepseek",
+    "code_model_ds": "deepseek-flash",
+    # 用户在前端选的**代码模型**（代码生成 + 自我迭代都用它）：
+    #   auto（有 Key 走 V4.1）/ deepseek-flash / deepseek-flash-think / deepseek-v4-pro
+    #   / local:qwen3-vl:8b 等
+    "code_model_choice": "auto",
     # 程序启动时自动打开麦克风监听（说「小千小千」唤醒）。
     # 容器里没有麦克风，会自动跳过并提示，不影响其它功能。
     "voice_auto_start": True,
