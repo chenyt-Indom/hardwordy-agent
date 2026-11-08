@@ -3955,6 +3955,13 @@
         }
       } catch (e) { /* 兜底失败不影响主流程 */ }
       window.__lastAnswerLen = (answer || "").length;   // 诊断用（只有长度，无内容）
+      // 截断自检：结尾没有终止标点 → 大概率被切了，打日志便于定位（不打扰用户）
+      try {
+        const _t = String(answer || "").trim();
+        if (_t.length > 40 && !/[。！？!?….…”』」）)】\n`~]$/.test(_t)) {
+          console.warn("[stream] 回答结尾没有终止标点，可能被截断：", JSON.stringify(_t.slice(-24)));
+        }
+      } catch (e) {}
       if (answer) history.push({ role: "assistant", content: answer });
       // 检索来源：渲染成回答下方的可伸缩列表（默认折叠，点标题展开）
       if (sourcesData && sourcesData.items && sourcesData.items.length) {
