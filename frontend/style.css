@@ -1968,19 +1968,63 @@ select.pill-select option {
 }
 .confirm-remember input { width: 14px !important; height: 14px; margin: 0; accent-color: var(--accent); }
 .confirm-remember:hover { color: var(--text); }
-/* ================= 顶栏收起 / 展开（2026-11-08）=================
-   只靠 body.topbar-collapsed 这一个 class：
-     · 第一行能力开关整行隐藏；
-     · 第二行只留 #topbarToggle，其余控件隐藏 → 两行收成一行。
-   纯新增规则，不改任何既有 .top-bar 的 flex 骨架。 */
+/* ================= 顶栏收起 / 展开（含过渡动画）2026-11-08 =================
+   原始实现用的是 display:none —— **display 不参与过渡**，所以点下去是"啪"地一下就没了。
+   这里换成可动画的属性：
+     · 第一行 #topBar：max-height + opacity + padding 一起过渡（整行往上"收"）；
+     · 第二行：除按钮外的控件 max-width→0 + opacity→0 + 轻微左移（像被"扫"进去）；
+     · 按钮自己不受影响，只做一次轻微缩放反馈。
+   ⚠️ 收起后必须真的看不见、也点不到 —— 靠 opacity:0 + max-width:0 + pointer-events:none。 */
+#topBar {
+  overflow: hidden;
+  max-height: 240px;          /* 展开时给足高度，内容再多也不会被裁 */
+  opacity: 1;
+  transition: max-height .34s cubic-bezier(.4, 0, .2, 1),
+              opacity .2s ease,
+              padding .34s cubic-bezier(.4, 0, .2, 1),
+              border-bottom-color .2s ease;
+}
 body.topbar-collapsed #topBar {
-  display: none;
+  max-height: 0;
+  opacity: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-bottom-color: transparent;
+  pointer-events: none;
+}
+
+.top-bar.tools-bar { transition: padding .3s ease; }
+.top-bar.tools-bar > *:not(#topbarToggle) {
+  max-width: 220px;
+  transition: opacity .18s ease,
+              max-width .3s cubic-bezier(.4, 0, .2, 1),
+              margin .3s cubic-bezier(.4, 0, .2, 1),
+              padding .3s cubic-bezier(.4, 0, .2, 1),
+              transform .3s cubic-bezier(.4, 0, .2, 1);
 }
 body.topbar-collapsed .top-bar.tools-bar > *:not(#topbarToggle) {
-  display: none;
+  opacity: 0;
+  max-width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  border-width: 0;
+  margin: 0;
+  transform: translateX(-8px);
+  overflow: hidden;
+  pointer-events: none;
 }
-body.topbar-collapsed .top-bar.tools-bar {
-  padding: 4px 16px 8px;
+body.topbar-collapsed .top-bar.tools-bar { padding: 4px 16px 8px; }
+
+/* 按钮按下时给一点点"回弹"，让手感更实 */
+#topbarToggle { transition: transform .16s ease; }
+#topbarToggle:active { transform: scale(.94); }
+
+/* 系统开了"减少动态效果"就老实点，别动画 */
+@media (prefers-reduced-motion: reduce) {
+  #topBar,
+  .top-bar.tools-bar,
+  .top-bar.tools-bar > *:not(#topbarToggle),
+  #topbarToggle { transition: none !important; }
 }
 
 /* ================= 定时任务面板（2026-11-08）================= */
