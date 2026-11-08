@@ -41,8 +41,8 @@ DENY_DIRS = {
 }
 DENY_EXT = {".onnx", ".pt", ".pth", ".bin", ".safetensors", ".db", ".sqlite",
             ".zip", ".7z", ".rar", ".exe", ".dll", ".pyd", ".so", ".log"}
-MAX_READ = 400 * 1024          # 单文件读取上限 400KB
-MAX_WRITE = 1200 * 1024        # 单文件写入上限 1.2MB
+MAX_READ = 4 * 1024 * 1024     # 单文件读取上限 4MB（2026-11-09 从 400KB 放开）
+MAX_WRITE = 8 * 1024 * 1024    # 单文件写入上限 8MB（2026-11-09 从 1.2MB 放开）
 
 
 def locked() -> bool:

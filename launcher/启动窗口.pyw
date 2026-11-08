@@ -37,7 +37,7 @@ URL = f"http://{HOST}:{PORT}"
 # 轻量健康检查端点：纯内存返回（实测 0.03s）。
 # 根路径 / 要读 index.html（FileResponse），磁盘忙或冷启动时会明显变慢。
 HEALTH_URL = URL + "/api/health"
-TITLE = "本地多模态助手 · Qwen3-VL 8B"
+TITLE = "hardwordy · 本地智能体"
 WINDOW_W, WINDOW_H = 1280, 860
 
 # ---------------------------------------------------------------------------

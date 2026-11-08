@@ -2794,7 +2794,17 @@
       seen = all.length;
       if (chunk) { queue.push(new TextEncoder().encode(chunk)); wake(); }
     };
-    xhr.onload = () => { done = true; wake(); };
+    xhr.onload = () => {
+      // ⚠️ 2026-11-09：XHR 的 onprogress 不一定把最后一段吐出来（尤其是收尾那一两百字节），
+      //   这里在 load 时把 responseText 剩下的部分补一次 —— 否则手机上"最后几个字"会被吞。
+      const all = xhr.responseText || "";
+      if (all.length > seen) {
+        const chunk = all.slice(seen);
+        seen = all.length;
+        if (chunk) queue.push(new TextEncoder().encode(chunk));
+      }
+      done = true; wake();
+    };
     xhr.onerror = () => { fail = new Error("网络中断"); done = true; wake(); };
     xhr.onabort = () => { done = true; wake(); };
     xhr.send(bodyStr);
@@ -3589,6 +3599,8 @@
     streaming = true;
     typingHintShown = false;
     aborted = false;
+    // 长时间收不到任何数据（不是用户点终止）时自动断开的标记
+    let _hardStall = false;
     $("#sendBtn").disabled = true;
     setStopVisible(true);
     abortCtl = new AbortController();
@@ -3613,6 +3625,13 @@
       _stallT0 = Date.now();
       _stallTimer = setInterval(() => {
         const sec = Math.round((Date.now() - _stallT0) / 1000);
+        // 3 分钟一个字节都没进来 → 连接已经卡死，别再让用户对着转圈等
+        if (sec >= 180 && !_hardStall) {
+          _hardStall = true;
+          _clearStall();
+          try { abortCtl && abortCtl.abort(); } catch (e) { /* 忽略 */ }
+          return;
+        }
         if (sec >= 4) {
           thinkStatus.textContent = _backendStatus
             ? (_backendStatus + "　已等待 " + sec + " 秒")
@@ -3710,6 +3729,22 @@
       }
       }   // ← 非微信分支结束
       const decoder = new TextDecoder();
+      // 2026-11-09：**最后几个字被吞掉**的根因。
+      //   NDJSON 最后一行可能没有结尾换行（或被切在半个字上），
+      //   原代码 `if (done) break;` 直接退出循环，buf 里剩的那一截永远没人解析，
+      //   表现就是"回答停在一半、光标还在闪"。
+      //   修法：reader 结束时先 flush 解码器，再补一个换行，让残留走同一套解析。
+      const _rawRead = reader.read.bind(reader);
+      let _tailSent = false;
+      reader.read = async () => {
+        const r = await _rawRead();
+        if (r.done && !_tailSent) {
+          _tailSent = true;
+          const rest = decoder.decode();
+          return { done: false, value: new TextEncoder().encode((rest || "") + "\n") };
+        }
+        return r;
+      };
       let buf = "";
       while (true) {
         const { value, done } = await reader.read();
@@ -3804,6 +3839,24 @@
           //    这段时间 Ollama 一个字都不吐，不提示的话界面上就是"完全没反应"。
           //    只改状态栏文案，不动回答气泡 —— 真正的思考/正文到了会覆盖它。
           if (obj.status) { _backendStatus = obj.status; thinkStatus.textContent = obj.status; }
+          // ★ 2026-11-09：用户反复报「回答差最后那几个字」。
+          //   后端在结束块里带了**整段完整正文**（done.text），但以前这里只 break、
+          //   完全没用它 —— 增量流只要少发一个分片（扣住的尾巴没补发、最后一片被截断、
+          //   网络收尾丢包），界面上就永远缺那一小段，没有任何补救机会。
+          //   这里以 done.text 为准做一次兜底：比增量累积的长，就用它重绘。
+          if (obj.done) {
+            const _full = (typeof obj.text === "string") ? obj.text : "";
+            if (_full && _full.length > answer.length) {
+              answer = _full;
+              paintAnswer(true);
+            }
+            const _fullThink = (typeof obj.thinking === "string") ? obj.thinking : "";
+            if (_fullThink && _fullThink.length > thinking.length) {
+              thinking = _fullThink;
+              updateThinkStatus();
+              if (thinkBody.style.display !== "none") thinkBody.textContent = thinking;
+            }
+          }
           if (obj.done || obj.__end) break;
           _lastEventAt = Date.now();
         }
@@ -3811,6 +3864,54 @@
       }
       finishThinking();
       // 回答里带代码块的话渲染成可编辑卡片；否则维持原来的纯文本（不改变原有观感）
+      // ⚠️ 收尾：最后一片 NDJSON 可能没有换行结尾（服务端异常断开时常见），
+      //    它会被留在 buf 里、**静默丢掉** —— 用户看到的就是"最后一个字没了"。
+      //    这里补处理一次（只取正文增量，够用且不会出错）。
+      try {
+        const _rest = (buf || "").trim();
+        if (_rest) {
+          const _o = JSON.parse(_rest);
+          if (_o && _o.message && _o.message.content) answer += _o.message.content;
+          // 残片如果正好是结束块（服务端把最后一行写了一半），同样拿它带的完整正文兜底
+          if (_o && _o.done && typeof _o.text === "string" && _o.text.length > answer.length) {
+            answer = _o.text;
+          }
+        }
+        buf = "";
+      } catch (e) { /* 残片解析不了就算了，别影响收尾 */ }
+      // ⚠️ 2026-11-09 修「回答差最后几个字」：上面整段 JSON.parse 一旦失败就全丢，
+      //   而流被切断时残留的往往正是最后那个 done 块的一半 —— 它的 "text"
+      //   （整段完整正文）在切断点之前、通常是完整的，只是后面的 "thinking"
+      //   没传完 → 整体 parse 失败 → 界面上就少了尾巴。这里做字段级抢救。
+      try {
+        const _rest2 = (buf || "").trim();
+        if (_rest2) {
+          for (const _seg of _rest2.split("\n").map((x) => x.trim()).filter(Boolean)) {
+            let _o2 = null;
+            try { _o2 = JSON.parse(_seg); } catch (e1) { _o2 = null; }
+            if (_o2) {
+              if (_o2.message && _o2.message.content) answer += _o2.message.content;
+              if (_o2.done && typeof _o2.text === "string" && _o2.text.length > answer.length) {
+                answer = _o2.text;
+              }
+              continue;
+            }
+            // —— 半截行：按字段抢救 ——
+            const _mt = _seg.match(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+            if (_mt) {
+              try {
+                const _f = JSON.parse('"' + _mt[1] + '"');
+                if (_f.length > answer.length) answer = _f;
+              } catch (e2) { /* 转义序列被切断，救不回 */ }
+            }
+            const _mc = _seg.match(/"content"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+            if (_mc) {
+              try { answer += JSON.parse('"' + _mc[1] + '"'); } catch (e3) { answer += _mc[1]; }
+            }
+          }
+        }
+        buf = "";
+      } catch (e) { /* 收尾抢救失败也不影响主流程 */ }
       if (answer && answer.indexOf("```") >= 0) renderAnswerWithCode(answerBubble, answer, promptText);
       else renderAnswerLinks(answerBubble, answer);
       if (!answer) {
@@ -3829,7 +3930,18 @@
       persistSession();   // 落盘，保证程序重启后能恢复这段对话
     } catch (err) {
       finishThinking();
-      if (aborted || (err && err.name === "AbortError")) {
+      if (_hardStall) {
+        // 不是用户点的终止，而是 3 分钟没有任何新内容（连接卡死）——
+        // 必须说清「内容已保留」，否则用户会以为是自己误触了终止。
+        const _keep = (answer || "").trim();
+        answerBubble.textContent = (_keep ? _keep + "\n\n" : "")
+          + "（⚠️ 已经 3 分钟没有任何新内容，连接像是卡住了，我已自动断开。"
+          + "上面已生成的部分都保留着 —— 回一句「继续」我就接着往下写。）";
+        answerBubble.classList.remove("empty-answer");
+        if (answer) history.push({ role: "assistant", content: answerBubble.textContent });
+        showToast("连接卡住了，已自动断开（内容已保留）");
+        try { persistSession(); } catch (e) { /* 落盘失败不影响使用 */ }
+      } else if (aborted || (err && err.name === "AbortError")) {
         // 用户点了「■ 终止」：把已经生成出来的部分留着，别报成错误
         answerBubble.classList.remove("empty-answer");
         // ⚠️⚠️ **终止也必须往历史里写一条助手消息**（哪怕一个字都没生成）。
@@ -3857,8 +3969,16 @@
       }
     } finally {
       streaming = false;
+      _hardStall = false;
       abortCtl = null;
       _clearStall();                 // 别忘了停掉卡顿看门狗
+      // ⚠️ 已经生成了一半才出错（网络断、后端异常）时，**绝不能把已生成的内容抹掉** ——
+      //    catch 分支原本会直接把气泡替换成一行报错，用户看到的就是"回答突然只剩报错"。
+      if (answer && !aborted && answerBubble.textContent.indexOf("❌") === 0) {
+        answerBubble.textContent = answer + "\n\n" + answerBubble.textContent;
+        history.push({ role: "assistant", content: answerBubble.textContent });
+        try { persistSession(); } catch (e) { /* 落盘失败不影响使用 */ }
+      }
       $("#sendBtn").disabled = false;
       setStopVisible(false);
     }

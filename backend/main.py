@@ -36,9 +36,9 @@ from . import (config, ollama_client, deepseek_client, cloud_image, image_models
                selfdev, scheduler, perf, model_manager, selftest, memory, kb,
                file_tools, video, web_tools,
                t2i, tools, voice, sessions, image_library, doclib, docx_write,
-               workspace)
+               workspace, actlog)
 
-app = FastAPI(title="本地多模态助手", version="1.0.0")
+app = FastAPI(title="hardwordy", version="1.0.0")
 client = ollama_client.OllamaClient()
 
 # ⚠️ 这个 **必须**有：本文件多处用 `logger.xxx` 打日志，
@@ -1706,7 +1706,7 @@ def model_installed():
 #   「一轮写一个文件 + 一轮跑一次」，10 轮根本不够用，任务做到一半就被掐断。
 #   现在默认放到 60 轮，同时加一道**时间预算**（max_tool_seconds，默认 20 分钟）——
 #   光靠轮次防死循环不可靠：一轮可能很快，也可能很慢。
-MAX_TOOL_ROUNDS = 60
+MAX_TOOL_ROUNDS = 120
 
 # Ollama 解析"模型写出来的工具调用"失败时，会把 Go 的 JSON 错误塞进流里。
 # ⚠️ 用户看到的是一句英文，比如
@@ -3734,7 +3734,7 @@ class _SystemPrompt:
             #   **10.6 秒全在重算前缀**，用户看到的就是"发出去半天没反应"。
             # 现在把时间挪到**最后一条用户消息的末尾**（见 _attach_live_ctx），
             # 它排在「系统提示 + 工具定义」之后，大段稳定前缀就能被缓存复用。
-            "你是本地多模态助手，像一位能干的项目助理。你的所有处理都在用户本机完成，注意保护隐私。",
+            "你是 hardwordy，像一位能干的项目助理。你的所有处理都在用户本机完成，注意保护隐私。",
             # ★ 2026-11-08 用户要求：「所有调动都必须有 LLM 打头阵，由 LLM 决策调度、
             #   有规划地完成任务」。这段是**稳定的固定文本**（不随时间变），
             #   放在最前面不会破坏 Ollama 的前缀缓存。
@@ -3752,7 +3752,28 @@ class _SystemPrompt:
             # ★ 2026-11-08 用户要求：「解决问题之后的总结要美观、结构化」。
             #   模板写死在这里（稳定文本，不破坏缓存）；前端已支持 Markdown 渲染。
             "\n【收尾必须结构化 —— 用户明确要求】\n"
+                        """
+            【先判形态，再动笔 —— 这里最容易出错】
+            动笔前先给这一轮归个类，只有 C 类才允许用后面的收尾模板：
+            · A 类｜寒暄、闲聊、道谢、确认收到、表达情绪、只发一句「你好 / 啊？ / 可以啊」→ 像正常人一样接话，1~2 句、不超过 30 字；不许出现任何标题、清单、「做完了什么 / 关键点 / 产物 / 下一步」这类段落，也不许为了凑内容去调工具。
+            · B 类｜回答问题、解释概念、查信息、给建议、把某件事说清 → 直接答，第一句就是答案；可以用要点，但不套收尾模板。
+            · C 类｜真的调了工具并产出了文件 / 图片 / 文档 / 代码 / 代码改动 → 最后一段才按下面的模板写。
+            ⚠️ 判成 C 类是最常见的误判：用户只打了个招呼，你却回一份带「产物 / 下一步」的报告，比不写总结更糟。拿不准时一律按 A / B 类处理，宁短不长。
+            ⚠️ 用户没在对话里亲口说过的身份信息（姓名、城市、年龄、单位、职业），一律不许写进回复，更不许从记忆或猜测里搬来填模板 —— 那是编造。
+            """,
             "活干完后，**最后一段回复**按这个模板写（用 Markdown 标题和列表，不要大段散文）：\n"
+            "⚠️ 上面说的「活干完」严格指：**这一轮真的调用了工具，并且产出了文件 / 图片 / 文档 / 代码 / 代码改动**。"
+            "**寒暄（你好 / 谢谢 / 在吗）、闲聊、单纯回答问题、解释概念、确认收到、用户只是表达情绪或疑问 —— 一律不用这个模板**，"
+            "正常对话 1~3 句说清就完事。绝不为了凑格式去编造用户身份、记忆、文件名或改动。\n"
+            "⚠️ 模板里每一格都必须有**本轮真实依据**；某格填不出来就**整节删掉**，绝不硬编（尤其不许凭空写用户的姓名、城市、记忆内容）。\n"
+            "\n【先正面回答，别答非所问】\n"
+            "开口前先在心里问一句：「用户这句话到底在问什么、要什么？」**第一句必须直接回应那个问题**，之后再补充别的。\n"
+            "· 用户问「刚刚改了什么」→ 就说改了什么；没改就直说没改，别扯别的；\n"
+            "· 用户只发一句「你好 / 啊？ / 可以啊」→ 正常接话即可，不要输出报告、清单、总结；\n"
+            "· 用户指出你上一轮说错了 → 先承认、说清错在哪，再谈怎么改。\n"
+            "⚠️ 不要自动附加「关键点 / 产物 / 下一步」这类自我介绍式段落，用户没要就别加。\n"
+                        """（注：上面这条「不要自动附加」只约束 A / B 类；本轮属于 C 类、真的产出了东西时，按下面模板写是允许且要求的。）
+            """,
             "### ✅ 做完了什么\n"
             "（一两句话，说结果，不说过程）\n"
             "### 📋 关键点\n"
@@ -4024,6 +4045,12 @@ class _SystemPrompt:
         return "\n\n".join(p for p in parts if p)
 
 
+# 上游「一句话都不说」多久判定为卡死（秒）。
+# 2026-11-08 用户报「光标还在闪、按钮还显示终止，但再也不出字」：
+# 上游连接没断、也不吐数据，旧代码会永远等下去，前端永远停在"生成中"。
+_STREAM_IDLE_TIMEOUT = 150.0
+
+
 async def _stream_lines(resp, session: str = ""):
     """在子线程里读阻塞的 `requests.iter_lines`，通过队列交回事件循环。
 
@@ -4042,6 +4069,7 @@ async def _stream_lines(resp, session: str = ""):
     所以**不需要额外的停止接口**，关键是这个 finally 必须真的执行到。
     """
     q: asyncio.Queue = asyncio.Queue(maxsize=256)
+    q = asyncio.Queue()      # ⚠️ 不设上限：满了丢块 = 正文中间被挖掉一段（2026-11-08）
     loop = asyncio.get_running_loop()
 
     def _worker():
@@ -4057,7 +4085,16 @@ async def _stream_lines(resp, session: str = ""):
     _register_stream(session, resp)
     try:
         while True:
-            item = await q.get()
+            try:
+                item = await asyncio.wait_for(q.get(), timeout=_STREAM_IDLE_TIMEOUT)
+            except asyncio.TimeoutError:
+                # 上游 150 秒一个字节都没吐（连接没断、但也不出字）——
+                # 旧代码在这里会永远等下去，前端就一直停在"生成中"。
+                # 现在主动掐断，并给主循环一个哨兵：当成"中途断掉"走续写逻辑。
+                logger.warning("[stream-idle] 上游 %.0f 秒无任何数据，判定卡死并掐断",
+                               _STREAM_IDLE_TIMEOUT)
+                yield b'{"__idle": true}'
+                break
             if item is None:
                 break
             yield item
@@ -4556,6 +4593,14 @@ async def chat(req: ChatRequest,
             mem_ctx = (_handoff_ctx + "\n\n" + mem_ctx) if mem_ctx else _handoff_ctx
     except Exception:
         logger.warning("交接卡注入失败（本轮忽略）", exc_info=True)
+    # ★ 2026-11-09：把「本对话真实执行过的工具动作」也挂上去 —— 用户问
+    #   「你刚刚改了什么」时，模型手里必须有账本，不能只说「没改任何东西」。
+    try:
+        _act_ctx = actlog.render(session)
+        if _act_ctx:
+            mem_ctx = (_act_ctx + "\n\n" + mem_ctx) if mem_ctx else _act_ctx
+    except Exception:
+        logger.warning("工具动作账本注入失败（本轮忽略）", exc_info=True)
     rag_ctx = ""
     if cfg.get("rag_enabled"):
         try:
@@ -4836,7 +4881,7 @@ async def chat(req: ChatRequest,
             _max_rounds = int(cfg.get("max_tool_rounds") or MAX_TOOL_ROUNDS)
         except Exception:
             _max_rounds = MAX_TOOL_ROUNDS
-        _max_rounds = max(1, min(_max_rounds, 200))
+        _max_rounds = max(1, min(_max_rounds, 500))
         try:
             _budget_s = float(cfg.get("max_tool_seconds") or 1200)
         except Exception:
@@ -4896,6 +4941,11 @@ async def chat(req: ChatRequest,
             # 孤儿文件就永远清不掉（实测正是这么漏的）。
             tool_calls = None
             done_reason = ""
+            # 这一轮有没有收到 Ollama 的「结束块」(done)。
+            # 收不到 = 上游是**中途断掉**的（连接被掐 / Ollama 崩了 / 超时），
+            # 此时正文只有半截。以前这种情况既不提示也不续写，
+            # 用户看到的就是"说到一半突然没了"（2026-11-08 用户报）。
+            done_seen = False
             # Ollama 报的"这个提示词实际占了多少 token"（见下面 done 的处理）。
             # 判断"还剩多少额度能写正文"时，它是唯一权威的数字 ——
             # 按字符估算会差得很远（工具 schema 那种 JSON 尤其不准）。
@@ -4913,6 +4963,12 @@ async def chat(req: ChatRequest,
                     obj = json.loads(line)
                 except Exception:
                     continue
+                if obj.get("__idle"):
+                    logger.warning("[stream-idle] 本轮被空闲超时中断，转入续写/收尾")
+                    yield json.dumps({"note": (
+                        "模型这边超过 %d 秒没有任何输出（上游卡住了），已断开重来…"
+                        % int(_STREAM_IDLE_TIMEOUT))}) + "\n"
+                    break
                 if obj.get("error"):
                     _emsg = str(obj["error"])
                     # ⚠️ 这种情况**不是环境坏了**，是模型这一次把工具调用的 JSON
@@ -4955,7 +5011,7 @@ async def chat(req: ChatRequest,
                     round_msg["thinking"] = (round_msg["thinking"] or "") + m["thinking"]
                     final_thinking += m["thinking"]
                     # 实时透出思考增量（即使在折叠状态下也要持续刷新进度）
-                    yield json.dumps({"message": {"thinking": m["thinking"]}}) + "\n"
+                    yield json.dumps({"message": {"thinking": m["thinking"]}}, ensure_ascii=False) + "\n"
                     # —— 思考打转（复读）检测 ——
                     # 每多出 240 字查一次"有没有哪段话重复了 3 遍以上"。
                     # 采样参数能大幅减少打转，但压不干净；真发生时至少要让
@@ -4989,7 +5045,7 @@ async def chat(req: ChatRequest,
                         _piece = round_msg["content"][code_emitted:_safe]
                         code_emitted = _safe
                         final_text += _piece
-                        yield json.dumps({"message": {"content": _piece}}) + "\n"
+                        yield json.dumps({"message": {"content": _piece}}, ensure_ascii=False) + "\n"
                     if code_model_on:
                         # ★ "AI 自动逐字输入到编辑器"就靠这一段：
                         #   模型把 workspace_write 的正文**逐字**吐出来，
@@ -5050,6 +5106,7 @@ async def chat(req: ChatRequest,
                 # 这是判断"回答是否被思考吃光"的**可靠信号**，比猜正文长不长准得多。
                 if obj.get("done"):
                     done_reason = obj.get("done_reason") or ""
+                    done_seen = True
                     # 记下**提示词实测 token 数**：算"本轮还能写多少正文"要用它。
                     # 实测（2026-09-25）：全开 38 个工具时这里会报 ~14700，
                     # 而 num_ctx 只有 24576 —— 光提示词就吃掉 60% 的窗口。
@@ -5087,7 +5144,7 @@ async def chat(req: ChatRequest,
                     _tail = _clean[code_emitted:]
                     code_emitted = len(_clean)
                     final_text += _tail
-                    yield json.dumps({"message": {"content": _tail}}) + "\n"
+                    yield json.dumps({"message": {"content": _tail}}, ensure_ascii=False) + "\n"
                 if _calls:
                     # ⚠️ 本轮**原生通道已经调过工具**时，正文里这坨多半是模型在"复述"
                     #    （实测它连 `<result>` 都自己编出来了）—— 只清文本、**不再执行**，
@@ -5109,6 +5166,12 @@ async def chat(req: ChatRequest,
                 # （思考把配额用尽，正文一个字都没来得及写）。
                 # 这不是模型坏了，纯粹是配额给少了——加倍重试一次。
                 truncated = (done_reason == "length")
+                # 上游中途断掉（整轮没收到 done 块）：正文很可能只有半截。
+                # 这跟"撞长度上限"是两种不同的断法，但对用户的观感一样 ——
+                # 话说到一半就没了，所以续写逻辑要一起覆盖（2026-11-08）。
+                cut_off = (not done_seen)
+                if cut_off:
+                    truncated = True      # 复用下面同一套续写逻辑：对用户来说都是「话说一半没了」
                 # 只有「本轮一个字正文都没写出来」才值得重试。
                 # 已经有正文还重试的话：模型是从头重写，而前端已经渲染过一份，
                 # 两轮内容会**拼在一起**（正文叠正文，最难看出是重复的那种）。
@@ -5469,6 +5532,14 @@ async def chat(req: ChatRequest,
             text_results = []
             for _idx, name, result, ev in sorted(gathered, key=lambda x: x[0]):
                 used_tools.add(name)
+                # 记进「工具动作账本」：这是"刚才改了什么"唯一的可靠来源
+                try:
+                    _args = calls[_idx][1] if 0 <= _idx < len(calls) else {}
+                    actlog.record(session, name, _args,
+                                  ok=not str(result).startswith("[工具执行失败]"),
+                                  result=result)
+                except Exception:
+                    pass
                 # 把本次新产生的图片登记下来，后续工具（如保存到图库）可按序号引用
                 for e in ev:
                     if e.get("type") == "image":
@@ -5539,7 +5610,7 @@ async def chat(req: ChatRequest,
                     "不要写「我将要…」，直接把现状总结出来。")})
                 _wrap = client.chat(working, model=model, stream=True,
                                     params=_wrap_params, tools=None)
-                for _raw in _wrap.iter_lines():
+                async for _raw in _stream_lines(_wrap, session):
                     if not _raw:
                         continue
                     if isinstance(_raw, bytes):
@@ -5615,6 +5686,18 @@ async def chat(req: ChatRequest,
                 % "、".join(_fake[:3]))}) + "\n"
 
         # 自动记忆：把本轮要点提炼进记忆（后台，且**等用户停手再做**，不跟聊天抢显卡）。
+        # ---- 收尾兜底：这次回答是「说一半就断」的，必须明确告诉用户 ----
+        # 续写两次仍被截断、或已经没有轮次可续时，前端只会看到一个半截气泡 ——
+        # 用户根本分不清是「答完了」还是「断了」。这里补一句人话（2026-11-08）。
+        try:
+            _last_cut = bool(locals().get("truncated")) and not locals().get("tool_calls")
+        except Exception:
+            _last_cut = False
+        if _last_cut:
+            _hint = ("\n\n（⚠️ 这条回答在长度上限处被截断了，**不是答完了** —— "
+                     "回一句「继续」我就接着往下写。）")
+            final_text += _hint
+            yield json.dumps({"message": {"content": _hint}}) + "\n"
         # 每轮都安排，覆盖最近几轮内容；命中信号词（尤其"我做过/参加过"这类经历）则立即做。
         # 有了这层沉淀，久远的聊天记录才能安全清理。
         if cfg.get("auto_memorize", True):
@@ -5633,7 +5716,7 @@ async def chat(req: ChatRequest,
                                          urgent=_looks_memorable(last_user))
             except Exception:
                 pass
-        yield json.dumps({"done": True, "text": final_text, "thinking": final_thinking}) + "\n"
+        yield json.dumps({"done": True, "text": final_text, "thinking": final_thinking}, ensure_ascii=False) + "\n"
 
     # 用 _track_chat 包一层：登记"有聊天在跑"，后台记忆提炼会主动让路（见 _chat_busy）
     return StreamingResponse(_track_chat(gen()), media_type="application/x-ndjson")
@@ -6290,6 +6373,31 @@ async def chat_deepseek(req: ChatRequest,
     # 工具在（41 个里有 ask_user），但模型不知道**什么时候该用**。
     sys_prompt += _ask_rules(cfg)
 
+    # ★ 2026-11-09：云端通道原来**完全没接**交接卡和工具账本 —— 用户用 DeepSeek 时
+    #   问「刚刚改了什么」，模型手里一点证据都没有（只会答"没改任何东西"）。
+    #   和主通道一样挂在**最后一条用户消息**上（不动 system，保住前缀缓存）。
+    try:
+        from . import handoff as _handoff2
+        _ctx2 = []
+        _h2 = _handoff2.render(session)
+        if _h2:
+            _ctx2.append(_h2)
+        _a2 = actlog.render(session)
+        if _a2:
+            _ctx2.append(_a2)
+        if _ctx2 and clean:
+            for _i in range(len(clean) - 1, -1, -1):
+                if clean[_i].get("role") == "user":
+                    _c = clean[_i].get("content")
+                    _blk = "\n\n" + "\n\n".join(_ctx2)
+                    if isinstance(_c, str):
+                        clean[_i]["content"] = _c + _blk
+                    elif isinstance(_c, list):      # 带图那轮 content 是数组
+                        clean[_i]["content"] = _c + [{"type": "text", "text": _blk}]
+                    break
+    except Exception:
+        logger.warning("云端通道注入交接卡/账本失败（本轮忽略）", exc_info=True)
+
     loop = asyncio.get_running_loop()
 
     async def gen():
@@ -6336,7 +6444,13 @@ async def chat_deepseek(req: ChatRequest,
 
                 def executor(name: str, args: dict) -> str:
                     ui_events.clear()
-                    return tools.dispatch(name, args, ui_events, ctx)
+                    try:
+                        _r = tools.dispatch(name, args, ui_events, ctx)
+                    except Exception as _e:
+                        actlog.record(session, name, args, ok=False, result=str(_e))
+                        raise
+                    actlog.record(session, name, args, ok=True, result=_r)
+                    return _r
 
                 for kind, val in deepseek_client.chat_stream_with_tools(
                         clean, model, x_deepseek_key, tool_schemas, executor,
@@ -6351,7 +6465,7 @@ async def chat_deepseek(req: ChatRequest,
                                        (perf.get() or {}).get("max_tokens", 0)),
                         system_prompt=sys_prompt,
                         # 轮次上限跟主通道用同一份配置（用户要求放到最多）
-                        max_rounds=max(1, min(int(cfg.get("max_tool_rounds") or 60), 200)),
+                        max_rounds=max(1, min(int(cfg.get("max_tool_rounds") or MAX_TOOL_ROUNDS), 500)),
                         # ★ 「光嘴上说说」兜底：要文件/图片却只写正文时退回一轮
                         guard=_ds_guard_factory(last_user)):
                     # 先把上一轮工具产生的 UI 事件排出去

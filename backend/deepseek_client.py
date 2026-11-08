@@ -315,7 +315,7 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
 
 def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                            tools: list[dict], tool_executor,
-                           max_rounds: int = 8,
+                           max_rounds: int = 120,
                            temperature: float = 0.7, max_tokens: int = 8192,
                            top_p: float | None = None,
                            thinking: bool | None = None,
@@ -339,7 +339,7 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
     tool_executor : callable(name: str, args: dict) -> str
                     由调用方注入（一般是 tools.dispatch 的包装），
                     这样本模块不依赖 tools.py，方便单测。
-    max_rounds : 最多几轮工具调用（防死循环）。默认 8。
+    max_rounds : 最多几轮工具调用（防死循环）。默认 120（服务器版改成"不轻易中断"）。
     guard : callable(used: set[str], final_text: str) -> str | None，可选。
             **「光嘴上说说」的兜底**：模型准备收官时调一次，返回非空字符串
             就把这段话当成用户消息再推给它，要求真正动手（只兜一次）。
@@ -507,7 +507,7 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
         #   开了 thinking 之后推理 token 也算进 max_tokens，正文很容易被截在半句。
         #   Ollama 那条通道早就有续写逻辑（见 tools._do_write_code），云端这条没有。
         if (not tool_calls and finish == "length" and content_buf
-                and cont_used < 2 and rnd + 1 < max_rounds):
+                and cont_used < 6 and rnd + 1 < max_rounds):
             cont_used += 1
             msgs.append({"role": "assistant", "content": "".join(content_buf)})
             msgs.append({"role": "user", "content": (
@@ -581,7 +581,60 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 "content": text[:12000],
             })
 
-    # 轮次用尽
+    # 轮次用尽：**先要一段收尾交代**，别让用户对着半截话。
+    # 2026-11-09 用户报「任务跑到一半就停、模型也不知道刚刚改了什么」：
+    # 原来这里只吐一句「已达上限」，用户既不知道改到哪一步，也看不到改过哪些文件。
+    try:
+        msgs.append({"role": "user", "content": (
+            "（系统提示）工具轮次已用尽，现在**不能再调用任何工具**。"
+            "请只用文字交代：① 已经改了/做了什么（逐个列出文件路径）；"
+            "② 还差什么没做完；③ 下一步建议。直接说现状，不要写「我将要…」。")})
+        _body = {
+            "model": wire_model,
+            "messages": msgs,
+            "stream": True,
+            "temperature": temperature,
+            **({"top_p": top_p} if top_p is not None else {}),
+            "max_tokens": max(512, min(int(max_tokens or 1024), 2048)),
+            "thinking": {"type": "disabled"},
+        }
+        _r = _session().post(
+            f"{BASE}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json",
+                     "Accept": "text/event-stream"},
+            data=json.dumps(_body, ensure_ascii=False).encode("utf-8"),
+            stream=True, timeout=TIMEOUT, proxies=NO_PROXY_MAP,
+        )
+        if _r.status_code == 200:
+            try:
+                for _raw in _r.iter_lines(decode_unicode=True):
+                    if not _raw:
+                        continue
+                    _line = _raw.strip()
+                    if not _line.startswith("data:"):
+                        continue
+                    _pl = _line[5:].strip()
+                    if not _pl or _pl == "[DONE]":
+                        continue
+                    try:
+                        _o = json.loads(_pl)
+                    except json.JSONDecodeError:
+                        continue
+                    for _ch in (_o.get("choices") or []):
+                        _d = _ch.get("delta") or {}
+                        if _d.get("content"):
+                            yield ("content", _d["content"])
+                        if _ch.get("finish_reason"):
+                            break
+            finally:
+                try:
+                    _r.close()
+                except Exception:
+                    pass
+    except Exception:                     # noqa: BLE001
+        pass                              # 收尾失败也不能影响已完成的产物
+
     yield ("content", f"\n\n（已达工具调用轮次上限 {max_rounds}，停止继续调用）")
 
 
