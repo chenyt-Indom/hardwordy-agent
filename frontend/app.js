@@ -4452,6 +4452,70 @@
     window.addEventListener("focus", report);
   })();
 
+  // ================== 顶栏：性能档位 / 上下文（2026-11-08）==================
+  // 用户反馈：这俩是日常聊天就要调的东西，不该藏在「🛠 自开发」面板里 —— 挪到顶栏。
+  // 控件由本脚本插到 #selfDevBtn 前面（index.html 不动），面板里那份已删除，不留重复控件。
+  (() => {
+    const bar = document.querySelector(".tools-bar");
+    const anchor = document.querySelector("#selfDevBtn");
+    if (!bar || !anchor) return;
+    const sel = document.createElement("select");
+    sel.id = "perfSelect";
+    sel.className = "pill pill-select";
+    sel.title = "性能档位：决定默认的输出上限与上下文长度";
+    const ctxBtn = document.createElement("button");
+    ctxBtn.type = "button";
+    ctxBtn.id = "perfCtxBtn";
+    ctxBtn.className = "pill pill-btn";
+    ctxBtn.title = "手动指定上下文长度（越大越能装长内容，但更吃显存、更慢）";
+    ctxBtn.textContent = "⚙ 上下文 —";
+    bar.insertBefore(sel, anchor);
+    bar.insertBefore(ctxBtn, anchor);
+
+    let last = null, panel = null;
+    const show = (v, override) => v + (override > 0 ? "（自定义）" : "（跟随档位）");
+    const paint = (d) => {
+      last = d;
+      sel.innerHTML = (d.profiles || []).map((x) => '<option value="' + x.id + '">' + x.name + "</option>").join("");
+      if (d.profile) sel.value = d.profile;
+      ctxBtn.textContent = "⚙ 上下文 " + Math.round(Number(d.num_ctx || 0) / 1024) + "k";
+      if (!panel) return;
+      const r = panel.querySelector("#perfCtxRange"), now = panel.querySelector("#perfCtxNow");
+      if (r) { r.min = d.min_ctx; r.max = d.max_ctx; r.value = d.num_ctx; }
+      if (now) now.textContent = show(d.num_ctx, d.override);
+    };
+    const post = async (body, okMsg) => {
+      try {
+        const r = await (await fetch("/api/perf", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json();
+        if (r.ok) { paint(r); showToast(okMsg, "ok"); } else showToast(r.error || "设置失败", "warn");
+      } catch (e) { showToast("设置失败：" + e.message, "warn"); }
+    };
+    sel.onchange = () => post({ profile: sel.value }, "性能档位 → " + sel.options[sel.selectedIndex].text);
+    ctxBtn.onclick = () => {
+      if (panel) { panel.remove(); panel = null; return; }
+      const d = last || { num_ctx: 40960, min_ctx: 4096, max_ctx: 131072, override: 0 };
+      panel = document.createElement("div");
+      panel.id = "perfPanel";
+      panel.style.cssText = "position:fixed;right:16px;bottom:90px;width:300px;background:#1e1e22;border:1px solid #33333c;border-radius:12px;padding:14px;z-index:99999;color:#e8e8ea;font-size:12.5px;box-shadow:0 16px 40px rgba(0,0,0,.5)";
+      panel.innerHTML =
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b>上下文长度</b>' +
+          '<span id="perfCtxNow" style="color:#5aa9ff">' + show(d.num_ctx, d.override) + "</span></div>" +
+        '<input id="perfCtxRange" type="range" step="1024" min="' + d.min_ctx + '" max="' + d.max_ctx + '" value="' + d.num_ctx + '" style="width:100%;accent-color:#4f8bf9">' +
+        '<div style="font-size:11px;color:#8a8a94;margin:6px 0 10px;line-height:1.6">拖动后松手才生效；「跟随档位」= 不单独指定。</div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+          '<button id="perfCtxFollow" type="button" style="padding:5px 10px;border-radius:8px;border:1px solid #3a4353;background:transparent;color:#9ad0ff;cursor:pointer">跟随档位</button>' +
+          '<button id="perfCtxClose" type="button" style="padding:5px 10px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#c8c8d0;cursor:pointer">关闭</button>' +
+        "</div>";
+      document.body.appendChild(panel);
+      const r = panel.querySelector("#perfCtxRange"), now = panel.querySelector("#perfCtxNow");
+      r.oninput = () => { now.textContent = r.value + "（自定义）"; };   // 拖动只改文字
+      r.onchange = () => post({ num_ctx: parseInt(r.value, 10) }, "上下文 → " + r.value);   // 松手才 POST
+      panel.querySelector("#perfCtxFollow").onclick = () => post({ num_ctx: 0 }, "上下文 → 跟随档位");
+      panel.querySelector("#perfCtxClose").onclick = () => { panel.remove(); panel = null; };
+    };
+    (async () => { try { paint(await (await fetch("/api/perf")).json()); } catch (e) { /* 拿不到就保留占位文字 */ } })();
+  })();
+
   // ================== 自开发面板（2026-11-08）==================
   // 用户要求：① 回撤要收进「🛠 自开发」里，点开才出现；
   //          ② 每个版本要标明**更新内容 + 日期**；
@@ -4501,15 +4565,6 @@
         '    <button id="sdDemo" type="button" title="用顶栏选定的代码模型真跑一次写文件，验证自我迭代能力（只写 dev_note.md，不碰源码）" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid #2a4a6a;background:transparent;color:#5aa9ff;cursor:pointer;white-space:nowrap">🧪 试一次迭代</button>',
         '    <button id="sdFull" type="button" title="完全访问：允许模型改写 backend/ 核心代码（风险自负）" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#9a9aa2;cursor:pointer;white-space:nowrap">🔓 完全访问·关</button>',
         '  </div>',
-        '  <div id="sdPerf" style="margin-top:12px;padding:10px 12px;border:1px solid #2f3a4a;border-radius:10px;background:rgba(30,34,42,.5)">',
-        '    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px;color:#cfd6e2">',
-        '      <span>性能</span><select id="sdProfile" style="padding:3px 8px;border-radius:6px;border:1px solid #3a4353;background:#1e2229;color:#d6dde8;font-size:12px"></select>',
-        '      <span style="color:#8f8f99">输出上限 <b id="sdOut">—</b></span>',
-        '      <span style="color:#8f8f99;margin-left:auto">上下文 <b id="sdCtxVal">—</b></span>',
-        '    </div>',
-        '    <input id="sdCtx" type="range" min="4096" max="131072" step="1024" style="width:100%;margin-top:8px;accent-color:#4f8bf9">',
-        '    <div style="font-size:11px;color:#6f7787;margin-top:4px">上下文越大越能装长内容，但更吃显存、更慢；「跟随档位」= 不单独指定。</div>',
-        '  </div>',
         '  <div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">版本历史（每次改动前自动备份，点「回撤」整批还原）</div>',
         '  <div id="sdHist"></div>',
         '  <div id="sdMsg" style="font-size:12.5px;min-height:18px;color:#f0b34a;margin-top:8px"></div>',
@@ -4535,36 +4590,6 @@
       };
       applyState();
 
-      // ---- 性能档位 / 上下文（无极调节）----
-      (() => {
-        const sel = mask.querySelector("#sdProfile");
-        const ctx = mask.querySelector("#sdCtx");
-        const ctxVal = mask.querySelector("#sdCtxVal");
-        const outEl = mask.querySelector("#sdOut");
-        const paint = (d) => {
-          sel.innerHTML = (d.profiles || []).map((p) =>
-            '<option value="' + p.id + '">' + p.name + '</option>').join("");
-          sel.value = d.profile;
-          ctx.value = d.num_ctx;
-          ctxVal.textContent = d.num_ctx + (d.override > 0 ? "" : "（跟随档位）");
-          outEl.textContent = d.max_tokens;
-        };
-        (async () => {
-          try { paint(await (await fetch("/api/perf")).json()); } catch (e) {}
-        })();
-        const post = async (body, okMsg) => {
-          try {
-            const r = await (await fetch("/api/perf", {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(body) })).json();
-            if (r.ok) { paint(r); toast(okMsg, "ok"); }
-            else toast(r.error || "设置失败", "err");
-          } catch (e) { toast("设置失败：" + e.message, "err"); }
-        };
-        sel.onchange = () => post({ profile: sel.value }, "性能档位 → " + sel.options[sel.selectedIndex].text);
-        ctx.oninput = () => { ctxVal.textContent = ctx.value + "（自定义）"; };
-        ctx.onchange = () => post({ num_ctx: parseInt(ctx.value, 10) }, "上下文 → " + ctx.value);
-      })();
 
       // ---- 用当前代码模型真跑一次迭代（只写 dev_note.md，零风险）----
       const demoBtn = mask.querySelector("#sdDemo");
