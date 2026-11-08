@@ -4281,6 +4281,7 @@ async def chat(req: ChatRequest,
     except Exception:
         pass
     sys_prompt = _SystemPrompt.build(last_user, session, req.docs, no_tools=code_model_on)
+    globals()["_LAST_SESSION"] = session   # 交接卡：重启前要读这个会话的历史（见 backend/handoff.py）
     if attach_paths:
         # 把落盘路径交给模型 —— 这是"按用户提供的图片做文档/PPT"能成立的前提。
         # ⚠️ **代码模型那一轮也要注入**：用户说「做个 PPT」会命中造物规则、
@@ -4545,6 +4546,16 @@ async def chat(req: ChatRequest,
     # ⚠️ 记忆 / 知识库材料现在挂在**用户消息**上（见 _attach_live_ctx），
     #    但它们同样要占上下文额度 —— 预算里必须算进去，否则会撑爆窗口。
     mem_ctx = _memory_ctx(session, last_user, cfg)
+    # ★ 2026-11-08 用户要求：「自我迭代重启之后，还记得刚才聊了什么、改了什么」。
+    #   交接卡由 backend/handoff.py 维护（改动清单 + 上次重启前的几轮对话），
+    #   **挂在最后一条用户消息上**（和记忆同一位置）—— 放进系统提示会破坏前缀缓存。
+    try:
+        from . import handoff as _handoff
+        _handoff_ctx = _handoff.render(session)
+        if _handoff_ctx:
+            mem_ctx = (_handoff_ctx + "\n\n" + mem_ctx) if mem_ctx else _handoff_ctx
+    except Exception:
+        logger.warning("交接卡注入失败（本轮忽略）", exc_info=True)
     rag_ctx = ""
     if cfg.get("rag_enabled"):
         try:
@@ -4818,6 +4829,8 @@ async def chat(req: ChatRequest,
         # 「要图却没画」也只兜一次（同样的道理：模型常把画面写成文字就收工）
         _img_nudge_done = False
         _ask_nudge_done = False      # 深度询问兜底只放一次
+        # 「回答被截断在半句」的自动续写次数（最多 2 次，见下面的 [continue] 段）
+        _cont_used = 0
         # 轮次/时间预算（用户要求把调度次数放宽到最多）
         try:
             _max_rounds = int(cfg.get("max_tool_rounds") or MAX_TOOL_ROUNDS)
@@ -5213,6 +5226,37 @@ async def chat(req: ChatRequest,
                 #   ⇒ 这里**代码层兜一次**：没产出文件就退回一轮，明确要求它去生成。
                 #   ⚠️ 只兜一次（`_office_nudge_done`），否则会和模型死磕、白烧时间。
                 #   ⚠️ 只在这种情况放行：模型确实写了正文（说明它自认为答完了）。
+                # ★★ 2026-11-08 用户报「你有时候说话总说一半」——根因就在这：
+                #   done_reason=length（撞到 num_predict 上限）时，上面的逻辑只处理
+                #   「一个字正文都没写」那种情况；**已经写了一半**的反而什么都不做，
+                #   于是回答硬生生停在半句上（截图里「什么时候」就是这么断的）。
+                #   ⇒ 补上「续写」：把已写正文放回历史，让它从断开处接着写。
+                #   云端通道（deepseek_client）早就有这段，本地通道一直缺。
+                if (truncated and has_body and _cont_used < 2
+                        and _round + 1 < _max_rounds):
+                    _cont_used += 1
+                    logger.warning("[continue] 正文被截断（第 %d 次续写），接着往下写",
+                                   _cont_used)
+                    yield json.dumps({"note": (
+                        "上一条回答被长度上限截断了，正在接着往下写完…")}) + "\n"
+                    working.append({"role": "assistant",
+                                    "content": round_msg["content"] or ""})
+                    working.append({"role": "user", "content": (
+                        "（系统提示）你上一条回答**被长度上限截断了**，停在了半句话上。"
+                        "现在**从断开的地方接着往下写**：不要重复已经写过的内容，"
+                        "不要重新开头，不要解释、不要道歉，直接续上正文；"
+                        "如果内容其实已经写完，就只把最后那句补完整。")})
+                    # 续写这一轮把额度抬到「窗口允许的最大」——
+                    # 否则同样的额度又会在同一个地方断掉，续写等于白跑。
+                    _room2 = MAX_TOKENS_CEILING
+                    if prompt_tokens:
+                        _room2 = min(MAX_TOKENS_CEILING,
+                                     max(1024,
+                                         int(cfg.get("num_ctx") or 8192)
+                                         - int(prompt_tokens) - 512))
+                    _cur2 = int(gen_params.get("max_tokens") or 2048)
+                    gen_params["max_tokens"] = min(max(_cur2 * 2, 4096), _room2)
+                    continue
                 if (office_mode and not _office_nudge_done
                         and round_msg["content"].strip()
                         and not (used_tools & _OFFICE_MAKER_TOOLS)
@@ -5842,6 +5886,11 @@ def selfdev_pending():
 @app.post("/api/selfdev/apply_restart")
 def selfdev_apply_restart():
     """用户点了「立即重启」才走到这里 —— 唯一真正重启的入口。"""
+    try:
+        from . import handoff as _hdy
+        _hdy.snapshot(str(globals().get("_LAST_SESSION") or ""), "用户点了「立即重启」")
+    except Exception:
+        logger.warning("重启前写交接卡失败（不影响重启）", exc_info=True)
     from . import pending as _pend
     v = selfdev.verify_import()
     if not v.get("ok"):
@@ -5896,6 +5945,11 @@ def selfdev_restart():
     #    这个接口现在只做「自检 + 打标记」，真正重启只走 /api/selfdev/apply_restart。
     from . import pending as _pend
     _v = selfdev.verify_import()
+    try:
+        from . import handoff as _hdz
+        _hdz.snapshot(str(globals().get("_LAST_SESSION") or ""), "模型请求重启")
+    except Exception:
+        logger.warning("重启前写交接卡失败（不影响重启）", exc_info=True)
     if not _v.get("ok"):
         return {"ok": False, "error": _v.get("error") or _v.get("msg")
                 or ("导入自检没通过：%s" % str(_v)[:200])}
@@ -7286,49 +7340,49 @@ def library_open_folder():
     return _open_folder_impl(doclib.ensure_dir())
 
 
-    @app.post("/api/doclib/open_file")
-    def library_open_file(body: dict):
-        """用本机默认程序**直接打开**生成文库里的一个文件。
+@app.post("/api/doclib/open_file")
+def library_open_file(body: dict):
+    """用本机默认程序**直接打开**生成文库里的一个文件。
 
-        用户反馈（2026-11-08）：产物卡片上只有一个「下载」按钮，想看 Word / PPT
-        还得自己去文件夹里一层层翻 —— 希望"双击就能打开"。
+    用户反馈（2026-11-08）：产物卡片上只有一个「下载」按钮，想看 Word / PPT
+    还得自己去文件夹里一层层翻 —— 希望"双击就能打开"。
 
-        所以这里直接交给系统：Windows `os.startfile`、macOS `open`、
-        Linux `xdg-open`（等同于在资源管理器里双击那个文件）。
-        容器里调不起宿主机的程序，改由宿主机小助手在资源管理器里选中该文件。
-        """
-        rel = str((body or {}).get("rel") or "").strip()
-        if not rel:
-            raise HTTPException(400, "缺少文件路径 rel")
-        try:
-            path = doclib.file_path(rel)          # 内部会校验越界
-        except Exception as e:
-            raise HTTPException(400, f"路径不合法：{e}")
-        if not os.path.isfile(path):
-            raise HTTPException(404, "文件不存在（可能已被删除或改名）")
+    所以这里直接交给系统：Windows `os.startfile`、macOS `open`、
+    Linux `xdg-open`（等同于在资源管理器里双击那个文件）。
+    容器里调不起宿主机的程序，改由宿主机小助手在资源管理器里选中该文件。
+    """
+    rel = str((body or {}).get("rel") or "").strip()
+    if not rel:
+        raise HTTPException(400, "缺少文件路径 rel")
+    try:
+        path = doclib.file_path(rel)          # 内部会校验越界
+    except Exception as e:
+        raise HTTPException(400, f"路径不合法：{e}")
+    if not os.path.isfile(path):
+        raise HTTPException(404, "文件不存在（可能已被删除或改名）")
 
-        if _is_container():
-            if _host_agent_alive() and _request_host_open(path):
-                return {"ok": True, "opened": False, "via": "host-agent",
-                        "host_path": _host_path(path),
-                        "detail": "运行在容器里，已请宿主机在资源管理器中选中这个文件"}
-            return {"ok": True, "opened": False, "host_path": _host_path(path),
-                    "detail": "运行在容器里，无法直接调用宿主机的程序"}
+    if _is_container():
+        if _host_agent_alive() and _request_host_open(path):
+            return {"ok": True, "opened": False, "via": "host-agent",
+                    "host_path": _host_path(path),
+                    "detail": "运行在容器里，已请宿主机在资源管理器中选中这个文件"}
+        return {"ok": True, "opened": False, "host_path": _host_path(path),
+                "detail": "运行在容器里，无法直接调用宿主机的程序"}
 
-        try:
-            import subprocess
-            if os.name == "nt":
-                os.startfile(path)                # 等同双击
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", path])
-            else:
-                subprocess.Popen(["xdg-open", path])
-            return {"ok": True, "opened": True, "path": path}
-        except FileNotFoundError:
-            return {"ok": True, "opened": False, "path": path,
-                    "detail": "系统里没找到能打开这个文件的程序"}
-        except Exception as e:
-            raise HTTPException(500, f"打开文件失败：{e}")
+    try:
+        import subprocess
+        if os.name == "nt":
+            os.startfile(path)                # 等同双击
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return {"ok": True, "opened": True, "path": path}
+    except FileNotFoundError:
+        return {"ok": True, "opened": False, "path": path,
+                "detail": "系统里没找到能打开这个文件的程序"}
+    except Exception as e:
+        raise HTTPException(500, f"打开文件失败：{e}")
 
 
 @app.post("/api/code/run")

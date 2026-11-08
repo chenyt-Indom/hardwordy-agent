@@ -88,3 +88,6 @@ tools_dev/
 dist_v*/
 dist_rel*/
 build/_pyi/
+
+# 交接卡运行时数据（2026-11-09）
+handoff/last.json

@@ -1634,6 +1634,7 @@ def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
 
 # 自动自查的节流（同一次对话里别每改一行就截一次图，太贵）
 _AUTO_REVIEW = {"at": 0.0, "rounds": 0}
+_SD_NOTE = {"note": ""}   # 交接卡：暂存本次自开发工具的 note（见 backend/handoff.py）
 
 
 def _auto_review(context: dict) -> str:
@@ -1737,6 +1738,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             _kind, _pick = code_model_pick(cfg, context)
             who = ("DeepSeek " + _pick) if _kind == "cloud" else ("本地 " + (_pick or "默认"))
             _selfdev_ui(ui_events, "apply", r, who)
+            from . import handoff as _hd; _hd.record_from_tool(r, "apply", str(a.get("note") or ""))
             d = r.get("diff") or {}
             return (("已用 %s 重写 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
                      "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
@@ -1774,6 +1776,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             if not r.get("ok"):
                 return "写入被拒绝：%s" % r.get("error")
             _selfdev_ui(ui_events, "write", r)
+            from . import handoff as _hd; _hd.record_from_tool(r, "write", str(a.get("note") or ""))
             d = r.get("diff") or {}
             return (("已写入 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
                      "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
@@ -1787,6 +1790,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             if not r.get("ok"):
                 return "插入失败：%s" % r.get("error")
             _selfdev_ui(ui_events, "insert", r)
+            from . import handoff as _hd; _hd.record_from_tool(r, "insert", str(a.get("note") or ""))
             d = r.get("diff") or {}
             return (("已在 %s 插入一段（+%d −%d 行）。详情已作为卡片展示给用户。\n"
                      "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
@@ -1798,6 +1802,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             if not r.get("ok"):
                 return "替换失败：%s" % r.get("error")
             _selfdev_ui(ui_events, "patch", r)
+            from . import handoff as _hd; _hd.record_from_tool(r, "patch", str(a.get("note") or ""))
             d = r.get("diff") or {}
             return (("已修改 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
                      "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
@@ -1821,6 +1826,11 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                         % (v.get("error") or v.get("msg") or str(v)[:200]))
             from . import pending as _pend
             st = _pend.mark("", "模型请求重启，等待用户确认")
+            try:
+                from . import handoff as _hd2
+                _hd2.snapshot(str((context or {}).get("session") or ""), "模型请求重启")
+            except Exception:
+                pass
             if isinstance(ui_events, list):
                 ui_events.append({"type": "restart_ready", **st})
             return ("已自检通过，前端已弹出「新版本已就绪」提示。\n"

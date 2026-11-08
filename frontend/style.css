@@ -2590,3 +2590,13 @@ html[data-theme="light"] select.pill-select option {
   .icon-btn { width: 32px; height: 32px; font-size: 14px; }
   #sendBtn { padding: 7px 12px; }
 }
+
+/* 手机端下拉文案被右侧箭头挤掉一个字（"深度询问"→"深度问"），给足内边距 2026-11-09 */
+@media (max-width: 768px) {
+  .top-bar select.pill-select {
+    padding-right: 20px !important;
+    min-width: 76px;
+    text-overflow: clip;
+    background-position: right 4px center;
+  }
+}

@@ -2776,6 +2776,41 @@
   }
   refreshMaskChip();
 
+  // 给"不支持 fetch 流"的浏览器用的 XHR 增量读取器（2026-11-09）
+  // 微信内置浏览器（X5）会把 fetch 的 ReadableStream 整段缓冲，
+  // 但 XHR 的 onprogress 是能拿到增量 responseText 的 —— 用它模拟 reader。
+  function makeXhrReader(url, headers, bodyStr, onAbortReg) {
+    const queue = [];
+    let done = false, fail = null, waiter = null, seen = 0;
+    const wake = () => { const w = waiter; waiter = null; if (w) w(); };
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url, true);
+    Object.keys(headers || {}).forEach((k) => {
+      try { xhr.setRequestHeader(k, headers[k]); } catch (e) { /* 忽略 */ }
+    });
+    xhr.onprogress = () => {
+      const all = xhr.responseText || "";
+      const chunk = all.slice(seen);
+      seen = all.length;
+      if (chunk) { queue.push(new TextEncoder().encode(chunk)); wake(); }
+    };
+    xhr.onload = () => { done = true; wake(); };
+    xhr.onerror = () => { fail = new Error("网络中断"); done = true; wake(); };
+    xhr.onabort = () => { done = true; wake(); };
+    xhr.send(bodyStr);
+    if (typeof onAbortReg === "function") onAbortReg(() => { try { xhr.abort(); } catch (e) {} });
+    return {
+      read: async () => {
+        while (!queue.length && !done) {
+          await new Promise((r) => { waiter = r; });
+        }
+        if (queue.length) return { done: false, value: queue.shift() };
+        if (fail) throw fail;
+        return { done: true, value: undefined };
+      },
+    };
+  }
+
   async function doSend(promptText, mediaB64, docPayload) {
     history.push({ role: "user", content: promptText });
 
@@ -2799,6 +2834,9 @@
     thinkHdr.appendChild(thinkArrow);
     const thinkBody = document.createElement("div");
     thinkBody.className = "think-body";     // 默认 display:none（折叠）
+    // 手机上屏幕窄、可点的地方少 —— 思考过程**默认展开**，让用户真能看到它在想什么
+    const _autoThink = window.innerWidth <= 768;
+    if (_autoThink) { thinkBody.style.display = "block"; thinkArrow.textContent = "▾"; }
     thinkBody.textContent = "本地模型思考中…";
     thinkWrap.appendChild(thinkHdr);
     thinkWrap.appendChild(thinkBody);
@@ -3527,6 +3565,11 @@
     };
     const finishThinking = () => {
       stopThinking();                            // 结束播放，一次性补齐剩余思考
+      // 手机端：思考是从头展开显示的；收尾时如果太长就折起来，只留字数
+      if (_autoThink && thinking.length > 500 && thinkBody.style.display !== "none") {
+        thinkBody.style.display = "none";
+        thinkArrow.textContent = "▸";
+      }
       // ⚠️ 2026-11-08：原来无论什么模型都显示「未输出思考」，
       //   用户看到会以为坏了。其实**本地 qwen3-vl 不是推理模型，压根没有思考链**，
       //   只有 DeepSeek V4.1（已默认开思考）/ 推理模型才会有。
@@ -3628,14 +3671,44 @@
         _payload.model = _prov;
       }
 
+      // 微信内置浏览器（X5）会整段缓冲 fetch 流 → 直接走 XHR 增量读取
+      const _isWeChat = /MicroMessenger/i.test(navigator.userAgent || "");
+      let _bodyStr = JSON.stringify(_payload);
+      let reader;
+      if (_isWeChat) {
+        let _xhrAbort = null;
+        const _origAbort = abortCtl.abort.bind(abortCtl);
+        abortCtl.abort = () => { try { _xhrAbort && _xhrAbort(); } catch (e) {} _origAbort(); };
+        reader = makeXhrReader(_chatUrl, _hdrs, _bodyStr, (fn) => { _xhrAbort = fn; });
+      } else {
       const resp = await fetch(_chatUrl, { method: "POST", headers: _hdrs,
         signal: abortCtl.signal,
-        body: JSON.stringify(_payload) });
+        body: _bodyStr });
       if (!resp.ok) {
         const e = await resp.json();
         throw new Error(e.detail || resp.statusText);
       }
-      const reader = resp.body.getReader();
+      // ⚠️ 2026-11-09：手机（尤其微信内置浏览器 / 老 Safari）没有
+      //   ReadableStream，`resp.body` 可能是 null —— 直接 .getReader() 会抛错，
+      //   表现就是"没有流式、甚至不出字"。这里做一个等价 shim：
+      //   拿不到 reader 时，把整段 NDJSON 一次性读出来当"一个分片"喂给同一个循环，
+      //   虽然不流式，但内容一定会出来。
+      if (resp.body && typeof resp.body.getReader === "function") {
+        reader = resp.body.getReader();
+      } else {
+        let sent = false;
+        showToast("当前浏览器不支持流式输出，已改为整段显示（换 Chrome/Safari 可恢复流式）", "warn");
+        reader = {
+          read: async () => {
+            if (sent) return { done: true, value: undefined };
+            sent = true;
+            const txt = await resp.text();
+            return { done: false, value: new TextEncoder().encode(txt) };
+          },
+          cancel: async () => {},
+        };
+      }
+      }   // ← 非微信分支结束
       const decoder = new TextDecoder();
       let buf = "";
       while (true) {
