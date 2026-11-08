@@ -6399,6 +6399,7 @@ async def chat_deepseek(req: ChatRequest,
         logger.warning("云端通道注入交接卡/账本失败（本轮忽略）", exc_info=True)
 
     loop = asyncio.get_running_loop()
+    _ACC: list = []          # 本轮完整正文（收尾回填用，见 __end.answer）
 
     async def gen():
         if not x_deepseek_key:
@@ -6491,6 +6492,7 @@ async def chat_deepseek(req: ChatRequest,
             if kind == "__done__":
                 break
             if kind == "content":
+                _ACC.append(val)                     # 全量正文，收尾时回填给前端
                 yield json.dumps({"message": {"content": val}}) + "\n"
             elif kind == "thinking":
                 yield json.dumps({"message": {"thinking": val}}) + "\n"
@@ -6506,7 +6508,12 @@ async def chat_deepseek(req: ChatRequest,
             elif kind == "error":
                 yield json.dumps({"error": deepseek_client.scrub(val)}) + "\n"
 
-        yield json.dumps({"__end": True}) + "\n"
+        # ★ 2026-11-09：把**完整正文**随结束事件一起发下去。
+        #   之前只发 {"__end": true}，一旦前端在接收环节漏了最后几个分片
+        #   （切在半个 JSON 上、XHR 缓冲吞尾等），界面上就永远少那几个字。
+        #   现在前端以此为准做一次回填 —— 丢字问题不依赖"猜哪里丢的"。
+        _full = "".join(_ACC)
+        yield json.dumps({"__end": True, "answer": _full}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 

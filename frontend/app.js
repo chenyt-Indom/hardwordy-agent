@@ -3756,6 +3756,16 @@
           if (!line.trim()) continue;
           let obj;
           try { obj = JSON.parse(line); } catch { continue; }
+          // ★ 服务端在结束事件里带完整正文（2026-11-09）
+          //   接收环节只要漏了一片（切在半个 JSON、XHR 缓冲吞尾…），界面上就会少字。
+          //   这里直接以服务端原文为准做一次回填，彻底不依赖"猜哪里丢的"。
+          if (obj.__end) {
+            if (typeof obj.answer === "string" && obj.answer.length > answer.length) {
+              try { console.warn("[stream] 用服务端完整正文回填：", answer.length, "→", obj.answer.length); } catch (e) {}
+              answer = obj.answer;
+            }
+            continue;
+          }
           if (obj.error) {
             // ⚠️ `explained` = 后端已经把原因翻成人话、也给了下一步怎么办。
             // 这类错误**不要**再跟一句"（可能内存/模型未就绪，请查看状态）"——
