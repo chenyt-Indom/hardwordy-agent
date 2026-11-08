@@ -140,7 +140,7 @@ class DeepSeekError(RuntimeError):
 
 
 def chat_stream(messages: list[dict], model: str, api_key: str,
-                temperature: float = 0.7, max_tokens: int = 4096,
+                temperature: float = 0.7, max_tokens: int = 8192,
                 thinking: bool | None = None,
                 reasoning_effort: str | None = None) -> Iterator[tuple[str, str]]:
     """流式对话。
@@ -267,7 +267,7 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
 def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                            tools: list[dict], tool_executor,
                            max_rounds: int = 8,
-                           temperature: float = 0.7, max_tokens: int = 4096,
+                           temperature: float = 0.7, max_tokens: int = 8192,
                            thinking: bool | None = None,
                            reasoning_effort: str | None = None,
                            system_prompt: str | None = None,
@@ -324,6 +324,7 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
 
     used: set[str] = set()      # 本会话真正调用过的工具（guard 要用）
     guard_used = False          # 兜底只放一次，避免和模型死磕
+    cont_used = 0               # 被 max_tokens 截断后自动续写的次数（最多 2 次）
 
     for rnd in range(max_rounds):
         body: dict = {
@@ -447,6 +448,21 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 resp.close()
             except Exception:
                 pass
+
+        # ★ 被 max_tokens 截断（finish_reason=length）→ **自动续写**
+        #   2026-11-08 用户报「思考过程有了，但输出被限制了」：
+        #   开了 thinking 之后推理 token 也算进 max_tokens，正文很容易被截在半句。
+        #   Ollama 那条通道早就有续写逻辑（见 tools._do_write_code），云端这条没有。
+        if (not tool_calls and finish == "length" and content_buf
+                and cont_used < 2 and rnd + 1 < max_rounds):
+            cont_used += 1
+            msgs.append({"role": "assistant", "content": "".join(content_buf)})
+            msgs.append({"role": "user", "content": (
+                "（系统提示）你上一条输出被长度上限截断了。"
+                "**接着往下写**，从断开的地方继续，不要重复已经写过的内容，"
+                "也不要重新开头。")})
+            yield ("note", "输出被长度上限截断，正在自动续写…")
+            continue
 
         # 这一轮没有工具调用 → 本该对话结束
         if not tool_calls:

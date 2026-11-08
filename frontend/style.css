@@ -2063,3 +2063,32 @@ select.pill-select option {
 .bubble .md-text b { color: var(--text); font-weight: 600; }
 .bubble a { color: var(--accent); text-decoration: none; }
 .bubble a:hover { text-decoration: underline; }
+
+/* 流式光标（2026-11-08）
+   ⚠️ 原来用的是 `▌` 这个方块字符 —— 在不同字体下会渲染成一块**很粗的蓝条**，
+   用户看到的就是"下面一直有个小蓝块在闪"。改成 2px 细竖线，尺寸写死。 */
+.stream-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: -0.15em;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: blinkCaret 1s steps(1) infinite;
+}
+@keyframes blinkCaret { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
+/* ================= 机器人回答区：必须竖着排（2026-11-08，真 bug）=================
+   现象：自我迭代时模型连着产出好几段代码，卡片**横向排成一行**把屏幕占满。
+   根因：回答容器是 `div.msg.bot`，而 `.msg{display:flex}` 是**行方向**——
+        往里面 append 的气泡、代码卡片、媒体卡片全变成了同一行的 flex 项。
+   修法：机器人这一侧改成**纵向**，子项占满整行；用户消息仍然靠右。
+   ⚠️ 以后往 answerWrap 里 append 任何东西都会自动竖排，不会再有横向挤压。 */
+.msg.bot {
+  flex-direction: column;
+  align-items: stretch;
+}
+.msg.bot > * { max-width: 100%; min-width: 0; }
+/* 气泡本身不能因此变成满宽（单条消息还是要有"对话感"） */
+.msg.bot > .bubble { align-self: flex-start; }

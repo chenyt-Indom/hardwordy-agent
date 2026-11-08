@@ -3634,7 +3634,7 @@ def _autosave_answer(text: str, user_text: str = "") -> str:
         return ""
 
 
-def _make_ui_channel(loop, live_ui, timeout: float = 900.0):
+def _make_ui_channel(loop, live_ui, timeout: float = 300.0):
     """生成"问用户"的两个通道：confirm（危险操作确认）与 ask（追问细节）。
 
     ⚠️ 为什么非得这么绕：工具跑在线程池里（阻塞），而弹窗必须**立刻**出现在网页上。
@@ -6045,6 +6045,11 @@ async def chat_deepseek(req: ChatRequest,
                 for kind, val in deepseek_client.chat_stream_with_tools(
                         clean, model, x_deepseek_key, tool_schemas, executor,
                         temperature=min(1.3, max(0.0, temp)),
+                        # ★ 2026-11-08 修：**原来没传 max_tokens**，用的是函数默认 4096。
+                        #   开了 thinking 之后推理 token 也吃这个额度 → 正文被截在半句
+                        #   （用户报「思考过程有了，但输出被限制了」）。
+                        #   现在跟随全局配置（16384），并配 client 侧的截断续写。
+                        max_tokens=int(cfg.get("max_tokens") or 8192),
                         system_prompt=sys_prompt,
                         # 轮次上限跟主通道用同一份配置（用户要求放到最多）
                         max_rounds=max(1, min(int(cfg.get("max_tool_rounds") or 60), 200)),

@@ -242,6 +242,14 @@
   function mdToHtml(text) {
     const raw = String(text == null ? "" : text);
     let esc = escapeHtml(raw);
+    // ★ 2026-11-08 用户要求：「简单情况下就不用 markdown 了」。
+    //   没有标题/列表/粗体/引用/表格这类标记的短文本，直接按纯文本渲染
+    //   （保留原来的换行观感，也不会因为 <p> 的间距显得"空荡荡"）。
+    const _hasMd = /(^|\n)\s*(#{1,4}\s|[-*•]\s|\d+[.、)]\s|>\s|\|)/.test(raw)
+      || /\*\*[^*\n]+\*\*/.test(raw) || /`[^`\n]+`/.test(raw);
+    if (!_hasMd && raw.length < 400) {
+      return esc.replace(/\r?\n/g, "<br>");
+    }
     // 行内：`code` / **粗** / *斜* / [文字](链接)
     const inline = (s) => s
       .replace(/`([^`\n]{1,120})`/g, '<code class="md-code">$1</code>')
@@ -2702,6 +2710,12 @@
     thinkHdr.className = "bubble think-hdr";
     const thinkStatus = document.createElement("span");
     thinkStatus.textContent = "🧠 思考中…";
+    // 本地 qwen3-vl 不是推理模型，永远不会有思考 → 别让「思考中…」一直挂着误导人
+    setTimeout(() => {
+      if (thinking.length === 0 && String(_prov || "").indexOf("deepseek") !== 0) {
+        thinkStatus.textContent = "🧠 本地模型不输出思考链";
+      }
+    }, 1800);
     const thinkArrow = document.createElement("span");
     thinkArrow.className = "arrow";
     thinkArrow.textContent = "▸";
@@ -2752,6 +2766,51 @@
     let sourcesData = null;
 
     let thinking = "", answer = "";
+    // ★ 2026-11-08：流式时也**边到边渲染 Markdown**（节流 ~120ms）。
+    //   以前是 textContent 原样贴，用户看到的是「**PPT**」「### 」这种原始符号，
+    //   观感像"没有格式化 / 不是流式"。现在每 120ms 重渲染一次，收尾再定稿。
+    let _paintAt = 0, _paintTimer = null;
+    // ⚠️ 2026-11-08：用户报「小蓝条一直一闪一闪的」= 流没结束但也没内容。
+    //   后端可能卡在工具里（比如等一个没人回答的确认框，最长 15 分钟），
+    //   这段时间界面看起来"活着"其实什么都没发生。这里加个看门狗：
+    //   90 秒没有任何事件 → 移掉光标 + 明确告诉用户，别让人干等。
+    let _lastEventAt = Date.now();
+    const _t0 = Date.now();
+    const _watchdog = setInterval(() => {
+      if (!streaming) { clearInterval(_watchdog); return; }
+      // 硬上限：5 分钟还没结束 → 直接中止并保留已生成内容
+      if (Date.now() - _t0 > 300000) {
+        clearInterval(_watchdog);
+        try { abortCtl.abort(); } catch (e) { /* ignore */ }
+        answerBubble.querySelectorAll(".stream-cursor").forEach((n) => n.remove());
+        showToast("这轮超过 5 分钟还没结束，已自动中断并保留已生成的部分", "warn");
+        return;
+      }
+      if (Date.now() - _lastEventAt < 90000) return;
+      clearInterval(_watchdog);
+      answerBubble.querySelectorAll(".stream-cursor").forEach((n) => n.remove());
+      showToast("已经 90 秒没有任何新内容 —— 模型可能卡在某个工具里了，"
+                + "可以点「■ 终止」重来", "warn");
+      if (thinkStatus && thinkStatus.textContent.indexOf("思考中") === 0) {
+        thinkStatus.textContent = "🧠 卡住了（90 秒无响应）";
+      }
+    }, 5000);
+    const paintAnswer = (force) => {
+      const now = Date.now();
+      if (!force && now - _paintAt < 120) {
+        if (!_paintTimer) {
+          _paintTimer = setTimeout(() => {
+            _paintTimer = null;
+            if (!streaming) return;      // 已经收尾就别再动
+            paintAnswer(true);
+          }, 130);
+        }
+        return;
+      }
+      _paintAt = now;
+      answerBubble.innerHTML = mdToHtml(stripToolLeak(answer))
+        + '<span class="stream-cursor"></span>';
+    };
     // ---------- 思考过程平滑逐字播放 ----------
     // Ollama 对 qwen3-vl 等推理模型常把 thinking 一次性整体返回（非逐 token），
     // 为避免"和回答一起弹出来"，这里把到达的增量拆成小块逐步渲染，
@@ -2916,7 +2975,10 @@
       // ★ 长代码**默认折叠**（用户要求：不要把整段代码摊在聊天里）
       //   短代码（≤12 行且 ≤700 字）照旧直接显示，免得为三五行还要点一下。
       const _lines = current.split("\n").length;
-      let _collapsed = (_lines > 12 || current.length > 700);
+      // ★ 2026-11-08 用户要求：「默认收起，我自己决定展开还是收缩」。
+      //   原来是 >12 行才折，结果模型一次产出好几段短代码，每段都摊开，
+      //   屏幕瞬间被占满。现在**一律默认收起**，点一下才展开。
+      let _collapsed = true;
       const _tg = document.createElement("button");
       _tg.className = "btn sm ghost code-toggle";
       _tg.type = "button";
@@ -3531,7 +3593,7 @@
               answer += obj.message.content;
               // 逐字流式时也过一遍闸：后端会先把"可能是工具调用壳子"的尾巴扣住，
               // 万一有变体漏过来，这里显示时也不会闪出一坨裸 JSON（`answer` 存的仍是原文）。
-              answerBubble.textContent = stripToolLeak(answer) + "▌";
+              paintAnswer(false);
             }
           }
           if (obj.tool_start) addToolChip(obj.tool_start.name);
@@ -3588,7 +3650,8 @@
           //    这段时间 Ollama 一个字都不吐，不提示的话界面上就是"完全没反应"。
           //    只改状态栏文案，不动回答气泡 —— 真正的思考/正文到了会覆盖它。
           if (obj.status) { _backendStatus = obj.status; thinkStatus.textContent = obj.status; }
-          if (obj.done) break;
+          if (obj.done || obj.__end) break;
+          _lastEventAt = Date.now();
         }
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
