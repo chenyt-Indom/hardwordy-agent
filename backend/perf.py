@@ -24,7 +24,7 @@ PROFILES = {
     "ultra":  {"name": "极高", "max_tokens": 65536, "num_ctx": 131072, "effort": "high"},
 }
 
-MIN_CTX, MAX_CTX = 4096, 131072       # 无极调节范围
+MIN_CTX, MAX_CTX = 4096, 1048576      # 无极调节范围（云模型 1M 也能开到）
 MIN_OUT = 8192                        # 输出下限（不允许低于这个，用户明确要求）
 
 
@@ -65,13 +65,45 @@ def detect_model() -> dict:
                 try:
                     n = int(v)
                     if n > 4096:
-                        out["max_ctx"] = min(n, 262144)
+                        out["max_ctx"] = min(n, MAX_CTX)
                         out["ok"] = True
                 except Exception:
                     pass
                 break
     except Exception:
         pass
+    return out
+
+
+def detect_cloud(key: str) -> dict:
+    """**读取云模型的真实参数**（用户要求：自动读型号与详细信息）。
+
+    DeepSeek 的 /models 会直接返回能力清单，实测：
+      deepseek-flash → context_window 1048576（1M）、max_output_tokens 393216、
+                       input_modalities ["text","image"]、effort low/high/max
+    之前只探测本地 Ollama，云端一律按 128k 处理 —— 等于把 1M 的能力锁死了。
+    """
+    out = {"ok": False, "models": []}
+    if not key:
+        return out
+    try:
+        import json as _j
+        import urllib.request as _u
+        req = _u.Request("https://api.deepseek.com/models",
+                         headers={"Authorization": "Bearer " + key})
+        with _u.urlopen(req, timeout=10) as r:
+            d = _j.loads(r.read().decode("utf-8", "ignore"))
+        for m in (d.get("data") or []):
+            out["models"].append({
+                "id": m.get("id"), "name": m.get("name") or m.get("id"),
+                "context_window": m.get("context_window"),
+                "max_output_tokens": m.get("max_output_tokens"),
+                "modalities": m.get("input_modalities") or [],
+                "effort": (m.get("effort") or {}).get("supported_levels") or [],
+            })
+        out["ok"] = bool(out["models"])
+    except Exception as e:                            # noqa: BLE001
+        out["error"] = "%s: %s" % (type(e).__name__, e)
     return out
 
 

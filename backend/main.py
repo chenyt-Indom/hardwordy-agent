@@ -5753,6 +5753,12 @@ def fullaccess_set(body: dict):
                     if on else "已关闭完全访问：只能改 frontend/ 与新建文件")}
 
 
+@app.post("/api/perf/cloud")
+def perf_cloud(x_deepseek_key: str = Header(default="")):
+    """用浏览器里的 Key 读云模型真实参数（型号/上下文/输出/模态/推理档）。"""
+    return perf.detect_cloud(x_deepseek_key)
+
+
 @app.get("/api/perf")
 def perf_get():
     return {"ok": True, **perf.get()}

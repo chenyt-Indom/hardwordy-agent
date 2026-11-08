@@ -4472,7 +4472,7 @@
     bar.insertBefore(sel, anchor);
     bar.insertBefore(ctxBtn, anchor);
 
-    let last = null, panel = null;
+    let last = null, panel = null, cloudCap = null;   // 云模型的真实能力（1M/393k）
     const show = (v, override) => v + (override > 0 ? "（自定义）" : "（跟随档位）");
     const paint = (d) => {
       last = d;
@@ -4523,7 +4523,29 @@
       panel.querySelector("#perfCtxFollow").onclick = () => post({ num_ctx: 0 }, "上下文 → 跟随档位");
       panel.querySelector("#perfCtxClose").onclick = () => { panel.remove(); panel = null; };
     };
-    (async () => { try { paint(await (await fetch("/api/perf")).json()); } catch (e) { /* 拿不到就保留占位文字 */ } })();
+    (async () => {
+      try { paint(await (await fetch("/api/perf")).json()); } catch (e) { /* 占位 */ }
+      // ★ 再读一次**云模型**的真实参数（用户：V4.1 是 1M，别写死 128k）
+      try {
+        const key = localStorage.getItem("ds_api_key") || "";
+        if (!key) return;
+        const c = await (await fetch("/api/perf/cloud", {
+          method: "POST", headers: { "X-DeepSeek-Key": key } })).json();
+        if (!c.ok || !(c.models || []).length) return;
+        const m = c.models.find((x) => x.id === "deepseek-flash") || c.models[0];
+        cloudCap = m;
+        if (last) {
+          last.max_ctx = Math.max(Number(last.max_ctx || 0), Number(m.context_window || 0));
+          last.max_out = Number(m.max_output_tokens || 0);
+          last.cloud = m;
+          ctxBtn.title = "云模型 " + (m.name || m.id) + "：上下文 "
+            + Math.round((m.context_window || 0) / 1024) + "k、输出上限 "
+            + Math.round((m.max_output_tokens || 0) / 1024) + "k（已自动读取）"
+            + (m.modalities && m.modalities.indexOf("image") >= 0 ? " · 支持图片输入" : "");
+          paint(last);
+        }
+      } catch (e) { /* 读不到就按本地能力 */ }
+    })();
   })();
 
   // ================== 顶栏：完全访问开关（2026-11-08）==================
