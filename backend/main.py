@@ -5366,10 +5366,12 @@ async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="
     """DeepSeek 流式对话。输出格式与 /api/chat 完全一致（NDJSON 行），
     前端渲染逻辑不用改一行。
 
-    支持：deepseek-chat（通用）/ deepseek-reasoner（带思维链）
+    支持：deepseek-flash（V4.1 Flash，默认不思考）
+          / deepseek-flash-think（同模型开 thinking，effort=medium）
+          / deepseek-v4-pro（V4 Pro，thinking + effort=high）
     不支持：本地工具（地图 / 工作区 / 画图）—— DeepSeek 是纯对话 API
     """
-    model = req.model or "deepseek-chat"
+    model = req.model or "deepseek-flash"
     messages = req.messages or []
 
     # 只保留 role/content：Ollama 的额外字段（images 等）DeepSeek 不认

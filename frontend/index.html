@@ -236,8 +236,9 @@
            provider，否则不知道该往哪个后端发。默认仍是「自动（本地）」。 -->
       <select id="modelSelect" class="pill pill-select" title="选择本轮对话用哪个模型">
         <option value="auto">🖥 本地 30B（自动）</option>
-        <option value="deepseek-chat">☁️ DeepSeek Chat</option>
-        <option value="deepseek-reasoner">🧠 DeepSeek Reasoner</option>
+        <option value="deepseek-flash">⚡ DeepSeek V4.1 Flash</option>
+        <option value="deepseek-flash-think">🧠 DeepSeek V4.1（思考）</option>
+        <option value="deepseek-v4-pro">🔮 DeepSeek V4 Pro</option>
       </select>
       <button type="button" class="pill pill-btn" id="dsKeyBtn"
               title="设置 DeepSeek API Key（只存本标签页 sessionStorage，关掉浏览器即清空；不写磁盘、不进日志）">🔑 DeepSeek</button>
