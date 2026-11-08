@@ -3204,16 +3204,44 @@
     };
     _armStall();
     try {
-      const resp = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+      // ── 模型路由（2026-11-08 新增）─────────────────────────────
+      // 本地 30B 走 /api/chat（带工具/记忆/RAG），DeepSeek 走 /api/chat/deepseek
+      // （纯对话，无工具）。Key 放请求头，不进 body、不进 URL。
+      const _msEl = document.querySelector("#modelSelect");
+      const _prov = _msEl ? _msEl.value : "auto";
+      const _isDS = _prov.indexOf("deepseek") === 0;
+      const _dsKey = _isDS ? (sessionStorage.getItem("ds_api_key") || "") : "";
+      if (_isDS && !_dsKey) {
+        showToast("请先点右上角 🔑 DeepSeek 填入 API Key", "warn");
+        streaming = false;
+        return;
+      }
+      const _chatUrl = _isDS ? "/api/chat/deepseek" : "/api/chat";
+      const _hdrs = { "Content-Type": "application/json" };
+      if (_isDS) _hdrs["X-DeepSeek-Key"] = _dsKey;
+
+      const _payload = {
+        messages: history, images_b64: mediaB64,
+        // ★ 涂抹选区（若有）：后端据此走"局部重绘"，只改涂过的地方
+        mask_b64: selMask ? [selMask] : null,
+        docs: (docPayload && docPayload.length) ? docPayload : null,
+        // 在开发台里说话 = 就是在写代码 → 后端**直接接入编程模型**，
+        // 不再靠关键词猜意图（用户："自动接入编程的模型"）
+        studio: !!(window.Studio && window.Studio.opened),
+        stream: true, session_id: sessionId,
+      };
+      if (_isDS) {
+        // DeepSeek 不认图片/选区/文档/工具：一律去掉，只发纯文本多轮
+        _payload.model = _prov;
+        _payload.images_b64 = null;
+        _payload.mask_b64 = null;
+        _payload.docs = null;
+        _payload.studio = false;
+      }
+
+      const resp = await fetch(_chatUrl, { method: "POST", headers: _hdrs,
         signal: abortCtl.signal,
-        body: JSON.stringify({ messages: history, images_b64: mediaB64,
-                               // ★ 涂抹选区（若有）：后端据此走"局部重绘"，只改涂过的地方
-                               mask_b64: selMask ? [selMask] : null,
-                               docs: (docPayload && docPayload.length) ? docPayload : null,
-                               // 在开发台里说话 = 就是在写代码 → 后端**直接接入编程模型**，
-                               // 不再靠关键词猜意图（用户："自动接入编程的模型"）
-                               studio: !!(window.Studio && window.Studio.opened),
-                               stream: true, session_id: sessionId }) });
+        body: JSON.stringify(_payload) });
       if (!resp.ok) {
         const e = await resp.json();
         throw new Error(e.detail || resp.statusText);
@@ -3814,6 +3842,323 @@
       if (!deviceSwitching) menu.hidden = true;
     });
     menu.addEventListener("click", (ev) => ev.stopPropagation());
+  })();
+
+  // ================== DeepSeek 接入（2026-11-08）==================
+  // 模型选择 + API Key 管理。
+  // ⚠️ Key 只存 sessionStorage：关掉标签页即清空，不写磁盘、不进日志、不进 URL。
+  (() => {
+    const sel = document.querySelector("#modelSelect");
+    const btn = document.querySelector("#dsKeyBtn");
+    if (!sel || !btn) return;
+
+    const saved = sessionStorage.getItem("chat_provider");
+    if (saved) sel.value = saved;
+
+    sel.addEventListener("change", () => {
+      sessionStorage.setItem("chat_provider", sel.value);
+      const isDS = sel.value.indexOf("deepseek") === 0;
+      if (isDS && !sessionStorage.getItem("ds_api_key")) {
+        showToast("已切到 DeepSeek，请点 🔑 填入 API Key", "warn");
+      } else {
+        showToast("本轮使用：" + sel.options[sel.selectedIndex].text, "ok");
+      }
+    });
+
+    btn.addEventListener("click", () => {
+      const old = sessionStorage.getItem("ds_api_key") || "";
+      const mask = document.createElement("div");
+      mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:center;justify-content:center";
+      mask.innerHTML = [
+        '<div style="background:#1e1e22;color:#e8e8ea;border-radius:12px;padding:22px;width:min(480px,92vw);box-shadow:0 20px 60px rgba(0,0,0,.5)">',
+        '  <h3 style="margin:0 0 6px;font-size:16px">🔑 DeepSeek API Key</h3>',
+        '  <p style="margin:0 0 14px;font-size:12.5px;line-height:1.6;color:#9a9aa2">',
+        '    只保存在<b>本标签页</b>（sessionStorage），关掉浏览器即清空。<br>不写磁盘文件、不写日志、不进 URL。',
+        '  </p>',
+        '  <input id="dsKeyIn" type="password" placeholder="sk-..." style="width:100%;box-sizing:border-box;padding:9px 11px;border-radius:8px;border:1px solid #3a3a42;background:#141416;color:#e8e8ea;font-size:13px;font-family:monospace">',
+        '  <div style="display:flex;gap:14px;margin:12px 0 4px;font-size:12.5px;flex-wrap:wrap">',
+        '    <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener" style="color:#5aa9ff">创建 Key</a>',
+        '    <a href="https://platform.deepseek.com/top_up" target="_blank" rel="noopener" style="color:#5aa9ff">充值</a>',
+        '    <a href="https://platform.deepseek.com/usage" target="_blank" rel="noopener" style="color:#5aa9ff">查余额/用量</a>',
+        '    <a href="#" id="dsKeyShow" style="color:#9a9aa2">显示</a>',
+        '  </div>',
+        '  <div id="dsKeyMsg" style="font-size:12.5px;min-height:18px;color:#f0b34a"></div>',
+        '  <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px">',
+        '    <button id="dsKeyCancel" style="padding:7px 14px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#c8c8d0;cursor:pointer">取消</button>',
+        '    <button id="dsKeyClear" style="padding:7px 14px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#e06c6c;cursor:pointer">清除</button>',
+        '    <button id="dsKeySave" style="padding:7px 16px;border-radius:8px;border:none;background:#3b82f6;color:#fff;cursor:pointer;font-weight:600">保存并校验</button>',
+        '  </div>',
+        '</div>'
+      ].join("\n");
+      document.body.appendChild(mask);
+
+      const inp = mask.querySelector("#dsKeyIn");
+      const msg = mask.querySelector("#dsKeyMsg");
+      const close = () => mask.remove();
+      inp.value = old;
+      setTimeout(() => inp.focus(), 50);
+
+      mask.querySelector("#dsKeyShow").onclick = (e) => {
+        e.preventDefault();
+        inp.type = inp.type === "password" ? "text" : "password";
+        e.target.textContent = inp.type === "password" ? "显示" : "隐藏";
+      };
+      mask.querySelector("#dsKeyCancel").onclick = close;
+      mask.querySelector("#dsKeyClear").onclick = () => {
+        sessionStorage.removeItem("ds_api_key");
+        inp.value = "";
+        msg.style.color = "#7bd88f";
+        msg.textContent = "已清除本页保存的 Key";
+      };
+      mask.querySelector("#dsKeySave").onclick = async () => {
+        const v = inp.value.trim();
+        if (!v) { msg.style.color = "#e06c6c"; msg.textContent = "Key 不能为空"; return; }
+        msg.style.color = "#f0b34a";
+        msg.textContent = "正在校验…";
+        try {
+          const r = await fetch("/api/deepseek/check", {
+            method: "POST", headers: { "X-DeepSeek-Key": v } });
+          const d = await r.json();
+          if (d.ok) {
+            sessionStorage.setItem("ds_api_key", v);
+            msg.style.color = "#7bd88f";
+            msg.textContent = "✅ 可用" + (d.balance ? "，余额 " + d.balance + " " + d.currency : "");
+            setTimeout(close, 900);
+          } else {
+            msg.style.color = "#e06c6c";
+            msg.textContent = "❌ " + (d.msg || "校验失败");
+          }
+        } catch (e) {
+          msg.style.color = "#e06c6c";
+          msg.textContent = "❌ 校验请求失败：" + e.message;
+        }
+      };
+      mask.addEventListener("click", (e) => { if (e.target === mask) close(); });
+    });
+  })();
+
+  // ================== 模型下载管理（2026-11-08）==================
+  // 状态机：未下载 → [⬇ 下载] → 下载中（进度条 + 取消）→ 已完成（[🗑 删除]）
+  // 下载在**后端线程**里跑，前端每 500ms 轮询 /api/model/status。
+  // 为什么不用 SSE：下载可能几十分钟，长连接容易被代理掐断；轮询更稳。
+  (() => {
+    const box = document.querySelector("#modelDl");
+    const btnPull = document.querySelector("#btnModelPull");
+    const btnRemove = document.querySelector("#btnModelRemove");
+    const prog = document.querySelector("#dlProgress");
+    const fill = document.querySelector("#dlFill");
+    const pctEl = document.querySelector("#dlPct");
+    const spdEl = document.querySelector("#dlSpeed");
+    const etaEl = document.querySelector("#dlEta");
+    const btnCancel = document.querySelector("#btnDlCancel");
+    if (!box || !btnPull) return;
+
+    let pollTimer = null;
+    let installedSet = new Set();
+    let targetModel = "";
+
+    const fmtSize = (b) => {
+      if (!b) return "0 B";
+      const u = ["B", "KB", "MB", "GB"];
+      let i = 0, n = b;
+      while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+      return n.toFixed(i >= 2 ? 1 : 0) + " " + u[i];
+    };
+    const fmtEta = (s) => {
+      s = Number(s || 0);
+      if (s <= 0) return "—";
+      if (s < 60) return s + "s";
+      if (s < 3600) return Math.floor(s / 60) + "m" + (s % 60) + "s";
+      return Math.floor(s / 3600) + "h" + Math.floor((s % 3600) / 60) + "m";
+    };
+
+    async function loadTarget() {
+      try {
+        const r = await fetch("/api/config");
+        const d = await r.json();
+        const cfg = (d && d.config) || d || {};
+        targetModel = cfg.default_model || "qwen3-vl:30b";
+      } catch (e) {
+        targetModel = "qwen3-vl:30b";
+      }
+    }
+
+    async function refreshInstalled() {
+      try {
+        const r = await fetch("/api/model/installed");
+        const d = await r.json();
+        installedSet = new Set((d.models || []).map((m) => m.name));
+      } catch (e) {
+        installedSet = new Set();
+      }
+      renderDl();
+    }
+
+    let dlState = "idle";   // idle | pulling | verifying | done | error | cancelled
+
+    // 三态互斥渲染：下载中 / 已安装 / 未安装
+    // 用户要求（2026-11-08）：一切就绪时进度条必须收起，只留「卸载模型」。
+    // 之前只用 hidden 控制，但 .dl-btn 有 display:flex，会把 [hidden] 盖掉
+    // → 四个控件同时显示（截图里的 bug）。CSS 已加兜底，这里再严格互斥一次。
+    function renderDl() {
+      box.hidden = false;
+      box.title = "当前配置的默认模型：" + targetModel;
+      const has = installedSet.has(targetModel);
+      const busy = (dlState === "pulling" || dlState === "verifying");
+
+      if (busy) {
+        prog.hidden = false;
+        btnPull.hidden = true;
+        btnRemove.hidden = true;
+        return;
+      }
+
+      // 非下载态：进度条收起、取消按钮复位
+      // （修「正在断开…」永久卡住：以前 cancelled/error 分支不复位文字）
+      prog.hidden = true;
+      btnCancel.textContent = "取消";
+      btnCancel.disabled = false;
+
+      btnPull.hidden = has;        // 已装 → 不显示「下载」
+      btnRemove.hidden = !has;     // 未装 → 不显示「卸载/删除」
+    }
+
+    function startPoll() {
+      if (pollTimer) return;
+      pollTimer = setInterval(async () => {
+        try {
+          const r = await fetch("/api/model/status");
+          const d = await r.json();
+          applyStatus(d);
+        } catch (e) { /* 网络抖动，下一轮再试 */ }
+      }, 500);
+    }
+    function stopPoll() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    function applyStatus(d) {
+      const st = d.status || "idle";
+      // ⚠️ 先同步状态再渲染：render() 靠 dlState 判断该显示进度条还是按钮。
+      // 之前忘了这一步，导致 cancelled/error 后 render 仍按旧状态画，
+      // 界面上「正在断开…」「下载模型」「删除模型」同时挂着。
+      dlState = st;
+
+      if (st === "pulling" || st === "verifying") {
+        renderDl();                     // 显示进度条、收起两个按钮
+        const p = Number(d.percent || 0);
+        fill.style.width = p + "%";
+        pctEl.textContent = p.toFixed(1) + "%"
+          + (d.total ? "　" + fmtSize(d.completed) + " / " + fmtSize(d.total) : "");
+        spdEl.textContent = d.speed ? fmtSize(d.speed) + "/s" : "—";
+        etaEl.textContent = "剩余 " + fmtEta(d.eta);
+        btnCancel.textContent = st === "verifying" ? "校验中…" : "取消";
+        btnCancel.disabled = (st === "verifying");
+        return;
+      }
+
+      if (st === "done") {
+        stopPoll();
+        fill.style.width = "100%";
+        showToast("✅ 模型下载完成：" + (d.model || targetModel), "ok");
+        refreshInstalled();           // 内部 render() → 只剩「卸载模型」
+        if (typeof refreshHealth === "function") refreshHealth();
+        return;
+      }
+
+      if (st === "cancelled") {
+        stopPoll();
+        showToast("已取消（已下载部分保留，下次自动续传）", "warn");
+        refreshInstalled();           // 内部 render() → 取消按钮文字复位
+        return;
+      }
+
+      if (st === "error") {
+        stopPoll();
+        showToast("下载失败：" + (d.error || "未知错误"), "err");
+        refreshInstalled();
+        return;
+      }
+
+      // idle 或其他未知状态：收起进度条，按是否已安装决定显示哪个按钮
+      stopPoll();
+      renderDl();
+    }
+
+    btnPull.onclick = async () => {
+      btnPull.disabled = true;
+      try {
+        const r = await fetch("/api/model/pull", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: targetModel }),
+        });
+        const d = await r.json();
+        if (!d.ok) {
+          showToast(d.msg || "启动下载失败", "err");
+          btnPull.disabled = false;
+          return;
+        }
+        // 立刻切到「下载中」态，避免点完之后界面还停在旧状态（有一瞬空窗）
+        dlState = "pulling";
+        renderDl();
+        fill.style.width = "0%";
+        pctEl.textContent = "0%";
+        spdEl.textContent = "…";
+        etaEl.textContent = "计算中";
+        btnCancel.disabled = false;
+        btnCancel.textContent = "取消";
+        startPoll();
+      } catch (e) {
+        showToast("请求失败：" + e.message, "err");
+        btnPull.disabled = false;
+      }
+    };
+
+    btnCancel.onclick = async () => {
+      btnCancel.disabled = true;
+      btnCancel.textContent = "正在断开…";
+      try {
+        await fetch("/api/model/cancel", { method: "POST" });
+      } catch (e) { /* ignore */ }
+    };
+
+    btnRemove.onclick = async () => {
+      if (!confirm("确定删除模型 " + targetModel + " 吗？\n删除后需要重新下载（可能十几 GB）。")) return;
+      btnRemove.disabled = true;
+      try {
+        const r = await fetch("/api/model/remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: targetModel }),
+        });
+        const d = await r.json();
+        showToast(d.ok ? "已删除 " + targetModel : (d.msg || "删除失败"),
+                  d.ok ? "ok" : "err");
+        await refreshInstalled();
+        if (typeof refreshHealth === "function") refreshHealth();
+      } catch (e) {
+        showToast("删除请求失败：" + e.message, "err");
+      } finally {
+        btnRemove.disabled = false;
+      }
+    };
+
+    // 初始化：读默认模型 → 查已安装 → 若正在下载则接管进度
+    (async () => {
+      await loadTarget();
+      await refreshInstalled();
+      try {
+        const r = await fetch("/api/model/status");
+        const d = await r.json();
+        if (d.status === "pulling" || d.status === "verifying") {
+          prog.hidden = false;
+          btnPull.hidden = true;
+          btnRemove.hidden = true;
+          startPoll();
+        }
+      } catch (e) { /* ignore */ }
+    })();
   })();
 
   refreshHealth();

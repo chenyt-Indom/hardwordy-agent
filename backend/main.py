@@ -6,7 +6,7 @@
     py -3 run.py
 """
 from fastapi import (FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect,
-                     Response, File)
+                     Response, File, Header)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, FileResponse, PlainTextResponse
@@ -32,7 +32,8 @@ import asyncio
 import datetime
 import logging
 import threading
-from . import (config, ollama_client, memory, kb, file_tools, video, web_tools,
+from . import (config, ollama_client, deepseek_client, model_manager, memory, kb,
+               file_tools, video, web_tools,
                t2i, tools, voice, sessions, image_library, doclib, docx_write,
                workspace)
 
@@ -1604,6 +1605,47 @@ def pull_model(body: dict):
         return {"ok": True, "message": f"模型 {name} 下载完成"}
     except ollama_client.OllamaError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+# ---------- 模型下载管理（后台线程 + 进度 + 取消 + 删除）----------
+# 和上面的 /api/pull 区别：/api/pull 是**阻塞式**（下载完才返回，前端 60 秒就超时），
+# 这里改成后台线程 + 轮询 /api/model/status：有进度、能取消、能删。
+@app.post("/api/model/pull")
+def model_pull(body: dict):
+    """启动后台下载。立即返回，进度查 /api/model/status。"""
+    name = (body or {}).get("model") or config.load_config().get("default_model") or ""
+    if not name:
+        return {"ok": False, "msg": "缺少 model 参数"}
+    return model_manager.pull(name)
+
+
+@app.get("/api/model/status")
+def model_status():
+    """当前下载进度（前端每 500ms 轮询）。"""
+    return {"ok": True, **model_manager.get_state()}
+
+
+@app.post("/api/model/cancel")
+def model_cancel():
+    """取消下载。已下载的 layer 会保留，下次 pull 断点续传。"""
+    ok = model_manager.cancel()
+    return {"ok": ok,
+            "msg": "已请求取消，正在断开…" if ok else "当前没有进行中的下载"}
+
+
+@app.post("/api/model/remove")
+def model_remove(body: dict):
+    """删除已下载的模型（释放磁盘）。"""
+    name = (body or {}).get("model") or ""
+    if not name:
+        return {"ok": False, "msg": "缺少 model 参数"}
+    return model_manager.remove(name)
+
+
+@app.get("/api/model/installed")
+def model_installed():
+    """已安装模型清单（含体积）。前端据此判断「未下载 / 已安装」。"""
+    return {"ok": True, "models": model_manager.installed()}
 
 
 # ---------- 对话 ----------
@@ -5288,6 +5330,83 @@ async def chat(req: ChatRequest):
 
     # 用 _track_chat 包一层：登记"有聊天在跑"，后台记忆提炼会主动让路（见 _chat_busy）
     return StreamingResponse(_track_chat(gen()), media_type="application/x-ndjson")
+
+
+# ================== DeepSeek 纯对话（流式）==================
+# 为什么单独开一路，不塞进 /api/chat：
+#   /api/chat 里全是工具循环 / 记忆 / RAG / 图片压缩，DeepSeek 是纯文本对话 API，
+#   没有函数调用能力接本地工具，硬走进去要加一堆 if 分支，容易碰坏原有逻辑。
+#
+# ⚠️ Key 安全（改这里之前先读）：
+#   · 从前端 X-DeepSeek-Key 请求头取，**不进 URL、不进 body**
+#   · 不写 config.json、不写日志文件、不留全局缓存
+#   · 所有错误信息过 deepseek_client.scrub()，把 sk-xxx 打码成 sk-***
+@app.get("/api/deepseek/models")
+def deepseek_models():
+    """前端下拉用：可选模型 + 官方链接（充值 / 建 Key / 查用量）。"""
+    return {
+        "ok": True,
+        "models": deepseek_client.list_models(),
+        "links": {
+            "topup": "https://platform.deepseek.com/top_up",
+            "keys": "https://platform.deepseek.com/api_keys",
+            "usage": "https://platform.deepseek.com/usage",
+        },
+    }
+
+
+@app.post("/api/deepseek/check")
+def deepseek_check(x_deepseek_key: str = Header(default="")):
+    """校验 Key 并顺便查余额（GET /user/balance）。Key 只在本次请求用。"""
+    return deepseek_client.check_key(x_deepseek_key)
+
+
+@app.post("/api/chat/deepseek")
+async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="")):
+    """DeepSeek 流式对话。输出格式与 /api/chat 完全一致（NDJSON 行），
+    前端渲染逻辑不用改一行。
+
+    支持：deepseek-chat（通用）/ deepseek-reasoner（带思维链）
+    不支持：本地工具（地图 / 工作区 / 画图）—— DeepSeek 是纯对话 API
+    """
+    model = req.model or "deepseek-chat"
+    messages = req.messages or []
+
+    # 只保留 role/content：Ollama 的额外字段（images 等）DeepSeek 不认
+    clean: list[dict] = []
+    for m in messages:
+        content = m.get("content")
+        if content is None:
+            continue
+        clean.append({"role": str(m.get("role") or "user"),
+                      "content": str(content)})
+
+    cfg = config.load_config()
+    temp = float(cfg.get("temperature", 0.7) or 0.7)
+
+    async def gen():
+        if not x_deepseek_key:
+            yield json.dumps({"error": "未填写 DeepSeek API Key（在右上角设置里填）"}) + "\n"
+            yield json.dumps({"__end": True}) + "\n"
+            return
+        try:
+            yield json.dumps({"note": f"正在调用 {model}…"}) + "\n"
+            for kind, text in deepseek_client.chat_stream(
+                    clean, model, x_deepseek_key,
+                    temperature=min(1.3, max(0.0, temp))):
+                if kind == "thinking":
+                    yield json.dumps({"message": {"thinking": text}}) + "\n"
+                else:
+                    yield json.dumps({"message": {"content": text}}) + "\n"
+        except deepseek_client.DeepSeekError as e:
+            yield json.dumps({"error": deepseek_client.scrub(e)}) + "\n"
+        except Exception as e:                       # noqa: BLE001
+            yield json.dumps({"error": deepseek_client.scrub(
+                f"未知错误 {type(e).__name__}: {e}")}) + "\n"
+        finally:
+            yield json.dumps({"__end": True}) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 @app.post("/api/tool/confirm")

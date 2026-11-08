@@ -1431,3 +1431,85 @@ button.pill-btn.bad:hover { border-color: #8a463c; }
 .mask-editor .me-bar .sp { flex: 1 1 auto; }
 .mask-editor .me-bar .btn { border-radius: 8px; }
 .mask-editor .me-count { opacity: .7; }
+
+/* ==================== 模型下载控件（2026-11-08）==================== */
+.model-dl {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dl-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  background: rgba(90, 150, 255, .16);
+  color: #cfe3ff;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.dl-btn:hover {
+  background: rgba(90, 150, 255, .28);
+  border-color: rgba(90, 150, 255, .5);
+}
+.dl-btn:disabled { opacity: .5; cursor: not-allowed; }
+.dl-btn.dl-danger {
+  background: rgba(255, 90, 90, .12);
+  color: #ffb3b3;
+  border-color: rgba(255, 90, 90, .28);
+}
+.dl-btn.dl-danger:hover {
+  background: rgba(255, 90, 90, .22);
+  border-color: rgba(255, 90, 90, .5);
+}
+
+.dl-progress { display: flex; flex-direction: column; gap: 6px; }
+.dl-bar {
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .1);
+  overflow: hidden;
+}
+.dl-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4f8cff, #7cc2ff);
+  transition: width .3s ease;
+}
+.dl-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: #9a9aa2;
+  font-variant-numeric: tabular-nums;
+}
+.dl-acts { display: flex; gap: 6px; }
+.dl-mini {
+  flex: 1;
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  background: transparent;
+  color: #c8c8d0;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dl-mini:hover { background: rgba(255, 255, 255, .08); }
+
+/* ⚠️ 必须的兜底（2026-11-08）：
+   .model-dl / .dl-btn / .dl-progress 都设了 display，会盖掉浏览器
+   默认的 [hidden] { display: none }，导致 hidden 属性完全失效
+   —— 症状就是"下载模型/进度条/取消/删除模型 全部同时显示"。
+   项目里 .code-stdin / .studio / .st-diff-mask 都加过同样的兜底。 */
+.model-dl[hidden],
+.model-dl .dl-btn[hidden],
+.model-dl .dl-progress[hidden] {
+  display: none !important;
+}

@@ -6,7 +6,8 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)
-![Ollama](https://img.shields.io/badge/Ollama-Qwen3--VL--Think--30B-000000)
+![Ollama](https://img.shields.io/badge/Ollama-Qwen3--VL-30B-000000)
+![DeepSeek](https://img.shields.io/badge/DeepSeek-API%20可选-4D6BFE)
 ![License](https://img.shields.io/badge/License-Apache_2.0-2b6cb0)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
 
@@ -254,6 +255,65 @@ budget = ctx_limit - reserve_out - overhead - search_reserve - 512
 
 ---
 
+## 双通道模型接入（本地 + 云端）
+
+> 2026-11 新增：**同一套界面既能跑本地 30B，也能调 DeepSeek API**，前端下拉一键切换。
+
+### 本地通道（默认）
+
+- Ollama 本地推理，**数据不出机器**
+- 默认 `qwen3-vl:30b`（18.2 GB，Q4_K_M）；显存不足时自动 offload（12GB 卡约 5–10 tok/s）
+- 备选 `qwen3-vl:8b`（5.8 GB，30–50 tok/s）—— 显存够就能全量驻留
+
+**模型下载管理**（状态卡片底部，三态互斥）
+
+| 状态 | 界面 |
+|------|------|
+| 未安装 | 只显示 `⬇ 下载模型` |
+| 下载中 | 只显示进度条（百分比 / 已下载 / 速度 / 剩余）+ `取消` |
+| 已安装 | 只显示 `🗑 删除模型` |
+
+- **后台线程下载**：不阻塞界面，浏览器不会 60 秒超时断开
+- **断点续传**：取消后已下载的分片保留在 `ollama-models/blobs`，下次自动接着下
+- **进度算法**：按 layer 累加（Ollama 的 `status` 是 `"pulling <digest>"`，不是 `"downloading"`，踩过这个坑）
+
+### DeepSeek 通道
+
+- 走 `https://api.deepseek.com`，**纯对话**（不支持本地工具：地图 / 工作区 / 画图）
+- 支持 `deepseek-chat`（通用，快） / `deepseek-reasoner`（思维链，推理强）
+- 右上角 **🔑 DeepSeek** 配置 Key，弹窗内直接给三个官方链接（创建 Key / 充值 / 查余额）
+
+**Key 安全设计**
+
+| 环节 | 做法 |
+|------|------|
+| 存储 | `sessionStorage`（关标签页即清空），**不写磁盘** |
+| 传输 | `X-DeepSeek-Key` 请求头，**不进 URL / body / 日志** |
+| 后端 | 只在请求作用域内使用，不写 `config.json`、不写日志文件 |
+| 错误脱敏 | 所有错误信息过 `scrub()`，`sk-xxx` 一律替换成 `sk-***` |
+| 输入框 | `type=password`，默认不显示明文，可点「显示」临时查看 |
+
+**为什么单开一路 `/api/chat/deepseek`**
+
+`/api/chat` 里是 Ollama 专用的工具循环 / 分层记忆 / RAG / 图片压缩，
+DeepSeek 是 OpenAI 兼容的纯文本协议。硬塞进去要加一堆 `if`，容易碰坏原有逻辑。
+两路独立、互不干扰，输出格式完全一致（NDJSON 行），前端渲染逻辑零改动。
+
+### 相关接口
+
+```
+POST /api/chat/deepseek      流式对话（NDJSON，格式与 /api/chat 一致）
+GET  /api/deepseek/models    可选模型清单 + 官方链接
+POST /api/deepseek/check     校验 Key 并查余额（GET /user/balance）
+POST /api/model/pull         启动后台下载（立即返回，不阻塞）
+GET  /api/model/status       查询下载进度（前端 500ms 轮询）
+POST /api/model/cancel       取消下载（保留已下载分片）
+POST /api/model/remove       删除已下载模型
+GET  /api/model/installed    已安装模型清单（含体积）
+```
+
+---
+
 ## 功能清单
 
 <details>
@@ -261,6 +321,9 @@ budget = ctx_limit - reserve_out - overhead - search_reserve - 512
 
 **对话**
 - 流式输出、思考过程可见、随时「终止」不占显卡
+- **双通道切换**：本地 30B / 8B（Ollama）与 DeepSeek API 前端下拉一键切换；
+  Key 只存 sessionStorage，不落盘、不进日志、不进 URL
+- **模型下载管理**：进度条（百分比 / 速度 / 剩余）、取消续传、一键删除
 - 模型可自主规划并调用工具，工具执行过程以卡片形式内联展示
 - **随时「终止」**：发送键旁边的停止按钮，点了模型真的会停下
 
