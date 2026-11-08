@@ -5363,16 +5363,27 @@ def deepseek_check(x_deepseek_key: str = Header(default="")):
 
 @app.post("/api/chat/deepseek")
 async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="")):
-    """DeepSeek 流式对话。输出格式与 /api/chat 完全一致（NDJSON 行），
-    前端渲染逻辑不用改一行。
+    """DeepSeek 流式对话（**带工具调用**）。输出格式与 /api/chat 一致。
 
-    支持：deepseek-flash（V4.1 Flash，默认不思考）
-          / deepseek-flash-think（同模型开 thinking，effort=medium）
-          / deepseek-v4-pro（V4 Pro，thinking + effort=high）
-    不支持：本地工具（地图 / 工作区 / 画图）—— DeepSeek 是纯对话 API
+    2026-11-08 补：原来是纯对话，用户反馈「接入 API 的模型无法调度其他工具」。
+    DeepSeek 官方 API 支持 function calling（OpenAI 兼容协议），这里补上完整循环：
+
+        发请求(带 tools) → 模型返回 tool_calls → 本地执行 → 结果回填 → 继续
+        直到模型不再调工具，最多 8 轮。
+
+    为什么用「独立线程 + queue」而不是直接 async：
+        tools.dispatch 内部全是阻塞逻辑（网络/文件/推理），
+        在 async 生成器里直接调会占住事件循环，把流式输出又憋成"一次性返回"。
+        所以整条同步生成器跑在 worker 线程里，增量通过 queue 传回。
+        —— 和主通道 /api/chat 的做法一致（那边用 asyncio.to_thread 逐个工具）。
+
+    支持模型：deepseek-flash（V4.1 Flash，默认不思考）
+              / deepseek-flash-think（同模型开 thinking，effort=medium）
+              / deepseek-v4-pro（V4 Pro，thinking + effort=high）
     """
     model = req.model or "deepseek-flash"
     messages = req.messages or []
+    session = req.session_id or ""
 
     # 只保留 role/content：Ollama 的额外字段（images 等）DeepSeek 不认
     clean: list[dict] = []
@@ -5383,30 +5394,100 @@ async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="
         clean.append({"role": str(m.get("role") or "user"),
                       "content": str(content)})
 
+    last_user = next((str(m.get("content") or "") for m in reversed(clean)
+                      if m.get("role") == "user"), "")
+
     cfg = config.load_config()
     temp = float(cfg.get("temperature", 0.7) or 0.7)
 
+    # DeepSeek 用精简工具集（压到 ~18KB，绕开 EdgeOne 对 30KB+ POST 的拦截）
+    tool_schemas = _ds_tools(cfg)
+    # 复用主通道的系统提示（工具规则 / 记忆 / 时间指引都在里面）
+    sys_prompt = _SystemPrompt.build(last_user, session)
+
+    loop = asyncio.get_running_loop()
+
     async def gen():
         if not x_deepseek_key:
-            yield json.dumps({"error": "未填写 DeepSeek API Key（在右上角设置里填）"}) + "\n"
+            yield json.dumps({"error": "未填写 DeepSeek API Key（点右上角 🔑 填入）"}) + "\n"
             yield json.dumps({"__end": True}) + "\n"
             return
-        try:
-            yield json.dumps({"note": f"正在调用 {model}…"}) + "\n"
-            for kind, text in deepseek_client.chat_stream(
-                    clean, model, x_deepseek_key,
-                    temperature=min(1.3, max(0.0, temp))):
-                if kind == "thinking":
-                    yield json.dumps({"message": {"thinking": text}}) + "\n"
-                else:
-                    yield json.dumps({"message": {"content": text}}) + "\n"
-        except deepseek_client.DeepSeekError as e:
-            yield json.dumps({"error": deepseek_client.scrub(e)}) + "\n"
-        except Exception as e:                       # noqa: BLE001
-            yield json.dumps({"error": deepseek_client.scrub(
-                f"未知错误 {type(e).__name__}: {e}")}) + "\n"
-        finally:
-            yield json.dumps({"__end": True}) + "\n"
+
+        q: queue.Queue = queue.Queue()
+
+        class _UIAdapter:
+            """把 UI 事件直接塞进主队列 —— _make_ui_channel 只要求 put_nowait。
+
+            ⚠️ 为什么不用独立的 asyncio.Queue：
+                原来 gen 循环用 `wait_for(run_in_executor(None, q.get), timeout=0.1)`
+                轮询，每次超时都会**泄漏一个仍阻塞在 q.get 上的线程任务**。
+                多个任务竞争同一个队列 → 消息被某个已超时丢弃的任务吃掉。
+                实测症状：假 Key 调用只返回 "正在调用…"，401 报错完全看不到。
+                改成「单队列 + 阻塞读」后彻底消失。
+            """
+            __slots__ = ()
+
+            def put_nowait(self, msg):
+                q.put(("ui", msg))
+
+        def worker() -> None:
+            ui_events: list = []                 # tools.dispatch 往里追加 UI 事件
+            try:
+                ctx = {
+                    # DeepSeek 是纯文本协议：不给图片类字段
+                    "images": [], "last_image": None, "mask": None,
+                    "shown_images": [],
+                    "ask_mode": str(cfg.get("ask_mode") or "quick"),
+                    "session": session,
+                    # 问用户 / 危险操作确认 两条通道（复用主通道的实现）
+                    **_dict_ui_channel(_make_ui_channel(loop, _UIAdapter())),
+                }
+
+                def executor(name: str, args: dict) -> str:
+                    ui_events.clear()
+                    return tools.dispatch(name, args, ui_events, ctx)
+
+                for kind, val in deepseek_client.chat_stream_with_tools(
+                        clean, model, x_deepseek_key, tool_schemas, executor,
+                        temperature=min(1.3, max(0.0, temp)),
+                        system_prompt=sys_prompt):
+                    # 先把上一轮工具产生的 UI 事件排出去
+                    while ui_events:
+                        q.put(("ui", ui_events.pop(0)))
+                    q.put((kind, val))
+                while ui_events:
+                    q.put(("ui", ui_events.pop(0)))
+            except Exception as e:               # noqa: BLE001
+                q.put(("error", f"{type(e).__name__}: {e}"))
+            finally:
+                q.put(("__done__", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        yield json.dumps({"note": f"正在调用 {model}…"}) + "\n"
+
+        # 单队列顺序消费：内容 / 思考 / 工具事件 / UI 事件 / 错误 都走这里。
+        # 不用超时轮询（会泄漏 run_in_executor 任务、导致消息丢失），
+        # 直接阻塞读 —— worker 结束时一定会 put ("__done__", None) 把这里放出来。
+        while True:
+            kind, val = await loop.run_in_executor(None, q.get)
+            if kind == "__done__":
+                break
+            if kind == "content":
+                yield json.dumps({"message": {"content": val}}) + "\n"
+            elif kind == "thinking":
+                yield json.dumps({"message": {"thinking": val}}) + "\n"
+            elif kind == "tool_start":
+                # 前端据此弹工具卡片
+                yield json.dumps({"tool_start": {"name": val}}) + "\n"
+            elif kind == "tool_result":
+                pass          # 结果交给模型总结，前端不需要原文
+            elif kind == "ui":
+                yield json.dumps({"ui": val}) + "\n"
+            elif kind == "error":
+                yield json.dumps({"error": deepseek_client.scrub(val)}) + "\n"
+
+        yield json.dumps({"__end": True}) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
