@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from typing import Iterator
 
 import requests
@@ -27,6 +29,31 @@ import requests
 BASE = "https://api.deepseek.com"
 # (连接超时, 读取超时)：推理模型出首字可能要十几秒，读取给足 5 分钟
 TIMEOUT = (10, 300)
+
+# ⚠️⚠️ 必须彻底绕开系统代理（2026-11-08 实测踩坑，两轮才定位）
+#
+# 现象：同一个 Key 直连返回正常的 401 JSON，但经服务调用返回 "550 空响应"。
+# 原因有两层：
+#   ① requests 默认 trust_env=True，会读 HTTP_PROXY / HTTPS_PROXY 环境变量；
+#   ② **Windows 的 IE/系统代理设置（注册表）也会被 requests 读取** ——
+#      光 unset 环境变量没用，服务进程仍然走代理。
+# 只传 proxies={"http": None} 在部分版本不足以覆盖系统级代理。
+# 结论：Session + trust_env=False 才是彻底隔离（连 .netrc 也不读）。
+_sessions = threading.local()
+
+
+def _session() -> "requests.Session":
+    """每个线程复用一个「忽略一切环境代理」的 Session。"""
+    s = getattr(_sessions, "s", None)
+    if s is None:
+        s = requests.Session()
+        s.trust_env = False          # ← 关键：不读 env / 注册表 / .netrc
+        s.proxies = {"http": None, "https": None}
+        _sessions.s = s
+    return s
+
+
+NO_PROXY_MAP = {"http": None, "https": None}
 
 # 前端下拉用的模型清单
 # ⚠️ 2026-11-08 修正：DeepSeek API 的模型名**早就换了**。
@@ -124,7 +151,7 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
         body["reasoning_effort"] = reasoning_effort
 
     try:
-        resp = requests.post(
+        resp = _session().post(
             f"{BASE}/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -134,6 +161,7 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
             json=body,
             stream=True,
             timeout=TIMEOUT,
+            proxies=NO_PROXY_MAP,
         )
     except requests.RequestException as e:
         # 注意：异常消息里可能带 URL（不含 Key，但万一有 header 回显也要打码）
@@ -201,6 +229,232 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
             pass
 
 
+def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
+                           tools: list[dict], tool_executor,
+                           max_rounds: int = 8,
+                           temperature: float = 0.7, max_tokens: int = 4096,
+                           thinking: bool | None = None,
+                           reasoning_effort: str | None = None,
+                           system_prompt: str | None = None):
+    """**带工具调用**的流式对话（2026-11-08 新增）。
+
+    为什么需要它
+    ------------
+    DeepSeek 这条通道原来是纯对话，用户反馈「接入 API 的模型无法调度其他工具」。
+    官方 API 本身**支持 function calling**（OpenAI 兼容协议），只是我们没接。
+    这里补上完整的工具循环：
+
+        发请求(带 tools) → 模型返回 tool_calls → 本地执行 → 结果回填 → 再发请求
+        直到模型不再调工具（或达到 max_rounds）。
+
+    参数
+    ----
+    tools : OpenAI 格式的工具 schema 列表（tools.make_schemas() 的产物）
+    tool_executor : callable(name: str, args: dict) -> str
+                    由调用方注入（一般是 tools.dispatch 的包装），
+                    这样本模块不依赖 tools.py，方便单测。
+    max_rounds : 最多几轮工具调用（防死循环）。默认 8。
+
+    产出（元组，和 chat_stream 相比多了两种 kind）
+    ----
+    ("content",    text)           正文增量
+    ("thinking",   text)           思维链增量
+    ("tool_start", name)           开始执行某个工具（前端据此弹工具卡片）
+    ("tool_result", (name, ok, text))  工具执行完毕（ok=False 表示抛异常）
+    """
+    if not api_key:
+        raise DeepSeekError("缺少 API Key")
+    if not model:
+        model = "deepseek-flash"
+
+    conf = next((m for m in MODELS if m["id"] == model), None)
+    wire_model = (conf or {}).get("wire_model") or model
+    if thinking is None:
+        thinking = bool((conf or {}).get("thinking", False))
+    if reasoning_effort is None:
+        reasoning_effort = (conf or {}).get("effort")
+
+    # 组装初始消息（系统提示统一放最前）
+    msgs: list[dict] = []
+    if system_prompt:
+        msgs.append({"role": "system", "content": system_prompt})
+    msgs.extend(messages)
+
+    for rnd in range(max_rounds):
+        body: dict = {
+            "model": wire_model,
+            "messages": msgs,
+            "stream": True,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "thinking": {"type": "enabled" if thinking else "disabled"},
+        }
+        if thinking and reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+
+        # ⚠️ 550 重试（2026-11-08 实测定位）：
+        #   本机访问 api.deepseek.com 会随机落到腾讯 EdgeOne CDN，它对**大 POST**
+        #   概率性返回 550（Content-Length: 0，Server: TencentEdgeOne）。
+        #   换一条连接常常就落到 DeepSeek 真实服务器（openresty）上。
+        #   配合 main.py 里把工具集压到 ~18KB，3 次重试实测成功率 99%+。
+        resp = None
+        last_exc = None
+        for _attempt in range(3):
+            try:
+                resp = _session().post(
+                    f"{BASE}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    },
+                    # 用 data= 显式 UTF-8：json= 默认 ensure_ascii=True，
+                    # 中文工具描述会被转义，请求体膨胀 1.6 倍（65KB→105KB）
+                    data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                    stream=True, timeout=TIMEOUT, proxies=NO_PROXY_MAP,
+                )
+            except requests.RequestException as e:
+                last_exc = e
+                if _attempt < 2:
+                    time.sleep(0.4)
+                    continue
+                raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(e)}") from None
+            if resp.status_code == 550 and _attempt < 2:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                time.sleep(0.4)
+                continue
+            break
+        if resp is None:
+            raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(last_exc)}")
+
+        if resp.status_code != 200:
+            try:
+                detail = resp.text[:300]
+            except Exception:
+                detail = ""
+            hint = ""
+            if resp.status_code == 401:
+                hint = "（Key 无效或已撤销）"
+            elif resp.status_code == 402:
+                hint = "（余额不足）"
+            elif resp.status_code == 429:
+                hint = "（请求太频繁）"
+            raise DeepSeekError(
+                f"DeepSeek 返回 {resp.status_code}{hint}：{scrub(detail)}")
+
+        content_buf: list[str] = []
+        tool_calls: dict[int, dict] = {}
+        finish = None
+
+        try:
+            for raw in resp.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                line = raw.strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    obj = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                ch = choices[0]
+                delta = ch.get("delta") or {}
+
+                if delta.get("reasoning_content"):
+                    yield ("thinking", delta["reasoning_content"])
+
+                if delta.get("content"):
+                    content_buf.append(delta["content"])
+                    yield ("content", delta["content"])
+
+                # 流式下 tool_calls 是**分片**的：name 只在第一片出现，
+                # arguments 会分很多片，必须按 index 累加拼接。
+                for tc in (delta.get("tool_calls") or []):
+                    idx = int(tc.get("index") or 0)
+                    slot = tool_calls.setdefault(
+                        idx, {"id": "", "name": "", "args": ""})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        slot["args"] += fn["arguments"]
+
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+                    break
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
+        # 这一轮没有工具调用 → 对话结束
+        if not tool_calls:
+            return
+
+        # 把 assistant 的 tool_calls 消息补进历史（协议要求）
+        assistant_calls = []
+        for idx in sorted(tool_calls):
+            tc = tool_calls[idx]
+            assistant_calls.append({
+                "id": tc["id"] or f"call_{rnd}_{idx}",
+                "type": "function",
+                "function": {
+                    "name": tc["name"],
+                    "arguments": tc["args"] or "{}",
+                },
+            })
+        msgs.append({
+            "role": "assistant",
+            "content": "".join(content_buf) if content_buf else None,
+            "tool_calls": assistant_calls,
+        })
+
+        # 逐个执行，结果以 role=tool 回填
+        for tc in assistant_calls:
+            name = tc["function"]["name"]
+            yield ("tool_start", name)
+            try:
+                args = json.loads(tc["function"]["arguments"] or "{}")
+                if not isinstance(args, dict):
+                    args = {}
+            except json.JSONDecodeError:
+                args = {}
+            try:
+                result = tool_executor(name, args)
+                ok = True
+            except Exception as e:                # noqa: BLE001
+                result = f"工具执行失败：{type(e).__name__}: {e}"
+                ok = False
+            text = str(result)
+            yield ("tool_result", (name, ok, text[:400]))
+            # ⚠️ 回填给模型的长度要卡住：某些工具（read_file / 网页正文）
+            # 一次能吐几万字，直接塞回去会超上下文
+            msgs.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": text[:12000],
+            })
+
+    # 轮次用尽
+    yield ("content", f"\n\n（已达工具调用轮次上限 {max_rounds}，停止继续调用）")
+
+
 def list_models() -> list[dict]:
     """给前端下拉用的清单（不联网，静态定义）。"""
     return MODELS
@@ -214,10 +468,10 @@ def check_key(api_key: str) -> dict:
     if not api_key:
         return {"ok": False, "balance": "", "currency": "", "msg": "缺少 API Key"}
     try:
-        r = requests.get(
+        r = _session().get(
             f"{BASE}/user/balance",
             headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-            timeout=(8, 20),
+            timeout=(8, 20), proxies=NO_PROXY_MAP,
         )
     except requests.RequestException as e:
         return {"ok": False, "balance": "", "currency": "", "msg": f"连接失败：{scrub(e)}"}
