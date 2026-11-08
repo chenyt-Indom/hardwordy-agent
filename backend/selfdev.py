@@ -45,6 +45,17 @@ MAX_READ = 400 * 1024          # 单文件读取上限 400KB
 MAX_WRITE = 1200 * 1024        # 单文件写入上限 1.2MB
 
 
+def locked() -> bool:
+    """服务器版锁死自开发（2026-11-09）。
+
+    为什么：部署到公网服务器后，`/api/selfdev/*` 能改服务器上的源码、重启服务，
+    而当前没有登录鉴权 —— 等于把 shell 权限挂在公网上。
+    用环境变量 `MM_DISABLE_SELFDEV=1` 一刀切：所有写操作直接拒绝，
+    读（tree/grep）也一并关掉，避免被当成文件浏览器。
+    """
+    return str(os.environ.get("MM_DISABLE_SELFDEV") or "").strip() in ("1", "true", "yes")
+
+
 def project_root() -> str:
     """项目根目录（源码模式下就是 D://local-multimodal-src）。"""
     cfg = config.load_config() or {}
@@ -289,6 +300,8 @@ def list_tree(rel: str = "", depth: int = 2) -> dict:
 
 
 def read(rel: str, start: int = 0, end: int = 0) -> dict:
+    if locked():
+        return {"ok": False, "error": "服务器版已锁定自开发：不允许读取服务端源码"}
     """读源码。**支持按行取**（2026-11-08 改）。
 
     ⚠️ 为什么必须分页：`backend/main.py` 有 340KB / 7000+ 行，
@@ -469,6 +482,8 @@ def _backup(rel: str, note: str = "") -> str:
 
 
 def write(rel: str, content: str, note: str = "") -> dict:
+    if locked():
+        return {"ok": False, "error": "服务器版已锁定自开发：不允许改写服务端源码"}
     try:
         r = safe_rel(rel)
     except PathError as e:

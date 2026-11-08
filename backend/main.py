@@ -3869,10 +3869,16 @@ class _SystemPrompt:
             "  只有当下一个工具的**参数依赖**上一个工具的结果时，才分轮调用。\n"
             "- **知识库优先**：用户自己的资料（知识库）比网上搜到的更贴合其领域，"
             "两者都有相关内容时以知识库为准，联网只用来补时效性信息。\n"
-            "- **回答要有实质内容，不要只给结论**：\n"
-            "  · 涉及知识性/分析性的问题，一般写 300 字以上，用「小标题 + 分点」组织；\n"
-            "  · 把材料里的**具体信息**（名称、数字、时间、条款）写出来，不要笼统概括；\n"
-            "  · 单纯打招呼、确认、道谢这类寒暄则简短回一句即可，不要刻意拉长。\n"
+            "- **回复长度按「档位」执行，不许凭感觉伸缩**（硬规定 —— 用户反馈过「一会长一会短」）：\n"
+            "  · **L0 寒暄**（打招呼、道谢、确认收到、纯情绪回应）：1~2 句，**不超过 30 字**，不列点、不加标题。\n"
+            "  · **L1 单一事实 / 单步操作**（问时间、某文件在哪、改个名字、查个数、一句话能答完的）：**直接答，1 段，30~120 字**，不分点、不加小标题。\n"
+            "  · **L2 解释 / 怎么做 / 排查**（概念解释、操作步骤、报错原因、用法说明）：**150~300 字**，2~4 个要点或 2~3 段，**不加一级标题**。\n"
+            "  · **L3 分析 / 比较 / 方案 / 综述**（为什么、选哪个、怎么看、对比、基于材料做综合判断）：**300~600 字**，用「小标题 + 分点」组织，3~5 个分点。\n"
+            "  · **交付物类**（写文章 / 文档 / PPT / 代码）：**正文不受上面限制**，按任务本身需要写满（文档正文一般 800 字以上）；但正文之外的说明、总结**不超过 100 字**。\n"
+            "- **同一类问题必须落在同一档，这是防抖动的关键**：\n"
+            "  · 用户没追加「详细说说 / 展开讲」时，**不要自行升档**写成长篇；\n"
+            "  · 用户没明确说「简单说 / 一句话」时，**不要压到只有半句**；\n"
+            "  · 用户说「详细点」升一档、说「简单说」降一档 —— 这是唯一允许的调档方式。\n"
             "- 若检索到的材料足以支撑推断，可以给出**你自己的分析和见解**，\n"
             "  但必须让用户分得清「材料里写的」和「你的推断」——后者要明说是推断。",
 
@@ -3936,7 +3942,8 @@ class _SystemPrompt:
         #
         # 现在改由 `_attach_live_ctx` 挂到**最后一条用户消息**上（排在工具定义之后），
         # 系统提示 + 工具定义这一大段就恒定不变了，缓存能一直命中。
-        parts.append("回答请使用中文，简洁、直接、可执行。")
+        parts.append("回答请使用中文；直接、可执行。"
+                     "长度严格按上面【回复长度分档】执行，不许凭感觉伸缩。")
         if no_tools:
             # ⚠️ **必须把工具说明整段摘掉，光追加一句"没有工具"不够。**
             # 那段说明又长又具体（"用 library 工具写进生成文库""写文件才进文库"…），
@@ -5802,14 +5809,45 @@ def selfdev_diff(batch: str = "", rel: str = ""):
 
 
 # ---------------- 自开发（改自己的源码）----------------
+# ---------- 「新版本已就绪」：改动落盘后不自动重启，等用户点确认 ----------
+# 用户明确要求：模型改完源码**不许自己重启**（会打断对话、用户不知情），
+# 只能在前端弹提示，等用户按下「立即重启」才真正重启；不按就继续跑旧代码。
+@app.get("/api/selfdev/pending")
+def selfdev_pending():
+    """前端轮询：有没有改完还没生效的新版本。"""
+    from . import pending as _pend
+    return {"ok": True, **_pend.status()}
+
+
+@app.post("/api/selfdev/apply_restart")
+def selfdev_apply_restart():
+    """用户点了「立即重启」才走到这里 —— 唯一真正重启的入口。"""
+    from . import pending as _pend
+    v = selfdev.verify_import()
+    if not v.get("ok"):
+        return {"ok": False, "error": v.get("error") or v.get("msg")
+                or ("导入自检没通过：%s" % str(v)[:200])}
+    _pend.clear()
+    return selfdev.restart()
+
+
+@app.post("/api/selfdev/dismiss_pending")
+def selfdev_dismiss_pending():
+    """用户点了「稍后」：先不重启，把提示收起来（改动仍然没生效）。"""
+    from . import pending as _pend
+    return {"ok": True, **_pend.clear()}
+
 @app.get("/api/selfdev/status")
 def selfdev_status():
     cfg = config.load_config() or {}
-    return {"ok": True,
+    return {"locked": selfdev.locked(),
+            "ok": True,
             "enabled": bool(cfg.get("self_dev_enabled")),
             "root": selfdev.project_root(),
             "mirror": selfdev.mirror_dir(),
             "journal": selfdev.recent_journal(20)}
+
+
 
 
 @app.post("/api/selfdev/toggle")
@@ -5834,6 +5872,17 @@ def selfdev_verify():
 @app.post("/api/selfdev/restart")
 def selfdev_restart():
     """重启应用（内部会先试导入，导入失败就拒绝）。"""
+    # ⚠️ 用户明确要求：模型改完源码**不许自己重启**（会打断对话、用户不知情）。
+    #    这个接口现在只做「自检 + 打标记」，真正重启只走 /api/selfdev/apply_restart。
+    from . import pending as _pend
+    _v = selfdev.verify_import()
+    if not _v.get("ok"):
+        return {"ok": False, "error": _v.get("error") or _v.get("msg")
+                or ("导入自检没通过：%s" % str(_v)[:200])}
+    _st = _pend.mark("", "模型请求重启，等待用户确认")
+    return {"ok": True, "pending": True, "restart": False,
+            "files": _st.get("files") or [],
+            "msg": "已标记新版本就绪，等待用户在前端点「立即重启」"}
     return selfdev.restart()
 
 

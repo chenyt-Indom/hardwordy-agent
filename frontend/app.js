@@ -1449,6 +1449,13 @@
 
   // ---------- 事件 ----------
   $("#toggleSidebar").onclick = () => $("#sidebar").classList.toggle("hidden");
+  // 手机端（窄屏）默认把侧栏收起来，否则一打开就盖住半个屏幕（2026-11-09）
+  if (window.innerWidth <= 768) {
+    $("#sidebar").classList.add("hidden");
+    // 手机屏：顶栏默认收起，别让三行控件吃掉半屏（点「▸ 展开」可拉开）
+    const _tb = document.querySelector("#topbarToggle");
+    if (_tb && !document.body.classList.contains("topbar-collapsed")) _tb.click();
+  }
 
   // ---------- 拖拽文件到聊天框 ----------
   // 拖进来的**任何非图片/视频文件**都按"文档"处理：抽取正文当作本轮资料。
@@ -3678,6 +3685,7 @@
             if (obj.ui.type === "sources") sourcesData = obj.ui;   // 稍后在回答下方渲染
             else if (obj.ui.type === "confirm") showConfirm(obj.ui);
             else if (obj.ui.type === "ask") showAskDialog(obj.ui);
+            else if (obj.ui.type === "restart_ready") { if (window.__onRestartReady) window.__onRestartReady(obj.ui); }
             else if (obj.ui.type === "library") {
               // 模型动了生成文库 → 面板跟着刷新，让用户马上看到结果
               if (typeof loadDoclib === "function") loadDoclib(obj.ui.rel);
@@ -4663,6 +4671,20 @@
     window.addEventListener("focus", load);
   })();
 
+  // 服务器版锁定自开发 → 把 🛠 / 🔓 两个入口都藏起来（2026-11-09）
+  (async () => {
+    try {
+      const d = await (await fetch("/api/selfdev/status")).json();
+      if (d && d.locked) {
+        ["#selfDevBtn", "#fullAccessBtn"].forEach((sel) => {
+          const el = document.querySelector(sel);
+          if (el) el.style.display = "none";
+        });
+        window.__selfdevLocked = true;
+      }
+    } catch (e) { /* 忽略 */ }
+  })();
+
   // ================== 自开发面板（2026-11-08）==================
   // 用户要求：① 回撤要收进「🛠 自开发」里，点开才出现；
   //          ② 每个版本要标明**更新内容 + 日期**；
@@ -5626,4 +5648,83 @@
   loadLibrary();
   loadDevice();
   setInterval(refreshHealth, 5000);
+  // ---------- 「新版本已就绪」：模型改完源码不自动重启，等用户点确认 ----------
+  // 用户要求：不许悄悄重启把对话打断；弹一条提示，按下才重启，不按继续跑旧代码。
+  (() => {
+    let banner = null;
+    let busy = false;
+
+    function box() {
+      if (banner) return banner;
+      banner = document.createElement("div");
+      banner.className = "restart-banner";
+      banner.innerHTML =
+        '<span class="rb-ico">🔄</span>' +
+        '<span class="rb-text">新版本已就绪</span>' +
+        '<button class="rb-go" type="button">立即重启</button>' +
+        '<button class="rb-later" type="button" title="先不重启，继续用旧版本">稍后</button>';
+      document.body.appendChild(banner);
+      banner.querySelector(".rb-go").onclick = apply;
+      banner.querySelector(".rb-later").onclick = later;
+      return banner;
+    }
+
+    function show(d) {
+      const b = box();
+      const fs = (d && d.files) || [];
+      const names = fs.slice(0, 2).map((f) => String(f).split("/").pop());
+      b.querySelector(".rb-text").textContent = names.length
+        ? "新版本已就绪：" + names.join("、") + (fs.length > 2 ? " 等" : "")
+        : "新版本已就绪";
+      b.classList.add("on");
+    }
+
+    function hide() { if (banner) banner.classList.remove("on"); }
+
+    async function poll() {
+      if (busy) return;
+      try {
+        const d = await (await fetch("/api/selfdev/pending", { cache: "no-store" })).json();
+        if (d && d.pending) show(d); else hide();
+      } catch (e) { /* 后端正在重启时连不上，忽略 */ }
+    }
+
+    async function apply() {
+      if (busy) return;
+      busy = true;
+      const b = box();
+      const go = b.querySelector(".rb-go");
+      go.disabled = true;
+      go.textContent = "重启中…";
+      try {
+        const r = await (await fetch("/api/selfdev/apply_restart", { method: "POST" })).json();
+        if (!r || !r.ok) {
+          showToast("重启失败：" + ((r && r.error) || "原因未知"), "warn");
+          go.disabled = false;
+          go.textContent = "立即重启";
+          busy = false;
+          return;
+        }
+      } catch (e) { /* 服务已经断开去重启了，属正常 */ }
+      let n = 0;
+      const tick = setInterval(async () => {
+        n++;
+        try {
+          const r = await fetch("/api/selfdev/pending", { cache: "no-store" });
+          if (r.ok) { clearInterval(tick); location.reload(); return; }
+        } catch (e) { /* 还没起来 */ }
+        if (n >= 90) { clearInterval(tick); location.reload(); }
+      }, 1000);
+    }
+
+    async function later() {
+      hide();
+      try { await fetch("/api/selfdev/dismiss_pending", { method: "POST" }); } catch (e) {}
+    }
+
+    // 后端推了「新版本就绪」事件 → 立刻显示，不用等轮询
+    window.__onRestartReady = (d) => show(d);
+    poll();
+    setInterval(poll, 4000);
+  })();
 })();

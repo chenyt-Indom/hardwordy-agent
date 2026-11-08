@@ -2160,3 +2160,433 @@ body.topbar-collapsed .top-bar.tools-bar { padding: 4px 16px 8px; }
   margin: 8px 0 4px;
 }
 .sd-batch-diff .sd-pre { border: 1px solid #2a323e; }
+
+/* ================= 视觉升级（2026-11-08 自我迭代）=================
+   用户要求：深色 + 玻璃拟态 / 微光质感，更现代；动画尽量少动。
+   ⚠️ 只动观感（底色、层次、留白、圆角），**不动布局骨架**；
+      颜色一律走 CSS 变量，浅色主题自动跟着变。 */
+
+/* 背景微光：两三个大范围光斑，不抢内容 */
+body {
+  background-image:
+    radial-gradient(900px 620px at 10% -12%, rgba(79, 139, 249, .18), transparent 62%),
+    radial-gradient(760px 520px at 94% 4%, rgba(123, 92, 240, .14), transparent 64%),
+    radial-gradient(680px 460px at 58% 112%, rgba(52, 199, 123, .08), transparent 62%);
+  background-attachment: fixed;
+}
+html[data-theme="light"] body {
+  background-image:
+    radial-gradient(900px 620px at 10% -12%, rgba(47, 111, 228, .10), transparent 62%),
+    radial-gradient(760px 520px at 94% 4%, rgba(123, 92, 240, .08), transparent 64%);
+}
+
+/* 玻璃面板：先给实色兜底，再用 color-mix 做半透明（老浏览器不认就保持实色） */
+.sidebar, .chat-header, .composer {
+  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  backdrop-filter: blur(18px) saturate(1.15);
+  -webkit-backdrop-filter: blur(18px) saturate(1.15);
+}
+.panel, .status-card {
+  background: var(--panel2);
+  background: color-mix(in srgb, var(--panel2) 86%, transparent);
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .10);
+}
+
+/* 对话区：留白松一点，长回答不再挤成一坨 */
+.messages { padding: 24px 26px; gap: 16px; }
+.msg { animation: msgIn .16s ease-out both; }
+@keyframes msgIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+.bubble {
+  max-width: min(76%, 880px);
+  padding: 13px 16px;
+  border-radius: 14px;
+  line-height: 1.78;
+}
+.msg.bot .bubble {
+  background: color-mix(in srgb, var(--panel2) 92%, transparent);
+  border-color: color-mix(in srgb, var(--border) 88%, transparent);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .12);
+}
+.msg.user .bubble {
+  background: linear-gradient(135deg, var(--accent), #6d7cf5);
+  box-shadow: 0 3px 14px rgba(79, 139, 249, .22);
+}
+
+/* 正文排版：段落 / 小标题 / 列表的呼吸感 */
+.bubble .md-p { margin: 7px 0; line-height: 1.8; }
+.bubble .md-gap { height: 4px; }
+.bubble .md-h { margin: 14px 0 7px; font-size: 14.5px; }
+.bubble .md-h::before {
+  content: ""; display: inline-block; width: 3px; height: 12px; margin-right: 7px;
+  border-radius: 2px; background: var(--accent); vertical-align: -1px;
+}
+.bubble .md-ul, .bubble .md-ol { margin: 6px 0 6px 22px; }
+.bubble .md-ul li, .bubble .md-ol li { margin: 4px 0; line-height: 1.8; }
+.bubble .md-quote { background: var(--chip-bg); }
+.bubble .md-code { color: var(--accent); background: var(--chip-bg); border-color: var(--chip-border); }
+
+/* 交互反馈：轻、快，不干扰阅读 */
+.btn, .icon-btn, .pill, .tab { transition: background-color .16s ease, border-color .16s ease, color .16s ease, transform .12s ease; }
+.btn:active, .icon-btn:active { transform: scale(.985); }
+
+/* ---------- 产物卡片：聊天里直接展开看内容（默认收起） ---------- */
+.art-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; white-space: normal; }
+.art-card {
+  border: 1px solid var(--border); border-radius: 11px; background: var(--panel);
+  overflow: hidden; white-space: normal;
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+.art-card:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); box-shadow: 0 4px 14px rgba(0, 0, 0, .12); }
+.art-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 11px;
+  border: 0; background: transparent; color: var(--text); font: inherit;
+  text-align: left; cursor: pointer;
+}
+.art-ico { flex: 0 0 auto; font-size: 15px; }
+.art-name { flex: 1 1 auto; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art-kind {
+  flex: 0 0 auto; font-size: 10.5px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px;
+}
+.art-arrow { flex: 0 0 auto; color: var(--muted); font-size: 11px; transition: transform .2s ease; }
+.art-card.open .art-arrow { transform: rotate(180deg); }
+
+/* 折叠过渡：grid-template-rows 0fr → 1fr，内容多长都不会被裁 */
+.art-body { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows .2s ease, opacity .16s ease; }
+.art-card.open .art-body { grid-template-rows: 1fr; opacity: 1; }
+.art-inner { min-height: 0; overflow: hidden; }
+.art-preview {
+  max-height: 320px; overflow: auto; font-size: 12.5px; line-height: 1.7;
+  color: var(--text); word-break: break-word; white-space: pre-wrap;
+}
+.art-card.open .art-preview { padding: 8px 11px; border-top: 1px solid var(--border); }
+.art-preview img { display: block; max-width: 100%; border-radius: 8px; }
+.art-preview .art-text { font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre-wrap; }
+.art-note { color: var(--muted); font-size: 11.5px; margin-top: 6px; line-height: 1.6; }
+.art-tip { color: var(--muted); font-size: 11.5px; margin-bottom: 6px; opacity: .85; }
+.art-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.art-card.open .art-acts { padding: 8px 11px 10px; }
+.art-btn {
+  display: inline-block; padding: 5px 12px; border: 1px solid var(--border);
+  border-radius: 8px; background: transparent; color: var(--text); font: inherit;
+  font-size: 12px; text-decoration: none; cursor: pointer;
+  transition: background-color .15s, border-color .15s, color .15s;
+}
+.art-btn:hover { border-color: var(--accent); color: var(--accent); }
+.art-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.art-btn.primary:hover { background: var(--accent-hover); color: #fff; }
+
+/* 正文里的行内胶囊（点它展开末尾对应的卡片） */
+.art-chip {
+  display: inline-flex; align-items: center; gap: 4px; margin: 2px 3px; padding: 2px 9px;
+  border: 1px solid var(--chip-border); border-radius: 999px; background: var(--chip-bg);
+  color: var(--accent); font: inherit; font-size: 12.5px; line-height: 1.6;
+  cursor: pointer; vertical-align: baseline; transition: filter .15s, transform .12s;
+}
+.art-chip:hover { filter: brightness(1.12); transform: translateY(-1px); }
+
+/* ================= 手机端适配（2026-11-09）=================
+   目标：窄屏（≤768px）下三行顶栏不占满屏、侧栏变成抽屉、气泡占满宽度。
+   桌面端规则一条不动，全部包在 media query 里。 */
+@media (max-width: 768px) {
+  /* --- 侧栏：抽屉式，默认收起（JS 在窄屏加载时加 .hidden）--- */
+  .sidebar {
+    position: fixed;
+    left: 0; top: 0; bottom: 0;
+    width: 84vw;
+    max-width: 320px;
+    min-width: 0;
+    z-index: 80;
+    transform: translateX(0);
+    transition: transform .25s cubic-bezier(.4, 0, .2, 1);
+    box-shadow: 8px 0 32px rgba(0, 0, 0, .5);
+  }
+  .sidebar.hidden {
+    width: 84vw; min-width: 0; padding: 18px;
+    border-right: 1px solid var(--border);
+    transform: translateX(-102%);
+    box-shadow: none;
+  }
+
+  /* --- 顶栏：每行改成横向滚动，不再折成 6 行 --- */
+  .top-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    justify-content: flex-start;
+    padding: 8px 10px;
+    gap: 8px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .top-bar::-webkit-scrollbar { display: none; }
+  .top-bar > * { flex: 0 0 auto; }
+  #topBar { max-height: none; }
+
+  .pill, .pill-select, .pill-btn { font-size: 12.5px; padding: 5px 9px; }
+  .chat-header { padding: 10px 12px; }
+  .chat-header h2 { font-size: 15px; }
+  .chat-header .privacy { display: none; }
+
+  /* --- 消息区：气泡占满，留白收紧 --- */
+  .messages { padding: 10px 8px; }
+  .msg.bot > .bubble { max-width: 100%; }
+  .bubble { max-width: 92%; font-size: 14px; padding: 10px 12px; }
+  .msg { gap: 6px; }
+  .code-body { font-size: 12px; }
+  .code-head { padding: 6px 8px; }
+  .code-btns .btn { font-size: 11px; padding: 3px 7px; }
+
+  /* --- 输入区：贴底、按钮不换行 --- */
+  .composer { padding: 8px 8px 12px; }
+  .composer textarea { font-size: 15px; min-height: 44px; }
+  .composer .row { gap: 6px; flex-wrap: nowrap; overflow-x: auto; }
+  .send { padding: 8px 14px; }
+
+  /* --- 图片库 / 面板：单列 --- */
+  .lib-grid { grid-template-columns: repeat(2, 1fr); }
+  .modal-card { width: 92vw !important; max-height: 88vh; }
+}
+
+/* 超窄屏（≤380px）再收一档 */
+@media (max-width: 380px) {
+  .pill, .pill-select, .pill-btn { font-size: 12px; padding: 4px 8px; }
+  .bubble { font-size: 13.5px; }
+}
+
+/* 手机端横向溢出修复（2026-11-09）
+   现象：390px 屏上 scrollWidth 549 > 视口，右侧被裁掉。
+   原因：flex 子项默认 min-width:auto，里面的 nowrap 行（工具条/输入行）把父级撑宽，
+       而 body 是 overflow:hidden → 直接裁切，看起来像"内容超出屏幕"。
+   修法：给所有 flex 容器 min-width:0，并允许这些行自己横向滚动。 */
+@media (max-width: 768px) {
+  html, body { max-width: 100%; overflow-x: hidden; }
+  .main { min-width: 0; width: 100%; overflow-x: hidden; }
+  .messages, #messages, .composer, .composer > *,
+  .msg, .msg.bot, .bubble, .chat-header { min-width: 0; max-width: 100%; }
+  .composer .row, #input-row, .composer-tools, .tip { min-width: 0; }
+  .composer .row, #input-row { overflow-x: auto; flex-wrap: nowrap; }
+  .top-bar, .top-bar > * { min-width: 0; }
+  .bubble { max-width: 100%; }
+}
+
+/* 手机端：tools-bar 不换行（.top-bar.tools-bar 的 flex-wrap:wrap 特异性更高，
+   上面的 .top-bar 规则压不住，必须同级覆盖）2026-11-09 */
+@media (max-width: 768px) {
+  .top-bar.tools-bar {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding: 6px 10px;
+  }
+  #topBar { flex-wrap: nowrap; justify-content: flex-start; overflow-x: auto; }
+  /* 输入框占满剩余宽度，按钮固定 */
+  #input-row { display: flex; align-items: flex-end; gap: 8px; }
+  #input { flex: 1 1 auto; min-width: 0; }
+  #sendBtn { flex: 0 0 auto; }
+}
+
+/* 手机端输入区：图标按钮缩小，把宽度让给输入框（2026-11-09） */
+@media (max-width: 768px) {
+  .input-row { gap: 6px; align-items: flex-end; }
+  .icon-btn { width: 34px; height: 34px; padding: 0; font-size: 15px; flex: 0 0 auto; }
+  #input { flex: 1 1 auto; min-width: 0; min-height: 40px; padding: 8px 10px; }
+  #sendBtn { flex: 0 0 auto; padding: 8px 12px; }
+  .composer-tools { display: flex; gap: 8px; overflow-x: auto; }
+}
+
+/* 「新版本已就绪」提示条：右下角小卡片，position:fixed 不占布局、不撑页面 */
+.restart-banner {
+  position: fixed;
+  right: 18px;
+  bottom: 92px;
+  z-index: 9998;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 36px));
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #1f2937;
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.3;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .22);
+}
+.restart-banner.on { display: flex; }
+.restart-banner .rb-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.restart-banner button {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+.restart-banner .rb-go { background: #2563eb; color: #fff; border-color: #2563eb; }
+.restart-banner .rb-go:disabled { opacity: .6; cursor: default; }
+.restart-banner .rb-later { background: transparent; color: #cbd5e1; border-color: #475569; }
+.restart-banner .rb-later:hover { color: #fff; border-color: #94a3b8; }
+
+/* ============================================================
+   可读性增强（2026-11-08）
+   用户反馈：白色（浅色）界面好看，但字不够明显、看着费劲。
+   做法：**只调"字"** —— 字号 +1 档、次要文字压深、正文对比度提高；
+        布局骨架（宽高 / flex / position）一律没动，页面不会撑变形。
+   ============================================================ */
+
+/* ---- 1. 浅色主题：正文与次要文字整体压深一档，白底上不再发灰 ---- */
+html[data-theme="light"] {
+  --text: #101828;
+  --muted: #4a5568;
+  --meta-fg: #6b7280;
+  --border: #d3dae6;
+}
+
+/* ---- 2. 对话正文：14 → 15px，行距/字重一起提一点 ---- */
+.bubble { font-size: 15px; line-height: 1.85; }
+.bubble .md-p,
+.bubble .md-ul li,
+.bubble .md-ol li { font-size: 15px; line-height: 1.85; }
+.bubble .md-h { font-size: 15.5px; font-weight: 700; }
+.bubble .md-h::before { height: 13px; }
+.bubble .md-text b,
+.bubble .md-p b { font-weight: 700; }
+/* 用户自己的消息：蓝底白字（原来靠继承，浅色主题下会变成深灰字压蓝底） */
+.msg.user .bubble { color: #fff; }
+.msg.user .bubble a { color: #fff; text-decoration: underline; }
+
+/* ---- 3. 侧栏：11~12px 的小字抬到 12~12.5px ---- */
+.brand .sub { font-size: 12.5px; }
+.status-card p { font-size: 12.5px; }
+.model-info { font-size: 12px !important; opacity: 1; }
+.panel label { font-size: 13px; }
+.hint { font-size: 12.5px; }
+.tab { font-size: 12.5px; }
+.mem-item, .kb-item { font-size: 13.5px; }
+.mem-item .meta, .kb-item .meta,
+.mem-item .tag,
+.mem-item .meta button, .kb-item .meta button { font-size: 12px; }
+.switch-row { font-size: 13.5px; }
+
+/* ---- 4. 顶栏开关 / 输入框 / 占位提示 ---- */
+.pill, button.pill-btn { font-size: 13.5px; }
+#input, .input-row textarea { font-size: 15px; }
+#input::placeholder, .input-row textarea::placeholder { color: var(--muted); opacity: 1; }
+.chat-header .privacy { font-size: 12.5px; }
+
+/* ============================================================
+   浅色模式可读性修正（2026-11-08 用户截图反馈）
+   ------------------------------------------------------------
+   问题：状态卡片里的「下载模型 / 自检」按钮、自检明细、以及顶栏开关，
+   颜色是早期**写死成深色模式**的值（浅蓝字 #cfe3ff 压在浅蓝底上、
+   白描边 rgba(255,255,255,.08) 压在白色卡片上）。
+   深色下没问题，一切到浅色主题 → 字几乎看不见（用户说"有字但被盖住了"）。
+   做法：**只在浅色模式覆盖**成「深字 + 浅底 + 清晰描边」，
+        深色模式一个像素都不动；只改颜色，不动宽高/布局。
+   ============================================================ */
+
+/* ---- 1. 状态卡片里的按钮（⬇ 下载模型 / 🗑 删除 / 🔄 自检）---- */
+html[data-theme="light"] .dl-btn {
+  border-color: #c3d6f7;
+  background: #e8f0ff;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+html[data-theme="light"] .dl-btn:hover {
+  background: #d7e6ff;
+  border-color: #9dbdf0;
+}
+html[data-theme="light"] .dl-btn:disabled { opacity: .6; }
+html[data-theme="light"] .dl-btn.dl-danger {
+  background: #fdeceb;
+  color: #b42318;
+  border-color: #f2c4c0;
+}
+html[data-theme="light"] .dl-btn.dl-danger:hover {
+  background: #fbdcda;
+  border-color: #e39d96;
+}
+
+/* ---- 2. 下载进度 / 自检明细 ---- */
+html[data-theme="light"] .dl-mini { border-color: #d3dae6; color: #344054; }
+html[data-theme="light"] .dl-mini:hover { background: #eef2f8; }
+html[data-theme="light"] .dl-bar { background: #dde5f2; }
+html[data-theme="light"] .dl-meta { color: #4a5568; }
+html[data-theme="light"] .st-detail { border-top-color: #dde3ec; }
+html[data-theme="light"] .st-row b { color: #101828; }
+html[data-theme="light"] .st-det { color: #4a5568; }
+html[data-theme="light"] .st-hint { color: #92400e; }
+
+/* ---- 3. 顶栏开关/下拉：原来写死深藏青底，浅色下是一块块黑疙瘩 ---- */
+html[data-theme="light"] .pill.on,
+html[data-theme="light"] button.pill-btn.on {
+  color: #1d4ed8;
+  border-color: #7aa7f5;
+  background: #e8f0ff;
+}
+html[data-theme="light"] .pill:not(.on):not(.bad),
+html[data-theme="light"] button.pill-btn:not(.on):not(.bad) {
+  color: #5a6473;
+  border-color: #d3dae6;
+  background: #eef1f6;
+}
+html[data-theme="light"] button.pill-btn:not(#amapKeyBtn):not(.on):not(.bad) {
+  color: #1f2937;
+  border-color: #d3dae6;
+  background: #f3f6fb;
+}
+html[data-theme="light"] .pill.bad,
+html[data-theme="light"] button.pill-btn.bad {
+  color: #b42318;
+  border-color: #f0b8b2;
+  background: #fdeaea;
+}
+html[data-theme="light"] .pill:not(.on):not(.bad) .sw { background: #9aa4b2; }
+html[data-theme="light"] select.pill-select {
+  color: #1f2937;
+  border-color: #d3dae6;
+  background: #f3f6fb;
+}
+html[data-theme="light"] select.pill-select option {
+  background: #ffffff;
+  color: #1f2937;
+}
+
+/* ================= 手机端二次优化（2026-11-09 用户反馈"难看"）=================
+   核心问题：三条横向控件条把屏幕占掉近 200px；选区提示条一直挂着；底部提示占一行。
+   做法：① 手机默认把顶栏收起（复用已有的 topbar-collapsed，点一下能展开）；
+        ② 修掉 mask-chip 的 hidden 失效（display:flex 压过了 [hidden]）；
+        ③ 收紧输入区，隐藏底部说明。 */
+@media (max-width: 768px) {
+  /* ① 选区提示条：hidden 属性必须真的生效 */
+  .mask-chip[hidden] { display: none !important; }
+
+  /* ② 顶栏紧凑 */
+  .top-bar { padding: 4px 8px !important; gap: 6px !important; }
+  .top-bar .pill, .top-bar .pill-select, .top-bar .pill-btn {
+    font-size: 11.5px !important; padding: 3px 7px !important;
+    height: 26px; line-height: 1;
+  }
+  .top-bar .sw { width: 8px; height: 8px; }
+  .chat-header { padding: 8px 10px; }
+  .chat-header h2 { font-size: 14.5px; }
+
+  /* ③ 输入区：一行高、图标更小、去掉说明与采样条 */
+  .composer { padding: 6px 8px 10px; gap: 6px; }
+  .composer .tip, .tip { display: none !important; }
+  .composer-tools { display: none !important; }
+  .mask-chip { margin: 0 0 6px; padding: 6px 8px; font-size: 12px; }
+  .mask-chip .mc-btn { padding: 3px 8px; font-size: 11.5px; }
+  #input { min-height: 38px; max-height: 120px; }
+  .icon-btn { width: 32px; height: 32px; font-size: 14px; }
+  #sendBtn { padding: 7px 12px; }
+}

@@ -1594,7 +1594,7 @@ def _selfdev_schemas() -> list:
             "name": "selfdev_restart",
             "description": ("**重启本应用**让改动生效。会先试 import 一遍 "
                             "backend.main —— 导入失败就**拒绝重启**并告诉你错在哪。"
-                            "改完代码后必须调它，否则改动不生效。"),
+                            "只做导入自检并通知用户「新版本已就绪」，**不会自己重启**；真正的重启由用户在前端点确认。"),
             "parameters": {"type": "object", "properties": {
                 "reason": {"type": "string", "description": "为什么重启（留痕用）"}},
                 "required": []}}},
@@ -1608,6 +1608,14 @@ def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
     这里只推结构化的差异数据，前端默认折叠成一行摘要，点开才看 diff，
     并且容器有固定最大高度 + 内部滚动。
     """
+    # user requirement: after writing code, DO NOT auto-restart.
+    # just mark 'new version ready', let the user press the restart button.
+    try:
+        from . import pending as _pend
+        _pend.mark(str((r or {}).get("rel") or ""), act)
+    except Exception:
+        pass
+
     if not isinstance(ui_events, list):
         return
     d = (r or {}).get("diff") or {}
@@ -1670,6 +1678,14 @@ def _auto_review(context: dict) -> str:
 
 def _do_selfdev(name: str, arguments: dict, context: dict = None,
                 ui_events: list = None) -> str:
+    # 服务器版：所有自开发工具一律拒绝（不只是写，读也关，避免被当文件浏览器）
+    try:
+        from . import selfdev as _sd0
+        if _sd0.locked():
+            return ("服务器版已锁定「自开发」：不允许读写服务端源码、也不允许重启服务。"
+                    "如需改动请在本地改完重新部署。")
+    except Exception:
+        pass
     """执行自开发工具。统一在这里兜异常，返回给模型的永远是文本。"""
     from . import selfdev as _sd
     if not _sd.enabled():
@@ -1723,7 +1739,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             _selfdev_ui(ui_events, "apply", r, who)
             d = r.get("diff") or {}
             return (("已用 %s 重写 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
-                     "改完调 selfdev_restart 生效。"
+                     "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
                      % (who, r["rel"], d.get("added", 0), d.get("removed", 0),
                         r["chars"]))
                     + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
@@ -1760,7 +1776,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             _selfdev_ui(ui_events, "write", r)
             d = r.get("diff") or {}
             return (("已写入 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
-                     "记得改完调 selfdev_restart 生效。"
+                     "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
                      % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
                     + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
         if name == "selfdev_insert_after":
@@ -1773,7 +1789,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             _selfdev_ui(ui_events, "insert", r)
             d = r.get("diff") or {}
             return (("已在 %s 插入一段（+%d −%d 行）。详情已作为卡片展示给用户。\n"
-                     "改完调 selfdev_restart 生效。"
+                     "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
                      % (r["rel"], d.get("added", 0), d.get("removed", 0)))
                     + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
         if name == "selfdev_patch":
@@ -1784,7 +1800,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             _selfdev_ui(ui_events, "patch", r)
             d = r.get("diff") or {}
             return (("已修改 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
-                     "改完调 selfdev_restart 生效。"
+                     "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
                      % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
                     + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
         if name == "selfdev_run":
@@ -1796,10 +1812,22 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                        (r.get("out") or "").strip()[-1500:] or "（空）",
                        (r.get("err") or "").strip()[-1500:] or "（空）"))
         if name == "selfdev_restart":
-            r = _sd.restart()
-            if not r.get("ok"):
-                return "重启被拒绝：%s" % r.get("error")
-            return r.get("msg") or "正在重启"
+            # ★ 用户明确要求：模型**不许自己重启**（会打断对话、用户毫不知情）。
+            #   这里只做「导入自检 + 打标记 + 通知前端」，
+            #   真正的重启由用户在前端点「立即重启」(/api/selfdev/apply_restart)。
+            v = _sd.verify_import()
+            if not v.get("ok"):
+                return ("导入自检没通过，先别重启：%s"
+                        % (v.get("error") or v.get("msg") or str(v)[:200]))
+            from . import pending as _pend
+            st = _pend.mark("", "模型请求重启，等待用户确认")
+            if isinstance(ui_events, list):
+                ui_events.append({"type": "restart_ready", **st})
+            return ("已自检通过，前端已弹出「新版本已就绪」提示。\n"
+                    "现在**不要自己重启**：等用户点「立即重启」才生效，"
+                    "在此之前应用仍跑旧代码。你可以继续把剩下的活干完，"
+                    "最后告诉用户「点一下重启按钮就生效」即可。")
+
     except Exception as e:                        # noqa: BLE001
         return "自开发工具出错：%s: %s" % (type(e).__name__, e)
     return "未知的自开发工具：%s" % name
