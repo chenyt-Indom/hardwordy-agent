@@ -1624,6 +1624,50 @@ def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
     })
 
 
+# 自动自查的节流（同一次对话里别每改一行就截一次图，太贵）
+_AUTO_REVIEW = {"at": 0.0, "rounds": 0}
+
+
+def _auto_review(context: dict) -> str:
+    """改完前端 → **自动**截一张、让模型看一眼，把结论附在工具结果里。
+
+    为什么要做到"自动"而不是"提醒它自己调"：
+    用户要的是「模型自主查看成果并决定是否微调」。但实测下来，
+    只写进提示词的话，模型经常改完就收尾了 —— 它觉得自己改对了。
+    把截图结果**直接塞进它的工具返回里**，它就绕不过去：
+      · 看：由工具强制做（不花模型的选择成本）；
+      · 改不改：仍然由模型决定（这本来就该它判断）。
+    """
+    import time as _t
+    cfg = config.load_config() or {}
+    if not bool(cfg.get("auto_review_frontend", True)):
+        return ""
+    now = _t.time()
+    if now - _AUTO_REVIEW["at"] < 20:      # 20 秒内不重复截
+        return ""
+    _AUTO_REVIEW["at"] = now
+    try:
+        from . import vision as V
+        shot = V.screenshot(width=1280, height=900)
+        if not shot.get("ok"):
+            return "\n\n【自动自查】想帮你看一眼，但截图失败：%s" % shot.get("error")
+        d = V.describe(shot["path"],
+                       "这是刚改完的界面。请只挑**确实存在的问题**："
+                       "控件重叠 / 被裁切 / 横向挤压 / 文字看不清 / 大片空白。"
+                       "没有问题就直说「没有问题」。",
+                       ds_key=str((context or {}).get("ds_key") or ""),
+                       model=str((context or {}).get("model") or "") or "deepseek-flash")
+        if not d.get("ok"):
+            return "\n\n【自动自查】截图成功但看不了：%s" % d.get("error")
+        _why = ("（DeepSeek 看图失败：%s，已退回本地视觉模型）" % d.get("note")
+                if d.get("via") == "local" and d.get("note") else "")
+        return ("\n\n【自动自查 · %s】%s\n%s\n"
+                "→ 有问题就继续改；确认没问题就可以收尾（不用再截图）。"
+                % (d.get("model"), _why, d.get("text")))
+    except Exception as e:                            # noqa: BLE001
+        return "\n\n【自动自查】出错：%s: %s" % (type(e).__name__, e)
+
+
 def _do_selfdev(name: str, arguments: dict, context: dict = None,
                 ui_events: list = None) -> str:
     """执行自开发工具。统一在这里兜异常，返回给模型的永远是文本。"""
@@ -1678,10 +1722,11 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             who = ("DeepSeek " + _pick) if _kind == "cloud" else ("本地 " + (_pick or "默认"))
             _selfdev_ui(ui_events, "apply", r, who)
             d = r.get("diff") or {}
-            return ("已用 %s 重写 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
-                    "改完调 selfdev_restart 生效。"
-                    % (who, r["rel"], d.get("added", 0), d.get("removed", 0),
-                       r["chars"]))
+            return (("已用 %s 重写 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
+                     "改完调 selfdev_restart 生效。"
+                     % (who, r["rel"], d.get("added", 0), d.get("removed", 0),
+                        r["chars"]))
+                    + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
 
         if name == "selfdev_tree":
             r = _sd.list_tree(str(a.get("rel") or ""),
@@ -1714,9 +1759,10 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                 return "写入被拒绝：%s" % r.get("error")
             _selfdev_ui(ui_events, "write", r)
             d = r.get("diff") or {}
-            return ("已写入 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
-                    "记得改完调 selfdev_restart 生效。"
-                    % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
+            return (("已写入 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
+                     "记得改完调 selfdev_restart 生效。"
+                     % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
+                    + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
         if name == "selfdev_insert_after":
             r = _sd.insert_after(str(a.get("rel") or ""),
                                  str(a.get("anchor") or ""),
@@ -1726,9 +1772,10 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                 return "插入失败：%s" % r.get("error")
             _selfdev_ui(ui_events, "insert", r)
             d = r.get("diff") or {}
-            return ("已在 %s 插入一段（+%d −%d 行）。详情已作为卡片展示给用户。\n"
-                    "改完调 selfdev_restart 生效。"
-                    % (r["rel"], d.get("added", 0), d.get("removed", 0)))
+            return (("已在 %s 插入一段（+%d −%d 行）。详情已作为卡片展示给用户。\n"
+                     "改完调 selfdev_restart 生效。"
+                     % (r["rel"], d.get("added", 0), d.get("removed", 0)))
+                    + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
         if name == "selfdev_patch":
             r = _sd.patch(str(a.get("rel") or ""), str(a.get("find") or ""),
                           str(a.get("replace") or ""), str(a.get("note") or ""))
@@ -1736,9 +1783,10 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                 return "替换失败：%s" % r.get("error")
             _selfdev_ui(ui_events, "patch", r)
             d = r.get("diff") or {}
-            return ("已修改 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
-                    "改完调 selfdev_restart 生效。"
-                    % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
+            return (("已修改 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
+                     "改完调 selfdev_restart 生效。"
+                     % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
+                    + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
         if name == "selfdev_run":
             r = _sd.run_py(str(a.get("rel") or ""), str(a.get("args") or ""))
             if not r.get("ok") and r.get("error"):

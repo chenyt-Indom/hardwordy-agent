@@ -156,6 +156,10 @@ def vision_chat(prompt: str, image_b64: str, model: str, api_key: str,
     body = {
         "model": wire,
         "max_tokens": max_tokens,
+        # ⚠️ 看图**必须关思考**：实测开着 thinking 时，模型把内容全写进
+        #   reasoning_content，content 为空 → 我们这边判定"模型没有返回内容"
+        #   然后退回本地小模型（白瞎了 DS 的视力）。
+        "thinking": {"type": "disabled"},
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": prompt or "描述这张图片"},
             {"type": "image_url",
@@ -177,6 +181,8 @@ def vision_chat(prompt: str, image_b64: str, model: str, api_key: str,
         raise DeepSeekError("看图返回的不是 JSON") from None
     msg = ((d.get("choices") or [{}])[0]).get("message") or {}
     txt = str(msg.get("content") or "").strip()
+    if not txt:                                   # 有的实现只给 reasoning_content
+        txt = str(msg.get("reasoning_content") or "").strip()
     if not txt:
         raise DeepSeekError("模型没有返回内容")
     return txt
