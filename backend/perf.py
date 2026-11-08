@@ -28,6 +28,44 @@ MIN_CTX, MAX_CTX = 4096, 131072       # 无极调节范围
 MIN_OUT = 8192                        # 输出下限（不允许低于这个，用户明确要求）
 
 
+def detect_model() -> dict:
+    """**自动读取**当前模型真实支持的上下文上限（用户要求：先探测再给选项）。
+
+    Ollama 的 /api/show 里 model_info 带 `<arch>.context_length`，
+    qwen3-vl 实测是 262144 —— 比我们写死的 131072 大一倍。
+    之前把上限写死，等于白白浪费一半能力。探测失败就退回保守值。
+    """
+    out = {"model": "", "max_ctx": MAX_CTX, "ok": False}
+    try:
+        cfg = config.load_config() or {}
+        model = str(cfg.get("default_model") or "")
+        base = str(cfg.get("ollama_url") or "http://127.0.0.1:11434").rstrip("/")
+        if not model:
+            return out
+        out["model"] = model
+        import json as _j
+        import urllib.request as _u
+        req = _u.Request(base + "/api/show",
+                         data=_j.dumps({"model": model}).encode(),
+                         headers={"Content-Type": "application/json"})
+        with _u.urlopen(req, timeout=8) as r:
+            d = _j.loads(r.read().decode("utf-8", "ignore"))
+        mi = d.get("model_info") or {}
+        for k, v in mi.items():
+            if k.lower().endswith("context_length"):
+                try:
+                    n = int(v)
+                    if n > 4096:
+                        out["max_ctx"] = min(n, 262144)
+                        out["ok"] = True
+                except Exception:
+                    pass
+                break
+    except Exception:
+        pass
+    return out
+
+
 def get() -> dict:
     cfg = config.load_config() or {}
     prof = str(cfg.get("perf_profile") or "medium")
@@ -46,13 +84,17 @@ def get() -> dict:
         mt = 0
     # 输出额度取"配置值"和"档位值"里更大的那个 —— 只能多不能少
     out = max(MIN_OUT, p["max_tokens"], mt)
+    det = detect_model()
+    hi = max(MAX_CTX, det["max_ctx"])      # 选项上限跟着模型真实能力走
     return {"profile": prof, "name": p["name"], "max_tokens": out,
             "num_ctx": ctx, "effort": p["effort"],
             "override": ov, "profiles": [{"id": k, "name": v["name"],
                                           "max_tokens": v["max_tokens"],
                                           "num_ctx": v["num_ctx"]}
                                          for k, v in PROFILES.items()],
-            "min_ctx": MIN_CTX, "max_ctx": MAX_CTX, "min_out": MIN_OUT}
+            "min_ctx": MIN_CTX, "max_ctx": hi, "min_out": MIN_OUT,
+            # 自动探测结果：前端据此显示"你这台机器实际能开多大"
+            "detected": det, "model_ctx_max": det["max_ctx"]}
 
 
 def set(profile: str = "", num_ctx: int = -1, max_tokens: int = 0) -> dict:
@@ -67,9 +109,11 @@ def set(profile: str = "", num_ctx: int = -1, max_tokens: int = 0) -> dict:
         if n == 0:
             cfg["num_ctx_override"] = 0          # 0 = 跟随档位
         else:
-            if not (MIN_CTX <= n <= MAX_CTX):
+            hi = max(MAX_CTX, detect_model()["max_ctx"])
+            if not (MIN_CTX <= n <= hi):
                 return {"ok": False,
-                        "error": "上下文要在 %d~%d 之间" % (MIN_CTX, MAX_CTX)}
+                        "error": "上下文要在 %d~%d 之间（上限由当前模型能力决定）"
+                                 % (MIN_CTX, hi)}
             cfg["num_ctx_override"] = n
     if max_tokens:
         m = int(max_tokens)

@@ -4479,6 +4479,16 @@
       sel.innerHTML = (d.profiles || []).map((x) => '<option value="' + x.id + '">' + x.name + "</option>").join("");
       if (d.profile) sel.value = d.profile;
       ctxBtn.textContent = "⚙ 上下文 " + Math.round(Number(d.num_ctx || 0) / 1024) + "k";
+      // 自动读取到的模型上限，直接写在按钮 title 里（用户要求：先探测再给选项）
+      try {
+        const det = d.detected || {};
+        if (det.model) {
+          ctxBtn.title = "当前模型 " + det.model + "：" + Math.round((det.max_ctx || 0) / 1024)
+            + "k 上下文上限（已自动读取）· 点这里手动调";
+          sel.title = "性能档位（当前 " + d.name + "，输出上限 " + d.max_tokens
+            + "；模型 " + det.model + " 支持 " + Math.round((det.max_ctx || 0) / 1024) + "k）";
+        }
+      } catch (e) {}
       if (!panel) return;
       const r = panel.querySelector("#perfCtxRange"), now = panel.querySelector("#perfCtxNow");
       if (r) { r.min = d.min_ctx; r.max = d.max_ctx; r.value = d.num_ctx; }
@@ -4514,6 +4524,48 @@
       panel.querySelector("#perfCtxClose").onclick = () => { panel.remove(); panel = null; };
     };
     (async () => { try { paint(await (await fetch("/api/perf")).json()); } catch (e) { /* 拿不到就保留占位文字 */ } })();
+  })();
+
+  // ================== 顶栏：完全访问开关（2026-11-08）==================
+  // 用户要求：这不是"只在自开发里用"的开关 —— 日常让模型改后端/写文件也要它，
+  // 所以放在顶栏，和 🛠 面板里那个读同一个后端状态（两边都能开关）。
+  (() => {
+    const bar = document.querySelector(".tools-bar");
+    const anchor = document.querySelector("#selfDevBtn");
+    if (!bar || !anchor) return;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.id = "fullAccessBtn";
+    b.className = "pill pill-btn";
+    b.title = "完全访问：允许模型改写 backend/ 等核心代码（关着只能改 frontend/ 与新建文件）";
+    bar.insertBefore(b, anchor);
+    let on = false;
+    const paint = () => {
+      b.textContent = on ? "🔓 完全访问·开" : "🔓 完全访问·关";
+      b.style.color = on ? "#f0b34a" : "";
+      b.style.borderColor = on ? "#7a5a20" : "";
+    };
+    const load = async () => {
+      try { on = !!(await (await fetch("/api/selfdev/fullaccess")).json()).on; } catch (e) {}
+      paint();
+    };
+    load();
+    b.onclick = async () => {
+      const tip = on
+        ? "关闭后模型只能改 frontend/，改 backend/ 会被拒绝。确定关闭？"
+        : "打开后模型可以改写后端核心代码（backend/），改坏了应用可能起不来。确定打开？";
+      if (!confirm(tip)) return;
+      b.disabled = true;
+      try {
+        const r = await (await fetch("/api/selfdev/fullaccess", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ on: !on }) })).json();
+        if (r.ok) { on = !!r.on; paint(); showToast(r.msg || "已切换", "ok"); }
+        else showToast("切换失败", "err");
+      } catch (e) { showToast("切换失败：" + e.message, "err"); }
+      b.disabled = false;
+    };
+    window.addEventListener("focus", load);
   })();
 
   // ================== 自开发面板（2026-11-08）==================
