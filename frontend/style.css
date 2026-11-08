@@ -1513,3 +1513,197 @@ button.pill-btn.bad:hover { border-color: #8a463c; }
 .model-dl .dl-progress[hidden] {
   display: none !important;
 }
+
+/* ==================== 顶栏控件统一重做（2026-11-08）====================
+   ⚠️ 之前的问题（用户截图）：
+     1. 11 个控件挤一行，每个被 flex 压到几十像素宽；
+     2. .pill 没有 white-space:nowrap，文字逐字换行 → "长期记忆" 竖成四行；
+     3. 按钮型 / 下拉 / 开关三种控件高度和内边距各不相同，一眼看去很乱。
+
+   现在的规则：
+     · top-bar 允许换行（flex-wrap），不再压缩控件；
+     · 所有控件统一 height:30px + 同样的圆角/内边距/字号；
+     · 文字一律 nowrap；
+     · 三态配色：开=亮（蓝边绿点）/ 关=暗（灰边暗点）/ 异常=红（红边红点）。
+   ⚠️ 这一段放在文件末尾，靠后加载覆盖前面的旧规则。 */
+.top-bar {
+  display: flex;
+  flex-wrap: wrap;            /* 放不下就换行，不压缩 */
+  gap: 8px;
+  justify-content: center;
+  align-items: center;
+  padding: 10px 16px;
+}
+
+/* 三种控件共用同一套尺寸 */
+.pill,
+button.pill-btn,
+select.pill-select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  white-space: nowrap;        /* 关键：永不换行 */
+  flex: 0 0 auto;             /* 关键：不参与压缩 */
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  transition: background .15s, border-color .15s, color .15s;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* 下拉框保留原生箭头 */
+select.pill-select {
+  padding-right: 8px;
+  color: var(--text);
+}
+
+/* ---------- 三态 ---------- */
+
+/* 关：暗 */
+.pill:not(.on):not(.bad),
+button.pill-btn:not(.on):not(.bad) {
+  color: #85858f;
+  border-color: #33333a;
+  background: #1a1a1e;
+}
+.pill:not(.on):not(.bad) .sw,
+button.pill-btn:not(.on):not(.bad) .sw {
+  background: #4a4a52;
+  box-shadow: none;
+}
+
+/* 开：亮 */
+.pill.on,
+button.pill-btn.on {
+  color: #e8ecf5;
+  border-color: #4f8cff;
+  background: #1c2947;
+}
+.pill.on .sw,
+button.pill-btn.on .sw {
+  background: #35d07f;
+  box-shadow: 0 0 6px #35d07f;
+}
+
+/* 异常：红 */
+.pill.bad,
+button.pill-btn.bad {
+  color: #ffb0a5;
+  border-color: #8a463c;
+  background: #2a1614;
+}
+.pill.bad .sw,
+button.pill-btn.bad .sw {
+  background: #ff5f4d;
+  box-shadow: 0 0 6px #ff5f4d;
+}
+
+/* hover 只提亮一点，不改颜色语义 */
+.pill:hover,
+button.pill-btn:hover,
+select.pill-select:hover {
+  filter: brightness(1.15);
+}
+
+/* 开关圆点统一尺寸（原来是 14px，挤在 30px 高的胶囊里偏大） */
+.pill .sw,
+button.pill-btn .sw {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  transition: all .15s;
+}
+
+/* ---------- 修正：非开关型控件默认就是「可用」的亮色（2026-11-08）----------
+   上一条规则把 button.pill-btn 的默认态也压成了暗灰，但「采样」「询问方式」
+   「🔑 DeepSeek」「模型下拉」并不是开关 —— 它们没有"关闭"这个概念，
+   变暗会让人以为被禁用了。这里只对**真正的开关**（label.pill）保留
+   "关=暗"的语义；按钮和下拉默认用中性亮色。
+
+   ⚠️ 高德 key 是例外：它是 button.pill-btn，但**有** on/bad 三态
+   （已连接=亮 / 不可用=红 / 未配置=暗），用 :not(#amapKeyBtn) 排除掉。 */
+button.pill-btn:not(#amapKeyBtn):not(.on):not(.bad) {
+  color: #d6dde8;
+  border-color: #3d4655;
+  background: #232833;
+}
+
+select.pill-select {
+  color: #d6dde8;
+  border-color: #3d4655;
+  background: #232833;
+}
+
+/* 下拉里的选项在深色背景下也要看得清（Windows 原生下拉默认白底黑字） */
+select.pill-select option {
+  background: #232833;
+  color: #e8ecf5;
+}
+
+/* ---------- 输入框下方的生成参数条（2026-11-08）----------
+   「采样」从顶栏挪到这里：它调的是温度和 top-p，属于"这一轮的生成参数"，
+   和输入框同一层语义；放顶栏会跟功能开关混在一起，看着像"又一个开关"。
+   右对齐 → 视觉上和右边的「发送」键一列，扫一眼就能找到。 */
+.composer-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* 这一条里的控件比顶栏略小一档，免得在输入区显得笨重 */
+.composer-tools .pill,
+.composer-tools button.pill-btn {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* ==================== 启动自检（2026-11-08）==================== */
+.selftest-box { margin-top: 8px; }
+
+.st-detail {
+  margin-top: 6px;
+  font-size: 11.5px;
+  max-height: 280px;
+  overflow-y: auto;
+  border-top: 1px solid rgba(255, 255, 255, .08);
+  padding-top: 6px;
+}
+/* 同上：display 会覆盖 [hidden]，必须显式兜底 */
+.st-detail[hidden] { display: none !important; }
+
+.st-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 3px 0;
+}
+.st-row b { font-weight: 600; color: #d6dde8; min-width: 78px; }
+.st-det {
+  color: #9a9aa2;
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+.st-hint {
+  color: #f0b34a;
+  font-size: 11px;
+  padding-left: 20px;
+  width: 100%;
+  line-height: 1.5;
+}

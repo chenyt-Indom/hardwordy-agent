@@ -4161,6 +4161,48 @@
     })();
   })();
 
+
+  // ================== 启动自检（2026-11-08）==================
+  // 用户要求「每次启动全部验证并报告状态」。后端启动时已跑过一次，
+  // 这里读缓存（毫秒级）；右键可现场重跑（约 5-10 秒）。
+  (() => {
+    const btn = document.querySelector("#btnSelftest");
+    const sum = document.querySelector("#stSummary");
+    const det = document.querySelector("#stDetail");
+    if (!btn || !sum || !det) return;
+
+    let busy = false;
+
+    async function load(rerun) {
+      if (busy) return;
+      busy = true;
+      sum.textContent = "🔄 自检中…";
+      try {
+        const r = await fetch("/api/selftest" + (rerun ? "?run=1" : ""));
+        const d = await r.json();
+        const ok = d.ok_count || 0, total = d.total || 0;
+        sum.textContent = (total && ok === total ? "✅" : "⚠️") + " 自检 " + ok + "/" + total;
+        det.innerHTML = (d.items || []).map((it) =>
+          "<div class=\"st-row\"><span>" + (it.ok ? "✅" : "❌") + "</span>" +
+          "<b>" + it.label + "</b>" +
+          "<span class=\"st-det\">" + String(it.detail || "").replace(/</g, "&lt;") + "</span>" +
+          (!it.ok && it.hint ? "<div class=\"st-hint\">→ " + String(it.hint).replace(/</g, "&lt;") + "</div>" : "") +
+          "</div>").join("");
+      } catch (e) {
+        sum.textContent = "⚠️ 自检失败";
+        det.textContent = String(e);
+      } finally {
+        busy = false;
+      }
+    }
+
+    btn.onclick = () => { det.hidden = !det.hidden; };
+    btn.oncontextmenu = (e) => { e.preventDefault(); det.hidden = false; load(true); };
+
+    load(false);
+    setInterval(() => load(false), 60000);
+  })();
+
   refreshHealth();
   loadToggles();
   loadMemory();

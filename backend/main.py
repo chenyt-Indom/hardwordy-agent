@@ -32,7 +32,7 @@ import asyncio
 import datetime
 import logging
 import threading
-from . import (config, ollama_client, deepseek_client, model_manager, memory, kb,
+from . import (config, ollama_client, deepseek_client, model_manager, selftest, memory, kb,
                file_tools, video, web_tools,
                t2i, tools, voice, sessions, image_library, doclib, docx_write,
                workspace)
@@ -1527,6 +1527,25 @@ def _open_folder_impl(target: str) -> dict:
 
 
 # ---------- 健康 / 配置 ----------
+@app.get("/api/selftest")
+def api_selftest(run: int = 0):
+    """启动自检：所有能力的状态（含修复提示）。
+
+    · `GET /api/selftest`        → 读缓存（启动时后台已跑过一次，毫秒级返回）
+    · `GET /api/selftest?run=1`  → 现场重跑（约 5-10 秒，会真的探一次网络）
+
+    检测项：Ollama 服务 / 本地模型 / GPU 显存 / 文生图 / 图片微改 /
+           Office 文档 / 文件读写 / 图像处理 / 联网 / DeepSeek API / 语音输入
+    每项都带 `hint`：失败时直接告诉用户怎么修。
+    """
+    if run:
+        return {"ok": True, **selftest.run_all()}
+    r = selftest.get()
+    if not r.get("total"):
+        return {"ok": True, **selftest.run_all()}
+    return {"ok": True, **r}
+
+
 @app.get("/api/health")
 def health():
     return client.health()
@@ -5442,6 +5461,11 @@ async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="
     tool_schemas = _ds_tools(cfg)
     # 复用主通道的系统提示（工具规则 / 记忆 / 时间指引都在里面）
     sys_prompt = _SystemPrompt.build(last_user, session)
+    # ⚠️⚠️ 2026-11-08 补：漏了这句 —— 「信息不足就先问」这一整段规则原来只在
+    # 主通道（/api/chat）里 `sys_prompt += _ask_rules(cfg)`，DeepSeek 通道没加。
+    # 症状：用户让 DeepSeek「做个 PPT / 画张图」，它不调 ask_user 直接瞎猜着做。
+    # 工具在（41 个里有 ask_user），但模型不知道**什么时候该用**。
+    sys_prompt += _ask_rules(cfg)
 
     loop = asyncio.get_running_loop()
 
@@ -6170,6 +6194,12 @@ def _warmup_on_start():
     只预热**默认模型**：显卡显存装不下默认模型 + 代码模型两个，
     同时加载会溢出到内存，反而更慢。代码模型仍按需加载。
     """
+    # ★ 启动自检（2026-11-08 新增）
+    #   用户要求：「每次启动都得全部验证所有东西并报告状态，确保无论隔多长时间都没问题」。
+    #   后台跑一遍（5-10 秒），结果缓存供 /api/selftest 查询；不阻塞服务起来，
+    #   也不受 warmup_on_start 开关影响。
+    threading.Thread(target=selftest.run_all, daemon=True).start()
+
     try:
         cfg = config.load_config() or {}
     except Exception:
