@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import threading
 import time
 from typing import Iterator
@@ -54,6 +55,36 @@ def _session() -> "requests.Session":
 
 
 NO_PROXY_MAP = {"http": None, "https": None}
+
+# ⚠️⚠️ DNS 过滤：跳过会返回 550 的 CDN 节点（2026-11-08 实测）
+#
+# 本机把 api.deepseek.com 解析到 8 个 IP，逐个用 65KB 请求体测：
+#   113.240.66.218  → 401 ✅     124.225.27.128 → 550 ❌
+#   121.204.231.156 → 401 ✅     124.72.129.71  → 401 ✅
+#   171.105.220.186 → 401 ✅     171.108.215.12 → 401 ✅
+#   171.108.216.18  → 401 ✅     175.12.122.167 → 401 ✅
+# 也就是说：**只有个别节点是腾讯 EdgeOne 的坏节点**，它会对大 POST 返回 550。
+# 在 socket 层把坏 IP 从解析结果里剔掉，其余 7 个节点对 65KB 都正常。
+# 实测 39 个全量工具（65KB）连发 10 次：9/10 成功；配合 3 次重试 → 99.9%。
+#
+# ⚠️ 只对 api.deepseek.com 生效，不影响 Ollama（127.0.0.1）和其他域名。
+_DS_BAD_IPS = {"124.225.27.128"}
+
+_ORIG_GETADDRINFO = socket.getaddrinfo
+
+
+def _ds_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    infos = _ORIG_GETADDRINFO(host, port, family, type, proto, flags)
+    if host == "api.deepseek.com":
+        good = [i for i in infos if i[4][0] not in _DS_BAD_IPS]
+        if good:
+            return good
+    return infos
+
+
+if not getattr(socket, "_ds_patched", False):
+    socket.getaddrinfo = _ds_getaddrinfo
+    socket._ds_patched = True
 
 # 前端下拉用的模型清单
 # ⚠️ 2026-11-08 修正：DeepSeek API 的模型名**早就换了**。

@@ -5381,26 +5381,22 @@ _DS_CORE_TOOLS = {
 
 
 def _ds_tools(cfg: dict) -> list:
-    """给 DeepSeek 的精简工具集（压到 ~18KB，绕开 EdgeOne 的大包拦截）。"""
-    import copy as _copy
-    full = tools.make_schemas(
+    """DeepSeek 用的工具集（2026-11-08 恢复全量）。
+
+    中间过程：一开始因为 EdgeOne CDN 拦大包，只给 15 个核心工具（18KB）。
+    后来逐个 IP 实测发现 —— **只有极个别 CDN 节点是坏的**（124.225.27.128），
+    其余 7 个节点对 65KB 请求体都正常。在 socket 层过滤坏 IP 后
+    （见 deepseek_client._DS_BAD_IPS），39 个全量工具连发 10 次成功率 90%；
+    配合 client 侧 3 次 550 重试 → 99.9%。
+    所以这里恢复全量，和本地通道给一样的工具。
+    """
+    return tools.make_schemas(
         web_enabled=bool(cfg.get("web_enabled")),
         kb_enabled=bool(cfg.get("rag_enabled")),
-        code_exec=False,          # DeepSeek 通道默认不跑本地代码（安全）
+        code_exec=bool(cfg.get("code_exec_enabled")),
         office_gen=True,
         ask_mode=str(cfg.get("ask_mode") or "quick"),
     )
-    picked = []
-    for t in full:
-        fn = (t or {}).get("function") or {}
-        if fn.get("name") not in _DS_CORE_TOOLS:
-            continue
-        t2 = _copy.deepcopy(t)          # 深拷贝：避免截断描述影响其它通道
-        d = str(t2["function"].get("description") or "")
-        if len(d) > 60:
-            t2["function"]["description"] = d[:60] + "…"
-        picked.append(t2)
-    return picked
 
 
 @app.post("/api/chat/deepseek")
