@@ -83,3 +83,8 @@ dist_old*/
 *.bak
 *.bak_*
 tools_dev/
+
+# 构建输出目录（2026-11-08：dist_v* 之前没被忽略，误提交过）
+dist_v*/
+dist_rel*/
+build/_pyi/
