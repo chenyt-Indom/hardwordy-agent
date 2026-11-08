@@ -10,9 +10,21 @@
 分发的本地 SD 模型（sd_model 目录）完成，全程离线。
 """
 import os
+import sys
 import threading
 import time
 import urllib.request
+
+# ⚠️⚠️ pythonw.exe 下 sys.stdout / sys.stderr 都是 None（无控制台）。
+# 后端代码里有大量 print()（诊断日志、[cigshape] 异常等），一执行就抛
+#   AttributeError: 'NoneType' object has no attribute 'write'
+# 然后进程瞬间退出 —— 用户双击快捷方式看到的就是"闪一下没了"。
+# 实测 2026-11-08：桌面 .lnk 指向 pythonw + run.py 时，进程活不到 1 秒。
+# 这里兜住：没有标准输出就丢到 devnull，功能不受影响。
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 import uvicorn
 

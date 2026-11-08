@@ -30,6 +30,31 @@
              不写死 —— 换模型后这里自动跟着变，用户能一眼确认到底生效了没有。
              内容由 refreshHealth() 填，见 app.js。 -->
         <p id="modelInfo" class="model-info"></p>
+
+        <!-- 模型下载控制（2026-11-08 新增）
+             为什么放这儿：模型没下载时，用户第一眼看到的就是这张卡片
+             （"Ollama 在线，模型未下载"），下载入口就该长在它下面，
+             而不是藏到设置页里。
+             状态机：未下载 → [⬇ 下载模型]
+                     下载中 → 进度条 + [取消]
+                     已完成 → [🗑 删除模型]（删完可以再点下载重装） -->
+        <div id="modelDl" class="model-dl" hidden>
+          <button type="button" id="btnModelPull" class="dl-btn">⬇ 下载模型</button>
+
+          <div id="dlProgress" class="dl-progress" hidden>
+            <div class="dl-bar"><div class="dl-fill" id="dlFill"></div></div>
+            <div class="dl-meta">
+              <span id="dlPct">0%</span>
+              <span id="dlSpeed">—</span>
+              <span id="dlEta">—</span>
+            </div>
+            <div class="dl-acts">
+              <button type="button" id="btnDlCancel" class="dl-mini">取消</button>
+            </div>
+          </div>
+
+          <button type="button" id="btnModelRemove" class="dl-btn dl-danger" hidden>🗑 删除模型</button>
+        </div>
       </div>
     </div>
 
@@ -206,6 +231,16 @@
            要求合并成一个「询问方式」按钮，并在按钮里显示当前选择。 -->
       <button type="button" class="pill pill-btn askmode-btn" id="askModeBtn"
               title="模型在动手前会问你多少问题：快速了解 = 只问最关键的几条；深度询问 = 分多轮把关键信息问透。点这里切换（下一次提问生效）。">询问方式：快速</button>
+      <!-- 模型选择（2026-11-08 新增）：本地 30B / DeepSeek。
+           之前移除过手动选择（用户嫌麻烦），但接入 DeepSeek 后必须手动指定
+           provider，否则不知道该往哪个后端发。默认仍是「自动（本地）」。 -->
+      <select id="modelSelect" class="pill pill-select" title="选择本轮对话用哪个模型">
+        <option value="auto">🖥 本地 30B（自动）</option>
+        <option value="deepseek-chat">☁️ DeepSeek Chat</option>
+        <option value="deepseek-reasoner">🧠 DeepSeek Reasoner</option>
+      </select>
+      <button type="button" class="pill pill-btn" id="dsKeyBtn"
+              title="设置 DeepSeek API Key（只存本标签页 sessionStorage，关掉浏览器即清空；不写磁盘、不进日志）">🔑 DeepSeek</button>
       <!-- 模型**全自动选择**，这里不放选择器。
            一度加过"手动指定模型"的下拉，用户试用后反馈：
            "算了，我还是想要自动选择，手动太麻烦了" —— 于是移除。
