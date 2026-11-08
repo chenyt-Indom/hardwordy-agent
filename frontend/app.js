@@ -3607,10 +3607,12 @@
         stream: true, session_id: sessionId,
       };
       if (_isDS) {
-        // DeepSeek 是纯文本协议（不吃图片/选区），但**工具是支持的**：
-        // 后端会把 tools schema 一起发过去、执行完再回填，和本地通道一致。
+        // ⚠️ 2026-11-09 修：这里原来把 images_b64 置空了，理由是"DeepSeek 不吃图片"——
+        //    **这是错的**：V4.1 Flash 是多模态（input_modalities 含 image），
+        //    实测能读截图。置空导致"粘贴了图，模型却说看不到"。
+        //    现在图片照常发（后端会按 image_url 拼进最后一条 user 消息）；
+        //    选区蒙版和文档仍然只在本地通道用，云端不支持就保持 null。
         _payload.model = _prov;
-        _payload.images_b64 = null;
         _payload.mask_b64 = null;
         _payload.docs = null;
         _payload.studio = false;
