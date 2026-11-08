@@ -40,6 +40,15 @@ def detect_model() -> dict:
         cfg = config.load_config() or {}
         model = str(cfg.get("default_model") or "")
         base = str(cfg.get("ollama_url") or "http://127.0.0.1:11434").rstrip("/")
+        # 配置里的 default 可能没下载（这台机器就是 30b 未装、实际跑 8b）。
+        # 探测要以**真正在用的**那个为准，否则读到的是"上限 131072"而不是模型的 262144。
+        try:
+            from . import main as M
+            have = M._installed_models()
+            if have and model not in have:
+                model = next((n for n in have if "qwen3-vl" in n), "") or have[0]
+        except Exception:
+            pass
         if not model:
             return out
         out["model"] = model
