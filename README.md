@@ -280,7 +280,22 @@ budget = ctx_limit - reserve_out - overhead - search_reserve - 512
 ### DeepSeek 通道
 
 - 走 `https://api.deepseek.com`，**纯对话**（不支持本地工具：地图 / 工作区 / 画图）
-- 支持 `deepseek-chat`（通用，快） / `deepseek-reasoner`（思维链，推理强）
+- 支持三个模型（`/api/deepseek/models` 可查）：
+
+  | 前端选项 | API model | thinking | reasoning_effort |
+  |---|---|---|---|
+  | DeepSeek V4.1 Flash | `deepseek-flash` | disabled | — |
+  | DeepSeek V4.1（思考） | `deepseek-flash` | **enabled** | medium |
+  | DeepSeek V4 Pro | `deepseek-v4-pro` | **enabled** | high |
+
+> ⚠️ **2026-11 协议变更**：DeepSeek API 的模型名已从旧的 `deepseek-chat` /
+> `deepseek-reasoner` 换成 `deepseek-flash`（由 DeepSeek-V4.1-Flash-1017 服务）/
+> `deepseek-v4-pro`。**推理能力不再靠"换个模型"，而是靠请求体参数**：
+> ```json
+> {"thinking": {"type": "enabled"}, "reasoning_effort": "low|medium|high"}
+> ```
+> 本项目把"同一模型的思考/不思考"拆成两个下拉选项（`deepseek-flash` 与
+> `deepseek-flash-think`），底层发的是同一个 model 名 + 不同的 thinking 参数。
 - 右上角 **🔑 DeepSeek** 配置 Key，弹窗内直接给三个官方链接（创建 Key / 充值 / 查余额）
 
 **Key 安全设计**

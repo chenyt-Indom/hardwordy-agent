@@ -29,18 +29,38 @@ BASE = "https://api.deepseek.com"
 TIMEOUT = (10, 300)
 
 # 前端下拉用的模型清单
+# ⚠️ 2026-11-08 修正：DeepSeek API 的模型名**早就换了**。
+# 旧文档里的 deepseek-chat / deepseek-reasoner 现在已不在文档中，
+# 现行的是（见 https://api-docs.deepseek.com/quick_start/pricing ）：
+#   deepseek-flash    → 由 DeepSeek-V4.1-Flash-1017 服务（默认不思考）
+#   deepseek-v4-pro   → V4 Pro，能力更强
+# 推理能力不再靠"换个模型"，而是请求体参数：
+#   "thinking": {"type": "enabled"}   开关思考
+#   "reasoning_effort": "low|medium|high"
+# 旧名 deepseek-v4-flash / deepseek-v4-flash-vision-exp 仍被接受，
+# 但对应模型已退役，请求会被路由到 V4.1-Flash-1017 并按 Flash 计费。
 MODELS = [
     {
-        "id": "deepseek-chat",
-        "name": "DeepSeek Chat",
-        "desc": "通用对话，响应快，便宜",
-        "support_image": False,
+        "id": "deepseek-flash",
+        "name": "DeepSeek V4.1 Flash",
+        "desc": "V4.1 Flash，响应快、便宜，默认不思考",
+        "thinking": False,
+        "effort": None,
     },
     {
-        "id": "deepseek-reasoner",
-        "name": "DeepSeek Reasoner",
-        "desc": "带思维链推理，复杂问题更强",
-        "support_image": False,
+        "id": "deepseek-flash-think",
+        "name": "DeepSeek V4.1 Flash（思考）",
+        "desc": "同一模型开 thinking + reasoning_effort=medium，复杂问题更稳",
+        "thinking": True,
+        "effort": "medium",
+        "wire_model": "deepseek-flash",      # 实际发给 API 的名字
+    },
+    {
+        "id": "deepseek-v4-pro",
+        "name": "DeepSeek V4 Pro",
+        "desc": "V4 Pro，最强，适合复杂推理与长文",
+        "thinking": True,
+        "effort": "high",
     },
 ]
 
@@ -59,35 +79,48 @@ class DeepSeekError(RuntimeError):
 
 def chat_stream(messages: list[dict], model: str, api_key: str,
                 temperature: float = 0.7, max_tokens: int = 4096,
+                thinking: bool | None = None,
                 reasoning_effort: str | None = None) -> Iterator[tuple[str, str]]:
     """流式对话。
 
     参数
     ----
     messages : OpenAI 格式的消息列表 [{"role": "user", "content": "..."}]
-    model    : deepseek-chat | deepseek-reasoner
+    model    : MODELS 里的 id（deepseek-flash / deepseek-flash-think / deepseek-v4-pro）
+               —— 前端下拉传的就是这个；实际发给 API 的名字由 wire_model 决定
     api_key  : 用户在前端输入的 Key（仅本次请求使用）
-    reasoning_effort : reasoner 专用，low/medium/high，None 用服务端默认
+    thinking : 是否开思考。None = 按 MODELS 里该模型的默认值
+    reasoning_effort : low / medium / high，None = 按模型默认值
 
     产出
     ----
     (kind, text) 元组：
       kind = "content"  → 正文增量
-      kind = "thinking" → 思维链增量（仅 reasoner）
+      kind = "thinking" → 思维链增量（开了 thinking 才有）
     """
     if not api_key:
         raise DeepSeekError("缺少 API Key")
     if not model:
-        model = "deepseek-chat"
+        model = "deepseek-flash"
+
+    # 查这个 id 的配置：wire_model（实际发给 API 的名字）、thinking、effort
+    conf = next((m for m in MODELS if m["id"] == model), None)
+    wire_model = (conf or {}).get("wire_model") or model
+    if thinking is None:
+        thinking = bool((conf or {}).get("thinking", False))
+    if reasoning_effort is None:
+        reasoning_effort = (conf or {}).get("effort")
 
     body: dict = {
-        "model": model,
+        "model": wire_model,
         "messages": messages,
         "stream": True,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        # ⚠️ 2026-11 的新协议：思考是请求参数，不是模型名
+        "thinking": {"type": "enabled" if thinking else "disabled"},
     }
-    if model == "deepseek-reasoner" and reasoning_effort:
+    if thinking and reasoning_effort:
         body["reasoning_effort"] = reasoning_effort
 
     try:
