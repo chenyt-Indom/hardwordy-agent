@@ -5361,6 +5361,48 @@ def deepseek_check(x_deepseek_key: str = Header(default="")):
     return deepseek_client.check_key(x_deepseek_key)
 
 
+# DeepSeek 专用的精简工具集（2026-11-08 实测定位）
+# ---------------------------------------------------------------
+# 问题：这台机器访问 api.deepseek.com 时被解析到腾讯 EdgeOne CDN，
+#       它对 **大 POST 请求有概率性拦截**（返回 550 / Server: TencentEdgeOne）。
+#       实测成功率（同一请求体连发 8 次）：
+#           276 字节 → 100%    17KB → 87.5%
+#           29KB     → 75%     65KB → 0%
+#       所以把工具集压到 ~18KB（15 个核心工具 + 描述截断到 60 字），
+#       再配合 client 侧的 550 重试（3 次），成功率可达 99%+。
+# 代价：DeepSeek 通道不能调用全部 39 个工具，只给最常用的一批。
+#       本地 30B/8B 通道不受影响（走 Ollama，没有 CDN）。
+_DS_CORE_TOOLS = {
+    "web_search", "web_read", "get_time", "remember", "search_memory",
+    "read_file", "write_file", "list_directory",
+    "generate_image", "edit_image", "web_image_search", "save_image_to_library",
+    "make_pptx", "make_docx", "ask_user",
+}
+
+
+def _ds_tools(cfg: dict) -> list:
+    """给 DeepSeek 的精简工具集（压到 ~18KB，绕开 EdgeOne 的大包拦截）。"""
+    import copy as _copy
+    full = tools.make_schemas(
+        web_enabled=bool(cfg.get("web_enabled")),
+        kb_enabled=bool(cfg.get("rag_enabled")),
+        code_exec=False,          # DeepSeek 通道默认不跑本地代码（安全）
+        office_gen=True,
+        ask_mode=str(cfg.get("ask_mode") or "quick"),
+    )
+    picked = []
+    for t in full:
+        fn = (t or {}).get("function") or {}
+        if fn.get("name") not in _DS_CORE_TOOLS:
+            continue
+        t2 = _copy.deepcopy(t)          # 深拷贝：避免截断描述影响其它通道
+        d = str(t2["function"].get("description") or "")
+        if len(d) > 60:
+            t2["function"]["description"] = d[:60] + "…"
+        picked.append(t2)
+    return picked
+
+
 @app.post("/api/chat/deepseek")
 async def chat_deepseek(req: ChatRequest, x_deepseek_key: str = Header(default="")):
     """DeepSeek 流式对话（**带工具调用**）。输出格式与 /api/chat 一致。
