@@ -6684,25 +6684,35 @@ async def chat_deepseek(req: ChatRequest,
                     not re.search(r"[。！？!?….…”』」）)】`~\n]$", _full.rstrip()))
         except Exception:
             _cut = False
-        if _cut:
+        # 宁多勿少：最多补 3 轮，直到结尾落在终止标点上（用户明确要求）
+        for _try in range(3):
+            try:
+                _bad_tail = (len(_full.strip()) > 60 and
+                             not re.search(r"[。！？!?….…”』」）)】`~\n]$", _full.rstrip()))
+            except Exception:
+                _bad_tail = False
+            if not _bad_tail:
+                break
             try:
                 _msgs = [
                     {"role": "system", "content": "你只负责补完句子。只输出缺失的那几个字，不要重复已有内容，不要解释。"},
-                    {"role": "user", "content": "下面这段回答被截断了，请只输出**接着往下写的那一小段**（补完这句话即可）：\n\n" + _full[-400:]},
+                    {"role": "user", "content": "下面这段回答被截断了，请只输出**接着往下写的那一小段**（补完这句话即可，15~60 字）：\n\n" + _full[-400:]},
                 ]
                 _buf = []
                 for _k, _v in deepseek_client.chat_stream(
                         _msgs, model=model, api_key=x_deepseek_key,
-                        temperature=0.3, max_tokens=200):
+                        temperature=0.3, max_tokens=300):
                     if _k == "content" and _v:
                         _buf.append(_v)
                 _add = "".join(_buf).strip()
-                if _add and len(_add) < 200:
-                    yield json.dumps({"message": {"content": _add}}, ensure_ascii=False) + "\n"
-                    _ACC.append(_add)
-                    _full = "".join(_ACC)
+                if not _add or len(_add) > 400:
+                    break
+                yield json.dumps({"message": {"content": _add}}, ensure_ascii=False) + "\n"
+                _ACC.append(_add)
+                _full = "".join(_ACC)
             except Exception:
-                logger.warning("补句失败（忽略）", exc_info=True)
+                logger.warning("补句失败（第 %d 次，忽略）", _try + 1, exc_info=True)
+                break
         yield json.dumps({"__end": True, "answer": _full}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")

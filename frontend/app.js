@@ -3028,6 +3028,10 @@
   }
 
   async function doSend(promptText, mediaB64, docPayload) {
+    // 用户自己发的（不是系统续写）→ 重置自动续写次数，避免"断两次以后再也不敢续"
+    try {
+      if (!/上一条回复被截断/.test(String(promptText || ""))) window.__autoCont = 0;
+    } catch (e) { /* 忽略 */ }
     history.push({ role: "user", content: promptText });
 
     // ---------- 思考过程：默认折叠，但实时刷新状态；展开可见实时全文 ----------
