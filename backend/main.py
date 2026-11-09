@@ -551,6 +551,49 @@ def _history_digest(dropped: list, per_msg: int = 90, cap: int = 1500) -> str:
 # 结果 `24576 - 8192(输出) - 16025(系统提示+工具) - 3800(联网预留) - 512 = -3953`
 # → **负数** → 历史每轮被砍到只剩最后 2 条，其余压成 743 字摘要。
 MIN_HISTORY_TOKENS = 2500
+
+
+def _recent_turns_index(messages: list, rounds: int = 8,
+                        user_chars: int = 60, bot_chars: int = 110) -> str:
+    """把最近几轮压成一份「速览」，专治多轮对话里的指代失忆。
+
+    为什么需要它（2026-11-10 用户报「上下文记忆不行，没两轮就失忆」）：
+      实测下来**历史并没有被裁掉**（1M 窗口下历史预算 63 万 token，MAX_CONTEXT_MESSAGES=120），
+      但用户问「我是说**胡萝卜**那个笑话」时，模型会拿**最近一条**回答顶替，
+      然后一本正经地解释错的那个。本质是"在几千字历史里做关键词对齐"失败了，
+      不是上下文丢了。
+      所以这里把最近 8 轮的「用户说了什么 + 我的回答开头」单独列一遍，
+      给模型一个可以直接比对的锚点 —— 用户提到「胡萝卜」，它一眼能扫到第几轮。
+
+    ⚠️ 标签必须写「用户 / 你的回答」，理由同 _history_digest：写「我/你」会让模型搞混指代。
+    ⚠️ 只取开头若干字：目的只是"能被认出来"，不是复述全文（全文本来就在历史里）。
+    """
+    pairs = []
+    pending = None
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        text = " ".join(str(m.get("content") or "").split())
+        if not text:
+            continue
+        if role == "user":
+            pending = text[:user_chars] + ("…" if len(text) > user_chars else "")
+        elif role == "assistant" and pending is not None:
+            pairs.append((pending,
+                          text[:bot_chars] + ("…" if len(text) > bot_chars else "")))
+            pending = None
+    if pending is not None:
+        pairs.append((pending, "（未回复）"))
+    pairs = pairs[-max(1, rounds):]
+    if not pairs:
+        return ""
+    total = len(pairs)
+    lines = ["· 第%d轮（倒数第%d轮）｜用户：%s｜你的回答开头：%s"
+             % (i, total - i + 1, u, a)
+             for i, (u, a) in enumerate(pairs, 1)]
+    return ("【最近 %d 轮速览｜用来对齐「刚才那个 / 上一个 / 第几个」这类指代】\n"
+            % total + "\n".join(lines))
 # 「较早对话摘要」的预留：摘要是在裁剪**之后**才生成的，之前完全没进预算，
 # 等于白送最多 1500 字（~1200 token）→ 也是撑爆窗口的一份子。这里先扣掉。
 DIGEST_RESERVE = 700
@@ -3846,6 +3889,12 @@ class _SystemPrompt:
             "· 用户只发一句「你好 / 啊？ / 可以啊」→ 正常接话即可，不要输出报告、清单、总结；\n"
             "· 用户指出你上一轮说错了 → 先承认、说清错在哪，再谈怎么改。\n"
             "⚠️ 不要自动附加「关键点 / 产物 / 下一步」这类自我介绍式段落，用户没要就别加。\n"
+            "\n【多轮对话：先对齐「那个」到底指什么，再开口】\n"
+            "用户说「刚才那个 / 上一个 / 第几个 / 我是说 X 那个」时，**不要拿最近一条顶替**。\n"
+            "· 先看本轮用户消息里附的【最近 N 轮速览】，按里面的关键词逐条比对，"
+            "确认是哪一轮，再回到历史里取那一轮的原文来回答；\n"
+            "· 对不上就直接问「你是指第几轮那个？」—— 猜错比问一句代价大得多；\n"
+            "· 用户纠正你「我是说 X 那个」时，**先承认答错了**，再按 X 重新回答，不要辩解。\n"
                         """（注：上面这条「不要自动附加」只约束 A / B 类；本轮属于 C 类、真的产出了东西时，按下面模板写是允许且要求的。）
             """,
             "### ✅ 做完了什么\n"
@@ -4689,6 +4738,15 @@ async def chat(req: ChatRequest,
     messages, dropped, _clamped = _trim_history_to_budget(
         messages, budget_sys, tool_schemas, cfg, images_b64=model_images)
     digest = _history_digest(dropped)
+    # ★ 2026-11-10：历史没被裁掉，但模型在几千字里做「关键词对齐」会抓错
+    #   （用户问「胡萝卜那个笑话」，它拿最近一条顶替）。这里把最近 8 轮压成速览
+    #   一起注入，给它一个能直接比对的锚点。
+    try:
+        _recent_idx = _recent_turns_index(req.messages)
+        if _recent_idx:
+            digest = (digest + "\n\n" + _recent_idx) if digest else _recent_idx
+    except Exception:
+        logger.warning("最近轮次速览生成失败（本轮忽略）", exc_info=True)
 
     # 联网搜索：以前这里会**预先**跑一次搜索并把结果塞进上下文，
     # 但模型自己也会调用 web_search 工具 —— 两条路径重复执行，结果两批材料叠加，
@@ -6574,6 +6632,23 @@ async def chat_deepseek(req: ChatRequest,
                     break
     except Exception:
         logger.warning("云端通道注入交接卡/账本失败（本轮忽略）", exc_info=True)
+
+        # ★ 2026-11-10：云端通道同样注入「最近 8 轮速览」。
+        #   云端虽然不裁历史，但模型在长历史里做关键词对齐同样会抓错，
+        #   和主通道用同一套锚点，用户换模型时体验才一致。
+        try:
+            _r2 = _recent_turns_index(req.messages)
+            if _r2 and clean:
+                for _i in range(len(clean) - 1, -1, -1):
+                    if clean[_i].get("role") == "user":
+                        _c = clean[_i].get("content")
+                        if isinstance(_c, str):
+                            clean[_i]["content"] = _c + "\n\n" + _r2
+                        elif isinstance(_c, list):      # 带图那轮 content 是数组
+                            clean[_i]["content"] = _c + [{"type": "text", "text": "\n\n" + _r2}]
+                        break
+        except Exception:
+            logger.warning("云端通道注入最近轮次速览失败（本轮忽略）", exc_info=True)
 
     loop = asyncio.get_running_loop()
     _ACC: list = []          # 本轮完整正文（收尾回填用，见 __end.answer）
