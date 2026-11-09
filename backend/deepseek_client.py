@@ -17,6 +17,9 @@ SSE（data: {...}\\n\\n），两者的错误码、限流、思维链字段完全
 会让 ollama_client 里那套"num_ctx 必须全局一致否则重载模型"的约束失效。
 """
 from __future__ import annotations
+import logging
+logger = logging.getLogger(__name__)
+
 
 import json
 import re
@@ -528,6 +531,12 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 resp.close()
             except Exception:
                 pass
+
+        try:
+            logger.warning("[ds] 本轮 finish=%s 正文=%d 字 工具=%d 个",
+                        finish, len("".join(content_buf)), len(tool_calls))
+        except Exception:
+            pass
 
         # ★ 被 max_tokens 截断（finish_reason=length）→ **自动续写**
         #   2026-11-08 用户报「思考过程有了，但输出被限制了」：

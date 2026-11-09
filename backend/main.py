@@ -6676,6 +6676,33 @@ async def chat_deepseek(req: ChatRequest,
         #   （切在半个 JSON 上、XHR 缓冲吞尾等），界面上就永远少那几个字。
         #   现在前端以此为准做一次回填 —— 丢字问题不依赖"猜哪里丢的"。
         _full = "".join(_ACC)
+        # ★ 服务端兜底补句（2026-11-09）：前端那些兜底都依赖"先收到"，但如果模型自己
+        #   在 max_tokens 边界停住、或最后一轮带工具调用导致不续写，正文就是半句。
+        #   这里直接再问一次"只补缺失的结尾"，把结果接上去 —— 不依赖客户端做任何事。
+        try:
+            _cut = (len(_full.strip()) > 60 and
+                    not re.search(r"[。！？!?….…”』」）)】`~\n]$", _full.rstrip()))
+        except Exception:
+            _cut = False
+        if _cut:
+            try:
+                _msgs = [
+                    {"role": "system", "content": "你只负责补完句子。只输出缺失的那几个字，不要重复已有内容，不要解释。"},
+                    {"role": "user", "content": "下面这段回答被截断了，请只输出**接着往下写的那一小段**（补完这句话即可）：\n\n" + _full[-400:]},
+                ]
+                _buf = []
+                for _k, _v in deepseek_client.chat_stream(
+                        _msgs, model=model, api_key=x_deepseek_key,
+                        temperature=0.3, max_tokens=200):
+                    if _k == "content" and _v:
+                        _buf.append(_v)
+                _add = "".join(_buf).strip()
+                if _add and len(_add) < 200:
+                    yield json.dumps({"message": {"content": _add}}, ensure_ascii=False) + "\n"
+                    _ACC.append(_add)
+                    _full = "".join(_ACC)
+            except Exception:
+                logger.warning("补句失败（忽略）", exc_info=True)
         yield json.dumps({"__end": True, "answer": _full}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
