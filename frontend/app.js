@@ -1187,8 +1187,9 @@
       // 换新键：旧的 plain_answer 曾被"默认纯文本"写成 1，会挡住 markdown 恢复
       const v = localStorage.getItem("render_style");
       if (v) return v === "plain";
-      const old = localStorage.getItem("plain_answer");
-      return old === "1";
+      // 旧的 plain_answer 曾被"默认纯文本"写成 1，不能再用它判断 —— 直接清掉
+      try { localStorage.removeItem("plain_answer"); } catch (e) {}
+      return false;                       // 默认：markdown
     } catch (e) { return false; }
   }
 
@@ -4338,6 +4339,14 @@
         history.push({ role: "assistant", content: answerBubble.textContent });
         try { persistSession(); } catch (e) { /* 落盘失败不影响使用 */ }
       }
+      // 2026-11-10：收尾渲染那一步在某些路径下不执行（见 __last_answer=0 的探针），
+      //   这里做最后兜底：还有 answer 但气泡里没有任何结构化标签 → 补渲染一次（带尾部核对）。
+      try {
+        if (answer && !isPlainMode() &&
+            !answerBubble.querySelector("strong,b,ul,ol,pre,code,h1,h2,h3,table")) {
+          renderFinal(answerBubble, answer, promptText);
+        }
+      } catch (e) { /* 忽略 */ }
       $("#sendBtn").disabled = false;
       setStopVisible(false);
     }
