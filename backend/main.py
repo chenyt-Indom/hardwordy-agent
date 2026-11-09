@@ -469,6 +469,10 @@ def _looks_unfinished(text: str) -> bool:
     if not s:
         return False
     tail = s[-1]
+    # 双字连词结尾（「…或者」「…但是」）句子必然没说完；endswith("或") 认不出「或者」。
+    for w in _CONNECTIVE_TAILS:
+        if s.endswith(w):
+            return True
     if tail in _FINISHED_TAIL:
         return False
     if tail in _UNFINISHED_TAIL:

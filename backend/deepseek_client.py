@@ -137,6 +137,12 @@ _SK_RE = re.compile(r"sk-[A-Za-z0-9_\-]{8,}")
 # 以前只认 finish_reason="length"，这种「假正常结束」既不续写也不提示。
 _UNFINISHED_TAIL = set("，,、；;：:（(【[《<「『“‘")
 _FINISHED_TAIL = set("。！？!?….\"'”』」）)】]》>`~*|")
+# 双字连词/介词结尾同样是半句话（「…或者」「…但是」），endswith("或") 认不出来。
+_CONNECTIVE_TAILS = ("或者", "还有", "还是", "但是", "不过", "可是", "然而",
+                     "因此", "于是", "接着", "另外", "此外", "同时", "至于",
+                     "关于", "对于", "除了", "无论", "不管", "即使", "虽然",
+                     "尽管", "要么", "而是", "并非", "以便", "从而", "进而",
+                     "一旦", "要是", "那么", "的话")
 _DANGLING_WORDS = ("我", "你", "他", "她", "它", "的", "地", "得", "和", "与",
                    "或", "但", "而", "就", "也", "都", "所以", "因为", "如果",
                    "然后", "并且", "而且", "以及", "包括", "例如", "比如")
@@ -148,6 +154,9 @@ def looks_unfinished(text: str) -> bool:
     if not s:
         return False
     tail = s[-1]
+    for w in _CONNECTIVE_TAILS:
+        if s.endswith(w):
+            return True
     if tail in _FINISHED_TAIL:
         return False
     if tail in _UNFINISHED_TAIL:

@@ -4174,13 +4174,7 @@
         if (/[?&]plain=0/.test(location.search)) localStorage.removeItem("plain_answer");
       } catch (e) { /* 忽略 */ }
       // 默认开启纯文本渲染（先保证"一个字都不少"），格式化模式可用 ?plain=0 关掉。
-      const _PLAIN_MODE = (() => {
-        try {
-          const v = localStorage.getItem("plain_answer");
-          if (v === null) { localStorage.setItem("plain_answer", "1"); return true; }
-          return v === "1";
-        } catch (e) { return true; }
-      })();
+      const _PLAIN_MODE = true;   // [诊断] 强制纯文本：排除渲染层的所有可能
       if (_PLAIN_MODE) {
         answerBubble.textContent = answer;          // 完全不做 markdown，只保留换行
         answerBubble.style.whiteSpace = "pre-wrap";
@@ -4219,6 +4213,7 @@
         }
       } catch (e) { /* 兜底失败不影响主流程 */ }
       window.__lastAnswerLen = (answer || "").length;   // 诊断用（只有长度，无内容）
+      try { localStorage.setItem("__last_answer", String(answer || "")); } catch (e) {}
       // ★ 自动续写（2026-11-09）：回答看起来被截断（结尾没有终止标点）时，
       //   自动补一条"从断开处继续"，最多 2 次。这样用户不用自己发现"少了一半"。
       try {
