@@ -192,6 +192,21 @@
     }
   }
 
+  // 手机上把"直接下载"换成"打开说明页"（2026-11-09）：
+  //   Office 文件手机浏览器渲染不了，直接 download 在微信里常常点了没反应；
+  //   /api/doclib/view 会给出文件名/大小/明确按钮，并提示"在浏览器中打开"。
+  function mobileViewUrl(url) {
+    try {
+      const u = new URL(url, location.href);
+      if (u.pathname !== "/api/doclib/download") return url;
+      const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+      if (!coarse && window.innerWidth > 768) return url;
+      return "/api/doclib/view" + u.search;
+    } catch (e) { return url; }
+  }
+
+  window.__mobileViewUrl = mobileViewUrl;      // artifacts.js 复用
+
   function dlGroup(label, url) {
   // 产物卡片接管（见 artifacts.js）：正文显示成小胶囊，卡片由 flush() 追加
   if (window.__Artifacts) {
@@ -204,7 +219,7 @@
       if (m) { try { rel = decodeURIComponent(m[1]); } catch (e) { rel = m[1]; } }
     }
     return '<span class="dl-group">' +
-      `<a class="dl-link" href="${url}" download>${label}</a>` +
+      `<a class="dl-link" href="${mobileViewUrl(url)}">${label}</a>` +
       (rel ? `<button type="button" class="dl-open" data-rel="${escapeHtml(rel)}"` +
              ` title="在左侧「生成文库」里定位并选中它">📂 在文件库中打开</button>` : "") +
       "</span>";

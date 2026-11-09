@@ -9,7 +9,8 @@ from fastapi import (FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDis
                      Response, File, Header)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, FileResponse, PlainTextResponse
+from fastapi.responses import (StreamingResponse, FileResponse, PlainTextResponse,
+                                HTMLResponse)
 from pydantic import BaseModel
 
 import os
@@ -7522,13 +7523,190 @@ def toggle_amap(body: dict):
                         "随时点「连接」就能恢复）。")}
 
 
+_MIME_BY_EXT = {
+    ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif",
+    ".txt": "text/plain; charset=utf-8", ".md": "text/plain; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8", ".json": "application/json",
+    ".html": "text/html; charset=utf-8", ".py": "text/plain; charset=utf-8",
+    ".js": "text/plain; charset=utf-8", ".css": "text/plain; charset=utf-8",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+# 浏览器能直接显示的，就走 inline（手机上点了能看，而不是"下载到一个找不到的地方"）
+_INLINE_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif",
+               ".txt", ".md", ".csv", ".json", ".py", ".js", ".css", ".log"}
+
+
 @app.get("/api/doclib/download")
-def library_download(rel: str):
+def library_download(rel: str, inline: int = 0):
+    """下载 / 预览生成文库里的文件。
+
+    2026-11-09 用户报「手机端生成的文档打不开」：
+      原来一律 `media_type=application/octet-stream` + `filename=`（= attachment），
+      手机浏览器（尤其微信）只会把它当"下载"，多数情况直接失败或下到找不到的目录。
+    现在：
+      · pdf / 图片 / 文本类 → 默认 inline，浏览器原地打开
+      · Office 等无法预览的 → 仍然 attachment（手机端请用 /api/doclib/view 那个说明页）
+    """
     path = doclib.file_path(rel)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(path, filename=os.path.basename(path),
-                        media_type="application/octet-stream")
+    ext = os.path.splitext(path)[1].lower()
+    mime = _MIME_BY_EXT.get(ext, "application/octet-stream")
+    want_inline = bool(inline) or ext in _INLINE_EXT
+    if want_inline and ext not in (".docx", ".xlsx", ".pptx"):
+        # inline 时不要把文件名塞进 disposition，否则部分手机仍会强制下载
+        return FileResponse(path, media_type=mime,
+                            headers={"Content-Disposition": "inline"})
+    return FileResponse(path, filename=os.path.basename(path), media_type=mime)
+
+
+def _office_to_html(path: str, ext: str) -> str:
+    """把 Office 文件转成手机能直接读的 HTML（失败返回空串）。
+
+    2026-11-09 用户报「手机端生成的文档打不开」：手机浏览器渲染不了 docx/pptx/xlsx，
+    只给"下载"按钮，在微信里还常常点不动。这里把内容抽出来直接展示，
+    排版不保证一致，但**能看**；下面仍然保留"下载原文件"。
+    """
+    import html as _h
+    try:
+        if ext == ".docx":
+            import docx
+            d = docx.Document(path)
+            parts = []
+            for p_ in d.paragraphs:
+                t = (p_.text or "").strip()
+                if not t:
+                    continue
+                style = (getattr(getattr(p_, "style", None), "name", "") or "").lower()
+                if style.startswith("heading"):
+                    lvl = "".join(ch for ch in style if ch.isdigit()) or "2"
+                    lvl = lvl if lvl in "123456" else "2"
+                    parts.append("<h%s>%s</h%s>" % (lvl, _h.escape(t), lvl))
+                else:
+                    parts.append("<p>%s</p>" % _h.escape(t))
+            for tb in getattr(d, "tables", []) or []:
+                rows = []
+                for r in tb.rows:
+                    cells = "".join("<td>%s</td>" % _h.escape((c.text or "").strip())
+                                    for c in r.cells)
+                    rows.append("<tr>%s</tr>" % cells)
+                if rows:
+                    parts.append("<table>%s</table>" % "".join(rows))
+            return "".join(parts)
+
+        if ext == ".pptx":
+            from pptx import Presentation
+            pr = Presentation(path)
+            out = []
+            for i, slide in enumerate(pr.slides, 1):
+                texts = []
+                for sh in slide.shapes:
+                    if getattr(sh, "has_text_frame", False):
+                        t = (sh.text_frame.text or "").strip()
+                        if t:
+                            texts.append(t)
+                if texts:
+                    out.append("<h3>第 %d 页</h3><p>%s</p>"
+                               % (i, _h.escape("\n".join(texts)).replace("\n", "<br>")))
+            return "".join(out)
+
+        if ext == ".xlsx":
+            import openpyxl
+            wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+            ws = wb[wb.sheetnames[0]]
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                cells = "".join("<td>%s</td>" % _h.escape("" if v is None else str(v))
+                                for v in row)
+                rows.append("<tr>%s</tr>" % cells)
+                if len(rows) >= 200:
+                    break
+            try:
+                wb.close()
+            except Exception:
+                pass
+            return "<table>%s</table>" % "".join(rows)
+    except Exception:
+        return ""
+    return ""
+
+
+@app.get("/api/doclib/view")
+def library_view(rel: str):
+    """手机友好的"打开文件"页：能预览的预览，不能预览的给一个明确按钮。
+
+    为什么需要：手机上点 Office 文件，浏览器没法渲染，微信里还可能直接吞掉。
+    这个页面把"文件名 / 大小 / 该点哪里"讲清楚，并把下载按钮放到手指好点的位置。
+    """
+    import html as _html
+    try:
+        path = doclib.file_path(rel)
+    except Exception as e:
+        raise HTTPException(400, f"路径不合法：{e}")
+    if not os.path.isfile(path):
+        raise HTTPException(404, "文件不存在（可能已被删除或改名）")
+    name = os.path.basename(path)
+    ext = os.path.splitext(name)[1].lower()
+    size = os.path.getsize(path)
+    human = ("%.1f MB" % (size / 1048576)) if size >= 1048576 else ("%.0f KB" % (size / 1024))
+    q = urllib.parse.quote(rel)
+    dl = "/api/doclib/download?rel=" + q + "&inline=1"
+
+    # 文本类：直接把内容摊开，手机上不用任何 App 就能看
+    text_html = ""
+    if ext in (".txt", ".md", ".csv", ".json", ".py", ".js", ".css", ".log") and size <= 400 * 1024:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text_html = "<pre>" + _html.escape(f.read()) + "</pre>"
+        except Exception:
+            text_html = ""
+
+    if text_html:
+        body = text_html
+    elif ext in (".docx", ".xlsx", ".pptx"):
+        conv = _office_to_html(path, ext)
+        if conv:
+            body = ('<p class="hint">以下是文件内容的网页预览（排版与原文件略有差异）。</p>'
+                    + conv +
+                    '<a class="btn" href="%s" download>⬇ 下载原文件</a>' % dl)
+        else:
+            body = ('<p class="hint">这个文件暂时没法在线预览，请下载后用 WPS / Office 打开。</p>'
+                    '<a class="btn" href="%s" download>⬇ 下载到手机</a>' % dl)
+    elif ext in _INLINE_EXT:
+        body = ('<p class="hint">这个文件浏览器可以直接打开。</p>'
+                '<a class="btn" href="%s">打开 / 预览</a>' % dl)
+    else:
+        body = ('<p class="hint">%s 格式浏览器无法直接预览，请下载后用 WPS / Office 打开。</p>'
+                '<a class="btn" href="%s" download>⬇ 下载到手机</a>'
+                '<p class="hint warn">如果在微信里点不动：点右上角「⋯」→「在浏览器中打开」，再回到本页。</p>'
+                % (_html.escape(ext.lstrip(".") or "该"), dl))
+
+    # 用拼接而不是 %-格式化：CSS 里有 `width:100%`，会和 %s 冲突（踩过一次）
+    page = ("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>" + _html.escape(name) + "</title>"
+        "<style>"
+        "body{margin:0;padding:16px;background:#0f1218;color:#e6e9ef;"
+        "font:15px/1.6 -apple-system,'Segoe UI','Microsoft YaHei',sans-serif}"
+        "h1{font-size:16px;margin:0 0 4px;word-break:break-all}"
+        ".meta{color:#8b93a7;font-size:12.5px;margin-bottom:14px}"
+        ".btn{display:block;text-align:center;background:#4f8bf9;color:#fff;"
+        "text-decoration:none;padding:13px;border-radius:10px;font-weight:600;margin:14px 0}"
+        ".hint{color:#a8b0c2;font-size:13px;margin:10px 0}"
+        ".hint.warn{color:#e0b25a}"
+        "pre{background:#141821;border:1px solid #232936;border-radius:10px;padding:12px;"
+        "overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:13.5px;margin:14px 0}"
+        "p{margin:9px 0} h2,h3{font-size:15px;margin:18px 0 8px;color:#cfe0ff}"
+        "table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13px}"
+        "td,th{border:1px solid #2a3140;padding:6px 8px;vertical-align:top}"
+        "</style></head><body>"
+        "<h1>" + _html.escape(name) + "</h1>"
+        "<div class=\"meta\">" + human + "</div>"
+        + body + "</body></html>")
+    return HTMLResponse(page)
 
 
 @app.post("/api/doclib/open_folder")

@@ -72,7 +72,7 @@
       + '<div class="art-preview" data-state="idle">' + (isImg ? "展开后加载图片…" : "展开后加载内容…") + '</div>'
       + '<div class="art-acts">'
       + (rel ? '<button type="button" class="art-btn primary" data-art-openfile="' + esc(rel) + '">🗂 直接打开</button>' : "")
-      + '<a class="art-btn' + (rel ? "" : " primary") + '" href="' + esc(item.url) + '" download>⬇ 下载</a>'
+      + '<a class="art-btn' + (rel ? "" : " primary") + '" href="' + esc(mobileViewUrl(item.url)) + '">⬇ 下载</a>'
       + (rel ? '<button type="button" class="art-btn" data-art-open="' + esc(rel) + '">📂 在文件库中定位</button>' : "")
       + '</div></div></div></div>';
   }
