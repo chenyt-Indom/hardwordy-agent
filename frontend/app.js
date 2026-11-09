@@ -4573,6 +4573,19 @@
     } catch (e) { /* 忽略：下次再对账 */ }
   }, 20000);
 
+  // 界面自更新重载后，把用户没发出去的草稿放回输入框（2026-11-09）
+  try {
+    const _draft = sessionStorage.getItem("draft_input");
+    if (_draft) {
+      sessionStorage.removeItem("draft_input");
+      const _box = document.getElementById("input");
+      if (_box && !_box.value.trim()) {
+        _box.value = _draft;
+        _box.dispatchEvent(new Event("input"));
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+
   // ---------- 初始化 ----------
   // 先恢复会话（含上次的历史消息），再跑其它轮询
   (async () => {
@@ -4605,8 +4618,8 @@
 
   const canReload = () => {
     if (streaming) return false;
-    const box = document.getElementById("input");
-    if (box && box.value.trim()) return false;
+    // 2026-11-09：原来"输入框有字就不重载"，结果用户输入框长期留着草稿 →
+    //   前端更新永远不生效（改了几版都看不到效果）。现在改成**保存草稿再重载**。
     if (window.Studio && window.Studio.hasUnsaved && window.Studio.hasUnsaved()) return false;
     return true;
   };
@@ -4631,6 +4644,10 @@
     reloading = true;
     showToast("界面已更新，正在重新加载…", "ok");
     // 给 toast 一点时间被看见，再重载（重载后会恢复聊天记录）
+    try {
+      const _box = document.getElementById("input");
+      if (_box && _box.value.trim()) sessionStorage.setItem("draft_input", _box.value);
+    } catch (e) { /* 忽略 */ }
     setTimeout(() => location.reload(), 900);
   }
 
