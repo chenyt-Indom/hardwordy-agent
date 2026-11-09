@@ -1180,11 +1180,13 @@
   // 纯文本模式下只用 textContent（不可能少字）；格式化模式下渲染完做尾部核对，
   // 屏幕上找不到原文结尾就退回纯文本。
   function isPlainMode() {
+    // 默认开着 markdown（收尾渲染一次），?plain=1 可切纯文本。
+    // 安全网：渲染后逐字核对结尾，屏幕上找不到原文结尾就自动退回纯文本。
     try {
       if (window.__PLAIN_FORCE) return true;
       const v = localStorage.getItem("plain_answer");
-      return v === null ? true : v === "1";
-    } catch (e) { return true; }
+      return v === null ? false : v === "1";
+    } catch (e) { return false; }
   }
 
   function renderFinal(bubble, text, userText) {
