@@ -2823,7 +2823,25 @@
   async function send() {
     const text = inputEl.value.trim();
     const imgB64 = images.map((s) => s.split(",")[1]);
-    if ((!text && imgB64.length === 0 && !videoB64) || streaming) return;
+    if (!text && imgB64.length === 0 && !videoB64) return;
+    if (streaming) {
+      // 2026-11-10：桌面端"发不出去"最常见的原因是 streaming 卡在 true（上一轮异常没复位），
+      //   老代码直接 return，用户点什么都没反应。这里先判断是否真的还在跑：
+      const idle = Date.now() - (window.__lastStreamAt || 0);
+      const stuck = !abortCtl || idle > 60000;
+      if (stuck) {
+        console.warn("[send] streaming 卡住了（闲置 " + Math.round(idle / 1000) + " 秒），自动复位");
+        streaming = false;
+        try { abortCtl && abortCtl.abort(); } catch (e) { /* 忽略 */ }
+        abortCtl = null;
+        try { setStopVisible(false); $("#sendBtn").disabled = false; } catch (e) {}
+        showToast("上一轮似乎卡住了，已自动复位，正在重发", "warn");
+      } else {
+        showToast("上一条还在生成，等它结束或点「■ 终止」", "warn");
+        return;
+      }
+    }
+    window.__lastStreamAt = Date.now();
     const promptText = text || (videoB64 ? "分析这段视频的内容" : "请详细描述这张图片的内容");
     addMsg("user", promptText);
     if (videoB64) {
@@ -4011,6 +4029,7 @@
         const { value, done } = await reader.read();
         if (done) break;
         _armStall();                 // 收到数据 → 重新计时（不再是"卡住"状态）
+        window.__lastStreamAt = Date.now();
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split("\n"); buf = lines.pop();
         for (const line of lines) {
