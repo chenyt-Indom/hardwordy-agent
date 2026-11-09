@@ -6701,10 +6701,15 @@ async def chat_deepseek(req: ChatRequest,
                 _buf = []
                 for _k, _v in deepseek_client.chat_stream(
                         _msgs, model=model, api_key=x_deepseek_key,
-                        temperature=0.3, max_tokens=300):
+                        temperature=0.3, max_tokens=1024):
                     if _k == "content" and _v:
                         _buf.append(_v)
                 _add = "".join(_buf).strip()
+                # ⚠️ 补句请求自己也可能被截断，那时 chat_stream 会吐一句
+                #   "（输出达到 max_tokens 上限被截断）" —— 绝不能把它当正文拼进去
+                if "上限被截断" in _add:
+                    logger.warning("补句结果本身就是截断提示，丢弃：%r", _add[:60])
+                    break
                 if not _add or len(_add) > 400:
                     break
                 yield json.dumps({"message": {"content": _add}}, ensure_ascii=False) + "\n"

@@ -2698,3 +2698,6 @@ html[data-theme="light"] select.pill-select option {
   /* 手机上没有资源管理器：这些"打开文件夹"点了只会报错，统一隐藏 */
   #dlOpenFolder, #dlBackup, #kbOpenFolder, #libOpenFolder { display: none; }
 }
+
+/* [hidden] 被 .mask-chip 的 display:flex 压过 —— 桌面端也要修（2026-11-09） */
+.mask-chip[hidden] { display: none !important; }

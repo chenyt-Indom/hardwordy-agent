@@ -255,6 +255,8 @@
   const TOOL_LEAK_HEAD_RE = /^\s*<[ \t]*\/?[ \t]*(?:function|tool)(?:[ _-]?calls?)?(?=\n|[^\s>])/i;
   function stripToolLeak(text) {
     let s = String(text == null ? "" : text);
+    // 内部提示不能出现在正文里（2026-11-09）：续写/补句被截断时后端会吐这句话
+    s = s.replace(/\n*（输出达到 max_tokens 上限被截断）\n*/g, "\n");
     if (s.indexOf("<") < 0 && s.indexOf("```tool") < 0) return s;   // 快路径
     // ⚠️ 2026-11-10：**必须在旧 TOOL_LEAK_XML_RE 之前**先把未闭合的 tool 标签摘掉。
     //   旧正则结尾是 `|$`，遇到没闭合的 <tool_call> 会把后面全部正文吃光
@@ -3971,8 +3973,13 @@
           //   这里直接以服务端原文为准做一次回填，彻底不依赖"猜哪里丢的"。
           if (obj.ping) { _armStall(); continue; }     // 服务端心跳：只是在跑长工具，别当成卡死
           if (obj.__end) {
-            if (typeof obj.answer === "string" && obj.answer.length > answer.length) {
-              try { console.warn("[stream] 用服务端完整正文回填：", answer.length, "→", obj.answer.length); } catch (e) {}
+            // 无条件以服务端为准：本地累计可能少（丢分片）或多（重复），都没意义
+            if (typeof obj.answer === "string" && obj.answer) {
+              try {
+                if (obj.answer !== answer) {
+                  console.warn("[stream] 以服务端正文为准：", answer.length, "→", obj.answer.length);
+                }
+              } catch (e) {}
               answer = obj.answer;
             }
             continue;
