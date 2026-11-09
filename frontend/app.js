@@ -4624,7 +4624,15 @@
       const d = await api("/api/frontend/version");
       v = d.version || "";
     } catch (e) { return; }          // 探测失败不影响使用
-    if (!feVersion) { feVersion = v; return; }
+    if (!feVersion) {
+      feVersion = v;
+      // 把版本号显示在标题旁边：一眼能看出窗口跑的是哪份前端（太小看不到也没关系）
+      try {
+        const el = document.getElementById("uiVer");
+        if (el) el.textContent = "v" + String(v).split(":").pop().slice(-6);
+      } catch (e) {}
+      return;
+    }
     if (v === feVersion) return;
     feVersion = v;
     if (!canReload()) {
