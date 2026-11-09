@@ -4173,7 +4173,14 @@
         if (/[?&]plain=1/.test(location.search)) localStorage.setItem("plain_answer", "1");
         if (/[?&]plain=0/.test(location.search)) localStorage.removeItem("plain_answer");
       } catch (e) { /* 忽略 */ }
-      const _PLAIN_MODE = (() => { try { return localStorage.getItem("plain_answer") === "1"; } catch (e) { return false; } })();
+      // 默认开启纯文本渲染（先保证"一个字都不少"），格式化模式可用 ?plain=0 关掉。
+      const _PLAIN_MODE = (() => {
+        try {
+          const v = localStorage.getItem("plain_answer");
+          if (v === null) { localStorage.setItem("plain_answer", "1"); return true; }
+          return v === "1";
+        } catch (e) { return true; }
+      })();
       if (_PLAIN_MODE) {
         answerBubble.textContent = answer;          // 完全不做 markdown，只保留换行
         answerBubble.style.whiteSpace = "pre-wrap";
