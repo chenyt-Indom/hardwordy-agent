@@ -6742,6 +6742,21 @@ async def chat_deepseek(req: ChatRequest,
             except Exception:
                 logger.warning("补句失败（第 %d 次，忽略）", _try + 1, exc_info=True)
                 break
+        # ★ 服务端落盘（2026-11-10）：把**服务端自己生成的完整正文**写进会话，
+        #   不等前端 PUT。这样即使前端丢片、渲染出错，磁盘上也有一份完整原文，
+        #   前端可以回读它来纠正显示（见 app.js 的 __reconcileFromServer）。
+        try:
+            if session:
+                _saved = [{"role": str(m.get("role") or "user"),
+                           "content": str(m.get("content") or "")} for m in clean]
+                _saved.append({"role": "assistant", "content": _full})
+                sessions.save_messages(session, _saved)
+                try:
+                    memory.save_transcript(session, _saved)
+                except Exception:
+                    pass
+        except Exception:
+            logger.warning("云端通道落盘失败（不影响显示）", exc_info=True)
         yield json.dumps({"__end": True, "answer": _full}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
@@ -8781,8 +8796,25 @@ def session_get(sid: str):
 
 @app.put("/api/sessions/{sid}")
 def session_save(sid: str, body: dict):
-    """保存会话消息（前端每次对话后调用，保证重启后能恢复）。"""
+    """保存会话消息（前端每次对话后调用，保证重启后能恢复）。
+
+    2026-11-10：**只许增长**。前端如果丢了一片，它 PUT 上来的 assistant 会比
+    服务端刚存的短；这里取长者，防止"前端覆盖掉完整原文"。
+    """
     msgs = body.get("messages") or []
+    try:
+        old = sessions.get_messages(sid) or []
+        if msgs and old:
+            o_last = next((m for m in reversed(old) if m.get("role") == "assistant"), None)
+            n_last = next((m for m in reversed(msgs) if m.get("role") == "assistant"), None)
+            if (o_last and n_last
+                    and len(str(o_last.get("content") or "")) > len(str(n_last.get("content") or ""))):
+                for m in reversed(msgs):
+                    if m.get("role") == "assistant":
+                        m["content"] = o_last.get("content")
+                        break
+    except Exception:
+        pass
     info = sessions.save_messages(sid, msgs)
     # 前端每次对话后都会 PUT 一次 —— 这里也刷一遍交接卡，
     # 兜住「流式生成中途被中断、没走到收尾分支」的情况。

@@ -4255,6 +4255,26 @@
         renderSources(answerWrap, sourcesData);
       }
       persistSession();   // 落盘，保证程序重启后能恢复这段对话
+      // ★ 最后一道保险（2026-11-10）：从服务端回读这轮的完整正文，
+      //   如果比屏幕上显示的长，就用服务端的重绘 —— 服务端是唯一真相。
+      (async () => {
+        try {
+          if (!sessionId) return;
+          const d = await api("/api/sessions/" + sessionId);
+          const msgs = d.messages || [];
+          const last = [...msgs].reverse().find((m) => m && m.role === "assistant");
+          const srv = String((last && last.content) || "");
+          if (srv.length > String(answer).length) {
+            console.warn("[stream] 服务端原文更长，按它重绘：", answer.length, "→", srv.length);
+            answer = srv;
+            renderFinal(answerBubble, answer, promptText);
+            for (let i = history.length - 1; i >= 0; i--) {
+              if (history[i] && history[i].role === "assistant") { history[i].content = srv; break; }
+            }
+            try { persistSession(); } catch (e) { /* 忽略 */ }
+          }
+        } catch (e) { /* 回读失败不影响已显示内容 */ }
+      })();
     } catch (err) {
       finishThinking();
       if (_hardStall) {
