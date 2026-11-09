@@ -533,8 +533,9 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 pass
 
         try:
-            logger.warning("[ds] 本轮 finish=%s 正文=%d 字 工具=%d 个",
-                        finish, len("".join(content_buf)), len(tool_calls))
+            _full_txt = "".join(content_buf)
+            logger.warning("[ds] 本轮 finish=%s 正文=%d 字 工具=%d 个 尾=%r",
+                        finish, len(_full_txt), len(tool_calls), _full_txt[-40:])
         except Exception:
             pass
 
