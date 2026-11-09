@@ -4341,11 +4341,17 @@ async def chat(req: ChatRequest,
     #   默认模型改成 deepseek-flash 后，下拉停在「本地·自动」会把 deepseek-flash
     #   发到 Ollama，结果就是界面一直停在"正在加载模型…"（用户报"桌面端发不出去"）。
     if str(model).strip().lower().startswith("deepseek"):
-        yield json.dumps({"error": (
-            "当前「本地·自动」跟随的配置是云端模型 %s，但这一路是本地 Ollama 通道。"
-            "请在顶栏把聊天模型切到「⚡ DS V4.1」，或切到本地模型再发。" % model
-        ), "explained": True, "__end": True}, ensure_ascii=False) + "\n"
-        return
+        # ⚠️ 这里**不能 yield**：这个函数本身是 `async def chat()`（返回 StreamingResponse），
+        #   一旦出现 yield 就变成 async generator，末尾 `return StreamingResponse(...)` 直接语法错误
+        #   （2026-11-10 实测把服务器打挂了一次）。改成构造一个小生成器返回。
+        _msg = ("当前「本地·自动」跟随的配置是云端模型 %s，但这一路是本地 Ollama 通道。"
+                "请在顶栏把聊天模型切到「⚡ DS V4.1」，或切到本地模型再发。" % model)
+
+        def _ds_mismatch():
+            yield json.dumps({"error": _msg, "explained": True, "__end": True},
+                             ensure_ascii=False) + "\n"
+
+        return StreamingResponse(_ds_mismatch(), media_type="application/x-ndjson")
     model_note = ""
     # ★ 2026-11-08：**模型没下载就别硬撞 404**。
     #   本机 default_model 是 qwen3-vl:30b（18GB，还没下），选「跟随配置」时
