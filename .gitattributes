@@ -1,7 +1,10 @@
-# 统一换行符，避免在 Windows 检出后脚本带 CRLF 而在 Linux 容器里执行失败
-*.sh        text eol=lf
-*.bat       text eol=crlf
-*.cmd       text eol=crlf
-Dockerfile* text eol=lf
-*.yml       text eol=lf
-*.yaml      text eol=lf
+# GitHub 语言统计优化（2026-11-10）
+# 第三方前端库不计入语言占比
+frontend/lib/**            linguist-vendored
+frontend/lib/leaflet/**    linguist-vendored
+# 文档不计入代码语言统计
+docs/**                    linguist-documentation
+*.md                       linguist-documentation
+# 打包配置与脚本不算主要语言
+build/*.spec               linguist-documentation
+docker/**                  linguist-documentation
