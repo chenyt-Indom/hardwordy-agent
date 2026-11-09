@@ -11,6 +11,23 @@
 """
 import os
 import sys
+
+# ⚠️ 2026-11-09：pythonw.exe 没有控制台，sys.stdout/stderr 是 None。
+#   只要程序里任何一处 print()/logging 往 stdout 写，就会抛 AttributeError 直接退出 ——
+#   表现就是"双击快捷方式（pythonw）一闪而过，服务没起来，界面发不出消息"。
+#   这里在**入口最前面**把 None 的流重定向到 data/app.log，既救活 pythonw，也留下日志。
+if sys.stdout is None or sys.stderr is None:
+    try:
+        _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        os.makedirs(_log_dir, exist_ok=True)
+        _f = open(os.path.join(_log_dir, "app.log"), "a", encoding="utf-8", buffering=1)
+        if sys.stdout is None:
+            sys.stdout = _f
+        if sys.stderr is None:
+            sys.stderr = _f
+    except Exception:
+        pass
+
 import threading
 import time
 import urllib.request
