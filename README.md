@@ -19,9 +19,25 @@
 
 | 版本 | 体积 | 说明 |
 |------|------|------|
-| **[全量版](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.08.3/LocalMultimodalAssistant-Full-Windows-x64.zip)** | **2.14 GB**（解压 3.2 GB） | 含**内置 VS Code**（code-server）与**抠图模型**（BiRefNet ×2）。解压后双击 `一键启动.bat` |
+| **全量版**（分 2 卷） | **2.14 GB**（解压 3.2 GB） | 含**内置 VS Code**（code-server）与**抠图模型**（BiRefNet ×2）。解压后双击 `一键启动.bat` |
 | **[轻量版](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.08.3/LocalMultimodalAssistant-Windows-x64.zip)** | **194.8 MB** | 只有程序本体，体积小；开发台与抠图不可用 |
 | 源码 | — | 见下方「快速开始」 |
+
+**全量版（2026.11.10c）分两卷** —— GitHub 单文件上限 2 GB，所以切开：
+
+- [`...Full-2026.11.10c.zip.part1`](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10c.zip.part1) — 1.4 GB
+- [`...Full-2026.11.10c.zip.part2`](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10c.zip.part2) — 791 MB
+
+**合并 + 校验**（Windows，CMD 或 powershell）：
+
+```powershell
+copy /b LocalMultimodalAssistant-Full-2026.11.10c.zip.part1 + LocalMultimodalAssistant-Full-2026.11.10c.zip.part2 LocalMultimodalAssistant-Full-2026.11.10c.zip
+
+# 校验（应等于 49ec6e997c1370e85fd0950167e5b5fccefe5231d2bae7f99517b189f689d0df）
+Get-FileHash .\LocalMultimodalAssistant-Full-2026.11.10c.zip -Algorithm SHA256
+```
+
+> macOS / Linux：`cat *.part1 *.part2 > Full.zip`
 
 > 两个包**都不含** AI 对话模型权重（由 Ollama 单独下载，18 GB / 6 GB）。
 > 也**都不含**本地文生图（torch ~9 GB + SD 权重）——本地绘图在当前机器上不可用，
@@ -532,9 +548,9 @@ ExecStart=/opt/multimodal/.venv/bin/python -m uvicorn backend.main:app --host 0.
 
 ### 方式一：Windows 一键包（推荐）
 
-下载 **[`releases/本地多模态助手-轻量版-Windows-x64.zip`](releases/本地多模态助手-轻量版-Windows-x64.zip)**（约 100MB）→ 解压 → 双击运行。
+下载 **[轻量版](https://github.com/chenyt-Indom/local-multimodal/releases)**（Release 页里约 195 MB 那个）→ 解压 → 双击 `一键启动.bat`。
 
-语音功能需额外下载 **[`releases/asr-model-zh-14M-int8.zip`](releases/asr-model-zh-14M-int8.zip)**（约 20MB），解压到 `_internal/asr_model/`。
+语音功能需额外下载 **[asr-model-zh-14M-int8.zip](https://github.com/chenyt-Indom/local-multimodal/releases)**（约 20 MB），解压到 `_internal/asr_model/`。
 
 ### 方式二：源码运行
 
@@ -692,5 +708,6 @@ GitHub：[@chenyt-Indom](https://github.com/chenyt-Indom)
 | 文档 | 内容 |
 |---|---|
 | [`docs/使用手册.md`](docs/使用手册.md) | 详细使用说明、参数说明、常见问题 |
+| [`docs/阅读攻略.pdf`](docs/阅读攻略.pdf) | **源码阅读攻略**（5 页）：3 天读懂本项目的路线、行号锚点、自测题 |
 | [`docker/使用说明.md`](docker/使用说明.md) | Docker 部署、显卡适配、离线包说明 |
 | [`docker/从镜像仓库部署.md`](docker/从镜像仓库部署.md) | 只拿镜像地址时的部署方式 |
