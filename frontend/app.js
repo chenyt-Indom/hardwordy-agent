@@ -1184,8 +1184,11 @@
     // 安全网：渲染后逐字核对结尾，屏幕上找不到原文结尾就自动退回纯文本。
     try {
       if (window.__PLAIN_FORCE) return true;
-      const v = localStorage.getItem("plain_answer");
-      return v === null ? false : v === "1";
+      // 换新键：旧的 plain_answer 曾被"默认纯文本"写成 1，会挡住 markdown 恢复
+      const v = localStorage.getItem("render_style");
+      if (v) return v === "plain";
+      const old = localStorage.getItem("plain_answer");
+      return old === "1";
     } catch (e) { return false; }
   }
 
@@ -4216,8 +4219,8 @@
       // 纯文本模式（A/B 用）：地址栏带 ?plain=1 即生效，之后一直记住。
       //   若开了它就不再断字，说明问题在 markdown 渲染；若还断，问题在数据/传输。
       try {
-        if (/[?&]plain=1/.test(location.search)) localStorage.setItem("plain_answer", "1");
-        if (/[?&]plain=0/.test(location.search)) localStorage.removeItem("plain_answer");
+        if (/[?&]plain=1/.test(location.search)) localStorage.setItem("render_style", "plain");
+        if (/[?&]plain=0/.test(location.search)) localStorage.setItem("render_style", "md");
       } catch (e) { /* 忽略 */ }
       // 默认开启纯文本渲染（先保证"一个字都不少"），格式化模式可用 ?plain=0 关掉。
       // 统一走 renderFinal：纯文本 / 格式化 + 尾部核对（见函数定义处）
