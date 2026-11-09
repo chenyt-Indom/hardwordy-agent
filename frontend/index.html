@@ -111,7 +111,12 @@
               <input id="schedEvery" type="number" min="1" value="60" hidden title="每隔多少分钟">
               <button class="btn sm" id="schedAdd">添加</button>
             </div>
-            <p class="hint">定时任务用<b>本机模型</b>执行，不会弹任何对话框；结果写回当前会话。</p>
+            <select id="schedModel" title="到点用哪个模型跑">
+              <option value="">自动（本机优先，连不上就用云端）</option>
+              <option value="deepseek-flash">云端 DeepSeek</option>
+              <option value="local">本机默认模型</option>
+            </select>
+            <p class="hint">不会弹任何对话框；结果写回当前会话。云端模型需要先在顶栏 🔑 填一次 Key（会存到本机，定时任务也能用）。</p>
           </div>
         </details>
       </div>

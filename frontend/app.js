@@ -4518,7 +4518,7 @@
         '<div style="background:#1e1e22;color:#e8e8ea;border-radius:12px;padding:22px;width:min(480px,92vw);box-shadow:0 20px 60px rgba(0,0,0,.5)">',
         '  <h3 style="margin:0 0 6px;font-size:16px">🔑 DeepSeek API Key</h3>',
         '  <p style="margin:0 0 14px;font-size:12.5px;line-height:1.6;color:#9a9aa2">',
-        '    只保存在<b>本机浏览器</b>（localStorage），关掉浏览器也不会丢。<br>不写磁盘文件、不写日志、不进 URL。',
+        '    存在<b>本机浏览器</b>（localStorage），关掉也不会丢；<br>同时存一份到本机数据目录，让<b>定时任务</b>半夜也能用云端模型。',
         '  </p>',
         '  <input id="dsKeyIn" type="password" placeholder="sk-..." style="width:100%;box-sizing:border-box;padding:9px 11px;border-radius:8px;border:1px solid #3a3a42;background:#141416;color:#e8e8ea;font-size:13px;font-family:monospace">',
         '  <div style="display:flex;gap:14px;margin:12px 0 4px;font-size:12.5px;flex-wrap:wrap">',
@@ -4551,6 +4551,7 @@
       mask.querySelector("#dsKeyCancel").onclick = close;
       mask.querySelector("#dsKeyClear").onclick = () => {
         localStorage.removeItem("ds_api_key");
+        fetch("/api/secret/clear", { method: "POST" }).catch(() => {});
         inp.value = "";
         msg.style.color = "#7bd88f";
         msg.textContent = "已清除本页保存的 Key";
@@ -4566,8 +4567,19 @@
           const d = await r.json();
           if (d.ok) {
             localStorage.setItem("ds_api_key", v);
+            // ★ 2026-11-09：同时存一份到本机 —— 定时任务半夜跑时浏览器不在，
+            //   只能靠这一份 Key 才能用云端模型（用户报「定时任务连不上 ollama」）。
+            let stored = false;
+            try {
+              const sr = await (await fetch("/api/secret/save", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ key: v }) })).json();
+              stored = !!(sr && sr.ok);
+            } catch (e) { /* 存不上也不影响浏览器里用 */ }
             msg.style.color = "#7bd88f";
-            msg.textContent = "✅ 可用" + (d.balance ? "，余额 " + d.balance + " " + d.currency : "");
+            msg.textContent = "✅ 可用" + (d.balance ? "，余额 " + d.balance + " " + d.currency : "")
+              + (stored ? "（已存到本机，定时任务也能用）"
+                        : "（本机保管失败，定时任务仍用本地模型）");
             setTimeout(close, 900);
           } else {
             msg.style.color = "#e06c6c";
@@ -4688,6 +4700,7 @@
             '<div class="sched-hd">' + st + ' <b>' + (j.name || "") + '</b></div>' +
             '<div class="sched-meta">' + (j.period || "") + ' · 下次 ' + (j.next_human || "-") +
             ' · ' + last + '</div>' +
+            (j.channel_hint ? '<div class="sched-meta">上次用：' + j.channel_hint + '</div>' : '') +
             (j.last_preview ? '<div class="sched-prev">' + String(j.last_preview).replace(/</g, "&lt;").slice(0, 80) + '…</div>' : "") +
             '<div class="sched-acts">' +
             '<button data-act="run">立即运行</button>' +
@@ -4707,13 +4720,43 @@
       b.disabled = true;
       try {
         if (act === "run") {
+          // 2026-11-09：改成"后台跑 + 轮询"。一次要 60~120 秒，
+          // 原来同步 await，浏览器早就超时了，用户看到的就是"点了没反应"。
           b.textContent = "运行中…";
+          const before = await fetch("/api/schedule").then((x) => x.json())
+            .then((d) => ((d.jobs || []).find((x) => x.id === id) || {}).last_run || "")
+            .catch(() => "");
           const r = await (await fetch("/api/schedule/run", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ id }) })).json();
-          showToast(r.ok ? "已跑完，结果写回当前会话" : ("失败：" + (r.error || "")),
-                    r.ok ? "ok" : "err");
-          if (r.ok && typeof loadSessions === "function") loadSessions();
+          if (!r.ok) {
+            showToast("没能启动：" + (r.error || ""), "err");
+            b.disabled = false; b.textContent = "立即运行"; return;
+          }
+          if (r.busy) { showToast(r.msg || "正在跑，稍等", "warn"); b.disabled = false; return; }
+          showToast("已开始运行（通常 1~2 分钟），跑完会提示", "ok");
+          let n = 0;
+          const timer = setInterval(async () => {
+            n++;
+            try {
+              const d = await (await fetch("/api/schedule")).json();
+              const job = (d.jobs || []).find((x) => x.id === id) || {};
+              if (job.last_run && job.last_run !== before) {
+                clearInterval(timer);
+                const bad = String(job.last_status || "").startsWith("error");
+                showToast(bad ? ("运行失败：" + job.last_status)
+                              : ("跑完了，结果已写回会话：「" + (job.name || "") + "」"),
+                          bad ? "err" : "ok");
+                load();
+                if (typeof loadSessions === "function") loadSessions();
+              } else if (n >= 100) {
+                clearInterval(timer);
+                showToast("还在跑（可能任务较重），稍后到会话里看结果", "warn");
+                load();
+              }
+            } catch (e) { /* 忽略单次失败 */ }
+          }, 3000);
+          return;                       // 别急着把按钮恢复
         } else if (act === "toggle") {
           const cur = b.textContent === "暂停";
           await fetch("/api/schedule/toggle", {
@@ -4741,6 +4784,7 @@
           name: name || prompt.slice(0, 16),
           prompt,
           session: (typeof sessionId !== "undefined" ? sessionId : ""),
+          model: (document.querySelector("#schedModel") || {}).value || "",
         };
         if (daily) body2.at_time = (timeIn.value || "09:00").trim();
         else body2.every_minutes = parseInt(everyIn.value || "60", 10) || 60;

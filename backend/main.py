@@ -96,7 +96,17 @@ def _env_ds_key() -> str:
     为什么不写进 config.json：那个文件会随打包/同步到处跑，容易泄露；
     systemd EnvironmentFile 只在服务进程环境里，`systemctl show` 也看不到值。
     """
-    return str(os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    # ★ 2026-11-09：环境变量之外，再读**本机保管**的 Key（data/secrets.json）。
+    #   原因：定时任务半夜跑时浏览器不在，拿不到 localStorage 里的 Key，
+    #   原来只能退回本地 Ollama → 用户报「定时任务无法连接 ollama」。
+    k = str(os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    if k:
+        return k
+    try:
+        from . import keyvault
+        return keyvault.get_key()
+    except Exception:
+        return ""
 
 
 def _ds_key(header_key: str = "") -> str:
@@ -5836,6 +5846,72 @@ def image_status():
 # 这个接口只收**布尔值**（有没有 Key），不接收 Key 本身 ——
 # 用来给用户/我确认"浏览器的 localStorage 里到底有没有"。
 _DS_SEEN = {"has_key": None, "at": ""}
+
+
+# ---------------- 本机保管 Key（2026-11-09）----------------
+# 目的只有一个：**无人值守的定时任务**也能用云端模型。
+# 用户在前端点「保存并校验」时顺手存一份到本机（data/secrets.json，权限 600）。
+# 对外接口一律只回布尔，绝不回显 Key 本身。
+@app.get("/api/secret/status")
+def secret_status():
+    from . import keyvault
+    return keyvault.status()
+
+
+@app.post("/api/secret/save")
+def secret_save(body: dict):
+    from . import keyvault
+    return keyvault.set_key(str((body or {}).get("key") or ""))
+
+
+@app.post("/api/secret/clear")
+def secret_clear():
+    from . import keyvault
+    return keyvault.clear()
+
+
+# ---------------- 本机保管 Key（2026-11-09）----------------
+# 目的只有一个：**无人值守的定时任务**也能用云端模型。
+# 用户在前端点「保存并校验」时顺手存一份到本机（data/secrets.json，权限 600）。
+# 对外接口一律只回布尔，绝不回显 Key 本身。
+@app.get("/api/secret/status")
+def secret_status():
+    from . import keyvault
+    return keyvault.status()
+
+
+@app.post("/api/secret/save")
+def secret_save(body: dict):
+    from . import keyvault
+    return keyvault.set_key(str((body or {}).get("key") or ""))
+
+
+@app.post("/api/secret/clear")
+def secret_clear():
+    from . import keyvault
+    return keyvault.clear()
+
+
+# ---------------- 本机保管 Key（2026-11-09）----------------
+# 目的只有一个：**无人值守的定时任务**也能用云端模型。
+# 用户在前端点「保存并校验」时顺手存一份到本机（data/secrets.json，权限 600）。
+# 对外接口一律只回布尔，绝不回显 Key 本身。
+@app.get("/api/secret/status")
+def secret_status():
+    from . import keyvault
+    return keyvault.status()
+
+
+@app.post("/api/secret/save")
+def secret_save(body: dict):
+    from . import keyvault
+    return keyvault.set_key(str((body or {}).get("key") or ""))
+
+
+@app.post("/api/secret/clear")
+def secret_clear():
+    from . import keyvault
+    return keyvault.clear()
 
 
 @app.get("/api/ds/env")

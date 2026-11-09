@@ -112,21 +112,93 @@ def describe(job: dict) -> str:
 
 
 # ---------------------------------------------------------------- 执行
-def _run_once(job: dict) -> dict:
-    """真的跑一次：本地模型 + 工具循环，结果写回会话。"""
-    from . import tools as T
-    from . import main as M          # 延迟导入，避免循环依赖
+def _ollama_alive(cfg: dict) -> bool:
+    """2 秒内探一下本机 Ollama 在不在线。
 
-    cfg = config.load_config() or {}
-    model = str(job.get("model") or cfg.get("default_model") or "")
-    prompt = str(job.get("prompt") or "").strip()
-    sid = str(job.get("session") or "")
-    if not sid:
-        try:
-            sid = sessions.ensure_default().get("id") or ""
-        except Exception:
-            sid = ""
+    为什么要先探：直接调 chat 会抛 requests 的连接异常，错误信息对用户毫无意义
+    （就是那句「无法连接 ollama」）。先探一下，才能决定"换云端跑"还是"给出人话提示"。
+    """
+    import requests
+    url = str(cfg.get("ollama_url") or "http://127.0.0.1:11434").rstrip("/")
+    try:
+        return requests.get(url + "/api/tags", timeout=2).status_code == 200
+    except Exception:
+        return False
 
+
+def _is_cloud_name(model: str) -> bool:
+    m = str(model or "").strip().lower()
+    return m.startswith("deepseek") or m.startswith("cloud:")
+
+
+def _cloud_key() -> str:
+    try:
+        from . import keyvault
+        return keyvault.get_key()
+    except Exception:
+        return ""
+
+
+def _pick_channel(job: dict, cfg: dict):
+    """决定这次走哪条通道：返回 (channel, model, note)。
+
+    规则（用户要求「无论用什么模型都能完成定时任务」）：
+      1. 任务里写了模型 → 尊重它：`local:xxx` 走本机，`deepseek-xxx` 走云端；
+      2. 没写 → 本机 Ollama 在线就用默认本地模型；不在线而有云端 Key 就用云端；
+      3. 选中的通道缺条件（云端没 Key / 本机没 Ollama）→ **自动换另一条**；
+      4. 两条都不行 → 抛人话错误，写进任务状态里（不再是干巴巴的"无法连接"）。
+    """
+    want = str(job.get("model") or "").strip()
+    default_model = str(cfg.get("default_model") or "qwen3-vl:30b")
+    key = _cloud_key()
+    local_ok = _ollama_alive(cfg)
+    note = ""
+
+    if want == "local":
+        # 前端选了「本机默认模型」
+        channel, model = "local", default_model
+    elif want.startswith("local:"):
+        channel, model = "local", want[6:].strip() or default_model
+    elif _is_cloud_name(want):
+        channel = "cloud"
+        model = want.split(":", 1)[1] if want.lower().startswith("cloud:") else want
+        if model in ("", "auto"):
+            model = "deepseek-flash"
+    elif local_ok:
+        channel, model = "local", (want or default_model)
+    elif key:
+        channel, model = "cloud", "deepseek-flash"
+        note = "本机 Ollama 不在线，已自动改用云端模型"
+    else:
+        raise RuntimeError(
+            "两条通道都不可用：本机 Ollama 连不上（%s），也没有保存 DeepSeek Key。"
+            "请在顶栏 🔑 里填一次 Key（会同时存到本机，定时任务也能用），"
+            "或者先把 Ollama 启动起来。"
+            % str(cfg.get("ollama_url") or "http://127.0.0.1:11434"))
+
+    # 通道缺条件 → 自动换另一条
+    if channel == "cloud" and not key:
+        if local_ok:
+            channel, model = "local", default_model
+            note = "没有云端 Key，已改用本机模型"
+        else:
+            raise RuntimeError(
+                "这个任务指定了云端模型 %s，但本机没有保存 DeepSeek Key，"
+                "且 Ollama 也不在线。请先在顶栏 🔑 里填一次 Key。" % model)
+    if channel == "local" and not local_ok:
+        if key:
+            channel, model = "cloud", "deepseek-flash"
+            note = "本机 Ollama 不在线，已自动改用云端模型"
+        else:
+            raise RuntimeError(
+                "本机 Ollama 连不上（%s），也没有保存 DeepSeek Key。"
+                "要么启动 Ollama，要么在顶栏 🔑 填一次 Key。"
+                % str(cfg.get("ollama_url") or "http://127.0.0.1:11434"))
+    return channel, model, note
+
+
+def _run_local(M, cfg: dict, model: str, prompt: str, schemas: list, ctx: dict) -> str:
+    """本机 Ollama 通道：原来的工具循环。"""
     # 模型没下载就退回已装的
     try:
         have = M._installed_models()
@@ -134,18 +206,6 @@ def _run_once(job: dict) -> dict:
             model = next((n for n in have if "qwen3-vl" in n), "") or have[0]
     except Exception:
         pass
-
-    schemas = T.make_schemas(
-        web_enabled=bool(cfg.get("web_enabled")),
-        kb_enabled=bool(cfg.get("rag_enabled")),
-        code_exec=bool(cfg.get("code_exec_enabled")),
-        office_gen=True, ask_mode="quick")
-    ctx = {"images": [], "last_image": None, "mask": None, "shown_images": [],
-           "ask_mode": "quick", "session": sid, "user_text": prompt,
-           "image_key": "", "ds_key": "",
-           # 无人值守：危险操作自动批准、提问直接跳过（见文件头第 2 条）
-           "confirm": lambda payload: True,
-           "ask": lambda payload: []}
 
     msgs = [{"role": "user", "content": prompt}]
     answer = ""
@@ -170,12 +230,103 @@ def _run_once(job: dict) -> dict:
                 except Exception:
                     args = {}
             try:
-                out = T.dispatch(name, args or {}, [], ctx)
+                out = T_dispatch(name, args or {}, [], ctx)
             except Exception as e:                    # noqa: BLE001
                 out = "工具出错：%s: %s" % (type(e).__name__, e)
             msgs.append({"role": "tool", "content": str(out)[:8000]})
+    return answer
+
+
+def _run_cloud(cfg: dict, model: str, key: str, prompt: str,
+               schemas: list, ctx: dict) -> str:
+    """云端通道（DeepSeek / OpenAI 兼容）：复用主对话那套带工具的流式循环。
+
+    ★ 2026-11-09 新增 —— 用户要求「无论使用什么模型都可以完成定时任务」。
+      原来这里写死 `M.client.chat(...)`（本机 Ollama），用户机器上 Ollama 没起
+      或没下载模型，定时任务就必然失败。
+    """
+    from . import deepseek_client
+
+    acc: list = []
+
+    def executor(name: str, args: dict) -> str:
+        return T_dispatch(name, args or {}, [], ctx)
+
+    for kind, val in deepseek_client.chat_stream_with_tools(
+            [{"role": "user", "content": prompt}], model, key, schemas, executor,
+            temperature=min(1.3, max(0.0, float(cfg.get("temperature") or 0.6))),
+            top_p=min(1.0, max(0.01, float(cfg.get("top_p") or 0.95))),
+            max_tokens=max(4096, int(cfg.get("max_tokens") or 8192)),
+            max_rounds=max(1, min(int(cfg.get("max_tool_rounds") or 30), 200))):
+        if kind == "content":
+            acc.append(val)
+    return "".join(acc)
+
+
+def T_dispatch(name, args, events, ctx):
+    """延迟取 tools.dispatch（避免模块级循环导入）。"""
+    from . import tools as _T
+    return _T.dispatch(name, args, events, ctx)
+
+
+def _run_once(job: dict) -> dict:
+    """真的跑一次：自动挑通道（本机 / 云端）+ 工具循环，结果写回会话。"""
+    from . import tools as T
+
+    cfg = config.load_config() or {}
+    prompt = str(job.get("prompt") or "").strip()
+    sid = str(job.get("session") or "")
+    if not sid:
+        try:
+            sid = sessions.ensure_default().get("id") or ""
+        except Exception:
+            sid = ""
+
+    channel, model, note = _pick_channel(job, cfg)
+    job["last_model"] = model
+    job["last_channel"] = channel
+
+    schemas = T.make_schemas(
+        web_enabled=bool(cfg.get("web_enabled")),
+        kb_enabled=bool(cfg.get("rag_enabled")),
+        code_exec=bool(cfg.get("code_exec_enabled")),
+        office_gen=True, ask_mode="quick")
+    ctx = {"images": [], "last_image": None, "mask": None, "shown_images": [],
+           "ask_mode": "quick", "session": sid, "user_text": prompt,
+           "image_key": "",
+           # 云端通道执行工具时可能要 Key（如云端视觉/图片），本机通道给空
+           "ds_key": (_cloud_key() if channel == "cloud" else ""),
+           # 无人值守：危险操作自动批准、提问直接跳过（见文件头第 2 条）
+           "confirm": lambda payload: True,
+           "ask": lambda payload: []}
+
+    # ★ 两条通道互为备胎：一条跑拖了就自动换另一条 ——
+    #   用户要求的是「无论用什么模型都能完成定时任务」，不是「选中了就只能靠它」。
+    from . import main as M          # 延迟导入，避免循环依赖
+    default_model = str(cfg.get("default_model") or "qwen3-vl:30b")
+    try:
+        if channel == "cloud":
+            answer = _run_cloud(cfg, model, _cloud_key(), prompt, schemas, ctx)
+        else:
+            answer = _run_local(M, cfg, model, prompt, schemas, ctx)
+    except Exception as _e:                           # noqa: BLE001
+        if channel == "cloud" and _ollama_alive(cfg):
+            channel, model = "local", default_model
+            job["last_model"], job["last_channel"] = model, channel
+            note = "云端调用失败（%s），已自动改用本机模型" % type(_e).__name__
+            answer = _run_local(M, cfg, model, prompt, schemas, ctx)
+        elif channel == "local" and _cloud_key():
+            channel, model = "cloud", "deepseek-flash"
+            job["last_model"], job["last_channel"] = model, channel
+            note = "本机模型调用失败（%s），已自动改用云端模型" % type(_e).__name__
+            answer = _run_cloud(cfg, model, _cloud_key(), prompt, schemas, ctx)
+        else:
+            raise
+
     if not answer:
         answer = "（这次没有产出正文，可能是轮次用尽或模型被截断）"
+    if note:
+        answer = "（%s）\n\n%s" % (note, answer)
 
     # 写回会话（用户下次打开就能看到）
     try:
@@ -192,19 +343,39 @@ def _run_once(job: dict) -> dict:
     try:
         p = os.path.join(_logs_dir(), "%s_%s.md" % (job.get("id"), time.strftime("%Y%m%d_%H%M%S")))
         with open(p, "w", encoding="utf-8") as f:
-            f.write("# %s\n\n- 时间：%s\n- 模型：%s\n- 周期：%s\n\n## 任务\n\n%s\n\n## 结果\n\n%s\n"
-                    % (job.get("name") or "", _now(), model, describe(job), prompt, answer))
+            f.write("# %s\n\n- 时间：%s\n- 通道：%s\n- 模型：%s\n- 周期：%s\n\n## 任务\n\n%s\n\n## 结果\n\n%s\n"
+                    % (job.get("name") or "", _now(),
+                       "云端" if channel == "cloud" else "本机",
+                       model, describe(job), prompt, answer))
     except Exception:
         pass
-    return {"answer": answer, "model": model, "session": sid}
+    return {"answer": answer, "model": model, "channel": channel, "session": sid}
 
 
-def run_now(job_id: str) -> dict:
-    """立即跑一次（前端"立即运行"按钮 / 测试用）。"""
+def run_now(job_id: str, background: bool = True) -> dict:
+    """立即跑一次。
+
+    2026-11-09：默认**后台跑**。原来同步执行，一次 60~120 秒（联网 + 工具 + 模型），
+    浏览器/nginx 那边早就超时了，用户看到的就是"点了没反应"。
+    现在立刻返回 {"started": true}，前端轮询 /api/schedule 看 last_run 变化。
+    """
     jobs = load_jobs()
     job = next((j for j in jobs if j.get("id") == job_id), None)
     if not job:
         return {"ok": False, "error": "没有这个任务"}
+    if _STATE.get("running") == job_id:
+        return {"ok": True, "started": False, "busy": True,
+                "msg": "这个任务正在跑，稍等"}
+    if background:
+        import threading as _th
+        def _bg():
+            try:
+                run_now(job_id, background=False)
+            except Exception:                        # noqa: BLE001
+                pass
+        _th.Thread(target=_bg, daemon=True).start()
+        return {"ok": True, "started": True, "id": job_id,
+                "msg": "已开始，通常 1~2 分钟；结果会写回会话并留档"}
     _STATE["running"] = job_id
     try:
         r = _run_once(job)
@@ -282,6 +453,9 @@ def list_jobs() -> list:
         nr = float(j.get("next_run") or 0)
         j["next_human"] = (time.strftime("%m-%d %H:%M", time.localtime(nr)) if nr else "-")
         j["period"] = describe(j)
+        j["channel_hint"] = ("\u2601 " if j.get("last_channel") == "cloud"
+                             else ("\U0001f4bb " if j.get("last_channel") == "local" else "")) \
+                            + str(j.get("last_model") or "")
         out.append(j)
     return out
 
@@ -302,8 +476,9 @@ def _loop() -> None:
             for j in due:
                 _STATE["running"] = j["id"]
                 try:
-                    _run_once(j)
+                    _r = _run_once(j)
                     j["last_status"] = "ok"
+                    j["last_preview"] = str(_r.get("answer") or "")[:200]
                 except Exception as e:                # noqa: BLE001
                     j["last_status"] = "error: %s" % e
                 finally:
