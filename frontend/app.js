@@ -3973,6 +3973,9 @@
           //   这里直接以服务端原文为准做一次回填，彻底不依赖"猜哪里丢的"。
           if (obj.ping) { _armStall(); continue; }     // 服务端心跳：只是在跑长工具，别当成卡死
           if (obj.__end) {
+            try { console.warn("[stream] __end local=", String(answer||"").length,
+                               "server=", (obj.answer||"").length,
+                               "尾=", JSON.stringify(String(obj.answer||"").slice(-26))); } catch (e) {}
             // 无条件以服务端为准：本地累计可能少（丢分片）或多（重复），都没意义
             if (typeof obj.answer === "string" && obj.answer) {
               try {
