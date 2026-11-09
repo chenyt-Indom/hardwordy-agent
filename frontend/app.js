@@ -3152,14 +3152,14 @@
     const _watchdog = setInterval(() => {
       if (!streaming) { clearInterval(_watchdog); return; }
       // 硬上限：5 分钟还没结束 → 直接中止并保留已生成内容
-      if (Date.now() - _t0 > 1200000) {
+      if (Date.now() - _t0 > 3600000) {   // 硬上限 20 分钟 → 60 分钟
         clearInterval(_watchdog);
         try { abortCtl.abort(); } catch (e) { /* ignore */ }
         answerBubble.querySelectorAll(".stream-cursor").forEach((n) => n.remove());
         showToast("这轮超过 20 分钟还没结束，已自动中断并保留已生成的部分", "warn");
         return;
       }
-      if (Date.now() - _lastEventAt < 90000) return;
+      if (Date.now() - _lastEventAt < 600000) return;   // 90 秒 → 10 分钟才提示
       clearInterval(_watchdog);
       answerBubble.querySelectorAll(".stream-cursor").forEach((n) => n.remove());
       showToast("已经 90 秒没有任何新内容 —— 模型可能卡在某个工具里了，"
@@ -3875,7 +3875,7 @@
       _stallTimer = setInterval(() => {
         const sec = Math.round((Date.now() - _stallT0) / 1000);
         // 3 分钟一个字节都没进来 → 连接已经卡死，别再让用户对着转圈等
-        if (sec >= 240 && !_hardStall) {
+        if (sec >= 1800 && !_hardStall) {   // 原来 240 秒就断言卡死；用户要求去掉限制
           _hardStall = true;
           _clearStall();
           try { abortCtl && abortCtl.abort(); } catch (e) { /* 忽略 */ }

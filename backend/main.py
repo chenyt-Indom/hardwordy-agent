@@ -590,6 +590,16 @@ def _image_tokens(images_b64: list) -> int:
     return total
 
 
+def _no_limit() -> bool:
+    """用户要求"限制都去掉"：返回 True 时不做任何输入裁剪。"""
+    if str(os.environ.get("MM_NO_OUTPUT_LIMIT", "")).lower() in ("1", "true", "yes"):
+        return True
+    try:
+        return bool((config.load_config() or {}).get("no_output_limit"))
+    except Exception:
+        return False
+
+
 def _clamp_message_text(text: str, max_tokens: int) -> tuple:
     """把过长的**单条**消息截到 max_tokens 以内（**保头保尾**）。
 
@@ -605,7 +615,8 @@ def _clamp_message_text(text: str, max_tokens: int) -> tuple:
     用二分找"截到多少字刚好装得下"，比按比例硬猜准（中英文 token 密度差很多）。
     """
     s = str(text or "")
-    if max_tokens <= 0 or not s:
+    if _no_limit() or max_tokens <= 0 or not s:      # 用户要求"去掉限制"：不裁剪任何消息
+        return text, s, False
         return s, len(s), len(s)
     if _est_tokens(s) <= max_tokens:
         return s, len(s), len(s)
