@@ -91,3 +91,4 @@ build/_pyi/
 
 # 交接卡运行时数据（2026-11-09）
 handoff/last.json
+frontend/*.broken-*
