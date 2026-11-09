@@ -3181,8 +3181,14 @@
         return;
       }
       _paintAt = now;
-      answerBubble.innerHTML = mdToHtml(stripToolLeak(answer))
-        + '<span class="stream-cursor"></span>';
+      // 2026-11-10：流式阶段**不再做 markdown**。
+      //   实测：收尾渲染那一步偶尔不执行（异常/分支没走到），屏幕就只剩流式的最后状态；
+      //   而流式用的是 mdToHtml，尾部会被吃掉。这里直接 textContent，屏幕 === answer。
+      answerBubble.textContent = answer;
+      answerBubble.style.whiteSpace = "pre-wrap";
+      const _cur = document.createElement("span");
+      _cur.className = "stream-cursor";
+      answerBubble.appendChild(_cur);
     };
     // ---------- 思考过程平滑逐字播放 ----------
     // Ollama 对 qwen3-vl 等推理模型常把 thinking 一次性整体返回（非逐 token），
@@ -4021,6 +4027,7 @@
                 }
               } catch (e) {}
               answer = obj.answer;
+              try { paintAnswer(true); } catch (e) { /* 重绘失败不影响 */ }
             }
             continue;
           }
