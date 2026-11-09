@@ -1176,13 +1176,50 @@
   });
   window.__saveViaDesktop = saveViaDesktop;       // 文库面板等处复用
 
+  // 统一渲染入口（2026-11-09）：实时回答与历史回放都走这里。
+  // 纯文本模式下只用 textContent（不可能少字）；格式化模式下渲染完做尾部核对，
+  // 屏幕上找不到原文结尾就退回纯文本。
+  function isPlainMode() {
+    try {
+      if (window.__PLAIN_FORCE) return true;
+      const v = localStorage.getItem("plain_answer");
+      return v === null ? true : v === "1";
+    } catch (e) { return true; }
+  }
+
+  function renderFinal(bubble, text, userText) {
+    const raw = String(text == null ? "" : text);
+    if (isPlainMode()) {
+      bubble.textContent = raw;
+      bubble.style.whiteSpace = "pre-wrap";
+      return;
+    }
+    try {
+      if (raw.indexOf("```") >= 0) renderAnswerWithCode(bubble, raw, userText || "");
+      else renderAnswerLinks(bubble, raw);
+    } catch (e) {
+      bubble.textContent = raw;
+      return;
+    }
+    try {
+      const wantTail = raw.replace(/\*\*|`|^\s*[-*]\s+/gm, "").trim().slice(-24)
+                          .replace(/\s+/g, "");
+      const shown = (bubble.innerText || "").replace(/\s+/g, "");
+      if (wantTail && shown && !shown.includes(wantTail)) {
+        console.warn("[stream] 渲染丢了结尾，退回纯文本：", JSON.stringify(wantTail));
+        bubble.textContent = raw;
+        bubble.style.whiteSpace = "pre-wrap";
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
   function addMsg(role, text) {
     const el = document.createElement("div");
     el.className = "msg " + role;
     el.innerHTML = `<div class="bubble"></div>`;
     // 助手的历史回答也走一遍链接渲染 —— 否则程序重启后恢复出来的对话里，
     // 之前给过的下载链接又变回不能点的纯文本了（实测踩到）。
-    if (role === "assistant") renderAnswerLinks(el.querySelector(".bubble"), text);
+    if (role === "assistant") renderFinal(el.querySelector(".bubble"), text);
     else el.querySelector(".bubble").textContent = text;
     messagesEl.appendChild(el);
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -4174,48 +4211,16 @@
         if (/[?&]plain=0/.test(location.search)) localStorage.removeItem("plain_answer");
       } catch (e) { /* 忽略 */ }
       // 默认开启纯文本渲染（先保证"一个字都不少"），格式化模式可用 ?plain=0 关掉。
-      const _PLAIN_MODE = true;   // [诊断] 强制纯文本：排除渲染层的所有可能
-      if (_PLAIN_MODE) {
-        answerBubble.textContent = answer;          // 完全不做 markdown，只保留换行
-        answerBubble.style.whiteSpace = "pre-wrap";
-      } else try {
-        if (answer && answer.indexOf("```") >= 0) renderAnswerWithCode(answerBubble, answer, promptText);
-        else renderAnswerLinks(answerBubble, answer);
-      } catch (e) {
-        answerBubble.textContent = answer;
-      }
-      if (!_PLAIN_MODE) try {
-        const _plain = String(answer || "");
-        const _wantTail = _plain.replace(/\*\*|`|^\s*[-*]\s+/gm, "").trim().slice(-24);
-        const _shownAll = (answerBubble.innerText || "").replace(/\s+/g, "");
-        const _wantAll = _wantTail.replace(/\s+/g, "");
-        if (_wantAll && _shownAll && !_shownAll.includes(_wantAll)) {
-          console.warn("[stream] 渲染丢了结尾，退回纯文本：", JSON.stringify(_wantTail));
-          answerBubble.textContent = _plain;      // 纯文本一定完整
-        }
-      } catch (e) { /* 忽略 */ }
+      // 统一走 renderFinal：纯文本 / 格式化 + 尾部核对（见函数定义处）
+      renderFinal(answerBubble, answer, promptText);
+      try { localStorage.setItem("__last_answer", String(answer || "")); } catch (e) {}
       if (!answer) {
-        // 别把空白气泡藏起来让用户一脸茫然——明确说明发生了什么
         answerBubble.textContent = notes.length
           ? "⚠️ " + notes[notes.length - 1]
           : "⚠️ 模型这次没有输出内容，请再试一次或换个问法。";
         answerBubble.classList.add("empty-answer");
-        answer = "";
       }
-      // 收尾一致性校验（2026-11-09）：渲染结果和收到的原文不一致时用纯文本兜底，
-      // 宁可少一点样式，也不能少字。（有代码卡片时不比对，结构本来就不同）
-      try {
-        const _shown = (answerBubble.innerText || "").replace(/\s+/g, "");
-        const _want = String(answer || "").replace(/\s+/g, "");
-        if (_want && _shown && _shown.length < _want.length && !answerBubble.querySelector(".code-card")) {
-          console.warn("[stream] 显示比收到短，已用纯文本兜底：", _shown.length, "→", _want.length);
-          answerBubble.textContent = answer;
-        }
-      } catch (e) { /* 兜底失败不影响主流程 */ }
-      window.__lastAnswerLen = (answer || "").length;   // 诊断用（只有长度，无内容）
-      try { localStorage.setItem("__last_answer", String(answer || "")); } catch (e) {}
-      // ★ 自动续写（2026-11-09）：回答看起来被截断（结尾没有终止标点）时，
-      //   自动补一条"从断开处继续"，最多 2 次。这样用户不用自己发现"少了一半"。
+      // 自动续写：结尾没有终止标点就补一条"从断开处继续"（最多 2 次，按用户消息重置）
       try {
         const _t = String(answer || "").trimEnd();
         const _cut = _t.length > 60 && !/[。！？!?….…”』」）)】\n`~；;：:]$/.test(_t);
@@ -4225,23 +4230,13 @@
           setTimeout(() => {
             try {
               const inp = document.querySelector("#input");
-              inp.value = "（系统）上一条回复被截断了（结尾停在「" +
-                          _t.slice(-6) + "」）。请**从断开处继续**写下去，不要重复前面的内容。";
+              inp.value = "（系统）上一条回复被截断了（结尾停在「" + _t.slice(-6) + "」）。请从断开处继续写下去，不要重复前面的内容。";
               inp.dispatchEvent(new Event("input"));
               send();
             } catch (e) { /* 忽略 */ }
           }, 400);
-        } else if (!_cut) {
-          window.__autoCont = 0;          // 正常收尾，重置计数
-        }
+        } else if (!_cut) { window.__autoCont = 0; }
       } catch (e) { /* 忽略 */ }
-      // 截断自检：结尾没有终止标点 → 大概率被切了，打日志便于定位（不打扰用户）
-      try {
-        const _t = String(answer || "").trim();
-        if (_t.length > 40 && !/[。！？!?….…”』」）)】\n`~]$/.test(_t)) {
-          console.warn("[stream] 回答结尾没有终止标点，可能被截断：", JSON.stringify(_t.slice(-24)));
-        }
-      } catch (e) {}
       if (answer) history.push({ role: "assistant", content: answer });
       // 检索来源：渲染成回答下方的可伸缩列表（默认折叠，点标题展开）
       if (sourcesData && sourcesData.items && sourcesData.items.length) {
