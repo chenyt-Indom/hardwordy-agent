@@ -2600,3 +2600,63 @@ html[data-theme="light"] select.pill-select option {
     background-position: right 4px center;
   }
 }
+
+/* ================= 手机端：侧栏能收回去 + 文件列表能删（2026-11-09）=================
+   问题：抽屉（84vw）盖住了顶栏的 ☰，用户没有任何入口能把它关掉，只能退出重进。 */
+.sb-close { display: none; }
+
+@media (max-width: 768px) {
+  .sb-close {
+    display: flex; align-items: center; justify-content: center;
+    position: sticky; top: 0; z-index: 90;
+    margin-left: auto; margin-bottom: 6px;
+    flex: 0 0 auto;                      /* 侧栏是 flex 列，不加这行会被压成 20px 高 */
+    width: 42px; height: 42px; min-height: 42px; border-radius: 12px;
+    background: #1b2130; color: #e6e9ef;
+    border: 1px solid #2a3140; font-size: 18px; line-height: 1;
+  }
+  .sb-mask { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); z-index: 70; }
+
+  /* 行内布局：图标 + 文件名（可省略）+ 时间/大小换到第二行，右侧留出删除按钮 */
+  .dl-item {
+    min-height: 52px; padding: 8px 46px 8px 9px; position: relative;
+    flex-wrap: wrap; align-items: center; row-gap: 2px;
+  }
+  .dl-item .dl-icon { flex: none; }
+  .dl-item .dl-name {
+    flex: 1 1 auto; min-width: 0; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; font-size: 13.5px;
+  }
+  .dl-item .dl-meta {
+    flex: 1 1 100%; order: 9; margin-left: 26px;
+    font-size: 11px; opacity: .75; white-space: nowrap;
+  }
+  .dl-del {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    width: 38px; height: 38px; border-radius: 10px;
+    background: transparent; border: 1px solid transparent;
+    color: #8b93a7; font-size: 15px;
+  }
+  .dl-del:active { background: #2a1b1b; border-color: #5a2a2a; color: #ff8a80; }
+  .folder-head { position: sticky; top: 0; background: var(--panel); z-index: 2; }
+}
+
+/* 文件夹标题变成可点的按钮（手机端"查看文件夹"）2026-11-09 */
+.folder-head {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  background: transparent; border: none; color: var(--muted);
+  font-size: 12.5px; padding: 8px 4px; cursor: pointer; text-align: left;
+}
+.folder-head .fh-arrow { width: 12px; opacity: .8; }
+.folder-head .fh-count {
+  margin-left: auto; font-size: 11px; padding: 1px 7px;
+  border: 1px solid var(--border); border-radius: 999px; opacity: .8;
+}
+.folder-body.collapsed { display: none; }
+@media (max-width: 768px) { .folder-head { min-height: 40px; font-size: 13px; } }
+
+/* 手机上没有资源管理器：「📂 文件夹」按钮点不出东西，直接隐藏 2026-11-09 */
+@media (max-width: 768px) {
+  /* 手机上没有资源管理器：这些"打开文件夹"点了只会报错，统一隐藏 */
+  #dlOpenFolder, #dlBackup, #kbOpenFolder, #libOpenFolder { display: none; }
+}

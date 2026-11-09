@@ -25,6 +25,8 @@
 <body>
   <!-- 侧边栏：状态 + 文段式记忆库 -->
   <aside class="sidebar" id="sidebar">
+    <!-- 手机端才显示：抽屉盖住了顶栏的 ☰，没有这个按钮就"收不回去"（2026-11-09） -->
+    <button type="button" class="sb-close" id="sbClose" title="收起侧栏">✕</button>
     <div class="brand">
       <div class="logo">◉</div>
       <div>
@@ -246,6 +248,9 @@
   </aside>
 
   <!-- 主聊天区 -->
+  <!-- 抽屉打开时的遮罩：点空白处也能收起 -->
+  <div class="sb-mask" id="sbMask" hidden></div>
+
   <main class="main" id="main">
     <header class="chat-header">
       <button class="icon-btn" id="toggleSidebar">☰</button>

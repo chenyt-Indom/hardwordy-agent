@@ -5668,6 +5668,14 @@ async def chat(req: ChatRequest,
         try:
             sessions.save_messages(session, full)
             sessions.prune(session)       # 过长则自动裁剪，避免记录无限膨胀
+            # ★ 2026-11-09 用户反馈「重启后总是忘记刚刚做过的事」：
+            #   以前交接卡只在「点重启」那一刻快照，崩溃/直接关窗口就一条不留。
+            #   这里每轮结束就把最近几轮原话实时落盘（内部有 3 秒节流，开销可忽略）。
+            try:
+                from . import handoff as _handoff_live
+                _handoff_live.touch(session, "对话进行中（实时落盘）")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -8632,6 +8640,13 @@ def session_save(sid: str, body: dict):
     """保存会话消息（前端每次对话后调用，保证重启后能恢复）。"""
     msgs = body.get("messages") or []
     info = sessions.save_messages(sid, msgs)
+    # 前端每次对话后都会 PUT 一次 —— 这里也刷一遍交接卡，
+    # 兜住「流式生成中途被中断、没走到收尾分支」的情况。
+    try:
+        from . import handoff as _handoff_put
+        _handoff_put.touch(sid, "前端保存会话（实时落盘）")
+    except Exception:
+        pass
     return {"ok": True, "session": info}
 
 

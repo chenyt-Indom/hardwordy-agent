@@ -323,6 +323,9 @@
   async function openInLibrary(rel) {
     const panel = document.getElementById("doclibPanel");
     if (!panel) { showToast("界面上找不到「生成文库」面板", "warn"); return false; }
+    if (window.innerWidth <= 768 && typeof window.__openSidebar === "function") {
+      window.__openSidebar();                 // 手机：先拉开抽屉，否则在屏幕外看不见
+    }
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
     await loadDoclib(rel || "");          // 刷新列表 + 选中（内部会打上 active）
     let hit = null;
@@ -1463,7 +1466,37 @@
   } catch (e) {}
 
   // ---------- 事件 ----------
-  $("#toggleSidebar").onclick = () => $("#sidebar").classList.toggle("hidden");
+  // 手机端侧栏（抽屉）开合：抽屉会盖住顶栏的 ☰，所以必须另有入口能关掉（2026-11-09）
+  const _sbEl = () => document.querySelector("#sidebar");
+  const _maskEl = () => document.querySelector("#sbMask");
+  const openSidebar = () => {
+    const el = _sbEl(); if (!el) return;
+    el.classList.remove("hidden");
+    const m = _maskEl(); if (m) m.hidden = false;
+  };
+  const closeSidebar = () => {
+    const el = _sbEl(); if (!el) return;
+    el.classList.add("hidden");
+    const m = _maskEl(); if (m) m.hidden = true;
+  };
+  window.__openSidebar = openSidebar;
+  window.__closeSidebar = closeSidebar;
+
+  $("#toggleSidebar").onclick = () => {
+    const el = _sbEl(); if (!el) return;
+    if (el.classList.contains("hidden")) openSidebar(); else closeSidebar();
+  };
+  const _sbCloseBtn = document.querySelector("#sbClose");
+  if (_sbCloseBtn) _sbCloseBtn.onclick = closeSidebar;
+  const _sbMaskEl = _maskEl();
+  if (_sbMaskEl) _sbMaskEl.onclick = closeSidebar;
+  // 点侧栏里的菜单项后自动收起（手机上更顺手）
+  _sbEl() && _sbEl().addEventListener("click", (ev) => {
+    if (window.innerWidth > 768) return;
+    if (ev.target.closest(".list-item") || ev.target.closest(".panel .btn")) {
+      setTimeout(closeSidebar, 150);
+    }
+  });
   // 手机端（窄屏）默认把侧栏收起来，否则一打开就盖住半个屏幕（2026-11-09）
   if (window.innerWidth <= 768) {
     $("#sidebar").classList.add("hidden");
@@ -1866,7 +1899,8 @@
       return `<div class="list-item dl-item${f.rel === dlCurrent ? " active" : ""}" data-rel="${escapeHtml(f.rel)}">` +
         `<span class="dl-icon">${icon}</span>` +
         `<span class="dl-name" title="${escapeHtml(f.rel)}">${escapeHtml(f.name)}</span>` +
-        `<span class="dl-meta">${escapeHtml(f.modified)} · ${(f.size / 1024).toFixed(1)}KB</span></div>`;
+        `<span class="dl-meta">${escapeHtml(f.modified)} · ${(f.size / 1024).toFixed(1)}KB</span>` +
+        `<button type="button" class="dl-del" data-rel="${escapeHtml(f.rel)}" title="删除">🗑</button></div>`;
     };
     // 同知识库：有子文件夹才分组显示
     if (!files.some((f) => (f.folder || "").trim())) {
@@ -1880,12 +1914,42 @@
         if (!groups[k]) { groups[k] = []; order.push(k); }
         groups[k].push(f);
       });
+      // 文件夹可点开/收起（手机上没有资源管理器，"查看文件夹"就是展开这一组）2026-11-09
       list.innerHTML = order
         .map((folder) =>
-          `<div class="folder-head">📁 ${escapeHtml(folder || "根目录")}</div>` +
-          groups[folder].map(dlRow).join(""))
+          `<button type="button" class="folder-head" data-folder="${escapeHtml(folder)}">` +
+          `<span class="fh-arrow">▾</span> 📁 ${escapeHtml(folder || "根目录")}` +
+          `<span class="fh-count">${groups[folder].length}</span></button>` +
+          `<div class="folder-body" data-folder="${escapeHtml(folder)}">` +
+          groups[folder].map(dlRow).join("") + "</div>")
         .join("");
     }
+    // 文件夹展开/收起
+    list.querySelectorAll(".folder-head").forEach((h) => {
+      h.onclick = () => {
+        const body = list.querySelector('.folder-body[data-folder="' +
+          (h.dataset.folder || "").replace(/"/g, '\\"') + '"]');
+        if (!body) return;
+        const closed = body.classList.toggle("collapsed");
+        h.querySelector(".fh-arrow").textContent = closed ? "▸" : "▾";
+      };
+    });
+    list.querySelectorAll(".dl-del").forEach((btn) => {
+      btn.onclick = async (ev) => {
+        ev.stopPropagation();
+        const rel = btn.dataset.rel;
+        if (!confirm("删除《" + rel + "》？\n（会移进回收站，需要时能捞回来）")) return;
+        try {
+          await api("/api/doclib/delete", { method: "POST",
+            body: JSON.stringify({ rel: rel }) });
+          showToast("已删除（在回收站里）", "ok");
+          if (dlCurrent === rel) { const ed = $("#dlEditor"); if (ed) ed.hidden = true; dlCurrent = ""; }
+          loadDoclib();
+        } catch (e) {
+          showToast("删除失败：" + (e.message || e), "err");
+        }
+      };
+    });
     list.querySelectorAll(".dl-item").forEach((el) => {
       el.onclick = () => openDoclibFile(el.dataset.rel);
       // 双击：用本机默认程序直接打开（Word/PPT/Excel 双击即开，不用去文件夹里翻）
