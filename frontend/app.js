@@ -237,6 +237,14 @@
   // ⚠️ 定义在**外层作用域**：renderAnswerLinks（历史回放也走它）在 doSend 之外。
   const TOOL_LEAK_XML_RE = /<\s*\|?\s*(?:function[ _-]?calls?|tool[ _-]?calls?)\s*\|?\s*>[\s\S]*?(?:<\s*\/\s*(?:function[ _-]?calls?|tool[ _-]?calls?)\s*>|$)/gi;
   const TOOL_LEAK_TAG_RE = /<\s*\|?\s*\/?\s*(?:function[ _-]?calls?|tool[ _-]?calls?)\s*\|?\s*\/?\s*>/gi;
+  // ⚠️ 2026-11-10 修「前端输出只有一半」的根因。
+  //   上面那条 TOOL_LEAK_XML_RE 结尾是 `|$`：模型只要写了一个**没闭合**的 <tool_call>
+  //   （写到一半放弃 / 被长度上限截断），非贪婪的 [\s\S]*? 就会一路吃到全文末尾，
+  //   把后面所有正文整段删掉 —— 实测 160 字正文洗完只剩 69 字，正是"一半"。
+  //   下面改用两条新正则（旧常量保留但不再引用）：成对闭合的整块删，
+  //   没闭合的只摘「标签 + 那坨调用」，后面正文一个字都不动。
+  const TOOL_LEAK_XML_PAIR_RE = /<\s*\|?\s*(?:function[ _-]?calls?|tool[ _-]?calls?)\s*\|?\s*>[\s\S]*?<\s*\/\s*(?:function[ _-]?calls?|tool[ _-]?calls?)\s*>/gi;
+  const TOOL_LEAK_XML_OPEN_RE = /<\s*\|?\s*(?:function[ _-]?calls?|tool[ _-]?calls?)\s*\|?\s*>/i;
   const TOOL_LEAK_FENCE_RE = /```(?:tool|tool_call)[ \t]*\r?\n[\s\S]*?```/g;
   // 「半个标签」：模型写到一半放弃，只剩 <function / <tool_call 就接正文了。
   // 实机复现过（2026-09-21）：它单独占一行，被流式推出去，正文开头冒出一截 `<function`。
@@ -248,6 +256,10 @@
   function stripToolLeak(text) {
     let s = String(text == null ? "" : text);
     if (s.indexOf("<") < 0 && s.indexOf("```tool") < 0) return s;   // 快路径
+    // ⚠️ 2026-11-10：**必须在旧 TOOL_LEAK_XML_RE 之前**先把未闭合的 tool 标签摘掉。
+    //   旧正则结尾是 `|$`，遇到没闭合的 <tool_call> 会把后面全部正文吃光
+    //   （实测 160 字剩 69 字，正是用户说的"只有一半"）。摘掉后旧正则就找不到开标签了。
+    s = _stripUnclosedToolBlocks(s);
     s = s.replace(TOOL_LEAK_XML_RE, "").replace(TOOL_LEAK_TAG_RE, "");
     s = s.replace(TOOL_LEAK_FENCE_RE, "");
     s = s.replace(TOOL_LEAK_STRAY_RE, "$1").replace(TOOL_LEAK_HEAD_RE, "");
@@ -255,6 +267,60 @@
   }
 
   // ---------------- 轻量 Markdown → HTML（2026-11-08）----------------
+  // 没闭合的 <tool_call> / <function_call>：只摘掉标签和那坨调用，**正文一律保留**。
+  // 2026-11-10：这是「输出只有一半」的修法 —— 旧正则遇到未闭合标签会一路吃到全文末尾。
+  function _stripUnclosedToolBlocks(s) {
+    let out = String(s || "");
+    for (let guard = 0; guard < 8; guard++) {
+      const m = TOOL_LEAK_XML_OPEN_RE.exec(out);
+      if (!m) break;
+      const start = m.index;
+      const p = start + m[0].length;
+      let q = p;
+      while (q < out.length && /\s/.test(out[q])) q++;
+      let end = p;                                  // 至少摘掉开标签本身
+      if (out[q] === "{" || out[q] === "[") {
+        const je = _jsonEndAt(out, q);
+        if (je > 0) {
+          let ok = false;
+          try {
+            const o = JSON.parse(out.slice(q, je));
+            ok = !!(o && (o.name || o.tool || o.function || o.tool_calls));
+          } catch (e) { ok = false; }
+          if (ok) end = je;                         // 调用体完整 → 一起摘掉
+          else {                                    // 调用体被截断 → 摘到空行/1500 字
+            const rest = out.slice(q);
+            const blank = rest.search(/\n[ \t]*\n/);
+            end = q + (blank >= 0 ? blank : Math.min(rest.length, 1500));
+          }
+        }
+      }
+      const tail = /^\s*<\s*\/\s*(?:function[ _-]?calls?|tool[ _-]?calls?)\s*>/i.exec(out.slice(end));
+      if (tail) end += tail[0].length;
+      // ⚠️ 兜底：这一段里要是有成片中文，说明吃进了正文 —— 只摘标签，内容留下
+      if ((out.slice(start, end).match(/[\u4e00-\u9fa5]/g) || []).length > 40) end = p;
+      out = out.slice(0, start) + out.slice(end);
+    }
+    return out;
+  }
+
+  // 从 s[i]（应当是 { 或 [）开始做括号配对，返回配对结束后的下标；配不上返回 -1
+  function _jsonEndAt(s, i) {
+    let depth = 0, inStr = false, esc = false;
+    for (let k = i; k < s.length; k++) {
+      const ch = s[k];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') { inStr = true; continue; }
+      if (ch === "{" || ch === "[") depth++;
+      else if (ch === "}" || ch === "]") { depth--; if (depth === 0) return k + 1; }
+    }
+    return -1;
+  }
   // 用户的反馈：「解决完问题的总结不够结构化和美观」。
   // 之前回复是 textContent + <br>，所以 `### 标题`、`- 列表`、`**重点**` 全是原样字符。
   // 这里做一层**受控**的渲染：先 escapeHtml（防注入），再套少量块级/行内语法。
@@ -323,6 +389,7 @@
   async function openInLibrary(rel) {
     const panel = document.getElementById("doclibPanel");
     if (!panel) { showToast("界面上找不到「生成文库」面板", "warn"); return false; }
+    if (window.__dlExpand) window.__dlExpand();
     if (window.innerWidth <= 768 && typeof window.__openSidebar === "function") {
       window.__openSidebar();                 // 手机：先拉开抽屉，否则在屏幕外看不见
     }
@@ -1872,6 +1939,39 @@
   // 刻意和知识库分开：知识库是用户的资料、只读；这里是模型的产出，可改可删可导出。
   let dlCurrent = "";
 
+  // 生成文库整块可折叠：点标题收起 / 展开，动画由 CSS（grid-template-rows 0fr↔1fr）负责
+  (() => {
+    const panel = $("#doclibPanel"), btn = $("#dlToggle");
+    if (!panel || !btn) return;
+    // 把标题之后的内容整体包进 .dl-body > .dl-body-in —— 有这一层才能做连续的高度过渡
+    const head = panel.querySelector(".sec-head");
+    if (head && !panel.querySelector(".dl-body")) {
+      const body = document.createElement("div");
+      body.className = "dl-body"; body.id = "dlBody";
+      const inner = document.createElement("div");
+      inner.className = "dl-body-in";
+      Array.prototype.slice.call(panel.children).forEach((n) => {
+        if (n !== head) inner.appendChild(n);
+      });
+      body.appendChild(inner); panel.appendChild(body);
+    }
+    const KEY = "doclib.collapsed";
+    const apply = (closed, remember) => {
+      panel.classList.toggle("collapsed", closed);
+      btn.setAttribute("aria-expanded", closed ? "false" : "true");
+      if (remember) { try { localStorage.setItem(KEY, closed ? "1" : "0"); } catch (e) {} }
+    };
+    let saved = "0";
+    try { saved = localStorage.getItem(KEY) || "0"; } catch (e) {}
+    if (saved === "1") apply(true, false);
+    btn.onclick = () => apply(!panel.classList.contains("collapsed"), true);
+    btn.onkeydown = (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); btn.onclick(); }
+    };
+    // 外部（如「在文件库中打开」）要定位文件时，先自动展开
+    window.__dlExpand = () => { if (panel.classList.contains("collapsed")) apply(false, true); };
+  })();
+
   async function loadDoclib(highlight) {
     const list = $("#dlList");
     if (!list) return;
@@ -1922,16 +2022,43 @@
           `<span class="fh-count">${groups[folder].length}</span></button>` +
           `<div class="folder-body" data-folder="${escapeHtml(folder)}">` +
           groups[folder].map(dlRow).join("") + "</div>")
+          // __probe__
         .join("");
     }
     // 文件夹展开/收起
+    // 目录默认收起：列表里只看到目录名，点一下展开、再点收起 2026-11-09
+    list.querySelectorAll(".folder-body").forEach((b) => b.classList.add("collapsed"));
+    list.querySelectorAll(".folder-head .fh-arrow").forEach((a) => { a.textContent = "▸"; });
+    // 要定位某个文件时，自动展开它所在的那一组（默认收起状态看不到高亮项）
+    if (highlight) {
+      const hit = list.querySelector('.folder-body .dl-item[data-rel="' + String(highlight).replace(/"/g, '\\"') + '"]');
+      const box = hit && hit.closest(".folder-body");
+      if (box) {
+        box.classList.remove("collapsed");
+        const head = box.previousElementSibling;
+        if (head && head.classList.contains("folder-head")) {
+          const ar = head.querySelector(".fh-arrow");
+          if (ar) ar.textContent = "▾";
+        }
+      }
+    }
     list.querySelectorAll(".folder-head").forEach((h) => {
       h.onclick = () => {
         const body = list.querySelector('.folder-body[data-folder="' +
           (h.dataset.folder || "").replace(/"/g, '\\"') + '"]');
         if (!body) return;
+        body.style.maxHeight = body.scrollHeight + "px";
+        void body.offsetHeight;
         const closed = body.classList.toggle("collapsed");
         h.querySelector(".fh-arrow").textContent = closed ? "▸" : "▾";
+        // 高度过渡：收起时过渡到 0；展开时过渡到实测高度，动画结束后放开为 none（否则内容变多会被截断）
+        if (closed) setTimeout(() => { body.style.maxHeight = "0px"; }, 0);
+        else {
+          body.style.maxHeight = body.scrollHeight + "px";
+          setTimeout(() => {
+            if (!body.classList.contains("collapsed")) body.style.maxHeight = "none";
+          }, 340);
+        }
       };
     });
     list.querySelectorAll(".dl-del").forEach((btn) => {
@@ -2982,11 +3109,11 @@
     const _watchdog = setInterval(() => {
       if (!streaming) { clearInterval(_watchdog); return; }
       // 硬上限：5 分钟还没结束 → 直接中止并保留已生成内容
-      if (Date.now() - _t0 > 300000) {
+      if (Date.now() - _t0 > 1200000) {
         clearInterval(_watchdog);
         try { abortCtl.abort(); } catch (e) { /* ignore */ }
         answerBubble.querySelectorAll(".stream-cursor").forEach((n) => n.remove());
-        showToast("这轮超过 5 分钟还没结束，已自动中断并保留已生成的部分", "warn");
+        showToast("这轮超过 20 分钟还没结束，已自动中断并保留已生成的部分", "warn");
         return;
       }
       if (Date.now() - _lastEventAt < 90000) return;
@@ -3705,7 +3832,7 @@
       _stallTimer = setInterval(() => {
         const sec = Math.round((Date.now() - _stallT0) / 1000);
         // 3 分钟一个字节都没进来 → 连接已经卡死，别再让用户对着转圈等
-        if (sec >= 180 && !_hardStall) {
+        if (sec >= 240 && !_hardStall) {
           _hardStall = true;
           _clearStall();
           try { abortCtl && abortCtl.abort(); } catch (e) { /* 忽略 */ }
@@ -3838,6 +3965,7 @@
           // ★ 服务端在结束事件里带完整正文（2026-11-09）
           //   接收环节只要漏了一片（切在半个 JSON、XHR 缓冲吞尾…），界面上就会少字。
           //   这里直接以服务端原文为准做一次回填，彻底不依赖"猜哪里丢的"。
+          if (obj.ping) { _armStall(); continue; }     // 服务端心跳：只是在跑长工具，别当成卡死
           if (obj.__end) {
             if (typeof obj.answer === "string" && obj.answer.length > answer.length) {
               try { console.warn("[stream] 用服务端完整正文回填：", answer.length, "→", obj.answer.length); } catch (e) {}
@@ -4044,6 +4172,27 @@
         }
       } catch (e) { /* 兜底失败不影响主流程 */ }
       window.__lastAnswerLen = (answer || "").length;   // 诊断用（只有长度，无内容）
+      // ★ 自动续写（2026-11-09）：回答看起来被截断（结尾没有终止标点）时，
+      //   自动补一条"从断开处继续"，最多 2 次。这样用户不用自己发现"少了一半"。
+      try {
+        const _t = String(answer || "").trimEnd();
+        const _cut = _t.length > 60 && !/[。！？!?….…”』」）)】\n`~；;：:]$/.test(_t);
+        const _n = (window.__autoCont = (window.__autoCont || 0));
+        if (_cut && !aborted && _n < 2 && !/上一条回复被截断/.test(promptText || "")) {
+          window.__autoCont = _n + 1;
+          setTimeout(() => {
+            try {
+              const inp = document.querySelector("#input");
+              inp.value = "（系统）上一条回复被截断了（结尾停在「" +
+                          _t.slice(-6) + "」）。请**从断开处继续**写下去，不要重复前面的内容。";
+              inp.dispatchEvent(new Event("input"));
+              send();
+            } catch (e) { /* 忽略 */ }
+          }, 400);
+        } else if (!_cut) {
+          window.__autoCont = 0;          // 正常收尾，重置计数
+        }
+      } catch (e) { /* 忽略 */ }
       // 截断自检：结尾没有终止标点 → 大概率被切了，打日志便于定位（不打扰用户）
       try {
         const _t = String(answer || "").trim();
@@ -4064,7 +4213,7 @@
         // 必须说清「内容已保留」，否则用户会以为是自己误触了终止。
         const _keep = (answer || "").trim();
         answerBubble.textContent = (_keep ? _keep + "\n\n" : "")
-          + "（⚠️ 已经 3 分钟没有任何新内容，连接像是卡住了，我已自动断开。"
+          + "（⚠️ 已经 4 分钟没有任何新内容，连接像是卡住了，我已自动断开。"
           + "上面已生成的部分都保留着 —— 回一句「继续」我就接着往下写。）";
         answerBubble.classList.remove("empty-answer");
         if (answer) history.push({ role: "assistant", content: answerBubble.textContent });
@@ -4088,7 +4237,14 @@
         answerBubble.textContent = answer ? answer + "\n\n" + stopMark : stopMark;
         history.push({ role: "assistant",
                        content: (answer ? answer + "\n\n" : "") + stopMark });
-        showToast("已终止本次生成");
+        if (answer) {
+          // 卡住被强制断开：把已有的正文留着，明确告诉用户"不是答完了"
+          answerBubble.textContent = answer.trimEnd() +
+            "\n\n（⚠️ 连接中断，以上是已生成的部分；可以点「发送」旁的终止后再问一次，或直接说「继续」）";
+          history.push({ role: "assistant", content: String(answer) });
+          try { persistSession(); } catch (e) { /* 忽略 */ }
+        }
+        showToast("连接中断，已保留已生成的内容");
         try { persistSession(); } catch (e) { /* 落盘失败不影响使用 */ }
       } else {
         // 后端已经解释过原因的（explained），正文里就是完整的人话，别再补尾巴。
@@ -4100,6 +4256,11 @@
       streaming = false;
       _hardStall = false;
       abortCtl = null;
+      // 2026-11-09：不管正常结束、被终止、还是流卡住，**必须把闪烁光标清掉**。
+      //   原来 aborted 分支不碰气泡，结果"内容停一半 + 光标一直闪"。
+      try {
+        answerBubble.querySelectorAll(".stream-cursor").forEach((n) => n.remove());
+      } catch (e) { /* 忽略 */ }
       _clearStall();                 // 别忘了停掉卡顿看门狗
       // ⚠️ 已经生成了一半才出错（网络断、后端异常）时，**绝不能把已生成的内容抹掉** ——
       //    catch 分支原本会直接把气泡替换成一行报错，用户看到的就是"回答突然只剩报错"。
@@ -4575,8 +4736,20 @@
     const saved = localStorage.getItem("chat_provider");
     if (saved) sel.value = saved;
 
+    // ★ 2026-11-10：把「对话最后选用的模型」镜像一份到本机 ——
+    //   定时任务半夜跑时浏览器不在，后端只能靠这份记录决定用哪个模型。
+    function syncChatModel() {
+      try {
+        fetch("/api/pref/chat_model", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: sel.value }) });
+      } catch (e) { /* 同步失败不影响对话 */ }
+    }
+    if (saved) syncChatModel();
+
     sel.addEventListener("change", () => {
       localStorage.setItem("chat_provider", sel.value);
+      syncChatModel();
       const isDS = sel.value.indexOf("deepseek") === 0;
       if (isDS && !localStorage.getItem("ds_api_key")) {
         showToast("已切到 DeepSeek，请点 🔑 填入 API Key", "warn");

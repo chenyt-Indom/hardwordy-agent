@@ -957,6 +957,31 @@ body.dragging .drop-overlay,
 
 /* ---------- 生成文库面板 ---------- */
 .dl-list { display: flex; flex-direction: column; gap: 4px; }
+
+/* 生成文库：点标题收起 / 展开，用 grid-template-rows 0fr↔1fr 做连续高度动画
+   （不用 display:none，所以是真·丝滑过渡，不是硬切） */
+/* flex:1 1 auto 让标题吃掉剩余宽度；word-break:keep-all 禁止中文逐字断行
+   （不加的话侧栏一窄，标题会被挤成一字一行竖排） */
+.dl-h2 {
+  flex: 1 1 auto; min-width: 0; cursor: pointer; user-select: none;
+  border-radius: 6px; word-break: keep-all; line-height: 1.45;
+}
+.dl-h2:hover { color: var(--text); }
+.dl-h2:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.dl-h2 .chev {
+  display: inline-block; font-size: 11px; color: var(--muted); margin-right: 5px;
+  transform-origin: 50% 50%;
+  transition: transform .34s cubic-bezier(.22, 1, .36, 1), color .2s;
+}
+.doclib.collapsed .dl-h2 .chev { transform: rotate(-90deg); }
+.dl-body {
+  display: grid; grid-template-rows: 1fr;
+  transition: grid-template-rows .34s cubic-bezier(.22, 1, .36, 1), opacity .26s ease;
+}
+.dl-body-in { min-height: 0; overflow: hidden; }
+.doclib.collapsed .dl-body { grid-template-rows: 0fr; opacity: 0; }
+.doclib.collapsed .sec-head { margin-bottom: 0; }
+.doclib.collapsed { padding-bottom: 14px; }
 .dl-item {
   display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 8px;
   cursor: pointer; border: 1px solid transparent;
@@ -2652,7 +2677,20 @@ html[data-theme="light"] select.pill-select option {
   margin-left: auto; font-size: 11px; padding: 1px 7px;
   border: 1px solid var(--border); border-radius: 999px; opacity: .8;
 }
-.folder-body.collapsed { display: none; }
+/* 文件夹分组：改成高度过渡 + 淡出，比 display:none 的硬切顺滑 */
+.folder-body {
+  display: block; overflow: hidden;
+  transition: max-height .32s cubic-bezier(.22, 1, .36, 1), opacity .24s ease;
+}
+.folder-body.collapsed { display: block; max-height: 0; opacity: 0; }
+/* 展开态强制放开高度：JS 在 max-height:0 的元素上量 scrollHeight 偶尔得 0，
+   会把 inline 的 max-height 写成 0px，导致分组"点了展不开"。
+   这里用 !important 压过 inline，显隐只由 collapsed 类决定 2026-11-09 */
+.folder-body:not(.collapsed) { max-height: none !important; opacity: 1 !important; }
+/* 目录分组：默认收起，点标题展开，再点收起。显隐只由 collapsed 类决定 2026-11-09 */
+.folder-body { overflow: visible !important; transition: none !important; }
+.folder-body.collapsed { display: none !important; max-height: 0 !important; opacity: 1 !important; }
+.folder-body:not(.collapsed) { display: block !important; max-height: none !important; opacity: 1 !important; }
 @media (max-width: 768px) { .folder-head { min-height: 40px; font-size: 13px; } }
 
 /* 手机上没有资源管理器：「📂 文件夹」按钮点不出东西，直接隐藏 2026-11-09 */

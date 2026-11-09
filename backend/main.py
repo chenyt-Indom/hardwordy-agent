@@ -434,6 +434,45 @@ MAX_TOKENS_CEILING = 24576
 MAX_CONTEXT_MESSAGES = 120
 
 
+# ============ 「回答是不是停在半句上」的判断（2026-11-09）============
+# 为什么需要它：
+#   用户反复报「回答只有一半」。查下来本地通道只在 done_reason == "length"
+#   时才续写；可 Ollama **经常给出 done_reason="stop"**（看起来正常结束），
+#   正文却停在半句话上 —— 模型自己吐了结束符、或上游把最后一段吞了。
+#   这种「假正常结束」以前既不续写、也不提示，用户看到的就是"说到一半没了"。
+_UNFINISHED_TAIL = set("，,、；;：:（(【[《<「『“‘")
+_FINISHED_TAIL = set("。！？!?….\"'”』」）)】]》>`~*|")
+# 这些词出现在结尾 → 句子明显没说完（"把主题告诉我，我" 就断在「我」上）
+_DANGLING_WORDS = ("我", "你", "他", "她", "它", "的", "地", "得", "和", "与",
+                   "或", "但", "而", "就", "也", "都", "所以", "因为", "如果",
+                   "然后", "并且", "而且", "以及", "包括", "例如", "比如")
+
+
+def _looks_unfinished(text: str) -> bool:
+    """正文是否**明显停在半句上**（用于「假正常结束」的自动续写判断）。
+
+    宁可不续写，也不要让模型把已经答完的内容重写一遍 —— 所以只认强信号：
+      · 结尾是逗号 / 顿号 / 分号 / 冒号 / 左括号 这类"后面必然还有话"的符号；
+      · 结尾是「我 / 的 / 但 / 所以…」这类明显的半句词；
+      · 或：正文够长（≥200 字）且**最后 40 字里一个句末标点都没有**。
+    """
+    s = (text or "").rstrip()
+    if not s:
+        return False
+    tail = s[-1]
+    if tail in _FINISHED_TAIL:
+        return False
+    if tail in _UNFINISHED_TAIL:
+        return True
+    for w in _DANGLING_WORDS:
+        if s.endswith(w):
+            return True
+    # 弱信号：长正文 + 最后 40 字没有任何句末标点 → 大概率被切了
+    if len(s) >= 200 and not any(ch in _FINISHED_TAIL for ch in s[-40:]):
+        return True
+    return False
+
+
 def _est_tokens(text) -> int:
     """粗略估算 token 数：中文约 1.2 字/token，其余约 3.5 字符/token。
 
@@ -5181,6 +5220,14 @@ async def chat(req: ChatRequest,
                 # 这跟"撞长度上限"是两种不同的断法，但对用户的观感一样 ——
                 # 话说到一半就没了，所以续写逻辑要一起覆盖（2026-11-08）。
                 cut_off = (not done_seen)
+                # ★★ 2026-11-09：**「假正常结束」也必须续写**（用户反复报「回答只有一半」）。
+                #   实测 Ollama 经常给 done_reason="stop"（看起来正常收尾），正文却停在半句上
+                #   （截图里「把主题告诉我，我」就是这么断的）。以前这种情况既不续写也不提示，
+                #   用户永远只能看到半句话。用 _looks_unfinished() 判定：明显没写完就按截断处理。
+                if not truncated and done_seen and _looks_unfinished(round_msg["content"]):
+                    truncated = True
+                    logger.warning("[continue] 正常结束但正文停在半句上，按截断处理：…%r",
+                                   round_msg["content"][-40:])
                 if cut_off:
                     truncated = True      # 复用下面同一套续写逻辑：对用户来说都是「话说一半没了」
                 # 只有「本轮一个字正文都没写出来」才值得重试。
@@ -5306,7 +5353,7 @@ async def chat(req: ChatRequest,
                 #   于是回答硬生生停在半句上（截图里「什么时候」就是这么断的）。
                 #   ⇒ 补上「续写」：把已写正文放回历史，让它从断开处接着写。
                 #   云端通道（deepseek_client）早就有这段，本地通道一直缺。
-                if (truncated and has_body and _cont_used < 2
+                if (truncated and has_body and _cont_used < 3
                         and _round + 1 < _max_rounds):
                     _cont_used += 1
                     logger.warning("[continue] 正文被截断（第 %d 次续写），接着往下写",
@@ -5331,6 +5378,16 @@ async def chat(req: ChatRequest,
                     _cur2 = int(gen_params.get("max_tokens") or 2048)
                     gen_params["max_tokens"] = min(max(_cur2 * 2, 4096), _room2)
                     continue
+
+                # ★ 2026-11-10：续写次数用完（或轮次用尽）时**必须告诉用户**。
+                #   以前这里什么都不做、直接往下走 —— 用户看到的就是「说到一半没了」，
+                #   既不知道是撞了长度上限，也不知道回一句「继续」就能接着写。
+                if truncated and has_body:
+                    _tip = ("\n\n（⚠️ 这条回答撞到了输出长度上限，已自动续写仍没写完。"
+                            "回一句「继续」我就从断开的地方接着往下写。）")
+                    final_text += _tip
+                    yield json.dumps({"message": {"content": _tip}},
+                                     ensure_ascii=False) + "\n"
                 if (office_mode and not _office_nudge_done
                         and round_msg["content"].strip()
                         and not (used_tools & _OFFICE_MAKER_TOOLS)
@@ -6201,6 +6258,17 @@ def selfdev_rollback(body: dict):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+# ---------------- 对话最后选用的模型（定时任务继承用） ----------------
+@app.get("/api/pref/chat_model")
+def pref_chat_model_get():
+    return {"ok": True, "model": scheduler.get_chat_model()}
+
+
+@app.post("/api/pref/chat_model")
+def pref_chat_model_set(body: dict):
+    return scheduler.set_chat_model(str((body or {}).get("model") or ""))
+
+
 # ---------------- 定时 / 长期自动化任务 ----------------
 @app.get("/api/schedule")
 def schedule_list():
@@ -6573,7 +6641,17 @@ async def chat_deepseek(req: ChatRequest,
         # 不用超时轮询（会泄漏 run_in_executor 任务、导致消息丢失），
         # 直接阻塞读 —— worker 结束时一定会 put ("__done__", None) 把这里放出来。
         while True:
-            kind, val = await loop.run_in_executor(None, q.get)
+            # 2026-11-09：长工具（跑代码/爬网页）会让这里**静默几分钟**，
+            #   nginx 60s 就掐连接、前端也以为卡死。每 15 秒发一个心跳包。
+            def _qget():
+                try:
+                    return q.get(timeout=15)
+                except queue.Empty:
+                    return ("__ping__", None)
+            kind, val = await loop.run_in_executor(None, _qget)
+            if kind == "__ping__":
+                yield json.dumps({"ping": 1}) + "\n"
+                continue
             if kind == "__done__":
                 break
             if kind == "content":

@@ -139,6 +139,36 @@ def _cloud_key() -> str:
         return ""
 
 
+def _pref_path() -> str:
+    return config.data("data", "chat_model.json")
+
+
+def get_chat_model() -> str:
+    """前端「对话最后选用的模型」（把 localStorage 的 chat_provider 镜像一份到本机）。
+
+    为什么要镜像：定时任务半夜跑，浏览器不在场，后端拿不到前端的下拉框。
+    """
+    try:
+        with open(_pref_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return str((d or {}).get("model") or "")
+    except Exception:
+        return ""
+
+
+def set_chat_model(model: str) -> dict:
+    """记下对话最后选用的模型（定时任务没写模型时就用它）。"""
+    m = str(model or "").strip()
+    try:
+        p = _pref_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"model": m, "updated": _now()}, f, ensure_ascii=False)
+        return {"ok": True, "model": m}
+    except Exception as e:
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 def _pick_channel(job: dict, cfg: dict):
     """决定这次走哪条通道：返回 (channel, model, note)。
 
@@ -149,6 +179,12 @@ def _pick_channel(job: dict, cfg: dict):
       4. 两条都不行 → 抛人话错误，写进任务状态里（不再是干巴巴的"无法连接"）。
     """
     want = str(job.get("model") or "").strip()
+    # ★ 2026-11-10 用户要求：「对话最后一次选定用什么模型，就用什么模型完成自动化」。
+    #   任务没写模型时，跟随前端镜像过来的「最后选用模型」；仍是 auto/空才走老的自动判断。
+    if not want or want.lower() == "auto":
+        want = get_chat_model()
+        if want.lower() == "auto":
+            want = ""
     default_model = str(cfg.get("default_model") or "qwen3-vl:30b")
     key = _cloud_key()
     local_ok = _ollama_alive(cfg)
@@ -207,18 +243,55 @@ def _run_local(M, cfg: dict, model: str, prompt: str, schemas: list, ctx: dict) 
     except Exception:
         pass
 
+    # ★ 2026-11-10 修「定时任务只输出一半」。
+    #   用户实测：国际新闻那条断在「#### 2. 油价飙升至五年高位：能源市场」，
+    #   后半截整段没有。根因：这里 stream=False 一把梭、**完全不看 done_reason**，
+    #   模型撞到 num_predict / 窗口上限时 content 本来就是半截，
+    #   却直接当完整答案返回，既不续写也不提示。
+    #   主对话（main.py 的 [continue] 分支）和云端通道早就有续写，只有这条漏了。
     msgs = [{"role": "user", "content": prompt}]
-    answer = ""
+    parts: list = []
+    cont_used = 0
+    params = dict(cfg)
     for _ in range(12):
         resp = M.client.chat(msgs, model=model, stream=False,
-                             tools=schemas, params=dict(cfg))
+                             tools=schemas, params=params)
         data = resp.json() if hasattr(resp, "json") else resp
         msg = data.get("message") or {}
         calls = msg.get("tool_calls") or []
+        body = str(msg.get("content") or "")
+        reason = str(data.get("done_reason") or "")
+
         if not calls:
-            answer = str(msg.get("content") or "")
+            if body:
+                parts.append(body)
+            # 撞长度上限 → 从断开处续写（最多 3 次），否则用户永远只看得到半句
+            if reason == "length" and cont_used < 3:
+                cont_used += 1
+                msgs.append({"role": "assistant", "content": body})
+                msgs.append({"role": "user", "content": (
+                    "（系统提示）你上一条回答**被长度上限截断了**，停在了半句话上。"
+                    "现在**从断开的地方接着往下写**：不要重复已经写过的内容，"
+                    "不要重新开头，不要解释、不要道歉，直接续上正文；"
+                    "如果内容其实已经写完，就只把最后那句补完整。")})
+                # 额度按**真实窗口**重算 —— 否则同样的额度会在同一个地方再断一次
+                try:
+                    pt = int(data.get("prompt_eval_count") or 0)
+                    room = 8192
+                    if pt:
+                        from . import perf as _perf
+                        room = max(1024, int(_perf.get()["num_ctx"]) - pt - 512)
+                    params = dict(params)
+                    params["max_tokens"] = min(
+                        24576, max(int(params.get("max_tokens") or 4096) * 2, room))
+                except Exception:
+                    pass
+                continue
+            if reason == "length":
+                parts.append("\n\n（⚠️ 这条输出达到长度上限被截断，"
+                             "回一句「继续」可以接着写。）")
             break
-        msgs.append({"role": "assistant", "content": msg.get("content") or "",
+        msgs.append({"role": "assistant", "content": body,
                      "tool_calls": calls})
         for c in calls:
             fn = (c or {}).get("function") or {}
@@ -234,7 +307,7 @@ def _run_local(M, cfg: dict, model: str, prompt: str, schemas: list, ctx: dict) 
             except Exception as e:                    # noqa: BLE001
                 out = "工具出错：%s: %s" % (type(e).__name__, e)
             msgs.append({"role": "tool", "content": str(out)[:8000]})
-    return answer
+    return "".join(parts)
 
 
 def _run_cloud(cfg: dict, model: str, key: str, prompt: str,

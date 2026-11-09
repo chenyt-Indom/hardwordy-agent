@@ -129,6 +129,33 @@ MODELS = [
 # Key 打码：sk- 后面跟 8 位以上字母数字
 _SK_RE = re.compile(r"sk-[A-Za-z0-9_\-]{8,}")
 
+# ===== 「回答是不是停在半句上」（2026-11-09，与 main.py 里同名函数保持一致）=====
+# 云端偶尔 finish_reason="stop"（看起来正常结束）但正文停在半句上，
+# 以前只认 finish_reason="length"，这种「假正常结束」既不续写也不提示。
+_UNFINISHED_TAIL = set("，,、；;：:（(【[《<「『“‘")
+_FINISHED_TAIL = set("。！？!?….\"'”』」）)】]》>`~*|")
+_DANGLING_WORDS = ("我", "你", "他", "她", "它", "的", "地", "得", "和", "与",
+                   "或", "但", "而", "就", "也", "都", "所以", "因为", "如果",
+                   "然后", "并且", "而且", "以及", "包括", "例如", "比如")
+
+
+def looks_unfinished(text: str) -> bool:
+    """正文是否明显停在半句上（宁可不续写，也不要把答完的内容重写一遍）。"""
+    s = (text or "").rstrip()
+    if not s:
+        return False
+    tail = s[-1]
+    if tail in _FINISHED_TAIL:
+        return False
+    if tail in _UNFINISHED_TAIL:
+        return True
+    for w in _DANGLING_WORDS:
+        if s.endswith(w):
+            return True
+    if len(s) >= 200 and not any(ch in _FINISHED_TAIL for ch in s[-40:]):
+        return True
+    return False
+
 
 def scrub(text: object) -> str:
     """把文本里可能出现的 API Key 打码。所有对外输出前必须过一遍。"""
@@ -506,6 +533,20 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
         #   2026-11-08 用户报「思考过程有了，但输出被限制了」：
         #   开了 thinking 之后推理 token 也算进 max_tokens，正文很容易被截在半句。
         #   Ollama 那条通道早就有续写逻辑（见 tools._do_write_code），云端这条没有。
+        # ★ 2026-11-09：**「假正常结束」也要续写**（用户反复报「回答只有一半」）。
+        #   finish_reason="stop" 看起来正常收尾，正文却停在半句上 —— 以前什么都不做。
+        if (not tool_calls and finish != "length" and content_buf
+                and cont_used < 6 and rnd + 1 < max_rounds
+                and looks_unfinished("".join(content_buf))):
+            cont_used += 1
+            msgs.append({"role": "assistant", "content": "".join(content_buf)})
+            msgs.append({"role": "user", "content": (
+                "（系统提示）你上一条输出**停在了半句话上**（没有写完）。"
+                "现在**从断开的地方接着往下写**：不要重复已经写过的内容，"
+                "不要重新开头，不要解释、不要道歉，直接续上正文；"
+                "如果内容其实已经写完，就只把最后那句补完整。")})
+            yield ("note", "回答停在半句上，正在自动续写…")
+            continue
         if (not tool_calls and finish == "length" and content_buf
                 and cont_used < 6 and rnd + 1 < max_rounds):
             cont_used += 1
