@@ -4165,8 +4165,34 @@
         }
         buf = "";
       } catch (e) { /* 收尾抢救失败也不影响主流程 */ }
-      if (answer && answer.indexOf("```") >= 0) renderAnswerWithCode(answerBubble, answer, promptText);
-      else renderAnswerLinks(answerBubble, answer);
+      // ★ 2026-11-09 最终防线：先渲染，再**逐字核对尾部**。
+      //   长度比对不可靠（markdown 符号会少几十个字），但"结尾有没有出现在屏幕上"骗不了人。
+      // 纯文本模式（A/B 用）：地址栏带 ?plain=1 即生效，之后一直记住。
+      //   若开了它就不再断字，说明问题在 markdown 渲染；若还断，问题在数据/传输。
+      try {
+        if (/[?&]plain=1/.test(location.search)) localStorage.setItem("plain_answer", "1");
+        if (/[?&]plain=0/.test(location.search)) localStorage.removeItem("plain_answer");
+      } catch (e) { /* 忽略 */ }
+      const _PLAIN_MODE = (() => { try { return localStorage.getItem("plain_answer") === "1"; } catch (e) { return false; } })();
+      if (_PLAIN_MODE) {
+        answerBubble.textContent = answer;          // 完全不做 markdown，只保留换行
+        answerBubble.style.whiteSpace = "pre-wrap";
+      } else try {
+        if (answer && answer.indexOf("```") >= 0) renderAnswerWithCode(answerBubble, answer, promptText);
+        else renderAnswerLinks(answerBubble, answer);
+      } catch (e) {
+        answerBubble.textContent = answer;
+      }
+      if (!_PLAIN_MODE) try {
+        const _plain = String(answer || "");
+        const _wantTail = _plain.replace(/\*\*|`|^\s*[-*]\s+/gm, "").trim().slice(-24);
+        const _shownAll = (answerBubble.innerText || "").replace(/\s+/g, "");
+        const _wantAll = _wantTail.replace(/\s+/g, "");
+        if (_wantAll && _shownAll && !_shownAll.includes(_wantAll)) {
+          console.warn("[stream] 渲染丢了结尾，退回纯文本：", JSON.stringify(_wantTail));
+          answerBubble.textContent = _plain;      // 纯文本一定完整
+        }
+      } catch (e) { /* 忽略 */ }
       if (!answer) {
         // 别把空白气泡藏起来让用户一脸茫然——明确说明发生了什么
         answerBubble.textContent = notes.length
