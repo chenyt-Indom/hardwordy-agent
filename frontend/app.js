@@ -4606,6 +4606,9 @@
   let pendingReload = false;
   let reloading = false;
 
+  const _touchActivity = () => { window.__lastActivity = Date.now(); };
+  try { _touchActivity(); setInterval(_touchActivity, 5000); } catch (e) {}
+
   const canReload = () => {
     if (streaming) return false;
     // 2026-11-09：原来"输入框有字就不重载"，结果用户输入框长期留着草稿 →
@@ -4625,6 +4628,18 @@
     if (v === feVersion) return;
     feVersion = v;
     if (!canReload()) {
+      // 2026-11-09：如果 streaming 卡死（异常后没复位），更新会永远等下去 ——
+      // 加一条自愈：闲置超过 30 秒就强制重载（草稿会保存）。
+      const _idle = Date.now() - (window.__lastActivity || 0);
+      if (_idle > 30000) {
+        try {
+          const _box = document.getElementById("input");
+          if (_box && _box.value.trim()) sessionStorage.setItem("draft_input", _box.value);
+        } catch (e) { /* 忽略 */ }
+        console.warn("[ui] 闲置 " + Math.round(_idle / 1000) + " 秒，强制加载新界面");
+        location.reload();
+        return;
+      }
       if (!pendingReload) {
         pendingReload = true;
         showToast("界面有新版本，等这一轮结束会自动更新", "ok");
