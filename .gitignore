@@ -87,10 +87,30 @@ tools_dev/
 # 构建输出目录（2026-11-08：dist_v* 之前没被忽略，误提交过）
 dist_v*/
 dist_rel*/
-build/_pyi/
 
 # 交接卡运行时数据（2026-11-09）
 handoff/last.json
 frontend/*.broken-*
-_fix_*.py
+
+# ---- PyInstaller 中间产物（2026-11-10）----
+# 注意：必须写成 build/_pyi*/ 才能匹配 _pyi3/_pyi5/_pyi6；
+#       单写 build/_pyi/ 只匹配同名那一个目录，等于没写。
+build/_pyi*/
+build/*/
+build/*.pkg
+build/*.toc
+xref-*.html
+
+# ---- 一次性脚本 ----
+
+# ---- PyInstaller 中间产物（2026-11-10）----
+# 注意：必须写成 build/_pyi*/ 才能匹配 _pyi3/_pyi5/_pyi6；
+#       单写 build/_pyi/ 只匹配同名那一个目录，等于没写。
+build/_pyi*/
+build/*/
+build/*.pkg
+build/*.toc
+xref-*.html
+
+# ---- 一次性脚本 ----
 _fix_*.py
