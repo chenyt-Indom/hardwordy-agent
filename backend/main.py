@@ -4337,6 +4337,15 @@ async def chat(req: ChatRequest,
     model = req.model or cfg["default_model"]
     if str(model).strip().lower() in ("", "auto"):
         model = cfg["default_model"]          # 前端传 "auto" 时按配置走
+    # ★ 2026-11-10：**云端模型名不能走本地通道**。
+    #   默认模型改成 deepseek-flash 后，下拉停在「本地·自动」会把 deepseek-flash
+    #   发到 Ollama，结果就是界面一直停在"正在加载模型…"（用户报"桌面端发不出去"）。
+    if str(model).strip().lower().startswith("deepseek"):
+        yield json.dumps({"error": (
+            "当前「本地·自动」跟随的配置是云端模型 %s，但这一路是本地 Ollama 通道。"
+            "请在顶栏把聊天模型切到「⚡ DS V4.1」，或切到本地模型再发。" % model
+        ), "explained": True, "__end": True}, ensure_ascii=False) + "\n"
+        return
     model_note = ""
     # ★ 2026-11-08：**模型没下载就别硬撞 404**。
     #   本机 default_model 是 qwen3-vl:30b（18GB，还没下），选「跟随配置」时

@@ -3925,7 +3925,11 @@
       // 本地模型走 /api/chat（带工具/记忆/RAG），DeepSeek 走 /api/chat/deepseek
       // （同样带工具：41 个全量 schema，见 _ds_tools）。Key 放请求头，不进 body、不进 URL。
       const _msEl = document.querySelector("#modelSelect");
-      const _prov = _msEl ? _msEl.value : "auto";
+      let _prov = _msEl ? _msEl.value : "auto";
+      // 「本地·自动」= 跟随配置；如果配置的默认模型是云端模型，就别往本地通道发
+      if (_prov === "auto" && /^deepseek/i.test(String(window.__defaultModel || ""))) {
+        _prov = String(window.__defaultModel);
+      }
       const _isDS = _prov.indexOf("deepseek") === 0;
       const _dsKey = _isDS ? (localStorage.getItem("ds_api_key") || "") : "";
       if (_isDS && !_dsKey && !window.__dsEnv) {
@@ -4622,6 +4626,14 @@
       }
     } catch (e) { /* 忽略：下次再对账 */ }
   }, 20000);
+
+  // 记住配置里的默认模型：「本地·自动」需要知道它是不是云端模型（2026-11-10）
+  (async () => {
+    try {
+      const d = await api("/api/config");
+      window.__defaultModel = (d && d.config && d.config.default_model) || "";
+    } catch (e) { /* 忽略 */ }
+  })();
 
   // 界面自更新重载后，把用户没发出去的草稿放回输入框（2026-11-09）
   try {
