@@ -23,21 +23,18 @@
 | **[轻量版](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.08.3/LocalMultimodalAssistant-Windows-x64.zip)** | **194.8 MB** | 只有程序本体，体积小；开发台与抠图不可用 |
 | 源码 | — | 见下方「快速开始」 |
 
-> ⚠️ **首次使用请把顶栏模型切到「⚡ DS V4.1」**。
-> 如果停在「🖥 本地·自动」，而默认模型又是云端模型，这一版可能会卡在「正在加载模型」（2026.11.10d 已修，见 Release 里 10d 的分卷）。
+**全量版（2026.11.10d）分两卷** —— GitHub 单文件上限 2 GB，所以切开：
 
-**全量版（2026.11.10c）分两卷** —— GitHub 单文件上限 2 GB，所以切开：
-
-- [`...Full-2026.11.10c.zip.part1`](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10c.zip.part1) — 1.4 GB
-- [`...Full-2026.11.10c.zip.part2`](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10c.zip.part2) — 791 MB
+- [`...Full-2026.11.10d.zip.part1`](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10d.zip.part1) — 1.4 GB
+- [`...Full-2026.11.10d.zip.part2`](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10d.zip.part2) — 791 MB
 
 **合并 + 校验**（Windows，CMD 或 powershell）：
 
 ```powershell
-copy /b LocalMultimodalAssistant-Full-2026.11.10c.zip.part1 + LocalMultimodalAssistant-Full-2026.11.10c.zip.part2 LocalMultimodalAssistant-Full-2026.11.10c.zip
+copy /b LocalMultimodalAssistant-Full-2026.11.10d.zip.part1 + LocalMultimodalAssistant-Full-2026.11.10d.zip.part2 LocalMultimodalAssistant-Full-2026.11.10d.zip
 
-# 校验（应等于 49ec6e997c1370e85fd0950167e5b5fccefe5231d2bae7f99517b189f689d0df）
-Get-FileHash .\LocalMultimodalAssistant-Full-2026.11.10c.zip -Algorithm SHA256
+# 校验（应等于 3239315cf79aff330627efcf7d07caf901d31b802f7c8c8bb047e22b498c83aa）
+Get-FileHash .\LocalMultimodalAssistant-Full-2026.11.10d.zip -Algorithm SHA256
 ```
 
 > macOS / Linux：`cat *.part1 *.part2 > Full.zip`
