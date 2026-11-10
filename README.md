@@ -708,6 +708,7 @@ GitHub：[@chenyt-Indom](https://github.com/chenyt-Indom)
 | 文档 | 内容 |
 |---|---|
 | [`docs/使用手册.md`](docs/使用手册.md) | 详细使用说明、参数说明、常见问题 |
-| [`docs/阅读攻略.pdf`](docs/阅读攻略.pdf) | **源码阅读攻略**（5 页）：3 天读懂本项目的路线、行号锚点、自测题 |
+| [`docs/源码导读-新手版.pdf`](docs/源码导读-新手版.pdf) | **源码导读 · 新手版**（19 页）：先补 5 个概念 → 逐段讲 `run.py` / `app.js` / `main.py` / `deepseek_client`，每段都有「这是什么 → 逐行在干什么 → 它和谁有关」+ 4 个动手实验 |
+| [`docs/阅读攻略.pdf`](docs/阅读攻略.pdf) | **速查版**（5 页）：3 天路线 + 行号锚点，适合已读完新手版后回查 |
 | [`docker/使用说明.md`](docker/使用说明.md) | Docker 部署、显卡适配、离线包说明 |
 | [`docker/从镜像仓库部署.md`](docker/从镜像仓库部署.md) | 只拿镜像地址时的部署方式 |
