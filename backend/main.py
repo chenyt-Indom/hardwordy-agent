@@ -6474,6 +6474,8 @@ def selfdev_apply_restart():
         _hdy.snapshot(str(globals().get("_LAST_SESSION") or ""), "用户点了「立即重启」")
     except Exception:
         logger.warning("重启前写交接卡失败（不影响重启）", exc_info=True)
+    # 重启前自动打一次版本快照（用户要求：改完能一键回到上一版）
+    _version_autosnapshot("用户点了「立即重启」")
     from . import pending as _pend
     v = selfdev.verify_import()
     if not v.get("ok"):
@@ -6533,6 +6535,7 @@ def selfdev_restart():
         _hdz.snapshot(str(globals().get("_LAST_SESSION") or ""), "模型请求重启")
     except Exception:
         logger.warning("重启前写交接卡失败（不影响重启）", exc_info=True)
+    _version_autosnapshot("模型请求重启")
     if not _v.get("ok"):
         return {"ok": False, "error": _v.get("error") or _v.get("msg")
                 or ("导入自检没通过：%s" % str(_v)[:200])}
@@ -9406,6 +9409,78 @@ def frontend_version():
         except OSError:
             parts.append("%s:-" % name)
     return {"version": "|".join(parts)}
+
+
+
+# ---------------------------------------------------------------- 版本快照 / 回滚
+# 用户 2026-11-10 提出：自开发改了上百次代码，出问题只能靠散落的 .bak 手工拼。
+# 这里把 backend/version.py（git 封装）接出来：重启前自动打快照、前端看版本列表、
+# 支持整轮 / 单文件两种回滚粒度，回滚前自动建还原点。
+
+class VersionSnapReq(BaseModel):
+    message: str = ""
+
+
+class VersionRollbackReq(BaseModel):
+    hash: str = ""
+    files: list = []
+    note: str = ""
+
+
+def _version_autosnapshot(reason: str) -> dict:
+    """重启前自动打一次本地快照（只 commit，不 push）。失败绝不影响重启。"""
+    try:
+        from . import version as _ver
+        r = _ver.snapshot("自迭代快照 · " + str(reason or "重启前")[:60])
+        if r.get("ok") and not r.get("skipped"):
+            logger.info("重启前已打版本快照 %s（%s 个文件）",
+                        r.get("hash"), r.get("files"))
+        return r or {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("重启前打版本快照失败（不影响重启）：%s", e)
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/version/status")
+def version_status():
+    """版本功能是否可用 + 当前 HEAD + 有多少未提交改动。"""
+    from . import version as _ver
+    av = _ver.available()
+    if not av.get("ok"):
+        return {"ok": False, "error": av.get("error")}
+    return {"ok": True, "current": _ver.current(), "root": av.get("root")}
+
+
+@app.get("/api/version/list")
+def version_list(limit: int = 30):
+    from . import version as _ver
+    return _ver.list_versions(limit)
+
+
+@app.get("/api/version/detail")
+def version_detail(hash: str = ""):
+    from . import version as _ver
+    return _ver.detail(hash)
+
+
+@app.get("/api/version/diff")
+def version_diff(hash: str = "", rel: str = ""):
+    from . import version as _ver
+    return _ver.file_diff(hash, rel)
+
+
+@app.post("/api/version/snapshot")
+def version_snapshot(req: VersionSnapReq):
+    """手动打一个快照。"""
+    from . import version as _ver
+    return _ver.snapshot(req.message or "手动快照")
+
+
+@app.post("/api/version/rollback")
+def version_rollback(req: VersionRollbackReq):
+    """回滚到某个版本：files 空=整轮，给了列表=只回滚这几个文件。"""
+    from . import version as _ver
+    return _ver.rollback(req.hash, req.files or None, req.note or "")
 
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
