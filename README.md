@@ -1,13 +1,13 @@
-# 本地多模态助手
+# Hardwordy Agent
 
-**可私有化部署的本地 AI Agent —— 数据不出内网，边际成本趋近于零**
+**云端 AI 智能体 —— 会自己拆任务、调工具、改自己的源码；也能整体搬到本地跑**
 
-55 个工具编排 · 分层记忆 · 双协议工具调用 · **能改自己源码的自我迭代** · 断网可用
+55 个工具 · 技能编排 · 分层记忆 · 定时任务 · **能改自己源码的自我迭代** · 云端 / 本地双模
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)
-![Ollama](https://img.shields.io/badge/Ollama-Qwen3--VL-30B-000000)
-![DeepSeek](https://img.shields.io/badge/DeepSeek-API%20可选-4D6BFE)
+![DeepSeek](https://img.shields.io/badge/DeepSeek-V4.1-4D6BFE)
+![Ollama](https://img.shields.io/badge/Ollama-本地可选-000000)
 ![License](https://img.shields.io/badge/License-Apache_2.0-2b6cb0)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
 
@@ -20,13 +20,13 @@
 | 版本 | 体积 | 说明 |
 |------|------|------|
 | **全量版**（分 2 卷） | **2.14 GB**（解压 3.2 GB） | 含**内置 VS Code**（code-server）与**抠图模型**（BiRefNet ×2）。解压后双击 `一键启动.bat` |
-| **[轻量版](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.08.3/LocalMultimodalAssistant-Windows-x64.zip)** | **194.8 MB** | 只有程序本体，体积小；开发台与抠图不可用 |
+| **[轻量版](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.08.3/LocalMultimodalAssistant-Windows-x64.zip)** | **194.8 MB** | 只有程序本体，体积小；开发台与抠图不可用 |
 | 源码 | — | 见下方「快速开始」 |
 
 **全量版（2026.11.10d）分两卷** —— GitHub 单文件上限 2 GB，所以切开：
 
-- [`...Full-2026.11.10d.zip.part1`](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10d.zip.part1) — 1.4 GB
-- [`...Full-2026.11.10d.zip.part2`](https://github.com/chenyt-Indom/local-multimodal/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10d.zip.part2) — 791 MB
+- [`...Full-2026.11.10d.zip.part1`](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10d.zip.part1) — 1.4 GB
+- [`...Full-2026.11.10d.zip.part2`](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10d.zip.part2) — 791 MB
 
 **合并 + 校验**（Windows，CMD 或 powershell）：
 
@@ -64,11 +64,20 @@ ollama pull qwen3-vl:30b
 
 ## 这是什么
 
-一个**完全跑在自己机器上、全程不联网**的 AI 助手。
+一个**能真正把事做完**的 AI 智能体 —— 不是只会回话的聊天框。
 
-它不是"套壳调用某个云 API"——模型权重在本地，语音识别在本地，图片生成在本地，**断网之后功能一个不少**。
+默认接 **DeepSeek V4.1**（云端），填个 Key 就能用；把模型切到本地 Ollama，它又能**整机离线运行，数据不出内网**。
+同一套 Agent 内核，两种部署形态。
 
-但它真正的看点不止是"离线"，而是它是**一套完整的 Agent 系统**：55 个工具、双协议工具调用、分层记忆、知识库检索、工作区管理、并行执行调度。这些东西拼在一起，代码量到了 3.5 万行。
+它和"套壳聊天"的区别在三点：
+
+| | 普通套壳 | Hardwordy Agent |
+|---|---|---|
+| **有手** | 只会输出文字 | 55 个工具：读写文件、跑代码、搜网页、生成 PPT/Word/Excel、画图、查地图、控浏览器、定时任务 |
+| **有记性** | 每次对话从零开始 | 分层记忆（短期/长期/项目）+ 会话检索 + 知识库 |
+| **能改自己** | 不可能 | 自我迭代：改自己的源码 → 语法校验 → 失败自动回滚 → 重启生效 |
+
+代码量 3.5 万行，其中一半的复杂度不在"调用模型"，而在**让模型安全地动真实文件和真实进程**。
 
 如果你只有 30 秒：直接看 [技术难点](#技术难点) 那一节。
 
@@ -76,31 +85,27 @@ ollama pull qwen3-vl:30b
 
 ## 为什么做这个
 
-起点很朴素：**高频调用云端 API，token 成本不可控。**
+起点是想验证一件事：**一个"能自己动手"的 Agent，到底需要多少基础设施？**
 
-于是转向本地化方案，把「按量付费」换成「一次性投入 + 边际成本 ≈ 0」。做完之后发现它还有一个意料之外的价值——因为完全离线，可以直接部署进内网，**数据不出机器**。
+市面上两类产品各缺一半：纯聊天的不动手；绑死某个平台的，你的数据、你的工具、你的工作流都得搬过去。
+所以干脆自己搭一套，把三件事都握在手里：
 
-这对相当一部分场景不是"省钱选项"，而是"唯一可行选项"：
+1. **模型可选**：云端（DeepSeek V4.1，能力上限高）⇄ 本地（Ollama，数据不出机器），顶栏一键切
+2. **工具开放**：55 个工具都是本仓库的代码，想加就加，不用等平台排期
+3. **能自我演进**：它改自己的源码，改坏了自动回滚 —— 这是"智能体"和"调用器"的分界线
 
-| 场景 | 为什么必须是本地 |
-|---|---|
-| 政企内网 | 数据不得出网，是硬性规定 |
-| 涉密单位 | 根本不允许调用外部 API |
-| 医疗 / 金融 | 合规与隐私要求 |
-| 中小企业 | 既不想付持续 API 费用，也不想数据外流 |
+**两种形态的成本对比**
 
-**成本结构对比**
-
-|  | 云端 API | 本项目（本地） |
+|  | 云端模式（默认） | 本地模式（可选） |
 |---|---|---|
-| 单次调用成本 | 按 token 计费 | **0 元** |
-| 前置投入 | 0 | 显卡（一次性） |
-| 持续成本 | 随用量线性增长 | 仅电费 |
-| 数据流向 | 出机器 | **不出机器** |
-| 可用性 | 依赖网络与第三方服务 | **断网可用** |
-| 能力上限 | 顶级大模型 | 本地 30B 级模型 |
+| 前置投入 | 0（只填 Key） | 显卡（一次性） |
+| 持续成本 | 按 token 计费 | 仅电费 |
+| 能力上限 | 顶级模型 | 本地 8B~30B |
+| 数据流向 | 出机器（走 API） | **不出机器** |
+| 可用性 | 依赖网络 | **断网可用** |
+| 适合 | 日常干活、复杂任务 | 内网、涉密、合规、长期高频 |
 
-**定位一句话**：不是"更便宜的云 API"，而是"把 AI 搬进内网"。
+**定位一句话**：不是"又一个聊天壳"，而是**一套能带走的 Agent 内核** —— 云端用得起，本地也搬得动。
 
 ---
 
@@ -548,9 +553,9 @@ ExecStart=/opt/multimodal/.venv/bin/python -m uvicorn backend.main:app --host 0.
 
 ### 方式一：Windows 一键包（推荐）
 
-下载 **[轻量版](https://github.com/chenyt-Indom/local-multimodal/releases)**（Release 页里约 195 MB 那个）→ 解压 → 双击 `一键启动.bat`。
+下载 **[轻量版](https://github.com/chenyt-Indom/hardwordy-agent/releases)**（Release 页里约 195 MB 那个）→ 解压 → 双击 `一键启动.bat`。
 
-语音功能需额外下载 **[asr-model-zh-14M-int8.zip](https://github.com/chenyt-Indom/local-multimodal/releases)**（约 20 MB），解压到 `_internal/asr_model/`。
+语音功能需额外下载 **[asr-model-zh-14M-int8.zip](https://github.com/chenyt-Indom/hardwordy-agent/releases)**（约 20 MB），解压到 `_internal/asr_model/`。
 
 ### 方式二：源码运行
 
