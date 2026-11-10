@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+import json
 
 
 # ---------------------------------------------------------------- 基础
@@ -39,22 +40,38 @@ def project_root() -> str:
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _run(args, timeout=120):
-    """跑一条 git 命令，返回 (ok, 输出)。失败不抛异常，交给调用方判断。"""
+def _run(args, timeout=120, tries=3):
+    """跑一条 git 命令，返回 (ok, 输出)。失败不抛异常，交给调用方判断。
+
+    ⚠️ Windows 上连续快速起子进程偶尔会以 0xC0000142（DLL 初始化失败）退出，
+    表现为「返回码非 0 且没有任何输出」——这不是 git 真的出错，等一下重跑即可。
+    这里统一做 3 次重试，避免快照/回滚被这种偶发故障打断（2026-11-10 实测）。
+    """
     cmd = ["git", "-c", "core.quotepath=false"] + [str(a) for a in args]
-    try:
-        r = subprocess.run(cmd, cwd=project_root(), capture_output=True,
-                           timeout=timeout)
-    except FileNotFoundError:
-        return False, "本机没有安装 git，版本功能不可用"
-    except subprocess.TimeoutExpired:
-        return False, "git 命令超时（%s）" % " ".join(str(a) for a in args[:3])
-    except Exception as e:  # noqa: BLE001
-        return False, "git 命令失败：%s" % e
-    out = (r.stdout or b"").decode("utf-8", "replace")
-    err = (r.stderr or b"").decode("utf-8", "replace")
-    text = (out + ("\n" + err if err.strip() else "")).strip()
-    return r.returncode == 0, text
+    text = ""
+    r = None
+    for attempt in range(max(1, tries)):
+        try:
+            r = subprocess.run(cmd, cwd=project_root(), capture_output=True,
+                               timeout=timeout)
+        except FileNotFoundError:
+            return False, "本机没有安装 git，版本功能不可用"
+        except subprocess.TimeoutExpired:
+            return False, "git 命令超时（%s）" % " ".join(str(a) for a in args[:3])
+        except Exception as e:  # noqa: BLE001
+            return False, "git 命令失败：%s" % e
+        out = (r.stdout or b"").decode("utf-8", "replace")
+        err = (r.stderr or b"").decode("utf-8", "replace")
+        text = (out + ("\n" + err if err.strip() else "")).strip()
+        if r.returncode == 0:
+            return True, text
+        if text.strip() and 0 < r.returncode < 128:
+            return False, text          # 真正的业务失败（如 nothing to commit）
+        time.sleep(0.4 * (attempt + 1))  # 进程没能正常起来 → 重试
+    if not text.strip():
+        text = "git 进程异常退出（返回码 %s），已重试 %d 次" % (
+            getattr(r, "returncode", "?"), tries)
+    return False, text
 
 
 def available() -> dict:
@@ -63,7 +80,13 @@ def available() -> dict:
     if not ok or out.strip() != "true":
         return {"ok": False, "error": "当前目录不是 git 仓库：%s" % out[:200]}
     ok_n, name = _run(["config", "user.name"])
+    if not (ok_n and name.strip()):  # 偶发进程起不来（0xC0000142）：重试一次
+        time.sleep(0.4)
+        ok_n, name = _run(["config", "user.name"])
     ok_e, email = _run(["config", "user.email"])
+    if not (ok_e and email.strip()):
+        time.sleep(0.4)
+        ok_e, email = _run(["config", "user.email"])
     if not (ok_n and name.strip()) or not (ok_e and email.strip()):
         return {"ok": False,
                 "error": "git 还没配 user.name / user.email，无法提交快照"}
@@ -106,6 +129,9 @@ def snapshot(message, allow_empty=False) -> dict:
     if not msg:
         msg = "自迭代快照"
     ok3, out3 = _run(["commit", "-m", msg])
+    if not ok3:  # 偶发 index.lock 抢占：等一下重试一次
+        time.sleep(0.5)
+        ok3, out3 = _run(["commit", "-m", msg])
     if not ok3:
         return {"ok": False, "error": "git commit 失败：%s" % out3[:400]}
     ok4, h = _run(["rev-parse", "--short", "HEAD"])
@@ -115,6 +141,15 @@ def snapshot(message, allow_empty=False) -> dict:
 
 
 # ---------------------------------------------------------------- 列表 / 详情
+
+def count() -> int:
+    """仓库里一共有多少个版本（前端显示「当前版本 vN」用）。"""
+    ok, out = _run(["rev-list", "--count", "HEAD"])
+    try:
+        return int(out.strip()) if ok else 0
+    except Exception:
+        return 0
+
 
 def list_versions(limit=30) -> dict:
     """版本列表（最新在前）。每条带改了几个文件。"""
@@ -152,8 +187,13 @@ def list_versions(limit=30) -> dict:
             items.append(cur)
         elif cur is not None and line.strip():
             cur["files"] += 1
+    ok_c, cnt = _run(["rev-list", "--count", "HEAD"])
+    try:
+        total = int(cnt.strip())
+    except Exception:
+        total = len(items)
     cur = current()
-    return {"ok": True, "items": items, "current": cur}
+    return {"ok": True, "items": items, "current": cur, "total": total}
 
 
 def detail(hash) -> dict:
@@ -197,6 +237,43 @@ def file_diff(hash, rel) -> dict:
 
 
 # ---------------------------------------------------------------- 回滚
+def _undo_path() -> str:
+    """「上一次回滚」的记录文件（放在 data/，不进版本库）。"""
+    return os.path.join(project_root(), "data", "version_undo.json")
+
+
+def save_undo(restore_hash, target="", note="") -> dict:
+    """记住「回滚前的还原点」，前端据此提供「撤销这次回滚」。"""
+    if not restore_hash:
+        return {"ok": False, "error": "没有还原点"}
+    rec = {"restore_hash": str(restore_hash), "target": str(target)[:40],
+           "note": str(note)[:120], "ts": time.strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        p = _undo_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False)
+        return {"ok": True, "undo": rec}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": "写还原点记录失败：%s" % e}
+
+
+def get_undo() -> dict:
+    """上一次回滚的还原点信息（没有就 ok=False）。"""
+    try:
+        with open(_undo_path(), encoding="utf-8") as f:
+            rec = json.load(f) or {}
+    except Exception:
+        return {"ok": False}
+    if not rec.get("restore_hash"):
+        return {"ok": False}
+    ok, _ = _run(["rev-parse", "--verify",
+                  "%s^{commit}" % rec["restore_hash"]])
+    if not ok:
+        return {"ok": False, "error": "还原点已不在仓库里"}
+    return {"ok": True, "undo": rec}
+
+
 
 def _valid_ref(ref) -> bool:
     """只允许 hash / HEAD / 分支名这类安全字符，防止拼出奇怪的命令。"""
@@ -226,6 +303,8 @@ def rollback(hash, files=None, note="") -> dict:
     if not rp.get("ok"):
         return {"ok": False, "error": "建还原点失败，已中止回滚：%s" % rp.get("error")}
     restore_hash = rp.get("hash") or ""
+    # 记下还原点：前端「撤销这次回滚」用它，刷新页面也不丢
+    save_undo(restore_hash, target=str(hash)[:7], note=note or "")
 
     # 2) 把目标版本的文件检出到工作区
     targets = [str(f) for f in (files or []) if f]

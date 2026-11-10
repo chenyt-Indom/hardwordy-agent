@@ -5531,12 +5531,16 @@
     btn.addEventListener("click", async () => {
       let st = { enabled: on, mirror: "" };
       let hist = { batches: [], restore: "" };
+      let vst = { ok: false };
+      let vlist = { ok: false, items: [] };
       try {
         st = await (await fetch("/api/selfdev/status")).json();
         hist = await (await fetch("/api/selfdev/backups")).json();
         on = !!st.enabled;
         paint();
       } catch (e) { /* ignore */ }
+      try { vst = await (await fetch("/api/version/status")).json(); } catch (e) { /* ignore */ }
+      try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) { /* ignore */ }
 
       const mask = document.createElement("div");
       mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px";
@@ -5553,7 +5557,11 @@
         '    <button id="sdDemo" type="button" title="用顶栏选定的代码模型真跑一次写文件，验证自我迭代能力（只写 dev_note.md，不碰源码）" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid #2a4a6a;background:transparent;color:#5aa9ff;cursor:pointer;white-space:nowrap">🧪 试一次迭代</button>',
         '    <button id="sdFull" type="button" title="完全访问：允许模型改写 backend/ 核心代码（风险自负）" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#9a9aa2;cursor:pointer;white-space:nowrap">🔓 完全访问·关</button>',
         '  </div>',
-        '  <div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">版本历史（每次改动前自动备份，点「回撤」整批还原）</div>',
+        '  <div id="sdVerBar" style="display:flex;align-items:center;gap:8px;margin-top:10px;padding:8px 12px;border:1px solid #2f3a4a;border-radius:10px;background:rgba(26,30,38,.65)">',
+        '    <span id="sdVerTxt" style="flex:1;min-width:0;font-size:12px;color:#cfd6e2;line-height:1.6">当前版本：读取中…</span>',
+        '    <button id="sdUndo" type="button" style="display:none;flex:0 0 auto;padding:6px 10px;border-radius:7px;border:1px solid #4a5a3a;background:transparent;color:#9fd88f;cursor:pointer;font-size:12px;white-space:nowrap">↩ 撤销上次回撤</button>',
+        '  </div>',
+        '  <div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">版本历史（git 快照，脚本直改也记；点「回滚」整批还原）</div>',
         '  <div id="sdHist"></div>',
         '  <div id="sdMsg" style="font-size:12.5px;min-height:18px;color:#f0b34a;margin-top:8px"></div>',
         '  <div id="sdFoot" style="font-size:11px;color:#6f7787;line-height:1.7;margin-top:10px;border-top:1px solid #2a323e;padding-top:8px;word-break:break-all"></div>',
@@ -5569,6 +5577,8 @@
       const tgEl = mask.querySelector("#sdToggle");
       const list = mask.querySelector("#sdHist");
       const msg = mask.querySelector("#sdMsg");
+      const verTxt = mask.querySelector("#sdVerTxt");
+      const undoBtn = mask.querySelector("#sdUndo");
       const say = (t, c) => { msg.style.color = c || "#f0b34a"; msg.textContent = t; };
 
       const applyState = () => {
@@ -5663,40 +5673,117 @@
         } catch (e) { say("切换失败：" + e.message, "#e06c6c"); }
       };
 
-      // ---- 版本历史：日期 + 更新内容 + 文件 + ±行数 ----
+      // ---- 版本历史：读 git 快照（2026-11-10 改）----
+      // 旧版读的是 selfdev 改动日志，只记「用 selfdev 工具改的」；
+      // 用脚本直接写文件（run_python）的改动完全记不到 —— 用户发现「最近几次没更新」。
+      // git 快照不挑工具，任何改动在重启前都会被提交，所以改成读 git。
+      const btnStyle = "flex:0 0 auto;padding:5px 10px;border-radius:7px;background:transparent;cursor:pointer;font-size:12px";
+      const verPaint = () => {
+        const run = (vst && vst.running) || {};
+        const cur = (vst && vst.current) || {};
+        let txt;
+        if (!run.ok) {
+          txt = "当前版本：读不到（" + ((vst && vst.error) || "git 不可用") + "）";
+          verTxt.style.color = "#e0a0a0";
+        } else {
+          txt = "当前正在用：v" + (vst.total || "?") + " · " + (run.hash || "-")
+            + (run.boot_at ? "（" + String(run.boot_at).slice(5, 16) + " 启动）" : "");
+          txt += cur.dirty ? " · 有 " + cur.dirty + " 处未提交改动（重启前自动存快照）" : " · 工作区干净";
+          verTxt.style.color = "#cfd6e2";
+        }
+        verTxt.textContent = txt;
+        const u = vst && vst.undo;
+        undoBtn.style.display = (u && u.ok) ? "" : "none";
+        if (u && u.ok) undoBtn.title = "回到回滚前（" + String(u.undo.restore_hash || "").slice(0, 7) + "）";
+      };
       const render = (data) => {
-        const bs = data.batches || [];
+        const bs = (data && data.items) || [];
         if (!bs.length) {
-          list.innerHTML = '<div style="font-size:12.5px;color:#8f8f99;padding:6px 0">还没有改动记录。模型改过一次源码后，这里会出现版本。</div>';
+          list.innerHTML = '<div style="font-size:12.5px;color:#8f8f99;padding:6px 0">还没有版本。模型改过一次源码、重启后，这里就会出现。</div>';
           return;
         }
         list.innerHTML = bs.map((b) => {
-          const notes = (b.notes || []).filter(Boolean);
-          const title = notes.length ? notes.join("；") : "（这次没写说明）";
-          const files = (b.files || []).map((f) => f.rel).join("、");
-          const names = (b.files || []).length === 1
-            ? fmtRel(files) : (b.files || []).length + " 个文件";
+          const h = b.hash;
           return '<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid #2a2a31">' +
             '<div style="flex:1;min-width:0">' +
-            '<div style="font-size:12.5px;color:#cfd6e2">' + title + '</div>' +
+            '<div style="font-size:12.5px;color:#cfd6e2">' + (b.subject || "（没有说明）") + '</div>' +
             '<div style="font-size:11.5px;color:#828b99;margin-top:3px;line-height:1.6">' +
-            '<span style="font-family:ui-monospace,monospace">' + (b.ts || b.batch) + '</span> · ' +
-            names + ' · <span style="color:#5fd08a">+' + (b.added || 0) + '</span> ' +
-            '<span style="color:#e07a7a">−' + (b.removed || 0) + '</span>' +
-            '<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' +
-            files.replace(/"/g, "&quot;") + '">' + files + '</div>' +
-            '</div></div>' +
-            '<button data-batch="' + b.batch + '" style="flex:0 0 auto;padding:5px 10px;border-radius:7px;border:1px solid #4a3a3a;background:transparent;color:#e0a0a0;cursor:pointer;font-size:12px">回撤</button>' +
-            '<button data-diff="' + b.batch + '" data-files="' +
-            (b.files || []).map((f) => f.rel).join(",").replace(/"/g, "&quot;") +
-            '" style="flex:0 0 auto;padding:5px 10px;border-radius:7px;border:1px solid #3a4a5a;background:transparent;color:#8ab6e0;cursor:pointer;font-size:12px">看改动</button>' +
+            '<span style="font-family:ui-monospace,monospace">' + h + '</span> · ' + (b.time || '') +
+            ' · ' + (b.files || 0) + ' 个文件</div>' +
             '</div>' +
-            '<div class="sd-batch-diff" data-for="' + b.batch + '" hidden></div>';
+            '<button data-hash="' + h + '" style="' + btnStyle + ';border:1px solid #4a3a3a;color:#e0a0a0">回滚</button>' +
+            '<button data-detail="' + h + '" style="' + btnStyle + ';border:1px solid #3a4a5a;color:#8ab6e0">看改动</button>' +
+            '</div>' +
+            '<div class="sd-batch-diff" data-for="' + h + '" hidden></div>';
         }).join("");
       };
-      render(hist);
+      verPaint();
+      render(vlist);
+
+      // 「撤销上次回撤」：回到回滚前那一刻（后端回滚时会再存一个还原点，可反复）
+      undoBtn.onclick = async () => {
+        if (!confirm("撤销上一次回滚，把代码恢复到回滚前吗？\n（之后需要重启应用才生效）")) return;
+        undoBtn.disabled = true;
+        undoBtn.textContent = "撤销中…";
+        try {
+          const r = await (await fetch("/api/version/undo", { method: "POST" })).json();
+          say(r.ok ? "✅ " + (r.msg || "已撤销回滚") : "❌ " + (r.error || "撤销失败"),
+              r.ok ? "#7bd88f" : "#e06c6c");
+          if (r.ok) {
+            try { vst = await (await fetch("/api/version/status")).json(); } catch (e) {}
+            try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) {}
+            verPaint(); render(vlist);
+          }
+        } catch (e) { say("❌ " + e.message, "#e06c6c"); }
+        undoBtn.disabled = false;
+        undoBtn.textContent = "↩ 撤销上次回撤";
+      };
 
       list.onclick = async (ev) => {
+        // ---- git 版本：回滚 / 看改动 ----
+        const rb = ev.target.closest("button[data-hash]");
+        if (rb) {
+          const h = rb.dataset.hash;
+          if (!confirm("回滚到版本 " + h + " 吗？\n回滚前会自动存一个还原点，不满意可点「↩ 撤销上次回撤」回来。\n（回滚后要重启应用才生效）")) return;
+          rb.disabled = true; rb.textContent = "回滚中…";
+          try {
+            const r = await (await fetch("/api/version/rollback", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ hash: h }) })).json();
+            if (r.ok) {
+              rb.textContent = "✅ 已回滚";
+              say("✅ " + (r.msg || "已回滚") + "（重启应用后生效）", "#7bd88f");
+              try { vst = await (await fetch("/api/version/status")).json(); } catch (e) {}
+              try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) {}
+              verPaint(); render(vlist);
+            } else {
+              rb.disabled = false; rb.textContent = "回滚";
+              say("❌ " + (r.error || "回滚失败"), "#e06c6c");
+            }
+          } catch (e) { rb.disabled = false; rb.textContent = "回滚"; say("❌ " + e.message, "#e06c6c"); }
+          return;
+        }
+        const dd = ev.target.closest("button[data-detail]");
+        if (dd) {
+          const box = list.querySelector('[data-for="' + dd.dataset.detail + '"]');
+          if (!box) return;
+          if (!box.hidden) { box.hidden = true; dd.textContent = "看改动"; return; }
+          dd.disabled = true; dd.textContent = "读取…";
+          let html = "";
+          try {
+            const d = await (await fetch("/api/version/detail?hash=" + encodeURIComponent(dd.dataset.detail))).json();
+            if (!d.ok) html = '<div class="sd-diff-hd">读不到：' + (d.error || "") + '</div>';
+            else html = (d.files || []).map((f) =>
+              '<div class="sd-diff-hd">' + f.rel + ' <span style="color:#5fd08a">+' + f.added +
+              '</span> <span style="color:#e07a7a">−' + f.deleted + '</span></div>').join("")
+              || '<div class="sd-diff-hd">这个版本没有文件变更</div>';
+          } catch (e) { html = '<div class="sd-diff-hd">读取失败：' + e.message + '</div>'; }
+          box.innerHTML = html;
+          box.hidden = false;
+          dd.disabled = false; dd.textContent = "收起改动";
+          return;
+        }
+
         const db = ev.target.closest("button[data-diff]");
         if (db) {
           const box = list.querySelector('[data-for="' + db.dataset.diff + '"]');

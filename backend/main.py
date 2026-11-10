@@ -9417,6 +9417,15 @@ def frontend_version():
 # 这里把 backend/version.py（git 封装）接出来：重启前自动打快照、前端看版本列表、
 # 支持整轮 / 单文件两种回滚粒度，回滚前自动建还原点。
 
+# 启动时把「正在跑的代码版本」记下来：之后工作区再变，也能分清
+# 「已提交的最新版本」和「进程实际加载的版本」。
+try:
+    from . import version as _ver_boot
+    _BOOT_VER = _ver_boot.current()
+    _BOOT_VER["boot_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+except Exception as _e:  # noqa: BLE001
+    _BOOT_VER = {"ok": False, "error": str(_e)}
+
 class VersionSnapReq(BaseModel):
     message: str = ""
 
@@ -9448,7 +9457,9 @@ def version_status():
     av = _ver.available()
     if not av.get("ok"):
         return {"ok": False, "error": av.get("error")}
-    return {"ok": True, "current": _ver.current(), "root": av.get("root")}
+    return {"ok": True, "current": _ver.current(), "root": av.get("root"),
+            "running": _BOOT_VER, "total": _ver.count(),
+            "undo": _ver.get_undo()}
 
 
 @app.get("/api/version/list")
@@ -9481,6 +9492,28 @@ def version_rollback(req: VersionRollbackReq):
     """回滚到某个版本：files 空=整轮，给了列表=只回滚这几个文件。"""
     from . import version as _ver
     return _ver.rollback(req.hash, req.files or None, req.note or "")
+
+
+@app.get("/api/version/undo_info")
+def version_undo_info():
+    """上一次回滚的还原点（有就能「撤销这次回滚」）。"""
+    from . import version as _ver
+    return _ver.get_undo()
+
+
+@app.post("/api/version/undo")
+def version_undo():
+    """撤销上一次回滚：回到回滚前的那一刻（本身也会再存一个还原点）。"""
+    from . import version as _ver
+    u = _ver.get_undo()
+    if not u.get("ok"):
+        return {"ok": False, "error": "没有可撤销的回滚记录"}
+    h = u["undo"]["restore_hash"]
+    r = _ver.rollback(h, None, "撤销回滚")
+    if r.get("ok"):
+        r["msg"] = "已撤销回滚，代码回到 %s 那一刻。重启应用后生效。" % str(h)[:7]
+    return r
+
 
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
