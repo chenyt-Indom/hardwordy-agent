@@ -1324,6 +1324,17 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
     # 常驻能力：用户说「每天早上帮我…」「每两小时盯一下…」就要用它。
     schemas.extend(_schedule_schemas())
 
+    # ---------- 技能（用户自定义的做法/规范）----------
+    # 只有存在「启用的自动类技能」时才给 load_skill：
+    # 一个都没有的话这个工具白占 token，模型还会以为有东西可加载。
+    try:
+        from . import skills as _skills_mod
+        schemas.extend(_skill_schemas())          # save_skill / delete_skill：始终可用
+        if any(i["enabled"] and i["mode"] == "auto" for i in _skills_mod.load()):
+            schemas.append(_SKILL_LOAD_SCHEMA)    # 有「自动」类技能才给 load_skill
+    except Exception:
+        pass
+
     # ---------- 自开发工具（改自己的源码）----------
     # 只有用户在界面上打开「🛠 自开发」才给。关着时模型连这些工具都看不到，
     # 自然不会去碰 backend/frontend。
@@ -2198,6 +2209,87 @@ _WEB_SEARCH_SCHEMA = {
 
 # =====================================================================
 #  工具执行
+# ---------------------------------------------------------------------
+#  技能（skill）—— 用户自己配的「做法 / 规范」
+#  ⚠️ 只有 load_skill 一个工具，正文**不常驻**：
+#     系统提示里只放「名称 + 描述 + 触发词」的目录（见 skills.build_auto_catalog），
+#     模型判断本轮适用某个技能时再调这个工具取全文。
+#     这样技能再多也不会把上下文吃掉。
+_SKILL_LOAD_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "load_skill",
+        "description": (
+            "取出用户配置的某个技能的**完整内容**（具体做法 / 步骤 / 规范）。"
+            "系统提示里的【可用技能目录】列出了技能名、描述和触发词；"
+            "你判断本轮请求适用某个技能时，**先调这个工具取全文**，再严格照它执行。"
+            "不适用就不要调，也别向用户推销技能。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "技能名（目录里括号前那个名字）"},
+                "id": {"type": "string", "description": "技能 id（可选，比名字更准）"},
+            },
+        },
+    },
+}
+
+
+_SKILL_SAVE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "save_skill",
+        "description": (
+            "新增或修改用户的一个**技能**（用户自己配的做法 / 步骤 / 规范，"
+            "会长期保存并在以后按需生效）。"
+            "用户说「加一个XX技能」「以后都按这个格式做」「记住这个流程」时用它。"
+            "同名会直接覆盖更新。内容要写成**可直接照做的步骤**，"
+            "不要写「要认真仔细」这类空话。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "技能名，短一点，如「写周报」「审代码」"},
+                "content": {"type": "string",
+                            "description": "技能正文：具体怎么做（分几步、每步产出什么、有哪些禁忌）"},
+                "desc": {"type": "string", "description": "一句话描述，用于模型判断该不该用"},
+                "triggers": {"type": "array", "items": {"type": "string"},
+                             "description": "触发词，如 [\"周报\", \"工作总结\"]"},
+                "mode": {"type": "string", "enum": ["manual", "always", "auto"],
+                         "description": ("manual=用户点一下才用；always=每轮都生效；"
+                                         "auto=模型自己判断该不该用（默认 manual）")},
+                "enabled": {"type": "boolean", "description": "是否启用，默认 true"},
+            },
+            "required": ["name", "content"],
+        },
+    },
+}
+
+_SKILL_DELETE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "delete_skill",
+        "description": "删除用户的一个技能。用户说「删掉那个XX技能」时用它。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name_or_id": {"type": "string", "description": "技能名或 id"},
+            },
+            "required": ["name_or_id"],
+        },
+    },
+}
+
+
+def _skill_schemas():
+    """始终可用的技能工具：新建/修改 + 删除。
+
+    ⚠️ load_skill **不在这里** —— 只有存在「自动类技能」时才给（见调用处），
+    否则每个请求都白背一份用不上的 schema。
+    """
+    return [_SKILL_SAVE_SCHEMA, _SKILL_DELETE_SCHEMA]
+
 # =====================================================================
 def _ui(events, event):
     """收集要推送给前端展示的副作用事件（直接存原始事件，由主循环包 {"ui":event}）。"""
@@ -2247,6 +2339,16 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
         return _do_selfdev(name, arguments, context, ui_events)
     if name == "workspace_list":
         return _do_workspace_list()
+    if name == "load_skill":
+        # 技能全文不常驻：系统提示只给目录，模型判断适用时才来这里取。
+        from . import skills as _skills
+        return _skills.do_load_skill(arguments)
+    if name == "save_skill":
+        from . import skills as _skills
+        return _skills.do_save_skill(arguments)
+    if name == "delete_skill":
+        from . import skills as _skills
+        return _skills.do_delete_skill(arguments)
     if name == "workspace_read":
         return _do_workspace_read(arguments)
     if name == "workspace_write":
@@ -4893,7 +4995,7 @@ def _do_make_xlsx(arguments=None, ui_events=None) -> str:
         os.close(fd)
         r = _xl.build_xlsx(tmp, sheets,
                            theme=str(a.get("theme") or "blue"),
-                           author="本地多模态助手",
+                           author="Hardwordy Agent",
                            colors=a.get("colors"))
         if not r.get("ok"):
             return "生成表格失败：%s" % r.get("error")

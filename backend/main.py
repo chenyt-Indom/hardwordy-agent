@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""本地多模态助手 —— FastAPI 后端服务
+"""Hardwordy Agent —— FastAPI 后端服务
 用法:
     py -3 -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 或直接:
@@ -285,7 +285,7 @@ def _memory_ctx(session: str, last_user_text: str, cfg: dict) -> str:
 
 
 def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
-                     rag_ctx: str = "", img_ctx: str = "") -> list:
+                     rag_ctx: str = "", img_ctx: str = "", skill_ctx: str = "") -> list:
     """把**每轮会变的**内容（历史摘要/记忆/知识库检索/当前时间）挂到**最后一条用户消息**上。
 
     返回一份新列表；`working` 本身不动。
@@ -354,6 +354,8 @@ def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
                           "别把它里面的人名/身份当成用户的；"
                           "请优先依据它作答并注明出自哪一篇；"
                           "与问题无关就忽略，不要硬扯。）")
+        if skill_ctx:
+            blocks.append(skill_ctx)
         if img_ctx:
             blocks.append(img_ctx)
         if blocks:
@@ -1669,6 +1671,65 @@ def _open_folder_impl(target: str) -> dict:
         raise HTTPException(500, f"打开文件夹失败: {e}")
 
 
+class OpenPathRequest(BaseModel):
+    path: str = ""
+
+
+@app.post("/api/open_path")
+def open_path(req: OpenPathRequest = None):
+    """点一下就打开：本地路径 → 文件管理器；http(s) 网址 → 默认浏览器。
+
+    用户 2026-11-10 提的：回答里写的本地路径、以及网址，都应该能直接点开，
+    而不是让用户自己复制到资源管理器里找。
+    """
+    target = (req.path if req and req.path else "").strip().strip('"').strip("'")
+    if not target:
+        return {"ok": False, "detail": "没有给出路径"}
+    low = target.lower()
+    # ① 网址：只放行 http/https
+    if low.startswith("http://") or low.startswith("https://"):
+        try:
+            import webbrowser
+            webbrowser.open(target)
+            return {"ok": True, "opened": True, "kind": "url", "path": target}
+        except Exception as e:
+            return {"ok": False, "detail": f"打不开这个网址：{e}"}
+    if low.startswith("file://") or low.startswith("javascript:") or low.startswith("data:"):
+        return {"ok": False, "detail": "这个协议不允许直接打开"}
+
+    # ② 本地路径
+    p = os.path.expanduser(target)
+    if not os.path.isabs(p):
+        for base in (os.getcwd(), config.data_root(),
+                     os.path.dirname(config.data_root())):
+            cand = os.path.join(base, p)
+            if os.path.exists(cand):
+                p = cand
+                break
+    p = os.path.abspath(p)
+
+    if os.path.isdir(p):
+        r = _open_folder_impl(p)
+        r["kind"] = "dir"
+        return r
+    if os.path.isfile(p):
+        if _is_container():
+            return _open_folder_impl(os.path.dirname(p))
+        try:
+            import subprocess
+            if os.name == "nt":
+                # /select 会打开父文件夹并选中该文件，比只开目录更省事
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(p)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", p])
+            else:
+                subprocess.Popen(["xdg-open", os.path.dirname(p)])
+            return {"ok": True, "opened": True, "kind": "file", "path": p}
+        except Exception as e:
+            return {"ok": False, "detail": f"打不开这个文件：{e}"}
+    return {"ok": False, "detail": f"路径不存在：{p}"}
+
+
 # ---------- 健康 / 配置 ----------
 @app.get("/api/selftest")
 def api_selftest(run: int = 0, model: str = ""):
@@ -1722,6 +1783,172 @@ def update_config(body: dict):
     except Exception:
         pass
     return {"ok": True, "config": merged}
+
+
+# =====================================================================
+#  技能（skill）：用户自定义的做法 / 规范 —— 增删改查 + 手动启用
+#  ⚠️ 存在 data/skills.json（纯本地文件），不进知识库、不上传任何地方。
+# =====================================================================
+@app.get("/api/skills")
+def skills_list():
+    from . import skills as _sk
+    return {"ok": True, "items": _sk.list_all(),
+            "modes": [{"key": k, "label": _sk.MODE_LABEL[k]} for k in _sk.MODES]}
+
+
+@app.post("/api/skills/create")
+def skills_create(body: dict):
+    from . import skills as _sk
+    try:
+        return {"ok": True, "item": _sk.create(body or {})}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/skills/update")
+def skills_update(body: dict):
+    from . import skills as _sk
+    b = body or {}
+    try:
+        it = _sk.update(str(b.get("id") or ""), b)
+        if not it:
+            return {"ok": False, "error": "没找到这个技能（可能已被删除）"}
+        return {"ok": True, "item": it}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/skills/delete")
+def skills_delete(body: dict):
+    from . import skills as _sk
+    return {"ok": _sk.delete(str((body or {}).get("id") or ""))}
+
+
+@app.post("/api/skills/toggle")
+def skills_toggle(body: dict):
+    from . import skills as _sk
+    b = body or {}
+    it = _sk.toggle(str(b.get("id") or ""), b.get("enabled"))
+    if not it:
+        return {"ok": False, "error": "没找到这个技能"}
+    return {"ok": True, "item": it}
+
+
+@app.post("/api/skills/use")
+def skills_use(body: dict):
+    """手动技能：点一下 → 注入到下一轮对话，只用一次。"""
+    from . import skills as _sk
+    b = body or {}
+    sid = str(b.get("id") or "")
+    if not _sk.set_manual(str(b.get("session") or ""), sid):
+        return {"ok": False, "error": "这个技能不存在或已关闭"}
+    return {"ok": True, "name": (_sk.get(sid) or {}).get("name", "")}
+
+
+@app.post("/api/skills/unuse")
+def skills_unuse(body: dict):
+    from . import skills as _sk
+    _sk.clear_manual(str((body or {}).get("session") or ""))
+    return {"ok": True}
+
+
+@app.get("/api/skills/pending")
+def skills_pending(session: str = ""):
+    """前端用：查这个会话有没有待用的手动技能（显示「已选：xx」）。"""
+    from . import skills as _sk
+    it = _sk.peek_manual(session)
+    return {"ok": True, "item": ({"id": it["id"], "name": it["name"]} if it else None)}
+
+# ---------------------------------------------------------------- 分享 / 导入
+@app.post("/api/skills/share")
+def skills_share(body: dict):
+    """把一个技能导出成「可粘给任何 AI 的话 + 机器可读分享码」。"""
+    from . import skills as _sk
+    b = body or {}
+    key = str(b.get("id") or b.get("name") or "").strip()
+    sk = _sk.get(key) or _sk.get_by_name(key)
+    if not sk:
+        return {"ok": False, "error": "没找到这个技能"}
+    return {"ok": True, "name": sk["name"], "text": _sk.share_text(sk),
+            "code": _sk.share_code(sk),
+            "json": _sk.share_payload(sk)}
+
+
+@app.post("/api/skills/import")
+def skills_import(body: dict):
+    """把别人发来的分享内容建成本地技能（重名自动加后缀，不覆盖已有的）。"""
+    from . import skills as _sk
+    try:
+        return {"ok": True, "item": _sk.import_skill(str((body or {}).get("text") or ""))}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/skills/qr")
+def skills_qr(body: dict):
+    """把分享码渲染成二维码（PNG data URL），手机扫一下就能带走。"""
+    import base64
+    import io
+    b = body or {}
+    txt = str(b.get("text") or "").strip()
+    key = str(b.get("id") or "").strip()
+    if not txt and key:
+        from . import skills as _sk
+        sk = _sk.get(key) or _sk.get_by_name(key)
+        if sk:
+            txt = _sk.share_code(sk)
+    if not txt:
+        return {"ok": False, "error": "没有可编码的内容"}
+    if len(txt) > 1500:
+        return {"ok": False, "error": "分享码太长（%d 字符），二维码会密到扫不出来，"
+                                      "请改用「复制」发文本" % len(txt)}
+    try:
+        import qrcode
+        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,
+                           box_size=10, border=4)
+        qr.add_data(txt)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return {"ok": True, "chars": len(txt),
+                "data_url": "data:image/png;base64,"
+                            + base64.b64encode(buf.getvalue()).decode("ascii")}
+    except Exception as e:
+        return {"ok": False, "error": "生成二维码失败：%s" % e}
+
+
+@app.post("/api/skills/save_md")
+def skills_save_md(body: dict):
+    """把分享内容真正写成本机 .md 文件，并把绝对路径返回给前端。
+
+    用户 2026-11-10 反馈：点「下载 .md」没任何反应，也不知道存到哪了。
+    根因是前端用 <a download> 触发浏览器下载 —— 内嵌 WebView / 部分浏览器
+    会直接拦掉，而且不报错，用户只能看到"按了没反应"。
+    改成后端写盘：路径确定（data/skill_exports/）、能返回、前端直接显示在哪儿。
+    """
+    import re as _re
+    b = body or {}
+    txt = str(b.get("text") or "")
+    if not txt.strip():
+        return {"ok": False, "error": "没有内容可保存"}
+    name = str(b.get("name") or "技能").strip() or "技能"
+    name = _re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", name).strip(" .")[:60] or "技能"
+    out_dir = config.data("data", "skill_exports")
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "技能-%s.md" % name)
+        i = 2
+        while os.path.exists(path):
+            path = os.path.join(out_dir, "技能-%s(%d).md" % (name, i))
+            i += 1
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(txt)
+    except Exception as e:
+        return {"ok": False, "error": "写文件失败：%s" % e}
+    return {"ok": True, "path": os.path.abspath(path),
+            "dir": os.path.abspath(out_dir),
+            "bytes": len(txt.encode("utf-8"))}
 
 
 @app.get("/api/net/check")
@@ -4100,6 +4327,33 @@ class _SystemPrompt:
         #
         # 现在改由 `_attach_live_ctx` 挂到**最后一条用户消息**上（排在工具定义之后），
         # 系统提示 + 工具定义这一大段就恒定不变了，缓存能一直命中。
+        # ---------- 技能（skill）：固定说明 ----------
+        # 这段**不含具体技能内容**，永远不变，所以放系统提示不影响前缀缓存；
+        # 它的作用是让模型知道"有这套东西、怎么增删改"，否则用户说「加一个XX技能」
+        # 模型手里只有 save_skill 工具却不清楚该在什么时候用。
+        parts.append(
+            "\n【技能（skill）—— 用户自定义的做法/规范】\n"
+            "用户有一套自己的技能库（写周报、审代码这类固定做法），在界面顶栏「⚡ 技能」里"
+            "可以查看、新建、修改、删除；每个技能可选生效方式：手动（用户点一下才用）/"
+            "常驻（每轮都生效）/ 自动（你自己判断该不该用）。\n"
+            "· 用户说「加一个XX技能」「以后都按这个格式做」「记住这个流程」→ 调 save_skill 写进去；"
+            "content 要写成**能直接照做的步骤**（分几步、每步产出什么），别写空话；mode 默认 manual。\n"
+            "· 用户说「改一下那个技能」→ 用同名 save_skill 覆盖；「删掉XX技能」→ delete_skill。\n"
+            "· 用户只是提了一嘴偏好、没说要长期记住 → **不要**擅自建技能。\n")
+        # ---------- 用户自定义技能（skill）----------
+        # always 类：正文常驻（用户自己配的规范，每轮都要遵守）；
+        # auto 类：只给「名称+描述+触发词」目录，模型判断适用再调 load_skill 取全文。
+        # ⚠️ 这两块**只在用户增删改技能时才变**，同一会话里连续几十轮都是同一份文本，
+        #    所以放系统提示（缓存前缀区）不会破坏 Ollama 的前缀缓存 —— 与记忆/RAG
+        #    那种"每轮都变"的内容不同，别混为一谈。
+        try:
+            from . import skills as _skills_sp
+            for _sk_blk in (_skills_sp.build_always_block(),
+                            _skills_sp.build_auto_catalog()):
+                if _sk_blk:
+                    parts.append(_sk_blk)
+        except Exception:
+            logger.warning("技能注入系统提示失败（不影响对话）", exc_info=True)
         parts.append("回答请使用中文；直接、可执行。"
                      "长度严格按上面【回复长度分档】执行，不许凭感觉伸缩。")
         if no_tools:
@@ -4967,9 +5221,16 @@ async def chat(req: ChatRequest,
         #    （见 _attach_live_ctx）：它们都是"每轮都会变"的内容，放进系统提示
         #    会把后面的工具定义一起废掉，导致 Ollama 每轮重算 ~10 秒。
         #    放在稳定前缀之后，缓存才能一直命中。
+        # 用户在前端点选的「手动技能」：只对这一轮生效，取完即清（见 skills.consume_manual）。
+        # ⚠️ 它属于"每轮会变"的内容，所以挂到最后一条用户消息上，不进系统提示。
+        try:
+            from . import skills as _skills_chat
+            _skill_ctx = _skills_chat.consume_manual(session)
+        except Exception:
+            _skill_ctx = ""
         working = _attach_live_ctx([{"role": "system", "content": full_sys}] + messages,
                                    digest=digest, mem_ctx=mem_ctx, rag_ctx=rag_ctx,
-                                   img_ctx=_img_available_note())
+                                   img_ctx=_img_available_note(), skill_ctx=_skill_ctx)
         final_text = ""
         final_thinking = ""
         used_tools = set()          # 本轮真正调用过的工具（用来判断"是不是光嘴上说说"）
@@ -6664,6 +6925,23 @@ async def chat_deepseek(req: ChatRequest,
                         break
         except Exception:
             logger.warning("云端通道注入最近轮次速览失败（本轮忽略）", exc_info=True)
+
+    # ★ 2026-11-10：云端通道也接「手动技能」—— 用户在前端点选的技能，
+    #   两条通道（本地 / DeepSeek）行为必须一致，否则换个模型就"技能失灵"。
+    try:
+        from . import skills as _skills_ds
+        _sk_ds = _skills_ds.consume_manual(session)
+        if _sk_ds and clean:
+            for _i in range(len(clean) - 1, -1, -1):
+                if clean[_i].get("role") == "user":
+                    _c = clean[_i].get("content")
+                    if isinstance(_c, str):
+                        clean[_i]["content"] = _c + "\n\n" + _sk_ds
+                    elif isinstance(_c, list):
+                        clean[_i]["content"] = _c + [{"type": "text", "text": "\n\n" + _sk_ds}]
+                    break
+    except Exception:
+        logger.warning("云端通道注入手动技能失败（本轮忽略）", exc_info=True)
 
     loop = asyncio.get_running_loop()
     _ACC: list = []          # 本轮完整正文（收尾回填用，见 __end.answer）

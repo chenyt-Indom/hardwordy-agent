@@ -173,14 +173,14 @@ def text_to_docx(text: str, title: str = "") -> bytes:
             '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
             'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
             'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-            '<dc:title>%s</dc:title><dc:creator>本地多模态助手</dc:creator>'
-            '<cp:lastModifiedBy>本地多模态助手</cp:lastModifiedBy>'
+            '<dc:title>%s</dc:title><dc:creator>Hardwordy Agent</dc:creator>'
+            '<cp:lastModifiedBy>Hardwordy Agent</cp:lastModifiedBy>'
             '<dcterms:created xsi:type="dcterms:W3CDTF">%s</dcterms:created>'
             '<dcterms:modified xsi:type="dcterms:W3CDTF">%s</dcterms:modified>'
             '</cp:coreProperties>' % (_esc(title or "文档"), now, now))
     app = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
            '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">'
-           '<Application>本地多模态助手</Application></Properties>')
+           '<Application>Hardwordy Agent</Application></Properties>')
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", _CONTENT_TYPES)

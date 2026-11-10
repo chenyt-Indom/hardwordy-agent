@@ -114,3 +114,9 @@ xref-*.html
 
 # ---- 一次性脚本 ----
 _fix_*.py
+
+# ---- 打包/备份产物（2026-11-10 加：_backup_out 有 5.3GB，绝不能进版本库）----
+_backup_out/
+_pack_backup.log
+_pack_backup.py
+_pack_chunk.py

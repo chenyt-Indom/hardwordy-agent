@@ -119,7 +119,7 @@ def _safe_name(s, fallback):
     return s
 
 
-def build_xlsx(path, sheets, theme=DEFAULT_THEME, author="本地多模态助手",
+def build_xlsx(path, sheets, theme=DEFAULT_THEME, author="Hardwordy Agent",
                colors=None):
     """按 sheets 规格生成 xlsx。返回 {"ok","sheets","rows","warnings"}。"""
     warnings = []
@@ -137,7 +137,7 @@ def build_xlsx(path, sheets, theme=DEFAULT_THEME, author="本地多模态助手"
 
     wb = xlsxwriter.Workbook(out, {"in_memory": True})
     try:
-        wb.set_properties({"author": author, "comments": "由本地多模态助手生成"})
+        wb.set_properties({"author": author, "comments": "由Hardwordy Agent生成"})
 
         # ---------------- 共用格式 ----------------
         f_title = wb.add_format({"bold": True, "font_size": 15, "font_color": "#1F2A37",

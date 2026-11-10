@@ -18,6 +18,8 @@
   --bg: #0f1115;
   --panel: #171a21;
   --panel2: #1f2430;
+  /* 输入框专用底色：比 panel2 略亮，避免整块发黑（2026-11-10） */
+  --field-bg: #2a3140;
   --border: #2a3040;
   --text: #e6e9ef;
   --muted: #8a93a6;
@@ -57,6 +59,7 @@ html[data-theme="light"] {
   --bg: #f5f7fb;
   --panel: #ffffff;
   --panel2: #f0f3f9;
+  --field-bg: #ffffff;
   --border: #dbe1ec;
   --text: #1c2330;
   --muted: #667085;
@@ -2701,3 +2704,200 @@ html[data-theme="light"] select.pill-select option {
 
 /* [hidden] 被 .mask-chip 的 display:flex 压过 —— 桌面端也要修（2026-11-09） */
 .mask-chip[hidden] { display: none !important; }
+
+/* ---------- 技能面板（2026-11-10）----------
+   顶栏「⚡ 技能」点开的弹层。复用 .confirm-layer / .confirm-box 的外壳，
+   这里只加列表、开关、详情、编辑表单这几块的样式。 */
+.sk-box { width: min(760px, 94vw); }
+.sk-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.sk-title { font-size: 16px; font-weight: 600; color: var(--text); }
+.sk-count { font-size: 12px; color: var(--muted); }
+.sk-head-acts { margin-left: auto; display: flex; gap: 8px; }
+.sk-head-acts .btn { width: auto; margin: 0; }
+.sk-msg { font-size: 12.5px; color: var(--muted); min-height: 18px; }
+.sk-msg.ok { color: #6ee7b7; }
+.sk-msg.bad { color: #f87171; }
+.sk-list { margin-top: 6px; }
+.sk-item { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px;
+  background: var(--panel2); overflow: hidden; }
+.sk-item.off { opacity: .55; }
+.sk-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; cursor: pointer; }
+.sk-row:hover { background: rgba(255,255,255,.03); }
+.sk-name { font-size: 13.5px; font-weight: 600; color: var(--text); flex: 0 0 auto; }
+.sk-mode { font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); flex: 0 0 auto; }
+.sk-mode.m-manual { color: #7dd3fc; border-color: rgba(125,211,252,.35); }
+.sk-mode.m-always { color: #f0b429; border-color: rgba(240,180,41,.35); }
+.sk-mode.m-auto { color: #6ee7b7; border-color: rgba(110,231,183,.35); }
+.sk-desc { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-sw { flex: 0 0 auto; width: 30px; height: 16px; border-radius: 999px;
+  background: var(--border); position: relative; transition: background .15s; }
+.sk-sw i { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
+  border-radius: 50%; background: #8b96a8; transition: left .15s, background .15s; }
+.sk-sw i.on { left: 16px; background: #6ee7b7; }
+.sk-caret { flex: 0 0 auto; font-size: 11px; color: var(--muted); }
+.sk-detail { padding: 0 12px 12px; border-top: 1px solid var(--border); }
+.sk-trig { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.sk-content { margin-top: 8px; padding: 10px 12px; max-height: 280px; overflow: auto;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 12.5px;
+  line-height: 1.6; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.sk-acts { margin-top: 10px; display: flex; gap: 8px; }
+.sk-acts .btn { width: auto; margin: 0; }
+.sk-empty { padding: 18px; text-align: center; font-size: 13px; color: var(--muted); }
+.sk-field { margin-bottom: 10px; }
+.sk-field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.sk-field input, .sk-field select, .sk-field textarea { width: 100%; box-sizing: border-box;
+  padding: 7px 10px; background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+/* 输入框文字/占位符跟随主题，避免浅色主题下黑底黑字看不见（2026-11-10） */
+.sk-field input::placeholder, .sk-field textarea::placeholder { color: var(--muted); opacity: 1; }
+.sk-field input:focus, .sk-field select:focus, .sk-field textarea:focus {
+  outline: none; border-color: var(--accent); background: var(--panel); }
+.sk-field textarea { font-family: Consolas, "Cascadia Mono", Menlo, monospace;
+  font-size: 12.5px; line-height: 1.6; resize: vertical; }
+
+  /* ============================================================
+     输入框可读性兜底（2026-11-10 用户反馈「太黑 / 字也是黑的看不见」）
+     ------------------------------------------------------------
+     1) 底色统一走 --field-bg（深色下比 panel2 亮一档，浅色下纯白）
+     2) -webkit-text-fill-color 显式指定，避免继承到写死的黑色
+     3) 修正 Chrome 自动填充强行覆盖成浅底深字 / 深底深字
+     只用变量，切主题不会瞎。
+     ============================================================ */
+  .input-row textarea,
+  #input,
+  .sk-field input,
+  .sk-field select,
+  .sk-field textarea,
+  .st-dialog-input,
+  .sched-form input,
+  .sched-form textarea,
+  .sched-form select {
+    background: var(--field-bg);
+    color: var(--text);
+    -webkit-text-fill-color: var(--text);
+  }
+
+  .input-row textarea::placeholder,
+  #input::placeholder,
+  .sk-field input::placeholder,
+  .sk-field textarea::placeholder,
+  .sched-form input::placeholder {
+    color: var(--muted);
+    -webkit-text-fill-color: var(--muted);
+    opacity: 1;
+  }
+
+  /* 自动填充：Chrome 会插一层内阴影，把底色和文字都覆盖掉 */
+  .input-row textarea:-webkit-autofill,
+  #input:-webkit-autofill,
+  .sk-field input:-webkit-autofill,
+  .sk-field textarea:-webkit-autofill {
+    -webkit-text-fill-color: var(--text) !important;
+    -webkit-box-shadow: 0 0 0 1000px var(--field-bg) inset !important;
+    transition: background-color 9999s ease-in-out 0s;
+  }
+
+
+/* 2026-11-10：回答里的本地路径 / 网址做成可点胶囊，点一下直接打开 */
+.bubble .path-link,
+.bubble a.ext-link {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+  word-break: break-all;
+  transition: background .15s ease, border-color .15s ease;
+}
+.bubble .path-link:hover,
+.bubble a.ext-link:hover {
+  border-color: var(--accent);
+  background: var(--panel2);
+  filter: brightness(1.25);
+}
+.bubble .path-link:active { transform: translateY(1px); }
+
+
+/* ---------- 技能分享 / 导入（2026-11-10 用户要求）----------
+   分享弹层：可编辑预览 + 复制 / 下载 .md / 二维码 / 系统分享；
+   导入弹层：粘贴别人的分享内容，一键建成本地技能。 */
+.sk-share { width: min(700px, 94vw); }
+.sk-share-tip { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin: 2px 0 8px; }
+.sk-share-ta {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  min-height: 180px; max-height: 46vh; padding: 10px 12px;
+  background: var(--field-bg); color: var(--text);
+  -webkit-text-fill-color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  font-family: Consolas, "Cascadia Mono", Menlo, monospace;
+  font-size: 12.5px; line-height: 1.6; white-space: pre-wrap;
+}
+.sk-share-ta::placeholder { color: var(--muted); -webkit-text-fill-color: var(--muted); opacity: 1; }
+.sk-share-ta:focus { outline: none; border-color: var(--accent); }
+.sk-share-acts { flex-wrap: wrap; }
+.sk-qr { text-align: center; margin-top: 4px; }
+.sk-qr-img {
+  width: 260px; height: 260px; image-rendering: pixelated; cursor: zoom-in;
+  border-radius: 8px; background: #fff; padding: 6px; margin-top: 8px;
+}
+.sk-qr-tip { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.sk-qr-tip.bad { color: #f87171; }
+.sk-import-msg { margin-top: 6px; }
+.sk-share-msg { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.7; word-break: break-all; }
+.sk-share-msg.ok { color: #4ade80; }
+.sk-share-msg.bad { color: #f87171; }
+.sk-share-msg .path-link { font-size: 12px; }
+
+/* ================= 代码改动汇总列表（2026-11-10）=================
+   用户要求：「每次修改代码不要一份一份往下堆……像列表一样收起与展开，跟生成文库差不多」。
+   一个列表装本轮所有改动；列表头可整体收起，每个文件只占一行，点行才展开 diff。 */
+.sd-list {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #2f3a4a;
+  border-radius: 10px;
+  background: rgba(30, 34, 42, 0.72);
+  margin: 6px 0;
+  overflow: hidden;
+}
+.sd-list-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: #cfd6e2;
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+}
+.sd-list-head:hover { background: rgba(90, 169, 255, .07); }
+.sd-list-arrow { flex: 0 0 auto; color: #8b94a3; font-size: 11px; }
+.sd-list-title { flex: 0 0 auto; font-weight: 600; }
+.sd-list-sum {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-family: ui-monospace, Consolas, monospace;
+  color: #8b94a3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sd-list-body { border-top: 1px solid #2a323e; }
+.sd-row { width: 100%; box-sizing: border-box; }
+.sd-row + .sd-row { border-top: 1px solid #262d38; }
+.sd-row .sd-head { cursor: pointer; }
+.sd-row .sd-head:hover { background: rgba(90, 169, 255, .06); }
+.sd-row .sd-body { border-top: 1px solid #262d38; }

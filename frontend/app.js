@@ -334,19 +334,44 @@
     //   没有标题/列表/粗体/引用/表格这类标记的短文本，直接按纯文本渲染
     //   （保留原来的换行观感，也不会因为 <p> 的间距显得"空荡荡"）。
     const _hasMd = /(^|\n)\s*(#{1,4}\s|[-*•]\s|\d+[.、)]\s|>\s|\|)/.test(raw)
-      || /\*\*[^*\n]+\*\*/.test(raw) || /`[^`\n]+`/.test(raw);
+      || /\*\*[^*\n]+\*\*/.test(raw) || /`[^`\n]+`/.test(raw) || /https?:\/\//.test(raw) || /\[[^\]\n]{1,60}\]\([^)\s]+\)/.test(raw);
     if (!_hasMd && raw.length < 400) {
       return esc.replace(/\r?\n/g, "<br>");
     }
-    // 行内：`code` / **粗** / *斜* / [文字](链接)
-    const inline = (s) => s
-      .replace(/`([^`\n]{1,120})`/g, '<code class="md-code">$1</code>')
-      .replace(/\*\*([^*\n]{1,80})\*\*/g, "<b>$1</b>")
-      .replace(/(^|[^*])\*([^*\n]{1,60})\*(?!\*)/g, "$1<i>$2</i>")
-      .replace(/\[([^\]\n]{1,60})\]\(([^)\s]+)\)/g, (m, label, url) => {
-        if (url.indexOf("/api/") === 0) return dlGroup(label, fixApiUrl(url));
-        return '<a href="' + url + '" target="_blank" rel="noopener">' + label + "</a>";
+    // 行内：`code` / **粗** / *斜* / [文字](链接) / 裸网址 / 裸本地路径
+    // ★ 2026-11-10 用户要求：回答里写的本地路径、网址要能点开
+    const pathKind = (s) => {
+      if (/^https?:\/\/\S+$/i.test(s)) return "url";
+      if (s.indexOf("/api/") === 0) return "";
+      if (/^[a-zA-Z]:[\\/]/.test(s)) return "path";
+      if (/^\\\\[^\\]/.test(s)) return "path";
+      if (/^~\//.test(s)) return "path";
+      if (/^\/(Users|home|var|tmp|opt|mnt|Volumes|srv)\//.test(s)) return "path";
+      // 相对路径（data/library/x.pptx 这种）：带斜杠且是已知文件后缀才算
+      if (/[\\/]/.test(s) && /\.(py|js|ts|json|md|txt|zip|rar|7z|pptx|docx|xlsx|csv|pdf|png|jpe?g|gif|mp4|mp3|exe|log)$/i.test(s)) return "path";
+      return "";
+    };
+    const anchorHtml = (kind, s) => (kind === "url"
+      ? '<a class="ext-link" href="' + s + '" target="_blank" rel="noopener">' + s + "</a>"
+      : '<a class="path-link" href="javascript:void(0)" data-path="' + s + '" title="点击打开">' + s + "</a>");
+    const inline = (s) => {
+      const held = [];
+      const hold = (h) => { held.push(h); return "\u0000H" + (held.length - 1) + "\u0000"; };
+      s = s.replace(/`([^`\n]{1,300})`/g, (m, code) => {
+        const k = pathKind(code);
+        return hold(k ? anchorHtml(k, code) : '<code class="md-code">' + code + "</code>");
       });
+      s = s.replace(/\[([^\]\n]{1,60})\]\(([^)\s]+)\)/g, (m, label, url) => {
+        if (url.indexOf("/api/") === 0) return hold(dlGroup(label, fixApiUrl(url)));
+        return hold('<a href="' + url + '" target="_blank" rel="noopener">' + label + "</a>");
+      });
+      s = s.replace(/\*\*([^*\n]{1,80})\*\*/g, "<b>$1</b>")
+        .replace(/(^|[^*])\*([^*\n]{1,60})\*(?!\*)/g, "$1<i>$2</i>");
+      s = s.replace(/\bhttps?:\/\/[^\s<>"'）)】\]，。；：、]+/g, (u) => hold(anchorHtml("url", u)));
+      s = s.replace(/(^|[\s（(【\[：:、，])([a-zA-Z]:\\[^\s<>"'（）()【】\[\]，。；：、]{2,})/g,
+        (m, pre, p) => pre + hold(anchorHtml("path", p)));
+      return s.replace(/\u0000H(\d+)\u0000/g, (m, i) => held[+i]);
+    };
 
     const lines = esc.split(/\r?\n/);
     const out = [];
@@ -1153,6 +1178,30 @@
     }
     return true;                       // true = 已经接管，别再走默认行为
   }
+  // 点开一个路径 / 网址：交给后端用系统程序打开（浏览器里也能用）
+  async function openTarget(target) {
+    const s = String(target || "").trim();
+    if (!s) return;
+    try {
+      const r = await fetch(fixApiUrl("/api/open_path"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: s }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (j && j.ok) {
+        if (j.opened === false && j.detail) showToast(j.detail, "warn");
+        return;
+      }
+      showToast((j && j.detail) || ("打不开：" + s), "warn");
+    } catch (err) {
+      if (/^https?:\/\//i.test(s)) window.open(s, "_blank");
+      else showToast("打开失败：" + String(err.message || err), "warn");
+    }
+  }
+  window.__openTarget = openTarget;
+
+
   // 事件委托：回答里的下载/定位按钮是 innerHTML 塞进去的，逐个绑定不现实
   document.addEventListener("click", (e) => {
     const t = e.target;
@@ -1164,6 +1213,14 @@
       openInLibrary(op.getAttribute("data-rel") || "");
       return;
     }
+    // ③ 路径 / 网址：点一下真的打开（后端调系统文件管理器 / 默认浏览器）
+    const pl = t.closest(".path-link, a.ext-link");
+    if (pl) {
+      e.preventDefault();
+      openTarget(pl.getAttribute("data-path") || pl.getAttribute("href") || "");
+      return;
+    }
+
     // ② 下载按钮：桌面壳里走原生「另存为」（否则会被 WebView2 静默吞掉）
     const a = t.closest("a.dl-link");
     if (!a) return;
@@ -3261,9 +3318,58 @@
     // ---- 自开发改动卡片（2026-11-08）----
     // 用户要求：改了哪个文件、改了什么要能点开看详情，但**不许把页面撑变形**。
     // 做法：默认只显示一行摘要；展开后 diff 在 max-height 320px 的容器里滚动。
+    // ---------- 代码改动汇总列表（2026-11-10）----------
+    // ⚠️ 用户原话：「每次修改代码不要一份一份往下堆，这样我看不到你的思考过程，
+    //    我想要你把更改的代码像列表一样收起与展开，就跟生成文库那样差不多」。
+    // 以前：每改一个文件就往聊天里追加一张 sd-card，一轮改 6 个文件就是 6 张卡，
+    //      把正文和思考都挤到屏幕外。现在：本轮所有改动收进**一个**折叠列表 ——
+    //      列表头「🛠 本轮代码改动 · N 处 · +X −Y」可整体收起；
+    //      列表里每个文件只占一行（类型 + 路径 + 增删数），点这一行才展开 diff。
+    let selfdevList = null;
+    const ensureSelfdevList = () => {
+      if (selfdevList && selfdevList.parentNode) return selfdevList;
+      const box = document.createElement("div");
+      box.className = "sd-list";
+      const head = document.createElement("button");
+      head.type = "button";
+      head.className = "sd-list-head";
+      head.innerHTML = '<span class="sd-list-arrow">▾</span>' +
+        '<span class="sd-list-title">🛠 本轮代码改动</span>' +
+        '<span class="sd-list-sum">0 处</span>';
+      const body = document.createElement("div");
+      body.className = "sd-list-body";
+      box.appendChild(head);
+      box.appendChild(body);
+      box.__body = body;
+      box.__head = head;
+      head.onclick = () => {
+        const closed = box.classList.toggle("collapsed");
+        body.hidden = closed;
+        head.querySelector(".sd-list-arrow").textContent = closed ? "▸" : "▾";
+      };
+      answerWrap.appendChild(box);
+      selfdevList = box;
+      return box;
+    };
+    const refreshSelfdevSum = (box) => {
+      const rows = box.__body.querySelectorAll(".sd-row");
+      let add = 0, del = 0;
+      rows.forEach((r) => {
+        add += Number(r.dataset.add || 0);
+        del += Number(r.dataset.del || 0);
+      });
+      const sum = box.__head.querySelector(".sd-list-sum");
+      sum.innerHTML = rows.length + ' 处 · <span class="sd-add">+' + add +
+        '</span> <span class="sd-del">−' + del + "</span>";
+    };
+
+    // 单个文件一行：点这一行才展开它的 diff（原 sd-card 的详情逻辑原样保留）
     const makeSelfdevCard = (ui) => {
+      const box = ensureSelfdevList();
       const wrap = document.createElement("div");
-      wrap.className = "sd-card";
+      wrap.className = "sd-row";
+      wrap.dataset.add = ui.added || 0;
+      wrap.dataset.del = ui.removed || 0;
       const actName = ui.act === "apply" ? "代码模型重写"
         : (ui.act === "patch" ? "局部替换" : "写入");
       const rel = String(ui.rel || "");
@@ -3332,10 +3438,23 @@
       wrap.appendChild(body);
 
       const tg = head.querySelector(".sd-toggle");
-      tg.onclick = () => {
+      // 抽成一个函数：小按钮和整行都调它。
+      // ⚠️ 不要用 tg.click() —— 某些嵌入环境里元素没有 click()，会直接抛异常
+      const toggleBody = () => {
         body.hidden = !body.hidden;
         tg.textContent = body.hidden ? "详情 ▾" : "收起 ▴";
       };
+      tg.onclick = toggleBody;
+      head.onclick = (ev) => { if (ev.target !== tg) toggleBody(); };
+
+      box.__body.appendChild(wrap);
+      refreshSelfdevSum(box);
+      // 整列被收起时来了新改动 → 自动展开，免得用户以为"没动静"
+      if (box.classList.contains("collapsed")) {
+        box.classList.remove("collapsed");
+        box.__body.hidden = false;
+        box.__head.querySelector(".sd-list-arrow").textContent = "▾";
+      }
       return wrap;
     };
 
@@ -4108,7 +4227,7 @@
             }
             else if (obj.ui.type === "selfdev") {
               // 模型改了应用源码：给一张**可折叠**的改动卡片（默认收起，不撑页面）
-              answerWrap.appendChild(makeSelfdevCard(obj.ui));
+              makeSelfdevCard(obj.ui);   // 收进本轮改动列表（不再一张张往下堆）
               messagesEl.scrollTop = messagesEl.scrollHeight;
             }
             else if (obj.ui.type === "code") {
@@ -6427,4 +6546,389 @@
     poll();
     setInterval(poll, 4000);
   })();
+})();
+
+/* =====================================================================
+   技能（skill）面板 —— 2026-11-10 用户要求：
+     · 顶栏「⚡ 技能」点开弹层，列出全部技能，点条目看详情；
+     · 支持新建 / 编辑 / 删除 / 启用开关；
+     · 三种生效方式：手动（点「用它」注入下一轮）/ 常驻 / 自动（模型自己判断）。
+   数据全在后端 data/skills.json，这里只做展示与增删改。
+   ===================================================================== */
+(function () {
+  const btn = document.getElementById("skillBtn");
+  if (!btn) return;
+
+  const MODE_LABEL = { manual: "手动", always: "常驻", auto: "自动" };
+  const MODE_HINT = {
+    manual: "点「用它」注入到下一轮对话，只生效一次",
+    always: "始终注入系统提示，每一轮都起作用",
+    auto: "只把名称和触发词给模型，它自己判断该不该用"
+  };
+  let items = [];
+  let openId = null;     // 展开详情的技能 id
+  let editing = null;    // 正在编辑的数据（新建时是空对象）
+
+  const sid = () => localStorage.getItem("ai_session_id") || "";
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+  async function call(url, body) {
+    const opt = body === undefined ? {} :
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body) };
+    const r = await fetch(url, opt);
+    return await r.json();
+  }
+
+  let el = null;
+  function layer() {
+    if (el) return el;
+    el = document.createElement("div");
+    el.className = "confirm-layer sk-layer";
+    el.innerHTML =
+      '<div class="confirm-box sk-box">' +
+        '<div class="sk-head">' +
+          '<span class="sk-title">⚡ 技能</span>' +
+          '<span class="sk-count"></span>' +
+          '<span class="sk-head-acts">' +
+            '<button type="button" class="btn sm sk-new">＋ 新建</button>' +
+            '<button type="button" class="btn sm ghost sk-import">导入</button>' +
+            '<button type="button" class="btn sm ghost sk-close">关闭</button>' +
+          '</span>' +
+        '</div>' +
+        '<div class="sk-msg"></div>' +
+        '<div class="sk-list"></div>' +
+      '</div>';
+    document.body.appendChild(el);
+    el.addEventListener("click", (e) => { if (e.target === el) hide(); });
+    el.querySelector(".sk-close").onclick = hide;
+    el.querySelector(".sk-import").onclick = () => { openImport(); };
+    el.querySelector(".sk-new").onclick = () => {
+      openId = null; editing = { mode: "manual", enabled: true }; render();
+    };
+    el.querySelector(".sk-list").addEventListener("click", onList);
+    return el;
+  }
+
+  function say(t, kind) {
+    const m = layer().querySelector(".sk-msg");
+    m.textContent = t || "";
+    m.className = "sk-msg " + (kind || "");
+    if (t) setTimeout(() => { if (m.textContent === t) m.textContent = ""; }, 3500);
+  }
+
+  function hide() {
+    if (el) { el.remove(); el = null; }
+    openId = null; editing = null;
+  }
+
+  function render() {
+    const box = layer();
+    box.querySelector(".sk-count").textContent =
+      "共 " + items.length + " 个 · 已启用 " + items.filter(i => i.enabled).length + " 个";
+    const list = box.querySelector(".sk-list");
+    let html = "";
+
+    if (editing) {
+      const e = editing;
+      html += '<div class="sk-edit">' +
+        '<div class="sk-field"><label>名称</label>' +
+          '<input class="sk-in-name" maxlength="60" value="' + esc(e.name) + '" placeholder="如：写周报"></div>' +
+        '<div class="sk-field"><label>一句话描述</label>' +
+          '<input class="sk-in-desc" maxlength="200" value="' + esc(e.desc) + '" placeholder="它解决什么问题（模型判断用不用时会看这句）"></div>' +
+        '<div class="sk-field"><label>触发词</label>' +
+          '<input class="sk-in-trig" value="' + esc((e.triggers || []).join("，")) + '" placeholder="用逗号分隔，如：周报，工作总结"></div>' +
+        '<div class="sk-field"><label>生效方式</label>' +
+          '<select class="sk-in-mode">' +
+            ["manual", "always", "auto"].map(k =>
+              '<option value="' + k + '"' + ((e.mode || "manual") === k ? " selected" : "") + '>' +
+              MODE_LABEL[k] + " — " + MODE_HINT[k] + '</option>').join("") +
+          '</select></div>' +
+        '<div class="sk-field"><label>内容（做法 / 步骤 / 规范）</label>' +
+          '<textarea class="sk-in-content" rows="10" placeholder="写清要模型怎么做：分几步、每步产出什么、有哪些禁忌">' +
+          esc(e.content) + '</textarea></div>' +
+        '<div class="sk-acts">' +
+          '<button type="button" class="btn sm" data-act="save">保存</button>' +
+          '<button type="button" class="btn sm ghost" data-act="cancel">取消</button>' +
+        '</div></div>';
+      list.innerHTML = html;
+      return;
+    }
+
+    if (!items.length) {
+      list.innerHTML = '<div class="sk-empty">还没有技能。点右上角「＋ 新建」加一个，' +
+        '或者直接跟我说「加一个XX技能」。</div>';
+      return;
+    }
+
+    html = items.map(function (it) {
+      const open = openId === it.id;
+      let row = '<div class="sk-item' + (it.enabled ? "" : " off") + '" data-id="' + esc(it.id) + '">' +
+        '<div class="sk-row" data-act="open">' +
+          '<span class="sk-name">' + esc(it.name) + '</span>' +
+          '<span class="sk-mode m-' + esc(it.mode) + '">' + MODE_LABEL[it.mode] + '</span>' +
+          '<span class="sk-desc">' + esc(it.desc || "（没有描述）") + '</span>' +
+          '<span class="sk-sw" data-act="toggle" title="启用 / 关闭">' +
+            '<i class="' + (it.enabled ? "on" : "") + '"></i></span>' +
+          '<span class="sk-caret">' + (open ? "▾" : "▸") + '</span>' +
+        '</div>';
+      if (open) {
+        row += '<div class="sk-detail">' +
+          (it.triggers && it.triggers.length
+            ? '<div class="sk-trig">触发词：' + it.triggers.map(esc).join("、") + '</div>' : "") +
+          '<pre class="sk-content">' + esc(it.content || "（空）") + '</pre>' +
+          '<div class="sk-acts">' +
+            (it.mode === "manual"
+              ? '<button type="button" class="btn sm" data-act="use">用它</button>' : "") +
+            '<button type="button" class="btn sm ghost" data-act="share">分享</button>' +
+            '<button type="button" class="btn sm ghost" data-act="edit">编辑</button>' +
+            '<button type="button" class="btn sm ghost danger" data-act="del">删除</button>' +
+          '</div></div>';
+      }
+      return row + '</div>';
+    }).join("");
+    list.innerHTML = html;
+  }
+
+  async function onList(e) {
+    const t = e.target.closest("[data-act]");
+    if (!t) return;
+    const act = t.getAttribute("data-act");
+    const item = t.closest(".sk-item");
+    const id = item ? item.getAttribute("data-id") : "";
+
+    if (act === "save") { await save(); return; }
+    if (act === "cancel") { editing = null; render(); return; }
+    if (!id) return;
+
+    if (act === "open") {
+      openId = openId === id ? null : id;
+      render();
+      return;
+    }
+    if (act === "toggle") {
+      e.stopPropagation();
+      const cur = items.find(i => i.id === id);
+      if (!cur) return;
+      const r = await call("/api/skills/toggle", { id: id, enabled: !cur.enabled });
+      if (!r.ok) { say(r.error || "操作失败", "bad"); return; }
+      await reload();
+      say((r.item.enabled ? "已启用：" : "已关闭：") + r.item.name, "ok");
+      return;
+    }
+    if (act === "use") {
+      const r = await call("/api/skills/use", { id: id, session: sid() });
+      if (!r.ok) { say(r.error || "用不了这个技能", "bad"); return; }
+      say("已选「" + r.name + "」—— 下一条消息会按它来做（只生效一次）", "ok");
+      return;
+    }
+    if (act === "share") {
+      const cur = items.find(i => i.id === id);
+      if (cur) await openShare(cur);
+      return;
+    }
+    if (act === "edit") {
+      const cur = items.find(i => i.id === id);
+      if (cur) { editing = JSON.parse(JSON.stringify(cur)); openId = null; render(); }
+      return;
+    }
+    if (act === "del") {
+      const cur = items.find(i => i.id === id);
+      if (!cur) return;
+      if (!confirm("删除技能「" + cur.name + "」？删了就找不回来了。")) return;
+      const r = await call("/api/skills/delete", { id: id });
+      if (!r.ok) { say("删除失败（可能已经不存在）", "bad"); return; }
+      await reload();
+      say("已删除：" + cur.name, "ok");
+      return;
+    }
+  }
+
+  async function save() {
+    const box = layer();
+    const v = (sel) => { const n = box.querySelector(sel); return n ? n.value : ""; };
+    const data = {
+      name: v(".sk-in-name").trim(),
+      desc: v(".sk-in-desc").trim(),
+      content: v(".sk-in-content"),
+      triggers: v(".sk-in-trig"),
+      mode: v(".sk-in-mode") || "manual"
+    };
+    if (!data.name) { say("名称不能为空", "bad"); return; }
+    const isNew = !editing || !editing.id;
+    const r = isNew
+      ? await call("/api/skills/create", data)
+      : await call("/api/skills/update", Object.assign({ id: editing.id }, data));
+    if (!r.ok) { say(r.error || "保存失败", "bad"); return; }
+    editing = null;
+    await reload();
+    openId = r.item.id;
+    render();
+    say("已保存：" + r.item.name, "ok");
+  }
+
+  // ---------------- 分享 / 导入（2026-11-10 用户要求） ----------------
+  //  分享：一段可直接粘给任何 AI 的话 + 机器可读分享码，可复制 / 下载 / 二维码 / 系统分享
+  //  导入：把别人发来的整段内容粘回来，一键建成本地技能（重名自动加后缀）
+  function modal(html) {
+    const d = document.createElement("div");
+    d.className = "confirm-layer sk-layer";
+    d.innerHTML = '<div class="confirm-box sk-box sk-share">' + html + '</div>';
+    document.body.appendChild(d);
+    d.addEventListener("click", (e) => { if (e.target === d) d.remove(); });
+    return d;
+  }
+
+  function fallbackCopy(t) {
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    ta.remove();
+  }
+
+  function copyText(t) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(t).catch(() => fallbackCopy(t));
+    }
+    fallbackCopy(t);
+    return Promise.resolve();
+  }
+
+  async function openShare(it) {
+    const r = await call("/api/skills/share", { id: it.id });
+    if (!r.ok) { say(r.error || "导出失败", "bad"); return; }
+    const d = modal(
+      '<div class="sk-head"><span class="sk-title">分享：' + esc(it.name) + '</span>' +
+        '<span class="sk-head-acts"><button type="button" class="btn sm ghost sk-x">关闭</button></span></div>' +
+      '<div class="sk-share-tip">下面这段可以直接发给别人，内容可改，改完再复制。' +
+        '生效方式已固定建议为「自动」，对方可自行调整。</div>' +
+      '<textarea class="sk-share-ta" rows="12" spellcheck="false"></textarea>' +
+      '<div class="sk-acts sk-share-acts">' +
+        '<button type="button" class="btn sm" data-s="copy">复制文本</button>' +
+        '<button type="button" class="btn sm ghost" data-s="md">保存 .md</button>' +
+        '<button type="button" class="btn sm ghost" data-s="qr">二维码</button>' +
+        '<button type="button" class="btn sm ghost" data-s="sys">系统分享</button>' +
+      '</div>' +
+      '<div class="sk-share-msg"></div>' +
+      '<div class="sk-qr"></div>'
+    );
+    const ta = d.querySelector(".sk-share-ta");
+    ta.value = r.text;
+    d.querySelector(".sk-x").onclick = () => d.remove();
+    d.querySelector(".sk-share-acts").addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-s]");
+      if (!b) return;
+      const act = b.getAttribute("data-s");
+      const txt = ta.value;
+      if (act === "copy") {
+        await copyText(txt);
+        const old = b.textContent;
+        b.textContent = "已复制 ✓";
+        setTimeout(() => { b.textContent = old; }, 1600);
+      } else if (act === "md") {
+        // 2026-11-10 用户反馈：点「下载 .md」没反应、也不知道存哪了。
+        // 根因：原来直接 a.click() 触发浏览器下载，内嵌 WebView 会静默拦掉；
+        //       而且 a 没挂到 DOM 上，某些浏览器同样不触发。改成后端真实写盘，
+        //       把绝对路径显示出来（点一下就能打开所在文件夹）。
+        const mb = d.querySelector(".sk-share-msg");
+        const oldTxt = b.textContent;
+        b.disabled = true;
+        b.textContent = "保存中…";
+        let sr = { ok: false, error: "请求失败" };
+        try { sr = await call("/api/skills/save_md", { text: txt, name: it.name }); }
+        catch (err) { sr = { ok: false, error: String((err && err.message) || err) }; }
+        b.disabled = false;
+        b.textContent = oldTxt;
+        if (sr.ok) {
+          mb.className = "sk-share-msg ok";
+          mb.innerHTML = "已保存到：" +
+            '<a class="path-link" href="javascript:void(0)" data-path="' + esc(sr.path) +
+            '" title="点击打开所在文件夹">' + esc(sr.path) + "</a>" +
+            "（" + sr.bytes + " 字节，点路径可直接打开）";
+        } else {
+          // 后端写不了盘时退回浏览器下载，这次挂到 DOM 上并明确告知去哪儿找
+          const blob = new Blob([txt], { type: "text/markdown;charset=utf-8" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = "技能-" + it.name + ".md";
+          a.style.display = "none";
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+          mb.className = "sk-share-msg bad";
+          mb.textContent = "后端保存失败（" + (sr.error || "未知原因") +
+            "），已改为浏览器下载：请到浏览器的「下载」目录里找「技能-" + it.name + ".md」";
+        }
+      } else if (act === "qr") {
+        const box = d.querySelector(".sk-qr");
+        const m = txt.match(/SKILL1:[A-Za-z0-9_\-=]+/);
+        box.innerHTML = '<div class="sk-qr-tip">生成中…</div>';
+        const q = await call("/api/skills/qr", m ? { text: m[0] } : { id: it.id });
+        if (!q.ok) {
+          box.innerHTML = '<div class="sk-qr-tip bad">' + esc(q.error || "生成失败") + '</div>';
+          return;
+        }
+        box.innerHTML = '<img class="sk-qr-img" onclick="window.open(this.src)" alt="分享二维码" title="点击看原图" src="' + q.data_url + '">' +
+          '<div class="sk-qr-tip">手机扫码 → 复制 → 粘到「导入」里即可原样重建</div>';
+      } else if (act === "sys") {
+        if (navigator.share) {
+          try { await navigator.share({ title: "技能分享：" + it.name, text: txt }); }
+          catch (err) {}
+        } else {
+          await copyText(txt);
+          const old = b.textContent;
+          b.textContent = "已复制（本机无系统分享）";
+          setTimeout(() => { b.textContent = old; }, 2200);
+        }
+      }
+    });
+  }
+
+  function openImport() {
+    const d = modal(
+      '<div class="sk-head"><span class="sk-title">导入技能</span>' +
+        '<span class="sk-head-acts"><button type="button" class="btn sm ghost sk-x">关闭</button></span></div>' +
+      '<div class="sk-share-tip">把别人发来的整段分享内容粘进来（带 SKILL1: 的分享码也认）。' +
+        '重名会自动加「（导入1）」，不会覆盖你已有的技能。</div>' +
+      '<textarea class="sk-share-ta sk-import-ta" rows="10" placeholder="粘贴分享内容…"></textarea>' +
+      '<div class="sk-acts"><button type="button" class="btn sm sk-do">导入</button></div>' +
+      '<div class="sk-msg sk-import-msg"></div>'
+    );
+    const ta = d.querySelector(".sk-import-ta");
+    const msg = d.querySelector(".sk-import-msg");
+    d.querySelector(".sk-x").onclick = () => d.remove();
+    d.querySelector(".sk-do").onclick = async () => {
+      if (!ta.value.trim()) {
+        msg.textContent = "先粘贴内容"; msg.className = "sk-msg bad"; return;
+      }
+      const r = await call("/api/skills/import", { text: ta.value });
+      if (!r.ok) {
+        msg.textContent = r.error || "导入失败"; msg.className = "sk-msg bad"; return;
+      }
+      await reload();
+      d.remove();
+      openId = r.item.id;
+      render();
+      say("已导入：" + r.item.name, "ok");
+    };
+  }
+
+  async function reload() {
+    try {
+      const d = await call("/api/skills");
+      items = (d && d.items) || [];
+    } catch (err) { items = []; }
+    if (openId && !items.some(i => i.id === openId)) openId = null;
+  }
+
+  btn.addEventListener("click", async function () {
+    layer();
+    await reload();
+    render();
+  });
 })();
