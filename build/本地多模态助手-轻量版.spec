@@ -116,7 +116,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="本地多模态助手",
+    name="HardwordyAgent",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -134,5 +134,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="本地多模态助手",
+    name="HardwordyAgent",
 )
