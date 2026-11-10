@@ -410,12 +410,14 @@ def check_gpu_mem() -> dict:
     """
     import shutil
     import subprocess
+    from .procwin import NOWIN as _NOWIN
     exe = shutil.which("nvidia-smi") or r"C://Windows//System32//nvidia-smi.exe"
     if os.path.isfile(exe):
         try:
             r = subprocess.run(
                 [exe, "--query-gpu=memory.free,memory.total",
                  "--format=csv,noheader,nounits"],
+                 creationflags=_NOWIN,
                 capture_output=True, text=True, timeout=12)
             line = (r.stdout or "").strip().splitlines()[0] if (r.stdout or "").strip() else ""
             if line:

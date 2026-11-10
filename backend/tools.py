@@ -21,6 +21,7 @@ import glob
 import json
 import logging
 import urllib.parse
+from .procwin import NOWIN as _NOWIN
 
 from . import config
 from . import t2i
@@ -4166,6 +4167,7 @@ def run_code(code: str, allow_risky: bool = False, stdin_text: str = "") -> dict
             # 空输入时 communicate 会关掉它 → 仍是 EOF。
             p = _sp.Popen([sys.executable, "-X", "utf8", "-u", "snippet.py"],
                           cwd=d, env=env, stdin=_sp.PIPE,
+                          creationflags=_NOWIN,
                           stdout=_sp.PIPE, stderr=_sp.PIPE,
                           text=True, encoding="utf-8", errors="replace")
         except Exception as exc:
@@ -4254,6 +4256,7 @@ def run_file(path: str, allow_risky: bool = False, args: str = "",
                 _extra = []
         pr = _sp.Popen([sys.executable, "-X", "utf8", "-u", os.path.basename(p)] + _extra,
                        cwd=os.path.dirname(p) or ".", env=env,
+                       creationflags=_NOWIN,
                        # stdin 也接管道：模型可以**预先喂输入**来测 input() 程序
                        # （communicate 结束时会把管道关掉，所以没喂输入的程序
                        #   会照旧拿到 EOF，不会挂住智能体）。

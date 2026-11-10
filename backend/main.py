@@ -7401,6 +7401,7 @@ def ws_serve(body: dict):
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+            creationflags=(0x08000000 if os.name == "nt" else 0),  # CREATE_NO_WINDOW
             cwd=workspace.root(proj),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:

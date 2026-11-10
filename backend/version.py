@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from .procwin import NOWIN as _NOWIN
 import time
 import json
 
@@ -53,6 +54,7 @@ def _run(args, timeout=120, tries=3):
     for attempt in range(max(1, tries)):
         try:
             r = subprocess.run(cmd, cwd=project_root(), capture_output=True,
+            creationflags=_NOWIN,
                                timeout=timeout)
         except FileNotFoundError:
             return False, "本机没有安装 git，版本功能不可用"
