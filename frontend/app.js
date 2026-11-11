@@ -822,9 +822,13 @@
       '配了 key 之后，地图能搜到全国的小店、有真实评分、有实时路况和公交换乘，' +
       '步行骑行也是真实路径。<br>断开或没配时退回 OpenStreetMap —— ' +
       '能查大城市/道路/机场车站，但小店、评分、路况、公交都没有。<br>' +
-      '申请（1 分钟）：console.amap.com → 手机号注册+实名 → 建应用 → 加 Key → ' +
+      '申请（1 分钟）：手机号注册 + 实名 → 建应用 → 加 Key → ' +
       '<b>服务平台必须选「Web 服务」</b>（选成「Web 端(JS API)」用不了）。' +
       '</div>' +
+      // 申请入口：**始终显示**（切到"改 key"时上面的 tip 会隐藏，那时最需要这个链接）
+      '<div class="amap-golink">👉 还没有 key？' +
+      '<a href="https://console.amap.com/dev/key/app" target="_blank" rel="noopener">' +
+      '去高德控制台申请 / 管理 Key</a></div>' +
       '<div class="amap-msg"></div>' +
       '<div class="confirm-btns amap-btns"></div>' +
       '</div>';
