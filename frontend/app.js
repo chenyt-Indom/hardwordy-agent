@@ -2729,6 +2729,7 @@
 
   /** 把历史消息渲染到界面，并同步为上下文。返回实际渲染条数。 */
   function renderHistory(msgs) {
+    clearThinkDock();
     messagesEl.innerHTML = "";
     history.length = 0;
     const shown = (msgs || []).slice(-RECENT_SHOW);
