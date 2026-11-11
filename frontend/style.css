@@ -207,7 +207,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .tab {
   flex: 1 1 30%; padding: 7px 4px; font-size: 12px; border: 1px solid var(--border);
   background: var(--panel2); color: var(--muted); border-radius: 8px; cursor: pointer;
-  transition: all .15s;
+  transition: background-color .15s, border-color .15s, color .15s;
 }
 .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .tab:hover { border-color: var(--accent); }
