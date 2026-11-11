@@ -70,6 +70,7 @@
   function setFreeView(v) {
     if (freeView === v) return;
     freeView = v;
+    if (v) _keepTop = messagesEl.scrollTop;   // 记住「就停在这儿」
     syncFreeBtn();
   }
   function scrollBottom(force) {
