@@ -219,25 +219,26 @@
       ? "当前：跟随视角 —— 思考框固定在视口左下角，滚到哪都看得到。点一下改为「回到原位」"
       : "当前：回到原位 —— 思考框待在消息流原来的位置（工具条之前），不浮动。点一下改为「跟随视角」";
   }
-  // 计算悬浮位置：钉在「左下角工具条（输入区）上方」，左边对齐主区域
-  // 输入框会随内容变高、窗口会缩放，所以不能硬编码，每次 dock / resize 都重算
+  // 计算悬浮位置：钉在「视口左上角、顶栏下方」，左边对齐主区域
+  // ★ 2026-11-12 用户反馈「左下角会挡到回答内容」→ 从输入区上方改到左上方。
+  // 顶栏会收起/展开（max-height 过渡）、窗口会缩放，所以不能硬编码，每次 dock / resize 都重算
   function placeThinkDock(w) {
     if (!w || !w.classList.contains("think-dock")) return;
-    const comp = document.querySelector(".composer");
-    const cRect = comp ? comp.getBoundingClientRect() : null;
     const mRect = mainEl ? mainEl.getBoundingClientRect() : null;
+    const topBar = document.querySelector("#topBar");
+    const tRect = topBar ? topBar.getBoundingClientRect() : null;
     const vw = window.innerWidth, vh = window.innerHeight;
     const left = Math.max(8, (mRect ? mRect.left : 0) + 16);
-    // ★ 2026-11-12 实测（无头浏览器）：`.composer` 的 top 可能滚出视口（top=679 > vh=605），
-    //   用 `vh - top` 会算出负数/离谱值，框贴到视口底甚至跑出去。改用**高度**算，
-    //   不管输入区滚到哪，框都稳稳钉在「输入区上沿再往上 10px」。
-    let bottom = cRect ? Math.max(8, cRect.height + 12) : 96;
-    // 输入区很高（多行输入 / 附件条）或窗口很矮时，别让框顶出视口上沿
-    const cap = Math.max(8, vh - 150);
-    if (bottom > cap) bottom = cap;
+    // 顶栏展开时贴在它下沿再往下 12px；收起后（max-height:0）用 12px 兜底
+    let top = tRect && tRect.height > 4 ? Math.max(12, tRect.bottom + 12) : 12;
+    // 窗口很矮时别把框顶出视口下沿
+    const cap = Math.max(12, vh - 140);
+    if (top > cap) top = cap;
     const avail = (mRect ? mRect.width : vw) - 32;
     w.style.left = Math.round(left) + "px";
-    w.style.bottom = Math.round(bottom) + "px";
+    w.style.top = Math.round(top) + "px";
+    // ⚠️ 必须清掉旧的 bottom：top 和 bottom 同时有值时框会被拉成整屏高
+    w.style.bottom = "";
     w.style.width = Math.max(220, Math.min(430, Math.round(avail))) + "px";
   }
   // 所有浮动中的思考框都要跟着重排（窗口缩放、输入框变高、切按钮）
