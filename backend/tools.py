@@ -1495,7 +1495,8 @@ def _do_schedule(name: str, arguments: dict) -> str:
             jobs = _sch.list_jobs()
             if not jobs:
                 return "现在没有任何定时任务。"
-            lines = ["现有 %d 个定时任务：" % len(jobs)]
+            with_res = bool(a.get("with_result"))
+            lines = ["现有 %d 个定时任务（全局共享，任何对话里看到的都是这一批）：" % len(jobs)]
             for j in jobs:
                 lines.append("- %s（%s，%s）下次 %s｜上次 %s %s"
                              % (j.get("name"), j.get("period"),
@@ -1503,6 +1504,10 @@ def _do_schedule(name: str, arguments: dict) -> str:
                                 j.get("next_human"),
                                 j.get("last_run") or "从未",
                                 (j.get("last_status") or "")[:40]))
+                if with_res:
+                    body = _sch.latest_result(str(j.get("id") or ""), 3000)
+                    lines.append("  最近一次结果正文：\n" +
+                                 (body.strip() if body.strip() else "（还没有结果）"))
             return "\n".join(lines)
         if name == "cancel_schedule":
             key = str(a.get("name_or_id") or "").strip()
