@@ -532,10 +532,86 @@
     var KEY = 'more_open';
     var btn = document.getElementById('moreBtn');
     if (!btn) return;
-    function paint(open) {
-      document.body.classList.toggle('more-open', open);
+    /* 2026-11-12：加展开/收起动画。
+       原来 [data-more] 是 display:none ↔ inline-flex 硬切，控件瞬间蹦出来、
+       顶栏高度也瞬间变高。现在：
+         展开 = 顶栏高度补间撑开 + 控件逐个淡入上浮；
+         收起 = 先让控件淡出，再真正 display:none（否则会瞬间消失），高度同步回落。 */
+    var seq = 0; /* 连点保护：只有最后一次点击的动画能落地 */
+    function paint(open, animate) {
+      var bar = document.querySelector('.tools-bar');
+      var items = Array.prototype.slice.call(
+        document.querySelectorAll('.tools-bar [data-more]'));
+      var soft = true;
+      try {
+        soft = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      } catch (e) {}
       btn.classList.toggle('on', open);
       btn.textContent = open ? '⋯ 收起' : '⋯ 更多';
+      if (!animate || !bar || !soft || !items.length) {
+        document.body.classList.toggle('more-open', open);
+        return;
+      }
+      var my = ++seq;
+      var hFrom = bar.getBoundingClientRect().height;
+      function tweenBar(hTo) {
+        bar.style.overflow = 'hidden';
+        bar.style.height = hFrom + 'px';
+        bar.getBoundingClientRect(); /* 强制回流，动画才有起点 */
+        bar.style.transition = 'height .3s cubic-bezier(.4,0,.2,1)';
+        bar.style.height = hTo + 'px';
+        setTimeout(function () {
+          if (my !== seq) return;
+          bar.style.transition = '';
+          bar.style.height = '';
+          bar.style.overflow = '';
+        }, 330);
+      }
+      if (open) {
+        document.body.classList.add('more-open');
+        tweenBar(bar.getBoundingClientRect().height);
+        items.forEach(function (el, i) {
+          if (!el.animate) return;
+          el.animate([
+            { opacity: 0, transform: 'translateY(-5px) scale(.94)' },
+            { opacity: 1, transform: 'none' }
+          ], {
+            duration: 240,
+            delay: 40 + i * 28,
+            easing: 'cubic-bezier(.4,0,.2,1)',
+            fill: 'backwards'
+          });
+        });
+        return;
+      }
+      var anims = [];
+      items.forEach(function (el, i) {
+        if (!el.animate) return;
+        anims.push(el.animate([
+          { opacity: 1, transform: 'none' },
+          { opacity: 0, transform: 'translateY(-4px) scale(.96)' }
+        ], {
+          duration: 170,
+          delay: i * 16,
+          easing: 'ease',
+          fill: 'forwards'
+        }));
+      });
+      var closed = false;
+      function close() {
+        if (closed || my !== seq) return;
+        closed = true;
+        anims.forEach(function (a) { try { a.cancel(); } catch (e) {} });
+        document.body.classList.remove('more-open');
+        tweenBar(bar.getBoundingClientRect().height);
+      }
+      var last = anims.length ? anims[anims.length - 1] : null;
+      if (last) {
+        last.onfinish = close;
+        setTimeout(close, 600); /* 兜底：动画事件没触发也要收得回去 */
+      } else {
+        close();
+      }
     }
     var open = false;
     try { open = localStorage.getItem(KEY) === '1'; } catch (e) {}
