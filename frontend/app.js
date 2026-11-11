@@ -5774,7 +5774,12 @@
     const post = async (body, okMsg) => {
       try {
         const r = await (await fetch("/api/perf", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json();
-        if (r.ok) { paint(r); showToast(okMsg, "ok"); } else showToast(r.error || "设置失败", "warn");
+        if (r.ok) {
+          paint(r);
+          showToast(okMsg, "ok");
+          // ★ 上下文长度变了 → 占用比的分母就变了，通知圆环重算
+          window.dispatchEvent(new CustomEvent("perf-changed", { detail: r }));
+        } else showToast(r.error || "设置失败", "warn");
       } catch (e) { showToast("设置失败：" + e.message, "warn"); }
     };
     sel.onchange = () => post({ profile: sel.value }, "性能档位 → " + sel.options[sel.selectedIndex].text);
