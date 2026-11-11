@@ -2378,8 +2378,8 @@ body {
 }
 html[data-theme="light"] body {
   background-image:
-    radial-gradient(900px 620px at 10% -12%, rgba(47, 111, 228, .10), transparent 62%),
-    radial-gradient(760px 520px at 94% 4%, rgba(123, 92, 240, .08), transparent 64%);
+    radial-gradient(900px 620px at 10% -12%, rgba(47, 111, 228, .06), transparent 62%),
+    radial-gradient(760px 520px at 94% 4%, rgba(123, 92, 240, .05), transparent 64%);
 }
 
 /* 玻璃面板：先给实色兜底，再用 color-mix 做半透明（老浏览器不认就保持实色） */
