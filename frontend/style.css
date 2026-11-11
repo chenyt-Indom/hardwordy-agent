@@ -2648,8 +2648,8 @@ html[data-theme="light"] body {
 /* ---- 1. 浅色主题：正文与次要文字整体压深一档，白底上不再发灰 ---- */
 html[data-theme="light"] {
   --text: #131a2b;
-  --muted: #4a5570;
-  --meta-fg: #6a7489;
+  --muted: #3f4a63;
+  --meta-fg: #5c6780;
   --border: #c7d2e6;
 }
 
