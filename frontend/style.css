@@ -2740,14 +2740,14 @@ html[data-theme="light"] button.pill-btn.on {
 }
 html[data-theme="light"] .pill:not(.on):not(.bad),
 html[data-theme="light"] button.pill-btn:not(.on):not(.bad) {
-  color: #4b4436;
-  border-color: #cdc2a6;
-  background: #ece6d6;
+  color: #3a3e46;
+  border-color: #c2c2bc;
+  background: #f1f1ef;
 }
 html[data-theme="light"] button.pill-btn:not(#amapKeyBtn):not(.on):not(.bad) {
-  color: #241f17;
-  border-color: #cdc2a6;
-  background: #f5f1e5;
+  color: #14161a;
+  border-color: #c2c2bc;
+  background: #fafaf8;
 }
 html[data-theme="light"] .pill.bad,
 html[data-theme="light"] button.pill-btn.bad {
