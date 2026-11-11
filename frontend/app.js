@@ -101,7 +101,66 @@
     };
     messagesEl.addEventListener("wheel", () => requestAnimationFrame(maybeFree), { passive: true });
     messagesEl.addEventListener("touchmove", maybeFree, { passive: true });
+    // ★ 2026-11-12 用户报「拖滚动条上去看，模型一有动作还是被拽到底部」：
+    //   拖滚动条 / 按 PageUp / 点滚动槽**都不会触发 wheel**，上面那条检测就漏了。
+    //   补一条 scroll 监听：只要不是「贴着底部」，就自动进入自由查看。
+    //   （程序化滚到底时 _nearBottom() 为真，不会误判。）
+    messagesEl.addEventListener("scroll", () => requestAnimationFrame(maybeFree), { passive: true });
+    // ★ 2026-11-12 修「模型一有动作就跳到底部」的真正元凶：
+    //   每来一个工具调用，addToolChip 会调 chip.scrollIntoView({block:"nearest"})，
+    //   而 scrollIntoView 是**浏览器内部滚动**，根本不经过上面那个 scrollTop setter，
+    //   所以 freeView 挡不住它 —— 实测每调一次工具就跳一次底。
+    //   这里在自由查看期间把「消息区内部元素」的 scrollIntoView 直接跳过；
+    //   其余元素（侧栏、面板等）照常。
+    const _siiv = Element.prototype.scrollIntoView;
+    if (typeof _siiv === "function") {
+      Element.prototype.scrollIntoView = function (opt) {
+        if (freeView && messagesEl.contains(this)) return;
+        return _siiv.call(this, opt);
+      };
+    }
     syncFreeBtn();
+  })();
+
+  // ---------- 思考框：跟随视口 / 固定原位（2026-11-12 用户要求）----------
+  // 「跟随」= 思考期间贴住视口底部（.think-dock, position:sticky），滚到哪都能看到它在想什么；
+  // 「固定」= 老老实实待在消息流里（工具条之前），不跟着滚。
+  // 状态记在 localStorage.think_follow，刷新后保持。
+  let thinkFollow = localStorage.getItem("think_follow") !== "0";
+  let _thinkLive = null;      // 当前这轮还在思考的 thinkWrap（思考结束后置空）
+
+  function syncThinkBtn() {
+    const b = $("#thinkFollowBtn");
+    if (!b) return;
+    b.classList.toggle("tf-on", thinkFollow);
+    b.textContent = thinkFollow ? "🧠 思考框跟随" : "📍 思考框固定";
+    b.title = thinkFollow
+      ? "思考框贴在视口底部、跟着你滚动。点一下改成固定原位"
+      : "思考框固定在消息流原位、不跟着滚动。点一下改成跟随";
+  }
+  // 把当前这轮的思考框按当前偏好摆好（思考途中切按钮也能立刻生效）
+  function applyThinkDock() {
+    const w = _thinkLive;
+    if (!w || !w._home) return;
+    const docked = w.classList.contains("think-dock");
+    if (thinkFollow && !docked) {
+      w.classList.add("think-dock");
+      messagesEl.appendChild(w);
+    } else if (!thinkFollow && docked) {
+      w.classList.remove("think-dock");
+      messagesEl.insertBefore(w, w._home);
+    }
+  }
+  function setThinkFollow(v) {
+    thinkFollow = !!v;
+    try { localStorage.setItem("think_follow", thinkFollow ? "1" : "0"); } catch (e) { /* 隐私模式 */ }
+    syncThinkBtn();
+    applyThinkDock();
+  }
+  (function bindThinkFollow() {
+    const b = $("#thinkFollowBtn");
+    if (b) b.onclick = () => setThinkFollow(!thinkFollow);
+    syncThinkBtn();
   })();
 
   // ---------- 折叠高度补间（2026-11-12 用户要求「代码框展开/收起要有动画」）----------
