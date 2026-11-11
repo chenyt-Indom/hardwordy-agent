@@ -533,6 +533,31 @@ def list_jobs() -> list:
     return out
 
 
+def latest_result(job_id: str, limit: int = 4000) -> str:
+    """读某个任务**最近一次**运行的完整结果正文。
+
+    2026-11-11：用户要求「外面无论单开多少对话，所有对话都能访问定时任务的
+    完成情况和内容，是否查看由模型自主决断」——
+    面板和 list_schedules 的摘要只给前 200 字（job["last_preview"]），
+    正文留在这里，模型觉得需要时再取（list_schedules 传 with_result=true）。
+    """
+    try:
+        d = _logs_dir()
+        pref = "%s_" % job_id
+        cand = sorted(x for x in os.listdir(d)
+                      if x.startswith(pref) and x.endswith(".md"))
+        if not cand:
+            return ""
+        with open(os.path.join(d, cand[-1]), "r", encoding="utf-8") as f:
+            txt = f.read()
+        k = txt.find("## 结果")
+        if k >= 0:
+            txt = txt[k + len("## 结果"):].lstrip()
+        return txt[:limit]
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------- 后台循环
 def _loop() -> None:
     while True:
