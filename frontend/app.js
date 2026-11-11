@@ -2874,6 +2874,7 @@
       if (rest.length) { setSessionId(""); await switchSession(rest[0].id); }
       else {
         history.length = 0;
+        clearThinkDock();
         messagesEl.innerHTML = "";
         addMsg("bot", "对话都删掉了，点「＋ 新建」开一段新的。");
       }
