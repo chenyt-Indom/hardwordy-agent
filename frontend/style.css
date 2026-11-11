@@ -2987,3 +2987,22 @@ html[data-theme="light"] select.pill-select option {
   opacity: .8;
 }
 .code-card > .code-toggle-b:hover { opacity: 1; }
+
+/* ---- 整框折叠（2026-11-11 用户要求：下方也要能折叠「这张卡片的框」）----
+   收起时只留标题行 + 底部这个「展开整张卡片」按钮；
+   代码自身的折叠按钮（.code-toggle）一并隐藏，避免两个按钮互相打架。 */
+.code-card.card-collapsed > .code-body,
+.code-card.card-collapsed > .code-edit-area,
+.code-card.card-collapsed > .code-out,
+.code-card.card-collapsed > .code-stdin,
+.code-card.card-collapsed .code-toggle { display: none; }
+.code-card.card-collapsed { padding-bottom: 8px; }
+/* ⚠️ 同 .code-toggle-b：必须 `.code-card > .xxx`（0,2,0）才压得过 `.btn.sm { width:auto }` */
+.code-card > .code-card-toggle-b {
+  display: block;
+  width: 100%;
+  margin: 4px 0 0;
+  text-align: center;
+  opacity: .72;
+}
+.code-card > .code-card-toggle-b:hover { opacity: 1; }
