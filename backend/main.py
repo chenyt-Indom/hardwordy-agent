@@ -6551,6 +6551,15 @@ def _ctx_limit(num_ctx=0) -> int:
         v = 0
     if v > 0:
         return v
+    # 分母必须跟**实际生效**的窗口一致：perf 会把 num_ctx_override 和档位一起
+    # 算进 num_ctx，而 config["num_ctx"] 只是档位默认值、不含手动覆盖。
+    # 直接读后者会让圆环按 40960 算，实际窗口却是 154624 —— 显示成 126% 假爆表。
+    try:
+        n = int((perf.get() or {}).get("num_ctx") or 0)
+        if n > 0:
+            return n
+    except Exception:                                # noqa: BLE001
+        pass
     cfg = config.load_config() or {}
     return int(cfg.get("num_ctx") or 8192)
 
