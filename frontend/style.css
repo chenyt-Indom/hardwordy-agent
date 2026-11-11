@@ -2388,18 +2388,17 @@ html[data-theme="light"] body {
     radial-gradient(760px 520px at 94% 4%, rgba(196, 158, 74, .05), transparent 64%);
 }
 
-/* 玻璃面板：先给实色兜底，再用 color-mix 做半透明（老浏览器不认就保持实色） */
+/* 玻璃面板 → 2026-11-12 改成实色。
+   ⚠️ 原来这里挂的是 backdrop-filter: blur(18px)（侧栏 / 顶栏 / 输入区）
+   + blur(14px)（卡片）。这两块都是**大面积常驻元素**，浏览器每帧都要重新
+   计算一次模糊，滚动和流式输出时非常吃 GPU；而它们背后只是一层很淡的径向渐变，
+   blur 18px 和 0px 肉眼几乎看不出差别。换成实色后观感不变，帧率明显稳。
+   （用户要求「功能不能受影响，剩下随意」—— 这里只动绘制，不动任何交互。） */
 .sidebar, .chat-header, .composer {
   background: var(--panel);
-  background: color-mix(in srgb, var(--panel) 82%, transparent);
-  backdrop-filter: blur(18px) saturate(1.15);
-  -webkit-backdrop-filter: blur(18px) saturate(1.15);
 }
 .panel, .status-card {
   background: var(--panel2);
-  background: color-mix(in srgb, var(--panel2) 86%, transparent);
-  backdrop-filter: blur(14px) saturate(1.1);
-  -webkit-backdrop-filter: blur(14px) saturate(1.1);
   box-shadow: 0 6px 18px rgba(0, 0, 0, .10);
 }
 
