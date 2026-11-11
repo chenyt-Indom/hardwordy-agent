@@ -70,15 +70,15 @@ html[data-theme="light"] {
   --green: #2f9e6b;
   --danger: #d94a44;
 
-  --btn-bg: #e6ebf9;
-  --btn-bg-hover: #d8e0f4;
-  --accent-hover: #2a63c9;
-  --hover-bg: #e6ebf9;
-  --think-bg: #eaf0fb;
-  --chip-bg: #e6edfd;
-  --chip-border: #c9d8f6;
-  --gen-label-bg: #e6edfd;
-  --meta-fg: #8a93a9;
+  --btn-bg: #dfe6f5;
+  --btn-bg-hover: #cfd9ee;
+  --accent-hover: #1f57c4;
+  --hover-bg: #e0e7f6;
+  --think-bg: #e7eefb;
+  --chip-bg: #e3ebfc;
+  --chip-border: #b9cbec;
+  --gen-label-bg: #e3ebfc;
+  --meta-fg: #6a7489;
   --overlay: rgba(30, 38, 60, .5);
   --shadow: rgba(40, 52, 82, .16);
   --lb-cap: #eef2fb;
