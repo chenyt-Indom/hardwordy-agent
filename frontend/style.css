@@ -65,7 +65,7 @@ html[data-theme="light"] {
   --field-bg: #f8faff;      /* 输入框：不出现接近纯白 */
   --border: #c7d2e6;        /* 描边加深：卡片/分隔线看得清，不再糊成一片 */
   --text: #131a2b;          /* 正文：压到近黑，靠字提对比而不是靠白底 */
-  --muted: #4a5570;
+  --muted: #3f4a63;
   --accent: #2563d8;
   --green: #2f9e6b;
   --danger: #d94a44;
