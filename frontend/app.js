@@ -7403,4 +7403,84 @@
     await reload();
     render();
   });
+
+  // ================== 上下文占用环（2026-11-11）==================
+  // 底栏那个小圆环：绿 → 橙 → 红，越接近上限越红。
+  // · 容量（limit）由用户自己定（顶栏「⚙ 上下文」/ 性能档位），
+  //   所以每次都重新问后端要 —— 换模型、改长度后比例会跟着变；
+  // · 到 90% 就**自动压缩**：较早的对话压成要点摘要、最近的原文保留，
+  //   这样既不顶爆窗口，又不会失忆（摘要里带着「必须记住」的关键信息）。
+  (() => {
+    const btn = document.querySelector("#ctxRing");
+    const fg = document.querySelector("#ctxRingFg");
+    const txt = document.querySelector("#ctxRingTxt");
+    if (!btn || !fg || !txt) return;
+    const C = 2 * Math.PI * 15.5;        // 圆周长（r=15.5），与 HTML 的 dasharray 一致
+    let lastLen = -1, busy = false, compactAt = 0;
+
+    // 0 → 绿；0.7 → 橙；1 → 红，中间线性过渡
+    const colorOf = (r) => {
+      const g = [34, 197, 94], o = [245, 158, 11], rd = [239, 68, 68];
+      const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+      const c = r <= 0.7 ? mix(g, o, Math.max(0, r) / 0.7)
+                         : mix(o, rd, Math.min(1, (r - 0.7) / 0.3));
+      return "rgb(" + c.join(",") + ")";
+    };
+    const kk = (n) => (Number(n) >= 10000 ? (Number(n) / 10000).toFixed(1) + "万" : String(Number(n) || 0));
+
+    const paint = (d) => {
+      const r = Math.max(0, Math.min(1, Number(d.ratio) || 0));
+      fg.style.strokeDashoffset = String(C * (1 - r));
+      fg.style.stroke = colorOf(r);
+      txt.textContent = r >= 0.995 ? "满" : Math.round(r * 100) + "%";
+      txt.style.color = r >= 0.85 ? colorOf(r) : "#9a9aa2";
+      btn.title = "上下文占用 " + (r * 100).toFixed(1) + "%\n"
+        + "已用 " + kk(d.used) + " / " + kk(d.limit) + " token\n"
+        + "· 系统提示 " + kk(d.prompt) + "\n"
+        + "· 工具定义 " + kk(d.tools) + "\n"
+        + "· 对话历史 " + kk(d.history)
+        + (r >= 0.9 ? "\n\n已接近上限，会自动压缩较早的对话（保留要点）" : "");
+    };
+    const post = async (url, body) => {
+      const res = await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+      return res.json();
+    };
+
+    async function refresh(force) {
+      if (busy) return;
+      if (!force && history.length === lastLen) return;   // 没变化就不打扰后端
+      busy = true;
+      try {
+        const d = await post("/api/context/usage", { messages: history, session: sessionId });
+        if (!d || !d.ok) return;
+        lastLen = history.length;
+        paint(d);
+        // 到 90% 就压：留余量，别等真顶爆（那时这一轮已经塞不下了）
+        if (d.ratio >= 0.9 && history.length > 4 && (Date.now() - compactAt) > 20000) {
+          compactAt = Date.now();
+          const r = await post("/api/context/compact",
+            { messages: history, session: sessionId, target: 0.6 });
+          if (r && r.ok && r.changed && (r.messages || []).length) {
+            history.length = 0;
+            r.messages.forEach((m) => history.push(m));
+            lastLen = history.length;
+            showToast("上下文已自动压缩：保留最近 " + (r.kept || 0)
+              + " 条原文 + 较早对话的要点摘要（不会失忆）", "ok");
+            const d2 = await post("/api/context/usage", { messages: history, session: sessionId });
+            if (d2 && d2.ok) paint(d2);
+          }
+        }
+      } catch (e) { /* 读不到就保持原样，不打扰用户 */ }
+      finally { busy = false; }
+    }
+
+    btn.addEventListener("click", () => refresh(true));
+    window.addEventListener("model-changed", () => setTimeout(() => refresh(true), 300));
+    window.addEventListener("focus", () => refresh(false));
+    setInterval(() => refresh(false), 1500);      // 只比长度，变了才真的请求
+    setTimeout(() => refresh(true), 800);
+  })();
 })();
