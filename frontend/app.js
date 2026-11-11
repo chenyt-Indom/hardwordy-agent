@@ -4312,7 +4312,7 @@
         ? "（这次模型没有输出思考内容 —— 可能问题太简单，或该模型未开思考）"
         : "（本地 " + (_prov || "模型") + " 不是推理模型，没有思考过程。"
           + "想看思考过程请在顶栏把聊天模型切到 DeepSeek V4.1）";
-      thinkBody.style.display = "none";   // 完成后保持折叠
+      thinkBody.classList.remove("open");   // 完成后保持折叠（带动画）
       thinkArrow.textContent = "▸";
     };
 
