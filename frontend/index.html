@@ -675,7 +675,7 @@
 </body>
 <div class="think-dock" id="__probe" style="max-height:200px;font:12px/1.5 monospace;color:#fff">探针加载中…</div>
 <script>
-setTimeout(function(){
+(function(){
   var el=document.getElementById("__probe"); if(!el) return;
   var main=document.getElementById("main"), comp=document.querySelector(".composer");
   var vw=innerWidth, vh=innerHeight;
