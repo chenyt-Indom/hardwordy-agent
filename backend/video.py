@@ -357,14 +357,19 @@ def extract_audio(video, out, fmt="mp3", bitrate="192k"):
 
 
 # ---------------------------------------------------------------- 图片成片
-def images_to_video(images, out, seconds=3.0, fps=30, width=1920, height=1080,
+def images_to_video(images, out, seconds=3.0, fps=30, width=1920, height=None,
                     tmpdir=None):
-    """把一组图片做成视频（轮播 / 片头）。每张停留 `seconds` 秒。"""
+    """把一组图片做成视频（轮播 / 片头）。每张停留 `seconds` 秒。
+
+    ⚠️ height 默认**按 16:9 由 width 推出来**。原来写死 1080，用户只给
+       width=1280 时会得到 1280×1080 这种怪异比例（2026-11-11 实测踩到）。
+    """
     images = [p for p in (images or []) if p and os.path.isfile(p)]
     if not images:
         return {"ok": False, "error": "没有可用的图片"}
 
-    W, H = _even(width or 1920), _even(height or 1080)
+    W = _even(width or 1920)
+    H = _even(height or round(W * 9 / 16.0))
     tmp = tmpdir or tempfile.mkdtemp(prefix="vidimg_")
     lst = os.path.join(tmp, "list.txt")
     with open(lst, "w", encoding="utf-8") as f:
