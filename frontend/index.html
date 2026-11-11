@@ -323,6 +323,10 @@
       <button type="button" class="pill pill-btn" id="skillBtn" data-more="1"
               title="技能：你自己配的做法 / 规范（写周报、审代码…）。点开可查看详情、新建、修改、删除，并选用">⚡ 技能</button>
               <!-- 顶栏收起/展开（2026-11-08）：第二行里一个小按钮，收起时两行只剩这一行 + 这一个按钮 -->
+              <!-- 「⋯ 更多」（2026-11-12）：低频设置平时收着，点一下展开 / 再点收起。
+                   状态记在 localStorage.more_open，刷新后保持。 -->
+              <button type="button" class="pill pill-btn more-btn" id="moreBtn"
+                      title="更多设置：DeepSeek 密钥、绘图模型 / 图片 Key、代码模型、自开发、技能 —— 配一次就不动的东西都在这里">⋯ 更多</button>
               <button type="button" class="pill pill-btn" id="topbarToggle"
                       title="收起 / 展开上方能力开关（状态会记住，刷新后保持）">▾ 收起</button>
       <!-- 自开发面板（2026-11-08）：点开 🛠 后里面才有回撤历史 -->
