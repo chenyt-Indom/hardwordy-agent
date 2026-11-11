@@ -158,24 +158,35 @@
         return _siiv.call(this, opt);
       };
     }
-    // ★ 最后一道兜底（2026-11-12 用户二次反馈「还是会瞬移到最下方」）：
-    //   前面拦的都是「JS 主动滚」，但还有一堆拦不到的路径 —— 图片/视频加载完、
-    //   输入框 focus()、浏览器的滚动锚定、scrollIntoViewIfNeeded…
-    //   这里在自由查看期间直接盯住 DOM：内容一变，只要视口被往下拽了、又不是用户在滚，
-    //   就立刻写回用户原来的位置。rAF 节流，流式输出时也不会拖慢。
-    let _moPending = false;
-    const _mo = new MutationObserver(() => {
-      if (_moPending) return;
-      _moPending = true;
-      requestAnimationFrame(() => {
-        _moPending = false;
-        if (!freeView || _userActing()) return;
-        if (messagesEl.scrollTop > _keepTop + 1 && _d && _d.set) {
-          _d.set.call(messagesEl, Math.min(_keepTop, _maxTop()));
+    // ★ 最终方案（2026-11-12 三次反馈「自由查看要完全由用户决定」）：
+    //   前面几版都在「猜哪条路径会把视口拽走」（scrollTop 写入 / scrollIntoView /
+    //   scrollTo / DOM 变化），总有漏的：图片加载完、布局变化、浏览器滚动锚定、
+    //   focus()、拖滚动条…… 用户实测还是会被带下去。
+    //   改成不猜：自由查看期间开一个逐帧看门狗，只要发现视口「一下跳到底部」、
+    //   而用户并没有在做手势，就立刻写回用户停留的位置。
+    //   判据：程序滚动几乎总是一帧内直接跳到 scrollHeight；人滚轮/拖动是渐进的。
+    let _holdRAF = 0;
+    let _lastSeen = messagesEl.scrollTop;
+    function holdLoop() {
+      if (!freeView) { _holdRAF = 0; return; }
+      const cur = messagesEl.scrollTop;
+      const maxTop = _maxTop();
+      if (Math.abs(cur - _lastSeen) >= 1) {
+        const jumpedToBottom = cur >= maxTop - 12 && _lastSeen < maxTop - 120;
+        if (jumpedToBottom && !_userActing()) {
+          _setTop(Math.min(_keepTop, maxTop));      // 程序拽的 → 拉回原位
+        } else {
+          _keepTop = cur;                           // 用户自己滚的 → 以他为准
         }
-      });
-    });
-    _mo.observe(messagesEl, { childList: true, subtree: true, characterData: true });
+      }
+      _lastSeen = messagesEl.scrollTop;
+      _holdRAF = requestAnimationFrame(holdLoop);
+    }
+    _startHold = function () {
+      if (_holdRAF) return;
+      _lastSeen = messagesEl.scrollTop;
+      _holdRAF = requestAnimationFrame(holdLoop);
+    };
     syncFreeBtn();
   })();
 
