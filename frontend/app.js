@@ -87,6 +87,7 @@
   (function bindFreeView() {
     const _d = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
     const _maxTop = () => Math.max(0, messagesEl.scrollHeight - messagesEl.clientHeight);
+    let _lastScrollAt = 0;      // 上一次滚动事件时间（判断「正在连续滚动」，含触摸惯性）
     // 程序自己写位置时必须标记一下：否则这次写入触发的 scroll 事件会被当成
     // 「用户滚到这儿了」，反而把 _keepTop 改成底部 —— 那正是之前一直跳底的原因之一。
     let _reverting = false;
