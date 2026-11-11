@@ -3409,8 +3409,8 @@
         : "🧠 思考中…";
     };
     thinkHdr.onclick = () => {
-      const open = thinkBody.style.display !== "none";
-      thinkBody.style.display = open ? "none" : "block";
+      const open = thinkBody.classList.contains("open");
+      thinkBody.classList.toggle("open", !open);
       thinkArrow.textContent = open ? "▸" : "▾";
       if (!open) thinkBody.textContent = thinking + "▌";
     };
