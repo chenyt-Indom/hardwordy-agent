@@ -685,8 +685,8 @@
   var cap=Math.max(8,vh-150); if(bottom>cap) bottom=cap;
   var avail=(mR?mR.width:vw)-32;
   var width=Math.max(220,Math.min(430,Math.round(avail)));
-  el.style.left=Math.round(left)+"px"; el.style.bottom=Math.round(bottom)+"px"; el.style.width=width+"px";
-  el.textContent="vw="+vw+" vh="+vh+" | main.left="+(mR?Math.round(mR.left):"null")+" main.w="+(mR?Math.round(mR.width):"null")+" | composer.top="+(cR?Math.round(cR.top):"null")+" composer.h="+(cR?Math.round(cR.height):"null")+" | => left="+Math.round(left)+" bottom="+Math.round(bottom)+" width="+width;
+  el.style.left="16px"; el.style.bottom="180px"; el.style.width="560px"; el.style.maxHeight="220px";
+  el.textContent="vw="+vw+" vh="+vh+" | main.left="+(mR?Math.round(mR.left):"null")+" main.w="+(mR?Math.round(mR.width):"null")+" | comp.top="+(cR?Math.round(cR.top):"null")+" comp.h="+(cR?Math.round(cR.height):"null")+" | => left="+Math.round(left)+" bottom="+Math.round(bottom)+" width="+width;
 },600);
 </script>
 </html>
