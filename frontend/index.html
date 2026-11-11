@@ -172,7 +172,13 @@
 
     <!-- 记忆：一份长期（跨对话共享）+ 每个对话一份短期（互相独立） -->
     <section class="panel memory" id="memoryPanel">
-      <h2>🧠 记忆库</h2>
+      <!-- 标题行：点一下折叠 / 展开整块记忆库（状态存 localStorage） -->
+      <div class="mem-head" id="memToggle" role="button" tabindex="0"
+           aria-expanded="true" title="点一下折叠 / 展开记忆库">
+        <h2>🧠 记忆库</h2>
+        <span class="mu-caret" id="memCaret">▾</span>
+      </div>
+      <div class="mem-fold" id="memFoldBody">
       <p class="hint"><b>长期记忆</b>跨所有对话共享（放身份/偏好/约定），所以新开对话也不会不认识你；
         <b>短期记忆</b>只属于当前对话（放正在做的事），切对话就换一份，可随时释放。</p>
 
