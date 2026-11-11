@@ -6601,9 +6601,14 @@ def context_compact(body: dict):
     target = min(0.9, max(0.2, target))
     u = _ctx_used(msgs, str(b.get("session") or ""))
     budget = int(limit * target) - u["overhead"]
-    if budget <= 512 or len(msgs) <= 2:
+    # ⚠️ 固定开销（系统提示 + 工具定义）本身就可能超过目标预算 ——
+    #    实测 4 万窗口下开销 2.86 万，60% 目标只有 2.46 万，差值为负。
+    #    这时**仍然要压**（至少把历史压到最近几条），否则圆环永远降不下来。
+    if budget <= 512:
+        budget = 512
+    if len(msgs) <= 2:
         return {"ok": True, "changed": False, "messages": msgs, "dropped": 0,
-                "limit": limit, "reason": "空间足够，无需压缩"}
+                "limit": limit, "reason": "历史太短，无需压缩"}
     kept, used = [], 0
     for m in reversed(msgs):
         t = _est_tokens(m.get("content") or "")
