@@ -500,6 +500,40 @@
       });
     }
   })();
+
+  /* 「⋯ 更多」：低频设置收起 / 展开（2026-11-12）
+     ⚠️ 只切 body 上的一个 class，显隐交给 style.css 的 [data-more] 规则；
+        不删控件、不改 id、不重绑事件 —— 功能一点没动。 */
+  (function () {
+    var KEY = 'more_open';
+    var btn = document.getElementById('moreBtn');
+    if (!btn) return;
+    function paint(open) {
+      document.body.classList.toggle('more-open', open);
+      btn.classList.toggle('on', open);
+      btn.textContent = open ? '⋯ 收起' : '⋯ 更多';
+    }
+    var open = false;
+    try { open = localStorage.getItem(KEY) === '1'; } catch (e) {}
+    paint(open);
+    btn.addEventListener('click', function () {
+      var now = !document.body.classList.contains('more-open');
+      try { localStorage.setItem(KEY, now ? '1' : '0'); } catch (e) {}
+      paint(now);
+    });
+    /* 点别处自动收起，免得一直占着顶栏一行 */
+    document.addEventListener('click', function (ev) {
+      if (!document.body.classList.contains('more-open')) return;
+      if (ev.target === btn || btn.contains(ev.target)) return;
+      var el = ev.target;
+      while (el && el !== document.body) {
+        if (el.hasAttribute && el.hasAttribute('data-more')) return; // 点的是菜单里的控件
+        el = el.parentElement;
+      }
+      paint(false);
+      try { localStorage.setItem(KEY, '0'); } catch (e) {}
+    });
+  })();
   </script>
   <!-- 2026-11-10：给脚本加时间戳，彻底绕开 WebView2 的磁盘缓存。
        之前改完前端，窗口常常还在跑旧 JS（no-store 也拦不住 WebView 缓存），
