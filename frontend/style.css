@@ -690,6 +690,20 @@ body.dragging .drop-overlay,
 .dev-sub b { color: var(--text); }
 
 /* ---------- 内存占用面板 ---------- */
+/* ---------- 记忆库：整块折叠 ---------- */
+.mem-head {
+  display: flex; align-items: center; gap: 7px; cursor: pointer;
+  padding: 2px 4px; margin: -2px -4px 8px; border-radius: 6px;
+  user-select: none; outline: none;
+}
+.mem-head h2 { margin: 0 !important; }
+.mem-head .mu-caret { margin-left: auto; }
+.mem-head:hover { background: rgba(255, 255, 255, .04); }
+.mem-head:focus-visible { box-shadow: 0 0 0 2px rgba(90, 150, 255, .45); }
+.mem-fold {
+  overflow: hidden;
+  transition: max-height .32s cubic-bezier(.4, 0, .2, 1), opacity .24s ease;
+}
 .mem-usage {
   margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px;
 }
