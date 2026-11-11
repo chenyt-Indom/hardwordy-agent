@@ -3783,6 +3783,22 @@
       _tg2.type = "button";
       _tg2.onclick = _toggle;
       card.appendChild(_tg2);
+
+      // ★ 2026-11-11 用户要求：除了在下方折叠「代码」，还要能折叠「整张卡片」这个框。
+      //   场景：长代码展开后卡片很高，想把它整个收成一行，聊天区立刻清爽。
+      //   与上面的代码折叠是两套独立状态：整框收起时保留代码的折叠/展开记忆。
+      let _cardCollapsed = false;
+      const _tg3 = document.createElement("button");
+      _tg3.className = "btn sm ghost code-card-toggle code-card-toggle-b";
+      _tg3.type = "button";
+      _tg3.title = "收起 / 展开整张代码卡片（只保留标题行）";
+      const _syncCard = () => {
+        card.classList.toggle("card-collapsed", _cardCollapsed);
+        _tg3.textContent = _cardCollapsed ? "▾ 展开整张卡片" : "▴ 收起整张卡片";
+      };
+      _tg3.onclick = () => { _cardCollapsed = !_cardCollapsed; _syncCard(); };
+      card.appendChild(_tg3);
+      _syncCard();
       _syncTg();
 
       const paintOut = (r) => {
@@ -5993,7 +6009,7 @@
 
       // 「撤销上次回撤」：回到回滚前那一刻（后端回滚时会再存一个还原点，可反复）
       undoBtn.onclick = async () => {
-        if (!confirm("撤销上一次回滚，把代码恢复到回滚前吗？\n（之后需要重启应用才生效）")) return;
+        if (!confirm("确定撤销上一次回滚、把代码恢复到回滚前吗？\n\n点「确定」后：立刻恢复 → 自动重启应用（会短暂断开一下）")) return;
         undoBtn.disabled = true;
         undoBtn.textContent = "撤销中…";
         try {
@@ -6004,6 +6020,7 @@
             try { vst = await (await fetch("/api/version/status")).json(); } catch (e) {}
             try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) {}
             verPaint(); render(vlist);
+            if (window.__restartAppNow) setTimeout(() => window.__restartAppNow(), 500);
           }
         } catch (e) { say("❌ " + e.message, "#e06c6c"); }
         undoBtn.disabled = false;
@@ -6015,7 +6032,7 @@
         const rb = ev.target.closest("button[data-hash]");
         if (rb) {
           const h = rb.dataset.hash;
-          if (!confirm("回滚到版本 " + h + " 吗？\n回滚前会自动存一个还原点，不满意可点「↩ 撤销上次回撤」回来。\n（回滚后要重启应用才生效）")) return;
+          if (!confirm("确定回滚到版本 " + h + " 吗？\n\n· 回滚前会自动存一个还原点，后悔可点「↩ 撤销上次回撤」\n· 点「确定」后：立刻回滚 → 自动重启应用（会短暂断开一下）")) return;
           rb.disabled = true; rb.textContent = "回滚中…";
           try {
             const r = await (await fetch("/api/version/rollback", {
@@ -6023,10 +6040,11 @@
               body: JSON.stringify({ hash: h }) })).json();
             if (r.ok) {
               rb.textContent = "✅ 已回滚";
-              say("✅ " + (r.msg || "已回滚") + "（重启应用后生效）", "#7bd88f");
+              say("✅ " + (r.msg || "已回滚") + "，正在自动重启…", "#7bd88f");
               try { vst = await (await fetch("/api/version/status")).json(); } catch (e) {}
               try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) {}
               verPaint(); render(vlist);
+              if (window.__restartAppNow) { setTimeout(() => window.__restartAppNow(), 500); return; }
             } else {
               rb.disabled = false; rb.textContent = "回滚";
               say("❌ " + (r.error || "回滚失败"), "#e06c6c");
@@ -6082,7 +6100,7 @@
         const t = ev.target.closest("button[data-batch]");
         if (!t) return;
         const batch = t.dataset.batch;
-        if (!confirm("回撤到「" + batch + "」这次改动之前吗？\n这一批改过的文件都会被还原，之后需要重启应用。")) return;
+        if (!confirm("确定回撤到「" + batch + "」这次改动之前吗？\n\n· 这一批改过的文件都会被还原\n· 点「确定」后：立刻回撤 → 自动重启应用（会短暂断开一下）")) return;
         t.disabled = true; t.textContent = "回撤中…";
         try {
           const r = await (await fetch("/api/selfdev/rollback_batch", {
@@ -6090,7 +6108,8 @@
             body: JSON.stringify({ batch: batch }) })).json();
           if (r.ok) {
             t.textContent = "✅ 已回撤";
-            say("✅ " + (r.msg || "已回撤") + "（重启应用后生效）", "#7bd88f");
+            say("✅ " + (r.msg || "已回撤") + "，正在自动重启…", "#7bd88f");
+            if (window.__restartAppNow) { setTimeout(() => window.__restartAppNow(), 500); return; }
           } else {
             t.disabled = false; t.textContent = "回撤";
             say("❌ " + (r.error || r.msg || "回撤失败"), "#e06c6c");
@@ -6850,8 +6869,11 @@
       const b = box();
       const fs = (d && d.files) || [];
       const names = fs.slice(0, 2).map((f) => String(f).split("/").pop());
+      // 用户要求（2026-11-11）：前端文件改动也要提示重启（重启后按 Ctrl+F5 才会用上新样式）
+      const onlyFe = fs.length > 0 && fs.every((f) => String(f).startsWith("frontend/"));
+      const tail = onlyFe ? "（前端改动 · 重启后 Ctrl+F5 生效）" : "";
       b.querySelector(".rb-text").textContent = names.length
-        ? "新版本已就绪：" + names.join("、") + (fs.length > 2 ? " 等" : "")
+        ? "新版本已就绪：" + names.join("、") + (fs.length > 2 ? " 等" : "") + tail
         : "新版本已就绪";
       b.classList.add("on");
     }
@@ -6901,6 +6923,8 @@
 
     // 后端推了「新版本就绪」事件 → 立刻显示，不用等轮询
     window.__onRestartReady = (d) => show(d);
+    // 回撤版本后自动重启（用户要求：确认框点「确定」→ 回滚 → 立刻重启生效）
+    window.__restartAppNow = apply;
     poll();
     setInterval(poll, 4000);
   })();

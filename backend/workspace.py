@@ -28,6 +28,7 @@ import time
 import sys
 import time
 import zipfile
+from .procwin import NOWIN as _NOWIN
 
 from . import config
 
@@ -538,6 +539,7 @@ def start_run(rel: str, proj: str = "", run_id: str = "",
         proc = _sp.Popen(
             # -u 同样是为了**关掉子进程缓冲**，否则 print 会攒成一块再吐
             [sys.executable, "-X", "utf8", "-u", os.path.basename(p)] + extra,
+            creationflags=_NOWIN,
             cwd=os.path.dirname(p) or ".", env=env,
             # ⚠️ stdin 必须接到管道：后端是 GUI 启动的、**没有终端可读**，
             # 不接管道的话程序里一句 `input()` 直接
@@ -596,6 +598,7 @@ def start_run_code(code: str, run_id: str = "", stdin_text: str = "") -> dict:
     env.pop("MM_DATA_DIR", None)           # 被跑的代码不该摸到应用数据目录
     try:
         proc = _sp.Popen([sys.executable, "-X", "utf8", "-u", "snippet.py"],
+        creationflags=_NOWIN,
                          cwd=d, env=env,
                          # stdin 接管道：程序里 input() 时界面能喂进去（同 start_run）
                          stdin=_sp.PIPE,

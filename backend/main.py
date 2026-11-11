@@ -6607,7 +6607,14 @@ def selfdev_rollback_batch(body: dict):
     batch = str((body or {}).get("batch") or "").strip()
     if not batch:
         return {"ok": False, "error": "缺少 batch"}
-    return selfdev.rollback_batch(batch)
+    r = selfdev.rollback_batch(batch)
+    if isinstance(r, dict) and r.get("ok"):
+        try:
+            from . import pending as _pend
+            _pend.mark("", "回撤到「%s」之前" % batch)
+        except Exception:
+            logger.warning("批次回撤后标记待生效失败", exc_info=True)
+    return r
 
 
 @app.post("/api/selfdev/rollback")
@@ -9544,7 +9551,15 @@ def version_snapshot(req: VersionSnapReq):
 def version_rollback(req: VersionRollbackReq):
     """回滚到某个版本：files 空=整轮，给了列表=只回滚这几个文件。"""
     from . import version as _ver
-    return _ver.rollback(req.hash, req.files or None, req.note or "")
+    r = _ver.rollback(req.hash, req.files or None, req.note or "")
+    # 用户要求（2026-11-11）：代码一有改动就要有重启提示，回滚也算改动。
+    if isinstance(r, dict) and r.get("ok"):
+        try:
+            from . import pending as _pend
+            _pend.mark("", "回滚到版本 %s" % str(req.hash)[:7])
+        except Exception:
+            logger.warning("回滚后标记待生效失败", exc_info=True)
+    return r
 
 
 @app.get("/api/version/undo_info")
@@ -9565,6 +9580,11 @@ def version_undo():
     r = _ver.rollback(h, None, "撤销回滚")
     if r.get("ok"):
         r["msg"] = "已撤销回滚，代码回到 %s 那一刻。重启应用后生效。" % str(h)[:7]
+        try:
+            from . import pending as _pend
+            _pend.mark("", "撤销回滚到 %s" % str(h)[:7])
+        except Exception:
+            logger.warning("撤销回滚后标记待生效失败", exc_info=True)
     return r
 
 

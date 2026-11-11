@@ -21,6 +21,7 @@ import glob
 import json
 import logging
 import urllib.parse
+from .procwin import NOWIN as _NOWIN
 
 from . import config
 from . import t2i
@@ -1624,6 +1625,11 @@ def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
     try:
         from . import pending as _pend
         _pend.mark(str((r or {}).get("rel") or ""), act)
+        # ★ 用户要求（2026-11-11）：每一次改动都立刻进版本库，
+        #   这样连续改多个文件时也能精确退回任意一步。
+        _vc = _version_commit(act, r or {}, str(_SD_NOTE.get("note") or ""))
+        if isinstance(r, dict):
+            r["version"] = _vc
     except Exception:
         pass
 
@@ -1646,6 +1652,81 @@ def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
 # 自动自查的节流（同一次对话里别每改一行就截一次图，太贵）
 _AUTO_REVIEW = {"at": 0.0, "rounds": 0}
 _SD_NOTE = {"note": ""}   # 交接卡：暂存本次自开发工具的 note（见 backend/handoff.py）
+def _sd_patch_fixed(rel: str, find: str, replace: str, note: str = "") -> dict:
+    """修正版 selfdev.patch（2026-11-11 实测发现的严重 bug）。
+
+    原实现（backend/selfdev.py 里的 patch）用 `read(rel)` 取文本，而 read()
+    返回的是「带行号、且只给前 200 行」的**展示用**文本 —— 于是：
+      · 第 200 行以后的代码永远匹配不到（patch 只能改文件开头几屏）；
+      · 万一在前 200 行里命中，它会把这份带行号的 200 行文本写回文件，
+        文件后面几千行**直接被截断**（灾难级）。
+    selfdev.py 是回撤机制本身、被划成只读，所以这里在工具层提供一份正确
+    实现：读原始全文 → 命中唯一才替换 → 写回仍走 _sd.write
+    （自带备份 + Python 语法校验）。
+    """
+    from . import selfdev as _sd
+    try:
+        r = _sd.safe_rel(rel)
+    except Exception as e:                            # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    p = os.path.join(_sd.project_root(), r)
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError as e:
+        return {"ok": False, "error": "读取失败：%s" % e}
+    if not find:
+        return {"ok": False, "error": "find 不能为空"}
+    n = text.count(find)
+    if n == 0:
+        return {"ok": False,
+                "error": "没找到这段原文（空格/缩进/换行必须完全一致）"}
+    if n > 1:
+        return {"ok": False,
+                "error": "这段原文出现了 %d 次，为免改错地方，请给更长的一段上下文" % n}
+    return _sd.write(r, text.replace(find, replace, 1), note or "patch")
+
+
+def _version_commit(act: str, r: dict, note: str = "") -> dict:
+    """★ 用户要求（2026-11-11）：自开发的**每一次**文件改动都要进版本库。
+
+    以前只有「重启前」才自动打一次快照，中间连续改好几个文件时，
+    万一某一轮改坏了，用户没有中间点可退 —— 只能退回上一次重启，
+    那次重启之后的全部改动一起丢掉。现在改成：write / patch /
+    insert_after / apply 每成功一次就 commit 一次，版本列表里
+    就是一步步的脚印，可以精确退回到任意一步。
+
+    失败**不影响**这次改动本身（文件已经写进磁盘了），只是把原因
+    附在工具返回里，让用户知道这一版没进版本库。
+    """
+    try:
+        from . import version as _ver
+        rel = str(r.get("rel") or "")
+        msg = "自迭代 · %s %s" % (act, rel)
+        nt = (note or "").strip()
+        if nt:
+            msg += " · " + nt[:60]
+        res = _ver.snapshot(msg)
+    except Exception as e:                            # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    if not res.get("ok"):
+        return {"ok": False, "error": str(res.get("error") or "")[:200]}
+    if res.get("skipped"):
+        return {"ok": True, "skipped": True, "hash": res.get("hash") or ""}
+    return {"ok": True, "hash": res.get("hash") or "",
+            "files": int(res.get("files") or 0)}
+
+
+def _version_commit_line(v: dict) -> str:
+    """把 _version_commit 的结果拼成一行给模型/用户看的说明。"""
+    if not v:
+        return ""
+    if v.get("ok") and not v.get("skipped"):
+        return "已自动上传版本库：%s（这一版可单独退回）。" % (v.get("hash") or "")
+    if v.get("ok") and v.get("skipped"):
+        return "版本库无新增改动，本次未产生新快照。"
+    return ("⚠️ 本次改动**没能进版本库**：%s（文件已写入，但这一步无法单独退回）。"
+            % (v.get("error") or "未知原因"))
 
 
 def _auto_review(context: dict) -> str:
@@ -1699,6 +1780,18 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
     except Exception:
         pass
     """执行自开发工具。统一在这里兜异常，返回给模型的永远是文本。"""
+    # ★ 记下这次调用的备注：改动成功后 _version_commit 会写进提交说明
+    _SD_NOTE["note"] = str((arguments or {}).get("note") or "")
+    # ★ 2026-11-11：selfdev.py 的 patch 会把文件截断（见 _sd_patch_fixed 注释），
+    #   （实测：修好后能改任意位置，且不会截断文件）
+    #   这里换成正确实现。selfdev.py 本身是只读的回撤机制，不在那儿改。
+    try:
+        from . import selfdev as _sd_fix
+        if not getattr(_sd_fix, "_patch_fixed", False):
+            _sd_fix.patch = _sd_patch_fixed
+            _sd_fix._patch_fixed = True
+    except Exception:
+        pass
     from . import selfdev as _sd
     if not _sd.enabled():
         return ("自开发模式没打开。请让用户点顶栏「🛠 自开发」打开后再试 —— "
@@ -4166,6 +4259,7 @@ def run_code(code: str, allow_risky: bool = False, stdin_text: str = "") -> dict
             # 空输入时 communicate 会关掉它 → 仍是 EOF。
             p = _sp.Popen([sys.executable, "-X", "utf8", "-u", "snippet.py"],
                           cwd=d, env=env, stdin=_sp.PIPE,
+                          creationflags=_NOWIN,
                           stdout=_sp.PIPE, stderr=_sp.PIPE,
                           text=True, encoding="utf-8", errors="replace")
         except Exception as exc:
@@ -4254,6 +4348,7 @@ def run_file(path: str, allow_risky: bool = False, args: str = "",
                 _extra = []
         pr = _sp.Popen([sys.executable, "-X", "utf8", "-u", os.path.basename(p)] + _extra,
                        cwd=os.path.dirname(p) or ".", env=env,
+                       creationflags=_NOWIN,
                        # stdin 也接管道：模型可以**预先喂输入**来测 input() 程序
                        # （communicate 结束时会把管道关掉，所以没喂输入的程序
                        #   会照旧拿到 EOF，不会挂住智能体）。

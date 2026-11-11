@@ -73,6 +73,7 @@ def screenshot(url: str = "http://127.0.0.1:8000", width: int = 1280,
              "--window-size=%d,%d" % (int(width), int(height)),
              "--virtual-time-budget=%d" % int(wait_ms),
              "--screenshot=%s" % out, url],
+             creationflags=(0x08000000 if os.name == "nt" else 0),  # CREATE_NO_WINDOW
             capture_output=True, timeout=90)
     except Exception as e:                            # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
