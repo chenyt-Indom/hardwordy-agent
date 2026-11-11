@@ -3317,3 +3317,22 @@ html[data-theme="light"] select.pill-select option {
   opacity: .72;
 }
 .code-card > .code-card-toggle-b:hover { opacity: 1; }
+
+/* ================= 自由查看 + 折叠补间（2026-11-12）=================
+   自由查看：暂停自动跟随，用户可以停在任意位置看某一步。
+   开着时按钮变实心蓝，一眼能看出「现在是暂停状态」。 */
+#freeViewBtn.fv-on {
+  color: #fff;
+  background: var(--accent, #2563d8);
+  border-color: transparent;
+}
+#freeViewBtn.fv-on:hover { color: #fff; border-color: transparent; }
+
+/* 高度补间期间（app.js 的 animHeight 会给卡片加 .anim-h）：
+   ① 关掉子元素的 CSS 过渡 —— 两边同时动会抖；
+   ② 卡片溢出裁掉 —— 否则动画途中内容会漏到卡片外面。 */
+.code-card.anim-h,
+.code-card.anim-h * {
+  transition: none !important;
+}
+.code-card.anim-h { overflow: hidden; }
