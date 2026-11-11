@@ -2720,13 +2720,13 @@ html[data-theme="light"] .dl-btn.dl-danger:hover {
 }
 
 /* ---- 2. 下载进度 / 自检明细 ---- */
-html[data-theme="light"] .dl-mini { border-color: #d3dae6; color: #344054; }
-html[data-theme="light"] .dl-mini:hover { background: #eef2f8; }
-html[data-theme="light"] .dl-bar { background: #dde5f2; }
-html[data-theme="light"] .dl-meta { color: #4a5568; }
-html[data-theme="light"] .st-detail { border-top-color: #dde3ec; }
-html[data-theme="light"] .st-row b { color: #101828; }
-html[data-theme="light"] .st-det { color: #4a5568; }
+html[data-theme="light"] .dl-mini { border-color: #d0c5a9; color: #3a3529; }
+html[data-theme="light"] .dl-mini:hover { background: #f0ebdc; }
+html[data-theme="light"] .dl-bar { background: #e5ddc7; }
+html[data-theme="light"] .dl-meta { color: #574f3f; }
+html[data-theme="light"] .st-detail { border-top-color: #ded5c0; }
+html[data-theme="light"] .st-row b { color: #241f17; }
+html[data-theme="light"] .st-det { color: #574f3f; }
 html[data-theme="light"] .st-hint { color: #92400e; }
 
 /* ---- 3. 顶栏开关/下拉：原来写死深藏青底，浅色下是一块块黑疙瘩 ---- */
