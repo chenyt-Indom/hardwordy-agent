@@ -6507,6 +6507,126 @@ def perf_set(body: dict):
     return perf.set(str(b.get("profile") or ""), num_ctx=ctx, max_tokens=mt)
 
 
+# ---------------- 上下文占用环（2026-11-11）----------------
+# 前端底栏那个小圆环要显示「这次对话用掉了多少上下文」。
+# ⚠️ 不能只按历史字数估：**固定开销（系统提示 + 工具定义）就有 3 万 token 量级**，
+#    比多数对话的历史还大。只算历史的话圆环永远是绿的，等它变红已经顶爆了。
+# 固定开销缓存 60 秒 —— 重建一次系统提示要读记忆/技能文件，没必要每轮都读。
+_CTX_OVH = {"t": 0.0, "tokens": 0, "parts": {}}
+
+
+def _ctx_overhead(session: str = "") -> dict:
+    """系统提示 + 工具定义占多少 token（缓存 60 秒）。"""
+    now = time.time()
+    if _CTX_OVH["tokens"] and (now - _CTX_OVH["t"]) < 60:
+        return _CTX_OVH
+    cfg = config.load_config() or {}
+    try:
+        sp = _SystemPrompt.build("", session)
+    except Exception:
+        logger.warning("上下文环：系统提示构建失败，按 0 计", exc_info=True)
+        sp = ""
+    try:
+        sp += _ask_rules(cfg)
+    except Exception:
+        pass
+    try:
+        import json as _json
+        sch = tools.make_schemas(web_enabled=bool(cfg.get("web_enabled")),
+                                 kb_enabled=bool(cfg.get("rag_enabled")))
+        tools_t = _est_tokens(_json.dumps(sch, ensure_ascii=False))
+    except Exception:
+        logger.warning("上下文环：工具定义统计失败，按 0 计", exc_info=True)
+        tools_t = 0
+    prompt_t = _est_tokens(sp)
+    _CTX_OVH.update({"t": now, "tokens": prompt_t + tools_t,
+                     "parts": {"prompt": prompt_t, "tools": tools_t}})
+    return _CTX_OVH
+
+
+def _ctx_limit(num_ctx=0) -> int:
+    try:
+        v = int(num_ctx or 0)
+    except Exception:
+        v = 0
+    if v > 0:
+        return v
+    cfg = config.load_config() or {}
+    return int(cfg.get("num_ctx") or 8192)
+
+
+def _ctx_used(messages, session: str = "") -> dict:
+    ov = _ctx_overhead(session)
+    hist = 0
+    for m in (messages or []):
+        if isinstance(m, dict):
+            hist += _est_tokens(m.get("content") or "")
+    return {"overhead": int(ov["tokens"]),
+            "prompt": int(ov["parts"].get("prompt", 0)),
+            "tools": int(ov["parts"].get("tools", 0)),
+            "history": hist, "used": int(ov["tokens"]) + hist}
+
+
+@app.post("/api/context/usage")
+def context_usage(body: dict):
+    """返回当前上下文的占用情况（前端圆环用）。
+
+    前端每次换模型 / 改上下文长度都会重新调它 —— 所以 limit 一定按**当前配置**算，
+    不缓存 limit（只缓存固定开销）。
+    """
+    b = body or {}
+    limit = _ctx_limit(b.get("num_ctx"))
+    u = _ctx_used(b.get("messages"), str(b.get("session") or ""))
+    ratio = (u["used"] / limit) if limit > 0 else 0.0
+    return {"ok": True, "limit": limit, "ratio": round(ratio, 4),
+            "pct": round(ratio * 100, 1),
+            "free": max(0, limit - u["used"]), **u}
+
+
+@app.post("/api/context/compact")
+def context_compact(body: dict):
+    """把上下文压到目标比例以内：**保留最近的消息，较早的压成要点摘要**。
+
+    为什么不是直接丢：用户回头问「开头聊了什么」时模型必须还答得上来 ——
+    摘要就是「压缩但不失忆」的保证（和主通道 _trim_history_to_budget 同一套做法）。
+    返回压缩后的消息数组，前端直接替换自己的 history。
+    """
+    b = body or {}
+    msgs = [m for m in (b.get("messages") or []) if isinstance(m, dict)]
+    limit = _ctx_limit(b.get("num_ctx"))
+    try:
+        target = float(b.get("target") or 0.6)
+    except Exception:
+        target = 0.6
+    target = min(0.9, max(0.2, target))
+    u = _ctx_used(msgs, str(b.get("session") or ""))
+    budget = int(limit * target) - u["overhead"]
+    if budget <= 512 or len(msgs) <= 2:
+        return {"ok": True, "changed": False, "messages": msgs, "dropped": 0,
+                "limit": limit, "reason": "空间足够，无需压缩"}
+    kept, used = [], 0
+    for m in reversed(msgs):
+        t = _est_tokens(m.get("content") or "")
+        if kept and (used + t) > budget:
+            break
+        kept.append(m)
+        used += t
+    kept.reverse()
+    dropped = msgs[: len(msgs) - len(kept)]
+    digest = _history_digest(dropped)
+    out = list(kept)
+    if digest:
+        # 摘要并进**第一条**（若是 user 就合并，避免出现两条连续 user）
+        if out and out[0].get("role") == "user":
+            out[0] = {"role": "user",
+                      "content": digest + "\n\n" + str(out[0].get("content") or "")}
+        else:
+            out.insert(0, {"role": "user", "content": digest})
+    return {"ok": True, "changed": bool(digest) or len(out) != len(msgs),
+            "messages": out, "dropped": len(dropped), "kept": len(kept),
+            "digest_chars": len(digest), "limit": limit}
+
+
 @app.get("/api/selfdev/diff")
 def selfdev_diff(batch: str = "", rel: str = ""):
     """给版本历史用：某批次里某个文件「备份 vs 现在」的差异。"""
