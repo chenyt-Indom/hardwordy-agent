@@ -2995,8 +2995,23 @@ html[data-theme="light"] select.pill-select option {
 .code-card.card-collapsed > .code-edit-area,
 .code-card.card-collapsed > .code-out,
 .code-card.card-collapsed > .code-stdin,
-.code-card.card-collapsed .code-toggle { display: none; }
-.code-card.card-collapsed { padding-bottom: 8px; }
+.code-card.card-collapsed .code-toggle,
+.code-card.card-collapsed .code-btns,
+.code-card.card-collapsed > .code-card-toggle-b { display: none; }
+/* ★ 2026-11-11 用户要求「收缩到只剩一条」：收起后整张卡就是干净的一行，
+   点这一行任意位置即可展开（展开后再点底部「收起整张卡片」收回去）。 */
+.code-card.card-collapsed { padding-bottom: 0; }
+.code-card.card-collapsed > .code-head {
+  cursor: pointer; border-bottom: none; padding: 7px 10px;
+}
+.code-card.card-collapsed > .code-head:hover { background: var(--panel); }
+/* 折叠时右侧的「▸ 展开」提示（平时不显示） */
+.code-open-hint {
+  display: none; margin-left: auto; font-size: 12px; color: var(--accent, #5aa9ff);
+  white-space: nowrap;
+}
+.code-card.card-collapsed .code-open-hint { display: inline-block; }
+.code-card.card-collapsed .code-meta { margin-left: auto; }
 /* ⚠️ 同 .code-toggle-b：必须 `.code-card > .xxx`（0,2,0）才压得过 `.btn.sm { width:auto }` */
 .code-card > .code-card-toggle-b {
   display: block;
