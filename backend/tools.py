@@ -3885,7 +3885,8 @@ def _do_video_edit(arguments, ui_events, context):
 
     action = str(arguments.get("action") or "").strip().lower()
     _known = ("trim", "concat", "audio", "text", "subtitle",
-              "extract_audio", "images_to_video", "compress", "info")
+              "extract_audio", "images_to_video", "compress", "info",
+              "transition", "effect")
     if action not in _known:
         return ("错误：不认识的 action「%s」。可用的是：%s"
                 % (action, " / ".join(_known)))
