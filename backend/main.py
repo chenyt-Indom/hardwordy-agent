@@ -9544,7 +9544,15 @@ def version_snapshot(req: VersionSnapReq):
 def version_rollback(req: VersionRollbackReq):
     """回滚到某个版本：files 空=整轮，给了列表=只回滚这几个文件。"""
     from . import version as _ver
-    return _ver.rollback(req.hash, req.files or None, req.note or "")
+    r = _ver.rollback(req.hash, req.files or None, req.note or "")
+    # 用户要求（2026-11-11）：代码一有改动就要有重启提示，回滚也算改动。
+    if isinstance(r, dict) and r.get("ok"):
+        try:
+            from . import pending as _pend
+            _pend.mark("", "回滚到版本 %s" % str(req.hash)[:7])
+        except Exception:
+            logger.warning("回滚后标记待生效失败", exc_info=True)
+    return r
 
 
 @app.get("/api/version/undo_info")
