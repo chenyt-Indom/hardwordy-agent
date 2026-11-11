@@ -56,30 +56,31 @@
 html[data-theme="light"] {
   color-scheme: light;
 
-  /* 2026-11-11 用户反馈「纯白太刺眼」：整体换成低对比的淡蓝紫灰调，
-     不再有大面积纯白，色温偏冷、饱和度压低，长时间看不累。 */
-  --bg: #e9edf8;
-  --panel: #f6f8fe;
-  --panel2: #eef2fc;
-  --field-bg: #fdfdff;
-  --border: #d5dcf0;
-  --text: #2b3247;
-  --muted: #6d7793;
-  --accent: #3f6fe0;
+  /* 2026-11-12 用户第二次反馈「白色太刺眼」，并给了 WorkBuddy 的浅蓝紫灰做参照：
+     底色统一走 #edf0fa 一档的冷调灰蓝，主区/输入框都不再出现接近纯白的 #fdfdff，
+     对比度只靠文字和边框撑，长时间盯着不累。 */
+  --bg: #edf0fa;            /* 页面/侧栏底：浅蓝紫灰 */
+  --panel: #f4f6fd;         /* 主内容区：比底略亮一档，但不是白 */
+  --panel2: #e9eefb;        /* 气泡/次级面板 */
+  --field-bg: #f8faff;      /* 输入框：原 #fdfdff 太亮，压一档 */
+  --border: #dbe2f3;
+  --text: #2b3147;
+  --muted: #6f7995;
+  --accent: #2f6fe0;
   --green: #2f9e6b;
   --danger: #d94a44;
 
-  --btn-bg: #e6ebf8;
-  --btn-bg-hover: #d9e0f3;
-  --accent-hover: #3360cc;
-  --hover-bg: #e6ebf8;
+  --btn-bg: #e6ebf9;
+  --btn-bg-hover: #d8e0f4;
+  --accent-hover: #2a63c9;
+  --hover-bg: #e6ebf9;
   --think-bg: #eaf0fb;
-  --chip-bg: #e4ecfd;
-  --chip-border: #c6d6f6;
-  --gen-label-bg: #e4ecfd;
-  --meta-fg: #8b93a9;
+  --chip-bg: #e6edfd;
+  --chip-border: #c9d8f6;
+  --gen-label-bg: #e6edfd;
+  --meta-fg: #8a93a9;
   --overlay: rgba(30, 38, 60, .5);
-  --shadow: rgba(40, 52, 82, .18);
+  --shadow: rgba(40, 52, 82, .16);
   --lb-cap: #eef2fb;
   --tag-pin-bg: #2f9e6b;
   --tag-pin-fg: #fff;
@@ -89,8 +90,8 @@ html[data-theme="light"] {
   --warn: #a86a12;
   --warn-border: #e0b877;
   --warn-bg: rgba(224, 184, 119, .18);
-  --scrollbar: #cbd4e3;
-  --scrollbar-hover: #b3bfd3;
+  --scrollbar: #ccd5e6;
+  --scrollbar-hover: #b6c1d6;
 }
 
 /* 主题切换的过渡：只给底色/文字色，避免整页元素一起动导致卡顿 */
