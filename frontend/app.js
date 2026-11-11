@@ -3779,12 +3779,8 @@
       _tg.onclick = _toggle;
       const _btns = card.querySelector(".code-btns");
       if (_btns) _btns.prepend(_tg);
-      // 底部按钮：挂在整张卡片最末尾（输出、stdin 之下），始终够得着
-      _tg2 = document.createElement("button");
-      _tg2.className = "btn sm ghost code-toggle code-toggle-b";
-      _tg2.type = "button";
-      _tg2.onclick = _toggle;
-      card.appendChild(_tg2);
+      // ★ 2026-11-11 简化：删掉底部重复的「展开/收起代码」按钮。
+      //   原来一张卡最多挂 7 个按钮，很乱；现在底部只留一个「收起整张卡片」。
 
       // ★ 2026-11-11 用户要求：除了在下方折叠「代码」，还要能折叠「整张卡片」这个框。
       //   场景：长代码展开后卡片很高，想把它整个收成一行，聊天区立刻清爽。
