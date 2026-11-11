@@ -7481,7 +7481,7 @@
             if (d2 && d2.ok) paint(d2);
           }
         }
-      } catch (e) { /* 读不到就保持原样，不打扰用户 */ }
+      } catch (e) { document.title = "RING|ERR|" + (e && (e.message || e.name)) + "|len=" + history.length; }
       finally { busy = false; }
     }
 
