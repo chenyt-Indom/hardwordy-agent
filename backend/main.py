@@ -5454,7 +5454,8 @@ async def chat(req: ChatRequest,
                         _hard = all_messages[-2:] if len(all_messages) > 2 else all_messages
                         working[:] = _attach_live_ctx(
                             [{"role": "system", "content": full_sys}] + list(_hard),
-                            digest=digest, mem_ctx=mem_ctx, rag_ctx="")
+                            digest=digest, mem_ctx=mem_ctx, rag_ctx="",
+                            sched_ctx=_sched_ctx())
                         logger.warning("[ctx-overflow] 提示词超出窗口，已精简到最近 %d 条重试：%s",
                                        len(_hard), _emsg[:120])
                         yield json.dumps({"note": (
