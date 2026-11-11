@@ -1709,7 +1709,13 @@ def _open_folder_impl(target: str) -> dict:
     try:
         import subprocess
         if os.name == "nt":
-            subprocess.Popen(["explorer", target.replace("/", "\\")])
+            # ⚠️ 必须走 ShellExecute（os.startfile），不能用 subprocess.Popen(["explorer", ...])。
+            # procwin.install_nowin_patch() 给所有 Popen 补了 STARTF_USESHOWWINDOW + SW_HIDE
+            # （本意是治 ffmpeg/python 这类控制台程序弹黑窗），但 explorer.exe 是 GUI 程序：
+            # 被 SW_HIDE 启动的结果是「窗口开出来了、但始终是隐藏的」——用户点「打开文件夹」
+            # 完全没反应。2026-11-11 实测：残留 10 个 CabinetWClass 窗口，IsWindowVisible 全为 False。
+            # os.startfile 走 ShellExecute，不经过 Popen，补丁管不到，实测窗口可见。
+            os.startfile(os.path.normpath(target))
         elif sys.platform == "darwin":
             subprocess.Popen(["open", target])
         else:
