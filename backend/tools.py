@@ -1152,6 +1152,94 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
         {
             "type": "function",
             "function": {
+                "name": "video_edit",
+                "description": (
+                    "【剪视频】裁剪 / 拼接 / 配音 / 加文字水印 / 烧字幕 / 抽音轨 / "
+                    "图片成片 / 压缩转码。底层是本机 ffmpeg，**能保留原声**。\n"
+                    "用户说「剪一下视频」「把这段裁出来」「把几段拼起来」「加背景音乐」"
+                    "「加个标题 / 水印」「加字幕」「把声音导出来」「压小一点」时用它。\n"
+                    "⚠️ 用 action 选动作：\n"
+                    "  trim=按时间裁剪（source + start + duration 或 end），保留原声\n"
+                    "  concat=多段拼接（sources 列表，至少两个）\n"
+                    "  audio=加背景音乐 / 换音轨（source + audio；mode=replace 换掉原声，"
+                    "mode=mix 和原声混在一起；volume 是背景音乐音量）\n"
+                    "  text=在画面上压字（source + text；position 选位置；box 是否加底框；"
+                    "opacity 透明度；start/end 只在某段时间显示）\n"
+                    "  subtitle=把 .srt 字幕烧进画面（source + subtitle）\n"
+                    "  extract_audio=导出音轨（source，fmt=mp3/m4a/wav）\n"
+                    "  images_to_video=多张图片做成轮播视频（images 列表 + seconds）\n"
+                    "  compress=压缩 / 转码 / 改分辨率（source + crf + width）\n"
+                    "  info=只看视频信息（时长 / 分辨率 / 有没有声音）\n"
+                    "⚠️ source / sources / audio / subtitle 都可以给本地绝对路径，"
+                    "或生成文库里的文件名。\n"
+                    "⚠️ **做不了**：多轨时间线编辑、花哨的转场特效、AI 自动抠视频主体。"
+                    "用户要这些时如实说明做不到，别硬接。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["trim", "concat", "audio", "text", "subtitle",
+                                     "extract_audio", "images_to_video", "compress", "info"],
+                            "description": "要做哪种操作，见工具说明"},
+                        "source": {"type": "string",
+                                   "description": "输入视频：本地绝对路径或文库文件名"},
+                        "sources": {"type": "array", "items": {"type": "string"},
+                                    "description": "concat 用：要拼接的多段视频，按顺序给"},
+                        "images": {"type": "array", "items": {"type": "string"},
+                                   "description": "images_to_video 用：图片路径列表"},
+                        "audio": {"type": "string",
+                                  "description": "audio 用：背景音乐 / 新音轨文件"},
+                        "subtitle": {"type": "string",
+                                     "description": "subtitle 用：.srt 字幕文件路径"},
+                        "start": {"type": "number",
+                                  "description": "trim 起点（秒）；text 的显示起始秒"},
+                        "end": {"type": "number",
+                                "description": "trim 终点（秒）；text 的显示结束秒"},
+                        "duration": {"type": "number",
+                                     "description": "trim 时长（秒），和 end 二选一"},
+                        "mode": {"type": "string", "enum": ["replace", "mix"],
+                                 "description": "audio 用：replace 换掉原声（默认），"
+                                                "mix 与原声混合"},
+                        "volume": {"type": "number",
+                                   "description": "audio 用：背景音乐音量，1.0 为原音量"},
+                        "text": {"type": "string",
+                                 "description": "text 用：要压在画面上的文字"},
+                        "position": {
+                            "type": "string",
+                            "enum": ["top", "bottom", "center", "top-left",
+                                     "top-right", "bottom-left", "bottom-right"],
+                            "description": "text 用：文字位置，默认 bottom"},
+                        "fontsize": {"type": "integer",
+                                     "description": "text 用：字号，默认 48"},
+                        "color": {"type": "string",
+                                  "description": "text 用：字色，如 white / yellow / 0xFFCC00"},
+                        "box": {"type": "boolean",
+                                "description": "text 用：是否加半透明底框"
+                                               "（默认 true；水印建议 false）"},
+                        "opacity": {"type": "number",
+                                    "description": "text 用：不透明度 0~1，水印常用 0.5~0.7"},
+                        "margin": {"type": "integer",
+                                   "description": "text 用：距画面边缘留白像素，默认 60"},
+                        "fmt": {"type": "string", "enum": ["mp3", "m4a", "wav"],
+                                "description": "extract_audio 用：导出格式，默认 mp3"},
+                        "seconds": {"type": "number",
+                                    "description": "images_to_video 用：每张停留秒数，默认 3"},
+                        "crf": {"type": "integer",
+                                "description": "compress 用：画质 18~32，越大越小越糊，默认 28"},
+                        "width": {"type": "integer",
+                                  "description": "compress / concat 用：目标宽度，高度自动"},
+                        "filename": {"type": "string",
+                                     "description": "（可选）成品文件名"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "list_directory",
                 "description": "列出指定目录下的一级内容（文件/子目录）。用于浏览用户本机文件系统。",
                 "parameters": {
