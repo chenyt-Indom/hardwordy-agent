@@ -227,7 +227,10 @@
     const mRect = mainEl ? mainEl.getBoundingClientRect() : null;
     const vw = window.innerWidth, vh = window.innerHeight;
     const left = Math.max(8, (mRect ? mRect.left : 0) + 16);
-    const bottom = cRect ? Math.max(8, vh - cRect.top + 10) : 96;
+    let bottom = cRect ? Math.max(8, vh - cRect.top + 10) : 96;
+    // 输入区很高（多行输入 / 附件条）或窗口很矮时，别让框顶出视口上沿
+    const cap = Math.max(8, vh - 150);
+    if (bottom > cap) bottom = cap;
     const avail = (mRect ? mRect.width : vw) - 32;
     w.style.left = Math.round(left) + "px";
     w.style.bottom = Math.round(bottom) + "px";
