@@ -5667,6 +5667,12 @@
       const act = b.dataset.act;
       b.disabled = true;
       try {
+        if (act === "result") {
+          const nm = (box.querySelector(".sched-hd b") || {}).textContent || "";
+          b.disabled = false;
+          openResult(id, nm);
+          return;
+        }
         if (act === "run") {
           // 2026-11-09：改成"后台跑 + 轮询"。一次要 60~120 秒，
           // 原来同步 await，浏览器早就超时了，用户看到的就是"点了没反应"。
