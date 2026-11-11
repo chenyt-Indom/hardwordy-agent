@@ -6901,6 +6901,8 @@
 
     // 后端推了「新版本就绪」事件 → 立刻显示，不用等轮询
     window.__onRestartReady = (d) => show(d);
+    // 回撤版本后自动重启（用户要求：确认框点「确定」→ 回滚 → 立刻重启生效）
+    window.__restartAppNow = apply;
     poll();
     setInterval(poll, 4000);
   })();
