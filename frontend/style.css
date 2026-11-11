@@ -1539,6 +1539,10 @@ button.pill-btn.bad:hover { border-color: #8a463c; }
   font-size: 13px; font-family: Consolas, Menlo, monospace; letter-spacing: .3px;
 }
 .amap-newinput:focus { outline: none; box-shadow: 0 0 0 2px rgba(79, 139, 249, .25); }
+/* 申请 key 的入口链接：始终显示（切到"改 key"时上面的说明会隐藏，那时最需要它） */
+.amap-golink { margin-top: 10px; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+.amap-golink a { color: #5aa9ff; text-decoration: underline; text-underline-offset: 2px; }
+.amap-golink a:hover { color: #8cc4ff; }
 
 
 /* ---------- 涂抹选区（精确微改） ---------- */
