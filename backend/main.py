@@ -294,8 +294,47 @@ def _memory_ctx(session: str, last_user_text: str, cfg: dict) -> str:
         "  不要只说「加油」「坚持就是胜利」这种空话。")
 
 
+def _sched_ctx() -> str:
+    """定时任务的**现状摘要**（全局，跨会话共享）。
+
+    2026-11-11 用户要求：「外面无论单开多少对话，所有对话都可以访问定时任务的
+    完成情况以及内容，**是否查看由模型自主决断**」。
+
+    所以这里只给一行摘要（有几个、最近一次跑的是什么、200 字预览），
+    并明确告诉模型「要不要细看由你判断、要看就调 list_schedules」。
+    ⚠️ 正文**不塞进来**：这块挂在用户消息上，每轮都发，塞全文会白烧上下文。
+    """
+    try:
+        from . import scheduler as _sch
+        jobs = _sch.list_jobs()
+    except Exception:
+        return ""
+    if not jobs:
+        return ""
+    n_on = sum(1 for j in jobs if j.get("enabled"))
+    last = None
+    for j in jobs:
+        lr = str(j.get("last_run") or "")
+        if lr and (last is None or lr > str(last.get("last_run") or "")):
+            last = j
+    bits = ["共 %d 个（启用 %d）" % (len(jobs), n_on)]
+    if last:
+        bits.append("最近一次「%s」%s %s" % (
+            last.get("name"), str(last.get("last_run") or "")[5:16],
+            str(last.get("last_status") or "")[:20]))
+        prev = str(last.get("last_preview") or "").strip().replace("\n", " ")
+        if prev:
+            bits.append("摘要：" + prev[:80] + ("…" if len(prev) > 80 else ""))
+    return ("【定时任务的现状】（全局共享，任何对话看到的都是同一批；"
+            "**要不要细看、要不要跟用户提，由你自己判断** —— 跟本轮无关就别念）\n· "
+            + "；".join(bits)
+            + "\n· 想看全部任务或某次运行的完整结果 → 调 list_schedules"
+              "（要正文加 with_result=true）。")
+
+
 def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
-                     rag_ctx: str = "", img_ctx: str = "", skill_ctx: str = "") -> list:
+                     rag_ctx: str = "", img_ctx: str = "", skill_ctx: str = "",
+                     sched_ctx: str = "") -> list:
     """把**每轮会变的**内容（历史摘要/记忆/知识库检索/当前时间）挂到**最后一条用户消息**上。
 
     返回一份新列表；`working` 本身不动。
