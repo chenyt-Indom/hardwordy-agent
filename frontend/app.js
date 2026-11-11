@@ -4079,7 +4079,7 @@
         card.classList.toggle("card-collapsed", _cardCollapsed);
         _tg3.textContent = _cardCollapsed ? "▾ 展开整张卡片" : "▴ 收起整张卡片";
       };
-      const _flipCard = () => { _cardCollapsed = !_cardCollapsed; _syncCard(); };
+      const _flipCard = () => animHeight(card, () => { _cardCollapsed = !_cardCollapsed; _syncCard(); });
       _tg3.onclick = _flipCard;
       card.appendChild(_tg3);
       // 收起状态下整张卡只剩标题行 —— 点这一行也能展开，不用去找按钮
