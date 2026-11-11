@@ -92,11 +92,11 @@
         configurable: true,
         get() { return _d.get.call(this); },
         set(v) {
-          // 只拦「滚到底」这一种写入；其它（恢复位置等）照常放行。
-          // 2026-11-12 用户二次反馈「还是会跳」：原来是 |v - scrollHeight| < 2，
-          // 代码写 scrollTop = scrollHeight 时读值和写值之间内容只要又长了一点就漏拦，
-          // 改成按「可滚动上限」比，稳得多。
-          if (freeView && v >= _maxTop() - 4) return;
+          // ★ 2026-11-12 三次反馈「还是会被带下去」：
+          //   原来只拦「写入值≈底部」这一种，只要有一条路径写的是「离底部差几像素」
+          //   的值就漏过去了。现在自由查看期间干脆**不接受任何 JS 写入**，
+          //   一律写回用户停留的位置 —— 视口只由用户的手势决定。
+          if (freeView) { _setTop(Math.min(_keepTop, _maxTop())); return; }
           _d.set.call(this, v);
         },
       });
