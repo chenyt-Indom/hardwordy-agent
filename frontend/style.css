@@ -2220,6 +2220,39 @@ body.topbar-collapsed .top-bar.tools-bar { padding: 4px 16px 8px; }
 }
 .sched-close:hover { color: var(--text); border-color: var(--accent); }
 .sched-float .sched-body { overflow: auto; flex: 1 1 auto; }
+/* 📄 定时任务结果查看窗（2026-11-11）：用户要「一个能看结果的窗口」。
+   只读小窗，居中悬浮，正文内部滚动，不挤压页面布局。 */
+.sched-win {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(720px, calc(100vw - 48px));
+  max-height: 72vh;
+  display: flex;
+  flex-direction: column;
+  z-index: 70;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
+  overflow: hidden;
+}
+.sched-win[hidden] { display: none; }
+.sched-win .sched-close { margin-left: auto; }
+.sched-win-body {
+  margin: 0;
+  padding: 12px 16px;
+  flex: 1 1 auto;
+  max-height: 64vh;
+  overflow: auto;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .sched-ro {
   margin: 0;
   padding: 9px 12px;
