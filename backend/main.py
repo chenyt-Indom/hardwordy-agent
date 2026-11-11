@@ -40,6 +40,16 @@ from . import (config, ollama_client, deepseek_client, cloud_image, image_models
                workspace, actlog)
 
 app = FastAPI(title="hardwordy", version="1.0.0")
+
+
+# ⚠️ 必须在任何子进程启动之前装上：之后所有 subprocess.Popen（含只读模块
+#    backend/selfdev.py 里的 node --check、git）都不会再弹控制台黑窗。
+#    用户反馈：「调用工具时总有一些窗口闪来闪去，很影响观感」。
+try:
+    from . import procwin as _procwin
+    _procwin.install_nowin_patch()
+except Exception:
+    pass
 client = ollama_client.OllamaClient()
 
 # ⚠️ 这个 **必须**有：本文件多处用 `logger.xxx` 打日志，
