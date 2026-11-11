@@ -307,12 +307,13 @@
     syncThinkBtn();
     applyThinkDock();
     if (was !== thinkFollow && typeof showToast === "function") {
-      showToast(
-        thinkFollow
-          ? "思考框改为「跟随」：思考时固定在左下角，滚到哪都看得到"
-          : "思考框改为「固定」：留在消息流原位，不再浮动",
-        ""
-      );
+      // 说明当前有没有真的动了框：没有存活思考框时，讲清楚「下一轮才生效」，
+      // 免得用户点了按钮、界面没变化，以为按钮坏了。
+      const n = Array.from(_thinkBoxes).filter((w) => w.isConnected).length;
+      const mode = thinkFollow
+        ? "跟随视角：思考框固定在视口左下角，滚到哪都看得到"
+        : "回到原位：思考框已放回消息流原来的位置";
+      showToast(n ? mode : mode + "（这一轮没有进行中的思考框，下一轮开始后生效）", "");
     }
   }
   (function bindThinkFollow() {
