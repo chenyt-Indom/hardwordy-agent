@@ -79,27 +79,61 @@ def _extract_locked(text: str, begin: str, end: str):
     return text[i:j + len(end)]
 
 
+def _extract_all_locked(text: str, begin: str, end: str) -> list:
+    """取出**所有**同名区块（按出现顺序），每项为含两端标记的原文。
+
+    ⚠️⚠️ 2026-11-11 修：原来只用 `.find()` 取第一处，于是同一个名字在文件里
+    出现两次时，**第二处完全不受保护**。实测 `frontend/app.js` 的
+    `default-model-ready` 就在两处（初始化那处 + doSend 里的通道判定），
+    `doSend` 那处正是最关键的，却被静默放过（篡改不报错）。
+    现在改成逐处收全，数量不对 / 任何一处内容变了都拒绝。
+    某处有 LOCK 却没有对应 END 时，该项为 None（视为该区块已破损）。
+    """
+    out = []
+    s = text or ""
+    i = 0
+    while True:
+        i = s.find(begin, i)
+        if i < 0:
+            return out
+        j = s.find(end, i)
+        if j < 0:
+            out.append(None)          # 有头无尾
+            return out
+        out.append(s[i:j + len(end)])
+        i = j + len(end)
+
+
 def _check_locked_blocks(rel: str, old: str, new: str) -> str:
-    """新内容必须**逐字保留**所有锁定区块。
+    """新内容必须**逐字保留**所有锁定区块（同名区块的**每一处**都要保留）。
 
     返回空串 = 通过；否则返回给模型看的拒绝原因。
     磁盘上本来就没有这一段时跳过（不拦首次添加）。
     """
     for b, e in _LOCKED_BLOCKS.get(rel, ()):
-        a = _extract_locked(old, b, e)
-        if a is None:
+        olds = _extract_all_locked(old, b, e)
+        if not olds:
             continue
-        c = _extract_locked(new, b, e)
-        if c is None:
-            return ("拒绝：这段代码是**锁定区**，不允许删除或改名（%s）。\n"
-                    "它是用户要求的硬性保护，删掉会让界面直接变空白、且极难排查。\n"
-                    "请原样保留整个区块（从 LOCK 到 END），只改区块外面的代码。"
-                    % b)
-        if c != a:
-            return ("拒绝：这段代码是**锁定区**，不允许修改（%s）。\n"
-                    "它是用户要求的硬性保护，改了会让界面直接变空白、且极难排查。\n"
-                    "如需调整，请先在回答里说明改动原因，由用户手动解除锁定后再改。"
-                    % b)
+        news = _extract_all_locked(new, b, e)
+        if len(news) < len(olds):
+            return ("拒绝：**锁定区被删除或合并**（%s）。\n"
+                    "磁盘上有 %d 处，提交的内容里只剩 %d 处。\n"
+                    "这几处是用户要求的硬性保护，删掉会让界面直接变空白、且极难排查。\n"
+                    "请原样保留每一处（从 LOCK 到 END），只改区块外面的代码。"
+                    % (b, len(olds), len(news)))
+        for k, a in enumerate(olds, 1):
+            if a is None:             # 磁盘上本来就是破损的（有头无尾），无从比对
+                continue
+            c = news[k - 1]
+            if c is None:
+                return ("拒绝：第 %d 处锁定区少了 END 标记（%s）。\n"
+                        "请原样保留整个区块（从 LOCK 到 END），只改区块外面的代码。"
+                        % (k, b))
+            if c != a:
+                return ("拒绝：第 %d 处锁定区**不允许修改**（%s）。\n"
+                        "它是用户要求的硬性保护，改了会让界面直接变空白、且极难排查。\n"
+                        "如需调整，请先在回答里说明改动原因，由用户手动解除锁定后再改。"
+                        % (k, b))
     return ""
 
 
