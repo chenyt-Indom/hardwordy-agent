@@ -148,8 +148,14 @@ body {
   width: 0; min-width: 0; padding-left: 0; padding-right: 0;
   border-right-width: 0; border-right-color: transparent; overflow: hidden;
 }
-/* 内容跟着淡出/淡入，宽度收窄时文字不会硬生生被切断 */
-.sidebar > * { transition: opacity .2s ease; }
+/* 内容跟着淡出/淡入，宽度收窄时文字不会硬生生被切断。
+   ⚠️ 这里必须把颜色过渡一起写上：`.sidebar > *` 会命中侧栏里的 .panel，
+   而它的优先级和后面的顺序都会盖掉第 101 行那条，只写 opacity 会让
+   侧栏内的卡片在切主题时变成硬切。 */
+.sidebar > * {
+  transition: opacity .2s ease,
+              background-color .18s ease, color .18s ease, border-color .18s ease;
+}
 .sidebar.hidden > * { opacity: 0; }
 
 .brand { display: flex; gap: 12px; align-items: center; }
