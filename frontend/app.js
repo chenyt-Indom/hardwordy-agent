@@ -3458,6 +3458,56 @@
       return wrap;
     };
 
+    // ---- 代码卡片分组：一次跑很多段代码时，不让卡片一张张往下堆 ----
+    // 2026-11-11 用户反馈：模型一轮里连着跑好几段代码，每段一张大卡片，
+    // 聊天区被这些提示塞满、翻不到正文。现在**连续的**代码卡片自动收进同一个
+    // 分组，分组头只占一行「🐍 本地执行的代码 · N 段」，点一下整组收起/展开。
+    const codeGroupOf = (parent) => {
+      const last = parent.lastElementChild;
+      if (last && last.classList && last.classList.contains("code-group")) return last;
+      const g = document.createElement("div");
+      g.className = "code-group";
+      const head = document.createElement("div");
+      head.className = "code-group-head";
+      // 用 createElement 逐个建，而不是 innerHTML 拼串：可读、可控、便于自测
+      const ttl = document.createElement("span");
+      ttl.className = "cg-title";
+      ttl.textContent = "🐍 本地执行的代码";
+      const cntEl = document.createElement("span");
+      cntEl.className = "cg-count";
+      const btn = document.createElement("button");
+      btn.className = "btn sm ghost cg-toggle";
+      btn.type = "button";
+      btn.textContent = "▴ 全部收起";
+      head.appendChild(ttl);
+      head.appendChild(cntEl);
+      head.appendChild(btn);
+      const body = document.createElement("div");
+      body.className = "code-group-body";
+      g.appendChild(head);
+      g.appendChild(body);
+      g.__body = body;
+      g.__cnt = cntEl;
+      // ⚠️ 和 sd-card 一样：不要用 btn.click() —— 某些嵌入环境里元素没有 click()
+      const sync = () => {
+        const collapsed = g.classList.contains("collapsed");
+        body.hidden = collapsed;
+        btn.textContent = collapsed ? "▾ 展开全部" : "▴ 全部收起";
+      };
+      const toggle = () => { g.classList.toggle("collapsed"); sync(); };
+      btn.onclick = (ev) => { ev.stopPropagation(); toggle(); };
+      head.onclick = toggle;
+      sync();
+      parent.appendChild(g);
+      return g;
+    };
+    const appendCodeCard = (parent, card) => {
+      const g = codeGroupOf(parent);
+      g.__body.appendChild(card);
+      if (g.__cnt) g.__cnt.textContent = "· " + g.__body.querySelectorAll(".code-card").length + " 段";
+      return card;
+    };
+
     const makeCodeCard = (ui, title) => {
       const card = document.createElement("div");
       card.className = "code-card";
@@ -3792,7 +3842,7 @@
           d.textContent = "（这里原本是一次内部工具调用，已折叠）";
           bubble.appendChild(d);
         } else {
-          bubble.appendChild(makeCodeCard(
+          appendCodeCard(bubble, makeCodeCard(
             { code: p.v, lang: p.lang, userText: userText || "" },
             "📄 代码（可编辑后直接运行）"));
         }
@@ -4231,7 +4281,7 @@
               messagesEl.scrollTop = messagesEl.scrollHeight;
             }
             else if (obj.ui.type === "code") {
-              answerWrap.appendChild(makeCodeCard(obj.ui));
+              appendCodeCard(answerWrap, makeCodeCard(obj.ui));
               messagesEl.scrollTop = messagesEl.scrollHeight;
             }
             else if (obj.ui.type === "typing") {

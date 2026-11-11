@@ -2901,3 +2901,20 @@ html[data-theme="light"] select.pill-select option {
 .sd-row .sd-head { cursor: pointer; }
 .sd-row .sd-head:hover { background: rgba(90, 169, 255, .06); }
 .sd-row .sd-body { border-top: 1px solid #262d38; }
+
+/* ===== 代码卡片分组（2026-11-11 用户要求：代码提示别堆成一屏）===== */
+.code-group {
+  margin: 10px 0; border: 1px solid var(--border); border-radius: 12px;
+  background: rgba(255, 255, 255, .02); overflow: hidden; max-width: 100%;
+}
+.code-group-head {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 7px 10px; background: var(--panel2); user-select: none;
+}
+.code-group-head:hover { background: var(--panel); }
+.code-group-head .cg-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.code-group-head .cg-count { font-size: 11px; color: var(--muted); }
+.code-group-head .cg-toggle { margin-left: auto; }
+.code-group-body { padding: 0 8px 2px; }
+.code-group-body .code-card { margin: 8px 0; }
+.code-group.collapsed .code-group-body { display: none; }
