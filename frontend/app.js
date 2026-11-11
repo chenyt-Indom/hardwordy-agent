@@ -286,7 +286,11 @@
   function clearThinkDock() {
     _thinkLive = null;
     _thinkBoxes.clear();
-    document.querySelectorAll("body > .think-dock").forEach((n) => n.remove());
+    document.querySelectorAll("body > .think-dock").forEach((n) => {
+      if (n._ph && n._ph.parentNode) n._ph.parentNode.removeChild(n._ph);
+      n._ph = null;
+      n.remove();
+    });
   }
   // 按当前偏好把**所有**思考框摆好（思考途中、思考结束后切按钮都立刻生效）
   function applyThinkDock() {
