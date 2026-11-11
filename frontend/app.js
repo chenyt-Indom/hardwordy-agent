@@ -2075,6 +2075,9 @@
   })();
 
   async function loadDoclib(highlight) {
+  // 2026-11-11 重构：改走「全量视图」—— 生成文库 + 工作区软件 + 生成图片，
+  // 按类别分组、可展开收起、双击用本机程序打开。旧实现保留在 loadDoclibLegacy。
+  return __dlLoadAll(highlight);
     const list = $("#dlList");
     if (!list) return;
     if (highlight) dlCurrent = highlight;
@@ -2188,6 +2191,198 @@
         }
       };
     });
+  }
+
+  // ---------- 生成文库 · 全量视图（2026-11-11 重构）----------
+  // 用户要求：① 文库要有文本 / PPT / Excel / Word / 图片 / 软件等**所有**产出；
+  //          ② 双击直接用本机程序打开；③ 按类别展开与收起（默认全部收起）。
+  // 数据来自 /api/doclib/all（后端聚合 文库 + 工作区项目 + 生成图片，只读、不动磁盘）。
+  const DL_CATS = [
+    ["recent", "🕒 最近生成"],
+    ["doc", "📄 文档"],
+    ["ppt", "📊 演示文稿"],
+    ["sheet", "📈 表格"],
+    ["text", "📝 文本"],
+    ["code", "💻 代码"],
+    ["image", "🖼 图片 / 视频"],
+    ["software", "📦 软件 / 压缩包"],
+    ["other", "📎 其它"],
+  ];
+  const DL_OPEN_KEY = "doclib.openCats";
+  let dlAll = [], dlById = {}, dlCurrentId = "";
+
+  function dlOpenSet() {
+    try {
+      const raw = localStorage.getItem(DL_OPEN_KEY);
+      if (raw) return new Set(JSON.parse(raw) || []);
+    } catch (e) { /* 读不到就按默认：全部收起 */ }
+    return new Set();
+  }
+  function dlSaveOpen(set) {
+    try { localStorage.setItem(DL_OPEN_KEY, JSON.stringify(Array.from(set))); } catch (e) {}
+  }
+  function dlSizeText(b) {
+    const n = Number(b) || 0;
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + "MB";
+    if (n >= 1024) return (n / 1024).toFixed(0) + "KB";
+    return n + "B";
+  }
+  function dlIconOf(f) {
+    const m = { doc: "📄", ppt: "📊", sheet: "📈", text: "📝",
+                code: "💻", image: "🖼", software: "📦", other: "📎" };
+    return m[f.cat] || "📎";
+  }
+  function dlCatLabel(key) {
+    for (let i = 0; i < DL_CATS.length; i++) if (DL_CATS[i][0] === key) return DL_CATS[i][1];
+    return key;
+  }
+  function dlRowHtml(f) {
+    const sub = f.src === "ws" ? (f.project || "") : (f.folder || "");
+    const tag = f.src === "ws" ? '<span class="dl-tag">软件</span>'
+      : (f.src === "img" ? '<span class="dl-tag">生成图</span>' : "");
+    return '<div class="list-item dl-item' + (f.id === dlCurrentId ? " active" : "") +
+      '" data-id="' + escapeHtml(f.id) + '" data-rel="' +
+      escapeHtml(f.src === "lib" ? f.rel : "") +
+      '" title="双击用本机程序打开：' + escapeHtml(f.name) + '">' +
+      '<span class="dl-icon">' + dlIconOf(f) + '</span>' +
+      '<span class="dl-main"><span class="dl-name">' + escapeHtml(f.name) + '</span>' +
+      '<span class="dl-sub">' + (sub ? escapeHtml(sub) + " · " : "") +
+      escapeHtml(f.modified) + " · " + dlSizeText(f.size) +
+      (tag ? " " + tag : "") + '</span></span>' +
+      (f.editable ? '<button type="button" class="dl-del" data-rel="' +
+        escapeHtml(f.rel) + '" title="删除">🗑</button>' : "") +
+      '</div>';
+  }
+  function dlCatBlock(key, items, opened) {
+    return '<div class="dl-cat' + (opened ? " open" : "") + '" data-cat="' + key + '">' +
+      '<button type="button" class="dl-cat-head" data-cat="' + key + '" aria-expanded="' +
+      (opened ? "true" : "false") + '">' +
+      '<span class="dl-cat-arrow">' + (opened ? "▾" : "▸") + '</span>' +
+      '<span class="dl-cat-name">' + dlCatLabel(key) + '</span>' +
+      '<span class="dl-cat-count">' + items.length + '</span></button>' +
+      '<div class="dl-cat-body">' + items.map(dlRowHtml).join("") + '</div></div>';
+  }
+
+  async function dlOpenWithSystem(id) {
+    const f = dlById[id];
+    if (!f) return;
+    showToast("正在用本机程序打开：" + f.name, "");
+    try {
+      const r = await api("/api/doclib/open_any", { method: "POST",
+        body: JSON.stringify({ id: id }) });
+      if (r && r.opened) showToast("已打开：" + f.name, "ok");
+      else showToast((r && r.detail) || "无法直接打开这个文件", "warn");
+    } catch (e) {
+      showToast("打开失败：" + (e.message || e), "warn");
+    }
+  }
+
+  async function dlSelect(id) {
+    const f = dlById[id];
+    if (!f) return;
+    dlCurrentId = id;
+    document.querySelectorAll(".dl-item").forEach((el) =>
+      el.classList.toggle("active", el.dataset.id === id));
+    // 文本 / 代码：面板内打开可编辑；Office、软件、图片：提示双击用本机程序打开
+    if (f.editable && (f.cat === "text" || f.cat === "code" || f.cat === "other")) {
+      await openDoclibFile(f.rel);
+    } else {
+      showToast("双击「" + f.name + "」用本机程序打开", "");
+    }
+  }
+
+  async function dlDelete(rel) {
+    if (!rel) return;
+    if (!confirm("删除《" + rel + "》？\n（会移进回收站，需要时能捞回来）")) return;
+    try {
+      await api("/api/doclib/delete", { method: "POST",
+        body: JSON.stringify({ rel: rel }) });
+      showToast("已删除（在回收站里）", "ok");
+      if (dlCurrent === rel) {
+        const ed = $("#dlEditor"); if (ed) ed.hidden = true; dlCurrent = "";
+      }
+      loadDoclib();
+    } catch (e) {
+      showToast("删除失败：" + (e.message || e), "err");
+    }
+  }
+
+  async function __dlLoadAll(highlight) {
+    const list = $("#dlList");
+    if (!list) return;
+    let d;
+    try {
+      d = await api("/api/doclib/all");
+    } catch (e) {
+      list.innerHTML = '<div class="hint">读取失败：' +
+        escapeHtml(String(e.message || e)) + "</div>";
+      return;
+    }
+    dlAll = d.files || [];
+    dlById = {};
+    dlAll.forEach((f) => { dlById[f.id] = f; });
+    if (!dlAll.length) {
+      list.innerHTML = '<div class="hint">还没有任何产出。让模型写文档、做 PPT / Excel、' +
+        '写代码或做软件，产物都会出现在这里（工作区项目和生成的图片也算）。</div>';
+      return;
+    }
+    // 旧调用传的是文库内 rel（「在文件库中定位」），换算成新 id
+    if (highlight) {
+      const hit = dlAll.find((f) => f.src === "lib" && f.rel === highlight);
+      if (hit) dlCurrentId = hit.id;
+    }
+    const open = dlOpenSet();
+    const byCat = {};
+    dlAll.forEach((f) => { (byCat[f.cat] = byCat[f.cat] || []).push(f); });
+    const recent = (d.recent || []).map((id) => dlById[id]).filter(Boolean);
+    // 定位时自动展开它所在的类别，否则收起状态下看不见高亮项
+    if (highlight && dlCurrentId) {
+      const hit = dlById[dlCurrentId];
+      if (hit) {
+        open.add(hit.cat);
+        if (recent.some((x) => x.id === hit.id)) open.add("recent");
+        dlSaveOpen(open);
+      }
+    }
+    let html = "";
+    if (recent.length) html += dlCatBlock("recent", recent, open.has("recent"));
+    DL_CATS.forEach((pair) => {
+      const key = pair[0];
+      if (key === "recent") return;
+      const arr = byCat[key] || [];
+      if (arr.length) html += dlCatBlock(key, arr, open.has(key));
+    });
+    list.innerHTML = html;
+
+    list.querySelectorAll(".dl-cat-head").forEach((h) => {
+      h.onclick = () => {
+        const box = h.parentElement;
+        const key = h.dataset.cat;
+        const isOpen = box.classList.toggle("open");
+        h.setAttribute("aria-expanded", isOpen ? "true" : "false");
+        const ar = h.querySelector(".dl-cat-arrow");
+        if (ar) ar.textContent = isOpen ? "▾" : "▸";
+        const set = dlOpenSet();
+        if (isOpen) set.add(key); else set.delete(key);
+        dlSaveOpen(set);
+      };
+    });
+    list.querySelectorAll(".dl-item").forEach((el) => {
+      el.onclick = () => dlSelect(el.dataset.id);
+      // 双击：一律用本机默认程序打开（Word/PPT/Excel/zip/exe 都是双击即开）
+      el.ondblclick = () => dlOpenWithSystem(el.dataset.id);
+    });
+    list.querySelectorAll(".dl-del").forEach((btn) => {
+      btn.onclick = (ev) => { ev.stopPropagation(); dlDelete(btn.dataset.rel); };
+    });
+    if (highlight) {
+      const esc = String(highlight).replace(/"/g, '\\"');
+      const hit = list.querySelector('.dl-item[data-rel="' + esc + '"]');
+      if (hit) {
+        hit.classList.add("dl-flash");
+        setTimeout(() => hit.classList.remove("dl-flash"), 2600);
+      }
+    }
   }
 
   async function openDoclibFile(rel) {

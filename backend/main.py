@@ -8299,6 +8299,58 @@ def library_open_file(body: dict):
         raise HTTPException(500, f"打开文件失败：{e}")
 
 
+@app.get("/api/doclib/all")
+def library_all():
+    """生成文库「全量视图」：文库本体 + 工作区软件 + 生成的图片/视频。
+
+    2026-11-11 用户要求：「不仅要有文本，PPT/Excel/Word 等所有内容以及
+    软件都要有，并且支持双击打开，按类别展开与收起」。
+    这里只做**聚合读取**，不移动、不修改任何磁盘文件。
+    """
+    try:
+        return doclib.list_all()
+    except Exception as e:
+        raise HTTPException(500, "读取失败：%s" % e)
+
+
+@app.post("/api/doclib/open_any")
+def library_open_any(body: dict):
+    """按 id 用本机默认程序打开（文库 / 工作区软件 / 图片都支持）。
+
+    前端双击列表项就走这里 —— 一律 os.startfile，等同在资源管理器里双击。
+    """
+    ident = str((body or {}).get("id") or "").strip()
+    if not ident:
+        raise HTTPException(400, "缺少文件 id")
+    try:
+        info = doclib.resolve_id(ident)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    path = info["path"]
+    if _is_container():
+        if _host_agent_alive() and _request_host_open(path):
+            return {"ok": True, "opened": False, "via": "host-agent",
+                    "host_path": _host_path(path),
+                    "detail": "运行在容器里，已请宿主机打开这个文件"}
+        return {"ok": True, "opened": False, "host_path": _host_path(path),
+                "detail": "运行在容器里，无法直接调用宿主机的程序"}
+    try:
+        import subprocess
+        if os.name == "nt":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return {"ok": True, "opened": True, "path": path,
+                "name": info["rel"].split("/")[-1]}
+    except FileNotFoundError:
+        return {"ok": True, "opened": False, "path": path,
+                "detail": "系统里没找到能打开这个文件的程序"}
+    except Exception as e:
+        raise HTTPException(500, "打开失败：%s" % e)
+
+
 @app.post("/api/code/run")
 def code_run(req: CodeRunRequest):
     """前端代码卡片里的「▶ 运行」——跑用户自己写的/改过的代码。

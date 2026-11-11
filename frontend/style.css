@@ -1008,6 +1008,38 @@ body.dragging .drop-overlay,
 }
 #dlText:focus { border-color: var(--accent); }
 
+
+/* ---------- 生成文库 · 类别分组（2026-11-11）----------
+   用户要求「按不同类别展开与收起，默认全部收起，只看类别和数量」。
+   用 .dl-cat.open 控制展开；行内改成两行（文件名 + 副标题），
+   长文件名不会再把它后面的时间和大小挤没。 */
+.dl-cat { margin: 2px 0 4px; }
+.dl-cat-head {
+  width: 100%; display: flex; align-items: center; gap: 7px;
+  padding: 7px 9px; border-radius: 8px; border: 1px solid transparent;
+  background: var(--panel2); color: var(--text);
+  font-size: 12.5px; font-weight: 600; cursor: pointer; text-align: left;
+}
+.dl-cat-head:hover { border-color: var(--border); }
+.dl-cat-arrow { flex: none; width: 12px; opacity: .8; font-size: 11px; }
+.dl-cat-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-cat-count {
+  flex: none; min-width: 20px; text-align: center; font-size: 11px;
+  color: var(--muted); background: var(--bg); border-radius: 9px; padding: 1px 6px;
+}
+.dl-cat-body { display: none; padding: 3px 0 2px 8px; }
+.dl-cat.open > .dl-cat-body { display: block; }
+.dl-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dl-main .dl-name { flex: none; width: 100%; }
+.dl-sub {
+  font-size: 11px; color: var(--muted); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.dl-tag {
+  display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 6px;
+  font-size: 10px; color: var(--accent); background: rgba(79,139,249,.25);
+}
+
 /* ---------- 输入弹层（复制/改名等；不用原生 prompt，WebView2 不支持它）---------- */
 .input-dialog { margin-top: 10px; font-size: 13px; padding: 9px 11px; }
 
