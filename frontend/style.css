@@ -3360,6 +3360,14 @@ html[data-theme="light"] select.pill-select option {
 }
 #freeViewBtn.fv-on:hover { color: #fff; border-color: transparent; }
 
+/* 思考框跟随开着 = 绿色实心（和「自由查看」的蓝区分开，一眼看出是两个不同的开关） */
+#thinkFollowBtn.tf-on {
+  color: #fff;
+  background: #2f9e6e;
+  border-color: transparent;
+}
+#thinkFollowBtn.tf-on:hover { color: #fff; border-color: transparent; }
+
 /* 高度补间期间（app.js 的 animHeight 会给卡片加 .anim-h）：
    ① 关掉子元素的 CSS 过渡 —— 两边同时动会抖；
    ② 卡片溢出裁掉 —— 否则动画途中内容会漏到卡片外面。 */
