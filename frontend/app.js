@@ -228,7 +228,10 @@
     const mRect = mainEl ? mainEl.getBoundingClientRect() : null;
     const vw = window.innerWidth, vh = window.innerHeight;
     const left = Math.max(8, (mRect ? mRect.left : 0) + 16);
-    let bottom = cRect ? Math.max(8, vh - cRect.top + 10) : 96;
+    // ★ 2026-11-12 实测（无头浏览器）：`.composer` 的 top 可能滚出视口（top=679 > vh=605），
+    //   用 `vh - top` 会算出负数/离谱值，框贴到视口底甚至跑出去。改用**高度**算，
+    //   不管输入区滚到哪，框都稳稳钉在「输入区上沿再往上 10px」。
+    let bottom = cRect ? Math.max(8, cRect.height + 12) : 96;
     // 输入区很高（多行输入 / 附件条）或窗口很矮时，别让框顶出视口上沿
     const cap = Math.max(8, vh - 150);
     if (bottom > cap) bottom = cap;
