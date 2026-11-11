@@ -299,7 +299,10 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 }
 .icon-btn:hover { background: var(--hover-bg); }
 
-.messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px;
+  /* 2026-11-12：关掉浏览器的「滚动锚定」。它会在内容变长/上方元素高度变化时
+     自动调整 scrollTop 来保持某个元素不动 —— 表现就是「用户没动，视角自己往下走」。 */
+  overflow-anchor: none; }
 .msg { display: flex; gap: 10px; }
 .msg.user { justify-content: flex-end; }
 .bubble {
