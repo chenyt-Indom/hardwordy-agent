@@ -147,6 +147,24 @@
         return _siiv.call(this, opt);
       };
     }
+    // ★ 最后一道兜底（2026-11-12 用户二次反馈「还是会瞬移到最下方」）：
+    //   前面拦的都是「JS 主动滚」，但还有一堆拦不到的路径 —— 图片/视频加载完、
+    //   输入框 focus()、浏览器的滚动锚定、scrollIntoViewIfNeeded…
+    //   这里在自由查看期间直接盯住 DOM：内容一变，只要视口被往下拽了、又不是用户在滚，
+    //   就立刻写回用户原来的位置。rAF 节流，流式输出时也不会拖慢。
+    let _moPending = false;
+    const _mo = new MutationObserver(() => {
+      if (_moPending) return;
+      _moPending = true;
+      requestAnimationFrame(() => {
+        _moPending = false;
+        if (!freeView || _userActing()) return;
+        if (messagesEl.scrollTop > _keepTop + 1 && _d && _d.set) {
+          _d.set.call(messagesEl, Math.min(_keepTop, _maxTop()));
+        }
+      });
+    });
+    _mo.observe(messagesEl, { childList: true, subtree: true, characterData: true });
     syncFreeBtn();
   })();
 
