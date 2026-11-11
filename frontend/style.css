@@ -2754,9 +2754,9 @@ html[data-theme="light"] button.pill-btn.bad {
 }
 html[data-theme="light"] .pill:not(.on):not(.bad) .sw { background: #9aa4b2; }
 html[data-theme="light"] select.pill-select {
-  color: #1f2937;
-  border-color: #d3dae6;
-  background: #f3f6fb;
+  color: #16202f;
+  border-color: #c2cee3;
+  background: #f1f4fb;
 }
 html[data-theme="light"] select.pill-select option {
   background: #ffffff;
