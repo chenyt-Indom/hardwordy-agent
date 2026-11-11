@@ -2310,6 +2310,8 @@ body.topbar-collapsed .top-bar.tools-bar { padding: 4px 16px 8px; }
 .code-body {
   max-height: 460px;          /* 展开也不许无限长，内部滚动 */
   overflow: auto;
+  transition: max-height .3s cubic-bezier(.4, 0, .2, 1), opacity .22s ease,
+              padding .3s ease;
 }
 .code-toggle { flex: 0 0 auto; }
 
