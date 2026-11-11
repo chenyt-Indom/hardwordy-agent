@@ -56,34 +56,36 @@
 html[data-theme="light"] {
   color-scheme: light;
 
-  --bg: #f5f7fb;
-  --panel: #ffffff;
-  --panel2: #f0f3f9;
-  --field-bg: #ffffff;
-  --border: #dbe1ec;
-  --text: #1c2330;
-  --muted: #667085;
-  --accent: #2f6fe4;
-  --green: #1f9d5b;
-  --danger: #d93a32;
+  /* 2026-11-11 用户反馈「纯白太刺眼」：整体换成低对比的淡蓝紫灰调，
+     不再有大面积纯白，色温偏冷、饱和度压低，长时间看不累。 */
+  --bg: #e9edf8;
+  --panel: #f6f8fe;
+  --panel2: #eef2fc;
+  --field-bg: #fdfdff;
+  --border: #d5dcf0;
+  --text: #2b3247;
+  --muted: #6d7793;
+  --accent: #3f6fe0;
+  --green: #2f9e6b;
+  --danger: #d94a44;
 
-  --btn-bg: #e6ebf4;
-  --btn-bg-hover: #d8e0ee;
-  --accent-hover: #2560cc;
-  --hover-bg: #e6ebf4;
-  --think-bg: #f7f9fd;
-  --chip-bg: #e8f0ff;
-  --chip-border: #c3d6f7;
-  --gen-label-bg: #e8f0ff;
-  --meta-fg: #8b93a3;
-  --overlay: rgba(20, 26, 38, .55);
-  --shadow: rgba(20, 26, 38, .22);
-  --lb-cap: #f2f5fb;
-  --tag-pin-bg: #1f9d5b;
+  --btn-bg: #e6ebf8;
+  --btn-bg-hover: #d9e0f3;
+  --accent-hover: #3360cc;
+  --hover-bg: #e6ebf8;
+  --think-bg: #eaf0fb;
+  --chip-bg: #e4ecfd;
+  --chip-border: #c6d6f6;
+  --gen-label-bg: #e4ecfd;
+  --meta-fg: #8b93a9;
+  --overlay: rgba(30, 38, 60, .5);
+  --shadow: rgba(40, 52, 82, .18);
+  --lb-cap: #eef2fb;
+  --tag-pin-bg: #2f9e6b;
   --tag-pin-fg: #fff;
-  --tag-auto-bg: #dbe6ff;
+  --tag-auto-bg: #dfe8ff;
   --tag-auto-fg: #2b4a8a;
-  --danger-soft: rgba(217, 58, 50, .1);
+  --danger-soft: rgba(217, 74, 68, .1);
   --warn: #a86a12;
   --warn-border: #e0b877;
   --warn-bg: rgba(224, 184, 119, .18);
