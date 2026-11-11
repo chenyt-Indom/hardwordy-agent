@@ -2753,15 +2753,15 @@ html[data-theme="light"] button.pill-btn.bad {
   border-color: #f0b8b2;
   background: #fdeaea;
 }
-html[data-theme="light"] .pill:not(.on):not(.bad) .sw { background: #9aa4b2; }
+html[data-theme="light"] .pill:not(.on):not(.bad) .sw { background: #a29880; }
 html[data-theme="light"] select.pill-select {
-  color: #16202f;
-  border-color: #c2cee3;
-  background: #f1f4fb;
+  color: #241f17;
+  border-color: #cdc2a6;
+  background: #f5f1e5;
 }
 html[data-theme="light"] select.pill-select option {
-  background: #ffffff;
-  color: #1f2937;
+  background: #faf7ee;
+  color: #241f17;
 }
 
 /* ================= 手机端二次优化（2026-11-09 用户反馈"难看"）=================
