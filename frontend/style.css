@@ -3290,7 +3290,8 @@ html[data-theme="light"] select.pill-select option {
   position: fixed;
   z-index: 80;
   left: 16px;
-  bottom: 120px;
+  top: 96px;                  /* 兜底值，真实位置由 app.js 的 placeThinkDock() 按顶栏算 */
+  bottom: auto;
   width: 420px;
   max-width: calc(100vw - 32px);
   max-height: 46vh;
