@@ -5481,7 +5481,34 @@
     const badge = document.querySelector("#schedBadge");
     const fold = document.querySelector("#schedFold");
     const body = document.querySelector("#schedBody");
+    const float = document.querySelector("#schedFloat");
     if (!list) return;
+
+    // ★ 2026-11-11：定时任务改成**独立浮层**（用户要求：不占对话/侧栏位置，
+    //   「单开一个框，只可以读不能聊天」）。开合入口是顶栏那颗 ⏰（与「⚙ 上下文」
+    //   同一套 pill 样式，插在 #selfDevBtn 前面，不改 index.html 的顶栏结构）。
+    const openFloat = (on) => {
+      if (!float) return;
+      float.hidden = !on;
+      if (on) load();
+    };
+    const bar = document.querySelector(".tools-bar");
+    const anchor = document.querySelector("#selfDevBtn");
+    if (bar && anchor && !document.querySelector("#schedOpenBtn")) {
+      const ob = document.createElement("button");
+      ob.type = "button";
+      ob.id = "schedOpenBtn";
+      ob.className = "pill pill-btn";
+      ob.title = "定时任务（独立面板 · 只读，不能在这里聊天）";
+      ob.textContent = "⏰ 定时";
+      ob.onclick = () => openFloat(float ? float.hidden : true);
+      bar.insertBefore(ob, anchor);
+    }
+    const closeBtn = document.querySelector("#schedClose");
+    if (closeBtn) closeBtn.onclick = () => openFloat(false);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && float && !float.hidden) openFloat(false);
+    });
 
     fold.onclick = () => {
       body.hidden = !body.hidden;
