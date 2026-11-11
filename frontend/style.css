@@ -130,9 +130,27 @@ body {
   width: 300px; min-width: 300px; background: var(--panel);
   border-right: 1px solid var(--border); padding: 18px;
   display: flex; flex-direction: column; gap: 16px; overflow-y: auto;
-  transition: width .2s;
+  /* 2026-11-12 用户要求：点 ☰ 展开/收起侧栏要有动画。
+     原来只有 transition: width .2s —— 太快，几乎看不出；而 padding / border
+     是瞬间跳变（收起瞬间内容被裁、右边框直接消失），观感就是「啪一下」。
+     现在宽度、min-width、内边距、右边框宽度/颜色走同一条缓动曲线。
+     顺带修好：第 101 行那条颜色过渡其实被这条覆盖了，侧栏切主题一直没过渡。 */
+  transition:
+    width .34s cubic-bezier(.4, 0, .2, 1),
+    min-width .34s cubic-bezier(.4, 0, .2, 1),
+    padding .34s cubic-bezier(.4, 0, .2, 1),
+    border-right-width .34s cubic-bezier(.4, 0, .2, 1),
+    background-color .18s ease, color .18s ease, border-color .18s ease;
 }
-.sidebar.hidden { width: 0; min-width: 0; padding: 0; border: none; overflow: hidden; }
+/* 收起：左右内边距归零、右边框收成 0 并转透明。
+   不能再用 border: none —— 它会让边框宽度瞬间跳到 0，动画直接跳过。 */
+.sidebar.hidden {
+  width: 0; min-width: 0; padding-left: 0; padding-right: 0;
+  border-right-width: 0; border-right-color: transparent; overflow: hidden;
+}
+/* 内容跟着淡出/淡入，宽度收窄时文字不会硬生生被切断 */
+.sidebar > * { transition: opacity .2s ease; }
+.sidebar.hidden > * { opacity: 0; }
 
 .brand { display: flex; gap: 12px; align-items: center; }
 .logo {
