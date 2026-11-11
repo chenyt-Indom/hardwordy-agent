@@ -2513,6 +2513,7 @@ html[data-theme="light"] body {
 @media (prefers-reduced-motion: reduce) {
   .msg { animation: none !important; }
   .think-body, .code-card > .code-body, .code-group .code-group-body { transition: none !important; }
+  .sidebar, .sidebar > * { transition: none !important; }
 }
 
 .bubble {
