@@ -170,7 +170,6 @@
     //   判据：程序滚动几乎总是一帧内直接跳到 scrollHeight；人滚轮/拖动是渐进的。
     let _holdRAF = 0;
     let _lastSeen = messagesEl.scrollTop;
-    let _lastScrollAt = 0;
     function holdLoop() {
       if (!freeView) { _holdRAF = 0; return; }
       const cur = messagesEl.scrollTop;
