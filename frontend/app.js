@@ -7023,6 +7023,12 @@
     poll();
     setInterval(poll, 4000);
   })();
+
+  // 上下文占用环写在**平级的另一个模块**里（技能模块后面），拿不到这里的
+  // history / sessionId / showToast —— 用 window 钩子把引用暴露出去，
+  // 和 __showSampling / __restartAppNow 同一套做法（箭头函数读的是最新值）。
+  window.__ctxState = () => ({ messages: history, session: sessionId });
+  window.__ctxToast = showToast;
 })();
 
 /* =====================================================================
