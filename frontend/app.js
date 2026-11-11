@@ -274,8 +274,14 @@
     }
     placeThinkDock(w);
   }
-  function undockOne(w) {
+  // ★ 2026-11-12 用户三次反馈「点了跟随，过一会儿又自己回原位」：
+  //   根因是**好几处**都会调 undockOne（正文开始输出、思考结束、新一轮开始…），
+  //   只要有一处没判断 thinkFollow，用户选的「跟随」就被悄悄盖掉。
+  //   现在把判断收进函数本身：跟随模式下**一律拒绝**收回，只有 force=true 才允许
+  //   （新一轮清理上一轮框时用 force）。这样以后再加调用点也不会再破坏跟随。
+  function undockOne(w, force) {
     if (!w || !w.classList.contains("think-dock")) return;
+    if (thinkFollow && !force) return;
     w.classList.remove("think-dock");
     w.style.left = w.style.bottom = w.style.width = w.style.top = "";
     // ★ 优先按占位节点回原位（精确到「工具条之前」）。
