@@ -82,16 +82,28 @@
     messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 60;
   (function bindFreeView() {
     const _d = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
+    const _maxTop = () => Math.max(0, messagesEl.scrollHeight - messagesEl.clientHeight);
     if (_d && _d.set) {
       Object.defineProperty(messagesEl, "scrollTop", {
         configurable: true,
         get() { return _d.get.call(this); },
         set(v) {
-          // 只拦「滚到底」这一种写入；其它（恢复位置等）照常放行
-          if (freeView && Math.abs(v - messagesEl.scrollHeight) < 2) return;
+          // 只拦「滚到底」这一种写入；其它（恢复位置等）照常放行。
+          // 2026-11-12 用户二次反馈「还是会跳」：原来是 |v - scrollHeight| < 2，
+          // 代码写 scrollTop = scrollHeight 时读值和写值之间内容只要又长了一点就漏拦，
+          // 改成按「可滚动上限」比，稳得多。
+          if (freeView && v >= _maxTop() - 4) return;
           _d.set.call(this, v);
         },
       });
+    }
+    // scrollTo / scrollBy 是浏览器内部滚动，同样绕开上面的 setter —— 一并挡住
+    const _sto = messagesEl.scrollTo, _sby = messagesEl.scrollBy;
+    if (typeof _sto === "function") {
+      messagesEl.scrollTo = function (a, b) { if (freeView) return; return _sto.call(this, a, b); };
+    }
+    if (typeof _sby === "function") {
+      messagesEl.scrollBy = function (a, b) { if (freeView) return; return _sby.call(this, a, b); };
     }
     const b = $("#freeViewBtn");
     if (b) b.onclick = () => {
