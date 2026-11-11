@@ -67,10 +67,14 @@
       ? "已暂停自动滚动 —— 可以停在任意位置慢慢看。点一下恢复跟随最新"
       : "AI 有新内容时自动滚到最新。点一下暂停，就能停在某一步慢慢看";
   }
+  let _startHold = null;    // 由 bindFreeView 注入：进入自由查看时启动「逐帧守位」
   function setFreeView(v) {
     if (freeView === v) return;
     freeView = v;
-    if (v) _keepTop = messagesEl.scrollTop;   // 记住「就停在这儿」
+    if (v) {
+      _keepTop = messagesEl.scrollTop;   // 记住「就停在这儿」
+      if (_startHold) _startHold();
+    }
     syncFreeBtn();
   }
   function scrollBottom(force) {
