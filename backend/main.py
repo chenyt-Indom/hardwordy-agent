@@ -7228,8 +7228,14 @@ async def chat_deepseek(req: ChatRequest,
         #   前端可以回读它来纠正显示（见 app.js 的 __reconcileFromServer）。
         try:
             if session:
+                # ⚠️⚠️ 2026-11-11 修：必须用 **messages（原始请求）** 落盘，
+                #   不能用 clean —— clean 里已经被追加了「工具动作账本 / 最近几轮速览 /
+                #   长期记忆」等注入块。用 clean 落盘会把它们**永久写进会话历史**，
+                #   下次打开时前端把整块当成用户说的话渲染成一个巨大的蓝气泡
+                #   （用户反馈「手机端有些变形」就是这么来的），而且每轮还会重复发给模型。
+                #   本地通道一直是对的（all_messages 在注入之前就取好了），只有云端漏了。
                 _saved = [{"role": str(m.get("role") or "user"),
-                           "content": _content_to_text(m.get("content"))} for m in clean]
+                           "content": _content_to_text(m.get("content"))} for m in messages]
                 _saved.append({"role": "assistant", "content": _full})
                 sessions.save_messages(session, _saved)
                 try:
