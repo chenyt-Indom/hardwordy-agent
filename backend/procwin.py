@@ -79,6 +79,16 @@ def install_nowin_patch():
             cf = int(kwargs.get("creationflags", 0) or 0)
             if not (cf & _KEEP):
                 kwargs["creationflags"] = cf | CREATE_NO_WINDOW
+                # 第二道保险（2026-11-11 用户报「一叠叠 Terminal 窗口」）：
+                # Win11 若把默认终端设成 Windows Terminal，CREATE_NO_WINDOW
+                # 并不能完全阻止它接管控制台 —— 会拉起 OpenConsole.exe 开窗口，
+                # 客户端进程被强杀后窗口还会残留成一叠僵尸窗口（实测残留 48 个）。
+                # 再显式要求「以隐藏方式创建窗口」，把这条路径也堵上。
+                if kwargs.get("startupinfo") is None:
+                    si = _sp.STARTUPINFO()
+                    si.dwFlags |= _sp.STARTF_USESHOWWINDOW
+                    si.wShowWindow = 0   # SW_HIDE
+                    kwargs["startupinfo"] = si
         except Exception:
             pass
         return _orig_init(self, *args, **kwargs)
