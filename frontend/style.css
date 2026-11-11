@@ -313,6 +313,9 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   max-height: 0; opacity: 0; overflow: hidden;
   /* 折叠态边框也透明，否则会留一条 2px 的虚线 */
   border-color: transparent;
+  /* 2026-11-12：透明边框仍占 2px 高度，在整行宽度下看就是一条细黑线；
+     折叠态把边框宽度直接收成 0（展开时由 .open 恢复 1px） */
+  border-width: 0;
   transition: max-height .3s cubic-bezier(.4, 0, .2, 1), opacity .24s ease,
               margin-top .3s ease, padding .3s ease,
               background-color .18s ease, color .18s ease, border-color .18s ease;
