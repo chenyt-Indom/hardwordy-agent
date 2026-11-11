@@ -1239,6 +1239,24 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                                 "description": "compress 用：画质 18~32，越大越小越糊，默认 28"},
                         "width": {"type": "integer",
                                   "description": "compress / concat 用：目标宽度，高度自动"},
+                        "trans": {
+                            "description": "transition 用：转场名，给一个字符串（全部同一种）"
+                                           "或数组（每处不同）。常用 fade / wipeleft / "
+                                           "circleopen / zoomin / slideup / pixelize / "
+                                           "dissolve / fadewhite / hblur / radial",
+                            "anyOf": [{"type": "string"},
+                                      {"type": "array", "items": {"type": "string"}}]},
+                        "effects": {"type": "array", "items": {"type": "string"},
+                                    "description": "effect 用：特效名列表，按顺序叠加，"
+                                                   "如 [\"warm\",\"vignette\"]"},
+                        "strength": {"type": "number",
+                                     "description": "effect 用：kenburns 推拉幅度 0~1，"
+                                                    "默认 1.0（约放大 18%）"},
+                        "custom": {"type": "string",
+                                   "description": "effect 用：追加一段原生 ffmpeg 滤镜串"},
+                        "audio_join": {"type": "string", "enum": ["crossfade", "none"],
+                                       "description": "transition 用：音频接法，"
+                                                      "crossfade 交叉淡化（默认）或 none 去音轨"},
                         "filename": {"type": "string",
                                      "description": "（可选）成品文件名"},
                     },
