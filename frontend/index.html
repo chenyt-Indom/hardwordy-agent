@@ -374,6 +374,16 @@
            「采样」调的是温度和 top-p，属于**这一轮的生成参数**，跟输入框是同一层语义；
            放顶栏会和那些功能开关混在一起，看着像"又一个开关"。 -->
       <div class="composer-tools">
+        <!-- 上下文占用环（2026-11-11）：绿 → 橙 → 红，越接近上限越红。
+             换模型 / 改上下文长度都会自动重算（见 app.js 的 ctxRing 模块）。 -->
+        <button type="button" class="ctx-ring" id="ctxRing" title="上下文占用：正在读取…">
+          <svg viewBox="0 0 36 36" aria-hidden="true">
+            <circle class="ctx-ring-bg" cx="18" cy="18" r="15.5"></circle>
+            <circle class="ctx-ring-fg" id="ctxRingFg" cx="18" cy="18" r="15.5"
+                    stroke-dasharray="97.4" stroke-dashoffset="97.4"></circle>
+          </svg>
+          <span class="ctx-ring-txt" id="ctxRingTxt">—</span>
+        </button>
         <button type="button" class="pill pill-btn" id="sampleBtn" title="调「温度」和「采样范围 top-p」—— 拖完立刻生效（不用重启），旁边写着建议值" onclick="window.__showSampling&&window.__showSampling()">🎛 采样</button>
       </div>
       <p class="tip">智能体模式：直接说指令，AI 自主规划并调用工具完成任务。数据均在本机处理。</p>
