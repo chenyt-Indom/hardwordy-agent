@@ -44,7 +44,7 @@ copy /b HardwordyAgent-Full-2026.11.11b.zip.part1 + HardwordyAgent-Full-2026.11.
 
 校验（合并后应等于）：
 ```
-__SHA256__
+aeabd29b9dff94759d6d677361bce9fca8b352ae72b059e8016c1d8acb618ed8
 ```
 
 解压 → 双击 `一键启动.bat`；顶栏 🔑 填自己的 DeepSeek Key。
