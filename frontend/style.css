@@ -536,6 +536,37 @@ body.dragging .drop-overlay,
 /* 面板标题右侧的按钮组，避免被 space-between 拆散 */
 .head-acts { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 .sessions-list { max-height: 230px; overflow-y: auto; }
+/* 标题行：点一下折叠 / 展开整块对话列表 */
+.sess-head {
+  cursor: pointer; user-select: none; outline: none;
+  justify-content: flex-start;
+}
+.sess-head h2 { margin: 0; }
+.sess-head .mu-caret { margin-left: 6px; }
+.sess-head .head-acts { margin-left: auto; }
+.sess-head:hover { background: rgba(255, 255, 255, .04); border-radius: 6px; }
+.sess-head:focus-visible { box-shadow: 0 0 0 2px rgba(90, 150, 255, .45); }
+.sess-fold {
+  overflow: hidden;
+  transition: max-height .32s cubic-bezier(.4, 0, .2, 1), opacity .24s ease;
+}
+/* 批量选择：底部操作条 + 行内勾选框 */
+.sess-batch {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--muted);
+}
+.sess-batch[hidden] { display: none; }
+.sess-batch-info { margin-right: auto; }
+.sess-batch-info b { color: var(--text); }
+.session-item .sess-check {
+  flex: 0 0 auto; width: 14px; height: 14px; margin: 0;
+  accent-color: var(--accent); cursor: pointer;
+}
+.session-item.sel {
+  background: rgba(79, 139, 249, .1);
+  border-color: rgba(79, 139, 249, .5); color: var(--text);
+}
 .session-item {
   display: flex; align-items: center; gap: 6px;
   padding: 7px 10px; margin-bottom: 4px;
