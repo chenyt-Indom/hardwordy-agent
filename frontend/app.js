@@ -7484,6 +7484,7 @@
 
     btn.addEventListener("click", () => refresh(true));
     window.addEventListener("model-changed", () => setTimeout(() => refresh(true), 300));
+    window.addEventListener("perf-changed", () => setTimeout(() => refresh(true), 300));
     window.addEventListener("focus", () => refresh(false));
     setInterval(() => refresh(false), 1500);      // 只比长度，变了才真的请求
     setTimeout(() => refresh(true), 800);
