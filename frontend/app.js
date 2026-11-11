@@ -250,8 +250,15 @@
   // 切换/新建/清空对话时：悬浮的思考框挂在 body 上，不会随 messagesEl.innerHTML 一起消失，
   // 必须手动摘掉，否则会一直浮在左下角。
   function dockOne(w) {
-    if (!w || !w._home) return;
+    // ★ 2026-11-12 修：原来这里要求 `w._home` 必须存在，否则直接 return ——
+    //   没有锚点的思考框点「跟随」就完全没反应（用户反馈「有时候点了不跟」就是这个）。
+    //   现在不再依赖 _home：进消息流时就地插一个注释占位当锚点，绝对回得去。
+    if (!w) return;
     if (!w.classList.contains("think-dock")) {
+      if (!w._ph || !w._ph.parentNode) {
+        w._ph = document.createComment("think-anchor");
+        if (w.parentNode) w.parentNode.insertBefore(w._ph, w);
+      }
       w.classList.add("think-dock");
       // 挂到 body 上：.messages 是 overflow:auto 的滚动容器，
       // 留在里面虽然 fixed 也能浮起来，但一旦以后给祖先加 transform/contain 就会失效。
@@ -263,9 +270,13 @@
   function undockOne(w) {
     if (!w || !w.classList.contains("think-dock")) return;
     w.classList.remove("think-dock");
-    w.style.left = w.style.bottom = w.style.width = "";
-    // _home 可能已经被清空（换对话 / 清空消息），那就退回消息区末尾，别抛错
-    if (w._home && w._home.parentNode === messagesEl) messagesEl.insertBefore(w, w._home);
+    w.style.left = w.style.bottom = w.style.width = w.style.top = "";
+    // ★ 优先按占位节点回原位（精确到「工具条之前」）。
+    //   以前只认 _home，那一轮的容器被清掉时会 appendChild 到消息区末尾 ——
+    //   用户看到的就是「点了固定，它跑到最下面去了，不是原位」。
+    const ph = w._ph;
+    if (ph && ph.parentNode) ph.parentNode.insertBefore(w, ph);
+    else if (w._home && w._home.parentNode === messagesEl) messagesEl.insertBefore(w, w._home);
     else messagesEl.appendChild(w);
   }
   function clearThinkDock() {
