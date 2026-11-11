@@ -527,8 +527,8 @@ def transition(sources, out, trans="fade", duration=1.0, width=None, height=None
     ins = []
     for s in segs:
         ins += ["-i", s]
-    r = _run(ins + ["-filter_complex", ";".join(parts)] + maps + _VOUT
-             + (_AOUT if keep_audio else []) + [out])
+    tail = (_AOUT + ["-shortest"]) if keep_audio else []
+    r = _run(ins + ["-filter_complex", ";".join(parts)] + maps + _VOUT + tail + [out])
     if not r.get("ok"):
         return {"ok": False, "error": "转场合成失败：%s" % r.get("error")}
 
