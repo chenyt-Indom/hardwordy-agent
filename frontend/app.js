@@ -2613,7 +2613,7 @@
         history.push({ role: m.role, content: m.content });
       }
     });
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    scrollBottom(true);        // 切会话是主动行为 → 强制回到底部
     return shown.length;
   }
 
