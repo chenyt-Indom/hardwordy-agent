@@ -497,7 +497,10 @@ def transition(sources, out, trans="fade", duration=1.0, width=None, height=None
     for k in range(n):
         parts.append("[%d:v]setpts=PTS-STARTPTS[v%d]" % (k, k))
         if keep_audio:
-            parts.append("[%d:a]asetpts=PTS-STARTPTS,apad[a%d]" % (k, k))
+            # ⚠️ 必须是 apad=pad_dur=N，不能只写 apad —— 裸 apad 会**无限**填充
+            #    静音，音频流永远不结束，ffmpeg 就一直跑不退出。实测卡死 600 秒、
+            #    进程吃到 1.1 GB 内存。这里只补 2 秒，够 acrossfade 用了。
+            parts.append("[%d:a]asetpts=PTS-STARTPTS,apad=pad_dur=2[a%d]" % (k, k))
 
     last_v, last_a = "v0", "a0"
     elapsed = float(infos[0].get("duration") or 0)
