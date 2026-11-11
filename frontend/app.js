@@ -139,12 +139,11 @@
     //   补一条 scroll 监听：只要不是「贴着底部」，就自动进入自由查看。
     //   （程序化滚到底时 _nearBottom() 为真，不会误判。）
     messagesEl.addEventListener("scroll", () => {
+      if (_reverting) return;          // 程序自己写的，不算用户意图
       if (!freeView) { requestAnimationFrame(maybeFree); return; }
-      // 用户自己在滚 → 以他停的位置为准；否则是程序把视口拽走了 → 立刻拉回
-      if (_userActing()) { _keepTop = messagesEl.scrollTop; return; }
-      if (messagesEl.scrollTop > _keepTop + 1 && _d && _d.set) {
-        _d.set.call(messagesEl, Math.min(_keepTop, _maxTop()));
-      }
+      // 自由查看期间「位置归谁」统一交给 holdLoop 判断（见下），
+      // 这里只做一件事：用户手势刚过，就把他停的位置记下来。
+      if (_userActing()) _keepTop = messagesEl.scrollTop;
     }, { passive: true });
     // ★ 2026-11-12 修「模型一有动作就跳到底部」的真正元凶：
     //   每来一个工具调用，addToolChip 会调 chip.scrollIntoView({block:"nearest"})，
