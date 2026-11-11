@@ -7456,11 +7456,13 @@
     };
 
     async function refresh(force) {
+      document.title = "RING|refresh|force=" + force + "|busy=" + busy;
       if (busy) return;
       if (!force && history.length === lastLen) return;   // 没变化就不打扰后端
       busy = true;
       try {
         const d = await post("/api/context/usage", { messages: history, session: sessionId });
+        document.title = "RING|got|" + JSON.stringify(d).slice(0, 150);
         if (!d || !d.ok) return;
         lastLen = history.length;
         paint(d);
