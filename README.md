@@ -19,29 +19,23 @@
 
 | 版本 | 体积 | 说明 |
 |------|------|------|
-| **全量版**（分 2 卷） | **2.14 GB**（解压 3.2 GB） | 含**内置 VS Code**（code-server）与**抠图模型**（BiRefNet ×2）。解压后双击 `一键启动.bat` |
+| **全量版** | **2.69 GB**（解压 3.4 GB） | 含**内置 VS Code**（code-server）与**抠图模型**（BiRefNet ×2）。解压后双击 `一键启动.bat` |
 | **[轻量版](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.08.3/LocalMultimodalAssistant-Windows-x64.zip)** | **194.8 MB** | 只有程序本体，体积小；开发台与抠图不可用 |
 | 源码 | — | 见下方「快速开始」 |
 
-**全量版（2026.11.11a · Hardwordy Agent）分两卷** —— GitHub 单文件上限 2 GB，所以切开：
+> **全量版不通过 GitHub 分发**（安装包 2.69 GB，走网盘）。
+> 文件名 `HardwordyAgent-Full-<版本>.zip`；若拿到的是
+> `…zip.part1` / `…zip.part2` 两卷，用下面这行合并：
+>
+> ```powershell
+> copy /b HardwordyAgent-Full-<版本>.zip.part1 + HardwordyAgent-Full-<版本>.zip.part2 HardwordyAgent-Full-<版本>.zip
+> ```
+>
+> 校验值随包内 `SHA256.txt` 一起提供，装前对一下更稳妥。
 
-- [`HardwordyAgent-Full-2026.11.11a.zip.part1`](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.11/HardwordyAgent-Full-2026.11.11a.zip.part1) — 1.4 GB
-- [`HardwordyAgent-Full-2026.11.11a.zip.part2`](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.11/HardwordyAgent-Full-2026.11.11a.zip.part2) — 791 MB
-
-**合并 + 校验**（Windows，CMD 或 powershell）：
-
-```powershell
-copy /b HardwordyAgent-Full-2026.11.11a.zip.part1 + HardwordyAgent-Full-2026.11.11a.zip.part2 HardwordyAgent-Full-2026.11.11a.zip
-
-# 校验（应等于 98584f5e51de309ea8d87a332976e6a898381da022d48ace4b3db469a4ead5d3）
-Get-FileHash .\HardwordyAgent-Full-2026.11.11a.zip -Algorithm SHA256
-```
-
-> macOS / Linux：`cat *.part1 *.part2 > HardwordyAgent-Full.zip`
-
-> 两个包**都不含** AI 对话模型权重（由 Ollama 单独下载，18 GB / 6 GB）。
-> 也**都不含**本地文生图（torch ~9 GB + SD 权重）——本地绘图在当前机器上不可用，
-> 云端绘图正常。详见「已知限制」。
+> 两个包**都不含** AI 对话模型权重（由 Ollama 单独下载）。
+> 也**都不含**本地文生图（torch + SD 权重）——本地绘图不可用，云端绘图正常。
+> 详见「已知限制」。
 
 **装法（3 步）**
 
