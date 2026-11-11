@@ -244,32 +244,52 @@
   // 把当前这轮的思考框按当前偏好摆好（思考途中切按钮也能立刻生效）
   // 切换/新建/清空对话时：悬浮的思考框挂在 body 上，不会随 messagesEl.innerHTML 一起消失，
   // 必须手动摘掉，否则会一直浮在左下角。
-  function clearThinkDock() {
-    _thinkLive = null;
-    document.querySelectorAll("body > .think-dock").forEach((n) => n.remove());
-  }
-  function applyThinkDock() {
-    const w = _thinkLive;
+  function dockOne(w) {
     if (!w || !w._home) return;
-    const docked = w.classList.contains("think-dock");
-    if (thinkFollow && !docked) {
+    if (!w.classList.contains("think-dock")) {
       w.classList.add("think-dock");
       // 挂到 body 上：.messages 是 overflow:auto 的滚动容器，
       // 留在里面虽然 fixed 也能浮起来，但一旦以后给祖先加 transform/contain 就会失效。
       // 直接挂 body 最稳，也彻底不占消息流高度（不会把内容挤动）。
       document.body.appendChild(w);
-      placeThinkDock(w);
-    } else if (!thinkFollow && docked) {
-      w.classList.remove("think-dock");
-      w.style.left = w.style.bottom = w.style.width = "";
-      messagesEl.insertBefore(w, w._home);
     }
+    placeThinkDock(w);
+  }
+  function undockOne(w) {
+    if (!w || !w.classList.contains("think-dock")) return;
+    w.classList.remove("think-dock");
+    w.style.left = w.style.bottom = w.style.width = "";
+    // _home 可能已经被清空（换对话 / 清空消息），那就退回消息区末尾，别抛错
+    if (w._home && w._home.parentNode === messagesEl) messagesEl.insertBefore(w, w._home);
+    else messagesEl.appendChild(w);
+  }
+  function clearThinkDock() {
+    _thinkLive = null;
+    _thinkBoxes.clear();
+    document.querySelectorAll("body > .think-dock").forEach((n) => n.remove());
+  }
+  // 按当前偏好把**所有**思考框摆好（思考途中、思考结束后切按钮都立刻生效）
+  function applyThinkDock() {
+    _thinkBoxes.forEach((w) => {
+      if (!w.isConnected) { _thinkBoxes.delete(w); return; }
+      if (thinkFollow) dockOne(w); else undockOne(w);
+    });
+    if (thinkFollow) placeAllThinkDocks();
   }
   function setThinkFollow(v) {
+    const was = thinkFollow;
     thinkFollow = !!v;
     try { localStorage.setItem("think_follow", thinkFollow ? "1" : "0"); } catch (e) { /* 隐私模式 */ }
     syncThinkBtn();
     applyThinkDock();
+    if (was !== thinkFollow && typeof showToast === "function") {
+      showToast(
+        thinkFollow
+          ? "思考框改为「跟随」：思考时固定在左下角，滚到哪都看得到"
+          : "思考框改为「固定」：留在消息流原位，不再浮动",
+        ""
+      );
+    }
   }
   (function bindThinkFollow() {
     const b = $("#thinkFollowBtn");
