@@ -673,31 +673,5 @@
     })();
   </script>
 
-<div id="__probe" style="position:fixed;left:16px;bottom:180px;width:560px;z-index:9999;background:#1b2430;border:2px solid #ff3b30;border-radius:8px;padding:10px;font:12px/1.5 monospace;color:#fff">探针加载中…</div>
-<script>
-(function () {
-  var el = document.getElementById("__probe");
-  if (!el) return;
-  var main = document.getElementById("main");
-  var comp = document.querySelector(".composer");
-  var vw = window.innerWidth, vh = window.innerHeight;
-  var mR = main ? main.getBoundingClientRect() : null;
-  var cR = comp ? comp.getBoundingClientRect() : null;
-  var left = Math.max(8, (mR ? mR.left : 0) + 16);
-  var bottom = cR ? Math.max(8, vh - cR.top + 10) : 96;
-  var cap = Math.max(8, vh - 150);
-  if (bottom > cap) bottom = cap;
-  var avail = (mR ? mR.width : vw) - 32;
-  var width = Math.max(220, Math.min(430, Math.round(avail)));
-  el.textContent = "vw=" + vw + " vh=" + vh
-    + " | main.left=" + (mR ? Math.round(mR.left) : "null")
-    + " main.w=" + (mR ? Math.round(mR.width) : "null")
-    + " | comp.top=" + (cR ? Math.round(cR.top) : "null")
-    + " comp.h=" + (cR ? Math.round(cR.height) : "null")
-    + " | => left=" + Math.round(left)
-    + " bottom=" + Math.round(bottom)
-    + " width=" + width;
-})();
-</script>
 </body>
 </html>
