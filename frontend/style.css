@@ -3331,8 +3331,8 @@ html[data-theme="light"] select.pill-select option {
 /* 高度补间期间（app.js 的 animHeight 会给卡片加 .anim-h）：
    ① 关掉子元素的 CSS 过渡 —— 两边同时动会抖；
    ② 卡片溢出裁掉 —— 否则动画途中内容会漏到卡片外面。 */
-.code-card.anim-h,
-.code-card.anim-h * {
+.anim-h,
+.anim-h * {
   transition: none !important;
 }
-.code-card.anim-h { overflow: hidden; }
+.anim-h { overflow: hidden; }
