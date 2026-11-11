@@ -1170,9 +1170,17 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                     "  images_to_video=多张图片做成轮播视频（images 列表 + seconds）\n"
                     "  compress=压缩 / 转码 / 改分辨率（source + crf + width）\n"
                     "  info=只看视频信息（时长 / 分辨率 / 有没有声音）\n"
+                    "  transition=**转场拼接**：多段之间加过渡特效（sources + trans + "
+                    "duration）。支持 58 种转场名，如 fade/wipeleft/circleopen/zoomin/"
+                    "slideup/pixelize/dissolve 等；音频默认交叉淡化\n"
+                    "  effect=**加特效**：整段视频套滤镜（source + effects 列表，可叠加）。"
+                    "可选 vignette 暗角 / warm 暖调 / cool 冷调 / mono 黑白 / vintage 复古 / "
+                    "highcontrast / vivid / blur / sharpen / edge / chroma 色差 / noise 噪点 / "
+                    "scanlines 扫描线 / kenburns_in 缓慢推近 / kenburns_out 缓慢拉远\n"
                     "⚠️ source / sources / audio / subtitle 都可以给本地绝对路径，"
                     "或生成文库里的文件名。\n"
-                    "⚠️ **做不了**：多轨时间线编辑、花哨的转场特效、AI 自动抠视频主体。"
+                    "⚠️ kenburns 推拉很慢（53 秒视频可能要好几分钟），用时先跟用户说一声。\n"
+                    "⚠️ **做不了**：多轨时间线编辑、AI 自动抠视频主体。"
                     "用户要这些时如实说明做不到，别硬接。"
                 ),
                 "parameters": {
