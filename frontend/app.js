@@ -45,6 +45,25 @@
 
   // ---------- 基础工具 ----------
   function esc(s) {
+  // ---------- 折叠高度补间（2026-11-12 用户要求「代码框展开/收起要有动画」）----------
+  // 为什么不用纯 CSS：卡片里还有一批 display:none 的元素（输出区、按钮、编辑区），
+  // 它们一出现高度就突变；CSS 只过渡了 code-body，看起来仍是「啪一下弹出来」。
+  // 这里直接量「切换前 → 切换后」的真实高度，用 WAAPI 把整张卡片补间过去，最稳。
+  function animHeight(el, mutate, dur = 300) {
+    if (!el || typeof el.animate !== "function") { mutate(); return; }
+    const h1 = el.getBoundingClientRect().height;
+    el.classList.add("anim-h");     // 动画期间关掉子元素的 CSS 过渡，免得两边打架
+    mutate();
+    const h2 = el.getBoundingClientRect().height;
+    if (Math.abs(h2 - h1) < 1.5) { el.classList.remove("anim-h"); return; }
+    const a = el.animate(
+      [{ height: h1 + "px" }, { height: h2 + "px" }],
+      { duration: dur, easing: "cubic-bezier(.4,0,.2,1)" }
+    );
+    const done = () => el.classList.remove("anim-h");
+    a.onfinish = done;
+    a.oncancel = done;
+  }
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
