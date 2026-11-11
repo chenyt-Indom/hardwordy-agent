@@ -56,42 +56,43 @@
 html[data-theme="light"] {
   color-scheme: light;
 
-  /* 2026-11-12 用户第二次反馈「白色太刺眼」，并给了 WorkBuddy 的浅蓝紫灰做参照：
-     底色统一走 #edf0fa 一档的冷调灰蓝，主区/输入框都不再出现接近纯白的 #fdfdff，
-     对比度只靠文字和边框撑，长时间盯着不累。 */
-  --bg: #e6ebf6;            /* 页面/侧栏底：冷调灰蓝，整体亮度压低，不发光 */
-  --panel: #f5f7fd;         /* 主内容区：比底亮一档，但不是白 */
-  --panel2: #e9eefa;        /* 气泡/次级面板 */
-  --field-bg: #f8faff;      /* 输入框：不出现接近纯白 */
-  --border: #c7d2e6;        /* 描边加深：卡片/分隔线看得清，不再糊成一片 */
-  --text: #131a2b;          /* 正文：压到近黑，靠字提对比而不是靠白底 */
-  --muted: #3f4a63;
+  /* 2026-11-12 用户第三次反馈：底色偏蓝、看久了累，希望「稍微浅黄一点、别太黄」的护眼色。
+     做法：整套冷调灰蓝换成**暖米黄（cream）**——色相往暖走一点（约 40°），
+     明度与原来基本持平（不会突然变亮刺眼），文字继续压到近黑靠字撑对比。
+     主色蓝保留，作为唯一的冷色点缀（链接/按钮），在米黄底上反而更清楚。 */
+  --bg: #ece6d6;            /* 页面/侧栏底：暖米黄，亮度与原冷灰蓝持平 */
+  --panel: #f7f3e8;         /* 主内容区：比底亮一档，仍是米黄不是白 */
+  --panel2: #f0eadb;        /* 气泡/次级面板 */
+  --field-bg: #faf7ee;      /* 输入框：暖白，不刺眼 */
+  --border: #d3c8ab;        /* 描边：暖灰褐，卡片/分隔线看得清 */
+  --text: #241f17;          /* 正文：暖近黑，靠字提对比 */
+  --muted: #574f3f;
   --accent: #2563d8;
   --green: #2f9e6b;
   --danger: #d94a44;
 
-  --btn-bg: #dfe6f5;
-  --btn-bg-hover: #cfd9ee;
+  --btn-bg: #eae3cf;
+  --btn-bg-hover: #ded5bd;
   --accent-hover: #1f57c4;
-  --hover-bg: #e0e7f6;
-  --think-bg: #e7eefb;
-  --chip-bg: #e3ebfc;
-  --chip-border: #b9cbec;
-  --gen-label-bg: #e3ebfc;
-  --meta-fg: #6a7489;
-  --overlay: rgba(30, 38, 60, .5);
-  --shadow: rgba(40, 52, 82, .16);
-  --lb-cap: #eef2fb;
+  --hover-bg: #ece5d2;
+  --think-bg: #f0ead8;
+  --chip-bg: #efe8d2;
+  --chip-border: #cfc3a2;
+  --gen-label-bg: #efe8d2;
+  --meta-fg: #6b6250;
+  --overlay: rgba(40, 35, 24, .5);
+  --shadow: rgba(80, 68, 44, .16);
+  --lb-cap: #f4f0e3;
   --tag-pin-bg: #2f9e6b;
   --tag-pin-fg: #fff;
-  --tag-auto-bg: #dfe8ff;
+  --tag-auto-bg: #e6ddc2;
   --tag-auto-fg: #2b4a8a;
   --danger-soft: rgba(217, 74, 68, .1);
   --warn: #a86a12;
   --warn-border: #e0b877;
   --warn-bg: rgba(224, 184, 119, .18);
-  --scrollbar: #b9c5db;
-  --scrollbar-hover: #a3b1cb;
+  --scrollbar: #cdc2a8;
+  --scrollbar-hover: #b8ac90;
 }
 
 /* 主题切换的过渡：只给底色/文字色，避免整页元素一起动导致卡顿 */
