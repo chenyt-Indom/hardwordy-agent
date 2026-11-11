@@ -3831,11 +3831,11 @@
       box.appendChild(body);
       box.__body = body;
       box.__head = head;
-      head.onclick = () => {
+      head.onclick = () => animHeight(box, () => {
         const closed = box.classList.toggle("collapsed");
         body.hidden = closed;
         head.querySelector(".sd-list-arrow").textContent = closed ? "▸" : "▾";
-      };
+      });
       answerWrap.appendChild(box);
       selfdevList = box;
       return box;
