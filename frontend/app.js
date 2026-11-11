@@ -4622,7 +4622,7 @@
             if (_fullThink && _fullThink.length > thinking.length) {
               thinking = _fullThink;
               updateThinkStatus();
-              if (thinkBody.style.display !== "none") thinkBody.textContent = thinking;
+              if (thinkBody.classList.contains("open")) thinkBody.textContent = thinking;
             }
           }
           if (obj.done || obj.__end) break;
