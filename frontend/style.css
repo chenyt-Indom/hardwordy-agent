@@ -2957,33 +2957,3 @@ html[data-theme="light"] select.pill-select option {
 .code-group-body { padding: 0 8px 2px; }
 .code-group-body .code-card { margin: 8px 0; }
 .code-group.collapsed .code-group-body { display: none; }
-
-
-/* ================= 思考框贴底 + 代码卡片底部折叠（2026-11-11）=================
-   用户要求：① 思考时思考框永远居于最下方，方便监控模型在想什么；
-             ② 代码折叠框除了上方，下方也要有一个折叠按钮。 */
-.think-dock {
-  position: sticky;
-  bottom: 6px;
-  z-index: 40;
-  /* sticky 之后，下面的内容会从它背后穿过 —— 必须给不透明底色，
-     否则文字会叠在一起看不清 */
-  background: var(--bg);
-  border-radius: 12px;
-  padding-bottom: 2px;
-  box-shadow: 0 -6px 18px rgba(0, 0, 0, .28);
-}
-.think-dock .think-hdr,
-.think-dock .think-body {
-  max-width: 100%;   /* 贴底时铺满整行，不然 70% 宽度看着歪 */
-}
-/* ⚠️ 必须用 `.code-card > .code-toggle-b`（0,2,0）压过 `.btn.sm { width:auto }`，
-   否则底部按钮只有 83px 宽、还丢掉 margin —— 实测过。 */
-.code-card > .code-toggle-b {
-  display: block;
-  width: 100%;
-  margin: 6px 0 0;
-  text-align: center;
-  opacity: .8;
-}
-.code-card > .code-toggle-b:hover { opacity: 1; }

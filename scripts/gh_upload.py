@@ -17,19 +17,19 @@ import requests
 
 OWNER = "chenyt-Indom"
 REPO = "local-multimodal"
-TAG = "v2026.11.11"
-NAME = "Hardwordy Agent 2026.11.11a（全量版）"
+TAG = "v2026.11.10"
+NAME = "本地多模态助手 2026.11.10c（全量版）"
 BODY = """**全量版 · 2026.11.10c**（不含任何 API Key，请自行在程序里填）
 
 GitHub 单文件上限 2 GB，所以切两卷，下载后合并：
 
 ```cmd
-copy /b HardwordyAgent-Full-2026.11.11a.zip.part1 + HardwordyAgent-Full-2026.11.11a.zip.part2 HardwordyAgent-Full-2026.11.11a.zip
+copy /b LocalMultimodalAssistant-Full-2026.11.10c.zip.part1 + LocalMultimodalAssistant-Full-2026.11.10c.zip.part2 LocalMultimodalAssistant-Full-2026.11.10c.zip
 ```
 
 校验（合并后应等于）：
 ```
-98584f5e51de309ea8d87a332976e6a898381da022d48ace4b3db469a4ead5d3
+49ec6e997c1370e85fd0950167e5b5fccefe5231d2bae7f99517b189f689d0df
 ```
 
 解压 → 双击 `一键启动.bat`；顶栏 🔑 填自己的 DeepSeek Key。
