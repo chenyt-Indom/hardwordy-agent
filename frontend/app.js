@@ -3796,8 +3796,18 @@
         card.classList.toggle("card-collapsed", _cardCollapsed);
         _tg3.textContent = _cardCollapsed ? "▾ 展开整张卡片" : "▴ 收起整张卡片";
       };
-      _tg3.onclick = () => { _cardCollapsed = !_cardCollapsed; _syncCard(); };
+      const _flipCard = () => { _cardCollapsed = !_cardCollapsed; _syncCard(); };
+      _tg3.onclick = _flipCard;
       card.appendChild(_tg3);
+      // 收起状态下整张卡只剩标题行 —— 点这一行也能展开，不用去找按钮
+      const _chead = card.querySelector(".code-head");
+      if (_chead) {
+        _chead.onclick = (ev) => {
+          if (!_cardCollapsed) return;                    // 展开时标题行里的按钮照常可用
+          if (ev.target && ev.target.closest && ev.target.closest(".code-btns")) return;
+          _flipCard();
+        };
+      }
       _syncCard();
       _syncTg();
 
