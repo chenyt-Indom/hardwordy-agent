@@ -15,6 +15,8 @@ WorkBuddy 的默认档（它的对话默认上限在 8k 输出 / 16k 上下文�
 """
 from __future__ import annotations
 
+import time
+
 from . import config
 
 PROFILES = {
@@ -27,14 +29,22 @@ PROFILES = {
 MIN_CTX, MAX_CTX = 4096, 1048576      # 无极调节范围（云模型 1M 也能开到）
 MIN_OUT = 8192                        # 输出下限（不允许低于这个，用户明确要求）
 
+# ---------------- 模型能力探测的缓存（2026-11-11 加）----------------
+# ⚠️ 为什么必须缓存：本机连 127.0.0.1:11434 时，**即使 Ollama 没开、被拒绝，
+#    Windows 也要等满 2 秒**才返回 ConnectionRefused（实测 2004 ms，原始 socket 也是）。
+#    而探测一次要连两个接口（/api/tags + /api/show）= 4 秒。
+#    这段代码在 /api/chat 里是**同步阻塞**调用，Ollama 一关，每条消息白等 6 秒
+#    （perf.get() 4s + _installed_models() 2s），整个事件循环一起冻住。
+#
+# 策略：成功缓存 60 秒；失败缓存 120 秒（失败时更要省，因为大概率还会失败）。
+# 缓存按**模型名**分桶 —— 换模型立刻失效，不会把 A 模型的能力安到 B 头上。
+_DET_CACHE = {"key": "", "t": 0.0, "fail_t": 0.0, "val": None}
+_OK_TTL = 60.0
+_FAIL_TTL = 120.0
 
-def detect_model() -> dict:
-    """**自动读取**当前模型真实支持的上下文上限（用户要求：先探测再给选项）。
 
-    Ollama 的 /api/show 里 model_info 带 `<arch>.context_length`，
-    qwen3-vl 实测是 262144 —— 比我们写死的 131072 大一倍。
-    之前把上限写死，等于白白浪费一半能力。探测失败就退回保守值。
-    """
+def _detect_model_raw() -> dict:
+    """真正去问 Ollama 的那一段（可能有 4 秒网络开销，只在缓存失效时走）。"""
     out = {"model": "", "max_ctx": MAX_CTX, "ok": False}
     try:
         cfg = config.load_config() or {}
@@ -53,6 +63,7 @@ def detect_model() -> dict:
             return out
         out["model"] = model
         import json as _j
+
         import urllib.request as _u
         req = _u.Request(base + "/api/show",
                          data=_j.dumps({"model": model}).encode(),
@@ -72,6 +83,37 @@ def detect_model() -> dict:
                 break
     except Exception:
         pass
+    return out
+
+
+def detect_model(force: bool = False) -> dict:
+    """自动读取当前模型真实支持的上下文上限（**带缓存**，见文件顶部的说明）。
+
+    Ollama 的 /api/show 里 model_info 带 `<arch>.context_length`，
+    qwen3-vl 实测是 262144 —— 比写死的 131072 大一倍，所以不能写死。
+
+    Args:
+        force: 跳过缓存强制重探（设置面板点「刷新」时用）。
+               注意：Ollama 没开时这一下要等 4 秒，别放进对话路径。
+    """
+    cfg = config.load_config() or {}
+    model = str(cfg.get("default_model") or "")
+    now = time.time()
+    c = _DET_CACHE
+    if not force and c["val"] is not None and c["key"] == model:
+        if c["t"] and (now - c["t"]) < _OK_TTL:
+            return c["val"]                      # 成功缓存
+        if c["fail_t"] and (now - c["fail_t"]) < _FAIL_TTL:
+            return c["val"]                      # 失败缓存（沿用上次结果，不再等超时）
+    out = _detect_model_raw()
+    c["key"] = model
+    c["val"] = out
+    if out.get("ok"):
+        c["t"] = now
+        c["fail_t"] = 0.0
+    else:
+        c["fail_t"] = now
+        c["t"] = 0.0
     return out
 
 
@@ -107,7 +149,17 @@ def detect_cloud(key: str) -> dict:
     return out
 
 
-def get() -> dict:
+def get(with_detect: bool = True) -> dict:
+    """读当前生效的性能档位 / 上下文 / 输出额度。
+
+    Args:
+        with_detect: 是否顺便探测模型真实上下文上限。
+            · 设置面板（`/api/perf`）要 True —— 它要显示"你这台机器能开多大"。
+            · **对话路径一律传 False**：`num_ctx` 和 `max_tokens` 完全由配置算出来，
+              跟探测结果无关（`hi` 恒等于 MAX_CTX，探测只影响展示字段）。
+              传 False 就不会为了一个用不到的展示字段，每条消息白等 4 秒。
+              2026-11-11 实测：Ollama 关闭时 True 要 4,128 ms，False 是 0 ms。
+    """
     cfg = config.load_config() or {}
     prof = str(cfg.get("perf_profile") or "medium")
     if prof not in PROFILES:
@@ -125,7 +177,9 @@ def get() -> dict:
         mt = 0
     # 输出额度取"配置值"和"档位值"里更大的那个 —— 只能多不能少
     out = max(MIN_OUT, p["max_tokens"], mt)
-    det = detect_model()
+    det = detect_model() if with_detect else {
+        "model": str(cfg.get("default_model") or ""),
+        "max_ctx": MAX_CTX, "ok": False, "skipped": True}
     hi = max(MAX_CTX, det["max_ctx"])      # 选项上限跟着模型真实能力走
     return {"profile": prof, "name": p["name"], "max_tokens": out,
             "num_ctx": ctx, "effort": p["effort"],

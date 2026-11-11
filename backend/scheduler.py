@@ -280,7 +280,8 @@ def _run_local(M, cfg: dict, model: str, prompt: str, schemas: list, ctx: dict) 
                     room = 8192
                     if pt:
                         from . import perf as _perf
-                        room = max(1024, int(_perf.get()["num_ctx"]) - pt - 512)
+                        # 只要 num_ctx，别带模型探测（Ollama 没开时那要等 4 秒）
+                        room = max(1024, int(_perf.get(with_detect=False)["num_ctx"]) - pt - 512)
                     params = dict(params)
                     params["max_tokens"] = min(
                         24576, max(int(params.get("max_tokens") or 4096) * 2, room))

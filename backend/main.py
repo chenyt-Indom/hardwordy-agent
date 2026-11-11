@@ -2746,12 +2746,21 @@ def _prev_code_flag(messages: list, last_user: str) -> bool:
             and not _is_doc_task(prev_user))
 
 
-_model_tags_cache = {"t": 0.0, "names": set()}
+_model_tags_cache = {"t": 0.0, "names": set(), "fail_t": 0.0}
 
 def _installed_models() -> set:
-    """本机已下载的 Ollama 模型名（缓存 60 秒，别每轮都去问一次）。"""
+    """本机已下载的 Ollama 模型名（缓存 60 秒，别每轮都去问一次）。
+
+    ⚠️ 2026-11-11 修：原来只在**成功**时更新时间戳，异常分支直接 return 旧值 ——
+       于是 Ollama 一关，`names` 永远是空集合，`if _model_tags_cache["names"]`
+       永远为假，**每次都重新等超时**，60 秒缓存形同虚设。
+       而本机连 11434 即使被拒绝也要等满 2 秒（实测 2004 ms，原始 socket 也一样），
+       这段又是在 async def chat 里同步调用 → 每条消息白冻 2 秒。
+       现在失败也记时间戳（fail_t），60 秒内不再重试。
+    """
     now = time.time()
-    if _model_tags_cache["names"] and now - _model_tags_cache["t"] < 60:
+    # 成功和失败共用 60 秒节流：哪怕真的一个模型都没装，也不用每轮都去问
+    if now - max(_model_tags_cache["t"], _model_tags_cache["fail_t"]) < 60:
         return _model_tags_cache["names"]
     names = set()
     try:
@@ -2766,8 +2775,9 @@ def _installed_models() -> set:
                     if ":" not in n:
                         names.add(n + ":latest")
     except Exception:
+        _model_tags_cache["fail_t"] = now
         return _model_tags_cache["names"]
-    _model_tags_cache.update(t=now, names=names)
+    _model_tags_cache.update(t=now, names=names, fail_t=0.0)
     return names
 
 
@@ -4656,7 +4666,10 @@ async def chat(req: ChatRequest,
     cfg = config.load_config()
     # ★ 性能档位/上下文在这里落到本次请求（用户要求：参数量不低于此，且可无极调）
     try:
-        _pf = perf.get()
+        # ⚠️ with_detect=False：对话路径只要 num_ctx / max_tokens，这两个完全由配置算出来，
+        #    跟"探测模型真实上限"无关。传 True 的话 Ollama 一关，每条消息先白等 4 秒
+        #    （2026-11-11 实测 4,128 ms，而且是同步调用，会把事件循环一起冻住）。
+        _pf = perf.get(with_detect=False)
         cfg["max_tokens"] = max(int(cfg.get("max_tokens") or 0), _pf["max_tokens"])
         cfg["num_ctx"] = _pf["num_ctx"]
     except Exception:
@@ -6555,7 +6568,8 @@ def _ctx_limit(num_ctx=0) -> int:
     # 算进 num_ctx，而 config["num_ctx"] 只是档位默认值、不含手动覆盖。
     # 直接读后者会让圆环按 40960 算，实际窗口却是 154624 —— 显示成 126% 假爆表。
     try:
-        n = int((perf.get() or {}).get("num_ctx") or 0)
+        # 前端圆环每次消息变化都会打这个接口 —— 绝对不能再带模型探测（见 perf.get 注释）
+        n = int((perf.get(with_detect=False) or {}).get("num_ctx") or 0)
         if n > 0:
             return n
     except Exception:                                # noqa: BLE001
@@ -7277,7 +7291,7 @@ async def chat_deepseek(req: ChatRequest,
                         #   （用户报「思考过程有了，但输出被限制了」）。
                         #   现在跟随全局配置（16384），并配 client 侧的截断续写。
                         max_tokens=max(int(cfg.get("max_tokens") or 8192),
-                                       (perf.get() or {}).get("max_tokens", 0)),
+                                       (perf.get(with_detect=False) or {}).get("max_tokens", 0)),
                         system_prompt=sys_prompt,
                         # 轮次上限跟主通道用同一份配置（用户要求放到最多）
                         max_rounds=max(1, min(int(cfg.get("max_tool_rounds") or MAX_TOOL_ROUNDS), 500)),
@@ -8050,6 +8064,12 @@ def _warmup_on_start():
     只预热**默认模型**：显卡显存装不下默认模型 + 代码模型两个，
     同时加载会溢出到内存，反而更慢。代码模型仍按需加载。
     """
+    # ★ 2026-11-11：一启动就后台探一次「本机装了哪些 Ollama 模型」。
+    #   为什么：本机连 11434 **即使被拒绝也要等满 2 秒**（实测 2004 ms，原始 socket 同样），
+    #   不预热的话重启后的**第一条消息**要先白冻 2 秒；预热后第一条也是 0 秒。
+    #   放在最前面，不等自检跑完。
+    threading.Thread(target=_installed_models, daemon=True).start()
+
     # ★ 启动自检（2026-11-08 新增）
     #   用户要求：「每次启动都得全部验证所有东西并报告状态，确保无论隔多长时间都没问题」。
     #   后台跑一遍（5-10 秒），结果缓存供 /api/selftest 查询；不阻塞服务起来，

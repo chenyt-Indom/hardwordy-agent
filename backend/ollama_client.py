@@ -135,9 +135,11 @@ class OllamaClient:
         # 不给的话，用户隔几分钟再发消息就要重新加载（实测冷启动 4.5 秒起步），
         # 体感就是"发出去半天没反应"。值走配置（model_keep_alive，默认 30m）。
         # ★ 上下文长度走性能档位（用户要求可无极调节）；读不到就退回配置
+        # ⚠️ with_detect=False：这里只要 num_ctx，不需要探测模型真实上限。
+        #    带探测的话 Ollama 没开时每次请求先等 4 秒（2026-11-11 实测）。
         try:
             from . import perf as _perf
-            _ctx = int(_perf.get()["num_ctx"])
+            _ctx = int(_perf.get(with_detect=False)["num_ctx"])
         except Exception:
             _ctx = None
         try:
