@@ -1008,45 +1008,6 @@ body.dragging .drop-overlay,
 }
 #dlText:focus { border-color: var(--accent); }
 
-
-/* ---------- 生成文库 · 类别分组（2026-11-11）----------
-   用户要求「按不同类别展开与收起，默认全部收起，只看类别和数量」。
-   用 .dl-cat.open 控制展开；行内改成两行（文件名 + 副标题），
-   长文件名不会再把它后面的时间和大小挤没。 */
-.dl-cat { margin: 2px 0 4px; }
-.dl-cat-head {
-  width: 100%; display: flex; align-items: center; gap: 7px;
-  padding: 7px 9px; border-radius: 8px; border: 1px solid transparent;
-  background: var(--panel2); color: var(--text);
-  font-size: 12.5px; font-weight: 600; cursor: pointer; text-align: left;
-}
-.dl-cat-head:hover { border-color: var(--border); }
-.dl-cat-arrow { flex: none; width: 12px; opacity: .8; font-size: 11px; }
-.dl-cat-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dl-cat-count {
-  flex: none; min-width: 20px; text-align: center; font-size: 11px;
-  color: var(--muted); background: var(--bg); border-radius: 9px; padding: 1px 6px;
-}
-.dl-cat-body { display: none; padding: 3px 0 2px 8px; }
-.dl-cat.open > .dl-cat-body { display: block; }
-.dl-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.dl-main .dl-name { flex: none; width: 100%; }
-.dl-sub {
-  font-size: 11px; color: var(--muted); overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
-}
-.dl-tag {
-  display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 6px;
-  font-size: 10px; color: var(--accent); background: rgba(79,139,249,.25);
-}
-
-/* 可执行文件（exe / bat）：双击是「直接运行」，跟「用程序打开」不是一回事，单独标出来 */
-.dl-run {
-  display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 6px;
-  font-size: 10px; font-weight: 600; color: #1a7f37;
-  background: rgba(46,160,67,.22);
-}
-
 /* ---------- 输入弹层（复制/改名等；不用原生 prompt，WebView2 不支持它）---------- */
 .input-dialog { margin-top: 10px; font-size: 13px; padding: 9px 11px; }
 
@@ -2940,50 +2901,3 @@ html[data-theme="light"] select.pill-select option {
 .sd-row .sd-head { cursor: pointer; }
 .sd-row .sd-head:hover { background: rgba(90, 169, 255, .06); }
 .sd-row .sd-body { border-top: 1px solid #262d38; }
-
-/* ===== 代码卡片分组（2026-11-11 用户要求：代码提示别堆成一屏）===== */
-.code-group {
-  margin: 10px 0; border: 1px solid var(--border); border-radius: 12px;
-  background: rgba(255, 255, 255, .02); overflow: hidden; max-width: 100%;
-}
-.code-group-head {
-  display: flex; align-items: center; gap: 8px; cursor: pointer;
-  padding: 7px 10px; background: var(--panel2); user-select: none;
-}
-.code-group-head:hover { background: var(--panel); }
-.code-group-head .cg-title { font-size: 12px; font-weight: 600; color: var(--text); }
-.code-group-head .cg-count { font-size: 11px; color: var(--muted); }
-.code-group-head .cg-toggle { margin-left: auto; }
-.code-group-body { padding: 0 8px 2px; }
-.code-group-body .code-card { margin: 8px 0; }
-.code-group.collapsed .code-group-body { display: none; }
-
-
-/* ================= 思考框贴底 + 代码卡片底部折叠（2026-11-11）=================
-   用户要求：① 思考时思考框永远居于最下方，方便监控模型在想什么；
-             ② 代码折叠框除了上方，下方也要有一个折叠按钮。 */
-.think-dock {
-  position: sticky;
-  bottom: 6px;
-  z-index: 40;
-  /* sticky 之后，下面的内容会从它背后穿过 —— 必须给不透明底色，
-     否则文字会叠在一起看不清 */
-  background: var(--bg);
-  border-radius: 12px;
-  padding-bottom: 2px;
-  box-shadow: 0 -6px 18px rgba(0, 0, 0, .28);
-}
-.think-dock .think-hdr,
-.think-dock .think-body {
-  max-width: 100%;   /* 贴底时铺满整行，不然 70% 宽度看着歪 */
-}
-/* ⚠️ 必须用 `.code-card > .code-toggle-b`（0,2,0）压过 `.btn.sm { width:auto }`，
-   否则底部按钮只有 83px 宽、还丢掉 margin —— 实测过。 */
-.code-card > .code-toggle-b {
-  display: block;
-  width: 100%;
-  margin: 6px 0 0;
-  text-align: center;
-  opacity: .8;
-}
-.code-card > .code-toggle-b:hover { opacity: 1; }
