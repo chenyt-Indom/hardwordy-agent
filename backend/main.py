@@ -41,6 +41,22 @@ from . import (config, ollama_client, deepseek_client, cloud_image, image_models
 
 app = FastAPI(title="hardwordy", version="1.0.0")
 
+# ⚠️ 本机地址一律不走系统代理（2026-11-11）。
+#   开发机上经常挂着 http_proxy（抓包 / 科学上网 / 各种客户端自带），
+#   requests 和 urllib 会老实把 http://127.0.0.1:11434 也发给代理，
+#   拿回来的不是 Ollama 而是一个 502 Bad Gateway —— 表现就是
+#   「Ollama 明明在跑，界面却说连不上 / 模型下载不了」，而且极难查。
+#   这里把本机地址加进 NO_PROXY（追加，不覆盖用户已有的设置）。
+#   · requests 走 get_environ_proxies()，会读 NO_PROXY
+#   · urllib 走 proxy_bypass_environment()，同样读 NO_PROXY
+#   注意：外网请求（DeepSeek 等）照旧走代理，这里只豁免本机回环地址。
+for _k in ("NO_PROXY", "no_proxy"):
+    _cur = os.environ.get(_k, "")
+    _add = [h for h in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+            if h not in [x.strip() for x in _cur.split(",") if x.strip()]]
+    if _add:
+        os.environ[_k] = (",".join(filter(None, [_cur] + _add)))
+
 
 # ⚠️ 必须在任何子进程启动之前装上：之后所有 subprocess.Popen（含只读模块
 #    backend/selfdev.py 里的 node --check、git）都不会再弹控制台黑窗。
@@ -2779,6 +2795,71 @@ def _installed_models() -> set:
         return _model_tags_cache["names"]
     _model_tags_cache.update(t=now, names=names, fail_t=0.0)
     return names
+
+
+def _ollama_port_alive(timeout: float = 0.6) -> bool:
+    """11434 到底有没有人接。用裸 socket，比 urlopen 快（本机被拒要等 2 秒）。"""
+    import socket
+    s = socket.socket()
+    s.settimeout(timeout)
+    try:
+        s.connect(("127.0.0.1", 11434))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _try_start_ollama() -> None:
+    """端口没起来时，尽力拉一次 `ollama serve`（尽力而为，失败不吵）。
+
+    为什么要有这个（2026-11-11 用户报「前端下载不了本地模型」）：
+      · 打包版的一键启动.bat 里本来就会 `start "" /min ollama serve`，
+      · 但**源码启动**（pythonw run.py）和桌面快捷方式完全没有这一步，
+      · Ollama 一关，前端就是彻底的死链：列表空、下载报错、删除报错，
+        而界面上只有一句「请先启动 ollama serve」，用户不知道该怎么办。
+
+    只为「服务在不在」而拉起：ollama serve 不加载任何模型，
+    显存占用是 0，真正吃显存要等有人发请求。
+    """
+    if _ollama_port_alive():
+        return
+    exe = ""
+    try:
+        import shutil
+        exe = shutil.which("ollama") or ""
+    except Exception:
+        pass
+    if not exe:
+        for p in (os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"),
+                  r"C:\Program Files\Ollama\ollama.exe"):
+            if os.path.isfile(p):
+                exe = p
+                break
+    if not exe:
+        logger.info("[启动] 没找到 ollama 可执行文件，本地模型功能需自行启动 Ollama")
+        return
+    try:
+        import subprocess
+        _base_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # 用「受管子进程」而不是脱离 job：
+        #   · CREATE_NO_WINDOW 保证不弹黑窗；
+        #   · **不**加 DETACHED/BREAKAWAY —— 实测脱离后在某些环境里会被
+        #     后台回收得莫名其妙（进程在、端口不通），受管的反而稳定。
+        #   · 代价是应用退出时 Ollama 一起停；下次启动再拉起来。
+        #     Ollama 本来就有 4h keep_alive，重开的成本可以接受。
+        subprocess.Popen([exe, "serve"],
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL,
+                         creationflags=_base_flags)
+        logger.info("[启动] Ollama 没在运行，已尝试拉起 ollama serve：%s", exe)
+    except Exception:
+        logger.warning("[启动] 拉起 ollama serve 失败（不影响云端对话）", exc_info=True)
 
 
 def _is_writing_task(text: str) -> bool:
@@ -8064,11 +8145,22 @@ def _warmup_on_start():
     只预热**默认模型**：显卡显存装不下默认模型 + 代码模型两个，
     同时加载会溢出到内存，反而更慢。代码模型仍按需加载。
     """
-    # ★ 2026-11-11：一启动就后台探一次「本机装了哪些 Ollama 模型」。
-    #   为什么：本机连 11434 **即使被拒绝也要等满 2 秒**（实测 2004 ms，原始 socket 同样），
-    #   不预热的话重启后的**第一条消息**要先白冻 2 秒；预热后第一条也是 0 秒。
-    #   放在最前面，不等自检跑完。
-    threading.Thread(target=_installed_models, daemon=True).start()
+    # ★ 2026-11-11：后台把 Ollama 拉起来 + 预热模型清单缓存。
+    #   ① 端口没起来就尽力 `ollama serve` —— 否则前端「下载本地模型」是死链
+    #      （列表空、下载必失败，界面上只有一句「请先启动 ollama serve」）；
+    #   ② 预热缓存：本机连 11434 **即使被拒绝也要等满 2 秒**（实测 2004 ms，
+    #      原始 socket 同样），不预热的话重启后第一条消息要先白冻 2 秒。
+    #   放最前面，不等自检跑完；失败一律静默（云端对话不受影响）。
+    def _boot_ollama() -> None:
+        _try_start_ollama()
+        for _ in range(16):                  # 最多等 8 秒，让它把端口起来
+            if _ollama_port_alive():
+                break
+            time.sleep(0.5)
+        _model_tags_cache["fail_t"] = 0.0     # 刚起过，允许立刻重探一次
+        _installed_models()
+
+    threading.Thread(target=_boot_ollama, daemon=True).start()
 
     # ★ 启动自检（2026-11-08 新增）
     #   用户要求：「每次启动都得全部验证所有东西并报告状态，确保无论隔多长时间都没问题」。

@@ -33,9 +33,22 @@ from typing import Any
 
 import requests
 
-OLLAMA = "http://127.0.0.1:11434"
+# Ollama 地址**走配置**，别写死 —— 换端口 / 换机器（远程 Ollama）时要能跟着走。
+# 之前写死 127.0.0.1:11434，配置改了这里不生效。
+_DEF = "http://127.0.0.1:11434"
+# 本机地址一律不走系统代理：开发机上常挂着 http_proxy（抓包/科学上网），
+# requests 会老实把 127.0.0.1 也发给代理，结果拿到 502 而不是连 Ollama。
+_NO_PROXY = {"http": None, "https": None}
 # (连接超时, 读取超时)：大文件下载读取给足 1 小时
 TIMEOUT = (10, 3600)
+
+
+def _base() -> str:
+    try:
+        from . import config
+        return str((config.load_config() or {}).get("ollama_url") or _DEF).rstrip("/")
+    except Exception:
+        return _DEF
 
 _LOCK = threading.Lock()
 
@@ -103,9 +116,9 @@ def _worker(model: str) -> None:
     last_c = 0
     try:
         resp = requests.post(
-            f"{OLLAMA}/api/pull",
+            f"{_base()}/api/pull",
             json={"name": model, "stream": True},
-            stream=True, timeout=TIMEOUT)
+            stream=True, timeout=TIMEOUT, proxies=_NO_PROXY)
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Ollama 返回 {resp.status_code}: {resp.text[:200]}")
@@ -179,6 +192,16 @@ def _worker(model: str) -> None:
         with _LOCK:
             _STATE.update({"status": "done", "percent": 100.0,
                            "finished_at": time.time()})
+    except requests.exceptions.ConnectionError:
+        # ⚠️ 2026-11-11：连不上时不要甩一坨 "Max retries exceeded with url..."，
+        #   用户看不懂也不知道下一步做什么。直接说清楚 + 给出动作。
+        with _LOCK:
+            _STATE.update({
+                "status": "error",
+                "error": "连不上 Ollama（%s）—— 下载本地模型必须先让它跑起来。\n"
+                         "请先执行 ollama serve（或双击 Ollama 图标），"
+                         "看到 11434 端口起来后再点一次下载。" % _base(),
+                "finished_at": time.time()})
     except Exception as e:                        # noqa: BLE001
         with _LOCK:
             _STATE.update({"status": "error",
@@ -191,8 +214,9 @@ def remove(model: str) -> dict[str, Any]:
     if is_running() and get_state().get("model") == model:
         return {"ok": False, "msg": "该模型正在下载，先取消再删除"}
     try:
-        r = requests.delete(f"{OLLAMA}/api/delete",
-                            json={"name": model}, timeout=(8, 120))
+        r = requests.delete(f"{_base()}/api/delete",
+                            json={"name": model}, timeout=(8, 120),
+                            proxies=_NO_PROXY)
         if r.status_code != 200:
             return {"ok": False, "msg": f"HTTP {r.status_code}: {r.text[:200]}"}
         return {"ok": True, "msg": f"已删除 {model}"}
@@ -203,7 +227,8 @@ def remove(model: str) -> dict[str, Any]:
 def installed() -> list[dict]:
     """已安装模型清单（含体积）。"""
     try:
-        r = requests.get(f"{OLLAMA}/api/tags", timeout=(6, 20))
+        r = requests.get(f"{_base()}/api/tags", timeout=(6, 20),
+                         proxies=_NO_PROXY)
         d = r.json()
         out = []
         for m in (d.get("models") or []):

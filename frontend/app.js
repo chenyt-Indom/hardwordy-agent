@@ -6673,15 +6673,41 @@
       return Math.floor(s / 3600) + "h" + Math.floor((s % 3600) / 60) + "m";
     };
 
+    // ⚠️⚠️ 2026-11-11 修：「下载模型」原来直接拿 config.default_model 当目标。
+    //   而默认模型现在可以被设成**云端**模型（deepseek-flash）——云端模型名
+    //   不是 Ollama 能 pull 的东西，于是点下载就去 `ollama pull deepseek-flash`，
+    //   必然失败，用户看到的就是「本地模型下载不了」。
+    //   这里只认本地模型名：默认模型是本地就用它，是云端就退回文档里的本地默认 8B。
+    const LOCAL_FALLBACK = "qwen3-vl:8b";
+    const CLOUD_RE = /^(deepseek|gpt-|chatgpt|o1|o3|o4|claude|gemini|glm|qwen-(max|plus|turbo|flash)|moonshot|kimi|doubao|ernie|hunyuan)/i;
+    const isCloudName = (m) => CLOUD_RE.test(String(m || "").trim());
+
+    function pickLocalModel(cfg) {
+      const def = String((cfg && cfg.default_model) || "").trim();
+      if (def && !isCloudName(def)) return def;
+      return LOCAL_FALLBACK;
+    }
+
+    // 下载框要跟**顶栏当前选中的本地模型**走：
+    //   选「🖥 本地 30B」就该能下载 30B，而不是永远盯着配置里的默认模型。
+    //   选「本地·自动」或任意云端模型时，退回配置里的本地默认，再不行用 8B。
+    let cfgCache = null;
+    function resolveTarget() {
+      const el = document.querySelector("#modelSelect");
+      const v = el ? String(el.value || "") : "";
+      if (v && v !== "auto" && !isCloudName(v)) return v;
+      return pickLocalModel(cfgCache);
+    }
+
     async function loadTarget() {
       try {
         const r = await fetch("/api/config");
         const d = await r.json();
-        const cfg = (d && d.config) || d || {};
-        targetModel = cfg.default_model || "qwen3-vl:30b";
+        cfgCache = (d && d.config) || d || {};
       } catch (e) {
-        targetModel = "qwen3-vl:30b";
+        cfgCache = null;
       }
+      targetModel = resolveTarget();
     }
 
     async function refreshInstalled() {
@@ -6722,6 +6748,13 @@
 
       btnPull.hidden = has;        // 已装 → 不显示「下载」
       btnRemove.hidden = !has;     // 未装 → 不显示「卸载/删除」
+      // ⚠️⚠️ 2026-11-11 修：按钮的 disabled **必须在这里复位**。
+      //   点「下载」时会先 btnPull.disabled = true 防重复点击，而下载失败/取消/
+      //   完成之后，唯一会重新渲染的就是这个函数 —— 之前没清 disabled，
+      //   结果报错一次按钮就永久变灰、点不动，只能刷新页面。
+      btnPull.disabled = false;
+      btnRemove.disabled = false;
+      if (targetModel) btnPull.textContent = "⬇ 下载 " + targetModel;
     }
 
     function startPoll() {
@@ -6849,6 +6882,14 @@
     (async () => {
       await loadTarget();
       await refreshInstalled();
+      // 顶栏换模型 → 下载框跟着换目标（选 30B 就显示「下载 30B」）
+      const sel = document.querySelector("#modelSelect");
+      if (sel) {
+        sel.addEventListener("change", async () => {
+          await loadTarget();
+          await refreshInstalled();
+        });
+      }
       try {
         const r = await fetch("/api/model/status");
         const d = await r.json();
