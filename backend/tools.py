@@ -3840,6 +3840,207 @@ def _do_compose_images(arguments, ui_events, context):
               "如实说明本工具只做排版式拼接，需要的话用 edit_image 逐张微改。")
 
 
+def _do_video_edit(arguments, ui_events, context):
+    """视频处理：裁剪 / 拼接 / 配音 / 加字 / 字幕 / 抽音轨 / 图片成片 / 压缩。
+
+    底层走 backend/video.py（调 imageio-ffmpeg 自带的 ffmpeg，**不依赖系统 PATH**），
+    产物直接落到**生成文库**，返回下载链接 —— 链接要模型原样给用户。
+
+    ⚠️ 能力边界（别对用户夸大）：只做「单轨、线性」的处理。
+       多轨时间线编辑、转场特效、AI 自动抠视频主体都没有，用户要就如实说做不到。
+    """
+    from . import doclib, video
+
+    if not video.available():
+        return ("错误：本机没有可用的 ffmpeg，剪不了视频。"
+                "装一个就行（约 100 MB）：pip install imageio-ffmpeg")
+
+    action = str(arguments.get("action") or "").strip().lower()
+    _known = ("trim", "concat", "audio", "text", "subtitle",
+              "extract_audio", "images_to_video", "compress", "info")
+    if action not in _known:
+        return ("错误：不认识的 action「%s」。可用的是：%s"
+                % (action, " / ".join(_known)))
+
+    def _resolve(p):
+        """本地绝对路径 → 生成文库里的文件名 → 原样返回（后面会报找不到）。"""
+        p = p.strip() if isinstance(p, str) else ""
+        if not p:
+            return ""
+        if os.path.isfile(p):
+            return p
+        try:
+            fp = doclib.file_path(p)
+            if os.path.isfile(fp):
+                return fp
+        except Exception:
+            pass
+        return p
+
+    def _target(ext):
+        """给成品算一个文库内的文件名 + 绝对路径。"""
+        name = str(arguments.get("filename") or "").strip()
+        if not name:
+            name = "视频_%s%s" % (time.strftime("%H%M%S"), ext)
+        elif not os.path.splitext(name)[1]:
+            name += ext
+        try:
+            full = doclib.file_path(name)
+        except Exception:
+            name = "视频_%s%s" % (time.strftime("%H%M%S"), ext)
+            full = doclib.file_path(name)
+        os.makedirs(os.path.dirname(full) or doclib.LIB_DIR, exist_ok=True)
+        return name, full
+
+    # ---------------- info：只看信息，不产出文件 ----------------
+    if action == "info":
+        src = _resolve(arguments.get("source"))
+        i = video.info(src)
+        if not i.get("ok"):
+            return "读不出这个视频：%s" % i.get("error")
+        return ("视频信息：时长 %.2f 秒，分辨率 %d×%d，帧率 %.0f fps，%s。"
+                % (i["duration"], i["width"], i["height"], i["fps"],
+                   "有声音" if i["has_audio"]
+                   else "**没有音轨**（加音乐时只能整条替换）"))
+
+    ext = ".mp4"
+    if action == "extract_audio":
+        fmt = str(arguments.get("fmt") or "mp3").lower().lstrip(".")
+        ext = "." + (fmt if fmt in ("mp3", "m4a", "wav") else "mp3")
+
+    rel, out = _target(ext)
+
+    _ui(ui_events, {"type": "status",
+                    "text": "正在处理视频（%s），大文件可能要等一两分钟…" % action})
+
+    note, r = "", None
+
+    if action == "trim":
+        src = _resolve(arguments.get("source"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        start = float(arguments.get("start") or 0)
+        dur = arguments.get("duration")
+        end = arguments.get("end")
+        if dur is None and end is None:
+            return "错误：裁剪要给出 duration（裁多长）或 end（裁到第几秒）。"
+        r = video.trim(src, out, start=start, duration=dur, end=end)
+        real = (float(dur) if dur is not None
+                else (float(end) - start if end is not None else 0))
+        note = "裁剪完成（从第 %.1f 秒起，共约 %.1f 秒，原声保留）" % (start, real)
+
+    elif action == "concat":
+        srcs = [_resolve(p) for p in (arguments.get("sources") or [])]
+        srcs = [p for p in srcs if p]
+        if len(srcs) < 2:
+            return "错误：拼接至少要给两个视频（sources 列表）。"
+        r = video.concat(srcs, out, width=arguments.get("width"))
+        if r.get("ok"):
+            note = ("拼接完成（%d 段，统一到 %d×%d，%s）"
+                    % (r["count"], r["width"], r["height"],
+                       "保留原声" if r.get("audio")
+                       else "**有段没有音轨，已整体去音**"))
+
+    elif action == "audio":
+        src = _resolve(arguments.get("source"))
+        aud = _resolve(arguments.get("audio"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        if not os.path.isfile(aud):
+            return "错误：找不到音频文件：%s" % (arguments.get("audio") or "（没给）")
+        mode = str(arguments.get("mode") or "replace").lower()
+        r = video.add_audio(src, aud, out, mode=mode,
+                            volume=arguments.get("volume"))
+        if r.get("ok"):
+            note = ("配乐完成（%s，音乐音量 %.2f，音乐比视频短时会循环垫满）"
+                    % ("替换原声" if mode != "mix" else "与原声混合",
+                       float(arguments.get("volume") or 1.0)))
+
+    elif action == "text":
+        src = _resolve(arguments.get("source"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        txt = str(arguments.get("text") or "").strip()
+        if not txt:
+            return "错误：没给要加的文字。"
+        r = video.add_text(src, out, txt,
+                           position=arguments.get("position") or "bottom",
+                           fontsize=arguments.get("fontsize") or 48,
+                           color=arguments.get("color") or "white",
+                           box=arguments.get("box") is not False,
+                           opacity=arguments.get("opacity"),
+                           start=arguments.get("start"),
+                           end=arguments.get("end"),
+                           margin=arguments.get("margin") or 60)
+        if r.get("ok"):
+            note = "文字已压上画面（%s，字号 %d）" % (
+                arguments.get("position") or "bottom",
+                int(arguments.get("fontsize") or 48))
+
+    elif action == "subtitle":
+        src = _resolve(arguments.get("source"))
+        srt = _resolve(arguments.get("subtitle"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        if not os.path.isfile(srt):
+            return ("错误：找不到字幕文件（要 .srt）：%s"
+                    % (arguments.get("subtitle") or "（没给）"))
+        r = video.add_subtitle(src, out, srt,
+                               fontsize=arguments.get("fontsize") or 22)
+        if r.get("ok"):
+            note = "字幕已烧进画面（硬字幕，任何播放器都能显示）"
+
+    elif action == "extract_audio":
+        src = _resolve(arguments.get("source"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        r = video.extract_audio(src, out, fmt=ext.lstrip("."))
+        if r.get("ok"):
+            note = "音轨已导出（%s）" % ext.lstrip(".").upper()
+
+    elif action == "images_to_video":
+        imgs = [_resolve(p) for p in (arguments.get("images") or [])]
+        imgs = [p for p in imgs if p and os.path.isfile(p)]
+        if not imgs:
+            return "错误：没给能读到的图片（images 列表）。"
+        r = video.images_to_video(imgs, out,
+                                  seconds=arguments.get("seconds") or 3,
+                                  width=arguments.get("width") or 1920)
+        if r.get("ok"):
+            note = ("图片成片完成（%d 张，每张 %.1f 秒，%d×%d）"
+                    % (r["count"], float(arguments.get("seconds") or 3),
+                       r["width"], r["height"]))
+
+    elif action == "compress":
+        src = _resolve(arguments.get("source"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        before = os.path.getsize(src)
+        r = video.compress(src, out, crf=arguments.get("crf") or 28,
+                           width=arguments.get("width"))
+        if r.get("ok"):
+            after = os.path.getsize(out)
+            note = ("压缩完成（CRF %d，%.1f MB → %.1f MB，%s）"
+                    % (int(arguments.get("crf") or 28),
+                       before / 1048576.0, after / 1048576.0,
+                       "减小 %.0f%%" % (100 - after * 100.0 / before)
+                       if before > 0 else "已生成"))
+
+    if not r:
+        return "错误：这个动作没有执行（action=%s）" % action
+    if not r.get("ok"):
+        return "视频处理失败：%s" % r.get("error")
+
+    try:
+        size_mb = os.path.getsize(out) / 1048576.0
+    except Exception:
+        size_mb = 0
+    link = ("\n下载链接（**原样给用户**）：\n/api/doclib/download?rel=%s"
+            % urllib.parse.quote(rel))
+    return ("%s。成品 %.1f MB，已存进生成文库（%s）。%s"
+            % (note, size_mb, rel, link))
+
+
 def _do_cutout_image(arguments, ui_events, context):
     """抠图：去掉背景，产出带透明通道的 PNG。
 
