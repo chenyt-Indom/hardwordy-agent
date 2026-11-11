@@ -2568,37 +2568,172 @@
     return list;
   }
 
+  // 批量选择状态（只在本次页面里，不落盘）
+  let sessBatchMode = false;
+  const sessSelected = new Set();
+  let sessCache = [];        // 最近一次渲染的列表，切批量模式时直接重绘、不再请求
+
+  function updateSessBatchBar() {
+    const bar = $("#sessBatchBar"), info = $("#sessBatchInfo"), allBtn = $("#sessSelectAll");
+    if (!bar) return;
+    bar.hidden = !sessBatchMode;
+    if (!sessBatchMode) return;
+    const n = sessSelected.size;
+    if (info) info.innerHTML = n ? `已选 <b>${n}</b> 个` : "已选 0 个";
+    if (allBtn) allBtn.textContent = (n && n === sessCache.length) ? "全不选" : "全选";
+  }
+
   function renderSessions(list) {
     if (!sessionsListEl) return;
+    sessCache = list || [];
+    // 列表刷新后，把已经不存在的选中项丢掉
+    const ids = new Set(sessCache.map((s) => s.id));
+    [...sessSelected].forEach((id) => { if (!ids.has(id)) sessSelected.delete(id); });
     sessionsListEl.innerHTML = "";
-    if (!list.length) {
+    if (!sessCache.length) {
       sessionsListEl.innerHTML = '<p class="hint">暂无对话，点「＋ 新建」开始。</p>';
+      updateSessBatchBar();
       return;
     }
-    list.forEach((s) => {
+    sessCache.forEach((s) => {
       const row = document.createElement("div");
       row.className = "session-item" + (s.id === sessionId ? " active" : "");
       const title = document.createElement("span");
       title.className = "session-title";
       title.textContent = s.title || "新对话";
       title.title = `${s.title || "新对话"}（${s.count || 0} 条）`;
-      const del = document.createElement("button");
-      del.className = "session-del";
-      del.textContent = "×";
-      del.title = "删除这个对话";
-      del.onclick = async (ev) => {
-        ev.stopPropagation();
-        if (!confirm(`删除对话「${s.title || "新对话"}」？`)) return;
-        await api("/api/sessions/" + s.id, { method: "DELETE" });
-        const rest = await loadSessions();
-        if (s.id === sessionId && rest.length) await switchSession(rest[0].id);
-      };
-      row.appendChild(title);
-      row.appendChild(del);
-      row.onclick = () => switchSession(s.id);
+      if (sessBatchMode) {
+        // 批量模式：行首勾选框，点整行＝勾选，不会切会话
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.className = "sess-check";
+        box.checked = sessSelected.has(s.id);
+        box.onclick = (ev) => ev.stopPropagation();
+        box.onchange = () => {
+          if (box.checked) sessSelected.add(s.id); else sessSelected.delete(s.id);
+          row.classList.toggle("sel", box.checked);
+          updateSessBatchBar();
+        };
+        row.classList.toggle("sel", box.checked);
+        row.onclick = () => { box.checked = !box.checked; box.onchange(); };
+        row.appendChild(box);
+        row.appendChild(title);
+      } else {
+        const del = document.createElement("button");
+        del.className = "session-del";
+        del.textContent = "×";
+        del.title = "删除这个对话";
+        del.onclick = async (ev) => {
+          ev.stopPropagation();
+          if (!confirm(`删除对话「${s.title || "新对话"}」？`)) return;
+          await api("/api/sessions/" + s.id, { method: "DELETE" });
+          const rest = await loadSessions();
+          if (s.id === sessionId && rest.length) await switchSession(rest[0].id);
+        };
+        row.appendChild(title);
+        row.appendChild(del);
+        row.onclick = () => switchSession(s.id);
+      }
       sessionsListEl.appendChild(row);
     });
+    updateSessBatchBar();
   }
+
+  function setSessBatchMode(on) {
+    sessBatchMode = !!on;
+    if (!sessBatchMode) sessSelected.clear();
+    const btn = $("#sessBatchBtn");
+    if (btn) btn.textContent = sessBatchMode ? "完成" : "批量";
+    renderSessions(sessCache);
+  }
+
+  async function deleteSelectedSessions() {
+    const ids = [...sessSelected];
+    if (!ids.length) { showToast("先勾选要删除的对话", "warn"); return; }
+    if (streaming) { showToast("正在回答中，请稍候再删", "warn"); return; }
+    if (!confirm(`删除选中的 ${ids.length} 个对话？删掉就找不回来了。`)) return;
+    const cur = sessionId;
+    let ok = 0;
+    for (const id of ids) {
+      try { await api("/api/sessions/" + id, { method: "DELETE" }); ok++; }
+      catch (e) { /* 单条失败不影响其它 */ }
+    }
+    sessSelected.clear();
+    const rest = await loadSessions();
+    // 当前对话也被删掉 → 切到剩下最新的一条，否则界面会停在一个已不存在的会话上
+    if (cur && !rest.some((s) => s.id === cur)) {
+      if (rest.length) { setSessionId(""); await switchSession(rest[0].id); }
+      else {
+        history.length = 0;
+        messagesEl.innerHTML = "";
+        addMsg("bot", "对话都删掉了，点「＋ 新建」开一段新的。");
+      }
+    }
+    setSessBatchMode(false);
+    showToast(`已删除 ${ok} 个对话`, "ok");
+  }
+
+  // 对话列表：整块折叠（点标题行，状态记 localStorage）+ 批量按钮绑定
+  (function bindSessFold() {
+    const head = $("#sessToggle"), body = $("#sessFoldBody"), caret = $("#sessCaret");
+    if (!head || !body) return;
+    const KEY = "ui.sessFolded";
+    const isFolded = () => head.classList.contains("folded");
+    const apply = (folded, animate) => {
+      head.classList.toggle("folded", folded);
+      head.setAttribute("aria-expanded", folded ? "false" : "true");
+      if (caret) caret.textContent = folded ? "▸" : "▾";
+      if (!animate) {
+        body.style.transition = "none";
+        body.style.maxHeight = folded ? "0px" : "none";
+        body.style.opacity = folded ? "0" : "1";
+        void body.offsetHeight;
+        body.style.transition = "";
+        return;
+      }
+      if (folded) {
+        body.style.maxHeight = body.scrollHeight + "px";
+        requestAnimationFrame(() => {
+          body.style.maxHeight = "0px";
+          body.style.opacity = "0";
+        });
+      } else {
+        body.style.maxHeight = body.scrollHeight + "px";
+        body.style.opacity = "1";
+        // 动画结束后放开高度限制，之后列表变长也不会被裁
+        setTimeout(() => { if (!isFolded()) body.style.maxHeight = "none"; }, 360);
+      }
+    };
+    let folded = false;
+    try { folded = localStorage.getItem(KEY) === "1"; } catch (e) { /* 隐私模式忽略 */ }
+    apply(folded, false);
+    const toggle = () => {
+      const next = !isFolded();
+      if (next && sessBatchMode) setSessBatchMode(false);   // 收起时退出批量
+      apply(next, true);
+      try { localStorage.setItem(KEY, next ? "1" : "0"); } catch (e) { /* 忽略 */ }
+    };
+    head.onclick = (e) => {
+      if (e.target.closest(".head-acts")) return;   // 点「批量 / 新建」不折叠
+      toggle();
+    };
+    head.onkeydown = (e) => {
+      if (e.target !== head) return;
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+    };
+    const batchBtn = $("#sessBatchBtn");
+    if (batchBtn) batchBtn.onclick = () => setSessBatchMode(!sessBatchMode);
+    const allBtn = $("#sessSelectAll");
+    if (allBtn) allBtn.onclick = () => {
+      if (sessSelected.size && sessSelected.size === sessCache.length) sessSelected.clear();
+      else sessCache.forEach((s) => sessSelected.add(s.id));
+      renderSessions(sessCache);
+    };
+    const delBtn = $("#sessDelSel");
+    if (delBtn) delBtn.onclick = deleteSelectedSessions;
+    const cancelBtn = $("#sessCancel");
+    if (cancelBtn) cancelBtn.onclick = () => setSessBatchMode(false);
+  })();
 
   async function switchSession(sid) {
     if (!sid || sid === sessionId) return;
