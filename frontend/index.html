@@ -406,6 +406,46 @@
   </div>
   <input type="file" id="stFileInput" multiple hidden />
 
+  <!-- ⏰ 定时任务浮层（2026-11-11）
+       用户要求：不要塞在对话/侧栏里，「单开一个框，只可以读不能聊天」。
+       所以它是一个**浮在页面上的独立卡片**，点顶栏 ⏰ 开合；
+       里面没有任何聊天输入，只展示任务与结果、并提供管理按钮。 -->
+  <div class="sched-float" id="schedFloat" hidden>
+    <div class="sched-float-head">
+      <span class="fold" id="schedFold">▾</span>
+      <span class="sched-float-title">⏰ 定时任务</span>
+      <span class="badge-mini" id="schedBadge">0</span>
+      <button type="button" class="sched-close" id="schedClose" title="关闭（Esc）">✕</button>
+    </div>
+    <div class="sched-body" id="schedBody">
+      <p class="sched-ro">这里只用来查看和管理，<b>不能在这里聊天</b>；任务跑完的结果会写回它所属的那个对话。</p>
+      <div class="list" id="schedList"></div>
+      <details class="sched-new">
+        <summary>＋ 新建定时任务</summary>
+        <div class="sched-form">
+          <input id="schedName" placeholder="任务名（如：每日AI新闻）">
+          <textarea id="schedPrompt" rows="2"
+                    placeholder="到点要做什么（写清楚，它到时候不会再来问你）"></textarea>
+          <div class="sched-row">
+            <select id="schedType">
+              <option value="daily">每天</option>
+              <option value="every">每隔</option>
+            </select>
+            <input id="schedTime" placeholder="09:00" value="09:00" title="每天几点（HH:MM）">
+            <input id="schedEvery" type="number" min="1" value="60" hidden title="每隔多少分钟">
+            <button class="btn sm" id="schedAdd">添加</button>
+          </div>
+          <select id="schedModel" title="到点用哪个模型跑">
+            <option value="">自动（跟随对话最后选用的模型）</option>
+            <option value="deepseek-flash">云端 DeepSeek</option>
+            <option value="local">本机默认模型</option>
+          </select>
+          <p class="hint">不会弹任何对话框；结果写回创建它的那个对话。云端模型需要先在顶栏 🔑 填一次 Key（会存到本机，定时任务也能用）。</p>
+        </div>
+      </details>
+    </div>
+  </div>
+
   <!-- 独立的「🧩 VS Code」覆盖层已删除：VS Code 现在就是开发台**唯一的编辑器**
        （见 .studio-editor 里的 #stVs），不再需要第二个入口。 -->
 
