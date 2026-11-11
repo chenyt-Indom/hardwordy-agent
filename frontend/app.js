@@ -191,20 +191,27 @@
   })();
 
   // ---------- 思考框：跟随视口 / 固定原位（2026-11-12 用户要求）----------
-  // 「跟随」= 思考期间贴住视口底部（.think-dock, position:sticky），滚到哪都能看到它在想什么；
+  // 「跟随」= 思考时固定悬浮在左下角（.think-dock, position:fixed），滚到哪都能看到它在想什么；
   // 「固定」= 老老实实待在消息流里（工具条之前），不跟着滚。
   // 状态记在 localStorage.think_follow，刷新后保持。
+  // ★ 2026-11-12 用户反馈「点了跟随，有时能跟有时又回原位」：
+  //   原来只认 `_thinkLive` 一个框，且正文一开始输出就无条件收回原位 —— 把用户
+  //   选的「跟随」也一起盖掉了；思考结束后 _thinkLive 置空，再点按钮就完全没反应。
+  //   现在用 _thinkBoxes 登记**所有**思考框，按 thinkFollow 统一定位，
+  //   正文输出也不再强行收回（只有用户选「固定」才收）。
   let thinkFollow = localStorage.getItem("think_follow") !== "0";
-  let _thinkLive = null;      // 当前这轮还在思考的 thinkWrap（思考结束后置空）
+  let _thinkLive = null;              // 当前这轮还在思考的 thinkWrap
+  const _thinkBoxes = new Set();      // 还活在页面上的所有思考框
 
   function syncThinkBtn() {
     const b = $("#thinkFollowBtn");
     if (!b) return;
     b.classList.toggle("tf-on", thinkFollow);
     b.textContent = thinkFollow ? "🧠 思考框跟随" : "📍 思考框固定";
+    b.setAttribute("aria-pressed", thinkFollow ? "true" : "false");
     b.title = thinkFollow
-      ? "思考框贴在视口底部、跟着你滚动。点一下改成固定原位"
-      : "思考框固定在消息流原位、不跟着滚动。点一下改成跟随";
+      ? "当前：跟随 —— 思考框固定悬浮在左下角，滚到哪都看得到。点一下改成固定原位"
+      : "当前：固定 —— 思考框留在消息流原位、不浮动。点一下改成跟随";
   }
   // 计算悬浮位置：钉在「左下角工具条（输入区）上方」，左边对齐主区域
   // 输入框会随内容变高、窗口会缩放，所以不能硬编码，每次 dock / resize 都重算
