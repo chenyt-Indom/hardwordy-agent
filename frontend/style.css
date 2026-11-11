@@ -311,11 +311,15 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   background: var(--think-bg); border: 1px solid var(--border); border-radius: 10px;
   font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word;
   max-height: 0; opacity: 0; overflow: hidden;
+  /* 折叠态边框也透明，否则会留一条 2px 的虚线 */
+  border-color: transparent;
   transition: max-height .3s cubic-bezier(.4, 0, .2, 1), opacity .24s ease,
-              margin-top .3s ease, padding .3s ease;
+              margin-top .3s ease, padding .3s ease,
+              background-color .18s ease, color .18s ease, border-color .18s ease;
 }
 .think-body.open {
   max-height: 260px; opacity: 1; margin-top: 6px; padding: 10px 12px; overflow: auto;
+  border-color: var(--border);
 }
 
 /* ---------- 工具调用过程（横向小条） ---------- */
