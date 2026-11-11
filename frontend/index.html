@@ -416,6 +416,9 @@
         <!-- 自由查看（2026-11-12）：AI 一有动静就把滚动条拽到底，想停在某一步看根本做不到。
              点一下暂停跟随，就能自由停在任意位置；再点一下恢复跟随最新。 -->
         <button type="button" class="pill pill-btn" id="freeViewBtn" title="AI 有新内容时自动滚到最新。点一下暂停，就能停在某一步慢慢看">⬇ 跟随最新</button>
+        <!-- 思考框跟随 / 固定（2026-11-12）：思考时思考框贴视口底部跟着你走，
+             还是老老实实待在消息流原位。状态记在 localStorage.think_follow。 -->
+        <button type="button" class="pill pill-btn" id="thinkFollowBtn" title="思考框贴在视口底部、跟着你滚动。点一下改成固定原位">🧠 思考框跟随</button>
       </div>
       <p class="tip">智能体模式：直接说指令，AI 自主规划并调用工具完成任务。数据均在本机处理。</p>
     </div>
