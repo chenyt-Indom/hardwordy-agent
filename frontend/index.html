@@ -161,13 +161,27 @@
       <div class="lib-grid" id="libGrid"></div>
     </section>
 
-    <!-- 会话列表：新建 / 切换 / 删除（每个会话互相独立） -->
+    <!-- 会话列表：新建 / 切换 / 删除（每个会话互相独立）
+         标题行可点击折叠（状态存 localStorage）；「批量」进入多选删除 -->
     <section class="panel sessions" id="sessionsPanel">
-      <div class="sec-head">
+      <div class="sec-head sess-head" id="sessToggle" role="button" tabindex="0"
+           aria-expanded="true" title="点一下折叠 / 展开对话列表">
         <h2>💬 对话</h2>
-        <button class="btn sm" id="newSessionBtn" title="开始一个新对话">＋ 新建</button>
+        <span class="mu-caret" id="sessCaret">▾</span>
+        <div class="head-acts">
+          <button class="btn sm ghost" id="sessBatchBtn" title="批量选择并删除对话">批量</button>
+          <button class="btn sm" id="newSessionBtn" title="开始一个新对话">＋ 新建</button>
+        </div>
       </div>
-      <div class="list sessions-list" id="sessionsList"></div>
+      <div class="sess-fold" id="sessFoldBody">
+        <div class="list sessions-list" id="sessionsList"></div>
+        <div class="sess-batch" id="sessBatchBar" hidden>
+          <span class="sess-batch-info" id="sessBatchInfo">已选 0 个</span>
+          <button class="btn sm ghost" id="sessSelectAll">全选</button>
+          <button class="btn sm ghost danger" id="sessDelSel">删除</button>
+          <button class="btn sm ghost" id="sessCancel">取消</button>
+        </div>
+      </div>
     </section>
 
     <!-- 记忆：一份长期（跨对话共享）+ 每个对话一份短期（互相独立） -->
