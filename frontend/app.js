@@ -5588,6 +5588,36 @@
       fold.textContent = body.hidden ? "▸" : "▾";
     };
 
+    // ★ 2026-11-11：结果查看窗。用户反馈「定时任务看不到结果在哪」——
+    //   原来只有 last_preview 那 200 字，正文要翻对话才找得到。
+    //   这里点「看结果」直接把最近一次的完整正文拉出来，只读、可滚动。
+    const win = document.querySelector("#schedWin");
+    const winBody = document.querySelector("#schedWinBody");
+    const winTitle = document.querySelector("#schedWinTitle");
+    const closeWin = () => { if (win) win.hidden = true; };
+    const winCloseBtn = document.querySelector("#schedWinClose");
+    if (winCloseBtn) winCloseBtn.onclick = closeWin;
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && win && !win.hidden) closeWin();
+    });
+    async function openResult(id, name) {
+      if (!win) return;
+      win.hidden = false;
+      winTitle.textContent = "📄 " + (name || "运行结果");
+      winBody.textContent = "读取中…";
+      try {
+        const d = await (await fetch("/api/schedule/result?id=" + encodeURIComponent(id))).json();
+        if (!d || !d.ok) {
+          winBody.textContent = "读取失败：" + ((d && d.error) || "未知原因");
+          return;
+        }
+        winBody.textContent = d.text ||
+          "这个任务还没有跑过，或者上次没留下正文。点「立即运行」跑一次就有结果了。";
+      } catch (e) {
+        winBody.textContent = "读取失败：" + e.message;
+      }
+    }
+
     const typeSel = document.querySelector("#schedType");
     const timeIn = document.querySelector("#schedTime");
     const everyIn = document.querySelector("#schedEvery");
