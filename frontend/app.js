@@ -228,7 +228,19 @@
     w.style.bottom = Math.round(bottom) + "px";
     w.style.width = Math.max(220, Math.min(430, Math.round(avail))) + "px";
   }
-  window.addEventListener("resize", () => placeThinkDock(_thinkLive));
+  // 所有浮动中的思考框都要跟着重排（窗口缩放、输入框变高、切按钮）
+  function placeAllThinkDocks() {
+    document.querySelectorAll("body > .think-dock").forEach((n) => placeThinkDock(n));
+  }
+  window.addEventListener("resize", placeAllThinkDocks);
+  // 输入框高度会变（多行输入、附件条出现）→ 用 ResizeObserver 实时跟随，别等 resize
+  (function watchComposer() {
+    const comp = document.querySelector(".composer");
+    if (!comp || typeof ResizeObserver !== "function") return;
+    try {
+      new ResizeObserver(() => placeAllThinkDocks()).observe(comp);
+    } catch (e) { /* 老浏览器忽略 */ }
+  })();
   // 把当前这轮的思考框按当前偏好摆好（思考途中切按钮也能立刻生效）
   // 切换/新建/清空对话时：悬浮的思考框挂在 body 上，不会随 messagesEl.innerHTML 一起消失，
   // 必须手动摘掉，否则会一直浮在左下角。
