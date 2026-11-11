@@ -2423,8 +2423,19 @@ html[data-theme="light"] body {
 
 /* 对话区：留白松一点，长回答不再挤成一坨 */
 .messages { padding: 24px 26px; gap: 16px; }
-.msg { animation: msgIn .16s ease-out both; }
-@keyframes msgIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+/* 2026-11-12 用户要求「发消息 / 回消息也要有动画」：
+   原来只有 .16s 位移 3px，几乎看不见。改成 .26s 带一点缩放的上浮，
+   观感是「弹上来」，但不夸张、不会拖慢流式输出。 */
+.msg { animation: msgIn .26s cubic-bezier(.22, .68, .36, 1) both; }
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(9px) scale(.985); }
+  to   { opacity: 1; transform: none; }
+}
+/* 系统开了「减少动态效果」就老实点 */
+@media (prefers-reduced-motion: reduce) {
+  .msg { animation: none !important; }
+  .think-body, .code-card > .code-body, .code-group .code-group-body { transition: none !important; }
+}
 
 .bubble {
   max-width: min(76%, 880px);
