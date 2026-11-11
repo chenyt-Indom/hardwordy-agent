@@ -673,5 +673,20 @@
     })();
   </script>
 </body>
-<div class="think-dock" id="__probe" style="left:16px;bottom:140px;width:320px;max-height:120px">探针：如果你看到这个框浮在左下角，说明 fixed 定位正常</div>
+<div class="think-dock" id="__probe" style="max-height:200px;font:12px/1.5 monospace;color:#fff">探针加载中…</div>
+<script>
+setTimeout(function(){
+  var el=document.getElementById("__probe"); if(!el) return;
+  var main=document.getElementById("main"), comp=document.querySelector(".composer");
+  var vw=innerWidth, vh=innerHeight;
+  var mR=main?main.getBoundingClientRect():null, cR=comp?comp.getBoundingClientRect():null;
+  var left=Math.max(8,(mR?mR.left:0)+16);
+  var bottom=cR?Math.max(8,vh-cR.top+10):96;
+  var cap=Math.max(8,vh-150); if(bottom>cap) bottom=cap;
+  var avail=(mR?mR.width:vw)-32;
+  var width=Math.max(220,Math.min(430,Math.round(avail)));
+  el.style.left=Math.round(left)+"px"; el.style.bottom=Math.round(bottom)+"px"; el.style.width=width+"px";
+  el.textContent="vw="+vw+" vh="+vh+" | main.left="+(mR?Math.round(mR.left):"null")+" main.w="+(mR?Math.round(mR.width):"null")+" | composer.top="+(cR?Math.round(cR.top):"null")+" composer.h="+(cR?Math.round(cR.height):"null")+" | => left="+Math.round(left)+" bottom="+Math.round(bottom)+" width="+width;
+},600);
+</script>
 </html>
