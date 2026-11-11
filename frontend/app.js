@@ -3351,6 +3351,25 @@
     } catch (e) { /* 忽略 */ }
     history.push({ role: "user", content: promptText });
 
+    // ⚠️⚠️ 2026-11-11 修（致命 bug）：`_prov` 必须声明在 doSend 的**函数作用域**里。
+    //
+    //   原来的写法是在下面那个 try 块里 `let _prov = ...`（大约第 4344 行）。
+    //   `let` 是**块级作用域**，而这个函数里有两处引用在 try 块**之外**：
+    //     · finishThinking() 里的第 4281 / 4288 行
+    //     · 下面 1.8 秒那个 setTimeout 的第 3363 行
+    //   于是它们每次执行都抛 `ReferenceError: _prov is not defined`。
+    //
+    //   为什么这个错误特别致命（实测复现）：
+    //     catch 分支的**第一句**就是 `finishThinking()` —— 一崩就把后面那句
+    //     `answerBubble.textContent = "❌ " + err.message` 整个跳过。
+    //     后端明明已经返回了清清楚楚的错误原因，界面上却只剩一个 "…"，
+    //     用户看到的就是「发出去没有任何反应 / 什么都没输出」。
+    //     实测：把 API Key 改成无效值 → 气泡文本恒为 "…"，一个字都不显示。
+    //
+    //   修法：在这里声明一次，try 里那行改成**只赋值**（那行在锁定区外面，
+    //   不触碰任何 🔒 区块）。同时这也让 finishThinking 能显示真实的模型名。
+    let _prov = "auto";
+
     // ---------- 思考过程：默认折叠，但实时刷新状态；展开可见实时全文 ----------
     const thinkWrap = document.createElement("div");
     thinkWrap.className = "msg bot";
@@ -4341,7 +4360,7 @@
       // 本地模型走 /api/chat（带工具/记忆/RAG），DeepSeek 走 /api/chat/deepseek
       // （同样带工具：41 个全量 schema，见 _ds_tools）。Key 放请求头，不进 body、不进 URL。
       const _msEl = document.querySelector("#modelSelect");
-      let _prov = _msEl ? _msEl.value : "auto";
+      _prov = _msEl ? _msEl.value : "auto";   // ← 只赋值；声明已提到 doSend 顶部（见上）
       // 「本地·自动」= 跟随配置；如果配置的默认模型是云端模型，就别往本地通道发
       /* 🔒LOCK:default-model-ready —— 自迭代禁止修改本区块（与上面同属一处逻辑） */
       // 先等"配置里的默认模型"就绪（最多 1.5 秒），否则「本地·自动」会被误判成
