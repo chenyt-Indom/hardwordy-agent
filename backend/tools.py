@@ -2603,6 +2603,8 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
         return _do_cutout_image(arguments, ui_events, context)
     if name == "composite_image":
         return _do_composite_image(arguments, ui_events, context)
+    if name == "video_edit":
+        return _do_video_edit(arguments, ui_events, context)
     if name == "list_directory":
         return _do_list_directory(arguments)
     if name == "read_file":
