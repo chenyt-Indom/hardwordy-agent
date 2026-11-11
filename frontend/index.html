@@ -456,6 +456,17 @@
     </div>
   </div>
 
+  <!-- 📄 定时任务「最近一次结果」查看窗（2026-11-11）
+       用户反馈：任务跑完只写回对话，面板里只有一行 200 字摘要，找不到结果在哪。
+       所以加一个只读小窗：点任务卡片上的「看结果」打开，正文可滚动。 -->
+  <div class="sched-win" id="schedWin" hidden>
+    <div class="sched-float-head">
+      <span class="sched-float-title" id="schedWinTitle">📄 运行结果</span>
+      <button type="button" class="sched-close" id="schedWinClose" title="关闭（Esc）">✕</button>
+    </div>
+    <pre class="sched-win-body" id="schedWinBody"></pre>
+  </div>
+
   <!-- 独立的「🧩 VS Code」覆盖层已删除：VS Code 现在就是开发台**唯一的编辑器**
        （见 .studio-editor 里的 #stVs），不再需要第二个入口。 -->
 
