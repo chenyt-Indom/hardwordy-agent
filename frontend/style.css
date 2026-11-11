@@ -1835,6 +1835,47 @@ select.pill-select option {
   font-size: 12px;
 }
 
+/* ---------- 上下文占用圆环（2026-11-11）----------
+   绿 → 橙 → 红，越接近上限越红（颜色由 app.js 按比例算）。
+   尺寸刻意做小（22px），只占一行里的一点点，不挤压输入区。 */
+.ctx-ring {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px 0 2px;
+  border: none;
+  border-radius: 13px;
+  background: transparent;
+  cursor: pointer;
+  flex: none;
+}
+.ctx-ring:hover { background: rgba(255, 255, 255, .07); }
+.ctx-ring svg {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  transform: rotate(-90deg);
+}
+.ctx-ring circle {
+  fill: none;
+  stroke-width: 3.4;
+  stroke-linecap: round;
+}
+.ctx-ring-bg { stroke: rgba(255, 255, 255, .16); }
+.ctx-ring-fg {
+  stroke: #22c55e;
+  transition: stroke-dashoffset .45s ease, stroke .45s ease;
+}
+.ctx-ring-txt {
+  font-size: 11px;
+  line-height: 1;
+  color: #9a9aa2;
+  font-variant-numeric: tabular-nums;
+  min-width: 26px;
+  text-align: left;
+}
+
 /* ==================== 启动自检（2026-11-08）==================== */
 .selftest-box { margin-top: 8px; }
 
