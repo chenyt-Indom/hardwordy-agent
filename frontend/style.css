@@ -302,12 +302,20 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 }
 .think-hdr:hover { border-color: var(--accent); color: var(--text); }
 .think-hdr .arrow { color: var(--muted); font-size: 12px; transition: transform .15s; }
+/* 2026-11-12 用户要求「展开/收起要有动画」：不再用 display:none 硬切，
+   改成 max-height 0 ↔ 260px（260 是原本的设计上限，超过内部滚动，所以不会裁内容）
+   + 淡入淡出 + 内外边距一起过渡。JS 侧改为切换 .open 类。 */
 .think-body {
-  display: none; /* 默认折叠 */
-  max-width: 70%; margin-top: 6px; padding: 10px 12px; color: var(--muted);
+  display: block; /* 默认折叠靠 max-height:0 */
+  max-width: 70%; margin-top: 0; padding: 0 12px; color: var(--muted);
   background: var(--think-bg); border: 1px solid var(--border); border-radius: 10px;
   font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word;
-  max-height: 260px; overflow: auto;
+  max-height: 0; opacity: 0; overflow: hidden;
+  transition: max-height .3s cubic-bezier(.4, 0, .2, 1), opacity .24s ease,
+              margin-top .3s ease, padding .3s ease;
+}
+.think-body.open {
+  max-height: 260px; opacity: 1; margin-top: 6px; padding: 10px 12px; overflow: auto;
 }
 
 /* ---------- 工具调用过程（横向小条） ---------- */
