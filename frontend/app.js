@@ -3930,7 +3930,7 @@
     thinkWrap._home = toolWrap;      // 取消跟随时回到这里（工具条之前）
     // 新一轮开始：上一轮还浮着的思考框一律收回原位，免得在左下角越堆越多
     Array.from(_thinkBoxes).forEach((w) => {
-      if (w !== thinkWrap) { undockOne(w); _thinkBoxes.delete(w); }
+      if (w !== thinkWrap) { undockOne(w, true); _thinkBoxes.delete(w); }
     });
     _thinkBoxes.add(thinkWrap);
     _thinkLive = thinkWrap;          // 登记成「当前这轮的思考框」，按钮切换时能立刻生效
