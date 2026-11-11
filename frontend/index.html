@@ -615,11 +615,11 @@
     }
     var open = false;
     try { open = localStorage.getItem(KEY) === '1'; } catch (e) {}
-    paint(open);
+    paint(open, false); /* 首次加载直接到位，不播动画 */
     btn.addEventListener('click', function () {
       var now = !document.body.classList.contains('more-open');
       try { localStorage.setItem(KEY, now ? '1' : '0'); } catch (e) {}
-      paint(now);
+      paint(now, true);
     });
     /* 点别处自动收起，免得一直占着顶栏一行 */
     document.addEventListener('click', function (ev) {
