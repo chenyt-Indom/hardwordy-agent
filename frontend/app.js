@@ -6084,7 +6084,7 @@
         const t = ev.target.closest("button[data-batch]");
         if (!t) return;
         const batch = t.dataset.batch;
-        if (!confirm("回撤到「" + batch + "」这次改动之前吗？\n这一批改过的文件都会被还原，之后需要重启应用。")) return;
+        if (!confirm("确定回撤到「" + batch + "」这次改动之前吗？\n\n· 这一批改过的文件都会被还原\n· 点「确定」后：立刻回撤 → 自动重启应用（会短暂断开一下）")) return;
         t.disabled = true; t.textContent = "回撤中…";
         try {
           const r = await (await fetch("/api/selfdev/rollback_batch", {
@@ -6092,7 +6092,8 @@
             body: JSON.stringify({ batch: batch }) })).json();
           if (r.ok) {
             t.textContent = "✅ 已回撤";
-            say("✅ " + (r.msg || "已回撤") + "（重启应用后生效）", "#7bd88f");
+            say("✅ " + (r.msg || "已回撤") + "，正在自动重启…", "#7bd88f");
+            if (window.__restartAppNow) { setTimeout(() => window.__restartAppNow(), 500); return; }
           } else {
             t.disabled = false; t.textContent = "回撤";
             say("❌ " + (r.error || r.msg || "回撤失败"), "#e06c6c");
