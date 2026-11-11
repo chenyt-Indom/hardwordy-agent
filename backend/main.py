@@ -6873,6 +6873,56 @@ def _ds_tools(cfg: dict) -> list:
     )
 
 
+def _content_to_text(c) -> str:
+    """把消息的 content 压成**纯文本**：多模态数组只留文字，丢掉 base64 图片。
+
+    ⚠️⚠️ 2026-11-11 修（这是「第一句话要等 8 秒」的真正根因）：
+      云端通道落盘时原来写的是 `str(m.get("content") or "")`。
+      而带图时 content 是一个列表 `[{type:text}, {type:image_url, data:base64…}]`，
+      `str()` 会把它变成 **Python repr 字符串**（单引号那种），于是整张图的
+      base64 以纯文本形式**永久写进会话历史**，之后每一轮请求都当普通文字
+      重新发给模型。
+
+      实测数据：一个 46 条消息的会话里只有 3 条被污染，却占了 55.4 万字
+      （≈18 万 token），把首字延迟从 1.5 秒拖到 8 秒，而且**越用越慢**。
+
+      历史里的旧图片对后续对话没有任何价值，只需要保留用户当时打的字。
+      清掉之后：554,004 字 → 15,056 字，省 97.3%。
+    """
+    if isinstance(c, str):
+        # 自愈：历史里可能已经躺着被旧代码 str() 成 repr 的多模态内容
+        # （形如 "[{'type': 'text', …}, {'type': 'image_url', …}]"）。
+        # 认出来就还原成纯文本，避免它被原样再存一遍、继续每轮重发。
+        s = c.lstrip()
+        if s.startswith('[{') and "'type'" in s[:200]:
+            try:
+                import ast as _ast
+                parsed = _ast.literal_eval(s)
+                if isinstance(parsed, list):
+                    return _content_to_text(parsed)
+            except Exception:
+                pass
+        return c
+    if isinstance(c, list):
+        out, imgs = [], 0
+        for p in c:
+            if not isinstance(p, dict):
+                continue
+            t = p.get("type")
+            if t == "text":
+                s = str(p.get("text") or "").strip()
+                if s:
+                    out.append(s)
+            elif t in ("image_url", "image"):
+                imgs += 1
+        txt = "\n".join(out)
+        if imgs:
+            txt = ((txt + "\n\n") if txt else "") + (
+                "（本轮附了 %d 张图片；图片已从历史中移除以节省上下文）" % imgs)
+        return txt
+    return str(c or "")
+
+
 @app.post("/api/chat/deepseek")
 async def chat_deepseek(req: ChatRequest,
                         x_deepseek_key: str = Header(default=""),
@@ -7179,7 +7229,7 @@ async def chat_deepseek(req: ChatRequest,
         try:
             if session:
                 _saved = [{"role": str(m.get("role") or "user"),
-                           "content": str(m.get("content") or "")} for m in clean]
+                           "content": _content_to_text(m.get("content"))} for m in clean]
                 _saved.append({"role": "assistant", "content": _full})
                 sessions.save_messages(session, _saved)
                 try:
