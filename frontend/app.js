@@ -2825,6 +2825,51 @@
     } catch (e) { /* 忽略：面板不可用不影响其它功能 */ }
   }
 
+  // 记忆库：整块可折叠（点标题行收起 / 展开，状态记在 localStorage）
+  (function bindMemFold() {
+    const head = $("#memToggle"), body = $("#memFoldBody"), caret = $("#memCaret");
+    if (!head || !body) return;
+    const KEY = "ui.memFolded";
+    const isFolded = () => head.classList.contains("folded");
+    const apply = (folded, animate) => {
+      head.classList.toggle("folded", folded);
+      head.setAttribute("aria-expanded", folded ? "false" : "true");
+      if (caret) caret.textContent = folded ? "▸" : "▾";
+      if (!animate) {
+        body.style.transition = "none";
+        body.style.maxHeight = folded ? "0px" : "none";
+        body.style.opacity = folded ? "0" : "1";
+        void body.offsetHeight;
+        body.style.transition = "";
+        return;
+      }
+      if (folded) {
+        body.style.maxHeight = body.scrollHeight + "px";
+        requestAnimationFrame(() => {
+          body.style.maxHeight = "0px";
+          body.style.opacity = "0";
+        });
+      } else {
+        body.style.maxHeight = body.scrollHeight + "px";
+        body.style.opacity = "1";
+        // 动画结束后放开高度限制，内容再变化也不会被裁
+        setTimeout(() => { if (!isFolded()) body.style.maxHeight = "none"; }, 360);
+      }
+    };
+    let folded = false;
+    try { folded = localStorage.getItem(KEY) === "1"; } catch (e) { /* 隐私模式忽略 */ }
+    apply(folded, false);
+    const toggle = () => {
+      const next = !isFolded();
+      apply(next, true);
+      try { localStorage.setItem(KEY, next ? "1" : "0"); } catch (e) { /* 忽略 */ }
+    };
+    head.onclick = toggle;
+    head.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+    };
+  })();
+
   (function bindMemUsage() {
     const head = $("#muToggle"), body = $("#muBody");
     if (!head || !body) return;
