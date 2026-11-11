@@ -6015,7 +6015,7 @@
         const rb = ev.target.closest("button[data-hash]");
         if (rb) {
           const h = rb.dataset.hash;
-          if (!confirm("回滚到版本 " + h + " 吗？\n回滚前会自动存一个还原点，不满意可点「↩ 撤销上次回撤」回来。\n（回滚后要重启应用才生效）")) return;
+          if (!confirm("确定回滚到版本 " + h + " 吗？\n\n· 回滚前会自动存一个还原点，后悔可点「↩ 撤销上次回撤」\n· 点「确定」后：立刻回滚 → 自动重启应用（会短暂断开一下）")) return;
           rb.disabled = true; rb.textContent = "回滚中…";
           try {
             const r = await (await fetch("/api/version/rollback", {
@@ -6023,10 +6023,11 @@
               body: JSON.stringify({ hash: h }) })).json();
             if (r.ok) {
               rb.textContent = "✅ 已回滚";
-              say("✅ " + (r.msg || "已回滚") + "（重启应用后生效）", "#7bd88f");
+              say("✅ " + (r.msg || "已回滚") + "，正在自动重启…", "#7bd88f");
               try { vst = await (await fetch("/api/version/status")).json(); } catch (e) {}
               try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) {}
               verPaint(); render(vlist);
+              if (window.__restartAppNow) { setTimeout(() => window.__restartAppNow(), 500); return; }
             } else {
               rb.disabled = false; rb.textContent = "回滚";
               say("❌ " + (r.error || "回滚失败"), "#e06c6c");
