@@ -1797,7 +1797,7 @@ button.pill-btn .sw {
   height: 8px;
   border-radius: 50%;
   flex: 0 0 auto;
-  transition: all .15s;
+  transition: background-color .15s, box-shadow .15s;
 }
 
 /* ---------- 修正：非开关型控件默认就是「可用」的亮色（2026-11-08）----------
