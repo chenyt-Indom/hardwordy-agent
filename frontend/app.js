@@ -3335,6 +3335,7 @@
   }
 
   async function send() {
+    setFreeView(false);        // 自己发消息 → 恢复跟随，别停在半路
     const text = inputEl.value.trim();
     const imgB64 = images.map((s) => s.split(",")[1]);
     if (!text && imgB64.length === 0 && !videoB64) return;
