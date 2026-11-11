@@ -3395,8 +3395,10 @@
     const thinkBody = document.createElement("div");
     thinkBody.className = "think-body";     // 默认 display:none（折叠）
     // 手机上屏幕窄、可点的地方少 —— 思考过程**默认展开**，让用户真能看到它在想什么
+    // 2026-11-12 用户要求「展开/收起要有动画」：不再用 style.display 硬切，
+    //   改用 .open 类，高度/透明度由 CSS 过渡（见 style.css 的 .think-body）。
     const _autoThink = window.innerWidth <= 768;
-    if (_autoThink) { thinkBody.style.display = "block"; thinkArrow.textContent = "▾"; }
+    if (_autoThink) { thinkBody.classList.add("open"); thinkArrow.textContent = "▾"; }
     thinkBody.textContent = "本地模型思考中…";
     thinkWrap.appendChild(thinkHdr);
     thinkWrap.appendChild(thinkBody);
