@@ -4296,8 +4296,8 @@
       stopThinking();                            // 结束播放，一次性补齐剩余思考
       undockThink();                             // 思考结束 → 思考框回归原位
       // 手机端：思考是从头展开显示的；收尾时如果太长就折起来，只留字数
-      if (_autoThink && thinking.length > 500 && thinkBody.style.display !== "none") {
-        thinkBody.style.display = "none";
+      if (_autoThink && thinking.length > 500 && thinkBody.classList.contains("open")) {
+        thinkBody.classList.remove("open");
         thinkArrow.textContent = "▸";
       }
       // ⚠️ 2026-11-08：原来无论什么模型都显示「未输出思考」，
