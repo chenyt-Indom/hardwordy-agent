@@ -2979,6 +2979,7 @@
       if (!sid) return;
       setSessionId(sid);
       history.length = 0;
+      clearThinkDock();
       messagesEl.innerHTML = "";
       addMsg("bot", "新对话已开始，这段对话与之前互不影响。");
       await loadSessions();
