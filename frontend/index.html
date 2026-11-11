@@ -527,91 +527,114 @@
 
   /* 「⋯ 更多」：低频设置收起 / 展开（2026-11-12）
      ⚠️ 只切 body 上的一个 class，显隐交给 style.css 的 [data-more] 规则；
-        不删控件、不改 id、不重绑事件 —— 功能一点没动。 */
+        不删控件、不改 id、不重绑事件 —— 功能一点没动。
+     2026-11-12 二次优化（用户反馈「点更多之后动画太卡、一点都不丝滑」）：
+       · 去掉控件上的 scale()：缩放会让中文/emoji 每帧重新栅格化，观感是「糊 + 卡」，
+         只留 opacity + translateY（走合成层，几乎不吃 CPU）；
+       · 高度补间改到 rAF 里启动：原来在点击处理里同步 getBoundingClientRect()
+         强制回流，点下去那一帧先卡一下；
+       · 收起改成「高度回落 + 控件淡出」并行：原来串行 170ms + 300ms ≈ 470ms，拖沓，
+         现在约 240ms 收完；
+       · 动画期间给工具条加 .more-anim（contain: layout paint），把重排关在工具条内部。 */
   (function () {
     var KEY = 'more_open';
     var btn = document.getElementById('moreBtn');
     if (!btn) return;
-    /* 2026-11-12：加展开/收起动画。
-       原来 [data-more] 是 display:none ↔ inline-flex 硬切，控件瞬间蹦出来、
-       顶栏高度也瞬间变高。现在：
-         展开 = 顶栏高度补间撑开 + 控件逐个淡入上浮；
-         收起 = 先让控件淡出，再真正 display:none（否则会瞬间消失），高度同步回落。 */
     var seq = 0; /* 连点保护：只有最后一次点击的动画能落地 */
+    var raf = window.requestAnimationFrame || function (f) { return setTimeout(f, 16); };
+    var bar = document.querySelector('.tools-bar');
+    var items = bar ? Array.prototype.slice.call(bar.querySelectorAll('[data-more]')) : [];
+    var soft = true;
+    try { soft = !window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) {}
+
+    function clearStyle() {
+      if (!bar) return;
+      bar.style.transition = '';
+      bar.style.height = '';
+      bar.style.overflow = '';
+      bar.classList.remove('more-anim');
+    }
+    function stopAnims() {
+      items.forEach(function (el) {
+        if (el.__moreAnim) {
+          try { el.__moreAnim.cancel(); } catch (e) {}
+          el.__moreAnim = null;
+        }
+      });
+    }
+    /* 高度从 hFrom 补间到 hTo。真正启动放到下一帧，点击那一帧只做测量 */
+    function tween(hFrom, hTo, my) {
+      if (!bar) return;
+      bar.classList.add('more-anim');
+      bar.style.overflow = 'hidden';
+      bar.style.height = hFrom + 'px';
+      raf(function () {
+        if (my !== seq) return;
+        bar.getBoundingClientRect(); /* 回流放在 rAF 里，不阻塞交互 */
+        bar.style.transition = 'height .22s cubic-bezier(.2,.8,.2,1)';
+        bar.style.height = hTo + 'px';
+      });
+    }
     function paint(open, animate) {
-      var bar = document.querySelector('.tools-bar');
-      var items = Array.prototype.slice.call(
-        document.querySelectorAll('.tools-bar [data-more]'));
-      var soft = true;
-      try {
-        soft = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      } catch (e) {}
       btn.classList.toggle('on', open);
       btn.textContent = open ? '⋯ 收起' : '⋯ 更多';
       if (!animate || !bar || !soft || !items.length) {
+        clearStyle();
+        stopAnims();
         document.body.classList.toggle('more-open', open);
         return;
       }
       var my = ++seq;
+      stopAnims();
+      clearStyle();
       var hFrom = bar.getBoundingClientRect().height;
-      function tweenBar(hTo) {
-        bar.style.overflow = 'hidden';
-        bar.style.height = hFrom + 'px';
-        bar.getBoundingClientRect(); /* 强制回流，动画才有起点 */
-        bar.style.transition = 'height .3s cubic-bezier(.4,0,.2,1)';
-        bar.style.height = hTo + 'px';
-        setTimeout(function () {
-          if (my !== seq) return;
-          bar.style.transition = '';
-          bar.style.height = '';
-          bar.style.overflow = '';
-        }, 330);
-      }
       if (open) {
         document.body.classList.add('more-open');
-        tweenBar(bar.getBoundingClientRect().height);
+        var hOpen = bar.getBoundingClientRect().height;
+        tween(hFrom, hOpen, my);
         items.forEach(function (el, i) {
           if (!el.animate) return;
-          el.animate([
-            { opacity: 0, transform: 'translateY(-5px) scale(.94)' },
-            { opacity: 1, transform: 'none' }
+          el.__moreAnim = el.animate([
+            { opacity: 0, transform: 'translateY(-6px)' },
+            { opacity: 1, transform: 'translateY(0)' }
           ], {
-            duration: 240,
-            delay: 40 + i * 28,
-            easing: 'cubic-bezier(.4,0,.2,1)',
+            duration: 170,
+            delay: i * 16,
+            easing: 'cubic-bezier(.2,.8,.2,1)',
             fill: 'backwards'
           });
         });
+        setTimeout(function () {
+          if (my !== seq) return;
+          stopAnims();
+          clearStyle();
+        }, 250);
         return;
       }
-      var anims = [];
+      /* 收起：先量出「收起来之后」的高度，再同一帧里恢复原样（用户看不见中间态），
+         这样高度回落可以和控件淡出并行，不用等淡出播完 */
+      document.body.classList.remove('more-open');
+      var hClose = bar.getBoundingClientRect().height;
+      document.body.classList.add('more-open');
+      tween(hFrom, hClose, my);
       items.forEach(function (el, i) {
         if (!el.animate) return;
-        anims.push(el.animate([
-          { opacity: 1, transform: 'none' },
-          { opacity: 0, transform: 'translateY(-4px) scale(.96)' }
+        el.__moreAnim = el.animate([
+          { opacity: 1, transform: 'translateY(0)' },
+          { opacity: 0, transform: 'translateY(-4px)' }
         ], {
-          duration: 170,
-          delay: i * 16,
-          easing: 'ease',
+          duration: 110,
+          delay: i * 8,
+          easing: 'ease-out',
           fill: 'forwards'
-        }));
+        });
       });
-      var closed = false;
-      function close() {
-        if (closed || my !== seq) return;
-        closed = true;
-        anims.forEach(function (a) { try { a.cancel(); } catch (e) {} });
+      setTimeout(function () {
+        if (my !== seq) return;
         document.body.classList.remove('more-open');
-        tweenBar(bar.getBoundingClientRect().height);
-      }
-      var last = anims.length ? anims[anims.length - 1] : null;
-      if (last) {
-        last.onfinish = close;
-        setTimeout(close, 600); /* 兜底：动画事件没触发也要收得回去 */
-      } else {
-        close();
-      }
+        stopAnims();
+        clearStyle();
+      }, 240);
     }
     var open = false;
     try { open = localStorage.getItem(KEY) === '1'; } catch (e) {}
@@ -630,8 +653,8 @@
         if (el.hasAttribute && el.hasAttribute('data-more')) return; // 点的是菜单里的控件
         el = el.parentElement;
       }
-      paint(false, true);
       try { localStorage.setItem(KEY, '0'); } catch (e) {}
+      paint(false, true);
     });
   })();
   </script>
