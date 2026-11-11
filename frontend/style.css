@@ -2755,15 +2755,15 @@ html[data-theme="light"] button.pill-btn.bad {
   border-color: #f0b8b2;
   background: #fdeaea;
 }
-html[data-theme="light"] .pill:not(.on):not(.bad) .sw { background: #a29880; }
+html[data-theme="light"] .pill:not(.on):not(.bad) .sw { background: #9a9a94; }
 html[data-theme="light"] select.pill-select {
-  color: #241f17;
-  border-color: #cdc2a6;
-  background: #f5f1e5;
+  color: #14161a;
+  border-color: #c2c2bc;
+  background: #ffffff;
 }
 html[data-theme="light"] select.pill-select option {
-  background: #faf7ee;
-  color: #241f17;
+  background: #ffffff;
+  color: #14161a;
 }
 
 /* ================= 手机端二次优化（2026-11-09 用户反馈"难看"）=================
