@@ -2298,7 +2298,13 @@ body.topbar-collapsed .top-bar.tools-bar { padding: 4px 16px 8px; }
 
 /* ================= 代码折叠 + Markdown 排版（2026-11-08）=================
    用户要求：① 代码不要整段摊开，折叠可展开；② 总结要结构化、好看。 */
-.code-card.collapsed .code-body { display: none; }
+/* 2026-11-12 用户要求「展开/收起代码要有动画」：
+   内层「▸ 展开代码 / ▾ 收起代码」原来 display:none 硬切，改成高度过渡。
+   上限仍是 .code-body 原有的 460px，超长本来就内部滚动，不会被裁。 */
+.code-card.collapsed .code-body {
+  display: block; max-height: 0; opacity: 0;
+  padding-top: 0; padding-bottom: 0; overflow: hidden;
+}
 .code-card.collapsed .code-out { display: none; }
 .code-card { max-width: 100%; }
 .code-body {
