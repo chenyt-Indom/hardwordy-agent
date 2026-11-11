@@ -6607,7 +6607,14 @@ def selfdev_rollback_batch(body: dict):
     batch = str((body or {}).get("batch") or "").strip()
     if not batch:
         return {"ok": False, "error": "缺少 batch"}
-    return selfdev.rollback_batch(batch)
+    r = selfdev.rollback_batch(batch)
+    if isinstance(r, dict) and r.get("ok"):
+        try:
+            from . import pending as _pend
+            _pend.mark("", "回撤到「%s」之前" % batch)
+        except Exception:
+            logger.warning("批次回撤后标记待生效失败", exc_info=True)
+    return r
 
 
 @app.post("/api/selfdev/rollback")
