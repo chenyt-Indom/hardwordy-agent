@@ -1775,8 +1775,16 @@ def open_path(req: OpenPathRequest = None):
         try:
             import subprocess
             if os.name == "nt":
-                # /select 会打开父文件夹并选中该文件，比只开目录更省事
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(p)])
+                # /select 会打开父文件夹并选中该文件，比只开目录更省事。
+                # 同样不能用 subprocess.Popen —— procwin 的补丁会给它加 SW_HIDE，
+                # explorer 窗口会「开出来但隐藏」，用户看着就是没反应。
+                # 改走 ShellExecuteW：不经过 Popen，补丁管不到。
+                import ctypes
+                _rc = ctypes.windll.shell32.ShellExecuteW(
+                    None, "open", "explorer.exe",
+                    '/select,"%s"' % os.path.normpath(p), None, 1)
+                if _rc <= 32:   # ShellExecuteW 返回值 ≤32 表示失败
+                    os.startfile(os.path.dirname(os.path.normpath(p)))
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", "-R", p])
             else:
