@@ -1455,8 +1455,14 @@ def _schedule_schemas() -> list:
                 "required": ["name", "prompt"]}}},
         {"type": "function", "function": {
             "name": "list_schedules",
-            "description": "列出所有定时任务（含下次运行时间、上次结果）。用户问「我有哪些定时任务」时用。",
-            "parameters": {"type": "object", "properties": {}, "required": []}}},
+            "description": ("列出所有定时任务（含下次运行时间、上次结果摘要）。"
+                            "**全局共享**：不管在哪个对话里问，看到的都是同一批任务；"
+                            "用户问「我有哪些定时任务」「昨天那个任务跑完没」时用。"
+                            "要看某次运行的**完整结果正文**就传 with_result=true。"),
+            "parameters": {"type": "object", "properties": {
+                "with_result": {"type": "boolean",
+                                "description": "true = 附带每个任务最近一次的完整结果正文（较长）"}},
+                "required": []}}},
         {"type": "function", "function": {
             "name": "cancel_schedule",
             "description": "按名字或 id 删除一个定时任务。",
