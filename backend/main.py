@@ -7401,6 +7401,7 @@ def ws_serve(body: dict):
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+            creationflags=(0x08000000 if os.name == "nt" else 0),  # CREATE_NO_WINDOW
             cwd=workspace.root(proj),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
@@ -8296,6 +8297,58 @@ def library_open_file(body: dict):
                 "detail": "系统里没找到能打开这个文件的程序"}
     except Exception as e:
         raise HTTPException(500, f"打开文件失败：{e}")
+
+
+@app.get("/api/doclib/all")
+def library_all():
+    """生成文库「全量视图」：文库本体 + 工作区软件 + 生成的图片/视频。
+
+    2026-11-11 用户要求：「不仅要有文本，PPT/Excel/Word 等所有内容以及
+    软件都要有，并且支持双击打开，按类别展开与收起」。
+    这里只做**聚合读取**，不移动、不修改任何磁盘文件。
+    """
+    try:
+        return doclib.list_all()
+    except Exception as e:
+        raise HTTPException(500, "读取失败：%s" % e)
+
+
+@app.post("/api/doclib/open_any")
+def library_open_any(body: dict):
+    """按 id 用本机默认程序打开（文库 / 工作区软件 / 图片都支持）。
+
+    前端双击列表项就走这里 —— 一律 os.startfile，等同在资源管理器里双击。
+    """
+    ident = str((body or {}).get("id") or "").strip()
+    if not ident:
+        raise HTTPException(400, "缺少文件 id")
+    try:
+        info = doclib.resolve_id(ident)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    path = info["path"]
+    if _is_container():
+        if _host_agent_alive() and _request_host_open(path):
+            return {"ok": True, "opened": False, "via": "host-agent",
+                    "host_path": _host_path(path),
+                    "detail": "运行在容器里，已请宿主机打开这个文件"}
+        return {"ok": True, "opened": False, "host_path": _host_path(path),
+                "detail": "运行在容器里，无法直接调用宿主机的程序"}
+    try:
+        import subprocess
+        if os.name == "nt":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return {"ok": True, "opened": True, "path": path,
+                "name": info["rel"].split("/")[-1]}
+    except FileNotFoundError:
+        return {"ok": True, "opened": False, "path": path,
+                "detail": "系统里没找到能打开这个文件的程序"}
+    except Exception as e:
+        raise HTTPException(500, "打开失败：%s" % e)
 
 
 @app.post("/api/code/run")
@@ -9417,6 +9470,15 @@ def frontend_version():
 # 这里把 backend/version.py（git 封装）接出来：重启前自动打快照、前端看版本列表、
 # 支持整轮 / 单文件两种回滚粒度，回滚前自动建还原点。
 
+# 启动时把「正在跑的代码版本」记下来：之后工作区再变，也能分清
+# 「已提交的最新版本」和「进程实际加载的版本」。
+try:
+    from . import version as _ver_boot
+    _BOOT_VER = _ver_boot.current()
+    _BOOT_VER["boot_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+except Exception as _e:  # noqa: BLE001
+    _BOOT_VER = {"ok": False, "error": str(_e)}
+
 class VersionSnapReq(BaseModel):
     message: str = ""
 
@@ -9448,7 +9510,9 @@ def version_status():
     av = _ver.available()
     if not av.get("ok"):
         return {"ok": False, "error": av.get("error")}
-    return {"ok": True, "current": _ver.current(), "root": av.get("root")}
+    return {"ok": True, "current": _ver.current(), "root": av.get("root"),
+            "running": _BOOT_VER, "total": _ver.count(),
+            "undo": _ver.get_undo()}
 
 
 @app.get("/api/version/list")
@@ -9481,6 +9545,28 @@ def version_rollback(req: VersionRollbackReq):
     """回滚到某个版本：files 空=整轮，给了列表=只回滚这几个文件。"""
     from . import version as _ver
     return _ver.rollback(req.hash, req.files or None, req.note or "")
+
+
+@app.get("/api/version/undo_info")
+def version_undo_info():
+    """上一次回滚的还原点（有就能「撤销这次回滚」）。"""
+    from . import version as _ver
+    return _ver.get_undo()
+
+
+@app.post("/api/version/undo")
+def version_undo():
+    """撤销上一次回滚：回到回滚前的那一刻（本身也会再存一个还原点）。"""
+    from . import version as _ver
+    u = _ver.get_undo()
+    if not u.get("ok"):
+        return {"ok": False, "error": "没有可撤销的回滚记录"}
+    h = u["undo"]["restore_hash"]
+    r = _ver.rollback(h, None, "撤销回滚")
+    if r.get("ok"):
+        r["msg"] = "已撤销回滚，代码回到 %s 那一刻。重启应用后生效。" % str(h)[:7]
+    return r
+
 
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")

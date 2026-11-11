@@ -2075,6 +2075,9 @@
   })();
 
   async function loadDoclib(highlight) {
+  // 2026-11-11 重构：改走「全量视图」—— 生成文库 + 工作区软件 + 生成图片，
+  // 按类别分组、可展开收起、双击用本机程序打开。旧实现保留在 loadDoclibLegacy。
+  return __dlLoadAll(highlight);
     const list = $("#dlList");
     if (!list) return;
     if (highlight) dlCurrent = highlight;
@@ -2188,6 +2191,200 @@
         }
       };
     });
+  }
+
+  // ---------- 生成文库 · 全量视图（2026-11-11 重构）----------
+  // 用户要求：① 文库要有文本 / PPT / Excel / Word / 图片 / 软件等**所有**产出；
+  //          ② 双击直接用本机程序打开；③ 按类别展开与收起（默认全部收起）。
+  // 数据来自 /api/doclib/all（后端聚合 文库 + 工作区项目 + 生成图片，只读、不动磁盘）。
+  const DL_CATS = [
+    ["recent", "🕒 最近生成"],
+    ["doc", "📄 文档"],
+    ["ppt", "📊 演示文稿"],
+    ["sheet", "📈 表格"],
+    ["text", "📝 文本"],
+    ["code", "💻 代码"],
+    ["image", "🖼 图片 / 视频"],
+    ["software", "📦 软件 / 压缩包"],
+    ["other", "📎 其它"],
+  ];
+  const DL_OPEN_KEY = "doclib.openCats";
+  let dlAll = [], dlById = {}, dlCurrentId = "";
+
+  function dlOpenSet() {
+    try {
+      const raw = localStorage.getItem(DL_OPEN_KEY);
+      if (raw) return new Set(JSON.parse(raw) || []);
+    } catch (e) { /* 读不到就按默认：全部收起 */ }
+    return new Set();
+  }
+  function dlSaveOpen(set) {
+    try { localStorage.setItem(DL_OPEN_KEY, JSON.stringify(Array.from(set))); } catch (e) {}
+  }
+  function dlSizeText(b) {
+    const n = Number(b) || 0;
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + "MB";
+    if (n >= 1024) return (n / 1024).toFixed(0) + "KB";
+    return n + "B";
+  }
+  function dlIconOf(f) {
+    const m = { doc: "📄", ppt: "📊", sheet: "📈", text: "📝",
+                code: "💻", image: "🖼", software: "📦", other: "📎" };
+    return m[f.cat] || "📎";
+  }
+  function dlCatLabel(key) {
+    for (let i = 0; i < DL_CATS.length; i++) if (DL_CATS[i][0] === key) return DL_CATS[i][1];
+    return key;
+  }
+  function dlRowHtml(f) {
+    const sub = f.src === "ws" ? (f.project || "") : (f.folder || "");
+    const tag = (f.src === "ws" ? '<span class="dl-tag">软件</span>'
+      : (f.src === "img" ? '<span class="dl-tag">生成图</span>' : "")) +
+      (f.runnable ? '<span class="dl-run">▶ 双击运行</span>' : "");
+    return '<div class="list-item dl-item' + (f.id === dlCurrentId ? " active" : "") +
+      '" data-id="' + escapeHtml(f.id) + '" data-rel="' +
+      escapeHtml(f.src === "lib" ? f.rel : "") +
+      '" title="' + (f.runnable ? "双击直接运行：" : "双击用本机程序打开：") +
+      escapeHtml(f.name) + '">' +
+      '<span class="dl-icon">' + dlIconOf(f) + '</span>' +
+      '<span class="dl-main"><span class="dl-name">' + escapeHtml(f.name) + '</span>' +
+      '<span class="dl-sub">' + (sub ? escapeHtml(sub) + " · " : "") +
+      escapeHtml(f.modified) + " · " + dlSizeText(f.size) +
+      (tag ? " " + tag : "") + '</span></span>' +
+      (f.editable ? '<button type="button" class="dl-del" data-rel="' +
+        escapeHtml(f.rel) + '" title="删除">🗑</button>' : "") +
+      '</div>';
+  }
+  function dlCatBlock(key, items, opened) {
+    return '<div class="dl-cat' + (opened ? " open" : "") + '" data-cat="' + key + '">' +
+      '<button type="button" class="dl-cat-head" data-cat="' + key + '" aria-expanded="' +
+      (opened ? "true" : "false") + '">' +
+      '<span class="dl-cat-arrow">' + (opened ? "▾" : "▸") + '</span>' +
+      '<span class="dl-cat-name">' + dlCatLabel(key) + '</span>' +
+      '<span class="dl-cat-count">' + items.length + '</span></button>' +
+      '<div class="dl-cat-body">' + items.map(dlRowHtml).join("") + '</div></div>';
+  }
+
+  async function dlOpenWithSystem(id) {
+    const f = dlById[id];
+    if (!f) return;
+    showToast((f.runnable ? "正在启动程序：" : "正在用本机程序打开：") + f.name, "");
+    try {
+      const r = await api("/api/doclib/open_any", { method: "POST",
+        body: JSON.stringify({ id: id }) });
+      if (r && r.opened) showToast("已打开：" + f.name, "ok");
+      else showToast((r && r.detail) || "无法直接打开这个文件", "warn");
+    } catch (e) {
+      showToast("打开失败：" + (e.message || e), "warn");
+    }
+  }
+
+  async function dlSelect(id) {
+    const f = dlById[id];
+    if (!f) return;
+    dlCurrentId = id;
+    document.querySelectorAll(".dl-item").forEach((el) =>
+      el.classList.toggle("active", el.dataset.id === id));
+    // 文本 / 代码：面板内打开可编辑；Office、软件、图片：提示双击用本机程序打开
+    if (f.editable && (f.cat === "text" || f.cat === "code" || f.cat === "other")) {
+      await openDoclibFile(f.rel);
+    } else {
+      showToast("双击「" + f.name + "」用本机程序打开", "");
+    }
+  }
+
+  async function dlDelete(rel) {
+    if (!rel) return;
+    if (!confirm("删除《" + rel + "》？\n（会移进回收站，需要时能捞回来）")) return;
+    try {
+      await api("/api/doclib/delete", { method: "POST",
+        body: JSON.stringify({ rel: rel }) });
+      showToast("已删除（在回收站里）", "ok");
+      if (dlCurrent === rel) {
+        const ed = $("#dlEditor"); if (ed) ed.hidden = true; dlCurrent = "";
+      }
+      loadDoclib();
+    } catch (e) {
+      showToast("删除失败：" + (e.message || e), "err");
+    }
+  }
+
+  async function __dlLoadAll(highlight) {
+    const list = $("#dlList");
+    if (!list) return;
+    let d;
+    try {
+      d = await api("/api/doclib/all");
+    } catch (e) {
+      list.innerHTML = '<div class="hint">读取失败：' +
+        escapeHtml(String(e.message || e)) + "</div>";
+      return;
+    }
+    dlAll = d.files || [];
+    dlById = {};
+    dlAll.forEach((f) => { dlById[f.id] = f; });
+    if (!dlAll.length) {
+      list.innerHTML = '<div class="hint">还没有任何产出。让模型写文档、做 PPT / Excel、' +
+        '写代码或做软件，产物都会出现在这里（工作区项目和生成的图片也算）。</div>';
+      return;
+    }
+    // 旧调用传的是文库内 rel（「在文件库中定位」），换算成新 id
+    if (highlight) {
+      const hit = dlAll.find((f) => f.src === "lib" && f.rel === highlight);
+      if (hit) dlCurrentId = hit.id;
+    }
+    const open = dlOpenSet();
+    const byCat = {};
+    dlAll.forEach((f) => { (byCat[f.cat] = byCat[f.cat] || []).push(f); });
+    const recent = (d.recent || []).map((id) => dlById[id]).filter(Boolean);
+    // 定位时自动展开它所在的类别，否则收起状态下看不见高亮项
+    if (highlight && dlCurrentId) {
+      const hit = dlById[dlCurrentId];
+      if (hit) {
+        open.add(hit.cat);
+        if (recent.some((x) => x.id === hit.id)) open.add("recent");
+        dlSaveOpen(open);
+      }
+    }
+    let html = "";
+    if (recent.length) html += dlCatBlock("recent", recent, open.has("recent"));
+    DL_CATS.forEach((pair) => {
+      const key = pair[0];
+      if (key === "recent") return;
+      const arr = byCat[key] || [];
+      if (arr.length) html += dlCatBlock(key, arr, open.has(key));
+    });
+    list.innerHTML = html;
+
+    list.querySelectorAll(".dl-cat-head").forEach((h) => {
+      h.onclick = () => {
+        const box = h.parentElement;
+        const key = h.dataset.cat;
+        const isOpen = box.classList.toggle("open");
+        h.setAttribute("aria-expanded", isOpen ? "true" : "false");
+        const ar = h.querySelector(".dl-cat-arrow");
+        if (ar) ar.textContent = isOpen ? "▾" : "▸";
+        const set = dlOpenSet();
+        if (isOpen) set.add(key); else set.delete(key);
+        dlSaveOpen(set);
+      };
+    });
+    list.querySelectorAll(".dl-item").forEach((el) => {
+      el.onclick = () => dlSelect(el.dataset.id);
+      // 双击：一律用本机默认程序打开（Word/PPT/Excel/zip/exe 都是双击即开）
+      el.ondblclick = () => dlOpenWithSystem(el.dataset.id);
+    });
+    list.querySelectorAll(".dl-del").forEach((btn) => {
+      btn.onclick = (ev) => { ev.stopPropagation(); dlDelete(btn.dataset.rel); };
+    });
+    if (highlight) {
+      const esc = String(highlight).replace(/"/g, '\\"');
+      const hit = list.querySelector('.dl-item[data-rel="' + esc + '"]');
+      if (hit) {
+        hit.classList.add("dl-flash");
+        setTimeout(() => hit.classList.remove("dl-flash"), 2600);
+      }
+    }
   }
 
   async function openDoclibFile(rel) {
@@ -3211,6 +3408,16 @@
     answerBubble.textContent = "…";
     answerWrap.appendChild(answerBubble);
     messagesEl.appendChild(answerWrap);
+    // ★ 2026-11-11 用户要求：「思考时，模型的思考框永远要居于最下方，以便我监控思考过程」。
+    //   做法：思考期间把思考框挪到消息流末尾，并用 .think-dock 粘住视口底部；
+    //   正文一开始输出就挪回原位（工具条之前），免得挡住答案。
+    thinkWrap.classList.add("think-dock");
+    messagesEl.appendChild(thinkWrap);
+    const undockThink = () => {
+      if (!thinkWrap.classList.contains("think-dock")) return;
+      thinkWrap.classList.remove("think-dock");
+      messagesEl.insertBefore(thinkWrap, toolWrap);
+    };
     messagesEl.scrollTop = messagesEl.scrollHeight;
     // 后端可能发来 note（例如"输出被长度上限截断，正在重试"），
     // 收起来备用：万一最终没有正文，就把它显示出来，而不是留一个空气泡
@@ -3265,6 +3472,7 @@
       // 2026-11-10：流式阶段**不再做 markdown**。
       //   实测：收尾渲染那一步偶尔不执行（异常/分支没走到），屏幕就只剩流式的最后状态；
       //   而流式用的是 mdToHtml，尾部会被吃掉。这里直接 textContent，屏幕 === answer。
+      if (answer) undockThink();   // 正文开始输出 → 思考框回归原位
       answerBubble.textContent = answer;
       answerBubble.style.whiteSpace = "pre-wrap";
       const _cur = document.createElement("span");
@@ -3458,6 +3666,56 @@
       return wrap;
     };
 
+    // ---- 代码卡片分组：一次跑很多段代码时，不让卡片一张张往下堆 ----
+    // 2026-11-11 用户反馈：模型一轮里连着跑好几段代码，每段一张大卡片，
+    // 聊天区被这些提示塞满、翻不到正文。现在**连续的**代码卡片自动收进同一个
+    // 分组，分组头只占一行「🐍 本地执行的代码 · N 段」，点一下整组收起/展开。
+    const codeGroupOf = (parent) => {
+      const last = parent.lastElementChild;
+      if (last && last.classList && last.classList.contains("code-group")) return last;
+      const g = document.createElement("div");
+      g.className = "code-group";
+      const head = document.createElement("div");
+      head.className = "code-group-head";
+      // 用 createElement 逐个建，而不是 innerHTML 拼串：可读、可控、便于自测
+      const ttl = document.createElement("span");
+      ttl.className = "cg-title";
+      ttl.textContent = "🐍 本地执行的代码";
+      const cntEl = document.createElement("span");
+      cntEl.className = "cg-count";
+      const btn = document.createElement("button");
+      btn.className = "btn sm ghost cg-toggle";
+      btn.type = "button";
+      btn.textContent = "▴ 全部收起";
+      head.appendChild(ttl);
+      head.appendChild(cntEl);
+      head.appendChild(btn);
+      const body = document.createElement("div");
+      body.className = "code-group-body";
+      g.appendChild(head);
+      g.appendChild(body);
+      g.__body = body;
+      g.__cnt = cntEl;
+      // ⚠️ 和 sd-card 一样：不要用 btn.click() —— 某些嵌入环境里元素没有 click()
+      const sync = () => {
+        const collapsed = g.classList.contains("collapsed");
+        body.hidden = collapsed;
+        btn.textContent = collapsed ? "▾ 展开全部" : "▴ 全部收起";
+      };
+      const toggle = () => { g.classList.toggle("collapsed"); sync(); };
+      btn.onclick = (ev) => { ev.stopPropagation(); toggle(); };
+      head.onclick = toggle;
+      sync();
+      parent.appendChild(g);
+      return g;
+    };
+    const appendCodeCard = (parent, card) => {
+      const g = codeGroupOf(parent);
+      g.__body.appendChild(card);
+      if (g.__cnt) g.__cnt.textContent = "· " + g.__body.querySelectorAll(".code-card").length + " 段";
+      return card;
+    };
+
     const makeCodeCard = (ui, title) => {
       const card = document.createElement("div");
       card.className = "code-card";
@@ -3504,15 +3762,27 @@
       const _tg = document.createElement("button");
       _tg.className = "btn sm ghost code-toggle";
       _tg.type = "button";
+      // ★ 2026-11-11 用户要求：「代码折叠框除了上方有折叠按钮，下方也需要有」。
+      //   原因：长代码展开后要滚回卡片顶部才够得着收起按钮，很麻烦。
+      //   底部这个与顶部共用同一个切换函数，文案跟着状态同步。
+      let _tg2 = null;
       const _syncTg = () => {
         card.classList.toggle("collapsed", _collapsed);
         _tg.textContent = _collapsed
           ? "▸ 展开代码（" + _lines + " 行 / " + current.length + " 字）"
           : "▾ 收起代码";
+        if (_tg2) _tg2.textContent = _collapsed ? "▸ 展开代码" : "▾ 收起代码";
       };
-      _tg.onclick = () => { _collapsed = !_collapsed; _syncTg(); };
+      const _toggle = () => { _collapsed = !_collapsed; _syncTg(); };
+      _tg.onclick = _toggle;
       const _btns = card.querySelector(".code-btns");
       if (_btns) _btns.prepend(_tg);
+      // 底部按钮：挂在整张卡片最末尾（输出、stdin 之下），始终够得着
+      _tg2 = document.createElement("button");
+      _tg2.className = "btn sm ghost code-toggle code-toggle-b";
+      _tg2.type = "button";
+      _tg2.onclick = _toggle;
+      card.appendChild(_tg2);
       _syncTg();
 
       const paintOut = (r) => {
@@ -3792,7 +4062,7 @@
           d.textContent = "（这里原本是一次内部工具调用，已折叠）";
           bubble.appendChild(d);
         } else {
-          bubble.appendChild(makeCodeCard(
+          appendCodeCard(bubble, makeCodeCard(
             { code: p.v, lang: p.lang, userText: userText || "" },
             "📄 代码（可编辑后直接运行）"));
         }
@@ -3973,6 +4243,7 @@
     };
     const finishThinking = () => {
       stopThinking();                            // 结束播放，一次性补齐剩余思考
+      undockThink();                             // 思考结束 → 思考框回归原位
       // 手机端：思考是从头展开显示的；收尾时如果太长就折起来，只留字数
       if (_autoThink && thinking.length > 500 && thinkBody.style.display !== "none") {
         thinkBody.style.display = "none";
@@ -4231,7 +4502,7 @@
               messagesEl.scrollTop = messagesEl.scrollHeight;
             }
             else if (obj.ui.type === "code") {
-              answerWrap.appendChild(makeCodeCard(obj.ui));
+              appendCodeCard(answerWrap, makeCodeCard(obj.ui));
               messagesEl.scrollTop = messagesEl.scrollHeight;
             }
             else if (obj.ui.type === "typing") {
@@ -5531,12 +5802,16 @@
     btn.addEventListener("click", async () => {
       let st = { enabled: on, mirror: "" };
       let hist = { batches: [], restore: "" };
+      let vst = { ok: false };
+      let vlist = { ok: false, items: [] };
       try {
         st = await (await fetch("/api/selfdev/status")).json();
         hist = await (await fetch("/api/selfdev/backups")).json();
         on = !!st.enabled;
         paint();
       } catch (e) { /* ignore */ }
+      try { vst = await (await fetch("/api/version/status")).json(); } catch (e) { /* ignore */ }
+      try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) { /* ignore */ }
 
       const mask = document.createElement("div");
       mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px";
@@ -5553,7 +5828,11 @@
         '    <button id="sdDemo" type="button" title="用顶栏选定的代码模型真跑一次写文件，验证自我迭代能力（只写 dev_note.md，不碰源码）" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid #2a4a6a;background:transparent;color:#5aa9ff;cursor:pointer;white-space:nowrap">🧪 试一次迭代</button>',
         '    <button id="sdFull" type="button" title="完全访问：允许模型改写 backend/ 核心代码（风险自负）" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid #3a3a42;background:transparent;color:#9a9aa2;cursor:pointer;white-space:nowrap">🔓 完全访问·关</button>',
         '  </div>',
-        '  <div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">版本历史（每次改动前自动备份，点「回撤」整批还原）</div>',
+        '  <div id="sdVerBar" style="display:flex;align-items:center;gap:8px;margin-top:10px;padding:8px 12px;border:1px solid #2f3a4a;border-radius:10px;background:rgba(26,30,38,.65)">',
+        '    <span id="sdVerTxt" style="flex:1;min-width:0;font-size:12px;color:#cfd6e2;line-height:1.6">当前版本：读取中…</span>',
+        '    <button id="sdUndo" type="button" style="display:none;flex:0 0 auto;padding:6px 10px;border-radius:7px;border:1px solid #4a5a3a;background:transparent;color:#9fd88f;cursor:pointer;font-size:12px;white-space:nowrap">↩ 撤销上次回撤</button>',
+        '  </div>',
+        '  <div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">版本历史（git 快照，脚本直改也记；点「回滚」整批还原）</div>',
         '  <div id="sdHist"></div>',
         '  <div id="sdMsg" style="font-size:12.5px;min-height:18px;color:#f0b34a;margin-top:8px"></div>',
         '  <div id="sdFoot" style="font-size:11px;color:#6f7787;line-height:1.7;margin-top:10px;border-top:1px solid #2a323e;padding-top:8px;word-break:break-all"></div>',
@@ -5569,6 +5848,8 @@
       const tgEl = mask.querySelector("#sdToggle");
       const list = mask.querySelector("#sdHist");
       const msg = mask.querySelector("#sdMsg");
+      const verTxt = mask.querySelector("#sdVerTxt");
+      const undoBtn = mask.querySelector("#sdUndo");
       const say = (t, c) => { msg.style.color = c || "#f0b34a"; msg.textContent = t; };
 
       const applyState = () => {
@@ -5663,40 +5944,117 @@
         } catch (e) { say("切换失败：" + e.message, "#e06c6c"); }
       };
 
-      // ---- 版本历史：日期 + 更新内容 + 文件 + ±行数 ----
+      // ---- 版本历史：读 git 快照（2026-11-10 改）----
+      // 旧版读的是 selfdev 改动日志，只记「用 selfdev 工具改的」；
+      // 用脚本直接写文件（run_python）的改动完全记不到 —— 用户发现「最近几次没更新」。
+      // git 快照不挑工具，任何改动在重启前都会被提交，所以改成读 git。
+      const btnStyle = "flex:0 0 auto;padding:5px 10px;border-radius:7px;background:transparent;cursor:pointer;font-size:12px";
+      const verPaint = () => {
+        const run = (vst && vst.running) || {};
+        const cur = (vst && vst.current) || {};
+        let txt;
+        if (!run.ok) {
+          txt = "当前版本：读不到（" + ((vst && vst.error) || "git 不可用") + "）";
+          verTxt.style.color = "#e0a0a0";
+        } else {
+          txt = "当前正在用：v" + (vst.total || "?") + " · " + (run.hash || "-")
+            + (run.boot_at ? "（" + String(run.boot_at).slice(5, 16) + " 启动）" : "");
+          txt += cur.dirty ? " · 有 " + cur.dirty + " 处未提交改动（重启前自动存快照）" : " · 工作区干净";
+          verTxt.style.color = "#cfd6e2";
+        }
+        verTxt.textContent = txt;
+        const u = vst && vst.undo;
+        undoBtn.style.display = (u && u.ok) ? "" : "none";
+        if (u && u.ok) undoBtn.title = "回到回滚前（" + String(u.undo.restore_hash || "").slice(0, 7) + "）";
+      };
       const render = (data) => {
-        const bs = data.batches || [];
+        const bs = (data && data.items) || [];
         if (!bs.length) {
-          list.innerHTML = '<div style="font-size:12.5px;color:#8f8f99;padding:6px 0">还没有改动记录。模型改过一次源码后，这里会出现版本。</div>';
+          list.innerHTML = '<div style="font-size:12.5px;color:#8f8f99;padding:6px 0">还没有版本。模型改过一次源码、重启后，这里就会出现。</div>';
           return;
         }
         list.innerHTML = bs.map((b) => {
-          const notes = (b.notes || []).filter(Boolean);
-          const title = notes.length ? notes.join("；") : "（这次没写说明）";
-          const files = (b.files || []).map((f) => f.rel).join("、");
-          const names = (b.files || []).length === 1
-            ? fmtRel(files) : (b.files || []).length + " 个文件";
+          const h = b.hash;
           return '<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid #2a2a31">' +
             '<div style="flex:1;min-width:0">' +
-            '<div style="font-size:12.5px;color:#cfd6e2">' + title + '</div>' +
+            '<div style="font-size:12.5px;color:#cfd6e2">' + (b.subject || "（没有说明）") + '</div>' +
             '<div style="font-size:11.5px;color:#828b99;margin-top:3px;line-height:1.6">' +
-            '<span style="font-family:ui-monospace,monospace">' + (b.ts || b.batch) + '</span> · ' +
-            names + ' · <span style="color:#5fd08a">+' + (b.added || 0) + '</span> ' +
-            '<span style="color:#e07a7a">−' + (b.removed || 0) + '</span>' +
-            '<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' +
-            files.replace(/"/g, "&quot;") + '">' + files + '</div>' +
-            '</div></div>' +
-            '<button data-batch="' + b.batch + '" style="flex:0 0 auto;padding:5px 10px;border-radius:7px;border:1px solid #4a3a3a;background:transparent;color:#e0a0a0;cursor:pointer;font-size:12px">回撤</button>' +
-            '<button data-diff="' + b.batch + '" data-files="' +
-            (b.files || []).map((f) => f.rel).join(",").replace(/"/g, "&quot;") +
-            '" style="flex:0 0 auto;padding:5px 10px;border-radius:7px;border:1px solid #3a4a5a;background:transparent;color:#8ab6e0;cursor:pointer;font-size:12px">看改动</button>' +
+            '<span style="font-family:ui-monospace,monospace">' + h + '</span> · ' + (b.time || '') +
+            ' · ' + (b.files || 0) + ' 个文件</div>' +
             '</div>' +
-            '<div class="sd-batch-diff" data-for="' + b.batch + '" hidden></div>';
+            '<button data-hash="' + h + '" style="' + btnStyle + ';border:1px solid #4a3a3a;color:#e0a0a0">回滚</button>' +
+            '<button data-detail="' + h + '" style="' + btnStyle + ';border:1px solid #3a4a5a;color:#8ab6e0">看改动</button>' +
+            '</div>' +
+            '<div class="sd-batch-diff" data-for="' + h + '" hidden></div>';
         }).join("");
       };
-      render(hist);
+      verPaint();
+      render(vlist);
+
+      // 「撤销上次回撤」：回到回滚前那一刻（后端回滚时会再存一个还原点，可反复）
+      undoBtn.onclick = async () => {
+        if (!confirm("撤销上一次回滚，把代码恢复到回滚前吗？\n（之后需要重启应用才生效）")) return;
+        undoBtn.disabled = true;
+        undoBtn.textContent = "撤销中…";
+        try {
+          const r = await (await fetch("/api/version/undo", { method: "POST" })).json();
+          say(r.ok ? "✅ " + (r.msg || "已撤销回滚") : "❌ " + (r.error || "撤销失败"),
+              r.ok ? "#7bd88f" : "#e06c6c");
+          if (r.ok) {
+            try { vst = await (await fetch("/api/version/status")).json(); } catch (e) {}
+            try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) {}
+            verPaint(); render(vlist);
+          }
+        } catch (e) { say("❌ " + e.message, "#e06c6c"); }
+        undoBtn.disabled = false;
+        undoBtn.textContent = "↩ 撤销上次回撤";
+      };
 
       list.onclick = async (ev) => {
+        // ---- git 版本：回滚 / 看改动 ----
+        const rb = ev.target.closest("button[data-hash]");
+        if (rb) {
+          const h = rb.dataset.hash;
+          if (!confirm("回滚到版本 " + h + " 吗？\n回滚前会自动存一个还原点，不满意可点「↩ 撤销上次回撤」回来。\n（回滚后要重启应用才生效）")) return;
+          rb.disabled = true; rb.textContent = "回滚中…";
+          try {
+            const r = await (await fetch("/api/version/rollback", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ hash: h }) })).json();
+            if (r.ok) {
+              rb.textContent = "✅ 已回滚";
+              say("✅ " + (r.msg || "已回滚") + "（重启应用后生效）", "#7bd88f");
+              try { vst = await (await fetch("/api/version/status")).json(); } catch (e) {}
+              try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) {}
+              verPaint(); render(vlist);
+            } else {
+              rb.disabled = false; rb.textContent = "回滚";
+              say("❌ " + (r.error || "回滚失败"), "#e06c6c");
+            }
+          } catch (e) { rb.disabled = false; rb.textContent = "回滚"; say("❌ " + e.message, "#e06c6c"); }
+          return;
+        }
+        const dd = ev.target.closest("button[data-detail]");
+        if (dd) {
+          const box = list.querySelector('[data-for="' + dd.dataset.detail + '"]');
+          if (!box) return;
+          if (!box.hidden) { box.hidden = true; dd.textContent = "看改动"; return; }
+          dd.disabled = true; dd.textContent = "读取…";
+          let html = "";
+          try {
+            const d = await (await fetch("/api/version/detail?hash=" + encodeURIComponent(dd.dataset.detail))).json();
+            if (!d.ok) html = '<div class="sd-diff-hd">读不到：' + (d.error || "") + '</div>';
+            else html = (d.files || []).map((f) =>
+              '<div class="sd-diff-hd">' + f.rel + ' <span style="color:#5fd08a">+' + f.added +
+              '</span> <span style="color:#e07a7a">−' + f.deleted + '</span></div>').join("")
+              || '<div class="sd-diff-hd">这个版本没有文件变更</div>';
+          } catch (e) { html = '<div class="sd-diff-hd">读取失败：' + e.message + '</div>'; }
+          box.innerHTML = html;
+          box.hidden = false;
+          dd.disabled = false; dd.textContent = "收起改动";
+          return;
+        }
+
         const db = ev.target.closest("button[data-diff]");
         if (db) {
           const box = list.querySelector('[data-for="' + db.dataset.diff + '"]');
