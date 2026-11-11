@@ -3755,9 +3755,15 @@
     // ★ 2026-11-11 用户要求：「思考时，模型的思考框永远要居于最下方，以便我监控思考过程」。
     //   做法：思考期间把思考框挪到消息流末尾，并用 .think-dock 粘住视口底部；
     //   正文一开始输出就挪回原位（工具条之前），免得挡住答案。
-    thinkWrap.classList.add("think-dock");
-    messagesEl.appendChild(thinkWrap);
+    // 2026-11-12：贴不贴底由「🧠 思考框跟随 / 📍 思考框固定」按钮决定（thinkFollow）。
+    thinkWrap._home = toolWrap;      // 取消跟随时回到这里（工具条之前）
+    _thinkLive = thinkWrap;          // 登记成「当前这轮的思考框」，按钮切换时能立刻生效
+    if (thinkFollow) {
+      thinkWrap.classList.add("think-dock");
+      messagesEl.appendChild(thinkWrap);
+    }
     const undockThink = () => {
+      if (_thinkLive === thinkWrap) _thinkLive = null;   // 思考结束，按钮不再管它
       if (!thinkWrap.classList.contains("think-dock")) return;
       thinkWrap.classList.remove("think-dock");
       messagesEl.insertBefore(thinkWrap, toolWrap);
