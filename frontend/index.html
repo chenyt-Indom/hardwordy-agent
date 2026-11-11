@@ -96,40 +96,9 @@
     </div>
 
     <!-- 知识库：把 .txt/.md 丢进文件夹即可被检索，无需导入 -->
-    <!-- 定时任务（2026-11-08）：长期自动化，到点自己跑，结果写回会话 -->
-    <section class="panel schedpanel">
-      <div class="sec-head">
-        <span class="fold" id="schedFold">▾</span>
-        <span>⏰ 定时任务</span>
-        <span class="badge-mini" id="schedBadge">0</span>
-      </div>
-      <div class="sched-body" id="schedBody">
-        <div class="list" id="schedList"></div>
-        <details class="sched-new">
-          <summary>＋ 新建定时任务</summary>
-          <div class="sched-form">
-            <input id="schedName" placeholder="任务名（如：每日AI新闻）">
-            <textarea id="schedPrompt" rows="2"
-                      placeholder="到点要做什么（写清楚，它到时候不会再来问你）"></textarea>
-            <div class="sched-row">
-              <select id="schedType">
-                <option value="daily">每天</option>
-                <option value="every">每隔</option>
-              </select>
-              <input id="schedTime" placeholder="09:00" value="09:00" title="每天几点（HH:MM）">
-              <input id="schedEvery" type="number" min="1" value="60" hidden title="每隔多少分钟">
-              <button class="btn sm" id="schedAdd">添加</button>
-            </div>
-            <select id="schedModel" title="到点用哪个模型跑">
-              <option value="">自动（跟随对话最后选用的模型）</option>
-              <option value="deepseek-flash">云端 DeepSeek</option>
-              <option value="local">本机默认模型</option>
-            </select>
-            <p class="hint">不会弹任何对话框；结果写回当前会话。云端模型需要先在顶栏 🔑 填一次 Key（会存到本机，定时任务也能用）。</p>
-          </div>
-        </details>
-      </div>
-    </section>
+    <!-- ⏰ 定时任务已从侧栏移出（2026-11-11）：它不该占对话/侧栏的位置。
+         现在是一个**独立浮层卡片**（见文件末尾 #schedFloat），点顶栏 ⏰ 开合；
+         面板只读展示 + 管理，**不能在里面聊天**。 -->
 
     <section class="panel kbpanel" id="kbPanel">
       <div class="sec-head">
