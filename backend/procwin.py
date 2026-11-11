@@ -45,3 +45,44 @@ def win_kw(extra=None):
     if extra:
         kw.update(extra)
     return kw
+
+
+    # ---------------------------------------------------------------------------
+    # 全局兜底：把 subprocess.Popen 统一打上 CREATE_NO_WINDOW
+    # ---------------------------------------------------------------------------
+    # 为什么还要这一层：
+    #     只靠"在每个调用点手写 creationflags"永远会漏 —— 而且有几个模块
+    #     （backend/selfdev.py 的回撤机制自身）**被锁成只读**，改不了。
+    #     漏一处就闪一次窗，用户看到的就是"窗口闪来闪去"。
+    # 做法：
+    #     进程启动时 patch 一次 Popen.__init__，Windows 上自动补标志。
+    #     调用方显式要"新控制台/独立控制台"时不动它，尊重原意图。
+    def install_nowin_patch():
+        """给 subprocess.Popen 打全局补丁：Windows 上默认不分配控制台窗口。
+
+        幂等：重复调用只生效一次。
+        """
+        if os.name != "nt":
+            return False
+        import subprocess as _sp
+
+        if getattr(_sp.Popen, "_nowin_patched", False):
+            return True
+
+        _orig_init = _sp.Popen.__init__
+
+        # 调用方若明确要下面这些，就不覆盖（它们和 CREATE_NO_WINDOW 语义冲突）
+        _KEEP = 0x00000010 | 0x00000008   # CREATE_NEW_CONSOLE | DETACHED_PROCESS
+
+        def _patched_init(self, *args, **kwargs):
+            try:
+                cf = int(kwargs.get("creationflags", 0) or 0)
+                if not (cf & _KEEP):
+                    kwargs["creationflags"] = cf | CREATE_NO_WINDOW
+            except Exception:
+                pass
+            return _orig_init(self, *args, **kwargs)
+
+        _sp.Popen.__init__ = _patched_init
+        _sp.Popen._nowin_patched = True
+        return True
