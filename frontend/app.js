@@ -3789,7 +3789,9 @@
       // ★ 2026-11-11 用户要求：除了在下方折叠「代码」，还要能折叠「整张卡片」这个框。
       //   场景：长代码展开后卡片很高，想把它整个收成一行，聊天区立刻清爽。
       //   与上面的代码折叠是两套独立状态：整框收起时保留代码的折叠/展开记忆。
-      let _cardCollapsed = false;
+      // ★ 2026-11-11 用户要求：「收缩到只剩一条」—— 所以默认就是整框收起状态，
+      //   聊天里每段代码只占一行，要看内容再点开。
+      let _cardCollapsed = true;
       const _tg3 = document.createElement("button");
       _tg3.className = "btn sm ghost code-card-toggle code-card-toggle-b";
       _tg3.type = "button";
