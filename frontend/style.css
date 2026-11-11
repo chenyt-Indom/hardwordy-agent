@@ -2650,10 +2650,10 @@ html[data-theme="light"] body {
 
 /* ---- 1. 浅色主题：正文与次要文字整体压深一档，白底上不再发灰 ---- */
 html[data-theme="light"] {
-  --text: #241f17;
-  --muted: #574f3f;
-  --meta-fg: #5f5747;
-  --border: #d3c8ab;
+  --text: #14161a;
+  --muted: #4a4e57;
+  --meta-fg: #4f535c;
+  --border: #c8c8c2;
 }
 
 /* ---- 2. 对话正文：14 → 15px，行距/字重一起提一点 ---- */
