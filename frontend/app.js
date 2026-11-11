@@ -3356,6 +3356,9 @@
       }
     }
     window.__lastStreamAt = Date.now();
+    // ★ 2026-11-12：用户主动发消息 → 自动退出自由查看。
+    //   否则开着「自由查看」时发出去的消息会被留在屏幕外，用户以为没发出去。
+    setFreeView(false);
     const promptText = text || (videoB64 ? "分析这段视频的内容" : "请详细描述这张图片的内容");
     addMsg("user", promptText);
     if (videoB64) {
