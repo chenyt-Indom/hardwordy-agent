@@ -6004,6 +6004,7 @@
             try { vst = await (await fetch("/api/version/status")).json(); } catch (e) {}
             try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) {}
             verPaint(); render(vlist);
+            if (window.__restartAppNow) setTimeout(() => window.__restartAppNow(), 500);
           }
         } catch (e) { say("❌ " + e.message, "#e06c6c"); }
         undoBtn.disabled = false;
