@@ -5993,7 +5993,7 @@
 
       // 「撤销上次回撤」：回到回滚前那一刻（后端回滚时会再存一个还原点，可反复）
       undoBtn.onclick = async () => {
-        if (!confirm("撤销上一次回滚，把代码恢复到回滚前吗？\n（之后需要重启应用才生效）")) return;
+        if (!confirm("确定撤销上一次回滚、把代码恢复到回滚前吗？\n\n点「确定」后：立刻恢复 → 自动重启应用（会短暂断开一下）")) return;
         undoBtn.disabled = true;
         undoBtn.textContent = "撤销中…";
         try {
