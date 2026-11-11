@@ -3878,11 +3878,20 @@ def _do_video_edit(arguments, ui_events, context):
         return p
 
     def _target(ext):
-        """给成品算一个文库内的文件名 + 绝对路径。"""
+        """给成品算一个文库内的文件名 + 绝对路径。
+
+        ⚠️ 判断「用户给的文件名带没带扩展名」**不能只看 splitext** ——
+           文件名里出现小数点太常见了（「测试_1.5秒」「v2.0 版本」），
+           splitext 会把 `.5秒` 当成扩展名，于是不再追加 `.mp4`，
+           ffmpeg 直接报 "Unable to choose an output format"（2026-11-11 实测踩到）。
+           所以只认真正的媒体扩展名。
+        """
+        _EXTS = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv", ".wmv",
+                 ".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg")
         name = str(arguments.get("filename") or "").strip()
         if not name:
             name = "视频_%s%s" % (time.strftime("%H%M%S"), ext)
-        elif not os.path.splitext(name)[1]:
+        elif os.path.splitext(name)[1].lower() not in _EXTS:
             name += ext
         try:
             full = doclib.file_path(name)
