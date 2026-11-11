@@ -1488,7 +1488,8 @@ def _do_schedule(name: str, arguments: dict) -> str:
                 return "创建失败：%s" % r.get("error")
             j = r["job"]
             return ("已创建定时任务「%s」：%s，下次 %s。"
-                    "到点会自动执行并把结果写回这个会话（界面左侧「定时任务」面板能看到）。"
+                    "到点会自动执行并把结果写回这个会话"
+                    "（界面顶栏「⏰ 定时」里能看到全部任务与结果）。"
                     % (j["name"], _sch.describe(j),
                        time.strftime("%m-%d %H:%M", time.localtime(float(j["next_run"])))))
         if name == "list_schedules":
