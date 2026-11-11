@@ -6959,6 +6959,24 @@ def schedule_list():
             "status": scheduler.status()}
 
 
+@app.get("/api/schedule/result")
+def schedule_result(id: str = "", limit: int = 20000):
+    """某个定时任务**最近一次运行**的完整结果正文（只读）。
+
+    2026-11-11：用户反馈「定时任务看不到结果在哪」—— 面板和 list_schedules
+    只给 last_preview（前 200 字），正文在日志里。这里把它整段取出来，
+    供前端那个「结果查看窗」显示。
+    """
+    jid = str(id or "").strip()
+    if not jid:
+        return {"ok": False, "error": "缺少任务 id"}
+    try:
+        n = max(500, min(int(limit or 20000), 60000))
+    except Exception:
+        n = 20000
+    return {"ok": True, "id": jid, "text": scheduler.latest_result(jid, limit=n)}
+
+
 @app.post("/api/schedule")
 def schedule_add(body: dict):
     b = body or {}

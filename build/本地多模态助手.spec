@@ -20,10 +20,20 @@ def _collect(pkg):
         return [], [], [pkg]
 
 
-# —— 收集文生图 / GUI 相关的大型第三方依赖 ——
-_pkgs = ['torch', 'diffusers', 'transformers', 'accelerate', 'safetensors',
-         'torchvision', 'tokenizers', 'huggingface_hub', 'webview',
-         'sherpa_onnx', 'sounddevice']
+# —— 收集 GUI / 语音相关依赖 ——
+# ⚠️⚠️ 2026-11-11（11.11c）：把本地 SD 那一整套（torch / diffusers / transformers）
+#   从打包里**排除**。
+#   理由：本地文生图已于 2026-11-08 下线，这些包在全仓 **0 处顶层 import**
+#   （17 处全是函数内惰性导入），功能上完全用不到；但 PyInstaller 做静态分析时
+#   仍然会把它们整棵树收进来 —— 11.11b 因此打出 9.6GB，事后靠手工删 torch
+#   才回到 3.1GB，还差点把 models/vendor 一起删掉。
+#   现在从源头排掉，产物稳定在 3GB 量级。将来要恢复文生图，把下面
+#   _EXCLUDE_BIG 里对应的名字去掉、并把包加回 _pkgs 即可。
+_pkgs = ['webview', 'sherpa_onnx', 'sounddevice']
+
+_EXCLUDE_BIG = ['torch', 'torchvision', 'diffusers', 'transformers',
+                'accelerate', 'safetensors', 'tokenizers', 'huggingface_hub',
+                'nvidia', 'triton', 'xformers', 'deepspeed', 'bitsandbytes']
 
 all_datas, all_binaries, all_hidden = [], [], []
 for _p in _pkgs:
@@ -104,7 +114,7 @@ a = Analysis(
     hiddenimports=all_hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "PyQt5", "PySide6", "PyQt6"],
+    excludes=["tkinter", "PyQt5", "PySide6", "PyQt6"] + _EXCLUDE_BIG,
     noarchive=False,
     optimize=0,
 )
