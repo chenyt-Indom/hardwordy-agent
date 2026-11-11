@@ -1935,6 +1935,8 @@ select.pill-select option {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;      /* 2026-11-12：多了「思考框跟随」按钮，窄屏允许换行，别横向挤压 */
+  row-gap: 6px;
   gap: 8px;
   margin-top: 6px;
 }
