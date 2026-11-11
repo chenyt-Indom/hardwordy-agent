@@ -63,6 +63,60 @@
     const done = () => el.classList.remove("anim-h");
     a.onfinish = done;
     a.oncancel = done;
+
+    // ---------- 自由查看（2026-11-12 用户要求）----------
+    // 问题：AI 每有一点动静就把滚动条拽到底，用户想停在中间看某一步根本做不到。
+    // 做法：不逐个去改那十几处 `scrollTop = scrollHeight`（漏一处就又会被拉走），
+    //      而是直接接管 messagesEl.scrollTop 的写入 —— freeView 开着时，
+    //      凡是「想滚到底部」的写入一律忽略；用户自己滚动、点按钮恢复都不受影响。
+    function syncFreeBtn() {
+      const b = $("#freeViewBtn");
+      if (!b) return;
+      b.classList.toggle("fv-on", freeView);
+      b.textContent = freeView ? "📌 自由查看中" : "⬇ 跟随最新";
+      b.title = freeView
+        ? "已暂停自动滚动 —— 可以停在任意位置慢慢看。点一下恢复跟随最新"
+        : "AI 有新内容时自动滚到最新。点一下暂停，就能停在某一步慢慢看";
+    }
+    function setFreeView(v) {
+      if (freeView === v) return;
+      freeView = v;
+      syncFreeBtn();
+    }
+    function scrollBottom(force) {
+      if (force) setFreeView(false);
+      if (freeView) return;
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+    const _nearBottom = () =>
+      messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 60;
+    (function bindFreeView() {
+      const _d = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
+      if (_d && _d.set) {
+        Object.defineProperty(messagesEl, "scrollTop", {
+          configurable: true,
+          get() { return _d.get.call(this); },
+          set(v) {
+            // 只拦「滚到底」这一种写入；其它（恢复位置等）照常放行
+            if (freeView && Math.abs(v - messagesEl.scrollHeight) < 2) return;
+            _d.set.call(this, v);
+          },
+        });
+      }
+      const b = $("#freeViewBtn");
+      if (b) b.onclick = () => {
+        setFreeView(!freeView);
+        if (!freeView) scrollBottom();     // 恢复跟随时立刻跳到最新
+      };
+      // 用户自己往上滚 → 自动进入自由查看，否则刚滚上去就被拽回来
+      const maybeFree = () => {
+        if (freeView) return;
+        if (!_nearBottom()) setFreeView(true);
+      };
+      messagesEl.addEventListener("wheel", () => requestAnimationFrame(maybeFree), { passive: true });
+      messagesEl.addEventListener("touchmove", maybeFree, { passive: true });
+      syncFreeBtn();
+    })();
   }
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
