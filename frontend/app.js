@@ -54,6 +54,9 @@
   //      而是直接接管 messagesEl.scrollTop 的写入 —— freeView 开着时，
   //      凡是「想滚到底部」的写入一律忽略；用户自己滚动、点按钮恢复都不受影响。
   let freeView = false;
+  let _keepTop = 0;       // 自由查看期间「用户想停留的位置」
+  let _userActAt = 0;     // 用户最后一次主动滚动的时间戳
+  const _userActing = () => Date.now() - _userActAt < 600;
 
   function syncFreeBtn() {
     const b = $("#freeViewBtn");
