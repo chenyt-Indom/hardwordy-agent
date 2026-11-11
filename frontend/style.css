@@ -1834,6 +1834,13 @@ select.pill-select {
 .tools-bar [data-more] { display: none !important; }
 body.more-open .tools-bar [data-more] { display: inline-flex !important; }
 body.more-open .tools-bar { flex-wrap: wrap; row-gap: 6px; }
+
+/* 「⋯ 更多」展开 / 收起动画期间的性能约束（2026-11-12）
+   高度补间本身必然要重排，这里把重排范围关在工具条内部（contain: layout paint），
+   并给参与淡入的控件提前挂合成层提示 —— 避免每帧在整页范围重算导致掉帧。
+   动画一结束由 JS 移除 .more-anim，不留常驻开销。 */
+.tools-bar.more-anim { contain: layout paint; }
+.tools-bar.more-anim [data-more] { will-change: transform, opacity; }
 .more-btn.on { border-color: var(--accent); color: var(--text); }
 
 /* ---------- 三态 ---------- */
