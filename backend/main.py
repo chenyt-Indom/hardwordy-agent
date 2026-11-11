@@ -9573,6 +9573,11 @@ def version_undo():
     r = _ver.rollback(h, None, "撤销回滚")
     if r.get("ok"):
         r["msg"] = "已撤销回滚，代码回到 %s 那一刻。重启应用后生效。" % str(h)[:7]
+        try:
+            from . import pending as _pend
+            _pend.mark("", "撤销回滚到 %s" % str(h)[:7])
+        except Exception:
+            logger.warning("撤销回滚后标记待生效失败", exc_info=True)
     return r
 
 
