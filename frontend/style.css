@@ -3192,7 +3192,18 @@ html[data-theme="light"] select.pill-select option {
 /* ---- 整框折叠（2026-11-11 用户要求：下方也要能折叠「这张卡片的框」）----
    收起时只留标题行 + 底部这个「展开整张卡片」按钮；
    代码自身的折叠按钮（.code-toggle）一并隐藏，避免两个按钮互相打架。 */
-.code-card.card-collapsed > .code-body,
+/* 2026-11-12 用户要求「展开/收起要有动画」：
+   代码体（最大的一块）改成 max-height 0 ↔ 460px + 淡入淡出，上限沿用 .code-body
+   原有的 460px（超长本来就内部滚动），所以不会被裁掉。
+   其余小元素（输出/编辑区/按钮）仍是 display:none —— 它们高度很小，瞬间切换几乎看不出。 */
+.code-card > .code-body {
+  transition: max-height .3s cubic-bezier(.4, 0, .2, 1), opacity .22s ease,
+              padding .3s ease;
+}
+.code-card.card-collapsed > .code-body {
+  display: block; max-height: 0; opacity: 0;
+  padding-top: 0; padding-bottom: 0; overflow: hidden;
+}
 .code-card.card-collapsed > .code-edit-area,
 .code-card.card-collapsed > .code-out,
 .code-card.card-collapsed > .code-stdin,
