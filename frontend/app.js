@@ -7461,33 +7461,38 @@
       return res.json();
     };
 
+    // 会话消息与 sessionId 在**主模块**作用域里，本模块拿不到 —— 走主模块暴露的钩子。
+    const st = () => (window.__ctxState ? window.__ctxState() : { messages: [], session: "" });
+
     async function refresh(force) {
-      document.title = "RING|refresh|force=" + force + "|busy=" + busy;
+      const s = st();
+      const msgs = s.messages || [];
       if (busy) return;
-      if (!force && history.length === lastLen) return;   // 没变化就不打扰后端
+      if (!force && msgs.length === lastLen) return;   // 没变化就不打扰后端
       busy = true;
       try {
-        const d = await post("/api/context/usage", { messages: history, session: sessionId });
-        document.title = "RING|got|" + JSON.stringify(d).slice(0, 150);
+        const d = await post("/api/context/usage", { messages: msgs, session: s.session || "" });
         if (!d || !d.ok) return;
-        lastLen = history.length;
+        lastLen = msgs.length;
         paint(d);
         // 到 90% 就压：留余量，别等真顶爆（那时这一轮已经塞不下了）
-        if (d.ratio >= 0.9 && history.length > 4 && (Date.now() - compactAt) > 20000) {
+        if (d.ratio >= 0.9 && msgs.length > 4 && (Date.now() - compactAt) > 20000) {
           compactAt = Date.now();
           const r = await post("/api/context/compact",
-            { messages: history, session: sessionId, target: 0.6 });
+            { messages: msgs, session: s.session || "", target: 0.6 });
           if (r && r.ok && r.changed && (r.messages || []).length) {
-            history.length = 0;
-            r.messages.forEach((m) => history.push(m));
-            lastLen = history.length;
-            showToast("上下文已自动压缩：保留最近 " + (r.kept || 0)
-              + " 条原文 + 较早对话的要点摘要（不会失忆）", "ok");
-            const d2 = await post("/api/context/usage", { messages: history, session: sessionId });
+            msgs.length = 0;                      // msgs 就是主模块那个 history 数组本身
+            r.messages.forEach((m) => msgs.push(m));
+            lastLen = msgs.length;
+            if (window.__ctxToast) {
+              window.__ctxToast("上下文已自动压缩：保留最近 " + (r.kept || 0)
+                + " 条原文 + 较早对话的要点摘要（不会失忆）", "ok");
+            }
+            const d2 = await post("/api/context/usage", { messages: msgs, session: s.session || "" });
             if (d2 && d2.ok) paint(d2);
           }
         }
-      } catch (e) { document.title = "RING|ERR|" + (e && (e.message || e.name)) + "|len=" + history.length; }
+      } catch (e) { /* 读不到就保持原样，不打扰用户 */ }
       finally { busy = false; }
     }
 
