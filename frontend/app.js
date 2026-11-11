@@ -138,6 +138,22 @@
       ? "思考框贴在视口底部、跟着你滚动。点一下改成固定原位"
       : "思考框固定在消息流原位、不跟着滚动。点一下改成跟随";
   }
+  // 计算悬浮位置：钉在「左下角工具条（输入区）上方」，左边对齐主区域
+  // 输入框会随内容变高、窗口会缩放，所以不能硬编码，每次 dock / resize 都重算
+  function placeThinkDock(w) {
+    if (!w || !w.classList.contains("think-dock")) return;
+    const comp = document.querySelector(".composer");
+    const cRect = comp ? comp.getBoundingClientRect() : null;
+    const mRect = mainEl ? mainEl.getBoundingClientRect() : null;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const left = Math.max(8, (mRect ? mRect.left : 0) + 16);
+    const bottom = cRect ? Math.max(8, vh - cRect.top + 10) : 96;
+    const avail = (mRect ? mRect.width : vw) - 32;
+    w.style.left = Math.round(left) + "px";
+    w.style.bottom = Math.round(bottom) + "px";
+    w.style.width = Math.max(220, Math.min(430, Math.round(avail))) + "px";
+  }
+  window.addEventListener("resize", () => placeThinkDock(_thinkLive));
   // 把当前这轮的思考框按当前偏好摆好（思考途中切按钮也能立刻生效）
   function applyThinkDock() {
     const w = _thinkLive;
@@ -145,9 +161,14 @@
     const docked = w.classList.contains("think-dock");
     if (thinkFollow && !docked) {
       w.classList.add("think-dock");
-      messagesEl.appendChild(w);
+      // 挂到 body 上：.messages 是 overflow:auto 的滚动容器，
+      // 留在里面虽然 fixed 也能浮起来，但一旦以后给祖先加 transform/contain 就会失效。
+      // 直接挂 body 最稳，也彻底不占消息流高度（不会把内容挤动）。
+      document.body.appendChild(w);
+      placeThinkDock(w);
     } else if (!thinkFollow && docked) {
       w.classList.remove("think-dock");
+      w.style.left = w.style.bottom = w.style.width = "";
       messagesEl.insertBefore(w, w._home);
     }
   }
