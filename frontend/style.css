@@ -3276,26 +3276,36 @@ html[data-theme="light"] select.pill-select option {
 /* ================= 思考框贴底 + 代码卡片底部折叠（2026-11-11）=================
    用户要求：① 思考时思考框永远居于最下方，方便监控模型在想什么；
              ② 代码折叠框除了上方，下方也要有一个折叠按钮。 */
+/* ★ 2026-11-12 用户二次反馈：「点了跟随，思考框并没有真的跟着走」。
+   原因：原来是 position:sticky + bottom:6px —— sticky 只在**滚动容器内部**生效，
+        元素会被自己的自然位置「推走」，用户滚上去看历史时它就滑出视野了，
+        而且它仍然占着消息流的位置，滚到底部时根本看不出在跟随。
+   现在改成 position:fixed：真正脱离文档流、钉在视口左下角（输入区上方），
+   滚到哪都一直可见。left / bottom / width 由 app.js 的 placeThinkDock()
+   按 .composer 的实际位置实时算（输入框会变高、窗口会缩放，硬编码会错位）。 */
 .think-dock {
-  position: sticky;
-  bottom: 6px;
-  z-index: 40;
-  /* 2026-11-12 用户反馈：思考时气泡下方有一条「贯穿整行的黑色条框」。
-     原因：dock 是 .messages（column flex）的子项，默认 stretch → 宽度铺满整行；
-     而它为了防穿透加了不透明底色 var(--bg)（#0f1115，比气泡的 --panel 更黑），
-     再加 box-shadow 向上 18px 的黑色扩散 —— 两者叠起来就是那条黑带。
-     修法：① align-self: flex-start 让底板只跟气泡一样宽，不再横贯整行；
-           ② 去掉向上的黑色投影。气泡自身有 --panel 不透明底，不会穿透。 */
-  align-self: flex-start;
-  max-width: 100%;
+  position: fixed;
+  z-index: 80;
+  left: 16px;
+  bottom: 120px;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  max-height: 46vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   background: var(--bg);
+  border: 1px solid var(--border);
   border-radius: 12px;
-  padding-bottom: 2px;
+  padding: 8px 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .38);
 }
 .think-dock .think-hdr,
 .think-dock .think-body {
   max-width: 100%;   /* 贴底时铺满整行，不然 70% 宽度看着歪 */
 }
+.think-dock .think-body.open { max-height: 32vh; }
 /* ⚠️ 必须用 `.code-card > .code-toggle-b`（0,2,0）压过 `.btn.sm { width:auto }`，
    否则底部按钮只有 83px 宽、还丢掉 margin —— 实测过。 */
 .code-card > .code-toggle-b {
