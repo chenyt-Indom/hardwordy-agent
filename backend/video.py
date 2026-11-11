@@ -382,8 +382,12 @@ def images_to_video(images, out, seconds=3.0, fps=30, width=1920, height=None,
     vf = ("scale=%d:%d:force_original_aspect_ratio=decrease,"
           "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=%d"
           % (W, H, W, H, int(fps or 30)))
+    # ⚠️ 总时长要**显式给 -t**：concat demuxer 会忽略最后一行的 duration，
+    #    所以上面要把最后一张再写一次；但这样一来最后一张会被算两遍
+    #    （3 张 ×1.5s 实测出来 6.03s）。用 -t 卡死总长最稳。
+    total = len(images) * float(seconds or 3.0)
     args = ["-f", "concat", "-safe", "0", "-i", "list.txt",
-            "-vf", vf] + _VOUT + ["-an", out]
+            "-vf", vf] + _VOUT + ["-an", "-t", "%.3f" % total, out]
     r = _run(args, cwd=tmp)
     if not r.get("ok"):
         return {"ok": False, "error": "图片合成视频失败：%s" % r.get("error")}
