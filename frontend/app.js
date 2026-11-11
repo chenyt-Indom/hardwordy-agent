@@ -4056,7 +4056,9 @@
           : "▾ 收起代码";
         if (_tg2) _tg2.textContent = _collapsed ? "▸ 展开代码" : "▾ 收起代码";
       };
-      const _toggle = () => { _collapsed = !_collapsed; _syncTg(); };
+      // ★ 2026-11-12：原来靠 CSS 的 max-height 0 ↔ 460px 过渡，短代码从 0 到实际
+      //   高度只用了 460px 里的前一小段，视觉上就是「啪」一下弹开。改成量真实高度补间。
+      const _toggle = () => animHeight(card, () => { _collapsed = !_collapsed; _syncTg(); });
       _tg.onclick = _toggle;
       const _btns = card.querySelector(".code-btns");
       if (_btns) _btns.prepend(_tg);
