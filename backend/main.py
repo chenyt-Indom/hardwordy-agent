@@ -405,6 +405,8 @@ def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
                           "与问题无关就忽略，不要硬扯。）")
         if skill_ctx:
             blocks.append(skill_ctx)
+        if sched_ctx:
+            blocks.append(sched_ctx)
         if img_ctx:
             blocks.append(img_ctx)
         if blocks:
