@@ -2669,6 +2669,48 @@ html[data-theme="light"] {
 .msg.user .bubble { color: #fff; }
 .msg.user .bubble a { color: #fff; text-decoration: underline; }
 
+/* ---- 4. 气泡配色（2026-11-12）：AI 蓝、用户绿，字必须清晰 ---- */
+:root {
+  --bot-bubble: #17233c;
+  --bot-bubble-border: #2b3f63;
+  --bot-bubble-fg: #eef2fa;
+  --bot-bubble-link: #8ab4ff;
+  --bot-bubble-chip: rgba(255, 255, 255, .10);
+  --user-bubble: #128c52;
+  --user-bubble-fg: #ffffff;
+}
+html[data-theme="light"] {
+  --bot-bubble: #e4eefc;
+  --bot-bubble-border: #c2d7f4;
+  --bot-bubble-fg: #10192b;
+  --bot-bubble-link: #1a4fd0;
+  --bot-bubble-chip: #d2e2f9;
+}
+.msg.bot .bubble:not(.doc-sent) {
+  background: var(--bot-bubble);
+  border-color: var(--bot-bubble-border);
+  color: var(--bot-bubble-fg);
+}
+.msg.bot .bubble a,
+.msg.bot .bubble .md-code { color: var(--bot-bubble-link); }
+.msg.bot .bubble .md-code {
+  background: var(--bot-bubble-chip);
+  border-color: var(--bot-bubble-border);
+}
+.msg.bot .bubble .md-quote {
+  background: var(--bot-bubble-chip);
+  border-left-color: var(--bot-bubble-link);
+}
+.msg.bot .bubble .md-h::before { background: var(--bot-bubble-link); }
+.msg.bot .bubble .md-ul li::marker,
+.msg.bot .bubble .md-ol li::marker { color: var(--bot-bubble-link); }
+.msg.user .bubble:not(.doc-sent) {
+  background: var(--user-bubble);
+  color: var(--user-bubble-fg);
+  box-shadow: 0 3px 14px rgba(18, 140, 82, .22);
+}
+.msg .bubble.doc-sent { background: var(--panel2); color: var(--muted); }
+
 /* ---- 3. 侧栏：11~12px 的小字抬到 12~12.5px ---- */
 .brand .sub { font-size: 12.5px; }
 .status-card p { font-size: 12.5px; }
