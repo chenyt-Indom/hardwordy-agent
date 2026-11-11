@@ -322,7 +322,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 }
 .think-body.open {
   max-height: 260px; opacity: 1; margin-top: 6px; padding: 10px 12px; overflow: auto;
-  border-color: var(--border);
+  border-color: var(--border); border-width: 1px;
 }
 
 /* ---------- 工具调用过程（横向小条） ---------- */
