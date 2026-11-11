@@ -115,6 +115,11 @@
       if (freeView) return;
       if (!_nearBottom()) setFreeView(true);
     };
+    // 任何「像用户在滚」的动作都记一笔，用于区分「用户自己滚」和「程序把他拽走」
+    const markUser = () => { _userActAt = Date.now(); };
+    ["wheel", "touchstart", "touchmove", "pointerdown", "mousedown", "keydown"].forEach((ev) =>
+      messagesEl.addEventListener(ev, markUser, { passive: true })
+    );
     messagesEl.addEventListener("wheel", () => requestAnimationFrame(maybeFree), { passive: true });
     messagesEl.addEventListener("touchmove", maybeFree, { passive: true });
     // ★ 2026-11-12 用户报「拖滚动条上去看，模型一有动作还是被拽到底部」：
