@@ -167,17 +167,19 @@
     //   判据：程序滚动几乎总是一帧内直接跳到 scrollHeight；人滚轮/拖动是渐进的。
     let _holdRAF = 0;
     let _lastSeen = messagesEl.scrollTop;
+    let _lastScrollAt = 0;
     function holdLoop() {
       if (!freeView) { _holdRAF = 0; return; }
       const cur = messagesEl.scrollTop;
       const maxTop = _maxTop();
-      if (Math.abs(cur - _lastSeen) >= 1) {
-        const jumpedToBottom = cur >= maxTop - 12 && _lastSeen < maxTop - 120;
-        if (jumpedToBottom && !_userActing()) {
-          _setTop(Math.min(_keepTop, maxTop));      // 程序拽的 → 拉回原位
-        } else {
-          _keepTop = cur;                           // 用户自己滚的 → 以他为准
-        }
+      const now = Date.now();
+      // 用户自己滚（有手势 / 正在连续滚动，含触摸惯性）→ 以他为准；
+      // 否则只要位置被挪动就拉回 —— 不再要求「一帧跳到底」，
+      // 渐进式滚动（动画、图片加载、布局重排）同样拦得住。
+      const userDriving = _userActing() || (now - _lastScrollAt < 140);
+      if (Math.abs(cur - _keepTop) >= 1) {
+        if (userDriving) _keepTop = Math.min(cur, maxTop);
+        else _setTop(Math.min(_keepTop, maxTop));
       }
       _lastSeen = messagesEl.scrollTop;
       _holdRAF = requestAnimationFrame(holdLoop);
