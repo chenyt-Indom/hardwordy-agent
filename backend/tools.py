@@ -4064,6 +4064,50 @@ def _do_video_edit(arguments, ui_events, context):
                        "减小 %.0f%%" % (100 - after * 100.0 / before)
                        if before > 0 else "已生成"))
 
+    elif action == "transition":
+        srcs = [_resolve(p) for p in (arguments.get("sources") or [])]
+        srcs = [p for p in srcs if p]
+        if len(srcs) < 2:
+            return "错误：转场拼接至少要给两个视频（sources 列表）。"
+        trans = arguments.get("trans") or "fade"
+        dur = arguments.get("duration")
+        dur = 1.0 if dur is None else max(0.1, float(dur))
+        _ui(ui_events, {"type": "status",
+                        "text": "正在做转场（%d 段，每处 %.1f 秒）…" % (len(srcs), dur)})
+        r = video.transition(srcs, out, trans=trans, duration=dur,
+                             width=arguments.get("width"),
+                             audio=str(arguments.get("audio_join") or "crossfade"))
+        if r.get("ok"):
+            note = ("转场拼接完成（%d 段，转场 %s，每处 %.1f 秒，成品 %.2f 秒，%s）"
+                    % (r["count"], " → ".join(r["transitions"]), dur,
+                       float(r.get("duration") or 0),
+                       "音频交叉淡化" if r.get("audio")
+                       else "**有段没有音轨，已整体去音**"))
+
+    elif action == "effect":
+        src = _resolve(arguments.get("source"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        effs = arguments.get("effects") or []
+        if isinstance(effs, str):
+            effs = [effs]
+        effs = [str(e).strip() for e in effs if str(e).strip()]
+        if not effs and not arguments.get("custom"):
+            return "错误：没给特效。可选：%s" % "、".join(video.EFFECT_PRESETS)
+        if any(e.lower() in ("kenburns_in", "kenburns_out") for e in effs):
+            _ui(ui_events, {"type": "status",
+                            "text": "Ken Burns 推拉比较慢，长视频可能要等好几分钟…"})
+        r = video.effect(src, out, presets=effs,
+                         custom=arguments.get("custom"),
+                         strength=arguments.get("strength") or 1.0,
+                         width=arguments.get("width"))
+        if r.get("ok"):
+            note = ("特效已应用（%s，%d×%d，时长 %.2f 秒，%s）"
+                    % ("、".join(r["effects"]) or "自定义",
+                       r["width"], r["height"],
+                       float(r.get("duration") or 0),
+                       "原声保留" if r.get("audio") else "无音轨"))
+
     if not r:
         return "错误：这个动作没有执行（action=%s）" % action
     if not r.get("ok"):
