@@ -1742,6 +1742,16 @@ select.pill-select {
   color: var(--text);
 }
 
+/* ---------- 顶栏「⋯ 更多」：低频设置收起（2026-11-12）----------
+   用户要求「把低频开关收进一个更多菜单」。这里**只做显隐**：
+   控件本体、id、事件一个都没动，所以功能完全不受影响。
+   平时 [data-more] 全部隐藏，顶栏只留常用的几个；
+   点「⋯ 更多」→ body.more-open → 它们展开（顶栏自动换行，不挤压别的控件）。 */
+.tools-bar [data-more] { display: none !important; }
+body.more-open .tools-bar [data-more] { display: inline-flex !important; }
+body.more-open .tools-bar { flex-wrap: wrap; row-gap: 6px; }
+.more-btn.on { border-color: var(--accent); color: var(--text); }
+
 /* ---------- 三态 ---------- */
 
 /* 关：暗 */
