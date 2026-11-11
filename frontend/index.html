@@ -299,17 +299,20 @@
         <option value="deepseek-flash-think">🧠 DS V4.1 思考</option>
         <option value="deepseek-v4-pro">🔮 DS V4 Pro</option>
       </select>
-      <button type="button" class="pill pill-btn" id="dsKeyBtn"
+      <!-- ⚡ 2026-11-12 顶栏整理：下面这几个都是「配一次就不动」的低频设置，
+           平时收在「⋯ 更多」里（data-more="1"），点一下才展开，顶栏不再挤。
+           只是 CSS 显隐，控件本身、id、事件全都没动，功能不受影响。 -->
+      <button type="button" class="pill pill-btn" id="dsKeyBtn" data-more="1"
               title="设置 DeepSeek API Key（只存本机浏览器 localStorage，重启后仍在；不写磁盘文件、不进日志）">🔑 DeepSeek</button>
       <!-- 绘图模型切换（2026-11-08）：和上面 LLM 下拉一个思路，云/本地都能选 -->
-      <select id="imgModelSelect" class="pill pill-select" title="选择绘图用哪个模型（云端 API / 本地权重）">
+      <select id="imgModelSelect" class="pill pill-select" data-more="1" title="选择绘图用哪个模型（云端 API / 本地权重）">
         <option value="cloud">☁️ 云端（当前配置）</option>
       </select>
       <!-- 云端图片 Key + 本地模型管理 -->
-      <button type="button" class="pill pill-btn" id="imgKeyBtn"
+      <button type="button" class="pill pill-btn" id="imgKeyBtn" data-more="1"
               title="图片 Key / 模型管理（云端 Key、本地模型下载与卸载）">🎨 图片</button>
       <!-- 代码模型（2026-11-08）：代码生成 + 自我迭代都走它 -->
-      <select id="codeModelSelect" class="pill pill-select"
+      <select id="codeModelSelect" class="pill pill-select" data-more="1"
               title="写代码 / 自我迭代用哪个模型（你在 LLM 下拉里选的是聊天模型，这个是代码模型）">
         <option value="auto">⌨ 代码·自动</option>
       </select>
