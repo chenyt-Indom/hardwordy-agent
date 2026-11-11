@@ -5281,7 +5281,8 @@ async def chat(req: ChatRequest,
             _skill_ctx = ""
         working = _attach_live_ctx([{"role": "system", "content": full_sys}] + messages,
                                    digest=digest, mem_ctx=mem_ctx, rag_ctx=rag_ctx,
-                                   img_ctx=_img_available_note(), skill_ctx=_skill_ctx)
+                                   img_ctx=_img_available_note(), skill_ctx=_skill_ctx,
+                                   sched_ctx=_sched_ctx())
         final_text = ""
         final_thinking = ""
         used_tools = set()          # 本轮真正调用过的工具（用来判断"是不是光嘴上说说"）
