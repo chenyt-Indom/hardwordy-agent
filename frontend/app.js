@@ -3894,18 +3894,19 @@
     //   正文一开始输出就挪回原位（工具条之前），免得挡住答案。
     // 2026-11-12：贴不贴底由「🧠 思考框跟随 / 📍 思考框固定」按钮决定（thinkFollow）。
     thinkWrap._home = toolWrap;      // 取消跟随时回到这里（工具条之前）
+    // 新一轮开始：上一轮还浮着的思考框一律收回原位，免得在左下角越堆越多
+    Array.from(_thinkBoxes).forEach((w) => {
+      if (w !== thinkWrap) { undockOne(w); _thinkBoxes.delete(w); }
+    });
+    _thinkBoxes.add(thinkWrap);
     _thinkLive = thinkWrap;          // 登记成「当前这轮的思考框」，按钮切换时能立刻生效
-    if (thinkFollow) {
-      thinkWrap.classList.add("think-dock");
-      document.body.appendChild(thinkWrap);   // fixed 悬浮，不占消息流高度
-      placeThinkDock(thinkWrap);
-    }
+    if (thinkFollow) dockOne(thinkWrap);   // fixed 悬浮，不占消息流高度
     const undockThink = () => {
-      if (_thinkLive === thinkWrap) _thinkLive = null;   // 思考结束，按钮不再管它
-      if (!thinkWrap.classList.contains("think-dock")) return;
-      thinkWrap.classList.remove("think-dock");
-      thinkWrap.style.left = thinkWrap.style.bottom = thinkWrap.style.width = "";
-      messagesEl.insertBefore(thinkWrap, toolWrap);
+      if (_thinkLive === thinkWrap) _thinkLive = null;
+      // ★ 2026-11-12 用户反馈「点了跟随，思考一会儿又回到原位」：
+      //   原来是正文一输出就无条件收回原位 —— 把用户选的「跟随」也一起盖掉了。
+      //   现在只有用户选「固定」时才收回；选「跟随」就让它一直浮着，直到下一轮开始。
+      if (!thinkFollow) undockOne(thinkWrap);
     };
     scrollBottom();     // 走统一入口：自由查看期间不抢滚动位置
     // 后端可能发来 note（例如"输出被长度上限截断，正在重试"），
