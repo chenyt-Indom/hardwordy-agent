@@ -3781,15 +3781,17 @@
     _thinkLive = thinkWrap;          // 登记成「当前这轮的思考框」，按钮切换时能立刻生效
     if (thinkFollow) {
       thinkWrap.classList.add("think-dock");
-      messagesEl.appendChild(thinkWrap);
+      document.body.appendChild(thinkWrap);   // fixed 悬浮，不占消息流高度
+      placeThinkDock(thinkWrap);
     }
     const undockThink = () => {
       if (_thinkLive === thinkWrap) _thinkLive = null;   // 思考结束，按钮不再管它
       if (!thinkWrap.classList.contains("think-dock")) return;
       thinkWrap.classList.remove("think-dock");
+      thinkWrap.style.left = thinkWrap.style.bottom = thinkWrap.style.width = "";
       messagesEl.insertBefore(thinkWrap, toolWrap);
     };
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    scrollBottom();     // 走统一入口：自由查看期间不抢滚动位置
     // 后端可能发来 note（例如"输出被长度上限截断，正在重试"），
     // 收起来备用：万一最终没有正文，就把它显示出来，而不是留一个空气泡
     const notes = [];
