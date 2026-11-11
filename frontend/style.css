@@ -2377,7 +2377,10 @@ body {
     radial-gradient(900px 620px at 10% -12%, rgba(79, 139, 249, .18), transparent 62%),
     radial-gradient(760px 520px at 94% 4%, rgba(123, 92, 240, .14), transparent 64%),
     radial-gradient(680px 460px at 58% 112%, rgba(52, 199, 123, .08), transparent 62%);
-  background-attachment: fixed;
+  /* ⚡ 2026-11-12 性能：去掉了 background-attachment: fixed。
+     固定背景会让浏览器在**每一帧滚动**都重绘整屏渐变（实测是掉帧的最大来源），
+     而这层渐变本来就铺满视口，视觉上和 fixed 没有区别。 */
+  background-attachment: scroll;
 }
 html[data-theme="light"] body {
   background-image:
