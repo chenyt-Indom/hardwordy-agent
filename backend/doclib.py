@@ -356,8 +356,10 @@ for _c, _es in _CAT_EXT.items():
 
 # 聚合时跳过的目录：缓存、版本库、构建产物、回收站 —— 否则工作区里
 # 一个 .git 就能刷出几千条无关文件，面板直接卡死。
+# 注意：**不能**跳过 dist / build —— PyInstaller 打的 exe 正输出在 dist/ 里，
+# 跳掉会让「软件」类里只剩源码压缩包，成品 exe 看不见（实测踩过）。
 _SKIP_DIRS = {"__pycache__", ".git", "node_modules", "venv", ".venv", "env",
-              "_回收站", "_备份", "build", "dist", ".idea", ".vscode",
+              "_回收站", "_备份", ".idea", ".vscode",
               "site-packages", ".pytest_cache", ".mypy_cache", "obj", "bin"}
 _MAX_FILE_BYTES = 300 * 1024 * 1024      # 单文件上限，超过的多半是镜像/模型，不该进列表
 
@@ -383,6 +385,8 @@ def _mk(src: str, rel: str, name: str, size: int, mtime: float,
         "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)),
         # 只有生成文库本体的文件可以编辑 / 删除，别处一律只读
         "editable": src == "lib",
+        # 双击就能直接跑起来的可执行文件（PyInstaller 打的 exe 等）
+        "runnable": ext in ("exe", "bat", "cmd", "msi", "com", "scr"),
     }
 
 

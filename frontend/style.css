@@ -1040,6 +1040,13 @@ body.dragging .drop-overlay,
   font-size: 10px; color: var(--accent); background: rgba(79,139,249,.25);
 }
 
+/* 可执行文件（exe / bat）：双击是「直接运行」，跟「用程序打开」不是一回事，单独标出来 */
+.dl-run {
+  display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 6px;
+  font-size: 10px; font-weight: 600; color: #1a7f37;
+  background: rgba(46,160,67,.22);
+}
+
 /* ---------- 输入弹层（复制/改名等；不用原生 prompt，WebView2 不支持它）---------- */
 .input-dialog { margin-top: 10px; font-size: 13px; padding: 9px 11px; }
 

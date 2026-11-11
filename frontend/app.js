@@ -2238,12 +2238,14 @@
   }
   function dlRowHtml(f) {
     const sub = f.src === "ws" ? (f.project || "") : (f.folder || "");
-    const tag = f.src === "ws" ? '<span class="dl-tag">软件</span>'
-      : (f.src === "img" ? '<span class="dl-tag">生成图</span>' : "");
+    const tag = (f.src === "ws" ? '<span class="dl-tag">软件</span>'
+      : (f.src === "img" ? '<span class="dl-tag">生成图</span>' : "")) +
+      (f.runnable ? '<span class="dl-run">▶ 双击运行</span>' : "");
     return '<div class="list-item dl-item' + (f.id === dlCurrentId ? " active" : "") +
       '" data-id="' + escapeHtml(f.id) + '" data-rel="' +
       escapeHtml(f.src === "lib" ? f.rel : "") +
-      '" title="双击用本机程序打开：' + escapeHtml(f.name) + '">' +
+      '" title="' + (f.runnable ? "双击直接运行：" : "双击用本机程序打开：") +
+      escapeHtml(f.name) + '">' +
       '<span class="dl-icon">' + dlIconOf(f) + '</span>' +
       '<span class="dl-main"><span class="dl-name">' + escapeHtml(f.name) + '</span>' +
       '<span class="dl-sub">' + (sub ? escapeHtml(sub) + " · " : "") +
@@ -2266,7 +2268,7 @@
   async function dlOpenWithSystem(id) {
     const f = dlById[id];
     if (!f) return;
-    showToast("正在用本机程序打开：" + f.name, "");
+    showToast((f.runnable ? "正在启动程序：" : "正在用本机程序打开：") + f.name, "");
     try {
       const r = await api("/api/doclib/open_any", { method: "POST",
         body: JSON.stringify({ id: id }) });
