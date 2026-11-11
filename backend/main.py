@@ -2125,6 +2125,17 @@ def model_installed():
     return {"ok": True, "models": model_manager.installed()}
 
 
+@app.post("/api/model/unload")
+def model_unload():
+    """把本地模型请出显存。切到云端模型时前端自动调用。
+
+    为什么需要：`model_keep_alive` 配的是 4 小时，切到 DeepSeek 之后本地模型
+    毫无用处却一直占着显存（8B 实测 9GB）。12GB 卡上这就是"显卡被锁死"，
+    用户体感是别的程序卡、再切回本地还要等重载。
+    """
+    return model_manager.unload_all()
+
+
 # ---------- 对话 ----------
 # 单次对话内最多连续调用工具轮次（默认值；真正生效的取 config.max_tool_rounds）。
 # ⚠️ 2026-11-08 用户反馈「8 次不够」：写代码/做项目这类活天生是

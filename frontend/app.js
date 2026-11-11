@@ -5369,6 +5369,26 @@
       localStorage.setItem("chat_provider", sel.value);
       syncChatModel();
       const isDS = sel.value.indexOf("deepseek") === 0;
+      // ★ 2026-11-11：切到云端就把本地模型请出显存。
+      //   为什么必须做：model_keep_alive 配的是 **4 小时**，切到 DeepSeek 之后
+      //   本地模型毫无用处却一直占着显存（8B 实测 9GB / 12GB 卡），
+      //   结果就是别的程序卡、再切回本地还要等重载。以前这里什么都不做。
+      //   后端会先查 /api/ps，只卸真的加载着的，并等它真退出再返回。
+      if (isDS) {
+        fetch("/api/model/unload", { method: "POST" })
+          .then((r) => r.json())
+          .then((d) => {
+            if (!d) return;
+            if (d.ok && (d.freed || []).length) {
+              showToast("已释放显存：" + d.freed.join("、")
+                + (d.waited ? "（" + d.waited + "s）" : ""), "ok");
+            } else if (!d.ok && d.error) {
+              // Ollama 收下请求却没放显存 = 模型进程卡死，得人手动重启
+              showToast(d.error, "warn");
+            }
+          })
+          .catch(() => { /* 释放失败不影响对话 */ });
+      }
       if (isDS && !localStorage.getItem("ds_api_key")) {
         showToast("已切到 DeepSeek，请点 🔑 填入 API Key", "warn");
       } else {

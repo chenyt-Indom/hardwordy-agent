@@ -209,6 +209,82 @@ def _worker(model: str) -> None:
                            "finished_at": time.time()})
 
 
+def unload_all() -> dict:
+    """把**当前真的在显存里**的 Ollama 模型请出去，返回卸了哪些。
+
+    场景（2026-11-11 用户提的）：顶栏从本地模型切到云端（DeepSeek）之后，
+    本地模型一点用都没有，但 `model_keep_alive` 配的是 **4 小时** ——
+    它会一直赖在显存里（8B 实测占 9GB），12GB 卡上等于把显卡锁死：
+    别的程序（游戏 / 绘图 / 另一个模型）拿不到显存，用户体感就是「卡死」。
+
+    为什么不直接复用 `t2i.free_ollama_vram()`：
+      那个是给「画图前腾地方」写的，会往**配置里列的所有模型**发 keep_alive=0，
+      包括根本没加载的。Ollama 收到这种请求会**先加载再卸载** ——
+      一个 5.8GB 的模型白折腾十几秒，中途还会把显存占满一次。
+      这里先查 /api/ps，只处理确实加载着的。
+
+    ⚠️ keep_alive=0 是**异步**的（实测约 2 秒才真退出），
+       必须轮询到 /api/ps 空为止，否则调用方以为腾出来了、其实还没有。
+    """
+    base = _base()
+    out = {"ok": True, "before": [], "freed": [], "waited": 0.0, "error": ""}
+
+    def _ps_names() -> list:
+        r = requests.get(f"{base}/api/ps", timeout=(3, 10), proxies=_NO_PROXY)
+        d = r.json()
+        return [str(m.get("name") or "") for m in (d.get("models") or [])
+                if m.get("name")]
+
+    try:
+        before = _ps_names()
+    except requests.exceptions.ConnectionError:
+        return {"ok": False, "before": [], "freed": [], "waited": 0.0,
+                "error": "连不上 Ollama（%s），没有可释放的显存" % base}
+    except Exception as e:                        # noqa: BLE001
+        return {"ok": False, "before": [], "freed": [], "waited": 0.0,
+                "error": "%s: %s" % (type(e).__name__, e)}
+
+    out["before"] = before
+    if not before:
+        return out                                # 本来就没加载，什么都不用做
+
+    for m in before:
+        try:
+            requests.post(f"{base}/api/generate",
+                          json={"model": m, "keep_alive": 0},
+                          timeout=(5, 30), proxies=_NO_PROXY)
+            out["freed"].append(m)
+        except Exception:                         # noqa: BLE001
+            pass                                  # 单个失败不影响其它的
+
+    # 等它真的落地：最多 12 秒（和 t2i 那边同一套经验值）
+    t0 = time.time()
+    left = before
+    for _ in range(24):
+        try:
+            left = _ps_names()
+        except Exception:                         # noqa: BLE001
+            left = []
+            break
+        if not left:
+            break
+        time.sleep(0.5)
+    out["waited"] = round(time.time() - t0, 1)
+
+    # ⚠️ 2026-11-11 实测：模型 runner 一旦卡死，Ollama 会**收下** keep_alive=0
+    #   （expires_at 立刻变成过去时间）但显存就是不放 —— 实测卡了 10.4GB 十几分钟，
+    #   `nvidia-smi` 里 llama-server.exe 一直挂着，任何 API 都卸不掉，只能重启 Ollama。
+    #   所以这里必须**复查**：还在就是失败，别报 ok 让调用方误以为腾出来了。
+    if left:
+        out["ok"] = False
+        out["stuck"] = left
+        out["error"] = (
+            "Ollama 收下了卸载请求，但显存没放出来（%s）。"
+            "这通常是模型进程卡死了 —— 退出 Ollama（右下角托盘 → Quit）再重新打开即可。"
+            % "、".join(left))
+    return out
+
+
 def remove(model: str) -> dict[str, Any]:
     """删除已下载的模型（释放磁盘）。"""
     if is_running() and get_state().get("model") == model:
