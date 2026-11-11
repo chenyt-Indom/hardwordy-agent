@@ -23,21 +23,21 @@
 | **[轻量版](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.08.3/LocalMultimodalAssistant-Windows-x64.zip)** | **194.8 MB** | 只有程序本体，体积小；开发台与抠图不可用 |
 | 源码 | — | 见下方「快速开始」 |
 
-**全量版（2026.11.10d）分两卷** —— GitHub 单文件上限 2 GB，所以切开：
+**全量版（2026.11.11a · Hardwordy Agent）分两卷** —— GitHub 单文件上限 2 GB，所以切开：
 
-- [`...Full-2026.11.10d.zip.part1`](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10d.zip.part1) — 1.4 GB
-- [`...Full-2026.11.10d.zip.part2`](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.10/LocalMultimodalAssistant-Full-2026.11.10d.zip.part2) — 791 MB
+- [`HardwordyAgent-Full-2026.11.11a.zip.part1`](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.11/HardwordyAgent-Full-2026.11.11a.zip.part1) — 1.4 GB
+- [`HardwordyAgent-Full-2026.11.11a.zip.part2`](https://github.com/chenyt-Indom/hardwordy-agent/releases/download/v2026.11.11/HardwordyAgent-Full-2026.11.11a.zip.part2) — 791 MB
 
 **合并 + 校验**（Windows，CMD 或 powershell）：
 
 ```powershell
-copy /b LocalMultimodalAssistant-Full-2026.11.10d.zip.part1 + LocalMultimodalAssistant-Full-2026.11.10d.zip.part2 LocalMultimodalAssistant-Full-2026.11.10d.zip
+copy /b HardwordyAgent-Full-2026.11.11a.zip.part1 + HardwordyAgent-Full-2026.11.11a.zip.part2 HardwordyAgent-Full-2026.11.11a.zip
 
-# 校验（应等于 3239315cf79aff330627efcf7d07caf901d31b802f7c8c8bb047e22b498c83aa）
-Get-FileHash .\LocalMultimodalAssistant-Full-2026.11.10d.zip -Algorithm SHA256
+# 校验（应等于 98584f5e51de309ea8d87a332976e6a898381da022d48ace4b3db469a4ead5d3）
+Get-FileHash .\HardwordyAgent-Full-2026.11.11a.zip -Algorithm SHA256
 ```
 
-> macOS / Linux：`cat *.part1 *.part2 > Full.zip`
+> macOS / Linux：`cat *.part1 *.part2 > HardwordyAgent-Full.zip`
 
 > 两个包**都不含** AI 对话模型权重（由 Ollama 单独下载，18 GB / 6 GB）。
 > 也**都不含**本地文生图（torch ~9 GB + SD 权重）——本地绘图在当前机器上不可用，
