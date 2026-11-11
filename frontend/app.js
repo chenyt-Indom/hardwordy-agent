@@ -5620,6 +5620,7 @@
             (j.channel_hint ? '<div class="sched-meta">上次用：' + j.channel_hint + '</div>' : '') +
             (j.last_preview ? '<div class="sched-prev">' + String(j.last_preview).replace(/</g, "&lt;").slice(0, 80) + '…</div>' : "") +
             '<div class="sched-acts">' +
+            '<button data-act="result">看结果</button>' +
             '<button data-act="run">立即运行</button>' +
             '<button data-act="toggle">' + (j.enabled ? "暂停" : "启用") + '</button>' +
             '<button data-act="del">删除</button>' +
