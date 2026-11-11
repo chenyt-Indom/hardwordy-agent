@@ -3155,6 +3155,14 @@ _TEXT_TOOL_DOCS = {
                    '"w":6,"h":0.5,"size":16}, {"op":"set_theme","theme":"green"}]}。'
                    '**编号要用 inspect 给的那些，别猜。**',
     "get_time": '获取当前日期与时间。参数 {}',
+    "video_edit": '【剪视频】裁剪 / 拼接 / 配音 / 加文字水印 / 烧字幕 / 抽音轨 / '
+                  '图片成片 / 压缩转码，底层是本机 ffmpeg，**能保留原声**。'
+                  '参数 {"action": "trim|concat|audio|text|subtitle|extract_audio|'
+                  'images_to_video|compress|info", ...}，其余参数：'
+                  'source（输入视频）/ sources（多段列表）/ audio（音乐）/ subtitle（.srt）'
+                  '/ start、end、duration（秒）/ mode（replace|mix）/ volume / '
+                  'text、position、fontsize（压字）/ crf、width（压缩）。'
+                  '⚠️ 做不了多轨时间线编辑、转场特效、AI 抠视频主体 —— 用户要就说做不到。',
     "connect_amap": '【连接高德地图】请用户把他的高德 key 填进来，填完当场验证、立刻生效。'
                     '**用户要用地图、而本机还没配高德 key 时，先调它** ——'
                     '别直接说做不到，也别默默用着弱底图不吭声。'
