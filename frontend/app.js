@@ -3408,6 +3408,16 @@
     answerBubble.textContent = "…";
     answerWrap.appendChild(answerBubble);
     messagesEl.appendChild(answerWrap);
+    // ★ 2026-11-11 用户要求：「思考时，模型的思考框永远要居于最下方，以便我监控思考过程」。
+    //   做法：思考期间把思考框挪到消息流末尾，并用 .think-dock 粘住视口底部；
+    //   正文一开始输出就挪回原位（工具条之前），免得挡住答案。
+    thinkWrap.classList.add("think-dock");
+    messagesEl.appendChild(thinkWrap);
+    const undockThink = () => {
+      if (!thinkWrap.classList.contains("think-dock")) return;
+      thinkWrap.classList.remove("think-dock");
+      messagesEl.insertBefore(thinkWrap, toolWrap);
+    };
     messagesEl.scrollTop = messagesEl.scrollHeight;
     // 后端可能发来 note（例如"输出被长度上限截断，正在重试"），
     // 收起来备用：万一最终没有正文，就把它显示出来，而不是留一个空气泡
@@ -3462,6 +3472,7 @@
       // 2026-11-10：流式阶段**不再做 markdown**。
       //   实测：收尾渲染那一步偶尔不执行（异常/分支没走到），屏幕就只剩流式的最后状态；
       //   而流式用的是 mdToHtml，尾部会被吃掉。这里直接 textContent，屏幕 === answer。
+      if (answer) undockThink();   // 正文开始输出 → 思考框回归原位
       answerBubble.textContent = answer;
       answerBubble.style.whiteSpace = "pre-wrap";
       const _cur = document.createElement("span");
@@ -3751,15 +3762,27 @@
       const _tg = document.createElement("button");
       _tg.className = "btn sm ghost code-toggle";
       _tg.type = "button";
+      // ★ 2026-11-11 用户要求：「代码折叠框除了上方有折叠按钮，下方也需要有」。
+      //   原因：长代码展开后要滚回卡片顶部才够得着收起按钮，很麻烦。
+      //   底部这个与顶部共用同一个切换函数，文案跟着状态同步。
+      let _tg2 = null;
       const _syncTg = () => {
         card.classList.toggle("collapsed", _collapsed);
         _tg.textContent = _collapsed
           ? "▸ 展开代码（" + _lines + " 行 / " + current.length + " 字）"
           : "▾ 收起代码";
+        if (_tg2) _tg2.textContent = _collapsed ? "▸ 展开代码" : "▾ 收起代码";
       };
-      _tg.onclick = () => { _collapsed = !_collapsed; _syncTg(); };
+      const _toggle = () => { _collapsed = !_collapsed; _syncTg(); };
+      _tg.onclick = _toggle;
       const _btns = card.querySelector(".code-btns");
       if (_btns) _btns.prepend(_tg);
+      // 底部按钮：挂在整张卡片最末尾（输出、stdin 之下），始终够得着
+      _tg2 = document.createElement("button");
+      _tg2.className = "btn sm ghost code-toggle code-toggle-b";
+      _tg2.type = "button";
+      _tg2.onclick = _toggle;
+      card.appendChild(_tg2);
       _syncTg();
 
       const paintOut = (r) => {
@@ -4220,6 +4243,7 @@
     };
     const finishThinking = () => {
       stopThinking();                            // 结束播放，一次性补齐剩余思考
+      undockThink();                             // 思考结束 → 思考框回归原位
       // 手机端：思考是从头展开显示的；收尾时如果太长就折起来，只留字数
       if (_autoThink && thinking.length > 500 && thinkBody.style.display !== "none") {
         thinkBody.style.display = "none";
