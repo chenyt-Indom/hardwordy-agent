@@ -3524,7 +3524,7 @@
             thinking += thinkPending.slice(0, take);
             thinkPending = thinkPending.slice(take);
             updateThinkStatus();
-            if (thinkBody.style.display !== "none") thinkBody.textContent = thinking + "▌";
+            if (thinkBody.classList.contains("open")) thinkBody.textContent = thinking + "▌";
           }
         }, 26);                                  // 帧间隔 ≈ 每帧约 26ms
       }
