@@ -45,6 +45,64 @@ MAX_READ = 4 * 1024 * 1024     # 单文件读取上限 4MB（2026-11-09 从 400K
 MAX_WRITE = 8 * 1024 * 1024    # 单文件写入上限 8MB（2026-11-09 从 1.2MB 放开）
 
 
+# ===== 🔒 自迭代禁区（2026-11-11 用户硬性要求）=====
+# 为什么要有：
+#   有几段代码被自迭代**反复改坏**，而它们的失效症状都是"界面一片空白 / 一直转圈"，
+#   极难排查（错误本身也被吞掉了）。用户明确要求：把这几处**锁死**，不许再改。
+#
+# 机制：
+#   文件里用 `/* 🔒LOCK:名字 ... */` … `/* 🔒END:名字 */` 圈出区块。
+#   自迭代写入时逐字比对；**区块内容变了、或标记被删 → 直接拒绝写盘**。
+#   只锁区块本身，文件其余部分照常可以改，不影响正常自迭代能力。
+#
+# 目前锁住的两处（都在 frontend/app.js）：
+#   stream-error-order   —— 流式事件里 error 必须排在 __end 之前。
+#                            顺序反了 → 后端所有 {error,__end} 事件被整条吞掉 → 界面全白。
+#   default-model-ready  —— 「本地·自动」的通道判定必须先等 __defaultModel 就绪。
+#                            没等 → 误判成本地通道 → 后端拒绝 → 同样全白。
+_LOCKED_BLOCKS = {
+    "frontend/app.js": [
+        ("/* 🔒LOCK:stream-error-order", "/* 🔒END:stream-error-order */"),
+        ("/* 🔒LOCK:default-model-ready", "/* 🔒END:default-model-ready */"),
+    ],
+}
+
+
+def _extract_locked(text: str, begin: str, end: str):
+    """取出 begin..end 之间的原文（含两端标记）；任一端缺失返回 None。"""
+    i = (text or "").find(begin)
+    if i < 0:
+        return None
+    j = text.find(end, i)
+    if j < 0:
+        return None
+    return text[i:j + len(end)]
+
+
+def _check_locked_blocks(rel: str, old: str, new: str) -> str:
+    """新内容必须**逐字保留**所有锁定区块。
+
+    返回空串 = 通过；否则返回给模型看的拒绝原因。
+    磁盘上本来就没有这一段时跳过（不拦首次添加）。
+    """
+    for b, e in _LOCKED_BLOCKS.get(rel, ()):
+        a = _extract_locked(old, b, e)
+        if a is None:
+            continue
+        c = _extract_locked(new, b, e)
+        if c is None:
+            return ("拒绝：这段代码是**锁定区**，不允许删除或改名（%s）。\n"
+                    "它是用户要求的硬性保护，删掉会让界面直接变空白、且极难排查。\n"
+                    "请原样保留整个区块（从 LOCK 到 END），只改区块外面的代码。"
+                    % b)
+        if c != a:
+            return ("拒绝：这段代码是**锁定区**，不允许修改（%s）。\n"
+                    "它是用户要求的硬性保护，改了会让界面直接变空白、且极难排查。\n"
+                    "如需调整，请先在回答里说明改动原因，由用户手动解除锁定后再改。"
+                    % b)
+    return ""
+
+
 def locked() -> bool:
     """服务器版锁死自开发（2026-11-09）。
 
@@ -496,6 +554,12 @@ def write(rel: str, content: str, note: str = "") -> dict:
         journal("write_rejected", r, err=err[:200])
         return {"ok": False, "error": err + "\n（没有写盘，改好再提交）"}
     before = _read_existing(r)
+    # 🔒 锁定区校验（2026-11-11）：这些区块被自迭代改坏过多次，
+    #    症状都是"界面空白/一直转"，用户要求硬性保护 —— 内容变了或标记被删就拒绝写盘。
+    _lock_err = _check_locked_blocks(r, before, content)
+    if _lock_err:
+        journal("write_rejected_locked", r, err=_lock_err[:200])
+        return {"ok": False, "error": _lock_err}
     bak = _backup(r, note)
     p = os.path.join(project_root(), r)
     try:

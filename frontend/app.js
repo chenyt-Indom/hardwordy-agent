@@ -4343,9 +4343,21 @@
       const _msEl = document.querySelector("#modelSelect");
       let _prov = _msEl ? _msEl.value : "auto";
       // 「本地·自动」= 跟随配置；如果配置的默认模型是云端模型，就别往本地通道发
+      /* 🔒LOCK:default-model-ready —— 自迭代禁止修改本区块（与上面同属一处逻辑） */
+      // 先等"配置里的默认模型"就绪（最多 1.5 秒），否则「本地·自动」会被误判成
+      // 纯本地通道 → 后端拒绝 → 前端把错误吞掉 → 看起来像"一直没反应"。
+      if (window.__defaultModel === undefined && window.__defaultModelPromise) {
+        try {
+          await Promise.race([
+            window.__defaultModelPromise,
+            new Promise((r) => setTimeout(r, 1500)),
+          ]);
+        } catch (e) { /* 拿不到就按"未知"处理 */ }
+      }
       if (_prov === "auto" && /^deepseek/i.test(String(window.__defaultModel || ""))) {
         _prov = String(window.__defaultModel);
       }
+      /* 🔒END:default-model-ready */
       const _isDS = _prov.indexOf("deepseek") === 0;
       const _dsKey = _isDS ? (localStorage.getItem("ds_api_key") || "") : "";
       if (_isDS && !_dsKey && !window.__dsEnv) {
@@ -4460,6 +4472,25 @@
           //   接收环节只要漏了一片（切在半个 JSON、XHR 缓冲吞尾…），界面上就会少字。
           //   这里直接以服务端原文为准做一次回填，彻底不依赖"猜哪里丢的"。
           if (obj.ping) { _armStall(); continue; }     // 服务端心跳：只是在跑长工具，别当成卡死
+          /* 🔒LOCK:stream-error-order —— 自迭代禁止修改本区块
+             【为什么锁】后端有 3 处返回**同一条事件里同时带 error 和 __end**
+             （本地通道收到云端模型名的提示、Ollama 报错、超窗兜底）。
+             只要 `__end` 排在 `error` 前面且带 `continue`，这些错误就会被整条吞掉，
+             界面上一个字都不显示 —— 用户只能看到空白，以为是"卡了/慢了"。
+             ⚠️ 正确顺序必须是：ping → error → __end。改动请先问用户。 */
+          if (obj.error) {
+            // `explained` = 后端已把原因翻成人话、也给了下一步怎么办。
+            // 这类错误**不要**再补"（可能内存/模型未就绪，请查看状态）"——
+            // 实测用户看到那句会去查显存，而真因（工具调用 JSON 写坏）跟硬件无关。
+            // 少数错误事件可能还带完整正文（部分成功后失败），先回填再抛，别丢内容。
+            if (typeof obj.answer === "string" && obj.answer) {
+              answer = obj.answer;
+              try { paintAnswer(true); } catch (e) { /* 重绘失败不影响报错 */ }
+            }
+            const _e = new Error(obj.error);
+            if (obj.explained) _e.explained = true;
+            throw _e;
+          }
           if (obj.__end) {
             try { console.warn("[stream] __end local=", String(answer||"").length,
                                "server=", (obj.answer||"").length,
@@ -4476,15 +4507,7 @@
             }
             continue;
           }
-          if (obj.error) {
-            // ⚠️ `explained` = 后端已经把原因翻成人话、也给了下一步怎么办。
-            // 这类错误**不要**再跟一句"（可能内存/模型未就绪，请查看状态）"——
-            // 实测用户看到那句会去查显存，而真正的原因（模型把工具调用的 JSON
-            // 写坏了）跟硬件毫无关系。见下面 catch 里的用法。
-            const _e = new Error(obj.error);
-            if (obj.explained) _e.explained = true;
-            throw _e;
-          }
+          /* 🔒END:stream-error-order */
           if (obj.message) {
             if (obj.message.thinking_reset) {
               // 后端因"思考吃满了输出空间"而加长上限重试：上一轮的思考已经作废。
@@ -5044,12 +5067,23 @@
   }, 20000);
 
   // 记住配置里的默认模型：「本地·自动」需要知道它是不是云端模型（2026-11-10）
-  (async () => {
+  /* 🔒LOCK:default-model-ready —— 自迭代禁止修改本区块
+     【为什么锁】这段决定「本地·自动」到底走本地通道还是云端通道。
+     `__defaultModel` 是异步取 /api/config 得来的；如果发消息时它还没到，
+     就会被判成纯本地通道，而 default_model 是云端模型时后端会直接拒绝
+     （返回 {error, explained, __end}）→ 界面上只剩一个"…"，看着像卡死。
+     所以必须：① 保存成可等待的 Promise；② 发消息前 await 它。
+     改动请先问用户。 */
+  window.__defaultModelPromise = (async () => {
     try {
       const d = await api("/api/config");
       window.__defaultModel = (d && d.config && d.config.default_model) || "";
-    } catch (e) { /* 忽略 */ }
+    } catch (e) {
+      // 拉不到就给个确定值（空串=不知道），否则下面"等它"的逻辑会一直等
+      if (window.__defaultModel === undefined) window.__defaultModel = "";
+    }
   })();
+  /* 🔒END:default-model-ready */
 
   // 界面自更新重载后，把用户没发出去的草稿放回输入框（2026-11-09）
   try {
