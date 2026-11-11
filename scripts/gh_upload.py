@@ -16,20 +16,35 @@ import time
 import requests
 
 OWNER = "chenyt-Indom"
-REPO = "local-multimodal"
-TAG = "v2026.11.11"
-NAME = "Hardwordy Agent 2026.11.11a（全量版）"
-BODY = """**全量版 · 2026.11.10c**（不含任何 API Key，请自行在程序里填）
+REPO = "hardwordy-agent"
+TAG = "v2026.11.11b"
+NAME = "Hardwordy Agent 2026.11.11b（全量版）"
+BODY = """**全量版 · 2026.11.11b**（不含任何 API Key，请自行在程序里填）
+
+## 这一版修了什么
+
+- **修掉一个致命 bug：后端报错时界面一个字都不显示**
+  根因是 `finishThinking()` 里的变量作用域错误（`ReferenceError: _prov is not defined`），
+  而它正好是错误分支的第一句 —— 一崩就把「显示错误原因」那行整个跳过，
+  界面上只剩一个「…」。顺带修好了「助手自己的回答没进历史 → 模型老是失忆」。
+- **大幅提速：8.0 秒 → 2.4 秒**
+  以前带图的消息会被 `str()` 成 Python repr 写进会话，整张图的 base64 以纯文本
+  永久留在历史里，之后每轮都当文字重发（实测一个会话里 3 条消息占了 18 万 token）。
+  现在落盘只保留文字，图片折成一句说明，并带自愈能力修历史脏数据。
+- **修掉流式错误被吞**：`error` 事件现在一定排在 `__end` 之前。
+- **自迭代片段锁加固**：同名锁定区现在逐处校验，删块/改块都会被拒。
+
+## 下载
 
 GitHub 单文件上限 2 GB，所以切两卷，下载后合并：
 
 ```cmd
-copy /b HardwordyAgent-Full-2026.11.11a.zip.part1 + HardwordyAgent-Full-2026.11.11a.zip.part2 HardwordyAgent-Full-2026.11.11a.zip
+copy /b HardwordyAgent-Full-2026.11.11b.zip.part1 + HardwordyAgent-Full-2026.11.11b.zip.part2 HardwordyAgent-Full-2026.11.11b.zip
 ```
 
 校验（合并后应等于）：
 ```
-98584f5e51de309ea8d87a332976e6a898381da022d48ace4b3db469a4ead5d3
+__SHA256__
 ```
 
 解压 → 双击 `一键启动.bat`；顶栏 🔑 填自己的 DeepSeek Key。
