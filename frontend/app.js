@@ -6853,8 +6853,11 @@
       const b = box();
       const fs = (d && d.files) || [];
       const names = fs.slice(0, 2).map((f) => String(f).split("/").pop());
+      // 用户要求（2026-11-11）：前端文件改动也要提示重启（重启后按 Ctrl+F5 才会用上新样式）
+      const onlyFe = fs.length > 0 && fs.every((f) => String(f).startsWith("frontend/"));
+      const tail = onlyFe ? "（前端改动 · 重启后 Ctrl+F5 生效）" : "";
       b.querySelector(".rb-text").textContent = names.length
-        ? "新版本已就绪：" + names.join("、") + (fs.length > 2 ? " 等" : "")
+        ? "新版本已就绪：" + names.join("、") + (fs.length > 2 ? " 等" : "") + tail
         : "新版本已就绪";
       b.classList.add("on");
     }
