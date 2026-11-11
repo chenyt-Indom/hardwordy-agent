@@ -630,7 +630,7 @@
         if (el.hasAttribute && el.hasAttribute('data-more')) return; // 点的是菜单里的控件
         el = el.parentElement;
       }
-      paint(false);
+      paint(false, true);
       try { localStorage.setItem(KEY, '0'); } catch (e) {}
     });
   })();
