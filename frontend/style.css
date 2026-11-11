@@ -90,8 +90,8 @@ html[data-theme="light"] {
   --warn: #a86a12;
   --warn-border: #e0b877;
   --warn-bg: rgba(224, 184, 119, .18);
-  --scrollbar: #ccd5e6;
-  --scrollbar-hover: #b6c1d6;
+  --scrollbar: #b9c5db;
+  --scrollbar-hover: #a3b1cb;
 }
 
 /* 主题切换的过渡：只给底色/文字色，避免整页元素一起动导致卡顿 */
