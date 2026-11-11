@@ -3157,7 +3157,15 @@ html[data-theme="light"] select.pill-select option {
 .code-group-head .cg-toggle { margin-left: auto; }
 .code-group-body { padding: 0 8px 2px; }
 .code-group-body .code-card { margin: 8px 0; }
-.code-group.collapsed .code-group-body { display: none; }
+/* 2026-11-12：代码分组展开/收起也走高度过渡，不再硬切 */
+.code-group .code-group-body {
+  max-height: 4000px; opacity: 1; overflow: hidden;
+  transition: max-height .3s cubic-bezier(.4, 0, .2, 1), opacity .22s ease,
+              padding .3s ease;
+}
+.code-group.collapsed .code-group-body {
+  display: block; max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0;
+}
 
 
 /* ================= 思考框贴底 + 代码卡片底部折叠（2026-11-11）=================
