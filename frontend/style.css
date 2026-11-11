@@ -56,43 +56,45 @@
 html[data-theme="light"] {
   color-scheme: light;
 
-  /* 2026-11-12 用户第三次反馈：底色偏蓝、看久了累，希望「稍微浅黄一点、别太黄」的护眼色。
-     做法：整套冷调灰蓝换成**暖米黄（cream）**——色相往暖走一点（约 40°），
-     明度与原来基本持平（不会突然变亮刺眼），文字继续压到近黑靠字撑对比。
-     主色蓝保留，作为唯一的冷色点缀（链接/按钮），在米黄底上反而更清楚。 */
-  --bg: #ece6d6;            /* 页面/侧栏底：暖米黄，亮度与原冷灰蓝持平 */
-  --panel: #f7f3e8;         /* 主内容区：比底亮一档，仍是米黄不是白 */
-  --panel2: #f0eadb;        /* 气泡/次级面板 */
-  --field-bg: #faf7ee;      /* 输入框：暖白，不刺眼 */
-  --border: #d3c8ab;        /* 描边：暖灰褐，卡片/分隔线看得清 */
-  --text: #241f17;          /* 正文：暖近黑，靠字提对比 */
-  --muted: #574f3f;
-  --accent: #2563d8;
-  --green: #2f9e6b;
-  --danger: #d94a44;
+  /* 2026-11-12 用户第四次反馈（最终口径）：
+     「还是以白色为主，主要体现字体以及背景间的对比度，还有线条之间的对比」。
+     做法：底色回归**中性白/浅灰**（不偏蓝也不偏黄），
+          **不靠压暗底色**，而是靠 ① 文字压到近黑 ② 描边明显加重 来拉对比。
+     明度阶梯：页面/侧栏 #f1f1ef → 主内容区 #ffffff → 次级面板 #f6f6f4，
+     三档差距小、不抢眼；所有边框统一到 #c8c8c2（白底上看得见但不脏）。 */
+  --bg: #f1f1ef;            /* 页面/侧栏底：中性浅灰，退到背景里去 */
+  --panel: #ffffff;         /* 主内容区：白（白色为主） */
+  --panel2: #f6f6f4;        /* 气泡/次级面板：极浅灰，与白区分开 */
+  --field-bg: #ffffff;      /* 输入框：白，靠描边界定边界 */
+  --border: #c8c8c2;        /* 描边：明显加重，卡片/分隔线一眼看得清 */
+  --text: #14161a;          /* 正文：近黑，对比度 ~16:1 */
+  --muted: #4a4e57;         /* 次要文字：深灰，白底上不发虚 */
+  --accent: #1d5fd0;
+  --green: #1f8f5f;
+  --danger: #c93a34;
 
-  --btn-bg: #eae3cf;
-  --btn-bg-hover: #ded5bd;
-  --accent-hover: #1f57c4;
-  --hover-bg: #ece5d2;
-  --think-bg: #f0ead8;
-  --chip-bg: #efe8d2;
-  --chip-border: #cfc3a2;
-  --gen-label-bg: #efe8d2;
-  --meta-fg: #6b6250;
-  --overlay: rgba(40, 35, 24, .5);
-  --shadow: rgba(80, 68, 44, .16);
-  --lb-cap: #f4f0e3;
-  --tag-pin-bg: #2f9e6b;
+  --btn-bg: #f0f0ed;
+  --btn-bg-hover: #e2e2de;
+  --accent-hover: #1750b6;
+  --hover-bg: #f1f1ee;
+  --think-bg: #f5f5f2;
+  --chip-bg: #f0f0ed;
+  --chip-border: #c8c8c2;
+  --gen-label-bg: #f0f0ed;
+  --meta-fg: #565a63;
+  --overlay: rgba(18, 20, 24, .5);
+  --shadow: rgba(24, 27, 33, .14);
+  --lb-cap: #f7f7f5;
+  --tag-pin-bg: #1f8f5f;
   --tag-pin-fg: #fff;
-  --tag-auto-bg: #e6ddc2;
-  --tag-auto-fg: #2b4a8a;
-  --danger-soft: rgba(217, 74, 68, .1);
-  --warn: #a86a12;
-  --warn-border: #e0b877;
-  --warn-bg: rgba(224, 184, 119, .18);
-  --scrollbar: #cdc2a8;
-  --scrollbar-hover: #b8ac90;
+  --tag-auto-bg: #e8e8e4;
+  --tag-auto-fg: #1d4a94;
+  --danger-soft: rgba(201, 58, 52, .09);
+  --warn: #9a610f;
+  --warn-border: #dfb877;
+  --warn-bg: rgba(223, 184, 119, .16);
+  --scrollbar: #c2c2bc;
+  --scrollbar-hover: #a6a6a0;
 }
 
 /* 主题切换的过渡：只给底色/文字色，避免整页元素一起动导致卡顿 */
