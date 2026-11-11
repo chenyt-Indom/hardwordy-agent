@@ -1783,6 +1783,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
     # ★ 记下这次调用的备注：改动成功后 _version_commit 会写进提交说明
     _SD_NOTE["note"] = str((arguments or {}).get("note") or "")
     # ★ 2026-11-11：selfdev.py 的 patch 会把文件截断（见 _sd_patch_fixed 注释），
+    #   （实测：修好后能改任意位置，且不会截断文件）
     #   这里换成正确实现。selfdev.py 本身是只读的回撤机制，不在那儿改。
     try:
         from . import selfdev as _sd_fix
