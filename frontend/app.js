@@ -330,6 +330,20 @@
     if (b) b.onclick = () => setThinkFollow(!thinkFollow);
     syncThinkBtn();
   })();
+  // ★ 第二道保险：跟随模式下，思考框只要被挪回消息流（父节点不是 body），立刻重新浮起。
+  //   前面 undockOne 已经拒绝了所有非强制收回，这里再兜一层 —— 万一有别处直接
+  //   操作 DOM（insertBefore / appendChild）把框搬回去，也能当场纠正。
+  (function watchThinkEscape() {
+    if (typeof MutationObserver !== "function") return;
+    try {
+      new MutationObserver(() => {
+        if (!thinkFollow) return;
+        _thinkBoxes.forEach((w) => {
+          if (w.isConnected && w.parentNode !== document.body) dockOne(w);
+        });
+      }).observe(messagesEl, { childList: true });
+    } catch (e) { /* 忽略 */ }
+  })();
 
   // ---------- 折叠高度补间（2026-11-12 用户要求「代码框展开/收起要有动画」）----------
   // 为什么不用纯 CSS：卡片里还有一批 display:none 的元素（输出区、按钮、编辑区），
