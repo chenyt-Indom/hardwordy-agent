@@ -212,11 +212,12 @@
     const b = $("#thinkFollowBtn");
     if (!b) return;
     b.classList.toggle("tf-on", thinkFollow);
-    b.textContent = thinkFollow ? "🧠 思考框跟随" : "📍 思考框固定";
+    // 文案按用户原话写清楚：跟随 = 相对视口固定；固定 = 回消息流原位
+    b.textContent = thinkFollow ? "🧠 跟随视角" : "📍 回到原位";
     b.setAttribute("aria-pressed", thinkFollow ? "true" : "false");
     b.title = thinkFollow
-      ? "当前：跟随 —— 思考框固定悬浮在左下角，滚到哪都看得到。点一下改成固定原位"
-      : "当前：固定 —— 思考框留在消息流原位、不浮动。点一下改成跟随";
+      ? "当前：跟随视角 —— 思考框固定在视口左下角，滚到哪都看得到。点一下改为「回到原位」"
+      : "当前：回到原位 —— 思考框待在消息流原来的位置（工具条之前），不浮动。点一下改为「跟随视角」";
   }
   // 计算悬浮位置：钉在「左下角工具条（输入区）上方」，左边对齐主区域
   // 输入框会随内容变高、窗口会缩放，所以不能硬编码，每次 dock / resize 都重算
