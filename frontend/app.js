@@ -3733,7 +3733,9 @@
         `<button class="btn sm ghost code-edit">✏ 编辑</button>` +
         `<button class="btn sm ghost code-run">▶ 运行</button>` +
         `<button class="btn sm ghost code-save">💾 存到文库</button>` +
-        `<button class="btn sm ghost code-copy">📋 复制</button></span></div>` +
+        `<button class="btn sm ghost code-copy">📋 复制</button></span>` +
+        // ★ 2026-11-11 用户要求：卡片默认缩成「一条」，折叠时右侧只显示这个提示
+        `<span class="code-open-hint">▸ 展开</span></div>` +
         `<pre class="code-body"><code></code></pre><div class="code-out"></div>` +
         // 运行中才显示：给程序喂标准输入（程序里有 input() 时全靠它）
         `<div class="code-stdin" hidden><input class="code-stdin-in" spellcheck="false" ` +
