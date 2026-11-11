@@ -7425,7 +7425,6 @@
     const btn = document.querySelector("#ctxRing");
     const fg = document.querySelector("#ctxRingFg");
     const txt = document.querySelector("#ctxRingTxt");
-    document.title = "RING|start|" + (!!btn) + (!!fg) + (!!txt);
     if (!btn || !fg || !txt) return;
     const C = 2 * Math.PI * 15.5;        // 圆周长（r=15.5），与 HTML 的 dasharray 一致
     let lastLen = -1, busy = false, compactAt = 0;
