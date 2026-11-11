@@ -201,6 +201,12 @@
   }
   window.addEventListener("resize", () => placeThinkDock(_thinkLive));
   // 把当前这轮的思考框按当前偏好摆好（思考途中切按钮也能立刻生效）
+  // 切换/新建/清空对话时：悬浮的思考框挂在 body 上，不会随 messagesEl.innerHTML 一起消失，
+  // 必须手动摘掉，否则会一直浮在左下角。
+  function clearThinkDock() {
+    _thinkLive = null;
+    document.querySelectorAll("body > .think-dock").forEach((n) => n.remove());
+  }
   function applyThinkDock() {
     const w = _thinkLive;
     if (!w || !w._home) return;
