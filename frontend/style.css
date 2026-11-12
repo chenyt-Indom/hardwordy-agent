@@ -3465,6 +3465,7 @@ html[data-theme="light"] select.pill-select option {
 .tts-menu-rate {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
   padding: 4px 8px 2px;
@@ -3472,4 +3473,5 @@ html[data-theme="light"] select.pill-select option {
   font-size: 12px;
   opacity: .85;
 }
+.tts-menu-rate > span { flex: none; }
 .tts-menu-rate .tts-menu-item { width: auto; padding: 3px 7px; font-size: 12px; }
