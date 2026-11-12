@@ -453,6 +453,13 @@
           <button class="btn sm ghost" id="p2pOpenBtn" title="G 级大文件点对点直传（不经服务器）">📡 传输</button>
         </span>
       </div>
+      <!-- 身份冲突提示（2026-11-13）：两台机器共用同一个 user_id —— 多半是把
+           整个程序目录拷给了别人。这时双方消息会互相显示成「自己发的」，
+           成员列表也分不清，必须提示并给一键换身份。默认隐藏。 -->
+      <div class="hive-warn" id="hiveIdWarn" hidden>
+        <span id="hiveIdWarnText"></span>
+        <button class="btn sm" id="hiveIdRenew">换一个新身份</button>
+      </div>
       <div class="hive-body">
         <div class="hive-msgs" id="hiveMsgs">
           <p class="hint hive-empty">左边选一个群，或者点「＋ 建群」开一个新的。</p>
