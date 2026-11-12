@@ -128,10 +128,15 @@
       <div class="sec-head">
         <h2 class="dl-h2" id="dlToggle" role="button" tabindex="0" title="点击收起 / 展开生成文库" aria-expanded="true"><span class="chev">▾</span>✍️ 生成文库</h2>
         <span class="head-acts">
-          <button class="btn sm ghost" id="dlOpenFolder" title="打开生成文库文件夹">📂 文件夹</button>
-          <button class="btn sm ghost" id="dlBackup" title="把整个文库备份一份">备份</button>
-          <button class="btn sm ghost" id="dlRefresh">刷新</button>
+          <button class="btn sm ghost ico" id="dlOpenFolder" title="打开生成文库文件夹">📂</button>
+          <button class="btn sm ghost ico" id="dlMore" title="更多：备份 / 刷新" aria-expanded="false" aria-controls="dlMenu">⋯</button>
         </span>
+      </div>
+      <div class="panel-menu" id="dlMenu" hidden>
+        <div class="panel-menu-acts">
+          <button class="btn sm ghost" id="dlBackup" title="把整个文库备份一份">💾 备份</button>
+          <button class="btn sm ghost" id="dlRefresh" title="重新读取文件列表">↻ 刷新</button>
+        </div>
       </div>
       <div class="dl-body" id="dlBody">
         <div class="dl-body-in">
