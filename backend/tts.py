@@ -258,10 +258,12 @@ def _safe_name(name: str) -> str:
 
 
 def synth(text: str, voice: str = "", rate: int = 0, engine: str = "auto",
-          filename: str = "") -> dict:
+          filename: str = "", pitch: int = 0, style: str = "") -> dict:
     """把文本合成音频。
 
-    rate: 语速百分比，0 为原速，20 = 快 20%，-15 = 慢 15%
+    rate:  语速百分比，0 为原速，20 = 快 20%，-15 = 慢 15%
+    pitch: 音高偏移（Hz），0 为原调，+15 更亮，-12 更沉（仅 edge 引擎有效）
+    style: 情感预设 id（见 STYLES），会在 rate/pitch/volume 上叠加偏移
     engine: auto / edge / sapi
     """
     t = clean_text(text)
