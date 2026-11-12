@@ -362,10 +362,13 @@ CHUNK_OVERLAP = 70
 VEC_WEIGHT = 0.65
 KW_WEIGHT = 0.35
 
-# 阈值：低于这个分的不返回（用户要求"分数太低的不给"）
-MIN_VEC = 0.30          # 纯语义相似度下限
-MIN_KW = 0.25           # 关键词归一化分下限
-MIN_FINAL = 0.22        # 融合分下限
+# 阈值：低于这个分的不返回（用户要求"分数太低的不给"）。
+# 这几个数是**实测校准**出来的，不是拍脑袋：bge-small-zh-v1.5 下
+# 真正相关的块余弦 0.52~0.66，无关块 0.21~0.26，但"沾一点边"的块能到 0.41~0.43，
+# 所以 MIN_VEC 必须取到 0.45，否则问「介绍人」会把毫不相干的段落也带出来。
+MIN_VEC = 0.45          # 纯语义相似度下限
+MIN_COV = 0.50          # 查询词覆盖率下限（专有名词/编号靠它）
+MIN_FINAL = 0.30        # 融合分下限
 
 _INDEX_META = os.path.join(KB_DIR, "_vec_meta.json")
 _INDEX_VEC = os.path.join(KB_DIR, "_vec.npy")
