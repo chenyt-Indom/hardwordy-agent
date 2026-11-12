@@ -10320,7 +10320,24 @@ def hive_join(body: dict):
         g = hive.join_group(b.get("payload") or "", b.get("name") or "")
     except Exception as e:
         return {"ok": False, "error": str(e)}
-    return {"ok": True, "group": g}
+    # 加入后自动连中继，并把「XX 加入了群」广播给其他人 ——
+    # 否则只有自己看得到提示，别人只知道名单多了一个人。
+    relay = {"configured": False, "connected": False, "error": ""}
+    try:
+        full = hive.load_group(g.get("gid") or "") or {}
+        host = (full.get("host") or "").strip()
+        if host:
+            st = hive_client.client().start(host, g["gid"])
+            relay = {"configured": True, "url": host,
+                     "connected": bool(st.get("connected")),
+                     "error": st.get("last_error") or ""}
+            if st.get("connected") and g.get("joined_new"):
+                me = hive.profile()
+                hive_client.client().send(g["gid"], f"{me['name']} 加入了群",
+                                          mtype="system")
+    except Exception as e:
+        relay["error"] = f"{type(e).__name__}: {e}"
+    return {"ok": True, "group": g, "relay": relay}
 
 
 @app.get("/api/hive/{gid}/messages")
