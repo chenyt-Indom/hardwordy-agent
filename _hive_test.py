@@ -5,6 +5,11 @@ import os
 import shutil
 import sys
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import backend.hive as H
