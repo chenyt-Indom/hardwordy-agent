@@ -3918,8 +3918,12 @@ html[data-theme="light"] select.pill-select option {
         思考卡片也是 .think-hdr + .think-body —— 样式全部继承，不再维护第二套。
    这里只补群聊特有的一点点：一个节点里有「昵称/思考/正文/操作/时间」多块，要竖排。 */
 .hive-msgs .msg {
-  flex-direction: column; align-items: stretch; gap: 3px;
-  max-width: min(76%, 880px); min-width: 0;
+  /* ★ 2026-11-13 用户反馈「群聊前端有些扭曲」：原来这里把**整个消息行**
+     限成 min(76%, 880px)，于是气泡靠右时贴的是 76% 的边界（屏幕中间），
+     系统消息也被挤成两行。单人模式是「整行铺满、气泡自己限宽」，
+     这里改成同一套：行占满、气泡靠 align-self 对齐、宽度由 .bubble 的 max-width 管。 */
+  flex-direction: column; align-items: flex-start; gap: 3px;
+  max-width: 100%; min-width: 0;
 }
 .hive-msgs .msg.user { align-items: flex-end; }
 .hive-msgs .msg > .bubble { align-self: flex-start; }
