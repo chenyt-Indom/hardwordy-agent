@@ -8916,7 +8916,20 @@
           + (m.pending ? " · 待发送" : "") + "</span>";
       const ts = m.ts ? new Date(m.ts * 1000).toLocaleTimeString("zh-CN",
         { hour: "2-digit", minute: "2-digit" }) : "";
-      wrap.innerHTML = who + '<div class="hmsg-bubble">' + fmtBody(m.text)
+      // 思考过程：**默认收起**。它可能几千字，展开会把整个聊天记录冲走；
+      // 但必须存下来且能点开 —— 后来进群的人也要能回看当时模型在想什么。
+      let think = "";
+      if (type === "ai" && m.thinking) {
+        const tc = String(m.thinking).length;
+        const dur = m.dur_ms ? " · 耗时 " + (m.dur_ms / 1000).toFixed(1) + "s" : "";
+        think = '<details class="hmsg-think"><summary>💭 思考过程（'
+          + tc + " 字" + dur + "）</summary><div class=\"hthink-body\">"
+          + hEsc(m.thinking).replace(/\n/g, "<br>") + "</div></details>";
+      }
+      if (type === "ai" && m.cancelled) {
+        think = '<div class="hmsg-cancel">⏹ 这次任务被取消了</div>' + think;
+      }
+      wrap.innerHTML = who + think + '<div class="hmsg-bubble">' + fmtBody(m.text)
         + "</div>" + (ts ? '<span class="hmsg-ts">' + ts + "</span>" : "");
       return wrap;
     }
