@@ -570,6 +570,18 @@ class MeshNode:
                 self._fanout(gid, T_FILE, dict(obj, ttl=ttl), skip=peer)
             return
 
+    def _announce_peers(self, gid: str) -> None:
+        """把「我认识谁」广播出去。
+
+        延迟 0.5 秒再发：对方刚连上时自己的 peers 列表里可能还没登记完，
+        立刻发会漏掉刚刚这条连接的双方。
+        """
+        time.sleep(0.5)
+        if self._stop:
+            return
+        known = self._known_list()
+        self._fanout(gid, T_PEERS, {"known": known})
+
     def _known_list(self) -> List[Dict[str, Any]]:
         me = H.profile().get("user_id", "")
         out = []
