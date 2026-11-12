@@ -693,6 +693,26 @@ def index_status():
             "hint": "" if info.get("ready") else embed_mod.install_hint()}
 
 
+def chunk_counts():
+    """每篇文档在向量索引里被切成了几块：{rel: n}。
+
+    前端要显示「2.4k 字 · 6 块」—— 块数直接反映这篇在检索时有多少个
+    独立可比对的位置，比字数更能说明"检索粒度细不细"。
+    ⚠️ 用 rel 归并而不是 doc_id：doc_id 是路径哈希，文档改名/移动后会变，
+    而 rel 是用户看得懂、也是 /api/kb 里对得上的那个键。
+    """
+    with _idx_lock:
+        if not _idx.get("chunks"):
+            _load_index()
+    with _idx_lock:
+        out = {}
+        for f in (_idx.get("files") or {}).values():
+            rel = f.get("rel") or ""
+            if rel:
+                out[rel] = out.get(rel, 0) + int(f.get("n") or 0)
+    return out
+
+
 def _build_postings(tokens_list):
     """BM25 倒排：{term: [(chunk_i, tf)]} + 各块长度。"""
     post, lens = {}, []
