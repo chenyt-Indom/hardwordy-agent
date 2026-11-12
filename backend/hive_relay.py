@@ -258,6 +258,23 @@ async def handler(ws: WebSocketServerProtocol) -> None:
                     "v": int(m.get("v") or 1),
                 }, skip=None)
 
+            elif t == "file" and room is not None:
+                # 附件分片：和 stream 一样**只转发、不落盘、不定序**。
+                # 为什么不落盘：中继只该转发，不该变成文件服务器（用户的
+                #   20MB 视频全堆到服务器上，磁盘和带宽都扛不住）；每个成员
+                #   收到后各自存一份，这才是「全员可见」。
+                # 中继依然看不到内容（blob 是密文）。
+                if not m.get("blob"):
+                    continue
+                await room.broadcast({
+                    "t": "file",
+                    "gid": room.gid,
+                    "fid": (m.get("fid") or "")[:40],
+                    "blob": m.get("blob"),
+                    "ts": float(m.get("ts") or time.time()),
+                    "v": int(m.get("v") or 1),
+                }, skip=ws)          # 发送者自己已经有了，不用回传
+
             elif t == "cancel" and room is not None:
                 # 取消 @hd 任务：转发给房间里所有人，由**真正在跑任务的机器**
                 # 自己判断要不要停（它才知道 task_id 是不是自己的）。
