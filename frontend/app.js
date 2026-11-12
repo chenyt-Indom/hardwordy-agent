@@ -9020,6 +9020,7 @@
       el("hiveMemCount").textContent = "(" + onN + "/" + members.length + ")";
       if (!members.length) {
         box.innerHTML = '<p class="hint">暂无成员</p>';
+        syncLeaveBtn();
         return;
       }
       const amOwner = members.some((m) => m.user_id === myId && m.role === "owner");
