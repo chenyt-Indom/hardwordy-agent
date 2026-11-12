@@ -104,15 +104,22 @@
       <div class="sec-head">
         <h2>📚 知识库</h2>
         <span class="head-acts">
-          <button class="btn sm ghost" id="kbOpenFolder" title="打开知识库文件夹 —— 把 .txt/.md 放进去就能被检索到">📂 打开文件夹</button>
-          <button class="btn sm ghost" id="kbReindex" title="把知识库重新切块并向量化。换了 embedding 模型、或一次改了很多文档时点一下">🧠 重建</button>
-          <button class="btn sm ghost" id="kbRefresh">刷新</button>
+          <button class="btn sm ghost ico" id="kbOpenFolder" title="打开知识库文件夹 —— 把 .txt / .md / PDF 放进去就能被检索到">📂</button>
+          <button class="btn sm ghost ico" id="kbMore" title="更多：重建索引 / 刷新 / 查看路径与说明" aria-expanded="false" aria-controls="kbMenu">⋯</button>
         </span>
       </div>
-      <p class="hint" id="kbHint">把领域资料（.txt / .md）放进这个文件夹即可，**不需要导入**，放进去就能被检索到。</p>
-      <div class="kb-path" id="kbPath"></div>
-      <div class="hint" id="kbIndexStatus"></div>
-      <div class="list" id="kbList"></div>
+      <!-- 极简做法：路径、说明、索引状态、重建/刷新全部收进这个菜单，
+           默认不占高度。信息一条没少，只是不挡文档列表。 -->
+      <div class="kb-menu" id="kbMenu" hidden>
+        <div class="kb-menu-acts">
+          <button class="btn sm ghost" id="kbReindex" title="把知识库重新切块并向量化。换了 embedding 模型、或一次改了很多文档时点一下">🧠 重建索引</button>
+          <button class="btn sm ghost" id="kbRefresh" title="重新读取文档列表和索引状态">↻ 刷新</button>
+        </div>
+        <div class="hint" id="kbHint"></div>
+        <div class="kb-path" id="kbPath" title="点击可复制路径"></div>
+        <div class="kb-idx" id="kbIndexStatus"></div>
+      </div>
+      <div class="list kb-list" id="kbList"></div>
     </section>
 
     <!-- 生成文库：模型产出的文件（作文/方案/代码模块…）
