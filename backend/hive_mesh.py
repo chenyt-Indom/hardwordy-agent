@@ -181,6 +181,7 @@ class Peer:
         self.out = out
         self.uid = ""
         self.name = ""
+        self.dev = ""
         self.ver = 0
         self.port = 0
         self.alive = True
