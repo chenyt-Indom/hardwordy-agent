@@ -8612,7 +8612,7 @@
                            "libraryPanel", "sessionsPanel", "memoryPanel"];
     const el = (id) => document.getElementById(id);
 
-    let mode = "single";
+    let mode = "hive";
     let curGid = "";
     let groups = [];
     let members = [];
