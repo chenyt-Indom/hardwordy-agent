@@ -3798,6 +3798,63 @@ html[data-theme="light"] select.pill-select option {
 .hive-msg.unknown .hmsg-who { color: var(--meta-fg); }
 .hive-msg .hmsg-ts { font-size: 10.5px; color: var(--meta-fg); }
 
+/* ---------- @hd 思考过程与实时进度 ---------- */
+/* 思考过程：默认收起（可能几千字），点开看全文 */
+.hmsg-think {
+  max-width: 86%; margin-bottom: 4px;
+  border: 1px dashed var(--border); border-radius: 9px;
+  background: var(--think-bg); font-size: 12px;
+}
+.hmsg-think > summary {
+  padding: 5px 10px; cursor: pointer; color: var(--muted);
+  font-size: 11.5px; user-select: none; outline: none;
+}
+.hmsg-think > summary:hover { color: var(--fg); }
+.hmsg-think .hthink-body {
+  max-height: 260px; overflow: auto;
+  padding: 2px 10px 8px; color: var(--muted);
+  line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+
+/* 实时进度卡片：正在跑的时候显示，跑完由正式消息替换 */
+.hd-live { max-width: 88%; }
+.hd-live-head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 10px; margin-bottom: 4px;
+  border: 1px solid var(--accent); border-radius: 9px;
+  background: rgba(79, 139, 249, .08);
+  font-size: 12px; color: var(--muted);
+}
+.hd-live-head .hd-phase { flex: 1; min-width: 0; }
+/* 呼吸圆点：让人一眼看出「还在动」，而不是卡住了 */
+.hd-live-head .hd-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); flex: none;
+  animation: hdPulse 1.1s ease-in-out infinite;
+}
+@keyframes hdPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .35; transform: scale(.75); }
+}
+/* ⚠️ 这里必须写 width:auto —— 全局 .btn 有 width:100%，
+   本项目已经因为这个坑把输入框压扁过两次（见 .hive-composer .btn 的注释） */
+.hd-live-head .hd-cancel {
+  flex: none; width: auto; margin: 0; padding: 3px 10px;
+  font-size: 11.5px; border-radius: 7px;
+  background: none; border: 1px solid var(--border);
+  color: var(--muted); cursor: pointer;
+}
+.hd-live-head .hd-cancel:hover {
+  color: var(--danger, #e5534b); border-color: var(--danger, #e5534b);
+}
+.hd-live .hmsg-bubble { max-height: 320px; overflow: auto; }
+.hd-live .hmsg-bubble:empty { display: none; }
+.hd-live .hd-think:not([open]) { display: none; }
+.hmsg-cancel {
+  font-size: 11.5px; color: var(--muted);
+  padding: 2px 8px; margin-bottom: 4px;
+}
+
 /* ---------- 输入区 ---------- */
 .hive-composer {
   flex: none;                 /* 同上：不设就会被压成一条竖线 */
