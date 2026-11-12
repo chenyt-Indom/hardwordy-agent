@@ -10663,6 +10663,30 @@ def hive_p2p_share(gid: str, body: dict = None):
         return {"ok": False, "error": str(e)}
 
 
+@app.post("/api/hive/{gid}/p2p/open")
+def hive_p2p_open(gid: str, body: dict = None):
+    """直接共享本机任意文件（G 级）。
+
+    为什么不走上传接口：上传要先 base64 进内存，几个 G 的文件直接炸。
+    这里只登记路径，发送时按偏移量流式读原文件，不复制、不占额外磁盘。
+    """
+    b = body or {}
+    try:
+        path = str(b.get("path") or "").strip().strip('"').strip("'")
+        if not path:
+            return {"ok": False, "error": "请填一个本机文件路径"}
+        if not os.path.isfile(path):
+            return {"ok": False, "error": "找不到这个文件：" + path}
+        fid = "f_" + secrets.token_hex(8)
+        r = hive_p2p.share(gid, fid, port=0, want_upnp=True,
+                           src_path=path, name=os.path.basename(path))
+        r["qr"] = hive._qr_data_url(r.get("code") or "")
+        r["name"] = os.path.basename(path)
+        return {"ok": True, **r}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/api/hive/{gid}/p2p/receive")
 def hive_p2p_receive(gid: str, body: dict = None):
     """用连接码接收文件（断点续传自动生效）。"""
