@@ -9328,6 +9328,15 @@ class UploadBody(BaseModel):
 def kb_list():
     """列出知识库文档，并带上目录路径（前端要显示"该把文件放哪"）。"""
     docs = kb.list_documents()
+    # 带上「这篇被切成了几块」——前端显示「2.4k 字 · 6 块」。
+    # 索引没建立时 chunk_counts 会自己从磁盘加载；真拿不到就填 0，
+    # 不能因为这个字段让整个列表 500。
+    try:
+        counts = kb.chunk_counts()
+    except Exception:
+        counts = {}
+    for d in docs:
+        d["chunks"] = int(counts.get(d.get("rel") or "", 0))
     return {"ok": True, "documents": docs, "dir": kb.KB_DIR,
             "enabled": bool(config.load_config().get("rag_enabled"))}
 
