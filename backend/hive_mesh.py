@@ -737,7 +737,6 @@ class MeshNode:
             self._last_err = "UDP 广播启动失败：%s" % e
             return
         threading.Thread(target=self._udp_recv_loop, daemon=True).start()
-        me = H.profile()
         while not self._stop:
             try:
                 with _LOCK:
