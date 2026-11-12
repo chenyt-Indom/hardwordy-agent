@@ -320,17 +320,21 @@ class HiveClient:
         body = H._open(key, rec.get("blob") or "") if key else None
         if not isinstance(body, dict):
             return
-        msg = {
-            "seq": rec.get("seq") or 0,
-            "id": mid or ("m_" + str(rec.get("seq"))),
-            "from": rec.get("uid") or body.get("from") or "?",
-            "name": body.get("name") or "成员",
-            "type": body.get("type") or "text",
-            "text": body.get("text") or "",
-            "ts": rec.get("ts") or time.time(),
-        }
-        if body.get("extra"):
-            msg.update(body["extra"])
+        # 合并信封（rec）和正文（body），再统一过 normalize_msg。
+        # 跨版本时 body 里可能有本版本不认识的字段 —— normalize 会原样保留，
+        # 不会在传输环节被吃掉；类型不认识则降级成 unknown，而不是丢掉整条。
+        merged: Dict[str, Any] = dict(rec)
+        merged.update(body)
+        if isinstance(body.get("extra"), dict):
+            merged.update(body["extra"])
+        merged.pop("blob", None)            # 密文没必要留在本地日志里
+        merged["id"] = mid or ("m_" + str(rec.get("seq")))
+        merged["from"] = rec.get("uid") or body.get("from") or "?"
+        merged["ts"] = rec.get("ts") or body.get("ts") or time.time()
+        merged["ver"] = int(rec.get("v") or body.get("ver") or 1)
+        msg = H.normalize_msg(merged)
+        if not msg:
+            return
         with self._lock:
             if mid:
                 self._seen.add(mid)
