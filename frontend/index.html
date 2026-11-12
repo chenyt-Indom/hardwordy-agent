@@ -504,6 +504,43 @@
   </div>
 
   <!-- 📄 定时任务「最近一次结果」查看窗（2026-11-11）
+  <!-- 🎼 音乐工坊（2026-11-12）
+       用户要求：「顶栏加个音乐入口，点开是个小工坊面板」。
+       纯本地算法合成（numpy + scipy），不联网、不出机，秒级出结果，最长 300 秒。
+       每首曲子的乐谱也存下来（data/music/scores），所以可以反复改编：
+       换风格重编 / 移调 / 变速 / 换配器 / 变奏 / 续写。 -->
+  <div class="sched-float mu-float" id="muFloat" hidden>
+    <div class="sched-float-head">
+      <span class="sched-float-title">🎼 音乐工坊</span>
+      <span class="badge-mini" id="muBadge">0</span>
+      <button type="button" class="sched-close" id="muClose" title="关闭（Esc）">✕</button>
+    </div>
+    <div class="mu-body">
+      <div class="mu-form">
+        <div class="mu-row">
+          <select id="muStyle" title="风格"></select>
+          <input id="muBars" type="number" min="2" max="160" step="2" value="16"
+                 title="小节数，每小节 4 拍（118bpm 下 16 小节约 33 秒）">
+          <input id="muBpm" type="number" min="40" max="220" placeholder="速度"
+                 title="BPM，留空就跟随所选风格">
+          <select id="muKey" title="调（0=C，1=升半音，-1=降半音）"></select>
+        </div>
+        <div class="mu-row">
+          <input id="muNotes" class="mu-wide"
+                 placeholder="可选旋律：C4 D4 E4 G4 或简谱 1 2 3 5 6"
+                 title="给了旋律就照它编曲；留空则自动生成旋律">
+          <label class="mu-ck"><input type="checkbox" id="muVocals" checked> 人声</label>
+          <button class="btn sm" id="muGen">生成</button>
+        </div>
+        <div class="mu-row mu-status-row">
+          <span class="mu-status" id="muStatus">纯本地合成 · 秒出 · 不联网</span>
+          <button class="btn sm ghost" id="muFolder" title="打开音乐文件夹">📂</button>
+        </div>
+      </div>
+      <div class="list mu-list" id="muList"></div>
+    </div>
+  </div>
+
        用户反馈：任务跑完只写回对话，面板里只有一行 200 字摘要，找不到结果在哪。
        所以加一个只读小窗：点任务卡片上的「看结果」打开，正文可滚动。 -->
   <div class="sched-win" id="schedWin" hidden>
