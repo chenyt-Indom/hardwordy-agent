@@ -11024,30 +11024,51 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
     _hd_running.pop(gid, None)
 
 
-@app.get("/api/hive/relay")
-def hive_relay_get():
-    return {"ok": True, "relay": hive.relay_config()}
+# ---------------------------------------------------------------- P2P 网络
+# 2026-11-13：中继相关的路由（relay 配置 / 五层探测 / 部署包 / 升级包 /
+# 让模型写部署步骤）已按需求**全部删除**。群聊改走 backend/hive_mesh.py 的
+# 纯 P2P：消息只在成员机器之间直连，不经过任何服务器。
+# 下面这组是替代它的接口。
 
 
-@app.post("/api/hive/relay/probe")
-def hive_relay_probe(body: dict):
-    """探测中继地址 —— 五层逐级验证（DNS/TCP/health/WS），带步骤日志。
+@app.get("/api/hive/mesh")
+def hive_mesh_status():
+    """P2P 网络状态：监听端口、局域网地址、在线 peer 数、待发队列。"""
+    return {"ok": True, "mesh": hive_mesh.node().status(),
+            "client": hive_client.client().status()}
 
-    不写任何配置，纯探测。建群时点「检测」走这里。
+
+@app.get("/api/hive/mesh/code")
+def hive_mesh_code(gid: str = ""):
+    """生成连接码（**只在跨网络时才需要**）。
+
+    同一个 WiFi 下根本用不上这个 —— UDP 广播会自动发现同群的人。
+    这个码是给「不在同一个网络」准备的：发给对方，他粘一下就连上，
+    数据一字节都不经过任何服务器。
     """
+    return hive_client.client().connect_code(gid)
+
+
+@app.post("/api/hive/mesh/connect")
+def hive_mesh_connect(body: dict):
+    """用连接码直连一个人。连上之后 peer exchange 会自动铺开其他成员。"""
     b = body or {}
-    try:
-        timeout = float(b.get("timeout") or 6)
-    except Exception:
-        timeout = 6.0
-    try:
-        return hive_deploy.probe_auto(b.get("url") or "", timeout=timeout)
-    except Exception as e:
-        return {"ok": False, "error": {"code": "unknown", "title": "探测出错",
-                                       "reason": f"{type(e).__name__}: {e}",
-                                       "advice": []},
-                "steps": [], "url": b.get("url") or "", "health": None,
-                "latency_ms": 0}
+    gid = b.get("gid") or ""
+    code = (b.get("code") or "").strip()
+    if not gid:
+        return {"ok": False, "error": "缺群号"}
+    if not code:
+        return {"ok": False, "error": "连接码不能为空"}
+    r = hive_client.client().connect_to(gid, code)
+    return {"ok": bool(r.get("ok")), "result": r,
+            "client": hive_client.client().status()}
+
+
+@app.get("/api/hive/{gid}/peers")
+def hive_peers(gid: str):
+    """这个群现在连上了谁（局域网发现的 + 手动连的）。"""
+    return {"ok": True, "peers": hive_client.client().lan_beacons(gid),
+            "mesh": hive_mesh.node().status()}
 
 
 @app.post("/api/hive/relay/bundle")
