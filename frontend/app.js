@@ -8651,8 +8651,6 @@
     function openModal(opt) {
       el("hiveModalTitle").textContent = opt.title || "";
       el("hiveModalHint").textContent = opt.hint || "";
-      const img = el("hiveQrImg");
-      if (opt.qr) { img.src = opt.qr; img.hidden = false; } else { img.hidden = true; }
       const ta = el("hiveModalInput");
       if (opt.input != null) {
         ta.value = opt.input;
