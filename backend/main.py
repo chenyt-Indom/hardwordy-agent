@@ -10554,6 +10554,46 @@ def hive_kick(gid: str, body: dict):
     return {"ok": True, **r}
 
 
+@app.get("/api/hive/{gid}/memory")
+def hive_memory_get(gid: str):
+    """读群记忆（没有就现建一份）。"""
+    try:
+        return {"ok": True, **hive.read_memory(gid)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/memory/rebuild")
+def hive_memory_rebuild(gid: str, body: dict = None):
+    """按当前群聊内容重建群记忆（覆盖写）。
+
+    为什么要手动重建：自动重建只在 @hd 跑任务时按需触发，
+    用户想立刻看到「现在这个群被理解成什么样」时得有个按钮。
+    """
+    try:
+        r = hive.rebuild_memory(gid)
+        return {"ok": True, **r}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/delete")
+def hive_delete(gid: str, body: dict = None):
+    """删除群（仅群主）。目录移到 data/hive/_deleted/，误删能捞回来。"""
+    try:
+        r = hive.delete_group(gid)
+    except PermissionError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    # 通知其他成员：他们本地那份也要下线（否则列表里还挂着一个打不开的群）
+    try:
+        hive_client.client().broadcast_gone(gid, r.get("name") or "")
+    except Exception:
+        pass
+    return {"ok": True, **r}
+
+
 @app.post("/api/hive/{gid}/leave")
 def hive_leave(gid: str, body: dict = None):
     """成员主动退出群。
