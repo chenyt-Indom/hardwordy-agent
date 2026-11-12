@@ -460,12 +460,24 @@ def _file_sha(path: str, limit_mb: int = 0) -> str:
     return h.hexdigest()
 
 
-def share(gid: str, fid: str, port: int = 0, want_upnp: bool = True) -> Dict[str, Any]:
-    """开始共享一个文件，返回连接码。同一文件重复调用会复用已有监听。"""
-    meta = H.get_file_meta(gid, fid)
-    path = H.file_path(gid, fid)
-    if not os.path.exists(path):
-        raise ValueError("文件不在本机")
+def share(gid: str, fid: str, port: int = 0, want_upnp: bool = True,
+          src_path: str = "", name: str = "") -> Dict[str, Any]:
+    """开始共享一个文件，返回连接码。同一文件重复调用会复用已有监听。
+
+    src_path 非空时共享**本机任意文件**：不复制、不读进内存，直接按偏移量读原文件。
+    这是发 G 级文件的唯一可行路径 —— 走上传接口要先 base64 进内存，几个 G 直接炸。
+    """
+    if src_path:
+        path = os.path.abspath(src_path)
+        if not os.path.isfile(path):
+            raise ValueError("找不到这个文件：" + src_path)
+        disp = name or os.path.basename(path)
+        meta = {"name": disp, "size": os.path.getsize(path), "fid": fid}
+    else:
+        meta = H.get_file_meta(gid, fid)
+        path = H.file_path(gid, fid)
+        if not os.path.exists(path):
+            raise ValueError("文件不在本机")
     size = os.path.getsize(path)
 
     with _LOCK:
