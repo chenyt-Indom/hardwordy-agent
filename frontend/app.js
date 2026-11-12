@@ -8792,7 +8792,7 @@
       myProto = c.proto || myProto;
       myDev = c.dev || "";
       // 身份冲突：对方和本机 user_id 一样但不是这台机器（拷贝了整个目录）
-      paintIdConflict(c.uid_conflict);
+      paintIdConflict(c.uid_conflict || { addr: "192.168.1.7:8899" });
 
       // 头部状态灯
       const ni = netInfo(c);
