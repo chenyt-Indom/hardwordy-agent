@@ -37,3 +37,7 @@ pyinstaller>=6.0
 python-pptx>=1.0.0
 # 生成 Word 文档（make_docx 工具）。纯 Python，带 lxml。
 python-docx>=1.0.0
+
+# 多人协作群（Hive）：把入群链接画成二维码。纯 Python，无系统依赖。
+# websockets 已经由 uvicorn[standard] 带进来，不需要单独写。
+qrcode>=7.4
