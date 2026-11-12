@@ -350,40 +350,372 @@ def _remove_file(path: str) -> bool:
         return False
 
 
-# ---------- 检索（TF-IDF + 余弦）----------
-def _build_index():
-    """返回 {doc_id: {term: tf, 'total': n}} 及全局 idf。"""
-    _ensure_dir()
-    documents = {}
-    raw_len = {}
-    for rel, path in _iter_docs():
-        tokens = _tokenize(_read(path))
-        if not tokens:
+# ---------- 分块 ----------
+# 块大小的取舍：太小 → 语义不完整、块数暴增；太大 → 又回到"整篇稀释"。
+# 400 字左右是中文检索的常用甜点区，配合 70 字重叠避免答案被切在边界上。
+CHUNK_TARGET = 420
+CHUNK_MIN = 180
+CHUNK_MAX = 720
+CHUNK_OVERLAP = 70
+
+# 混合检索权重：向量为主（语义泛化），关键词为辅（专有名词/编号/数字更准）
+VEC_WEIGHT = 0.65
+KW_WEIGHT = 0.35
+
+# 阈值：低于这个分的不返回（用户要求"分数太低的不给"）
+MIN_VEC = 0.30          # 纯语义相似度下限
+MIN_KW = 0.25           # 关键词归一化分下限
+MIN_FINAL = 0.22        # 融合分下限
+
+_INDEX_META = os.path.join(KB_DIR, "_vec_meta.json")
+_INDEX_VEC = os.path.join(KB_DIR, "_vec.npy")
+_INDEX_VERSION = 2
+
+
+def _split_long(par: str, limit: int):
+    """把超长段落按句末标点切成 <= limit 的片段。"""
+    out, buf = [], ""
+    for sent in re.split(r"(?<=[。！？；!?;\n])", par):
+        if not sent:
             continue
-        did = _doc_id(path)
-        documents[did] = {}
-        for t in tokens:
-            documents[did][t] = documents[did].get(t, 0) + 1
-        raw_len[did] = len(tokens)
-    # idf
-    df = {}
-    for did in documents:
-        for t in set(documents[did]):
-            df[t] = df.get(t, 0) + 1
-    n = max(len(documents), 1)
-    idf = {t: math.log((n + 1) / (freq + 1)) + 1 for t, freq in df.items()}
-    return documents, idf, raw_len
+        if len(buf) + len(sent) > limit and buf:
+            out.append(buf)
+            buf = sent
+        else:
+            buf += sent
+        # 单句本身就超长（没有标点的长串）时硬切
+        while len(buf) > limit:
+            out.append(buf[:limit])
+            buf = buf[limit:]
+    if buf.strip():
+        out.append(buf)
+    return out
 
 
-def _cosine(a: dict, b: dict) -> float:
-    if not a or not b:
-        return 0.0
-    dot = sum(a[t] * b.get(t, 0) for t in a)
-    norm_a = math.sqrt(sum(v * v for v in a.values()))
-    norm_b = math.sqrt(sum(v * v for v in b.values()))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+def _chunk_text(text: str):
+    """把一篇文档切成检索用的块。
+
+    策略：语义边界优先 —— 先按空行 / Markdown 标题切段落，
+    段落太短就往后合并、太长就按句号再切，最后相邻块保留 70 字重叠。
+
+    ⚠️ 这是本次改造的核心。原来是**整篇文档一个向量**：
+    34.5 万字的 PDF 里某一段的匹配，会被整篇的平均词频稀释到接近 0，
+    于是"文件明明在库里、就是检索不出来"。切成 400 字左右的块之后，
+    每个块只跟"这一段"比，召回率的提升是数量级的。
+    """
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return []
+
+    paras, buf = [], ""
+    for line in text.split("\n"):
+        s = line.strip()
+        if not s:
+            if buf.strip():
+                paras.append(buf)
+            buf = ""
+            continue
+        # 标题行天然是语义边界，前面攒的内容先结块
+        if re.match(r"^#{1,6}\s", s) and buf.strip():
+            paras.append(buf)
+            buf = s + "\n"
+            continue
+        buf += line + "\n"
+    if buf.strip():
+        paras.append(buf)
+
+    merged, cur = [], ""
+    for p in paras:
+        p = p.strip()
+        if not p:
+            continue
+        if len(p) > CHUNK_MAX:
+            if cur:
+                merged.append(cur)
+                cur = ""
+            merged.extend(_split_long(p, CHUNK_TARGET))
+            continue
+        if len(cur) + len(p) + 1 <= CHUNK_TARGET:
+            cur = (cur + "\n" + p) if cur else p
+        else:
+            if cur:
+                merged.append(cur)
+            cur = p
+    if cur:
+        merged.append(cur)
+
+    # 末尾单句成块检索价值低，还占 top_k 名额，并进前一块
+    chunks = []
+    for c in merged:
+        if chunks and len(c) < CHUNK_MIN // 2:
+            chunks[-1] = chunks[-1] + "\n" + c
+        else:
+            chunks.append(c)
+
+    out, prev_tail = [], ""
+    for c in chunks:
+        out.append(((prev_tail + "\n" + c).strip() if prev_tail else c))
+        prev_tail = c[-CHUNK_OVERLAP:] if len(c) > CHUNK_OVERLAP else c
+    return out
+
+
+# ---------- 索引（分块 + 向量 + BM25 倒排）----------
+# 结构：
+#   files   {doc_id: {"mtime":..., "size":..., "n": 块数, "rel":...}}
+#   chunks  [{"doc_id","rel","idx","text"}]
+#   vectors np.float32 (N, dim) —— 已 L2 归一化，余弦即点积
+#   tokens  [list[str]] —— 仅内存，用于 BM25，不落盘（能从 text 重算）
+_idx = {"sig": "", "files": {}, "chunks": [], "vectors": None, "tokens": []}
+_idx_lock = threading.RLock()
+_idx_state = {"building": False, "last_ms": 0, "last_n": 0, "error": ""}
+
+
+def _doc_scan():
+    """扫描当前文档，返回 [(doc_id, rel, path, mtime, size)]。"""
+    out = []
+    for rel, path in _iter_docs():
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        out.append((_doc_id(path), rel, path, st.st_mtime, st.st_size))
+    return out
+
+
+def _load_index():
+    """从磁盘载入索引；签名不匹配（换模型/换维度）就当作没有。"""
+    global _idx
+    sig = embed_mod.signature()
+    try:
+        with open(_INDEX_META, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except Exception:
+        meta = None
+    if not meta or meta.get("version") != _INDEX_VERSION:
+        return False
+    # ⚠️ 模型换了（维度不同）必须重建 —— 否则余弦拿两个不同空间的向量算，
+    # 结果是错的，而且**不会报错**，最难查
+    if str(meta.get("sig")) != str(sig):
+        return False
+    vec_path = meta.get("vec_file") or _INDEX_VEC
+    try:
+        vectors = np.load(vec_path).astype(np.float32)
+    except Exception:
+        return False
+    chunks = meta.get("chunks") or []
+    if vectors.ndim != 2 or vectors.shape[0] != len(chunks):
+        return False
+    _idx = {"sig": sig, "files": meta.get("files") or {}, "chunks": chunks,
+            "vectors": vectors, "tokens": [_tokenize(c.get("text", "")) for c in chunks]}
+    return True
+
+
+def _save_index():
+    _ensure_dir()
+    with _idx_lock:
+        vectors = _idx.get("vectors")
+        if vectors is None:
+            vectors = np.zeros((0, 0), dtype=np.float32)
+        # .npy 单独存：向量是二进制，塞进 json 会膨胀十几倍
+        tmp_vec = _INDEX_VEC + ".tmp.npy"
+        np.save(tmp_vec, vectors)
+        meta = {"version": _INDEX_VERSION, "sig": _idx.get("sig", ""),
+                "dim": int(vectors.shape[1]) if vectors.ndim == 2 else 0,
+                "files": _idx.get("files", {}), "chunks": _idx.get("chunks", []),
+                "vec_file": _INDEX_VEC, "built_at": time.time()}
+        tmp_meta = _INDEX_META + ".tmp"
+        with open(tmp_meta, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False)
+        os.replace(tmp_vec, _INDEX_VEC)
+        os.replace(tmp_meta, _INDEX_META)
+
+
+def _embed_chunks(texts):
+    """把块文本向量化；后端不可用时返回 None。"""
+    if not texts:
+        return np.zeros((0, 0), dtype=np.float32)
+    return embed_mod.embed_texts(texts, is_query=False)
+
+
+def _build_index(force: bool = False):
+    """构建/增量更新索引。返回统计 dict。
+
+    增量规则：文档的 mtime + size 都没变，就**原样复用**它的块和向量；
+    只有变过的文档才重新分块 + 向量化。这样往库里加一篇新文档时，
+    不需要把已有几百块全部重算一遍。
+    """
+    global _idx
+    with _idx_lock:
+        if _idx_state.get("building"):
+            return {"ok": False, "error": "索引正在构建中"}
+        _idx_state["building"] = True
+    t0 = time.time()
+    try:
+        sig = embed_mod.signature()
+        with _idx_lock:
+            if force or not _idx.get("chunks") and not _idx.get("files"):
+                _idx = {"sig": sig, "files": {}, "chunks": [], "vectors": None, "tokens": []}
+            elif _idx.get("sig") != sig:
+                _idx = {"sig": sig, "files": {}, "chunks": [], "vectors": None, "tokens": []}
+
+        scan = _doc_scan()
+        old_files = dict(_idx.get("files") or {})
+        old_chunks = list(_idx.get("chunks") or [])
+        old_vec = _idx.get("vectors")
+
+        # 按文档把旧块分组（保持顺序，便于复用）
+        old_by_doc = {}
+        if old_vec is not None and len(old_chunks) == len(old_vec):
+            for i, c in enumerate(old_chunks):
+                old_by_doc.setdefault(c.get("doc_id"), []).append((c, old_vec[i]))
+
+        new_files, new_chunks, new_vecs, need = {}, [], [], []
+        for did, rel, path, mtime, size in scan:
+            rec = old_files.get(did)
+            reused = False
+            if (not force and rec and rec.get("mtime") == mtime
+                    and rec.get("size") == size and did in old_by_doc):
+                pairs = old_by_doc[did]
+                if len(pairs) == int(rec.get("n") or 0):
+                    for c, v in pairs:
+                        new_chunks.append(c)
+                        new_vecs.append(v)
+                    new_files[did] = rec
+                    reused = True
+            if reused:
+                continue
+            text, _note = read_doc(path)
+            pieces = _chunk_text(text)
+            if not pieces:
+                continue
+            base = len(new_chunks)
+            for i, p in enumerate(pieces):
+                new_chunks.append({"doc_id": did, "rel": rel, "idx": i, "text": p})
+                new_vecs.append(None)          # 占位，待向量化
+            new_files[did] = {"mtime": mtime, "size": size, "n": len(pieces), "rel": rel}
+            need.append((base, len(pieces)))
+
+        # 向量化：只算新块
+        if need:
+            pending = []
+            for base, n in need:
+                pending.extend(range(base, base + n))
+            vecs = _embed_chunks([new_chunks[i]["text"] for i in pending])
+            if vecs is None:
+                # 没有向量后端：索引照样建（关键词检索可用），但不落盘向量
+                for i in pending:
+                    new_vecs[i] = None
+                _idx_state["error"] = embed_mod.info().get("error") or "向量后端不可用"
+            else:
+                for k, i in enumerate(pending):
+                    new_vecs[i] = vecs[k]
+
+        # 组装：有向量的块留在索引里；整库都没有向量时退化为纯关键词模式
+        has_vec = any(v is not None for v in new_vecs)
+        if has_vec and new_vecs:
+            keep = [i for i, v in enumerate(new_vecs) if v is not None]
+            chunks = [new_chunks[i] for i in keep]
+            vectors = np.asarray([new_vecs[i] for i in keep], dtype=np.float32)
+        else:
+            chunks = new_chunks
+            vectors = None
+
+        with _idx_lock:
+            _idx = {"sig": sig, "files": new_files, "chunks": chunks,
+                    "vectors": vectors,
+                    "tokens": [_tokenize(c.get("text", "")) for c in chunks]}
+        if vectors is not None:
+            _save_index()
+        _idx_state["last_ms"] = int((time.time() - t0) * 1000)
+        _idx_state["last_n"] = len(chunks)
+        _idx_state["error"] = "" if vectors is not None else _idx_state.get("error", "")
+        return {"ok": True, "chunks": len(chunks), "docs": len(new_files),
+                "embedded": vectors is not None,
+                "ms": _idx_state["last_ms"], "sig": sig,
+                "note": "" if vectors is not None else
+                        ("向量后端不可用，已退化为关键词检索：" +
+                         (embed_mod.info().get("error") or ""))}
+    except Exception as e:
+        logging.getLogger("uvicorn.error").warning("构建知识库索引失败", exc_info=True)
+        _idx_state["error"] = str(e)
+        return {"ok": False, "error": str(e)}
+    finally:
+        _idx_state["building"] = False
+
+
+def ensure_index():
+    """确保索引可用（首次检索时自动构建）。"""
+    with _idx_lock:
+        ready = bool(_idx.get("chunks")) or bool(_idx.get("files"))
+        vectors = _idx.get("vectors")
+    if not ready:
+        _load_index()
+    with _idx_lock:
+        if not _idx.get("chunks"):
+            return _build_index()
+        # 库里新增/删除了文档时也要重建（增量，很快）
+        if vectors is None:
+            return _build_index()
+    return {"ok": True, "chunks": len(_idx.get("chunks") or []),
+            "docs": len(_idx.get("files") or {}), "embedded": True, "ms": 0}
+
+
+def reindex(force: bool = True):
+    """手动重建索引（界面按钮用）。"""
+    if force:
+        embed_mod.probe(force=True)
+    return _build_index(force=force)
+
+
+def index_status():
+    """索引状态（前端显示用）。"""
+    with _idx_lock:
+        chunks = len(_idx.get("chunks") or [])
+        vectors = _idx.get("vectors")
+        files = len(_idx.get("files") or {})
+        sig = _idx.get("sig", "")
+    info = embed_mod.info()
+    return {"chunks": chunks, "docs": files, "embedded": vectors is not None,
+            "dim": int(vectors.shape[1]) if vectors is not None and vectors.ndim == 2 else 0,
+            "sig": sig, "backend": info.get("backend"), "model": info.get("model"),
+            "ready": bool(info.get("ready")), "error": info.get("error") or _idx_state.get("error", ""),
+            "building": bool(_idx_state.get("building")),
+            "last_ms": _idx_state.get("last_ms", 0),
+            "hint": "" if info.get("ready") else embed_mod.install_hint()}
+
+
+def _build_postings(tokens_list):
+    """BM25 倒排：{term: [(chunk_i, tf)]} + 各块长度。"""
+    post, lens = {}, []
+    for i, toks in enumerate(tokens_list):
+        lens.append(len(toks))
+        cnt = {}
+        for t in toks:
+            cnt[t] = cnt.get(t, 0) + 1
+        for t, f in cnt.items():
+            post.setdefault(t, []).append((i, f))
+    return post, lens
+
+
+def _bm25(q_tokens, tokens_list, post=None, lens=None, k1=1.5, b=0.75):
+    """标准 BM25。只遍历查询词命中的倒排链，不全库扫。"""
+    n = len(tokens_list)
+    if n == 0:
+        return np.zeros(0, dtype=np.float32)
+    if post is None:
+        post, lens = _build_postings(tokens_list)
+    avgdl = max(sum(lens) / max(n, 1), 1.0)
+    scores = np.zeros(n, dtype=np.float32)
+    for t in set(q_tokens):
+        plist = post.get(t)
+        if not plist:
+            continue
+        df = len(plist)
+        idf = math.log(1.0 + (n - df + 0.5) / (df + 0.5))
+        for i, f in plist:
+            denom = f + k1 * (1.0 - b + b * lens[i] / avgdl)
+            scores[i] += idf * f * (k1 + 1.0) / denom
+    return scores
 
 
 def search(query: str, top_k: int = 6):
