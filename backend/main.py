@@ -10372,7 +10372,6 @@ def hive_profile_renew():
     return {"ok": True, "profile": {"user_id": p.get("user_id"), "name": p.get("name")}}
 
 
-@app.post("/api/hive/create")
 def _hive_after_join(g: dict, target: str) -> dict:
     """入群后的收尾：启动 P2P 网络、广播「XX 加入了群」、同步成员表。
 
