@@ -1229,56 +1229,14 @@ def store_incoming(gid: str, meta: Dict[str, Any], data: bytes) -> Dict[str, Any
     return out
 
 
-# ---------------------------------------------------------------- 邀请 / 二维码
-
-def invite_payload(gid: str, host: str = "") -> Dict[str, Any]:
-    """生成二维码内容。包含群号、密钥、群名、群主名 —— 扫码即入群。"""
-    g = load_group(gid)
-    if not g:
-        raise ValueError("群不存在")
-    me = profile()
-    if g.get("owner") != me["user_id"]:
-        # 非群主也能拉人，但用的是同一个群密钥（邀请码共享）
-        pass
-    from urllib.parse import urlencode
-    q = {
-        "g": g["gid"],
-        "k": g.get("key", ""),
-        "n": g.get("name", ""),
-        "o": g.get("owner_name", ""),
-        "o_id": g.get("owner", ""),
-    }
-    if host:
-        q["h"] = host
-    payload = "hive://join?" + urlencode(q)
-    return {
-        "gid": gid,
-        "payload": payload,
-        "kfp": g.get("kfp"),
-        "host": host,
-        "qr_png": _qr_data_url(payload),
-    }
-
-
-def _qr_data_url(text: str) -> str:
-    """把载荷画成二维码，返回 data:image/png;base64,...（前端直接 <img src>）。"""
-    try:
-        import io
-
-        import qrcode
-    except Exception:
-        return ""
-    try:
-        qr = qrcode.QRCode(version=None, box_size=6, border=2,
-                           error_correction=qrcode.constants.ERROR_CORRECT_M)
-        qr.add_data(text)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-    except Exception:
-        return ""
+# ---------------------------------------------------------------- 邀请（已改密码）
+#
+# 2026-11-13：二维码整套删掉了。
+# 原因很直接 —— 这是电脑上的程序，没有摄像头可以扫码；
+# 原来那句「手机扫码直接打开入群链接」也不成立，手机上根本没装这个软件。
+# 真正起作用的从来是二维码下面那串文本。
+# 现在改成 12 位入群密码：群主看得到、成员输得进、不用传长串口令。
+# 老版本留下的 hive://join?... 口令仍能入群（见 join_group）。
 
 
 # ---------------------------------------------------------------- @hd 指令解析
