@@ -3632,7 +3632,10 @@ html[data-theme="light"] select.pill-select option {
 .hive-item .hi-dot.live { background: var(--green); }
 
 /* ---------- 主区：群聊界面 ---------- */
-.hive-main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.hive-main {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  overflow: hidden;           /* 兜底：子元素再高也不许撑破主区域 */
+}
 .hive-main[hidden] { display: none; }
 
 .hive-head {
