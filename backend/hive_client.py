@@ -447,6 +447,11 @@ class HiveClient:
             return p
         return m.connect(p["host"], p["port"], gid)
 
+    def seen_beacons(self) -> List[Dict[str, Any]]:
+        """局域网里听到的所有群广播（含自己不在的群）—— 密码入群靠它找群。"""
+        m = MESH.node()
+        return m.seen_beacons()
+
     def lan_beacons(self, gid: str) -> List[Dict[str, Any]]:
         """局域网里发现的同群成员（不含自己）。"""
         m = MESH.node()
