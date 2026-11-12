@@ -581,6 +581,15 @@ class MeshNode:
                 if isinstance(k, dict) and k.get("uid"):
                     self._learn(k, gid)
             self._merge_members(gid, obj.get("members"), obj.get("kicked"))
+            # 握手完成后互报水位：双方各发一次 T_SYNC，谁缺谁补。
+            # ⚠️ 2026-11-13 修：原来握手只发 T_HELLO，从不发 T_SYNC ——
+            #    于是「历史消息补发」这条路径其实从未生效，只有 outbox 在兜。
+            #    结果：走 send_message 落盘的消息（@hd 的回答、系统消息）
+            #    在对方当时不在线时，上线后永远补不到。实测确认。
+            try:
+                peer.send(T_SYNC, {"since": H.max_ts(gid)})
+            except Exception:
+                pass
             return
         if typ == T_MEMBERS:
             self._merge_members(gid, obj.get("members"), obj.get("kicked"))
