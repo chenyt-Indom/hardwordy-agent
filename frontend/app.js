@@ -9652,6 +9652,14 @@
     }
     if (el("p2pList")) {
       el("p2pList").addEventListener("click", (ev) => {
+        // 局域网发现的一键接收
+        const g = ev.target && ev.target.closest && ev.target.closest("[data-p2pcode]");
+        if (g) {
+          const inp = el("p2pInput");
+          if (inp) inp.value = g.getAttribute("data-p2pcode") || "";
+          p2pReceive();
+          return;
+        }
         const b = ev.target && ev.target.closest && ev.target.closest("[data-p2pact]");
         if (!b) return;
         p2pAct(b.getAttribute("data-tid"), b.getAttribute("data-p2pact"));
