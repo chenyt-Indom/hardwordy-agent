@@ -220,21 +220,50 @@ async def handler(ws: WebSocketServerProtocol) -> None:
 
             elif t == "msg" and room is not None:
                 # 消息体是密文，服务器不解析、只定序
+                blob = m.get("blob") or ""
+                if not blob:
+                    await ws.send(json.dumps(
+                        {"t": "error", "code": "empty_msg", "msg": "消息体是空的"},
+                        ensure_ascii=False))
+                    continue
                 async with _LOCK:
                     room.seq += 1
                     rec = {
                         "seq": room.seq,
                         "mid": (m.get("mid") or "")[:40],
                         "uid": uid,
-                        "blob": m.get("blob") or "",
+                        "blob": blob,
                         "ts": float(m.get("ts") or time.time()),
+                        "v": int(m.get("v") or 1),   # 发送者的协议版本
                     }
                     _append(room.gid, rec)
                     _save_seq(room.gid, room.seq)
                 await room.broadcast({"t": "msg", **rec}, skip=None)
 
             elif t == "ping":
-                await ws.send(json.dumps({"t": "pong", "ts": time.time()}))
+                # 客户端用心跳测延迟。回 ts 让对面算 RTT。
+                await ws.send(json.dumps({
+                    "t": "pong", "ts": time.time(),
+                    "echo": m.get("ts"), "proto": PROTO_VER,
+                }))
+
+            elif t == "hello":
+                # 只探活、不加入房间（用于"这个地址通不通"的轻量检查）
+                await ws.send(json.dumps({
+                    "t": "welcome", "svc": "hive-relay",
+                    "proto": PROTO_VER, "relay_ver": _RELAY_VER,
+                    "rooms": len(ROOMS), "ts": time.time(),
+                }, ensure_ascii=False))
+
+            else:
+                # ⚠️ 不认识的类型**不踢连接、不静默丢弃**。
+                # 可能是更新版本的客户端发了中继还不懂的东西 ——
+                # 回一条 error 让对方知道，但连接保留，其余功能照常。
+                await ws.send(json.dumps({
+                    "t": "error", "code": "unknown_type",
+                    "msg": f"不认识的消息类型「{t}」"
+                           f"（中继 v{_RELAY_VER} / proto {PROTO_VER}）",
+                }, ensure_ascii=False))
 
     except websockets.exceptions.ConnectionClosed:
         pass
