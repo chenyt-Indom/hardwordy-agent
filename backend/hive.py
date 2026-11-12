@@ -35,7 +35,6 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA = os.path.join(_ROOT, "data", "hive")
 _GROUPS = os.path.join(_DATA, "groups")
 _PROFILE = os.path.join(_DATA, "profile.json")
-_CFG = os.path.join(_DATA, "relay.json")
 
 _LOCK = threading.RLock()
 
