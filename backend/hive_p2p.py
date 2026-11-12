@@ -161,15 +161,27 @@ def _upd(tid: str, **kw) -> None:
             _TRANSFERS[tid].update(kw)
 
 
+_PLAIN = (str, int, float, bool, type(None), dict, list)
+
+
+def _public(r: Dict[str, Any]) -> Dict[str, Any]:
+    """只留能 JSON 序列化的字段。
+
+    ⚠️ 内部状态里放着 `threading.Event`（用于暂停/取消），直接返回给
+       FastAPI 会在序列化时炸掉 —— 必须在这里筛一遍。
+    """
+    return {k: v for k, v in r.items() if isinstance(v, _PLAIN)}
+
+
 def get(tid: str) -> Optional[Dict[str, Any]]:
     with _LOCK:
         r = _TRANSFERS.get(tid)
-        return dict(r) if r else None
+        return _public(r) if r else None
 
 
 def list_all(gid: str = "") -> List[Dict[str, Any]]:
     with _LOCK:
-        out = [dict(v) for v in _TRANSFERS.values()]
+        out = [_public(v) for v in _TRANSFERS.values()]
     if gid:
         out = [r for r in out if r.get("gid") == gid]
     return sorted(out, key=lambda r: r.get("ts", 0), reverse=True)
