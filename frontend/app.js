@@ -9185,7 +9185,7 @@
     // ---------------------------------------------------------- 启动
     let saved = "single";
     try { saved = localStorage.getItem("ui_mode") || "single"; } catch (e) { /* 忽略 */ }
-    setMode(saved === "hive" ? "hive" : "single");
+    setMode("hive"); // TEMP-SHOT
   })();
 
 })();
