@@ -9200,6 +9200,116 @@
       }
     }
 
+    // ---------------------------------------------------------- 附件上传
+    //
+    // 流程：选文件 → 读成 dataURL → POST /upload 落盘 → 拿到 meta
+    //      → 发消息时把 meta 列表放进 extra.files。
+    // 为什么**先上传再发消息**：文件要先落进群目录才能被广播出去；
+    // 而且上传失败时消息不该发出去（否则群里会出现一条指向空文件的消息）。
+    let pendingFiles = [];        // [{name,size,kind,preview,meta,up}]
+    let uploading = false;
+    const HIVE_MAX_FILE = 20 * 1024 * 1024;
+
+    function renderAttachBar() {
+      const bar = el("hiveAttachBar");
+      if (!bar) return;
+      if (!pendingFiles.length) {
+        bar.hidden = true;
+        bar.innerHTML = "";
+        return;
+      }
+      bar.hidden = false;
+      bar.innerHTML = pendingFiles.map((f, i) => {
+        const img = f.preview
+          ? '<img src="' + f.preview + '" alt="">'
+          : '<span class="hc-ico">' + fileIco({ name: f.name, kind: f.kind }) + "</span>";
+        return '<div class="hive-chip' + (f.up ? " up" : "") + '">'
+          + img
+          + '<span class="hc-name" title="' + hEsc(f.name) + '">' + hEsc(f.name) + "</span>"
+          + '<span class="hc-size">' + (f.up ? "上传中…" : fmtSize(f.size)) + "</span>"
+          + '<button type="button" class="hc-x" data-del="' + i + '" title="移除">✕</button>'
+          + "</div>";
+      }).join("");
+      Array.prototype.forEach.call(bar.querySelectorAll("[data-del]"), (b) => {
+        b.addEventListener("click", () => {
+          const i = parseInt(b.getAttribute("data-del"), 10);
+          if (!isNaN(i)) pendingFiles.splice(i, 1);
+          renderAttachBar();
+        });
+      });
+    }
+
+    function readAsDataURL(file) {
+      return new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(String(r.result || ""));
+        r.onerror = () => rej(new Error("这个文件读不出来"));
+        r.readAsDataURL(file);
+      });
+    }
+
+    async function addFiles(list) {
+      if (!curGid) { alert("先在左边选一个群，再上传附件"); return; }
+      const arr = Array.prototype.slice.call(list || []);
+      if (!arr.length) return;
+      uploading = true;
+      for (const file of arr) {
+        if (file.size > HIVE_MAX_FILE) {
+          alert("「" + file.name + "」太大（" + fmtSize(file.size) + "），单个上限 "
+            + fmtSize(HIVE_MAX_FILE));
+          continue;
+        }
+        const isImg = /^image\//.test(file.type || "");
+        const item = {
+          name: file.name, size: file.size,
+          kind: isImg ? "image" : "doc",
+          preview: "", meta: null, up: true,
+        };
+        pendingFiles.push(item);
+        renderAttachBar();
+        try {
+          const dataUrl = await readAsDataURL(file);
+          if (isImg) item.preview = dataUrl;      // 缩略图先用本地 dataURL，秒出
+          const r = await api("/api/hive/" + encodeURIComponent(curGid) + "/upload",
+            { name: file.name, mime: file.type || "", data: dataUrl });
+          if (!r.ok) throw new Error(r.error || "上传失败");
+          item.meta = r.file;
+          item.kind = r.file.kind || item.kind;
+          item.up = false;
+        } catch (e) {
+          item.up = false;
+          pendingFiles = pendingFiles.filter((x) => x !== item);
+          alert("「" + file.name + "」上传失败：" + e.message);
+        }
+        renderAttachBar();
+      }
+      uploading = false;
+    }
+
+    // 三个上传入口（图片 / 文档 / 视频）走同一个 addFiles，
+    // accept 只影响选择框过滤，最终按真实 mime 归类。
+    el("hiveAttachBtn").addEventListener("click", () => el("hiveFileInput").click());
+    el("hiveDocBtn").addEventListener("click", () => el("hiveDocInput").click());
+    el("hiveVideoBtn").addEventListener("click", () => el("hiveVideoInput").click());
+    ["hiveFileInput", "hiveDocInput", "hiveVideoInput"].forEach((id) => {
+      const inp = el(id);
+      if (inp) {
+        inp.addEventListener("change", () => {
+          addFiles(inp.files);
+          inp.value = "";          // 清空，否则同一个文件选第二次不触发 change
+        });
+      }
+    });
+
+    // 拖拽：全局那套在 document 捕获阶段就接走了，所以这里把入口暴露给外层，
+    // 由外层判断"当前是群聊模式"再转过来（见 app.js 的 drop 处理）。
+    window.__hiveOnDrop = (files) => addFiles(files);
+    window.__hiveMode = false;
+
+    // 引用条关闭
+    const qx = el("hiveQuoteX");
+    if (qx) qx.addEventListener("click", clearQuote);
+
     el("hiveSendBtn").addEventListener("click", sendMsg);
     el("hiveText").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); }
