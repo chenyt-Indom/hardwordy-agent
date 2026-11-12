@@ -13,6 +13,7 @@ import math
 import time
 import threading
 import logging
+import unicodedata
 
 import numpy as np
 
