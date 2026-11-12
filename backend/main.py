@@ -11071,80 +11071,8 @@ def hive_peers(gid: str):
             "mesh": hive_mesh.node().status()}
 
 
-@app.post("/api/hive/relay/bundle")
-def hive_relay_bundle(body: dict):
-    """生成中继部署包（zip：中继服务 + systemd/docker/nginx + 跨 WiFi 方案）。"""
-    b = body or {}
-    try:
-        r = hive_deploy.make_bundle({
-            "os": b.get("os") or "", "domain": b.get("domain") or "",
-            "note": b.get("note") or ""})
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    return {"ok": True, **r,
-            "download": "/api/hive/relay/bundle/download"}
-
-
-@app.get("/api/hive/relay/bundle/download")
-def hive_relay_bundle_download():
-    p = hive_deploy.status().get("bundle") or ""
-    if not p or not os.path.exists(p):
-        raise HTTPException(404, "还没生成部署包，先在界面上点「生成部署包」")
-    return FileResponse(p, filename="hive-relay-deploy.zip",
-                        media_type="application/zip")
-
-
-@app.get("/api/hive/upgrade/download")
-def hive_upgrade_download():
-    """下载「把服务器上的应用升级到带内置中继」的包（4 个 py + 说明）。"""
-    p = os.path.join(hive._DATA, "hive_upgrade.zip")
-    if not os.path.exists(p):
-        raise HTTPException(404, "升级包还没生成")
-    return FileResponse(p, filename="hive_upgrade.zip",
-                        media_type="application/zip")
-
-
-@app.get("/api/hive/relay/last")
-def hive_relay_last():
-    """上次用过的中继地址（建群时提示「沿用上次」）。"""
-    return {"ok": True, "last": hive_deploy.last_relay()}
-
-
-@app.post("/api/hive/relay/guide")
-def hive_relay_guide(body: dict):
-    """让模型按群主的实际环境写部署步骤（系统/域名/失败原因都带进去）。"""
-    b = body or {}
-
-    def _ask(system_p: str, user_p: str) -> str:
-        cfg = config.load_config() or {}
-        model = cfg.get("default_model") or ""
-        if not model:
-            raise RuntimeError("没有配置默认模型（先在设置里选一个）")
-        resp = client.chat(
-            [{"role": "system", "content": system_p},
-             {"role": "user", "content": user_p}],
-            model=model, stream=False,
-            params={"temperature": 0.2, "max_tokens": 1800})
-        d = resp.json()
-        msg = d.get("message") or {}
-        text = (msg.get("content") or "").strip()
-        if not text:
-            raise RuntimeError("模型没有返回正文")
-        return text
-
-    return hive_deploy.llm_guide(b, _ask)
-
-
-@app.post("/api/hive/relay")
-def hive_relay_set(body: dict):
-    """配置云端中继地址（比如 ws://你的腾讯云IP:8765）。"""
-    b = body or {}
-    try:
-        cfg = hive.set_relay(b.get("url") or "", b.get("token") or "",
-                             bool(b.get("enabled", True)))
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    return {"ok": True, "relay": cfg}
+# 中继部署包 / 升级包 / 模型写部署步骤 / 中继地址配置 —— 全部删除。
+# 没有服务器了，这些功能没有存在意义。
 
 
 @app.post("/api/hive/connect")
