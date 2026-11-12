@@ -9092,9 +9092,13 @@
       if (type === "ai" && m.thinking) {
         const tc = String(m.thinking).length;
         const dur = m.dur_ms ? " · 耗时 " + (m.dur_ms / 1000).toFixed(1) + "s" : "";
-        think = '<details class="hmsg-think"><summary>💭 思考过程（'
-          + tc + " 字" + dur + '）</summary><div class="hthink-body">'
-          + hEsc(m.thinking).replace(/\n/g, "<br>") + "</div></details>";
+        // 和单人模式**同一个结构**：.bubble.think-hdr + .think-body，
+        // 点击折叠、带过渡动画、位置也在正文气泡正上方（原来是 details.hmsg-think，
+        // 原生折叠条，样式和位置都和单人模式不同 —— 用户截图指出来的就是这里）。
+        think = '<div class="bubble think-hdr"><span>🧠 思考过程（'
+          + tc + " 字" + dur + '）</span><span class="arrow">▸</span></div>'
+          + '<div class="think-body">'
+          + hEsc(m.thinking).replace(/\n/g, "<br>") + "</div>";
       }
       if (type === "ai" && m.cancelled) {
         think = '<div class="hmsg-cancel">⏹ 这次任务被取消了</div>' + think;
