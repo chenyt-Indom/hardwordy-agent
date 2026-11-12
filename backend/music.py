@@ -669,6 +669,19 @@ def _drum_pattern(style: str, bar_beats: float, rng: random.Random) -> list:
     return pat
 
 
+def _pick_melody_inst(cfg: dict) -> str:
+    """从风格的配器里挑"主奏旋律"乐器。
+
+    ⚠️ 之前只往 lead/flute/chip_lead 三轨写旋律，结果 piano（纯钢琴）
+       和 lofi（电钢琴）风格**根本没有旋律**，古风的古筝也不响 —— 只有
+       pad 铺底和合成人声。按优先级推导，每个风格都有自己的主奏。
+    """
+    for k in ("lead", "flute", "chip_lead", "piano", "epiano", "organ", "pluck"):
+        if k in (cfg.get("inst") or []):
+            return k
+    return "lead"
+
+
 def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
                key: int = 0, seed: int | None = None,
                vocals: bool = True, title: str = "",
