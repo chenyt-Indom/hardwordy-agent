@@ -10715,7 +10715,6 @@ def hive_p2p_share(gid: str, body: dict = None):
             return {"ok": False, "error": "缺少 fid"}
         r = hive_p2p.share(gid, fid, port=int(b.get("port") or 0),
                            want_upnp=bool(b.get("upnp", True)))
-        r["qr"] = hive._qr_data_url(r.get("code") or "")
         return {"ok": True, **r}
     except Exception as e:
         return {"ok": False, "error": str(e)}
