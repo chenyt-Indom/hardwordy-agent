@@ -572,8 +572,14 @@ def receive(gid: str, code: str) -> Dict[str, Any]:
 
 def _recv_worker(tid: str, gid: str, fid: str, host: str, port: int,
                  token: str, stop_evt: threading.Event) -> None:
-    part = _part_path(gid, fid)
-    spath = _state_path(gid, fid)
+    # ⚠️ 本地状态文件名不能直接用「发送方的 fid」：共享「本机文件」时
+    #    fid 是空串，两个文件就会共用同一份 .state.json / .part，
+    #    第二个会继承第一个「已完成」的位图 → 直接判成功、但文件根本不存在。
+    #    （只有 >MAX_FILE 的文件受影响，而这正是 P2P 的主用途。）
+    #    fid 为空时改用 token：每次共享唯一，同一连接码重收仍能续传。
+    skey = fid or ("t_" + str(token))
+    part = _part_path(gid, skey)
+    spath = _state_path(gid, skey)
     key = _key(gid, token)
     aead = AESGCM(key)
     spd = _Speed()
