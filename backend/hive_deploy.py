@@ -144,6 +144,16 @@ def classify(err: str, url: str = "") -> Dict[str, Any]:
                        "执行 ss -lntp | grep 8765 看端口有没有在听",
                        "如果用的是 80/443 以外的端口，确认填的端口号一致"],
         }
+    if ("timed out" in e or "timeout" in e or "超时" in (err or "")) \
+            and host in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+        # 本机回环不可能被防火墙挡：超时基本就是端口上没服务
+        return {
+            "code": "refused", "title": "本机这个端口没有服务在监听",
+            "reason": f"连 {host}:{host and ''}本机端口超时，通常说明中继没启动。",
+            "advice": ["确认中继进程在跑：ps aux | grep hive_relay",
+                       "确认端口号填的和启动参数一致",
+                       "先 curl http://127.0.0.1:端口/health 试试"],
+        }
     if "timed out" in e or "timeout" in e or "超时" in (err or ""):
         return {
             "code": "timeout", "title": "连接超时（被挡住了）",
