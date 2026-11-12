@@ -9821,6 +9821,45 @@ def voice_set_device(body: dict):
     return _voice.set_device(str((body or {}).get("device") or ""))
 
 
+    # ---------- 文字转语音（TTS） ----------
+    @app.get("/api/tts/voices")
+    def tts_voices():
+        """可选音色清单（含离线兜底那个，标了 available）。"""
+        return {"ok": True, "default": tts.DEFAULT_VOICE, "voices": tts.voice_list()}
+
+
+    @app.post("/api/tts/synth")
+    def tts_synth(body: dict):
+        """把文本合成音频。body: {text, voice, rate, engine, filename}
+
+        · 同步路由 → FastAPI 会丢到线程池跑，不阻塞事件循环；
+        · 长文（几千字）要几十秒，前端记得给"生成中"提示；
+        · engine=auto 时在线失败会自动回退离线，返回里 warnings 说明原因。
+        """
+        body = body or {}
+        text = str(body.get("text") or "")
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="text 不能为空")
+        try:
+            rate = int(body.get("rate") or 0)
+        except Exception:
+            rate = 0
+        return tts.synth(text, voice=str(body.get("voice") or ""), rate=rate,
+                         engine=str(body.get("engine") or "auto"),
+                         filename=str(body.get("filename") or ""))
+
+
+    @app.get("/api/tts/audio/{name}")
+    def tts_audio(name: str):
+        """播放/下载合成好的音频（inline，浏览器和 <audio> 都能直接用）。"""
+        p = tts.audio_path(name)
+        if not p:
+            raise HTTPException(status_code=404, detail="音频不存在")
+        mime = "audio/mpeg" if p.lower().endswith(".mp3") else "audio/wav"
+        return FileResponse(p, media_type=mime,
+                            headers={"Content-Disposition": "inline"})
+
+
 # ---------- 前端 ----------
 _NO_CACHE = "no-store, no-cache, must-revalidate, max-age=0"
 
