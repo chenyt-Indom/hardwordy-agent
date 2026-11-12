@@ -1577,6 +1577,7 @@
     if (isPlainMode()) {
       bubble.textContent = raw;
       bubble.style.whiteSpace = "pre-wrap";
+      attachSpeak(bubble, raw);
       return;
     }
     try {
@@ -1584,6 +1585,7 @@
       else renderAnswerLinks(bubble, raw);
     } catch (e) {
       bubble.textContent = raw;
+      attachSpeak(bubble, raw);
       return;
     }
     try {
