@@ -673,6 +673,17 @@ class MeshNode:
                     self.outbox = self.outbox[-2000:]
         return n
 
+    def broadcast_members(self, gid: str) -> int:
+        """把本地成员表广播出去（加群/踢人/改角色/退群后调用）。
+
+        没有 peer 时不排队 —— 成员表不是消息，对方下次握手会重新交换，
+        排一堆旧快照反而会把已经踢掉的人带回来。
+        """
+        arr = self._members_of(gid)
+        if not arr:
+            return 0
+        return self._fanout(gid, T_MEMBERS, {"members": arr, "ttl": TTL_DEFAULT})
+
     def flush(self) -> int:
         """把断线期间攒下的消息发出去。"""
         n = 0
