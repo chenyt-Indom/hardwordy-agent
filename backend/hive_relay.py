@@ -315,6 +315,73 @@ async def _process_request(connection: Any, request: Any) -> Any:
         return None
 
 
+def set_data_dir(path: str) -> None:
+    """给「内置中继」用：把落盘目录指到应用自己的 data 下。"""
+    global _DATA
+    if path:
+        _DATA = path
+        try:
+            os.makedirs(_DATA, exist_ok=True)
+        except Exception:
+            pass
+
+
+class FastAPIWSAdapter:
+    """把 starlette 的 WebSocket 包装成 websockets 的用法。
+
+    为什么要这层：`handler()` 是按 websockets 库写的（`async for raw in ws`
+    + `await ws.send()`），而 FastAPI 的 WebSocket 是 `receive_text()` /
+    `send_text()`。有了这个薄壳，同一份 handler 既能给独立中继进程用，
+    也能挂进本应用的 `/hive` 路由 —— 不用维护两套转发逻辑。
+
+    2026-11-13：加它是为了解决「云服务器上只跑了应用、没跑中继」这个现实问题：
+    把中继挂进应用，就只占一个 443、不用开 8765、不用改 nginx。
+    """
+
+    __slots__ = ("_ws",)
+
+    def __init__(self, ws: Any):
+        self._ws = ws
+
+    # 要能当 dict key / 放进 set（CONN_UID 和 Room.clients 都靠它）
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __eq__(self, other: Any) -> bool:
+        return self is other
+
+    async def send(self, data: str) -> None:
+        await self._ws.send_text(data)
+
+    async def recv(self) -> str:
+        return await self._ws.receive_text()
+
+    def __aiter__(self) -> "FastAPIWSAdapter":
+        return self
+
+    async def __anext__(self) -> str:
+        # 断开时 starlette 抛 WebSocketDisconnect；handler 里只捕
+        # websockets 的 ConnectionClosed，所以这里统一转成 StopAsyncIteration，
+        # 让 for 循环正常结束（效果等价：连接没了，退出循环）。
+        try:
+            return await self._ws.receive_text()
+        except Exception:
+            raise StopAsyncIteration
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        try:
+            await self._ws.close(code=code, reason=reason)
+        except Exception:
+            pass
+
+
+async def handle_fastapi(ws: Any, data_dir: str = "") -> None:
+    """FastAPI 路由的入口：适配后直接复用 handler()。"""
+    if data_dir:
+        set_data_dir(data_dir)
+    await handler(FastAPIWSAdapter(ws))
+
+
 async def main() -> None:
     global _DATA
     ap = argparse.ArgumentParser(description="Hive 中继服务")
