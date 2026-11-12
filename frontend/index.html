@@ -509,6 +509,27 @@
                 title="快捷唤醒模型：点一下自动加上 @hd（再点取消）。加完在后面写你的指令就行">@hd</button>
         <button class="btn primary" id="hiveSendBtn">发送</button>
         </div>
+        <!-- ★ 2026-11-13 用户反馈「工具栏那些生成文库、图片库等等那些都没了」
+             以及「跟随视角这些按钮好像也没了」：单人模式这一排（上下文环 / 采样 /
+             跟随最新 / 跟随视角）群聊里原本一个都没有。现在补齐，**结构、class、
+             文案、位置完全照抄单人模式**，只把 id 换成 hv 前缀（两套控件不能同 id）。 -->
+        <div class="composer-tools">
+          <button type="button" class="ctx-ring" id="hvCtxRing" title="上下文占用：正在读取…">
+            <svg viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring-bg" cx="18" cy="18" r="15.5"></circle>
+              <circle class="ctx-ring-fg" id="hvCtxRingFg" cx="18" cy="18" r="15.5"
+                      stroke-dasharray="97.4" stroke-dashoffset="97.4"></circle>
+            </svg>
+            <span class="ctx-ring-txt" id="hvCtxRingTxt">—</span>
+          </button>
+          <button type="button" class="pill pill-btn" id="hvSampleBtn"
+                  title="调「温度」和「采样范围 top-p」—— 拖完立刻生效（不用重启），旁边写着建议值"
+                  onclick="window.__showSampling&&window.__showSampling()">🎛 采样</button>
+          <button type="button" class="pill pill-btn" id="hvFreeViewBtn"
+                  title="AI 有新内容时自动滚到最新。点一下暂停，就能停在某一步慢慢看">⬇ 跟随最新</button>
+          <button type="button" class="pill pill-btn" id="hvThinkFollowBtn"
+                  title="跟随视角：思考框固定在视口左上角，滚到哪都看得到。点一下改为回到原位">🧠 跟随视角</button>
+        </div>
       </div>
       <p class="tip">普通聊天不会调用模型，只有 @hd 才会唤醒。模型跑在群主的机器上。</p>
     </div>
