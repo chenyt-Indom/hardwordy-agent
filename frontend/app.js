@@ -9182,12 +9182,18 @@
       box.appendChild(node);
       box.scrollTop = box.scrollHeight;
       c = {
-        node: node, think: node.querySelector(".hthink-body"),
+        node: node, think: node.querySelector(".think-body"),
         out: node.querySelector(".hd-out"),
         phase: node.querySelector(".hd-phase"),
         who: node.querySelector(".hmsg-who"),
         details: node.querySelector(".hd-think"),
       };
+      // 实时卡片的思考框：点标题也能折叠（和正式消息一致）
+      c.details.addEventListener("click", () => {
+        const open = c.think.classList.contains("open");
+        c.think.classList.toggle("open", !open);
+        c.details.querySelector(".arrow").textContent = open ? "▸" : "▾";
+      });
       node.querySelector(".hd-cancel").addEventListener("click", () => hdCancel(mid));
       hdCards[mid] = c;
       return c;
