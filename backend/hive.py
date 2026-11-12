@@ -539,12 +539,21 @@ def parse_hd(text: str) -> Optional[str]:
     if not text:
         return None
     low = text.lower()
-    idx = low.find(HD_TAG)
+    idx = -1
+    start = 0
+    # 找 @hd，但要求它后面**不能紧跟字母数字**——
+    # 否则「@hdx」「@hd2」这类会被误判成唤醒，白烧一次算力。
+    while True:
+        i = low.find(HD_TAG, start)
+        if i < 0:
+            break
+        nxt = low[i + len(HD_TAG):i + len(HD_TAG) + 1]
+        if not (nxt.isalnum() or nxt == "_"):
+            idx = i
+            break
+        start = i + len(HD_TAG)
     if idx < 0:
-        # 兼容全角 @ 和中间夹空格
-        idx = text.find("@hd")
-        if idx < 0:
-            return None
+        return None
     rest = text[idx + len(HD_TAG):]
     return rest.strip().lstrip("，,：:、 ").strip()
 
