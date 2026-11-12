@@ -137,7 +137,10 @@ class HiveClient:
         self._url, self._gid = url, gid
         self._running = True
         self._last_error = ""
+        self._last_error_at = 0.0
         self._retry = 0
+        self._state = "connecting"
+        self._emit_status()
         self._thread = threading.Thread(target=self._run, name="hive-client", daemon=True)
         self._thread.start()
         # 等最多 3 秒，让状态尽快反映到界面
