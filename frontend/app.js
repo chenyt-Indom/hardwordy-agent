@@ -8934,6 +8934,85 @@
       return wrap;
     }
 
+    // ---------------------------------------------------------- @hd 实时进度
+    // 每个正在跑的任务一张卡片：思考区和正文区边跑边刷新。
+    // 用 mid 做 key —— 多人同时 @ 时各看各的（执行端是串行的，但卡片要分开）。
+    const hdCards = {};
+
+    function hdEnsure(f) {
+      const mid = f.mid || "?";
+      let c = hdCards[mid];
+      if (c && document.body.contains(c.node)) return c;
+      const box = el("hiveMsgs");
+      const empty = box.querySelector(".hive-empty");
+      if (empty) empty.remove();
+      const node = document.createElement("div");
+      node.className = "hive-msg ai hd-live";
+      node.innerHTML = '<span class="hmsg-who"></span>'
+        + '<div class="hd-live-head"><span class="hd-dot"></span>'
+        + '<span class="hd-phase">排队中…</span>'
+        + '<button class="hd-cancel" type="button">取消</button></div>'
+        + '<details class="hmsg-think hd-think"><summary>💭 思考过程</summary>'
+        + '<div class="hthink-body"></div></details>'
+        + '<div class="hmsg-bubble hd-out"></div>';
+      box.appendChild(node);
+      box.scrollTop = box.scrollHeight;
+      c = {
+        node: node, think: node.querySelector(".hthink-body"),
+        out: node.querySelector(".hd-out"),
+        phase: node.querySelector(".hd-phase"),
+        who: node.querySelector(".hmsg-who"),
+        details: node.querySelector(".hd-think"),
+      };
+      node.querySelector(".hd-cancel").addEventListener("click", () => hdCancel(mid));
+      hdCards[mid] = c;
+      return c;
+    }
+
+    async function hdCancel(mid) {
+      if (!curGid) return;
+      try {
+        const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/hd/cancel",
+          { task_id: mid });
+        if (!d.ok) alert(d.error || "取消失败");
+      } catch (e) { alert("取消失败：" + e.message); }
+    }
+
+    function hdStream(f) {
+      const c = hdEnsure(f);
+      const t = f.task || {};
+      const ph = f.phase;
+      const box = el("hiveMsgs");
+      if (ph === "queued") {
+        c.phase.textContent = (t.ahead > 0)
+          ? "排队中（前面还有 " + t.ahead + " 个任务）" : "已受理，准备开始…";
+        c.who.textContent = (t.asker || "成员") + " 唤醒了模型";
+      } else if (ph === "start") {
+        c.who.textContent = (t.asker || "成员") + " 唤醒了模型";
+        c.phase.textContent = "模型 " + (t.model || "") + " 正在思考…（参考了 "
+          + (t.hist || 0) + " 条上下文）";
+      } else if (ph === "thinking") {
+        c.phase.textContent = "思考中… " + (t.chars || 0) + " 字";
+        // 有思考内容了才展开，避免一开始就是一个空的折叠框
+        if (!c.details.hasAttribute("open")) c.details.setAttribute("open", "");
+        c.think.innerHTML += hEsc(f.delta || "").replace(/\n/g, "<br>");
+      } else if (ph === "content") {
+        c.phase.textContent = "正在输出… " + (t.chars || 0) + " 字";
+        c.out.innerHTML += fmtBody(f.delta || "");
+      } else if (ph === "done") {
+        c.phase.textContent = t.cancelled ? "已取消"
+          : (t.error ? "执行失败" : "完成");
+        // 正式消息马上会由 msg 事件补上（它带完整思考和耗时），
+        // 这里延时移除卡片，别抢在正式消息前面闪一下。
+        setTimeout(() => {
+          try { c.node.remove(); } catch (e) { /* 忽略 */ }
+          delete hdCards[f.mid || "?"];
+        }, 1200);
+        return;
+      }
+      box.scrollTop = box.scrollHeight;
+    }
+
     function renderMsgs(list) {
       const box = el("hiveMsgs");
       box.innerHTML = "";
