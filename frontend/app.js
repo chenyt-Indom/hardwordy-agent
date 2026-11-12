@@ -8436,6 +8436,158 @@
   let avAC = null;
   let avStop = null;
 
+  // ---- canvas 变形渲染（2026-11-12 增强）----
+  // 原来是叠一个红椭圆 div 做 scaleY，观感像"嘴上贴了个球"。
+  // 现在对**真实像素**做上下唇分离：位移场在嘴部外圈衰减到 0，
+  // 所以变形区与原图天然无缝（不会出现矩形接缝）；再叠一层柔边口腔。
+  // 眨眼同理——眼睛区域纵向压缩，压缩后空出的地方用下眼睑以下的皮肤补。
+  // 这些都是"形变"不是"重绘"，做不出 b/p/m 那种闭唇音素，这点不吹。
+  const AV_W = 270, AV_H = 360;                    // canvas 内部分辨率（3:4）
+  const AV_EYE_TOP = 0.362, AV_EYE_BOT = 0.408;
+  const AV_EYE_RECT = [[0.330, 0.494], [0.506, 0.670]];
+  const AV_BROW_TOP = 0.330, AV_BROW_BOT = 0.364;
+  const AV_EMO = {
+    neutral:  { squint: 0,     eyeDY: 0,  brow: 0,  tint: null },
+    happy:    { squint: 0.30,  eyeDY: -1, brow: -1, tint: "rgba(255,186,120,0.10)" },
+    thinking: { squint: 0.12,  eyeDY: -2, brow: 1,  tint: "rgba(150,180,255,0.07)" },
+    serious:  { squint: -0.08, eyeDY: 0,  brow: 2,  tint: "rgba(90,110,150,0.10)" },
+  };
+  const AV_EMO_NAME = { neutral: "自然", happy: "开心", thinking: "思考", serious: "严肃" };
+  const AV_EMO_ICON = { neutral: "🙂", happy: "😊", thinking: "🤔", serious: "😐" };
+  let avCanvasEl = null, avCtx2 = null, avSrcData = null, avDstData = null;
+  let avReady2 = false, avMouthV = 0, avBlinkV = 0;
+  let avBlinkAt = -9999, avNextBlink = 0, avEmoName = "neutral", avLoadedUrl = "";
+
+  function avPaintFrame() {
+    if (!avReady2) return;
+    const emo = AV_EMO[avEmoName] || AV_EMO.neutral;
+    const src = avSrcData, dst = avDstData;
+    const cxM = avMouthCfg.x * AV_W;
+    const cyM = avMouthCfg.y * AV_H;
+    const syM = Math.max(3, avMouthCfg.h * AV_H * 0.42);   // 嘴的垂直影响范围
+    const sxM = Math.max(8, avMouthCfg.w * AV_W * 0.52);   // 水平影响范围
+    const et = AV_EYE_TOP * AV_H, eb = AV_EYE_BOT * AV_H;
+    const eyeH = eb - et;
+    const kEye = 1 - avBlinkV * 0.86 - emo.squint * 0.45;
+    const eyeDY = emo.eyeDY;
+    const browShift = emo.brow;
+
+    // ① 整行拷贝：嘴部上下唇分离 + 眉毛位移
+    for (let y = 0; y < AV_H; y++) {
+      let s = y;
+      const gy = (y - cyM) / syM;
+      if (gy > -3.2 && gy < 3.2) {
+        s = y - avMouthV * 0.042 * AV_H * (gy * Math.exp(-gy * gy));
+      }
+      if (browShift && y >= AV_BROW_TOP * AV_H && y <= AV_BROW_BOT * AV_H) s -= browShift;
+      s = Math.round(s);
+      if (s < 0) s = 0; else if (s >= AV_H) s = AV_H - 1;
+      dst.set(src.subarray(s * AV_W * 4, (s + 1) * AV_W * 4), y * AV_W * 4);
+    }
+
+    // ② 眼睛区域：纵向压缩/睁大 + 轻微上移（逐像素，范围很小，很快）
+    if (Math.abs(kEye - 1) > 0.004 || eyeDY !== 0) {
+      const newH = Math.max(2, Math.round(eyeH * kEye));
+      for (let r = 0; r < AV_EYE_RECT.length; r++) {
+        const x0 = Math.round(AV_EYE_RECT[r][0] * AV_W);
+        const x1 = Math.round(AV_EYE_RECT[r][1] * AV_W);
+        for (let y = 0; y < newH; y++) {
+          const dy = Math.round(et + eyeDY + y);
+          if (dy < 0 || dy >= AV_H) continue;
+          const s = Math.round(et + y / kEye);
+          if (s < 0 || s >= AV_H) continue;
+          const so = s * AV_W * 4, dof = dy * AV_W * 4;
+          for (let x = x0; x < x1; x++) {
+            const si = so + x * 4, di = dof + x * 4;
+            dst[di] = src[si]; dst[di + 1] = src[si + 1]; dst[di + 2] = src[si + 2]; dst[di + 3] = 255;
+          }
+        }
+        for (let y = Math.round(et + eyeDY + newH); y < eb; y++) {
+          const dy = y;
+          if (dy < 0 || dy >= AV_H) continue;
+          const s = Math.min(AV_H - 1, Math.round(eb + (y - (et + newH)) * 0.5));
+          const so = s * AV_W * 4, dof = dy * AV_W * 4;
+          for (let x = x0; x < x1; x++) {
+            const si = so + x * 4, di = dof + x * 4;
+            dst[di] = src[si]; dst[di + 1] = src[si + 1]; dst[di + 2] = src[si + 2]; dst[di + 3] = 255;
+          }
+        }
+      }
+    }
+
+    avCtx2.putImageData(avDstData, 0, 0);
+
+    // ③ 口腔：张开到一定程度才画，柔边，避免"硬色块"
+    if (avMouthV > 0.18) {
+      const hh = avMouthV * 0.014 * AV_H;
+      const ww = avMouthCfg.w * AV_W * 0.34;
+      avCtx2.save();
+      try { avCtx2.filter = "blur(" + (hh * 0.42).toFixed(1) + "px)"; } catch (e) { /* ignore */ }
+      avCtx2.fillStyle = "rgba(56,28,34,0.80)";
+      avCtx2.beginPath();
+      avCtx2.ellipse(cxM, cyM + AV_H * 0.004 + hh * 0.32, ww, hh, 0, 0, Math.PI * 2);
+      avCtx2.fill();
+      avCtx2.restore();
+    }
+
+    // ④ 表情色调
+    if (emo.tint) {
+      avCtx2.save();
+      avCtx2.globalCompositeOperation = "soft-light";
+      avCtx2.fillStyle = emo.tint;
+      avCtx2.fillRect(0, 0, AV_W, AV_H);
+      avCtx2.restore();
+    }
+  }
+
+  function avLoop(now) {
+    if (!avReady2) return;
+    // 眨眼状态机：随机 2.2~6 秒一次，闭合 140ms + 睁开 110ms
+    if (now > avNextBlink) {
+      avBlinkAt = now;
+      avNextBlink = now + 2200 + Math.random() * 3800;
+    }
+    const bt = now - avBlinkAt;
+    if (bt >= 0 && bt < 140) avBlinkV = bt / 140;
+    else if (bt >= 140 && bt < 250) avBlinkV = 1 - (bt - 140) / 110;
+    else avBlinkV = 0;
+    avPaintFrame();
+    requestAnimationFrame(avLoop);
+  }
+
+  function avInitCanvas(url) {
+    if (!url || url === avLoadedUrl) return;
+    avLoadedUrl = url;
+    const im = new Image();
+    im.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = AV_W; c.height = AV_H;
+      const cx = c.getContext("2d", { willReadFrequently: true });
+      cx.drawImage(im, 0, 0, AV_W, AV_H);
+      avSrcData = cx.getImageData(0, 0, AV_W, AV_H).data;
+      avCanvasEl = $("#avCanvas");
+      if (!avCanvasEl) return;
+      avCanvasEl.width = AV_W;
+      avCanvasEl.height = AV_H;
+      avCtx2 = avCanvasEl.getContext("2d", { willReadFrequently: true });
+      avDstData = avCtx2.createImageData(AV_W, AV_H);
+      avCanvasEl.hidden = false;
+      if (avImg) avImg.hidden = true;         // img 只当占位，实际画面走 canvas
+      if (avPh) avPh.hidden = true;
+      avReady2 = true;
+      requestAnimationFrame(avLoop);
+    };
+    im.onerror = () => { /* 加载失败就继续用 img 兜底 */ };
+    im.src = url;
+  }
+
+  function avSetEmotion(name) {
+    avEmoName = AV_EMO[name] ? name : "neutral";
+    try { localStorage.setItem("avatar_emotion", avEmoName); } catch (e) { /* ignore */ }
+    const b = $("#avEmoBtn");
+    if (b) { b.textContent = AV_EMO_ICON[avEmoName]; b.title = "表情：" + AV_EMO_NAME[avEmoName]; }
+  }
+
   function avApplyMouth() {
     if (!avMouth) return;
     avMouth.style.left = (avMouthCfg.x * 100) + "%";
