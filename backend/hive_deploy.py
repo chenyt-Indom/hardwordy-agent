@@ -682,6 +682,7 @@ def make_bundle(host_hint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                  f"- 备注：{hint.get('note') or '未填'}\n")
     put("README.md", _README + extra)
 
+    zf.close()
     os.makedirs(_DATA, exist_ok=True)
     out = os.path.join(_DATA, "hive-relay-deploy.zip")
     with open(out, "wb") as f:
