@@ -8659,6 +8659,13 @@
         ta.placeholder = opt.placeholder || "";
         ta.hidden = false;
       } else { ta.hidden = true; }
+      // 第二个输入框（可选）：跨网络入群时填对方地址
+      const ex = el("hiveModalExtra");
+      if (opt.extra != null) {
+        ex.value = opt.extra;
+        ex.placeholder = opt.extraPlaceholder || "";
+        ex.hidden = false;
+      } else { ex.hidden = true; }
       const code = el("hiveModalCode");
       if (opt.code) { code.value = opt.code; code.hidden = false; }
       else { code.hidden = true; }
