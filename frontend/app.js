@@ -9572,8 +9572,7 @@
             || '<p class="p2p-empty">还没有传输任务。点附件上的 📡 开始共享，或粘贴连接码接收。</p>';
           return;
         }
-        if (beaconHtml) box.dataset.head = "1";
-        box.innerHTML = list.map((t) => {
+        box.innerHTML = beaconHtml + list.map((t) => {
           const total = t.total || 0;
           const done = t.done || 0;
           const pct = total ? Math.min(100, done * 100 / total) : 0;
