@@ -2647,7 +2647,10 @@
       });
       body.appendChild(inner); panel.appendChild(body);
     }
-    const KEY = "doclib.collapsed";
+    // 2026-11-12 用户报「前端没有音频栏」：生成文库默认展开时，7 个分类（40+ 文件）
+    // 会把下面的「🎵 音频」挤出 900px 视口，滚到「软件/压缩包」看着就像到底了。
+    // 改用 v2 这个 key + 默认收起，音频栏一进页面就在视野内；用户点标题展开后照旧记住。
+    const KEY = "doclib.collapsed.v2";
     const apply = (closed, remember) => {
       panel.classList.toggle("collapsed", closed);
       btn.setAttribute("aria-expanded", closed ? "false" : "true");
