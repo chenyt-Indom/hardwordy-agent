@@ -493,7 +493,8 @@ class HiveClient:
     # ------------------------------------------------------------ 发送
 
     def send(self, gid: str, text: str, mtype: str = "text",
-             extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+             extra: Optional[Dict[str, Any]] = None,
+             ref: str = "") -> Dict[str, Any]:
         me = H.profile()
         key = H.group_key(gid)
         if not key:
@@ -501,6 +502,8 @@ class HiveClient:
         mid = "m_" + str(int(time.time() * 1000))[-9:] + str(abs(hash(text)) % 10000)
         body = {"name": me["name"], "type": mtype, "text": text,
                 "from": me["user_id"], "ts": time.time(), "ver": self._proto}
+        if ref:
+            body["ref"] = ref
         if extra:
             body["extra"] = extra
         rec = {"t": "msg", "gid": gid, "mid": mid,
