@@ -1,27 +1,24 @@
 # -*- coding: utf-8 -*-
-"""临时脚本：生成并只打印关键信息。"""
-import json
+"""临时脚本：检查刚生成的两首音频的时长/峰值/RMS/声道。"""
 import os
-import backend.music as music
+import numpy as np
+from scipy.io import wavfile
 
-res = []
-for style, title in (("pop", "轻快流行"), ("gufeng", "古风五声")):
-    r = music.generate(style=style, bars=32, vocals=True, title=title)
-    keys = {}
-    if isinstance(r, dict):
-        for k in ("ok", "id", "name", "file", "path", "title", "style",
-                  "duration", "seconds", "bpm", "url", "audio"):
-            if k in r:
-                keys[k] = r[k]
-    res.append({"style": style, "keys": keys})
-
-print(json.dumps(res, ensure_ascii=False, indent=2))
-
-d = os.path.join("data", "music")
-if os.path.isdir(d):
-    files = [(f, os.path.getsize(os.path.join(d, f))) for f in os.listdir(d)
-             if f.lower().endswith(".wav")]
-    files.sort(key=lambda x: -x[1])
-    print("\n--- data/music 最近文件 ---")
-    for f, s in files[:8]:
-        print(f"{f}  {s/1024:.0f} KB")
+for f in ("pop_20261112_231406_1344.wav", "gufeng_20261112_231409_2342.wav"):
+    p = os.path.join("data", "music", f)
+    sr, x = wavfile.read(p)
+    x = x.astype(np.float32)
+    if x.ndim > 1:
+        ch = x.shape[1]
+        mono = x.mean(axis=1)
+        lr = float(np.corrcoef(x[:, 0], x[:, 1])[0, 1]) if ch >= 2 else 1.0
+    else:
+        ch, mono, lr = 1, x, 1.0
+    peak = float(np.max(np.abs(mono)))
+    rms = float(np.sqrt(np.mean(mono ** 2)))
+    dur = len(mono) / sr
+    # 低频占比（<200Hz 能量）
+    sp = np.abs(np.fft.rfft(mono[: sr * 8])) ** 2
+    fr = np.fft.rfftfreq(min(len(mono), sr * 8), 1 / sr)
+    low = float(sp[fr < 200].sum() / max(sp.sum(), 1e-9) * 100)
+    print(f"{f}\n  时长 {dur:.1f}s  采样率 {sr}  声道 {ch}  峰值 {peak:.2f}  RMS {rms:.3f}  低频 {low:.1f}%  声道相关 {lr:.2f}")
