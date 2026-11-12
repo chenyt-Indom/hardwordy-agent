@@ -550,7 +550,7 @@ def add_system_message(gid: str, text: str) -> Dict[str, Any]:
         msg = {
             "seq": seq, "id": "m_" + secrets.token_hex(6),
             "from": "system", "name": "系统", "type": "system",
-            "text": text, "ts": time.time(),
+            "text": text, "ts": time.time(), "ver": PROTO_VER,
         }
         _append_raw(gid, msg)
         g["seq"] = seq
