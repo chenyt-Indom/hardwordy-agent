@@ -9372,8 +9372,7 @@
     // ---------------------------------------------------------- 启动
     let saved = "single";
     try { saved = localStorage.getItem("ui_mode") || "single"; } catch (e) { /* 忽略 */ }
-    setMode("hive");
-    setTimeout(() => { el("hiveSide").hidden = false; renderMembers(); }, 1200);
+    setMode(saved === "hive" ? "hive" : "single");
   })();
 
 })();
