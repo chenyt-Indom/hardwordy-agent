@@ -235,6 +235,7 @@ class MeshNode:
         self.on_cancel = None   # Callable[[str, dict], None]
         self.on_file = None     # Callable[[str, dict], None]  附件分片
         self.on_peer = None     # Callable[[], None]
+        self.on_members = None  # Callable[[str], None]  成员表有变化（收到别人的）
 
     # ------------------------------------------------------------ 生命周期
 
