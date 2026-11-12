@@ -3858,15 +3858,67 @@ html[data-theme="light"] select.pill-select option {
 /* ---------- 输入区 ---------- */
 .hive-composer {
   flex: none;                 /* 同上：不设就会被压成一条竖线 */
-  display: flex; gap: 8px; align-items: flex-end;
+  display: flex; flex-direction: column; gap: 6px;
   padding: 10px 18px 6px; border-top: 1px solid var(--border);
 }
+/* 真正的输入行：上传按钮 + 文本框 + 终止 + @hd + 发送。
+   单独一层是因为上面还要放附件预览条和引用条（和单人模式同一个结构）。 */
+.hive-input-row {
+  display: flex; gap: 8px; align-items: flex-end; min-width: 0;
+}
+.hive-input-row .icon-btn { flex: none; padding: 8px 9px; font-size: 15px; }
 .hive-composer textarea {
   flex: 1; min-width: 0; resize: none; min-height: 44px; max-height: 140px;
   padding: 10px 12px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--field-bg);
   color: var(--text); font: inherit; font-size: 13px; line-height: 1.5;
 }
+
+/* ---------- 附件预览条（发送前） ---------- */
+.hive-attach-bar {
+  display: flex; flex-wrap: wrap; gap: 7px;
+  padding: 2px 0 4px;
+}
+.hive-attach-bar[hidden] { display: none; }
+.hive-chip {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  padding: 4px 7px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--panel2);
+  font-size: 11.5px; color: var(--text); max-width: 200px;
+}
+.hive-chip img {
+  width: 34px; height: 34px; object-fit: cover; border-radius: 5px; flex: none;
+}
+.hive-chip .hc-ico { font-size: 17px; flex: none; }
+.hive-chip .hc-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hive-chip .hc-size { color: var(--meta-fg); font-size: 10.5px; flex: none; }
+.hive-chip .hc-x {
+  flex: none; width: 16px; height: 16px; line-height: 14px; text-align: center;
+  border-radius: 50%; border: none; cursor: pointer; padding: 0;
+  background: var(--chip-bg); color: var(--muted); font-size: 11px;
+}
+.hive-chip .hc-x:hover { background: var(--danger); color: #fff; }
+.hive-chip.up { opacity: .6; }
+
+/* ---------- 引用条 ---------- */
+.hive-quote-bar {
+  display: flex; align-items: center; gap: 7px;
+  padding: 5px 9px; border-radius: 8px;
+  border-left: 3px solid var(--accent);
+  background: var(--chip-bg); font-size: 12px; color: var(--muted);
+}
+.hive-quote-bar[hidden] { display: none; }
+.hive-quote-bar .hq-ico { color: var(--accent); flex: none; }
+.hive-quote-bar .hq-txt {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hive-quote-bar .hq-x {
+  flex: none; width: 18px; height: 18px; border-radius: 50%; padding: 0;
+  border: none; background: none; color: var(--muted); cursor: pointer; font-size: 12px;
+}
+.hive-quote-bar .hq-x:hover { color: var(--danger); }
 .hive-composer textarea:focus { outline: none; border-color: var(--accent); }
 /* ⚠️ 必须同时压掉 `.btn { width: 100% }`（同 1727 行那个坑）：
    只写 flex:none 时按钮基准宽度仍是整行，textarea 会被挤成一条竖线。 */
