@@ -81,8 +81,9 @@ chk("有消息", len(msgs) >= 3, f"{len(msgs)} 条")
 chk("按 seq 升序", [m["seq"] for m in msgs] == sorted(m["seq"] for m in msgs))
 chk("带成员表", len(d["members"]) == 1)
 last = msgs[-1]["seq"]
-chk("增量读（since=最后一条）得 0 条",
-    len(c.get(f"/api/hive/{gid}/messages?since={last}").json()["messages"]) == 0)
+extra = c.get(f"/api/hive/{gid}/messages?since={last}").json()["messages"]
+chk("增量读只返回更新的消息", all((m["seq"] or 0) > last for m in extra),
+    f"新增 {len(extra)} 条（@hd 会异步插一条系统消息，属正常）")
 
 print("== 8. 二维码 ==")
 d = c.get(f"/api/hive/{gid}/invite").json()
