@@ -466,6 +466,23 @@
         </aside>
       </div>
       <div class="hive-composer">
+      <!-- 附件预览条：发送前能看到缩略图 / 文件名，可单个删掉。
+           和单人模式同一套交互，但**独立一套 id** —— 两个模式各有自己的
+           待发列表，切来切去不会串（共用一套的话，在单机拖的图会跑到群里）。 -->
+      <div class="hive-attach-bar" id="hiveAttachBar" hidden></div>
+      <!-- 引用回复：点某条消息的「引用」后，这里显示被引用的摘要 -->
+      <div class="hive-quote-bar" id="hiveQuoteBar" hidden>
+        <span class="hq-ico">↩</span>
+        <span class="hq-txt" id="hiveQuoteTxt"></span>
+        <button type="button" class="hq-x" id="hiveQuoteX" title="取消引用">✕</button>
+      </div>
+      <div class="hive-input-row">
+        <button type="button" class="icon-btn" id="hiveAttachBtn" title="上传图片（也可以直接把图拖进来）">🖼</button>
+        <button type="button" class="icon-btn" id="hiveDocBtn" title="上传文档（PDF / Word / Excel / PPT / txt 等）">📎</button>
+        <button type="button" class="icon-btn" id="hiveVideoBtn" title="上传视频">🎬</button>
+        <input type="file" id="hiveFileInput" accept="image/*" multiple hidden />
+        <input type="file" id="hiveDocInput" multiple hidden />
+        <input type="file" id="hiveVideoInput" accept="video/*" hidden />
         <textarea id="hiveText" rows="2"
           placeholder="说点什么…  输入 @hd + 指令 唤醒模型干活（例：@hd 帮我写一个登录接口）"></textarea>
         <!-- @hd 快捷开关（2026-11-13）：点一下在开头插入 @hd、再点一下撤掉。
