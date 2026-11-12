@@ -71,7 +71,7 @@ M.client.chat = lambda *a, **k: FR()
 frames.clear()
 M._hive_run_model_now(gid, "本地跑", {}, "hd_local1", "李四", "u_lisi")
 th3 = "".join(f["frame"]["delta"] for f in frames if f.get("type")=="hd_stream" and f["frame"]["phase"]=="thinking")
-chk("本地通道思考推送", th3 == "本地想", th3)
+chk("本地通道思考推送", th3 == "本地想本地写", th3)
 ai3 = [m for m in hive.read_messages(gid, 0, 200) if m.get("type") == "ai"]
 chk("本地结果落盘", "本地正文" in (ai3[-1].get("text") or ""), ai3[-1].get("text"))
 
