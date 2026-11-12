@@ -8656,7 +8656,16 @@
         ta.value = opt.input;
         ta.placeholder = opt.placeholder || "";
         ta.hidden = false;
-      } else { ta.hidden = true; }
+        // 只读：能滚动看全文、能选中复制，但改不了（展示群记忆用）
+        ta.readOnly = !!opt.readonly;
+        ta.style.height = opt.readonly ? "260px" : "";
+        ta.style.overflow = opt.readonly ? "auto" : "";
+      } else {
+        ta.hidden = true;
+        ta.readOnly = false;
+        ta.style.height = "";
+        ta.style.overflow = "";
+      }
       // 第二个输入框（可选）：跨网络入群时填对方地址
       const ex = el("hiveModalExtra");
       if (opt.extra != null) {
