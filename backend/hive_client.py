@@ -261,6 +261,7 @@ class HiveClient:
                 async with websockets.connect(
                     self._url, ping_interval=20, ping_timeout=20,
                     max_size=8 * 1024 * 1024, open_timeout=8,
+                    ssl=_ssl_for(self._url),
                 ) as ws:
                     self._ws = ws
                     self._connected = True
