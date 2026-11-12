@@ -9525,6 +9525,47 @@
       }
     }
 
+    // 共享本机任意文件：G 级文件的真正入口（不走上传，不复制，不占额外磁盘）
+    async function p2pOpenFile() {
+      const inp = el("p2pPath");
+      const path = ((inp && inp.value) || "").trim().replace(/^["']|["']$/g, "");
+      if (!path) { alert("先把文件的完整路径填进来"); return; }
+      if (!curGid) { alert("先选一个群"); return; }
+      const box = el("p2pShare");
+      const code = el("p2pCode");
+      const fn = el("p2pFname");
+      const addr = el("p2pAddr");
+      if (box) box.hidden = false;
+      if (fn) fn.textContent = "正在开启…";
+      if (code) code.value = "";
+      if (addr) addr.textContent = "";
+      try {
+        const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/p2p/open",
+          { path: path });
+        if (!d.ok) {
+          if (fn) fn.textContent = "开启失败";
+          if (addr) addr.textContent = d.error || "";
+          return;
+        }
+        p2pCurShare = d.code || "";
+        if (code) code.value = d.code || "";
+        if (el("p2pQr") && d.qr) el("p2pQr").src = d.qr;
+        if (fn) fn.textContent = d.name || "文件";
+        if (addr) {
+          const up = d.upnp || {};
+          let tip = "本机地址 " + (d.lan_ip || "") + ":" + (d.port || "");
+          if (up.ok) tip = "已用路由器映射到公网 " + (up.ip || "") + ":" + (d.port || "");
+          else if (up.why) tip = "本机地址 " + (d.lan_ip || "") + ":" + (d.port || "")
+            + "（" + up.why + "，公网需手动端口映射或已组网）";
+          addr.textContent = tip + " · " + fmtSize(d.size || 0);
+        }
+        p2pRefresh();
+      } catch (e) {
+        if (fn) fn.textContent = "开启失败";
+        if (addr) addr.textContent = e.message;
+      }
+    }
+
     async function p2pReceive() {
       const inp = el("p2pInput");
       const code = (inp && inp.value || "").trim();
