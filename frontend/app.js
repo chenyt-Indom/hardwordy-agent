@@ -10216,18 +10216,7 @@
     // ---------------------------------------------------------- 启动
     let saved = "single";
     try { saved = localStorage.getItem("ui_mode") || "single"; } catch (e) { /* 忽略 */ }
-    setMode("hive");
-    setTimeout(() => {
-      const box = el("hiveMsgs");
-      if (!box) return;
-      const now = Math.floor(Date.now() / 1000);
-      box.innerHTML = "";
-      box.appendChild(msgNode({ id: "x1", from: "u_other", name: "张三", type: "text", text: "帮我看下这个登录接口", ts: now }));
-      box.appendChild(msgNode({ id: "x2", from: myId, name: "我", type: "text", text: "好，我先看下代码", ts: now }));
-      box.appendChild(msgNode({ id: "x3", from: "u_ai", name: "hardwordy", type: "ai", by: "张三",
-        text: "这个接口缺少参数校验，建议补上必填检查。\n\n```js\napp.post('/login', (req, res) => {\n  const { user, pwd } = req.body;\n});\n```\n\n另外密码不要明文比对。",
-        thinking: "先看请求体结构，再看有没有校验…用户要的是登录接口，得提醒密码存储。", dur_ms: 1300, ts: now }));
-    }, 700);
+    setMode(saved === "hive" ? "hive" : "single");
   })();
 
 })();
