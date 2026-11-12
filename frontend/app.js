@@ -9516,7 +9516,6 @@
       if (!curGid) { alert("先选一个群"); return; }
       p2pOpen();
       const box = el("p2pShare");
-      const qr = el("p2pQr");
       const code = el("p2pCode");
       const fn = el("p2pFname");
       const addr = el("p2pAddr");
