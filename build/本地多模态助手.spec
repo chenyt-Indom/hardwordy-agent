@@ -29,10 +29,17 @@ def _collect(pkg):
 #   才回到 3.1GB，还差点把 models/vendor 一起删掉。
 #   现在从源头排掉，产物稳定在 3GB 量级。将来要恢复文生图，把下面
 #   _EXCLUDE_BIG 里对应的名字去掉、并把包加回 _pkgs 即可。
-_pkgs = ['webview', 'sherpa_onnx', 'sounddevice', 'edge_tts']
+_pkgs = ['webview', 'sherpa_onnx', 'sounddevice', 'edge_tts',
+         # ⚠️ 2026-11-13（11.13b）：新增向量检索后必须有这两个 ——
+         #   backend/embed.py 的 ONNX 回退路径要用 onnxruntime + tokenizers，
+         #   两个都是**函数内延迟导入**，静态分析抓不到。
+         #   tokenizers 原来躺在下面的 _EXCLUDE_BIG 里（当初排除它是因为
+         #   以为它跟 transformers 绑定），实测它**不依赖 torch**，是独立的
+         #   Rust 扩展，所以从排除表里挪出来。
+         'tokenizers', 'onnxruntime']
 
 _EXCLUDE_BIG = ['torch', 'torchvision', 'diffusers', 'transformers',
-                'accelerate', 'safetensors', 'tokenizers', 'huggingface_hub',
+                'accelerate', 'safetensors', 'huggingface_hub',
                 'nvidia', 'triton', 'xformers', 'deepspeed', 'bitsandbytes']
 
 all_datas, all_binaries, all_hidden = [], [], []
@@ -98,7 +105,13 @@ all_hidden += [
     "backend.main", "backend.config", "backend.ollama_client", "backend.tools",
     "backend.t2i", "backend.memory", "backend.kb", "backend.file_tools",
     "backend.video", "backend.web_tools", "backend.voice", "backend.tts",
-    "sounddevice", "sherpa_onnx",
+    # ⚠️ 2026-11-13（11.13b）新增的三个模块，必须显式列出：
+    #   · backend.embed   —— 向量化后端（kb.py / memvec.py 才 import 它，
+    #                        main.py 里一次都没提，靠遍历 main 的依赖找不到）
+    #   · backend.memvec  —— 记忆库向量索引
+    #   · backend.chatimg —— 对话图片台账
+    "backend.embed", "backend.memvec", "backend.chatimg",
+    "sounddevice", "sherpa_onnx", "tokenizers", "onnxruntime",
     # ⚠️ 2026-11-13：语音合成（backend/tts.py）用的是**函数内延迟导入** ——
     #   `import edge_tts` 和 `import win32com.client` 都写在函数体里，
     #   PyInstaller 的静态分析**抓不到**。实测：11.12a 那版打出来后
