@@ -10507,7 +10507,9 @@ def hive_send(gid: str, body: dict):
         # （原来这里是 if connected: send else: 只落盘，导致
         #   「对方不在线时发的消息」永远补发不出去。）
         r = cli.send(gid, text, mtype, extra, ref)
-        if r.get("ok") and r.get("msg"):
+        if not r.get("ok"):
+            return {"ok": False, "error": r.get("error") or "发送失败"}
+        if r.get("msg"):
             _broadcast_hive({"type": "msg", "gid": gid, "msg": r["msg"]})
     except Exception as e:
         return {"ok": False, "error": str(e)}
