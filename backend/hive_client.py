@@ -580,19 +580,29 @@ class HiveClient:
         if not fid:
             return False
         total = max(1, (len(data) + chunk - 1) // chunk)
-        for i in range(total):
-            body = {"fid": fid, "meta": meta, "idx": i, "total": total,
-                    "data": base64.b64encode(data[i * chunk:(i + 1) * chunk]).decode("ascii"),
-                    "ts": time.time(), "ver": self._proto}
-            rec = {"t": "file", "gid": gid, "fid": fid,
-                   "blob": H._seal(key, body), "ts": time.time(), "v": self._proto}
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._ws.send(json.dumps(rec, ensure_ascii=False)), self._loop
-                ).result(timeout=10)
-            except Exception:
-                return False
-        return True
+        ws = self._ws
+
+        async def _push() -> bool:
+            for i in range(total):
+                body = {"fid": fid, "meta": meta, "idx": i, "total": total,
+                        "data": base64.b64encode(
+                            data[i * chunk:(i + 1) * chunk]).decode("ascii"),
+                        "ts": time.time(), "ver": self._proto}
+                rec = {"t": "file", "gid": gid, "fid": fid,
+                       "blob": H._seal(key, body), "ts": time.time(), "v": self._proto}
+                await ws.send(json.dumps(rec, ensure_ascii=False))
+                # ⚠️ 片之间必须让一下（实测踩到）：连续猛发几个 500KB+ 的帧时，
+                #    中间那几片会被 nginx / 网络缓冲吞掉 —— 对端永远收不齐，
+                #    文件就卡在「传输中」不动。20ms 足够让链路喘口气。
+                if i + 1 < total:
+                    await asyncio.sleep(0.02)
+            return True
+
+        try:
+            return bool(asyncio.run_coroutine_threadsafe(
+                _push(), self._loop).result(timeout=120))
+        except Exception:
+            return False
 
     def send_cancel(self, gid: str, mid: str, by: str = "") -> bool:
         """广播一条「取消这个任务」的请求。"""
