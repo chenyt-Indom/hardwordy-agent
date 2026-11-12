@@ -8846,7 +8846,7 @@
         const isCur = g.gid === curGid;
         const on = isCur ? " on" : "";
         const owner = g.owner === myId ? "群主" : (g.owner_name || "");
-        // 只有当前群在连中继，其它群不知道状态 → 保持中性灰
+        // 只有当前群在 P2P 网络里，其它群不知道状态 → 保持中性灰
         let dot = "";
         if (isCur) dot = netCls === "idle" ? " offline" : " " + netCls;
         const stTxt = isCur
