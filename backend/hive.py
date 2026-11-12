@@ -332,6 +332,9 @@ def list_groups() -> List[Dict[str, Any]]:
     for n in names:
         g = _read_json(os.path.join(_GROUPS, n, "group.json"))
         if g:
+            if g.get("left"):
+                # 已经主动退出的群不再显示（消息日志仍留在磁盘上，重新扫码能回来）
+                continue
             item = _public_group(g)
             item["members"] = len(load_members(g["gid"]))
             out.append(item)
