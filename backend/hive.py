@@ -1024,6 +1024,10 @@ def ingest_message(gid: str, msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         g = load_group(gid)
         if not g:
             return None
+        # 被踢的人还在拿旧密钥发消息：直接丢弃，不让它落盘显示
+        sender = str(msg.get("from") or "")
+        if sender and sender in set(g.get("kicked") or []):
+            return None
         if mid and _has_mid(gid, mid):
             return None
         seq = (g.get("seq") or 0) + 1
