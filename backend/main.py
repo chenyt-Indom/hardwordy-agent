@@ -11137,25 +11137,56 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
         # 用户要求「@hd 能带图片/文档一起处理」—— 附件本身就在本机群目录里
         # （发送时已广播过来），这里直接按 fid 取，不需要前端再传一遍。
         images: list = []
+        image_mimes: list = []
         attach_note = ""
+        # 附件有两个来源：
+        #   · 本次指令自带的（extra.files）—— 优先，全部处理；
+        #   · **历史消息里的** —— 用户要求「LLM 要记得上下文」：
+        #     先发一张图、再单独 @hd 问「你收到图片了吗」，模型也得看得到。
+        #     原来只读本次 body，历史附件完全丢失，实测模型答「没有收到图片」。
+        # 历史附件要限流（图片≤4张、文档≤3个），否则聊久了会把上下文和带宽打爆。
         try:
-            for f in ((body or {}).get("extra") or {}).get("files") or []:
+            _cur_files = list(((body or {}).get("extra") or {}).get("files") or [])
+            _hist_files: list = []
+            for _m in reversed(hist or []):
+                for _f in (_m.get("files") or []):
+                    if isinstance(_f, dict) and _f.get("fid"):
+                        _hist_files.append(_f)
+                if len(_hist_files) >= 8:
+                    break
+            _seen_fid = set()
+            _n_img = 0
+            _n_doc = 0
+            for f in _cur_files + _hist_files:
                 fid = (f or {}).get("fid")
-                if not fid:
+                if not fid or fid in _seen_fid:
                     continue
+                _seen_fid.add(fid)
                 info = file_tools.read_file(hive.file_path(gid, fid))
                 if not info.get("ok"):
+                    attach_note += "\n[附件·取不到] " + str(f.get("name") or fid)
                     continue
                 if info.get("type") == "image":
+                    if _n_img >= 4:
+                        attach_note += ("\n[附件·图片·本次未载入] "
+                                        + str(f.get("name") or ""))
+                        continue
+                    _n_img += 1
                     images.append(info["b64"])
+                    image_mimes.append(str(f.get("mime") or "image/png"))
                     attach_note += "\n[附件·图片] " + str(f.get("name") or "")
                 else:
+                    if _n_doc >= 3:
+                        attach_note += ("\n[附件·文件·本次未载入] "
+                                        + str(f.get("name") or ""))
+                        continue
+                    _n_doc += 1
                     attach_note += ("\n\n【附件：" + str(f.get("name") or "")
                                     + "】\n" + (info.get("content") or "")[:8000])
         except Exception:
             pass
         if attach_note:
-            prompt += "\n\n【成员随指令提供的附件】" + attach_note
+            prompt += "\n\n【群里的附件（含本次指令与之前聊天里发过的）】" + attach_note
 
         cfg = config.load_config() or {}
         model = cfg.get("default_model") or ""
