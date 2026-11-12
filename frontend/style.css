@@ -865,13 +865,13 @@ body.dragging .drop-overlay,
 }
 
 /* ⋯ 菜单：展开后是一块卡片，装原来的全部信息 */
-.kb-menu {
+.kb-menu, .panel-menu {
   display: flex; flex-direction: column; gap: 6px;
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 9px; padding: 8px 9px; margin-bottom: 8px;
   animation: kbMenuIn .14s ease-out;
 }
-.kb-menu[hidden] { display: none; }
+.kb-menu[hidden], .panel-menu[hidden] { display: none; }
 @keyframes kbMenuIn {
   from { opacity: 0; transform: translateY(-3px); }
   to { opacity: 1; transform: none; }
