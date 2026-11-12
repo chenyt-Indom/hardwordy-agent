@@ -10732,16 +10732,40 @@ def _flush_pending_files() -> None:
         _pending_files[:] = left
 
 
+_flush_lock = threading.Lock()
+_flushing = False
+
+
 def _hive_on_peer() -> None:
-    """有人连上/断开：补发积压的附件，并让前端立刻刷新在线人数。"""
-    try:
-        _flush_pending_files()
-    except Exception:
-        logger.warning("补发附件失败", exc_info=True)
+    """有人连上/断开：刷新在线人数，并把积压的附件补发出去。"""
+    global _flushing
     try:
         _broadcast_hive({"type": "peers", "client": hive_client.client().status()})
     except Exception:
         pass
+    if not _pending_files:
+        return
+    # 补发放到后台线程、并延迟 1.2 秒：
+    #   · 不能在这个回调里直接发 —— on_peer 是在 mesh 的收包线程里同步调用的，
+    #     发几十片附件会把那条连接的读循环卡住；
+    #   · 也不能立刻发 —— 握手刚完成时对方偶尔还没准备好收大帧（实测偶发收不到）。
+    with _flush_lock:
+        if _flushing:
+            return
+        _flushing = True
+
+    def _later() -> None:
+        global _flushing
+        try:
+            time.sleep(1.2)
+            _flush_pending_files()
+        except Exception:
+            logger.warning("补发附件失败", exc_info=True)
+        finally:
+            with _flush_lock:
+                _flushing = False
+
+    threading.Thread(target=_later, daemon=True).start()
 
 
 def _hive_on_members(gid: str) -> None:
