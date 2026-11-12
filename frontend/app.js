@@ -9804,22 +9804,56 @@
       if (!side.hidden) renderMembers();
     });
 
-    // ---------------------------------------------------------- 邀请二维码
-    el("hiveQrBtn").addEventListener("click", async () => {
+    // ---------------------------------------------------------- 入群密码（取代二维码）
+    // 电脑没有摄像头，扫码这条路从来走不通；真正能用的一直是那串文本。
+    // 现在换成 12 位密码：群主看得到、成员输得进，不用再传长串口令。
+    async function showPassword() {
       if (!curGid) { alert("先选一个群"); return; }
+      const gid = curGid;
+      let d;
       try {
-        const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/invite");
-        if (!d.ok) { alert(d.error || "生成失败"); return; }
-        openModal({
-          title: "邀请加入「" + (el("hiveGroupName").textContent || "群") + "」",
-          hint: "手机扫码可直接打开入群链接；电脑端请把下面的口令发给对方，"
-            + "粘贴到「扫码入群」里即可。群密钥只在这张码里，别公开发出去。",
-          qr: d.qr_png || "",
-          code: d.payload || "",
-          noOk: true,
-        });
-      } catch (e) { alert("生成二维码失败：" + e.message); }
-    });
+        d = await api("/api/hive/" + encodeURIComponent(gid) + "/invite");
+      } catch (e) { alert("读取密码失败：" + e.message); return; }
+      if (!d.ok) { alert(d.error || "读取密码失败"); return; }
+      // 老群还没设过密码：群主点进来时直接生成一个
+      if (!d.password && d.is_owner) {
+        try {
+          const r = await api("/api/hive/" + encodeURIComponent(gid) + "/password",
+            { password: "" });
+          if (r.ok) d = Object.assign({}, d, { password: r.password });
+        } catch (e) { /* 下面照常提示 */ }
+      }
+      const pw = d.password || "";
+      openModal({
+        title: "「" + (el("hiveGroupName").textContent || "群") + "」的入群密码",
+        hint: pw
+          ? "把这 12 位密码告诉对方（微信、口头都行）。他点「🔑 密码入群」输进去，"
+            + "同一个 WiFi 下就能直接进群 —— 不用传长串口令，也没有二维码。"
+            + (d.is_owner
+              ? "\n\n注意：重置密码会换群密钥，老成员必须用新密码重新进群。"
+              : "\n\n只有群主能重置密码。")
+          : "只有群主能看到入群密码。请让群主点「🔑 密码」查看后告诉你。",
+        code: pw,
+        noOk: !d.is_owner || !pw,
+        okText: "重置密码",
+        onOk: async () => {
+          if (!confirm("重置后群密钥会变，所有老成员都必须用新密码重新进群。确定重置？")) {
+            return false;
+          }
+          try {
+            const r = await api("/api/hive/" + encodeURIComponent(gid) + "/password",
+              { password: "" });
+            if (!r.ok) { alert(r.error || "重置失败"); return false; }
+            el("hiveModalCode").value = r.password || "";
+            el("hiveModalCopy").hidden = false;
+            el("hiveModalHint").textContent =
+              "密码已更新。老成员需要用这个新密码重新进群。";
+          } catch (e) { alert("重置失败：" + e.message); }
+          return false;                       // 留在弹窗里，方便再复制一次
+        },
+      });
+    }
+    el("hiveQrBtn").addEventListener("click", showPassword);
 
     // ---------------------------------------------------------- 建群 / 入群
     // ---------------------------------------------------------- 建群向导
