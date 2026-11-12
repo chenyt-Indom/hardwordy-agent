@@ -750,7 +750,7 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
                key: int = 0, seed: int | None = None,
                vocals: bool = True, title: str = "",
                notes_in: list | None = None,
-               lyrics: str = "") -> dict:
+               lyrics: str = "", bar_beats: float = 4.0) -> dict:
     """生成一份乐谱（不含音频）。改编就是在这份乐谱上改。
 
     乐谱结构：
