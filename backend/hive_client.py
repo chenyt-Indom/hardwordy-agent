@@ -424,10 +424,17 @@ class HiveClient:
             piece = base64.b64decode(body.get("data") or "")
         except Exception:
             return
+        now = time.time()
         with self._lock:
+            # 清掉 2 分钟还没收齐的残留：对端中途掉线时这些片永远不会到齐，
+            # 不清就会一直占着内存（20MB 文件 × 几个 = 几十 MB 白占）。
+            for k in [k for k, v in self._file_buf.items()
+                      if now - (v.get("t0") or now) > 120]:
+                self._file_buf.pop(k, None)
             slot = self._file_buf.get(fid)
             if not slot:
-                slot = {"total": total, "parts": {}, "meta": body.get("meta") or {}}
+                slot = {"total": total, "parts": {}, "meta": body.get("meta") or {},
+                        "t0": now}
                 self._file_buf[fid] = slot
             slot["parts"][idx] = piece
             if len(slot["parts"]) < slot["total"]:
