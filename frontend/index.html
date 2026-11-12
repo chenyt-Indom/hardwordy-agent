@@ -107,6 +107,30 @@
          现在是一个**独立浮层卡片**（见文件末尾 #schedFloat），点顶栏 ⏰ 开合；
          面板只读展示 + 管理，**不能在里面聊天**。 -->
 
+    <!-- 协作群（2026-11-13）：只在「群聊」模式下显示。
+         侧栏只管"有哪些群 / 建群 / 入群"，聊天本身在主区域（#hiveMain）。 -->
+    <section class="panel hivepanel" id="hivePanel" hidden>
+      <div class="sec-head">
+        <h2>👥 协作群</h2>
+        <span class="head-acts">
+          <button class="btn sm ghost ico" id="hiveMore" title="更多：中继地址 / 我的昵称 / 连接状态"
+                  aria-expanded="false" aria-controls="hiveMenu">⋯</button>
+        </span>
+      </div>
+      <div class="panel-menu" id="hiveMenu" hidden>
+        <div class="panel-menu-acts">
+          <button class="btn sm ghost" id="hiveRelayBtn">🌐 中继地址</button>
+          <button class="btn sm ghost" id="hiveNameBtn">✏️ 我的昵称</button>
+        </div>
+        <div class="kb-idx" id="hiveStatusLine">未连接</div>
+      </div>
+      <div class="hive-acts">
+        <button class="btn sm" id="hiveCreateBtn">＋ 建群</button>
+        <button class="btn sm ghost" id="hiveJoinBtn">📷 扫码入群</button>
+      </div>
+      <div class="list hive-list" id="hiveGroupList"></div>
+    </section>
+
     <section class="panel kbpanel" id="kbPanel">
       <div class="sec-head">
         <h2>📚 知识库</h2>
