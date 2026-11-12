@@ -5785,6 +5785,7 @@
         if (!voiceDevLoaded) voiceLoadDevices();
       } else if (msg.type === "wake") {
         voiceUI("awake", msg.note ? "🎙 " + msg.note : undefined);
+        try { avWake(); } catch (e) { /* 数字人不在也能正常用语音 */ }
         // ⚠️ 唤醒后**把光标放进输入框**：用户接着说的话会实时出现在这里，
         //    他不用再去点一下（"唤醒了但不知道往哪说"就是这么来的）。
         //    顺便把视口滚到输入区 —— 用户喊唤醒词时多半没看着窗口。
