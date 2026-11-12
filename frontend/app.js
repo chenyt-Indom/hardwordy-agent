@@ -2482,18 +2482,31 @@
         const icon = ext === "pdf" ? "📕"
           : ["doc", "docx", "wps"].includes(ext) ? "📘"
           : ["xls", "xlsx", "et", "csv"].includes(ext) ? "📗"
-          : ["ppt", "pptx", "dps"].includes(ext) ? "📙" : "📄";
+          : ["ppt", "pptx", "dps"].includes(ext) ? "📙"
+          : ["md", "markdown"].includes(ext) ? "📝" : "📄";
         row.innerHTML = `<span class="kb-ico">${icon}</span>
+          <span class="kb-dot" aria-hidden="true"></span>
           <span class="kb-body">
             <span class="kb-name"></span>
             <span class="kb-sub"></span>
           </span>
           <span class="kb-size"></span>
           <button class="btn sm ghost danger kb-del" title="从知识库移除">×</button>`;
-        row.querySelector(".kb-name").textContent = doc.filename || doc.id;
-        row.querySelector(".kb-sub").textContent = doc.indexed
-          ? `${fmtChars(doc.chars)} · 可检索`
-          : (doc.note || "读不出文字");      // 读不了要说清原因，不能让人以为没放进去
+        const nameEl = row.querySelector(".kb-name");
+        const subEl = row.querySelector(".kb-sub");
+        nameEl.textContent = doc.filename || doc.id;
+        // 卡片里文件名是省略号，悬停看完整相对路径（含子文件夹）+ 备注
+        nameEl.title = (doc.rel || doc.filename || doc.id) +
+          (doc.note ? "\n" + doc.note : "");
+        // 副标题：字数 + 块数。块数 = 这篇在检索时有多少个独立可比对的位置，
+        // 比字数更能说明检索粒度（1 篇切成 6 块，就能定位到具体段落）。
+        if (doc.indexed) {
+          subEl.textContent = fmtChars(doc.chars) + " 字 · " +
+            (doc.chunks ? doc.chunks + " 块" : "未建索引");
+        } else {
+          subEl.textContent = doc.note || "读不出文字";  // 读不了要说清原因，不能让人以为没放进去
+        }
+        subEl.title = subEl.textContent;
         row.querySelector(".kb-size").textContent = fmtBytes(doc.size || 0);
         const rel = doc.rel || doc.filename || doc.id;
         row.querySelector(".kb-del").onclick = async () => {
