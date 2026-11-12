@@ -745,7 +745,25 @@ class MeshNode:
         known = self._known_list()
         self._fanout(gid, T_PEERS, {"known": known})
         # 互报水位：把对方没有的历史消息补过去（对方不缺的靠 mid 去重）
-        self._fanout(gid, T_SYNC, {"since": H.max_ts(gid)})
+        #
+        # ⚠️ 2026-11-13 修：只看 max_ts 会漏掉「新入群」这一种。
+        #    B 刚入群时本地会写一条「B 加入了群」的系统消息，它的 ts 是**现在**，
+        #    比 A 的所有历史消息都新 —— A 收到 since=现在，判断「他没缺什么」，
+        #    于是 B 永远看不到入群之前的聊天记录。实测确认。
+        #    所以本地消息很少时（新成员），主动发一次 full 请求，让对方推全量。
+        local_n = 0
+        try:
+            local_n = len(H.read_messages(gid, 0, 4))
+        except Exception:
+            pass
+        with _LOCK:
+            need_full = local_n <= 3 and gid not in self._full_req
+            if need_full:
+                self._full_req.add(gid)
+        if need_full:
+            self._fanout(gid, T_SYNC, {"since": 0.0, "full": True})
+        else:
+            self._fanout(gid, T_SYNC, {"since": H.max_ts(gid)})
 
     def _known_list(self) -> List[Dict[str, Any]]:
         out = []
