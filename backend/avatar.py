@@ -37,7 +37,10 @@ _META_FILE = "meta.json"
 
 
 def _dir() -> str:
-    d = config.data("avatar")
+    # ⚠️ 用 data/avatar 而不是 config.data("avatar")：后者会拼到**项目根**下，
+    #    和 data/tts 那种"运行数据统一放 data/"的约定不一致，备份时容易漏。
+    d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "data", "avatar")
     os.makedirs(d, exist_ok=True)
     return d
 
