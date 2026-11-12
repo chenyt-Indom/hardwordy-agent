@@ -3978,8 +3978,10 @@ html[data-theme="light"] select.pill-select option {
 }
 .hive-msgs .msg.member .hive-ref b { color: #14161b; }
 
-/* 实时进度卡片：正在跑的时候显示，跑完由正式消息替换 */
-.hd-live { max-width: 88%; }
+/* 实时进度卡片：正在跑的时候显示，跑完由正式消息替换。
+   ★ 2026-11-13：原来这里限了 max-width: 88%，于是「正在跑」的卡片比跑完的
+   正式消息窄一截，切换瞬间会跳一下。现在不设限宽，和正式消息完全同宽。 */
+.hd-live { max-width: 100%; }
 .hd-live-head {
   display: flex; align-items: center; gap: 7px;
   padding: 4px 10px; margin-bottom: 4px;
