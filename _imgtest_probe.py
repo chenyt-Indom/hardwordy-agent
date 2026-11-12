@@ -13,6 +13,11 @@ import urllib.request
 
 from PIL import Image
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 BASE = "http://127.0.0.1:11434"
 
 
