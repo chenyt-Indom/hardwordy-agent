@@ -10602,8 +10602,14 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
        非流式要等模型全部算完才拿到结果，中间几十秒群里一片死寂。
     """
     t0 = time.time()
-    ev = threading.Event()
-    _hd_cancel[mid] = ev
+    # 复用入队时建的那个 Event：如果排队期间已经有人取消，这里能直接看到
+    ev = _hd_cancel.setdefault(mid, threading.Event())
+    if ev.is_set():
+        _hd_cancel.pop(mid, None)
+        _hd_emit(gid, mid, "done",
+                 task={"dur_ms": 0, "cancelled": True, "error": "",
+                       "think_chars": 0, "out_chars": 0})
+        return
     _hd_running[gid] = {"task_id": mid, "asker": asker,
                         "asker_id": asker_id, "since": t0}
     thinking = ""
