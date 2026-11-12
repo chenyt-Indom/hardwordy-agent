@@ -10588,11 +10588,11 @@ def _hive_run_model(gid: str, instruction: str, body: dict) -> None:
     _hd_emit(gid, mid, "queued",
              task={"asker": asker, "ahead": ahead,
                    "instruction": (instruction or "")[:120]})
-    _hd_q.put((gid, instruction, body or {}, mid, asker))
+    _hd_q.put((gid, instruction, body or {}, mid, asker, me["user_id"]))
 
 
 def _hive_run_model_now(gid: str, instruction: str, body: dict,
-                        mid: str, asker: str) -> None:
+                        mid: str, asker: str, asker_id: str = "") -> None:
     """真正跑一次模型，全程流式推送思考和正文。
 
     ⚠️ 用流式不是为了「好看」，是因为**思考过程要实时给全员看**：
