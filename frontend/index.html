@@ -456,8 +456,8 @@
       <!-- 身份冲突提示（2026-11-13）：两台机器共用同一个 user_id —— 多半是把
            整个程序目录拷给了别人。这时双方消息会互相显示成「自己发的」，
            成员列表也分不清，必须提示并给一键换身份。默认隐藏。 -->
-      <div class="hive-warn" id="hiveIdWarn" hidden>
-        <span id="hiveIdWarnText"></span>
+      <div class="hive-warn" id="hiveIdWarn">
+        <span id="hiveIdWarnText">身份冲突：另一台机器（192.168.1.7:8899）的 user_id 和本机一样，多半是把整个程序目录拷过去了。这会让双方消息互相显示成「自己发的」。</span>
         <button class="btn sm" id="hiveIdRenew">换一个新身份</button>
       </div>
       <div class="hive-body">
