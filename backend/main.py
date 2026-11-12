@@ -10599,6 +10599,12 @@ def hive_delete(gid: str, body: dict = None):
         hive_client.client().broadcast_gone(gid, r.get("name") or "")
     except Exception:
         pass
+    # 广播完再从 P2P 网络里摘掉：群都没了，别再去发现/广播它
+    try:
+        from . import hive_mesh as _MESH
+        _MESH.node().remove_group(gid)
+    except Exception:
+        pass
     return {"ok": True, **r}
 
 
