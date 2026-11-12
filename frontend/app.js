@@ -1662,6 +1662,7 @@
       if (!r || !r.ok) throw new Error((r && r.error) || "合成失败");
       const a = new Audio(r.url);
       _ttsAudio = a;
+      try { avAttach(a); } catch (e) { /* 数字人没加载也不影响朗读 */ }
       btn.disabled = false;
       btn.textContent = "⏹";
       btn.onclick = (e) => {
