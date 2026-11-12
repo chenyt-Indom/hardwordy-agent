@@ -10343,6 +10343,11 @@
           loadGroups();
           return;
         }
+        // 成员表变了（有人进群/退群/被踢）→ 立刻刷成员列表。
+        // 原来只能靠 4 秒一次的轮询，别人进群后最多要等 4 秒才看到。
+        if (d.type === "members" && d.gid === curGid) { loadStatus(); return; }
+        // 有人上线/下线 → 立刻刷在线状态（顺带把积压附件补发的结果反映出来）
+        if (d.type === "peers") { loadStatus(); return; }
         if (d.type === "hd_stream" && d.gid === curGid && d.frame) {
           hdStream(d.frame);
           return;
