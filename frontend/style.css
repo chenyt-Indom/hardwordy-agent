@@ -3711,6 +3711,7 @@ html[data-theme="light"] select.pill-select option {
 
 /* ---------- 输入区 ---------- */
 .hive-composer {
+  flex: none;                 /* 同上：不设就会被压成一条竖线 */
   display: flex; gap: 8px; align-items: flex-end;
   padding: 10px 18px 6px; border-top: 1px solid var(--border);
 }
