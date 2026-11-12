@@ -620,7 +620,8 @@ def _recv_worker(tid: str, gid: str, fid: str, host: str, port: int,
             if m and int(m.get("size") or 0) == int(st.get("size") or -1):
                 _upd(tid, state="done", done=int(st.get("size") or 0),
                      total=int(st.get("size") or 0), name=st.get("name") or "",
-                     speed=0.0, eta=0, fid_out=out_fid)
+                     speed=0.0, eta=0, fid_out=out_fid,
+                     sha=st.get("sha") or "")
                 return
         # 群密钥换了或 token 变了，旧位图作废
         if st.get("token") != token:
