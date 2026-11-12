@@ -566,6 +566,7 @@ def save_transcript(session_id: str, messages: list):
             f.write(json.dumps({"role": msg["role"], "content": str(content)[:2000],
                                 "ts": _now()}, ensure_ascii=False) + "\n")
         f.write(json.dumps({"role": "sep", "ts": _now()}, ensure_ascii=False) + "\n")
+    _index_touch()      # 历史会话也是记忆的一部分，新内容要能被检索到
 
 
 def read_transcript(session_id: str, limit: int = 200) -> list:
