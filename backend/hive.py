@@ -544,6 +544,11 @@ def kick_member(gid: str, user_id: str) -> Dict[str, Any]:
             raise ValueError("这个人不在群里")
         who = members.pop(user_id).get("name", user_id)
         _save_members(gid, members)
+        # 记下被踢的人：否则对方下次广播成员表时会把自己加回来
+        kicked = list(g.get("kicked") or [])
+        if user_id not in kicked:
+            kicked.append(user_id)
+        g["kicked"] = kicked[-200:]
         g["seq"] = (g.get("seq") or 0) + 1
         _write_json(_group_path(gid), g)
         _append_raw(gid, {
