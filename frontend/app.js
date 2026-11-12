@@ -2541,7 +2541,7 @@
         return;
       }
       el.textContent = "🧠 向量索引 " + s.chunks + " 块 / " + s.docs + " 篇 · " +
-        (s.embed_ok === false || !s.backend ? "仅关键词"
+        ((!s.backend || s.embedded === false) ? "仅关键词"
           : (s.backend + " · " + s.model + " · " + s.dim + " 维"));
     } catch (e) {
       el.textContent = "";
