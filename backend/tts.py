@@ -347,3 +347,71 @@ def audio_path(name: str) -> str:
     if not os.path.exists(p):
         return ""
     return p
+
+
+# --------------------------------------------------------------------------
+#  音频库（界面「🎵 音频」栏用的）
+# --------------------------------------------------------------------------
+_AUD_EXT = (".mp3", ".wav", ".m4a", ".ogg", ".flac")
+
+
+def list_audio() -> list:
+    """列出 data/tts 下的音频，新的排前面。"""
+    from urllib.parse import quote
+    os.makedirs(OUT_DIR, exist_ok=True)
+    out = []
+    try:
+        names = os.listdir(OUT_DIR)
+    except OSError:
+        return out
+    for fn in names:
+        if not fn.lower().endswith(_AUD_EXT):
+            continue
+        p = os.path.join(OUT_DIR, fn)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        out.append({
+            "name": fn,
+            "bytes": st.st_size,
+            "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime)),
+            "mtime": st.st_mtime,
+            "url": "/api/tts/audio/" + quote(fn),
+        })
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out
+
+
+def delete_audio(name: str) -> dict:
+    """删除一个音频（只删 OUT_DIR 里的，防目录穿越）。"""
+    p = audio_path(name)
+    if not p:
+        return {"ok": False, "error": "文件不存在"}
+    try:
+        os.remove(p)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def rename_audio(name: str, new_name: str) -> dict:
+    """重命名（保留原扩展名）。"""
+    from urllib.parse import quote
+    p = audio_path(name)
+    if not p:
+        return {"ok": False, "error": "文件不存在"}
+    ext = os.path.splitext(name)[1] or ".mp3"
+    stem = _safe_name(new_name)
+    if not stem:
+        return {"ok": False, "error": "新名字是空的"}
+    if not stem.lower().endswith(ext.lower()):
+        stem += ext
+    dst = os.path.join(OUT_DIR, stem)
+    if os.path.abspath(dst) != os.path.abspath(p) and os.path.exists(dst):
+        return {"ok": False, "error": "同名文件已存在"}
+    try:
+        os.rename(p, dst)
+        return {"ok": True, "name": stem, "url": "/api/tts/audio/" + quote(stem)}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
