@@ -10634,6 +10634,60 @@ def hive_file_list(gid: str):
         return {"ok": False, "error": str(e)}
 
 
+# ---------------------------------------------------------------- P2P 直传
+#
+# 用户要求：G 级文件必须**直连互联网**，不经服务器。
+# 做法：连接信息做成「连接码」人工传递（二维码/复制粘贴），
+#       文件内容走 TCP 直连，**一个字节都不经过中继**。
+
+@app.post("/api/hive/{gid}/p2p/share")
+def hive_p2p_share(gid: str, body: dict = None):
+    """把本机一个附件设为可共享，返回连接码 + 二维码。"""
+    b = body or {}
+    try:
+        fid = str(b.get("fid") or "")
+        if not fid:
+            return {"ok": False, "error": "缺少 fid"}
+        r = hive_p2p.share(gid, fid, port=int(b.get("port") or 0),
+                           want_upnp=bool(b.get("upnp", True)))
+        r["qr"] = hive._qr_data_url(r.get("code") or "")
+        return {"ok": True, **r}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/p2p/receive")
+def hive_p2p_receive(gid: str, body: dict = None):
+    """用连接码接收文件（断点续传自动生效）。"""
+    b = body or {}
+    try:
+        code = str(b.get("code") or "").strip()
+        if not code:
+            return {"ok": False, "error": "缺少连接码"}
+        return {"ok": True, **hive_p2p.receive(gid, code)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/hive/{gid}/p2p/transfers")
+def hive_p2p_list(gid: str):
+    try:
+        return {"ok": True, "transfers": hive_p2p.list_all(gid),
+                "local_ip": hive_p2p.local_ip()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/p2p/{tid}/{act}")
+def hive_p2p_ctl(gid: str, tid: str, act: str):
+    """act = pause / resume / cancel"""
+    fn = {"pause": hive_p2p.pause, "resume": hive_p2p.resume,
+          "cancel": hive_p2p.cancel}.get(act)
+    if not fn:
+        return {"ok": False, "error": "未知操作"}
+    return {"ok": bool(fn(tid))}
+
+
 @app.get("/api/hive/{gid}/hd/status")
 def hive_hd_status(gid: str):
     """当前 @hd 执行状态：谁在跑、排队几个、我能不能取消。"""
