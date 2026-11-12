@@ -419,6 +419,18 @@ class MeshNode:
                 sock.close()
                 return
             typ, rk, body = fr
+            if typ == T_PROBE:
+                # 明文探测：只回「我有哪些群 + 验证标签 + 群名」。
+                # 用途：对方只知道地址和密码时，能确认「密码对不对、是哪个群」。
+                # 这里**不回密钥、不回成员、不回任何消息**。
+                with _LOCK:
+                    info = [{"gid": g, "vt": self.vts.get(g, ""),
+                             "gn": self.gnames.get(g, "")}
+                            for g in list(self.groups)]
+                _send_plain(sock, T_PROBE, {"svc": "hive-mesh",
+                                            "ver": PROTO_VER, "groups": info})
+                sock.close()
+                return
             if typ != T_HELLO:
                 sock.close()
                 return
