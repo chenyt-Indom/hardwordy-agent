@@ -10677,7 +10677,7 @@ def hive_p2p_open(gid: str, body: dict = None):
             return {"ok": False, "error": "请填一个本机文件路径"}
         if not os.path.isfile(path):
             return {"ok": False, "error": "找不到这个文件：" + path}
-        fid = "f_" + secrets.token_hex(8)
+        fid = "f_" + os.urandom(8).hex()
         r = hive_p2p.share(gid, fid, port=0, want_upnp=True,
                            src_path=path, name=os.path.basename(path))
         r["qr"] = hive._qr_data_url(r.get("code") or "")
