@@ -9846,9 +9846,14 @@ def tts_synth(body: dict):
         rate = int(body.get("rate") or 0)
     except Exception:
         rate = 0
+    try:
+        pitch = int(body.get("pitch") or 0)
+    except Exception:
+        pitch = 0
     return tts.synth(text, voice=str(body.get("voice") or ""), rate=rate,
                      engine=str(body.get("engine") or "auto"),
-                     filename=str(body.get("filename") or ""))
+                     filename=str(body.get("filename") or ""),
+                     pitch=pitch, style=str(body.get("style") or ""))
 
 
 @app.get("/api/tts/audio/{name}")
