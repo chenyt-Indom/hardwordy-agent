@@ -424,12 +424,15 @@ def search(query: str, sid: str = "", top_k: int = 5,
         if qv is not None and qv.ndim == 2 and qv.shape[1] == mat.shape[1]:
             vec_scores = (mat @ qv[0]).astype(float).tolist()
 
+    qc, qt = _q_sets(q)
     out = []
     for i, it in enumerate(items):
-        cov = _coverage(q, it["text"])
+        c, b = _cov_pair(qc, qt, *(_text_sets(it["text"])))
+        cov = max(c, b)                       # 门槛：任一说得通就收
         vec = float(vec_scores[i]) if vec_scores else 0.0
         if vec >= min_vec or cov >= min_cov:
-            score = (W_VEC * vec + W_COV * cov) if vec_scores else cov
+            rank_cov = 0.6 * c + 0.4 * b      # 排序：2-gram 更能分近义词边界
+            score = (W_VEC * vec + W_COV * rank_cov) if vec_scores else rank_cov
             out.append({
                 "level": _label(it, sid),
                 "section": it["section"],
