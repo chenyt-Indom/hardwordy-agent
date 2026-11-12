@@ -9596,34 +9596,6 @@
       } catch (e) { /* 网络抖动时静默，下次轮询再说 */ }
     }
 
-    // ==== 临时截图注入（截图后删除） ====
-    setTimeout(() => {
-      try {
-        if (typeof setMode === "function") setMode("hive");
-        p2pOpen();
-        el("p2pShare").hidden = false;
-        el("p2pFname").textContent = "项目源码_完整版.zip";
-        el("p2pCode").value = "HIVE1-eyJ2IjoxLCJnaWQiOiJnXzFmMTc4ZDUwMjM5ZCIsImZpZCI6ImZfYmJiYmJiYmJiYmJiYmJiYiIsImg";
-        el("p2pAddr").textContent = "已用路由器映射到公网 1.2.3.4:47800";
-        el("p2pQr").src = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNTAiIGhlaWdodD0iMTUwIj48cmVjdCB3aWR0aD0iMTUwIiBoZWlnaHQ9IjE1MCIgZmlsbD0iI2ZmZiIvPjxyZWN0IHg9IjEwIiB5PSIxMCIgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjMDAwIi8+PHJlY3QgeD0iMTAwIiB5PSIxMCIgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjMDAwIi8+PHJlY3QgeD0iMTAiIHk9IjEwMCIgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjMDAwIi8+PHJlY3QgeD0iNjAiIHk9IjYwIiB3aWR0aD0iMzAiIGhlaWdodD0iMzAiIGZpbGw9IiMwMDAiLz48L3N2Zz4=";
-        el("p2pList").innerHTML =
-          '<div class="p2p-item"><div class="p2p-item-top"><span class="p2p-dir up">发送</span>'
-          + '<span class="p2p-name">项目源码_完整版.zip</span><span class="p2p-st">传输中 · 3 人</span></div>'
-          + '<div class="p2p-bar"><i style="width:62%"></i></div>'
-          + '<div class="p2p-item-bottom"><span class="sp">1.2 GB / 2.0 GB · 84.3 MB/s · 剩 9 秒</span>'
-          + '<button class="p2p-mini">暂停</button><button class="p2p-mini danger">取消</button></div></div>'
-          + '<div class="p2p-item paused"><div class="p2p-item-top"><span class="p2p-dir">接收</span>'
-          + '<span class="p2p-name">数据库备份_2026.dump</span><span class="p2p-st">已暂停</span></div>'
-          + '<div class="p2p-bar"><i style="width:35%"></i></div>'
-          + '<div class="p2p-item-bottom"><span class="sp">2.4 GB / 6.8 GB</span>'
-          + '<button class="p2p-mini">继续</button><button class="p2p-mini danger">取消</button></div></div>'
-          + '<div class="p2p-item done"><div class="p2p-item-top"><span class="p2p-dir">接收</span>'
-          + '<span class="p2p-name">宣传片_4K.mp4</span><span class="p2p-st done">已完成</span></div>'
-          + '<div class="p2p-bar"><i style="width:100%"></i></div>'
-          + '<div class="p2p-item-bottom"><span class="sp">3.6 GB · 已完成</span></div></div>';
-      } catch (e) { console.error(e); }
-    }, 1200);
-    // ==== 临时截图注入结束 ====
 
     // 打开 / 关闭
     if (el("p2pOpenBtn")) el("p2pOpenBtn").addEventListener("click", p2pOpen);

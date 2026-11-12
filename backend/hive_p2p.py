@@ -762,3 +762,97 @@ def stop_all() -> None:
 
 def local_ip() -> str:
     return _lan_ip()
+
+
+# ---------------------------------------------------------------- 局域网自动发现
+#
+# 用户要「LLM 生成的东西同时分发到每个成员手上」。
+# 公网上这做不到全自动 —— 两台 NAT 后面的机器互相不知道对方在哪，
+# 连接码必须人工传一次（这是 TCP/IP 的限制，不是实现问题）。
+# **但同一个局域网内可以全自动**：共享者每 2 秒发一次 UDP 广播，
+# 其他人收到就知道「谁在共享哪个文件」，点一下就传。
+#
+# 广播内容不含文件内容，也不含群密钥，只有 gid / fid / 端口 / 一次性 token 前缀。
+
+BEACON_PORT = 47899
+BEACON_MAGIC = b"HIVEP2P1"
+_BEACONS: Dict[str, Dict[str, Any]] = {}   # fid -> {gid,name,size,host,port,ts,from}
+_BEACON_STOP = threading.Event()
+
+
+def _beacon_sender(tid: str, gid: str, fid: str, name: str, size: int,
+                   port: int, token: str) -> None:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    payload = json.dumps({
+        "gid": gid, "fid": fid, "name": name, "size": size,
+        "port": port, "t": token, "from": _lan_ip(), "ts": time.time(),
+    }, ensure_ascii=False).encode("utf-8")
+    try:
+        while not _BEACON_STOP.is_set():
+            with _LOCK:
+                alive = (_TRANSFERS.get(tid) or {}).get("state") in (
+                    "listening", "transferring", "paused")
+            if not alive:
+                break
+            try:
+                s.sendto(BEACON_MAGIC + payload, ("255.255.255.255", BEACON_PORT))
+            except Exception:
+                pass
+            time.sleep(2.0)
+    finally:
+        s.close()
+
+
+def _beacon_listener() -> None:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("", BEACON_PORT))
+    except Exception:
+        return          # 端口被占（比如本机已有别的实例）：放弃自动发现，不影响手动传
+    s.settimeout(1.0)
+    me = ""
+    try:
+        me = H.profile().get("user_id") or ""
+    except Exception:
+        pass
+    while not _BEACON_STOP.is_set():
+        try:
+            data, addr = s.recvfrom(8192)
+        except socket.timeout:
+            continue
+        except Exception:
+            break
+        if not data.startswith(BEACON_MAGIC):
+            continue
+        try:
+            d = json.loads(data[len(BEACON_MAGIC):].decode("utf-8"))
+        except Exception:
+            continue
+        if d.get("from") == me:
+            continue          # 自己发的，忽略
+        fid = str(d.get("fid") or "")
+        if not fid:
+            continue
+        with _LOCK:
+            _BEACONS[fid] = {**d, "seen": time.time()}
+
+
+def start_discovery() -> None:
+    """应用启动时调一次。失败了也不影响别的功能。"""
+    threading.Thread(target=_beacon_listener, daemon=True).start()
+
+
+def beacons(gid: str = "", max_age: float = 12.0) -> List[Dict[str, Any]]:
+    """最近看到的局域网共享（12 秒内有效）。前端据此提示「谁在共享什么」。"""
+    now = time.time()
+    with _LOCK:
+        out = [dict(v) for k, v in _BEACONS.items()
+               if now - float(v.get("seen") or 0) <= max_age]
+        for k in [k for k, v in _BEACONS.items()
+                  if now - float(v.get("seen") or 0) > max_age * 4]:
+            _BEACONS.pop(k, None)
+    if gid:
+        out = [b for b in out if b.get("gid") == gid]
+    return sorted(out, key=lambda b: b.get("seen") or 0, reverse=True)
