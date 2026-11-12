@@ -8788,10 +8788,11 @@
         const nt = el("hiveNetText");
         if (nt) nt.textContent = ni.text;
         net.title = [
-          "服务器：" + (c.url || "未配置"),
-          "本机协议 v" + (c.proto || "?") + " · 服务器协议 v" + (c.relay_proto || "?")
-            + (c.relay_ver ? "（软件 " + c.relay_ver + "）" : ""),
-          c.last_error ? "最近错误：" + c.last_error : "",
+          "方式：P2P 直连（不经过任何服务器）",
+          "监听端口 " + (c.port || "?") + " · 局域网 " + (c.lan_ip || "?"),
+          "协议 v" + (c.proto || "?") + " · 在线 " + (c.peers || 0) + " 人",
+          c.queued ? c.queued + " 条消息等对方上线" : "",
+          c.error ? "最近错误：" + c.error : "",
         ].filter(Boolean).join("\n");
       }
 
