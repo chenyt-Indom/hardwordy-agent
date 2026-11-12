@@ -343,6 +343,98 @@ class HiveClient:
 
     # ------------------------------------------------------------ 附加能力
 
+    # ---------------------------------------------------------- 密码进群
+
+    def join_by_password(self, pw: str, name: str = "", host: str = "",
+                         port: int = 0) -> Dict[str, Any]:
+        """用 12 位密码进群（二维码已经删掉了）。
+
+        找群的三个来源：本机已有记录、局域网 UDP 广播、你手填的地址。
+        每个候选都拿「密码派生的密钥」去核对验证标签 —— 对上了才算密码正确，
+        所以「密码错」和「没找到群」能分得清清楚楚。
+        """
+        m = MESH.node()
+        if not m.started:
+            m.start(0, [])
+        try:
+            pw_n = H.norm_password(pw)
+        except ValueError as e:
+            return {"ok": False, "stage": "format", "error": str(e)}
+
+        cands: List[Dict[str, Any]] = []
+        used = set()
+
+        def _add(gid, vt, nm, src, h="", p=0):
+            if not gid or gid in used:
+                return
+            key = H.derive_key(pw_n, gid)
+            tag = H.verify_tag(key, gid)
+            if vt and tag != vt:
+                return                      # 标签对不上 = 这个群不是这把密码
+            used.add(gid)
+            cands.append({"gid": gid, "vt": tag, "name": nm or "",
+                          "src": src, "host": h, "port": p, "key": key})
+
+        # (a) 本机已有记录（含之前退出的群）
+        for gid in H.all_group_ids():
+            g = H.load_group(gid) or {}
+            key = H.derive_key(pw_n, gid)
+            if g.get("kfp") == H.key_fingerprint(key):
+                _add(gid, H.verify_tag(key, gid), g.get("name") or "", "local")
+
+        # (b) 局域网广播
+        for b in m.seen_beacons():
+            _add(b.get("gid") or "", b.get("vt") or "", b.get("gn") or "",
+                 "lan", b.get("host") or "", int(b.get("port") or 0))
+
+        # (c) 手填的地址
+        net_err = ""
+        probe_ok = False
+        if host:
+            pr = m.probe(host, int(port) if port else MESH.MESH_PORT)
+            if pr.get("ok"):
+                probe_ok = True
+                for g in (pr.get("groups") or []):
+                    _add(g.get("gid") or "", g.get("vt") or "",
+                         g.get("gn") or "", "addr", host,
+                         int(pr.get("port") or port or 0))
+            else:
+                net_err = pr.get("error") or "连不上"
+
+        if not cands:
+            if net_err:
+                return {"ok": False, "stage": "network",
+                        "error": net_err + "。请确认对方地址和端口，"
+                                           "或者确认双方在同一 WiFi。"}
+            if probe_ok:
+                return {"ok": False, "stage": "password",
+                        "error": "密码不对：对方在线，但他的群没有一个和这个密码匹配。"}
+            return {"ok": False, "stage": "notfound",
+                    "error": "没找到匹配的群。先确认密码有没有输错；"
+                             "如果对方不在同一 WiFi，请再填上他的地址。"}
+
+        hit = cands[0]
+        try:
+            g = H.join_with_key(hit["gid"], hit["key"], name,
+                                meta={"n": hit["name"], "h": hit["host"]},
+                                allow_rekey=(hit["src"] != "local"))
+        except ValueError as e:
+            return {"ok": False, "stage": "join", "error": str(e)}
+
+        gg = H.load_group(hit["gid"]) or {}
+        m.add_group(hit["gid"], vt=gg.get("vt") or hit["vt"],
+                    gname=gg.get("name") or "")
+        self._gid = hit["gid"]
+        self._url = ""
+        self._state = "online"
+        self._error = ""
+        self._last_ok = time.time()
+        self._started_at = self._started_at or time.time()
+        if hit["src"] == "addr" and hit["host"]:
+            m.connect(hit["host"], int(hit["port"] or MESH.MESH_PORT), hit["gid"])
+        return {"ok": True, "group": g, "via": hit["src"],
+                "matched": len(cands), "password": H.format_password(pw_n)}
+
     def connect_code(self, gid: str) -> Dict[str, Any]:
         self._hook()
         return MESH.node().connect_code(gid or self._gid)
