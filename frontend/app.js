@@ -8770,6 +8770,20 @@
         text: "还没有人连上（同一 WiFi 会自动发现，跨网络用连接码）" };
     }
 
+    // 身份冲突（2026-11-13）：另一台机器和本机共用同一个 user_id。
+    // 典型原因：把整个程序目录拷给了别人，data/hive/profile.json 一起带过去了。
+    function paintIdConflict(cf) {
+      const box = el("hiveIdWarn");
+      if (!box) return;
+      if (!cf) { box.hidden = true; return; }
+      box.hidden = false;
+      const t = el("hiveIdWarnText");
+      if (t) {
+        t.textContent = "身份冲突：另一台机器（" + (cf.addr || "?") + "）的 user_id 和本机一样，"
+          + "多半是把整个程序目录拷过去了。这会让双方消息互相显示成「自己发的」。";
+      }
+    }
+
     function paintStatus(d) {
       if (!d || !d.ok) return;
       myId = d.hive.user_id;
