@@ -11102,6 +11102,62 @@ def _hive_run_model(gid: str, instruction: str, body: dict) -> None:
     _hd_q.put((gid, instruction, body or {}, mid, asker, me["user_id"]))
 
 
+def _hive_collect_attachments(gid: str, body: dict, hist: list):
+    """收集本次要喂给模型的附件：本次指令的 + 历史消息里的。
+
+    返回 (images, image_mimes, note)：
+      · images      —— base64 列表，交给视觉模型；
+      · image_mimes —— 与 images 一一对应的真实 mime；
+      · note        —— 拼进提示词的说明（图片名、文档正文）。
+
+    用户要求「LLM 要记得上下文」：先发一张图、再单独 @hd 问「你收到图片了吗」，
+    模型也必须看得到。原来只读本次 body，历史附件全丢，实测模型答「没有收到图片」。
+    历史附件限流（图片≤4、文档≤3），避免聊久了把上下文和带宽打爆。
+    """
+    images: list = []
+    image_mimes: list = []
+    note = ""
+    try:
+        cur = list(((body or {}).get("extra") or {}).get("files") or [])
+        old: list = []
+        for m in reversed(hist or []):
+            for f in (m.get("files") or []):
+                if isinstance(f, dict) and f.get("fid"):
+                    old.append(f)
+            if len(old) >= 8:
+                break
+        seen = set()
+        n_img = 0
+        n_doc = 0
+        for f in cur + old:
+            fid = (f or {}).get("fid")
+            if not fid or fid in seen:
+                continue
+            seen.add(fid)
+            info = file_tools.read_file(hive.file_path(gid, fid))
+            if not info.get("ok"):
+                note += "\n[附件·取不到] " + str(f.get("name") or fid)
+                continue
+            if info.get("type") == "image":
+                if n_img >= 4:
+                    note += "\n[附件·图片·本次未载入] " + str(f.get("name") or "")
+                    continue
+                n_img += 1
+                images.append(info["b64"])
+                image_mimes.append(str(f.get("mime") or "image/png"))
+                note += "\n[附件·图片] " + str(f.get("name") or "")
+            else:
+                if n_doc >= 3:
+                    note += "\n[附件·文件·本次未载入] " + str(f.get("name") or "")
+                    continue
+                n_doc += 1
+                note += ("\n\n【附件：" + str(f.get("name") or "")
+                         + "】\n" + (info.get("content") or "")[:8000])
+    except Exception:
+        pass
+    return images, image_mimes, note
+
+
 def _hive_run_model_now(gid: str, instruction: str, body: dict,
                         mid: str, asker: str, asker_id: str = "") -> None:
     """真正跑一次模型，全程流式推送思考和正文。
