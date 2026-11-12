@@ -570,9 +570,18 @@ def join_with_key(gid: str, key: bytes, name: str = "",
             os.makedirs(_gdir(gid), exist_ok=True)
             _write_json(_group_path(gid), g)
         else:
-            # 已经有这个群（重复扫码）：核对指纹，别把密钥换掉
+            # 已经有这个群：核对指纹，别把密钥换掉
             if g.get("kfp") != key_fingerprint(key):
-                raise ValueError("这个群号已存在，但二维码里的密钥不匹配")
+                if not allow_rekey:
+                    raise ValueError(
+                        "这个群已经在本机了，但密码算出来的密钥和本机记录的不一致。"
+                        "可能你输错了，也可能群主换过密码。")
+                # 群主换过密码：用新的（调用方已通过网络验证过）
+                g["key"] = _key_b64(key)
+                g["kfp"] = key_fingerprint(key)
+                g["vt"] = verify_tag(key, gid)
+                g.pop("pw", None)
+                _write_json(_group_path(gid), g)
             if g.get("left"):
                 # 之前主动退出过，现在重新加入 —— 清掉标记，群重新出现在列表里
                 g["left"] = False
