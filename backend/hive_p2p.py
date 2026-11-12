@@ -538,7 +538,7 @@ def share(gid: str, fid: str, port: int = 0, want_upnp: bool = True,
     code = make_code(gid, fid, host, bound, token)
     _reg(tid, gid=gid, fid=fid, dir="send", name=meta.get("name"),
          total=size, state="listening", port=bound, host=host,
-         code=code, upnp=up, token=token, stop=stop_evt)
+         code=code, upnp=up, token=token, stop=stop_evt, src=path)
 
     threading.Thread(target=_sender_worker,
                      args=(tid, gid, fid, path, token, srv, stop_evt,
