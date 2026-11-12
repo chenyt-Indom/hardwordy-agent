@@ -240,6 +240,24 @@ async def handler(ws: WebSocketServerProtocol) -> None:
                     _save_seq(room.gid, room.seq)
                 await room.broadcast({"t": "msg", **rec}, skip=None)
 
+            elif t == "stream" and room is not None:
+                # @hd 执行进度帧：**只转发、不落盘、不定序**。
+                # 为什么不定序：一次任务会推几百个增量帧，如果也走 seq，
+                #   正式消息的 seq 会被进度帧吃掉，增量拉取就乱了。
+                # 为什么不落盘：进度是过程数据，最终会落一条完整的 ai 消息，
+                #   过程帧存下来只会让消息日志膨胀几十倍。
+                # 中继依然看不到内容（blob 是密文），只负责转发。
+                if not m.get("blob"):
+                    continue
+                await room.broadcast({
+                    "t": "stream",
+                    "gid": room.gid,
+                    "mid": (m.get("mid") or "")[:40],
+                    "blob": m.get("blob"),
+                    "ts": float(m.get("ts") or time.time()),
+                    "v": int(m.get("v") or 1),
+                }, skip=None)
+
             elif t == "ping":
                 # 客户端用心跳测延迟。回 ts 让对面算 RTT。
                 await ws.send(json.dumps({
