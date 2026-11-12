@@ -2550,10 +2550,13 @@
       const d = await api("/api/kb/index_status");
       const s = (d && d.status) || {};
       if (!s.chunks) {
-        el.textContent = "🧠 索引未建立" + (s.error ? "：" + s.error : "");
+        // 用 textContent 而不是 innerHTML：s.error / s.model 是后端返回的字符串，
+        // 拼进 HTML 有注入风险（哪怕来源可信，也没必要留这个口子）
+        el.textContent = "索引未建立" +
+          (s.error ? "：" + s.error : " —— 点上面「重建索引」");
         return;
       }
-      el.textContent = "🧠 向量索引 " + s.chunks + " 块 / " + s.docs + " 篇 · " +
+      el.textContent = s.chunks + " 块 / " + s.docs + " 篇 · " +
         ((!s.backend || s.embedded === false) ? "仅关键词"
           : (s.backend + " · " + s.model + " · " + s.dim + " 维"));
     } catch (e) {
