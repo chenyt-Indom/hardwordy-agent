@@ -370,7 +370,9 @@ def create_group(name: str, owner_name: str = "") -> Dict[str, Any]:
     if owner_name:
         me = set_name(owner_name)
     gid = "g_" + secrets.token_hex(6)
-    key = _new_key()
+    # 密钥由入群密码派生 —— 密码本身就是凭证，不用再分发任何密钥
+    pw = gen_password()
+    key = derive_key(pw, gid)
     now = time.time()
     g = {
         "gid": gid,
@@ -378,10 +380,13 @@ def create_group(name: str, owner_name: str = "") -> Dict[str, Any]:
         "owner": me["user_id"],
         "owner_name": me["name"],
         "created": now,
-        "key": _key_b64(key),          # 群主本地保存；其他人只有二维码里的
+        "key": _key_b64(key),          # 群主本地保存；其他成员用密码自己算出来
         "kfp": key_fingerprint(key),
+        "vt": verify_tag(key, gid),    # 验证标签：判断「密码对不对」
+        "pw": pw,                      # 群主本机留存，便于再次展示
+        "pw_set": now,
         "seq": 0,
-        "invite": secrets.token_urlsafe(9),  # 邀请码（可重置）
+        "invite": "",
         "is_owner_here": True,          # 这个群的数据在本机是不是权威副本
     }
     with _LOCK:
