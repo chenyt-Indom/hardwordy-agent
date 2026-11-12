@@ -751,7 +751,16 @@ class MeshNode:
         arr = self._members_of(gid)
         if not arr:
             return 0
-        return self._fanout(gid, T_MEMBERS, {"members": arr, "ttl": TTL_DEFAULT})
+        return self._fanout(gid, T_MEMBERS,
+                            {"members": arr, "kicked": self._kicked_of(gid),
+                             "ttl": TTL_DEFAULT})
+
+    def _kicked_of(self, gid: str) -> List[str]:
+        """本机记的被踢名单（随成员表一起同步）。"""
+        try:
+            return list((H.load_group(gid) or {}).get("kicked") or [])
+        except Exception:
+            return []
 
     def flush(self) -> int:
         """把断线期间攒下的消息发出去。"""
