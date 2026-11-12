@@ -10453,6 +10453,7 @@ def hive_join(body: dict):
     legacy = str(b.get("payload") or "").strip()
     if not pw and not legacy:
         return {"ok": False, "stage": "format", "error": "请先输入 12 位入群密码"}
+    via, matched = "", 0
     try:
         if pw:
             r = hive_client.client().join_by_password(
@@ -10461,7 +10462,9 @@ def hive_join(body: dict):
             if not r.get("ok"):
                 return r                      # 带 stage，前端能分清错在哪一类
             g = r["group"]
-            if r.get("via") == "local":
+            # 透传「从哪找到的群」：local=本机记录 / lan=局域网 / addr=指定地址
+            via, matched = r.get("via") or "", int(r.get("matched") or 0)
+            if via == "local":
                 # 本机本来就有这个群：补一次网络启动
                 hive_client.client().start("", g["gid"])
         else:
