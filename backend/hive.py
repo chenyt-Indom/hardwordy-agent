@@ -1331,7 +1331,7 @@ def parse_hd(text: str) -> Optional[str]:
 
 
 def build_hd_prompt(instruction: str, history: List[Dict[str, Any]],
-                    asker: str, max_ctx: int = 40) -> str:
+                    asker: str, max_ctx: int = 40, memory: str = "") -> str:
     """构造给模型的提示。
 
     核心是**优先级**：@hd 之后那句指令绝对主导，前面的讨论只作参考，
