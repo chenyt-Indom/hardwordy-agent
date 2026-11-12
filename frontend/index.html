@@ -741,6 +741,13 @@
       info += " E:" + (window.__err || "无");
       ph.hidden = false;
       ph.textContent = info;
+      try {
+        fetch("/api/code/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: info, language: "txt", filename: "avprobe" })
+        });
+      } catch (e3) {}
     }, 3000);
   </script>
 </body>
