@@ -321,7 +321,12 @@ async def _process_request(connection: Any, request: Any) -> Any:
     """
     try:
         path = (getattr(request, "path", "") or "").split("?")[0]
-        if path not in ("/health", "/healthz", "/"):
+        # 兼容反代前缀：nginx 把 /hive 反代到中继时，路径可能是 /hive/health
+        # 或 /hive（取决于 proxy_pass 是否带尾斜杠）。这里统一按「结尾」判断，
+        # 免得部署方必须精确配好路径。
+        _p = path.rstrip("/") or "/"
+        _tail = _p.rsplit("/", 1)[-1]
+        if _p not in ("/", "") and _tail not in ("health", "healthz"):
             return None
         hdrs = str(getattr(request, "headers", "")).lower()
         if "upgrade" in hdrs and "websocket" in hdrs:
