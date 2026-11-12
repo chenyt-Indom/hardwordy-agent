@@ -494,7 +494,18 @@ def share(gid: str, fid: str, port: int = 0, want_upnp: bool = True,
                 }
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # ⚠️ Windows 的 SO_REUSEADDR 语义和 Unix 不同：它允许两个 socket 绑同一
+    #    地址+端口（第二个会"抢"第一个的流量），而不像 Unix 只管 TIME_WAIT。
+    #    实测后果：连续共享两个文件时，第二个也绑到 47800，接收方连上去
+    #    拿到的是**第一个文件**（SHA 对不上，直接报错）。
+    #    所以 Windows 上用 SO_EXCLUSIVEADDRUSE：被占就 bind 失败，自动换下一个端口。
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        try:
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        except OSError:
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    else:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     bound = 0
     for p in ([port] if port else range(PORT_RANGE[0], PORT_RANGE[1])):
         try:
