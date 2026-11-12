@@ -27,6 +27,7 @@ import os
 import secrets
 import threading
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------- 路径
