@@ -310,9 +310,11 @@ def _trans_items():
                 if not buf or taken >= TRANS_PER_FILE:
                     return
                 txt = "\n".join("%s：%s" % (r, c) for r, c in buf)[:TRANS_PASSAGE]
+                ch, tk = _text_sets(txt)
                 out.append({"key": "T:" + fn + ":" + str(len(out)),
                             "level": "历史会话", "sid": fn[:-6],
-                            "section": fn[:-6], "text": txt, "source": "transcript"})
+                            "section": fn[:-6], "text": txt, "source": "transcript",
+                            "_chars": ch, "_tok": tk})
 
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
