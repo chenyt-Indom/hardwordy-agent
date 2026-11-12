@@ -1355,7 +1355,10 @@ def build_hd_prompt(instruction: str, history: List[Dict[str, Any]],
         who = m.get("name") or m.get("from") or "?"
         t = m.get("type")
         body = (m.get("text") or "").strip()
-        if not body:
+        flist = m.get("files") or []
+        # ⚠️ 纯附件消息（只发图不写字）以前被 `if not body: continue` 整条丢掉，
+        #    模型完全不知道群里发过东西。有附件就必须留下这条记录。
+        if not body and not flist:
             continue
         if t == "code":
             body = "[代码]\n" + body
@@ -1364,6 +1367,19 @@ def build_hd_prompt(instruction: str, history: List[Dict[str, Any]],
         # 截断超长消息，避免一个人刷屏就把上下文占满
         if len(body) > 800:
             body = body[:800] + "…（已截断）"
+        # 附件清单写进上下文 —— 用户要求「LLM 要记得上下文」：
+        # 先发图、再单独问「你收到图片了吗」，模型必须知道前面发过什么。
+        if flist:
+            _names = []
+            for _f in flist:
+                if not isinstance(_f, dict):
+                    continue
+                _nm = str(_f.get("name") or "附件")
+                _kd = str(_f.get("kind") or "")
+                _kind_cn = {"image": "图片", "video": "视频"}.get(_kd, "文件")
+                _names.append(f"{_nm}（{_kind_cn}）")
+            if _names:
+                body = (body + "\n" if body else "") + "【附件】" + "、".join(_names)
         lines.append(f"{who}：{body}")
 
     ctx = "\n".join(lines) if lines else "（无）"
