@@ -311,9 +311,13 @@ class MeshNode:
         self.groups.clear()
         return self.status()
 
-    def add_group(self, gid: str) -> None:
+    def add_group(self, gid: str, vt: str = "", gname: str = "") -> None:
         with _LOCK:
             self.groups.add(gid)
+            if vt:
+                self.vts[gid] = vt
+            if gname:
+                self.gnames[gid] = gname
 
     def remove_group(self, gid: str) -> None:
         with _LOCK:
