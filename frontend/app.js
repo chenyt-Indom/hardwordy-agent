@@ -8806,6 +8806,9 @@
       const ch = comp ? comp.getBoundingClientRect().height : 120;
       avBox.style.bottom = Math.round(ch + 18) + "px";
     }
+    window.addEventListener("resize", () => {
+      if (avBox && !avBox.hidden) avPlace(avBox.offsetLeft, avBox.offsetTop);
+    });
     try {
       if (localStorage.getItem(AV_HIDE_KEY) === "1" && avTab) {
         avBox.hidden = true;
