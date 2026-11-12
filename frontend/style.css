@@ -3512,6 +3512,21 @@ html[data-theme="light"] select.pill-select option {
   pointer-events: none;
   transition: filter .4s ease;
 }
+/* canvas 变形层：铺满舞台，盖在 img 之上；口型/眨眼都在这里实时重绘 */
+.av-cv {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+/* 待机呼吸：极轻微上下浮动，让静态立绘“活”一点 */
+.av-box:not(.sleep) .av-stage { animation: avBreathe 4.6s ease-in-out infinite; }
+@keyframes avBreathe {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-1.5px) scale(1.004); }
+}
 /* 嘴：平时透明，说话时出现。位置/大小由 JS 按 avatar.mouth 覆盖 */
 .av-mouth {
   position: absolute;
