@@ -11,8 +11,13 @@ import re
 import json
 import math
 import time
+import threading
 import logging
+
+import numpy as np
+
 from . import config
+from . import embed as embed_mod
 
 KB_DIR = config.data("data", "kb")
 INDEX_FILE = os.path.join(KB_DIR, "_index.json")
