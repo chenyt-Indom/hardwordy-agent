@@ -2605,6 +2605,14 @@
         } catch (e) { showToast("读取失败", "warn"); }
         return;
       }
+      if (ev.target.closest(".au-loc")) {
+        // 打开文件所在文件夹并**选中这个文件**（后端 /api/open_path 走 explorer /select）
+        const sep = (__auDir || "").indexOf("\\") >= 0 ? "\\" : "/";
+        const full = __auDir ? __auDir + sep + name : name;
+        await openFolderRequest("/api/open_path",
+          { method: "POST", body: JSON.stringify({ path: full }) });
+        return;
+      }
       if (ev.target.closest(".au-ren")) {
         const nn = prompt("新的文件名（扩展名会保留）", name.replace(/\.[^.]+$/, ""));
         if (!nn) return;
