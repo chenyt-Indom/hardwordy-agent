@@ -9931,6 +9931,23 @@
       });
     });
 
+    // 换一个新身份（只在身份冲突时出现）
+    el("hiveIdRenew").addEventListener("click", async () => {
+      const ok = confirm(
+        "换一个新身份？\n\n"
+        + "· 你会在群里变成一个新成员（旧身份显示为离线）\n"
+        + "· 历史消息不受影响\n"
+        + "· 只有在「两台机器共用一个身份」时才需要这么做"
+      );
+      if (!ok) return;
+      const d = await api("/api/hive/profile/renew", {});
+      if (!d.ok) { alert("换身份失败：" + (d.error || "未知错误")); return; }
+      myId = (d.profile || {}).user_id || myId;
+      el("hiveIdWarn").hidden = true;
+      loadGroups();
+      if (curGid) openGroup(curGid);
+    });
+
     // 2026-11-13：这个按钮原来填「云端中继地址」，现在改成「连接码」。
     // 同一个 WiFi 下压根用不上它（UDP 广播自动发现），只有跨网络才需要：
     // 把自己的码发给对方，他粘进来就连上，数据不经过任何服务器。
