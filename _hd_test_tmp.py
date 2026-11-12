@@ -89,7 +89,10 @@ print("\n[3] 取消")
 frames.clear()
 ev_box = {}
 def slow_chat(*a, **k):
-    r = FakeResp(make_stream(["想" * 50], ["写" * 50]))
+    # ⚠️ 必须造一条**够慢**的流：第一次测用 3 行 × 0.02s = 0.06 秒，
+    #    比取消线程的 0.25 秒还快，任务早就跑完了，取消当然没生效。
+    #    这是测试设计问题，不是功能问题 —— 真实模型要跑几十秒。
+    r = FakeResp(make_stream(["想"] * 60, ["写"] * 60))
     ev_box["resp"] = r
     return r
 M.client.chat = slow_chat
