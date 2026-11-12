@@ -731,9 +731,8 @@
       var cv = document.getElementById("avCanvas");
       var im = document.getElementById("avImg");
       ph.textContent = "init:" + (window.__avInitRan ? "1" : "0")
-        + " boxNull:" + (window.__avBoxNull ? "1" : "0")
         + " cvW:" + (cv ? (cv.width || 0) : "-")
-        + " imgSrc:" + (im && im.getAttribute("src") ? "有" : "无");
+        + " err:" + (window.__err || "无");
     }, 3000);
   </script>
 </body>
