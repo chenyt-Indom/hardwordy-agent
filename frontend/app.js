@@ -8444,9 +8444,10 @@
   // 眨眼同理——眼睛区域纵向压缩，压缩后空出的地方用下眼睑以下的皮肤补。
   // 这些都是"形变"不是"重绘"，做不出 b/p/m 那种闭唇音素，这点不吹。
   const AV_W = 270, AV_H = 360;                    // canvas 内部分辨率（3:4）
-  const AV_EYE_TOP = 0.365, AV_EYE_BOT = 0.405;
-  const AV_EYE_RECT = [[0.330, 0.494], [0.506, 0.670]];
-  const AV_BROW_TOP = 0.330, AV_BROW_BOT = 0.364;
+  // 2026-11-12 换形象后重测：按像素刻度尺 + 裁图复核，眼/眉比旧值整体上移约 0.015
+  const AV_EYE_TOP = 0.350, AV_EYE_BOT = 0.392;
+  const AV_EYE_RECT = [[0.345, 0.490], [0.510, 0.655]];
+  const AV_BROW_TOP = 0.308, AV_BROW_BOT = 0.348;
   const AV_EMO = {
     neutral:  { squint: 0,     eyeDY: 0,  brow: 0,  tint: null },
     happy:    { squint: 0.30,  eyeDY: -1, brow: -1, tint: "rgba(255,186,120,0.10)" },
