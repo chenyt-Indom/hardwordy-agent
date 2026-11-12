@@ -9169,14 +9169,16 @@
       const empty = box.querySelector(".hive-empty");
       if (empty) empty.remove();
       const node = document.createElement("div");
-      node.className = "hive-msg ai hd-live";
+      // 实时进度卡片同样用单人模式那套 class（.msg.bot / .bubble / .think-hdr）
+      node.className = "msg bot hd-live";
       node.innerHTML = '<span class="hmsg-who"></span>'
         + '<div class="hd-live-head"><span class="hd-dot"></span>'
         + '<span class="hd-phase">排队中…</span>'
         + '<button class="hd-cancel" type="button">取消</button></div>'
-        + '<details class="hmsg-think hd-think"><summary>💭 思考过程</summary>'
-        + '<div class="hthink-body"></div></details>'
-        + '<div class="hmsg-bubble hd-out"></div>';
+        + '<div class="bubble think-hdr hd-think"><span>🧠 思考过程</span>'
+        + '<span class="arrow">▸</span></div>'
+        + '<div class="think-body"></div>'
+        + '<div class="bubble hmsg-body hd-out"></div>';
       box.appendChild(node);
       box.scrollTop = box.scrollHeight;
       c = {
