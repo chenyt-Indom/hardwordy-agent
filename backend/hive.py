@@ -1496,7 +1496,24 @@ def read_memory(gid: str) -> Dict[str, Any]:
 
 
 def memory_context(gid: str, max_chars: int = 2500) -> str:
-    """给提示词用的群记忆片段（裁到 max_chars，避免把上下文吃满）。"""
+    """给提示词用的群记忆片段（裁到 max_chars，避免把上下文吃满）。
+
+    ⚠️ 会**自动保鲜**：群里有比上次重建更新的消息就重建一次。
+    否则记忆会一直停在第一次生成的那一刻 —— 那就成"死记忆"了，
+    用户要的是「上下文根据群聊内容重新构建」。
+    """
+    p = _mem_path(gid)
+    stale = not os.path.exists(p)
+    if not stale:
+        try:
+            stale = max_ts(gid) > os.path.getmtime(p)
+        except Exception:
+            stale = False
+    if stale:
+        try:
+            rebuild_memory(gid)
+        except Exception:
+            pass
     d = read_memory(gid)
     c = (d.get("content") or "").strip()
     if not c:
