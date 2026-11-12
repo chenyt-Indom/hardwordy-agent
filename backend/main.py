@@ -10235,6 +10235,31 @@ def _hive_on_stream(gid: str, frame: dict) -> None:
 hive_client.client().on_stream = _hive_on_stream
 
 
+def _hive_on_cancel(gid: str, body: dict) -> None:
+    """别的成员请求取消任务 —— 只有**发起人本人或群主**才真的停。
+
+    为什么要在这里判权限：中继只转发、不做权限判断（它看不到明文，也不该解），
+    所以「谁有资格取消」必须在真正跑任务的这台机器上决定。
+    """
+    try:
+        mid = (body or {}).get("mid") or ""
+        by = (body or {}).get("by") or ""
+        info = _hd_running.get(gid) or {}
+        if not info or info.get("task_id") != mid:
+            return
+        g = hive.load_group(gid) or {}
+        if not by or (by != info.get("asker_id") and by != g.get("owner")):
+            return
+        ev = _hd_cancel.get(mid)
+        if ev:
+            ev.set()
+    except Exception:
+        pass
+
+
+hive_client.client().on_cancel = _hive_on_cancel
+
+
 @app.websocket("/hive")
 async def hive_relay_ws(ws: WebSocket):
     """**内置中继** —— 让本应用自己就能当群里那台中转站。
