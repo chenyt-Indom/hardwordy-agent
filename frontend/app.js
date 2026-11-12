@@ -8715,55 +8715,6 @@
     });
 
     // ---------------------------------------------------------- 模式切换
-    /* TEMP-CMP-START */
-    setTimeout(() => {
-      try {
-        const dump = (label, rootSel) => {
-          const root = document.querySelector(rootSel);
-          if (!root) return label + "：找不到容器";
-          const w = document.createElement("div");
-          w.className = "msg bot";
-          w.innerHTML = '<span class="hmsg-who">X</span>'
-            + '<div class="bubble think-hdr"><span>🧠 思考过程（114 字 · 耗时 1.2s）</span><span class="arrow">▸</span></div>'
-            + '<div class="think-body open">这是一段思考内容，用来对比两种模式的样式差异。</div>'
-            + '<div class="bubble hmsg-body">正文气泡</div>'
-            + '<span class="hmsg-ts">06:17</span>';
-          root.appendChild(w);
-          const hdr = w.querySelector(".think-hdr");
-          const body = w.querySelector(".think-body");
-          const cs = (e) => getComputedStyle(e);
-          const f = (e, k) => cs(e)[k];
-          const out = [
-            label,
-            "  容器宽=" + Math.round(root.clientWidth) + "  msg宽=" + Math.round(w.clientWidth),
-            "  hdr宽=" + Math.round(hdr.getBoundingClientRect().width)
-              + " maxW=" + f(hdr, "maxWidth") + " pad=" + f(hdr, "padding")
-              + " radius=" + f(hdr, "borderRadius") + " fs=" + f(hdr, "fontSize")
-              + " border=" + f(hdr, "borderStyle") + " bg=" + f(hdr, "backgroundColor"),
-            "  body宽=" + Math.round(body.getBoundingClientRect().width)
-              + " maxW=" + f(body, "maxWidth") + " pad=" + f(body, "padding")
-              + " radius=" + f(body, "borderRadius") + " fs=" + f(body, "fontSize")
-              + " border=" + f(body, "borderStyle") + " bg=" + f(body, "backgroundColor"),
-            "  msgGap=" + f(w, "gap") + " align=" + f(w, "alignItems"),
-          ].join("\n");
-          w.remove();
-          return out;
-        };
-        const t1 = document.querySelector('.mode-tab[data-mode="single"]');
-        const t2 = document.querySelector('.mode-tab[data-mode="hive"]');
-        if (t1) t1.click();
-        const a = dump("【单人模式】", ".messages");
-        if (t2) t2.click();
-        setTimeout(() => {
-          const b = dump("【群聊模式】", "#hiveMsgs");
-          const pre = document.createElement("pre");
-          pre.style.cssText = "position:fixed;left:60px;top:70px;z-index:99999;background:#000;color:#0f0;font:12px/1.6 monospace;padding:12px;border:1px solid #0f0;white-space:pre;max-width:900px";
-          pre.textContent = a + "\n\n" + b;
-          document.body.appendChild(pre);
-        }, 800);
-      } catch (e) { console.error(e); }
-    }, 1500);
-    /* TEMP-CMP-END */
     function setMode(m) {
       mode = m;
       const isHive = m === "hive";
