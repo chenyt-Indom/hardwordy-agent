@@ -74,16 +74,6 @@ _PUNCT = set("，。、；：？！…—·「」『』（）《》〈〉,.!?;:\
 # =====================================================================
 #  打分工具
 # =====================================================================
-def _char_cov(query: str, text: str) -> float:
-    """查询里的**实字**有多少出现在条目里（0~1）。抗断词，短查询也稳。"""
-    qc = [c for c in (query or "")
-          if c not in _STOP_CHARS and c not in _PUNCT and not c.isspace()]
-    if not qc:
-        return 0.0
-    tc = set(text or "")
-    return sum(1 for c in qc if c in tc) / float(len(qc))
-
-
 def _text_sets(text: str):
     """把文本变成 (实字集合, 2-gram 集合)。转录条目在构建时预算好，查询时不再分词。"""
     t = text or ""
