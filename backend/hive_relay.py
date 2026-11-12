@@ -264,7 +264,8 @@ async def main() -> None:
     print("提示：服务器上放行这个端口；生产环境建议前面挂 nginx + TLS，用 wss://")
     async with websockets.serve(handler, args.host, args.port,
                                 max_size=args.max_size, ping_interval=20,
-                                ping_timeout=20):
+                                ping_timeout=20,
+                                process_request=_process_request):
         await asyncio.Future()
 
 
