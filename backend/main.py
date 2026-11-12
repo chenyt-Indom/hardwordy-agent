@@ -10708,7 +10708,10 @@ def _queue_pending_file(gid: str, meta: dict) -> None:
 def _flush_pending_files() -> None:
     """有新成员连上来 → 把之前没发成功的附件补发一遍（接收端按 fid+片号去重）。"""
     with _pending_files_lock:
+        # 先取走再发：on_peer 会在握手/断线时被多个线程触发，
+        # 只 list 不 clear 的话同一批附件会被并发补发好几遍（实测发了 3 遍）。
         todo = list(_pending_files)
+        _pending_files.clear()
     if not todo:
         return
     cli = hive_client.client()
