@@ -5208,7 +5208,10 @@ async def chat(req: ChatRequest,
     # ⚠️ 附件图片也要占上下文（挂在最后一条 user 消息上发给 Ollama）——
     #    以前没算，拖一张大图进来就会撑爆窗口、Ollama 直接回 400。
     messages, dropped, _clamped = _trim_history_to_budget(
-        messages, budget_sys, tool_schemas, cfg, images_b64=model_images)
+        messages, budget_sys, tool_schemas, cfg,
+        # ⚠️ 2026-11-13：**回挂的历史图片也要算进预算**（每张约 1030 token）。
+        #    只算本轮 model_images 的话，历史里多挂两张就把窗口撑爆 → Ollama 回 400。
+        images_b64=(list(model_images or []) + list(_hist_imgs or [])))
     digest = _history_digest(dropped)
     # ★ 2026-11-10：历史没被裁掉，但模型在几千字里做「关键词对齐」会抓错
     #   （用户问「胡萝卜那个笑话」，它拿最近一条顶替）。这里把最近 8 轮压成速览
