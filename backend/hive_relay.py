@@ -135,6 +135,9 @@ class Room:
 
 
 ROOMS: Dict[str, Room] = {}
+# 连接 → 用户 ID。websockets 17 的 ServerConnection 不适合挂自定义属性，
+# 所以用独立映射表（leave 时按它判断"这个用户还有没有别的连接"）。
+CONN_UID: Dict[Any, str] = {}
 
 
 def _room(gid: str) -> Room:
