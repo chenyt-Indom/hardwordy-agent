@@ -3637,6 +3637,11 @@ html[data-theme="light"] select.pill-select option {
   flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted);
 }
 .hive-item .hi-dot.live { background: var(--green); }
+/* 当前群的连接状态：在线绿、连接中黄闪、离线灰、异常红。
+   不是当前群的点保持中性灰（它可能根本没连）。 */
+.hive-item .hi-dot.connecting { background: #f1c40f; animation: netPulse 1.1s infinite; }
+.hive-item .hi-dot.offline { background: #8b949e; }
+.hive-item .hi-dot.error { background: var(--danger); }
 
 /* ---------- 主区：群聊界面 ---------- */
 .hive-main {
