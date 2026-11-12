@@ -624,6 +624,8 @@ def join_with_key(gid: str, key: bytes, name: str = "",
                 g.pop("left_at", None)
                 _write_json(_group_path(gid), g)
 
+        if me["user_id"] in set(g.get("kicked") or []):
+            raise ValueError("你已被移出这个群，不能再加入。")
         members = load_members(gid)
         joined_new = me["user_id"] not in members
         if me["user_id"] not in members:
