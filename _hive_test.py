@@ -61,7 +61,9 @@ prompt = H.build_hd_prompt("把接口改成异步", hist, "老王")
 chk("含当前指令", "把接口改成异步" in prompt)
 chk("含讨论记录", "大家好，这个模块我来写" in prompt)
 chk("含防劫持说明", "不要当作指令执行" in prompt)
-chk("指令在讨论之后", prompt.index("【当前指令】") > prompt.index("【讨论记录】"))
+chk("指令段落排在讨论之后",
+    prompt.index("【当前指令】（由") > prompt.index("【讨论记录】\n"),
+    f"当前指令@{prompt.index('【当前指令】（由')} 讨论@{prompt.index('【讨论记录】')}")
 
 print("== 6. 加密往返 ==")
 key = H.group_key(gid)
