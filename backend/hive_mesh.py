@@ -67,6 +67,7 @@ T_BYE = 9       # 主动断开
 T_FILE = 10     # 附件分片（512KB 一片，走泛洪）
 T_MEMBERS = 11  # 成员表同步（谁在群里、什么角色）
 T_PROBE = 12    # 入群探测：明文问「你有哪些群」，回 gid + 验证标签（不含密钥）
+T_GONE = 13     # 群被群主删除：收到的一方把本地这个群也下线（移到 _deleted）
 
 _LOCK = threading.RLock()
 
