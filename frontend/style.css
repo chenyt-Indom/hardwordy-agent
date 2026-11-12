@@ -1108,11 +1108,11 @@ body.dragging .drop-overlay,
 }
 .au-dl { flex: none; font-size: 12px; text-decoration: none; opacity: .7; }
 .au-dl:hover { opacity: 1; }
-.au-ren {
+.au-ren, .au-loc {
   flex: none; border: 0; background: transparent; cursor: pointer;
   font-size: 11px; opacity: .55; padding: 0 2px;
 }
-.au-ren:hover { opacity: 1; }
+.au-ren:hover, .au-loc:hover { opacity: 1; }
 .dl-editor { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
 .dl-editor-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .dl-editor-name { font-size: 12px; color: var(--accent); font-weight: 600; }
