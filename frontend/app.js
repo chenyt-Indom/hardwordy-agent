@@ -9651,6 +9651,7 @@
     }
 
 
+
     // 打开 / 关闭
     if (el("p2pOpenBtn")) el("p2pOpenBtn").addEventListener("click", p2pOpen);
     if (el("p2pClose")) el("p2pClose").addEventListener("click", p2pClose);
