@@ -732,6 +732,7 @@ class MeshNode:
             if not _send_frame(s, T_HELLO, _rk(gid), key, {
                 "uid": self.uid,
                 "name": self.uname,
+                "dev": self.dev,
                 "ver": PROTO_VER,
                 "port": self.port,
                 "gid": gid,
