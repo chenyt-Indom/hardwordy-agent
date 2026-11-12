@@ -795,6 +795,10 @@ class MeshNode:
             for p in self.peers:
                 if p.alive and p.uid == uid:
                     return
+        # 只让 uid 较小的一方发起连接（见 _prefer_out 的说明）：
+        # 双方都主动连会形成双向双连接，去重时容易各自关掉不同方向的那条。
+        if not _prefer_out(self.uid, uid):
+            return
         threading.Thread(target=self.connect, args=(host, port, gid),
                          daemon=True).start()
 
