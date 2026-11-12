@@ -9466,38 +9466,6 @@
     }
 
     // ---------------------------------------------------------- 启动
-    // __TMP_SHOT_START__
-    let __tmpShotN = 0;
-    const __tmpShotTimer = setInterval(() => {
-      try {
-        __tmpShotN += 1;
-        if (__tmpShotN > 8) { clearInterval(__tmpShotTimer); return; }
-        setMode("hive");
-        const box = el("hiveMsgs");
-        if (!box) return;
-        box.innerHTML = "";
-        const n1 = document.createElement("div");
-        n1.className = "hive-msg ai hd-live";
-        n1.innerHTML = '<span class="hmsg-who">张三 唤醒了模型</span>'
-          + '<div class="hd-live-head"><span class="hd-dot"></span>'
-          + '<span class="hd-phase">思考中… 128 字</span>'
-          + '<button class="hd-cancel" type="button">取消</button></div>'
-          + '<details class="hmsg-think hd-think" open><summary>💭 思考过程</summary>'
-          + '<div class="hthink-body">用户要一个登录页，先确认字段：账号、密码。'
-          + '还要考虑表单校验和错误提示，以及密码是否可见。</div></details>'
-          + '<div class="hmsg-bubble hd-out">好的，我来写一个登录页，先给结构。</div>';
-        box.appendChild(n1);
-        const n2 = document.createElement("div");
-        n2.className = "hive-msg ai";
-        n2.innerHTML = '<span class="hmsg-who">李四（由 李四 唤醒）</span>'
-          + '<details class="hmsg-think"><summary>💭 思考过程（216 字 · 耗时 12.4s）</summary>'
-          + '<div class="hthink-body">已保存的思考内容……</div></details>'
-          + '<div class="hmsg-bubble">这是历史消息里的思考过程，默认收起，点开可看全文。</div>'
-          + '<span class="hmsg-ts">14:32</span>';
-        box.appendChild(n2);
-      } catch (e) { /* 忽略 */ }
-    }, 900);
-    // __TMP_SHOT_END__
     let saved = "single";
     try { saved = localStorage.getItem("ui_mode") || "single"; } catch (e) { /* 忽略 */ }
     setMode(saved === "hive" ? "hive" : "single");
