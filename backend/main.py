@@ -10531,7 +10531,7 @@ def hive_relay_probe(body: dict):
     except Exception:
         timeout = 6.0
     try:
-        return hive_deploy.probe(b.get("url") or "", timeout=timeout)
+        return hive_deploy.probe_auto(b.get("url") or "", timeout=timeout)
     except Exception as e:
         return {"ok": False, "error": {"code": "unknown", "title": "探测出错",
                                        "reason": f"{type(e).__name__}: {e}",
