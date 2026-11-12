@@ -279,6 +279,12 @@ def synth(text: str, voice: str = "", rate: int = 0, engine: str = "auto",
         engine = "edge"
 
     rate = max(-50, min(80, int(rate or 0)))
+    pitch = max(-50, min(50, int(pitch or 0)))
+    st = _style_meta(style) if style else None
+    if st and st["id"] != "neutral":
+        rate = max(-50, min(80, rate + int(st["rate"])))
+        pitch = max(-50, min(50, pitch + int(st["pitch"])))
+    vol_pct = int(st["volume"]) if st else 0
     base = _safe_name(filename) if filename else (
         "tts_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4])
 
