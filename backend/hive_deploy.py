@@ -651,10 +651,11 @@ def make_bundle(host_hint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """生成部署包 zip，返回路径和内容清单。"""
     hint = host_hint or {}
     buf = io.BytesIO()
+    zf = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
     files: List[str] = []
 
     def put(name: str, data: str) -> None:
-        buf.writestr(name, data.encode("utf-8"))
+        zf.writestr(name, data.encode("utf-8"))
         files.append(name)
 
     # 中继本体：直接复制当前正在用的那份，保证版本一致
