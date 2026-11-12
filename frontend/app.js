@@ -3619,6 +3619,59 @@
     };
   }
   bindMemoryPanel();
+  // ---------- 记忆库 · 向量检索（状态 + 检索测试）----------
+  // 为什么要有这个测试框：召回率好不好，用户不该只能"感觉"——
+  // 输入一句话就能看到召回了哪几条、各自语义分/字面分多少，
+  // 阈值调得对不对、索引有没有生效，一眼可验。
+  async function loadMemVecStat() {
+    const el = $("#memVecStat");
+    if (!el) return;
+    try {
+      const d = await api("/api/memory/index");
+      if (!d.ok) { el.textContent = "向量索引：不可用"; return; }
+      const lv = d.levels || {};
+      const parts = Object.keys(lv).map((k) => `${k} ${lv[k]}`).join(" · ");
+      const model = d.indexed
+        ? `${d.model || "?"} · ${d.dim || 0}维`
+        : "无向量模型（关键词兜底）";
+      el.textContent = `🧠 ${d.items || 0} 条（${parts || "空"}）· ${model}`
+        + (d.transcript_files ? ` · 历史会话 ${d.transcript_files} 个` : "");
+      el.title = el.textContent;
+    } catch (e) {
+      el.textContent = "向量索引：读取失败";
+    }
+  }
+
+  async function runMemVecSearch() {
+    const box = $("#memVecHits");
+    if (!box) return;
+    const q = (($("#memVecQ") || {}).value || "").trim();
+    if (!q) { box.hidden = true; return; }
+    box.hidden = false;
+    box.innerHTML = `<div class="mem-vec-empty">检索中…</div>`;
+    try {
+      const d = await api("/api/memory/search?q=" + encodeURIComponent(q)
+        + "&session_id=" + encodeURIComponent(sessionId || "") + "&top_k=6");
+      const hits = d.hits || [];
+      if (!hits.length) {
+        box.innerHTML = `<div class="mem-vec-empty">没有相关记忆（阈值生效：宁缺毋滥）</div>`;
+        return;
+      }
+      box.innerHTML = hits.map((h) => {
+        const sc = Number(h.score || 0).toFixed(3);
+        const extra = (h.vec === undefined) ? ""
+          : ` · 语义 ${Number(h.vec).toFixed(3)} · 字面 ${Number(h.cov || 0).toFixed(2)}`;
+        return `<div class="mem-vec-hit">
+          <div class="mem-vec-hit-h">${esc(h.level || "")} · 分 ${sc}${extra}</div>
+          <div class="mem-vec-hit-b">${esc(h.content || "")}</div>
+        </div>`;
+      }).join("");
+    } catch (e) {
+      box.innerHTML = `<div class="mem-vec-empty">检索失败：${esc(e.message || String(e))}</div>`;
+    }
+  }
+
+  loadMemVecStat();
 
   // ---------- 内存占用：看清占在哪 + 一键释放 ----------
   // 设计原则：**释放只动对话记录与归档，长期记忆一律保留**。
