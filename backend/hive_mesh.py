@@ -852,6 +852,9 @@ class MeshNode:
                         "rk": _rk(g).hex(), "gid": g,
                         "port": self.port, "uid": self.uid,
                         "name": self.uname, "ts": time.time(),
+                        # vt = 验证标签，让「只输密码」的人能确认密码对不对
+                        "vt": self.vts.get(g, ""),
+                        "gn": self.gnames.get(g, ""),
                     }).encode("utf-8")
                     try:
                         self._udp.sendto(pkt, ("255.255.255.255", self._beacon_port))
