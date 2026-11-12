@@ -220,30 +220,30 @@ def probe(force: bool = False) -> dict:
         _state.update({"backend": "", "model": "", "dim": 0,
                        "ready": False, "error": "", "probed": now})
 
-        # ① Ollama
         names = _ollama_models()
-        model = _pick_ollama_model(names)
-        if model:
+        errs = []
+        for backend, cand in BACKENDS:
             try:
-                v = _ollama_embed(["探测"], model)
-                dim = len(v[0]) if v and v[0] else 0
-                if dim > 0:
+                if backend == "ollama":
+                    model = _match_model(names, cand)
+                    if not model:
+                        continue
+                    v = _ollama_embed(["探测"], model)
+                    dim = len(v[0]) if v and v[0] else 0
+                    if dim <= 0:
+                        continue
                     _state.update({"backend": "ollama", "model": model,
                                    "dim": dim, "ready": True})
                     _LOG.info("向量后端：Ollama / %s（%d 维）", model, dim)
                     return dict(_state)
-            except Exception as e:
-                _state["error"] = "Ollama 向量化失败：%s" % e
-
-        # ② ONNX
-        for cand in ONNX_CANDIDATES:
-            loaded = _onnx_load(cand)
-            if not loaded:
-                continue
-            try:
-                v = _onnx_embed(["探测"], loaded)
-                dim = len(v[0]) if v and v[0] else 0
-                if dim > 0:
+                else:
+                    loaded = _onnx_load(cand)
+                    if not loaded:
+                        continue
+                    v = _onnx_embed(["探测"], loaded)
+                    dim = len(v[0]) if v and v[0] else 0
+                    if dim <= 0:
+                        continue
                     _onnx.update({"tok": loaded[0], "sess": loaded[1],
                                   "names": loaded[2], "name": cand})
                     _state.update({"backend": "onnx", "model": cand,
@@ -251,11 +251,11 @@ def probe(force: bool = False) -> dict:
                     _LOG.info("向量后端：ONNX / %s（%d 维）", cand, dim)
                     return dict(_state)
             except Exception as e:
-                _state["error"] = "ONNX 向量化失败：%s" % e
+                errs.append("%s/%s: %s" % (backend, cand, e))
 
-        if not _state["error"]:
-            _state["error"] = ("没有可用的向量模型（Ollama 未装 embedding 模型，"
-                               "本地也没有 ONNX 模型）")
+        _state["error"] = ("没有可用的向量模型（Ollama 里没有 embedding 模型，"
+                           "本地也没有 ONNX 模型）"
+                           + ("；尝试过：" + "；".join(errs[:3]) if errs else ""))
         return dict(_state)
 
 
