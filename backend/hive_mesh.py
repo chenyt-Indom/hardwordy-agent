@@ -587,13 +587,12 @@ class MeshNode:
         self._fanout(gid, T_PEERS, {"known": known})
 
     def _known_list(self) -> List[Dict[str, Any]]:
-        me = H.profile().get("user_id", "")
         out = []
         with _LOCK:
-            out.append({"uid": me, "host": lan_ip(), "port": self.port,
-                        "name": H.profile().get("name", ""), "gid": ""})
+            out.append({"uid": self.uid, "host": lan_ip(), "port": self.port,
+                        "name": self.uname, "gid": ""})
             for uid, k in self.known.items():
-                if uid == me:
+                if uid == self.uid:
                     continue
                 out.append({"uid": uid, "host": k.get("host", ""),
                             "port": k.get("port", 0), "name": k.get("name", ""),
