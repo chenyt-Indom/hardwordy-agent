@@ -10279,6 +10279,17 @@ def _hive_on_cancel(gid: str, body: dict) -> None:
 hive_client.client().on_cancel = _hive_on_cancel
 
 
+def _hive_on_file(gid: str, meta: dict) -> None:
+    """别人的附件收齐了 → 通知本机前端「有新文件」。
+
+    前端收到后刷新对应消息里的附件卡片（原来显示"传输中"的，现在能点开了）。
+    """
+    _broadcast_hive({"type": "file", "gid": gid, "file": meta})
+
+
+hive_client.client().on_file = _hive_on_file
+
+
 @app.websocket("/hive")
 async def hive_relay_ws(ws: WebSocket):
     """**内置中继** —— 让本应用自己就能当群里那台中转站。
