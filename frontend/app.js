@@ -3116,6 +3116,7 @@
   (function bindDoclibPanel() {
     const wrap = $("#doclibPanel");
     if (!wrap) return;
+    bindMoreMenu("dlMore", "dlMenu");
     const open = $("#dlOpenFolder");
     if (open) open.onclick = () =>
       openFolderRequest("/api/doclib/open_folder", { method: "POST" });
