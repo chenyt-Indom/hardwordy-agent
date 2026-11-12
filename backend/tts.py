@@ -333,6 +333,9 @@ def synth(text: str, voice: str = "", rate: int = 0, engine: str = "auto",
         "voice_name": _voice_meta(vid)["name"] if used == "edge" else _voice_meta(
             next((v["id"] for v in VOICES if v["engine"] == "sapi"), ""))["name"],
         "rate": rate,
+        "pitch": pitch,
+        "style": (st["id"] if st else "neutral"),
+        "style_name": (st["name"] if st else "自然"),
         "warnings": warnings,
     }
 
