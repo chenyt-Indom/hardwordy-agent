@@ -1295,6 +1295,15 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                         "rate": {"type": "integer",
                                  "description": "语速百分比，0 原速；讲解稿建议 0~10，"
                                                 "有声书建议 -5"},
+                        "pitch": {"type": "integer",
+                                  "description": "音高偏移（Hz），0 原调，+15 更亮更年轻，"
+                                                 "-12 更沉更稳重。仅在线引擎有效"},
+                        "style": {"type": "string",
+                                  "description": "情感预设：neutral 自然 / cheerful 愉悦 / "
+                                                 "gentle 温柔 / serious 严肃 / sad 低沉 / "
+                                                 "news 播报 / excited 激动。"
+                                                 "注意这是用「语速+音高+音量」组合近似，"
+                                                 "不是真正的情感合成"},
                         "engine": {"type": "string",
                                    "enum": ["auto", "edge", "sapi"],
                                    "description": "auto（默认，在线优先失败回退）/ edge 强制在线 / "
