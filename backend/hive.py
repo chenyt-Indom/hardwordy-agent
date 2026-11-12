@@ -1012,33 +1012,19 @@ def build_hd_prompt(instruction: str, history: List[Dict[str, Any]],
     )
 
 
-# ---------------------------------------------------------------- 中继配置
-
-def relay_config() -> Dict[str, Any]:
-    return _read_json(_CFG, {"url": "", "token": "", "enabled": False}) or {}
-
-
-def set_relay(url: str, token: str = "", enabled: bool = True) -> Dict[str, Any]:
-    cfg = {"url": (url or "").strip().rstrip("/"), "token": token or "",
-           "enabled": bool(enabled and url)}
-    _write_json(_CFG, cfg)
-    return cfg
-
-
 # ---------------------------------------------------------------- 自检
 
 def status() -> Dict[str, Any]:
     _ensure()
     me = profile()
     groups = list_groups()
-    cfg = relay_config()
     return {
         "user_id": me["user_id"],
         "name": me["name"],
         "groups": len(groups),
         "group_list": groups,
-        "relay": {"url": cfg.get("url", ""), "enabled": bool(cfg.get("enabled")),
-                  "connected": False},
+        # 中继已按需求删除：群聊走纯 P2P，不存在「服务器地址」这个概念了。
+        "relay": None,
         "data_dir": _DATA,
         "qr_ok": _qr_data_url("test") != "",
     }
