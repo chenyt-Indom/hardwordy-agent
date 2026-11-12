@@ -804,6 +804,7 @@ class MeshNode:
                 "gid": gid,
                 "known": self._known_list(),
                 "members": self._members_of(gid),
+                "kicked": self._kicked_of(gid),
             }):
                 s.close()
                 return {"ok": False, "error": "握手帧发送失败"}
