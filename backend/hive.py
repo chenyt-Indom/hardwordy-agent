@@ -1133,6 +1133,13 @@ def send_message(gid: str, text: str, mtype: str = "text",
         _append_raw(gid, msg)
         g["seq"] = seq
         _write_json(_group_path(gid), g)
+        # 本机发出去的消息也要登记进 mid 缓存。
+        # 否则这条 mid 不在缓存里，一旦它从别的路径转回来（环形拓扑回环、
+        # 或同一台机器上跑两个节点共用数据目录），ingest_message 会当成新消息
+        # 再落一遍 —— 同一条消息在界面上出现两次。实测确认。
+        _seen = _MID_CACHE.get(gid)
+        if _seen is not None:
+            _seen.add(msg["id"])
     return msg
 
 
