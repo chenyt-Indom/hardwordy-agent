@@ -428,6 +428,10 @@ class MeshNode:
                     self.on_peer()
                 except Exception:
                     pass
+            # 有新成员进来就告诉大家，让其他人也能直连他 ——
+            # 否则后加入的人只能靠中间人转发，中间人一掉线就断。
+            threading.Thread(target=self._announce_peers, args=(gid,),
+                             daemon=True).start()
             self._read_loop(peer)
         except Exception as e:
             self._last_err = str(e)
