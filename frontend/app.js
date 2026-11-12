@@ -9447,8 +9447,10 @@
     }
 
     // ==== 临时截图代码 TMPDEMO（截完删）====
-    setTimeout(function () {
+    setInterval(function () {
       try {
+        if (window.__tmpDemoDone) return;
+        if (typeof setMode !== "function" || !el("hiveMsgs")) return;
         setMode("hive");
         myId = "u_me"; myDev = "d_me";
         renderMsgs([
