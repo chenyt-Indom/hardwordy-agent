@@ -10493,7 +10493,8 @@ def hive_join(body: dict):
             hive_client.client().broadcast_members(g["gid"])
     except Exception as e:
         relay["error"] = f"{type(e).__name__}: {e}"
-    return {"ok": True, "group": g, "relay": relay}
+    return {"ok": True, "group": g, "relay": relay,
+            "via": via, "matched": matched}
 
 
 @app.get("/api/hive/{gid}/messages")
