@@ -2564,6 +2564,28 @@
     }
   }
 
+  // 面板标题右侧的「⋯」菜单，知识库和生成文库共用。
+  // 抽成一个函数是因为两边都要「点开 → 点外面或 Esc 收起」，
+  // 各写一遍迟早行为不一致（一边能 Esc 一边不能）。
+  function bindMoreMenu(btnId, menuId) {
+    const btn = $("#" + btnId), menu = $("#" + menuId);
+    if (!btn || !menu) return;
+    const set = (show) => {
+      menu.hidden = !show;
+      btn.setAttribute("aria-expanded", show ? "true" : "false");
+    };
+    btn.onclick = (e) => { e.stopPropagation(); set(menu.hidden); };
+    // 点菜单外面收起 —— 否则开着菜单去点别处，菜单一直挡着下面的列表
+    document.addEventListener("click", (e) => {
+      if (menu.hidden) return;
+      if (menu.contains(e.target) || btn.contains(e.target)) return;
+      set(false);
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !menu.hidden) set(false);
+    });
+  }
+
   (function bindKbPanel() {
     const open = $("#kbOpenFolder");
     if (open) open.onclick = () =>
