@@ -10289,6 +10289,13 @@ def _hive_on_file(gid: str, meta: dict) -> None:
 
 hive_client.client().on_file = _hive_on_file
 
+# 局域网 P2P 自动发现：监听 UDP 广播，知道同网段谁在共享什么。
+# 端口被占（比如开了两个实例）时内部会静默放弃，不影响手动传。
+try:
+    hive_p2p.start_discovery()
+except Exception as _e:
+    print("[hive-p2p] 自动发现启动失败（不影响手动传输）:", _e)
+
 
 @app.websocket("/hive")
 async def hive_relay_ws(ws: WebSocket):
