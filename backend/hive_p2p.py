@@ -792,6 +792,9 @@ def _beacon_sender(tid: str, gid: str, fid: str, name: str, size: int,
     payload = json.dumps({
         "gid": gid, "fid": fid, "name": name, "size": size,
         "port": port, "t": token, "from": _lan_ip(), "ts": time.time(),
+        # ⚠️ from 是 IP，用来给对端连；uid 才是「谁发的」，用来过滤自己。
+        #    早先只放了 from 却拿它比 user_id，永远不相等 → 自己也会看到自己的广播。
+        "uid": (H.profile().get("user_id") or ""),
     }, ensure_ascii=False).encode("utf-8")
     try:
         while not _BEACON_STOP.is_set():
