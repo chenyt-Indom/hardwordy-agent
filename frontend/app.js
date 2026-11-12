@@ -9909,27 +9909,41 @@
       });
     });
 
+    // 2026-11-13：这个按钮原来填「云端中继地址」，现在改成「连接码」。
+    // 同一个 WiFi 下压根用不上它（UDP 广播自动发现），只有跨网络才需要：
+    // 把自己的码发给对方，他粘进来就连上，数据不经过任何服务器。
     el("hiveRelayBtn").addEventListener("click", async () => {
-      let cur = "";
+      if (!curGid) { alert("先在左边选一个群"); return; }
+      let mine = "";
+      let mesh = {};
       try {
-        const d = await api("/api/hive/relay");
-        cur = (d.relay && d.relay.url) || "";
+        const d = await api("/api/hive/mesh/code?gid=" + encodeURIComponent(curGid));
+        mesh = d || {};
+        mine = d.wan_code || d.lan_code || "";
       } catch (e) { /* 忽略 */ }
+      const lan = mesh.lan_code || "";
+      const wan = mesh.wan_code || "";
+      const hint = wan
+        ? "把这行发给对方（微信/QQ 都行），他粘进同一个框里点确定就连上。"
+          + " 同一个 WiFi 下不用发 —— 会自动发现。"
+        : "没探到公网地址（可能被防火墙挡了）。局域网内用：" + (lan || "?")
+          + "；跨网络需要在路由器上做端口映射。";
       openModal({
-        title: "云端中继地址",
-        hint: "填你自己服务器上的中继地址，比如 ws://1.2.3.4:8765。"
-          + "不填就只能本机看消息（别人收不到）。留空表示不用中继。",
-        input: cur,
-        placeholder: "ws://你的服务器IP:8765",
+        title: "🔗 连接码",
+        hint: hint,
+        input: mine,
+        placeholder: "hive3://192.168.1.5:8899",
         onOk: async (v) => {
-          const url = (v || "").trim();
+          const c = (v || "").trim();
+          // 没改动 = 只是看了看自己的码，不算操作
+          if (!c || c === mine || c === lan || c === wan) return true;
           try {
-            const d = await api("/api/hive/relay", { url: url, enabled: !!url });
-            if (!d.ok) { alert(d.error || "保存失败"); return false; }
-          } catch (e) { alert("保存失败：" + e.message); return false; }
-          if (url && curGid) {
-            try { await api("/api/hive/connect", { gid: curGid }); } catch (e) { /* 忽略 */ }
-          }
+            const d = await api("/api/hive/mesh/connect", { gid: curGid, code: c });
+            if (!d.ok) {
+              alert("连不上：" + ((d.result || {}).error || d.error || "未知原因"));
+              return false;
+            }
+          } catch (e) { alert("连接失败：" + e.message); return false; }
           loadStatus();
           return true;
         },
