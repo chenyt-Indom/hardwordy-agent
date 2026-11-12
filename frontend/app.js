@@ -9652,7 +9652,7 @@
           if (t.state === "transferring" && t.speed) {
             line += " · " + fmtSize(t.speed) + "/s · 剩 " + p2pFmtEta(t.eta);
           }
-          if (t.state === "listening") line = fmtSize(total) + " · 等对方扫码或粘码";
+          if (t.state === "listening") line = fmtSize(total) + " · 等对方粘贴连接码";
           if (t.state === "done") line = fmtSize(total) + " · 已完成";
           if (t.error) line = t.error;
           let acts = "";
