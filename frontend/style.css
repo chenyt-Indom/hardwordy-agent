@@ -3966,9 +3966,11 @@ html[data-theme="light"] select.pill-select option {
 .hd-live-head .hd-cancel:hover {
   color: var(--danger, #e5534b); border-color: var(--danger, #e5534b);
 }
-.hd-live .hmsg-bubble { max-height: 320px; overflow: auto; }
-.hd-live .hmsg-bubble:empty { display: none; }
-.hd-live .hd-think:not([open]) { display: none; }
+/* 实时进度卡片已改用单人模式结构：正文是 .hmsg-body，思考是 .think-hdr/.think-body */
+.hd-live .hmsg-body { max-height: 320px; overflow: auto; }
+.hd-live .hmsg-body:empty { display: none; }
+/* 还没有思考内容时，把空壳藏起来（折叠态本来就是 0 高，这里只是不给边框留缝） */
+.hd-live .think-body:not(.open):empty { display: none; }
 .hmsg-cancel {
   font-size: 11.5px; color: var(--muted);
   padding: 2px 8px; margin-bottom: 4px;
