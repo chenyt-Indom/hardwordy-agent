@@ -8596,10 +8596,12 @@
     avMouth.style.height = (avMouthCfg.h * 100) + "%";
   }
 
-  // v: 0~1 张口幅度
+  // v: 0~1 张口幅度（由音频包络驱动）
   function avOpenMouth(v) {
-    if (!avMouth) return;
     const k = Math.max(0, Math.min(1, v));
+    avMouthV = k;
+    if (avReady2) return;                 // canvas 在跑，红椭圆不再需要
+    if (!avMouth) return;
     avMouth.style.transform =
       "translate(-50%, -50%) scale(" + (1 - k * 0.12).toFixed(3) + ", " +
       (0.45 + k * 2.1).toFixed(3) + ")";
