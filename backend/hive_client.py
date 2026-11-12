@@ -362,11 +362,11 @@ class HiveClient:
             return {"ok": False, "error": "这个群没有密钥，无法加密发送"}
         mid = "m_" + str(int(time.time() * 1000))[-9:] + str(abs(hash(text)) % 10000)
         body = {"name": me["name"], "type": mtype, "text": text,
-                "from": me["user_id"], "ts": time.time()}
+                "from": me["user_id"], "ts": time.time(), "ver": self._proto}
         if extra:
             body["extra"] = extra
         rec = {"t": "msg", "gid": gid, "mid": mid,
-               "blob": H._seal(key, body), "ts": time.time()}
+               "blob": H._seal(key, body), "ts": time.time(), "v": self._proto}
 
         if not self._connected or not self._loop or not self._ws:
             # 离线：先进队列，重连后补发；同时本地先落一条（标 pending）
