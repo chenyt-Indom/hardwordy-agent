@@ -10537,12 +10537,15 @@ def hive_send(gid: str, body: dict):
     text = b.get("text") or ""
     mtype = b.get("type") or "text"
     extra = b.get("extra")
+    # ⚠️ ref 必须单独取出来传给存储层 —— 之前漏了这一步，
+    #    前端传了 ref、后端也收到了，但没写进消息，引用块永远不显示。
+    ref = (b.get("ref") or "").strip()
     cli = hive_client.client()
     try:
         if cli.status().get("connected"):
-            r = cli.send(gid, text, mtype, extra)
+            r = cli.send(gid, text, mtype, extra, ref)
         else:
-            m = hive.send_message(gid, text, mtype, extra=extra)
+            m = hive.send_message(gid, text, mtype, ref=ref, extra=extra)
             _broadcast_hive({"type": "msg", "gid": gid, "msg": m})
             r = {"ok": True, "local": True, "msg": m}
     except Exception as e:
