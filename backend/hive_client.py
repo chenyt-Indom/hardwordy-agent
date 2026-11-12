@@ -153,7 +153,8 @@ class HiveClient:
         m = MESH.node()
         if not m.started:
             m.start(0, [gid])
-        m.add_group(gid)
+        m.add_group(gid, vt=g.get("vt") or "",
+                    gname=g.get("name") or "")
         self._gid = gid
         self._url = (url or "").strip()
         self._error = ""
