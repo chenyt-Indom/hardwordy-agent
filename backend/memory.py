@@ -391,22 +391,45 @@ def build_context(sid: str, query: str = "") -> str:
 #  检索（供 search_memory 工具）
 # =====================================================================
 def search_all(query: str, sid: str = "", top_k: int = 5) -> list:
-    q = _tokenize(query or "")
+    """检索记忆 —— **条目级**，只返回命中的那几条。
+
+    改造前：整块正文比一次、整块正文吐回去（长期记忆上限 15000 字、现在 67 条，
+    命中一条就返回全部），既塞 context 又定位不到具体哪条。
+    改造后：交给 memvec 做「语义向量 + 关键词覆盖率」的条目级混合检索，
+    无关时返回空（宁缺毋滥，不拿无关记忆污染回答）。
+    memvec 任何异常都退回到条目级关键词，功能不会整个挂掉。
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    try:
+        from . import memvec
+        hits = memvec.search(q, sid=sid, top_k=top_k)
+        if hits:
+            return hits
+    except Exception as e:
+        _LOG.warning("记忆向量检索失败，退化为关键词：%s", e)
+    return _keyword_items(q, sid, top_k)
+
+
+def _keyword_items(query: str, sid: str = "", top_k: int = 5) -> list:
+    """兜底：条目级关键词检索（没有向量模型 / 向量层出错时用）。"""
+    q = set(_tokenize(query or ""))
     if not q:
         return []
     out = []
-    for label, body in (("长期记忆", get_long()),
-                        ("短期记忆", get_short(sid) if sid else "")):
-        body = (body or "").strip()
-        if not body:
-            continue
-        inter = set(q) & set(_tokenize(body))
-        if inter:
-            out.append((len(inter) / max(len(q), 1),
-                        {"level": "记忆", "section": label,
-                         "content": f"【{label}】\n{body}", "source": "auto"}))
-    out.sort(key=lambda x: x[0], reverse=True)
-    return [x[1] for x in out[:top_k]]
+    for label, body, s in (("长期记忆", get_long(), ""),
+                           ("短期记忆", get_short(sid) if sid else "", sid)):
+        for e in _split_items(body or ""):
+            e = _norm_point(e)
+            if len(e) < 2:
+                continue
+            cov = len(q & set(_tokenize(e))) / max(len(q), 1)
+            if cov >= 0.5:
+                out.append({"level": label, "section": s, "content": e,
+                            "source": "auto", "score": round(cov, 4), "cov": cov})
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out[:top_k]
 
 
 def search_memories(query: str, top_k: int = 5) -> list:
