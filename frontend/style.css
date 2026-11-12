@@ -3682,6 +3682,10 @@ html[data-theme="light"] select.pill-select option {
 .hive-net.connecting .net-dot { background: #f1c40f; animation: netPulse 1.1s infinite; }
 .hive-net.connecting #hiveNetText { color: #d4a017; }
 .hive-net.offline .net-dot { background: #8b949e; }
+/* idle（本机模式）和 offline 都是灰点 —— 显式写死，
+   不让它继承到 --accent / --danger 这类强调色 */
+.hive-net.idle .net-dot { background: #8b949e; box-shadow: none; }
+.hive-net.idle #hiveNetText { color: var(--muted); }
 .hive-net.error .net-dot {
   background: var(--danger); box-shadow: 0 0 0 2px rgba(220, 80, 80, .16);
 }
