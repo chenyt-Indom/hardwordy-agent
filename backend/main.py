@@ -62,11 +62,14 @@ for _k in ("NO_PROXY", "no_proxy"):
 # ⚠️ 必须在任何子进程启动之前装上：之后所有 subprocess.Popen（含只读模块
 #    backend/selfdev.py 里的 node --check、git）都不会再弹控制台黑窗。
 #    用户反馈：「调用工具时总有一些窗口闪来闪去，很影响观感」。
+_NOWIN_STATUS = {}
 try:
     from . import procwin as _procwin
     _procwin.install_nowin_patch()
-except Exception:
-    pass
+    _NOWIN_STATUS = _procwin.status()
+except Exception as _e:            # noqa: BLE001
+    # 不能静默吞掉：补丁没装上 = 用户会看到黑窗一闪一闪，而代码里"看起来是好的"。
+    _NOWIN_STATUS = {"error": "%s: %s" % (type(_e).__name__, _e)}
 client = ollama_client.OllamaClient()
 
 # ⚠️ 这个 **必须**有：本文件多处用 `logger.xxx` 打日志，
