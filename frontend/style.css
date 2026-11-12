@@ -3671,8 +3671,9 @@ html[data-theme="light"] select.pill-select option {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .hive-net .net-dot {
-  width: 7px; height: 7px; border-radius: 50%; flex: none;
-  background: var(--meta-fg); transition: background .2s;
+  display: block; width: 7px; height: 7px; border-radius: 50%; flex: none;
+  /* idle 也要看得见 —— 之前继承 --meta-fg，在深色主题下几乎和背景同色 */
+  background: #8b949e; transition: background .2s;
 }
 .hive-net.online .net-dot {
   background: #2ecc71; box-shadow: 0 0 0 2px rgba(46, 204, 113, .16);
