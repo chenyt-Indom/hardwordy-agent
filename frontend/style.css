@@ -3912,23 +3912,28 @@ html[data-theme="light"] select.pill-select option {
 }
 .hive-msg.mine .hive-ref b { color: #fff; }
 
-/* ---------- @hd 思考过程与实时进度 ---------- */
-/* 思考过程：默认收起（可能几千字），点开看全文 */
-.hmsg-think {
-  max-width: 86%; margin-bottom: 4px;
-  border: 1px dashed var(--border); border-radius: 9px;
-  background: var(--think-bg); font-size: 12px;
+/* ---------- 群聊消息：版式与单人模式**完全统一**（2026-11-13 用户要求）----------
+   现象：用户截图指出「思考卡片的位置完全不一样」，而且群聊那套是独立样式。
+   做法：消息节点直接用单人模式的 class（.msg.bot / .msg.user / .bubble），
+        思考卡片也是 .think-hdr + .think-body —— 样式全部继承，不再维护第二套。
+   这里只补群聊特有的一点点：一个节点里有「昵称/思考/正文/操作/时间」多块，要竖排。 */
+.hive-msgs .msg {
+  flex-direction: column; align-items: stretch; gap: 3px;
+  max-width: min(76%, 880px); min-width: 0;
 }
-.hmsg-think > summary {
-  padding: 5px 10px; cursor: pointer; color: var(--muted);
-  font-size: 11.5px; user-select: none; outline: none;
+.hive-msgs .msg.user { align-items: flex-end; }
+.hive-msgs .msg > .bubble { align-self: flex-start; }
+.hive-msgs .msg.user > .bubble { align-self: flex-end; }
+/* 跨版本看不懂的消息：虚线 + 略淡（保留原来的可辨识度） */
+.hive-msgs .msg.bot.unknown > .bubble { border-style: dashed; opacity: .82; }
+.hive-msgs .msg .hmsg-who { font-size: 11px; color: var(--muted); }
+.hive-msgs .msg .hmsg-ts { font-size: 10.5px; color: var(--meta-fg); }
+/* 自己的气泡是深色底：引用块/强调色改白色系，否则看不清 */
+.hive-msgs .msg.user .hive-ref {
+  background: rgba(255, 255, 255, .16); border-left-color: #fff;
+  color: rgba(255, 255, 255, .85);
 }
-.hmsg-think > summary:hover { color: var(--fg); }
-.hmsg-think .hthink-body {
-  max-height: 260px; overflow: auto;
-  padding: 2px 10px 8px; color: var(--muted);
-  line-height: 1.6; white-space: pre-wrap; word-break: break-word;
-}
+.hive-msgs .msg.user .hive-ref b { color: #fff; }
 
 /* 实时进度卡片：正在跑的时候显示，跑完由正式消息替换 */
 .hd-live { max-width: 88%; }
