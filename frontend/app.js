@@ -10075,6 +10075,13 @@
         let d = null;
         try { d = JSON.parse(ev.data); } catch (e) { return; }
         if (d.type === "hello") { paintStatus(d); return; }
+        // 群被群主删除：本机那份也下线了，列表要立刻跟着变
+        if (d.type === "group_gone") {
+          if (d.gid === curGid) { curGid = ""; }
+          toast("群「" + (d.name || d.gid) + "」已被群主删除");
+          loadGroups();
+          return;
+        }
         if (d.type === "hd_stream" && d.gid === curGid && d.frame) {
           hdStream(d.frame);
           return;
