@@ -11077,15 +11077,17 @@ def hive_peers(gid: str):
 
 @app.post("/api/hive/connect")
 def hive_connect(body: dict):
-    """连上中继（进入群聊模式时调用）。"""
+    """进入群聊时调用：启动 P2P 网络。
+
+    `url` 留空 = 局域网模式（UDP 广播自动找同群的人，零配置零服务器）；
+    填 hive3://IP:端口 = 直连那个人（跨网络，人工传一次码）。
+    """
     b = body or {}
     gid = b.get("gid") or ""
     if not gid:
         return {"ok": False, "error": "缺群号"}
-    url = (b.get("url") or hive.relay_config().get("url") or "").strip()
-    if not url:
-        return {"ok": False, "error": "还没有配置中继地址"}
-    r = hive_client.client().start(url, gid)
+    code = (b.get("url") or b.get("code") or "").strip()
+    r = hive_client.client().start(code, gid)
     return {"ok": bool(r.get("ok")), "client": hive_client.client().status(),
             "error": r.get("error") or ""}
 
