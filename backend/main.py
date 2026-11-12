@@ -9447,9 +9447,32 @@ def kb_delete(name: str):
 
 @app.post("/api/kb/search")
 def kb_search(body: dict):
+    """检索知识库（块级混合检索：语义向量 + BM25）。
+
+    返回的是**片段**而不是整篇文档，所以同一篇长文档里不同段落会被分别命中，
+    这正是召回率提升的关键。每条带 vec_score / kw_score / chunk 便于排查。
+    """
     q = body.get("query") or ""
-    results = kb.search(q, top_k=body.get("top_k", 5))
+    results = kb.search(q, top_k=body.get("top_k", 5),
+                        min_score=body.get("min_score"))
     return {"ok": True, "results": results}
+
+
+@app.post("/api/kb/reindex")
+def kb_reindex():
+    """重建知识库索引（向量化）。
+
+    做成**显式触发**：向量化要跑几秒到几十秒（看文档量），
+    不该拖慢每一次普通检索，所以只在用户点按钮或检测到模型变更时才重建。
+    """
+    st = kb.reindex(force=True)
+    return {"ok": bool(st.get("ok")), "stats": st, "status": kb.index_status()}
+
+
+@app.get("/api/kb/index_status")
+def kb_index_status():
+    """索引状态：后端 / 模型 / 维度 / 块数 / 是否可用。"""
+    return {"ok": True, "status": kb.index_status()}
 
 
 # ---------- 本地文件读取 API ----------
