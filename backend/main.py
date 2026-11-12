@@ -10962,7 +10962,13 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
     resp = None
     try:
         hist = hive.read_messages(gid, 0, 60)
-        prompt = hive.build_hd_prompt(instruction, hist, asker)
+        # 群记忆：按群聊内容整理过的长期背景（用户要求「记忆库上下文根据群聊内容重新构建」）。
+        # 没有就现建一份；建失败也不影响这次任务，只是少一层背景。
+        try:
+            gmem = hive.memory_context(gid, 2500)
+        except Exception:
+            gmem = ""
+        prompt = hive.build_hd_prompt(instruction, hist, asker, memory=gmem)
 
         # 附件：图片交给视觉模型看，文档抽出正文拼进提示词。
         # 用户要求「@hd 能带图片/文档一起处理」—— 附件本身就在本机群目录里
