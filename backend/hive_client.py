@@ -361,6 +361,32 @@ class HiveClient:
 
     # ------------------------------------------------------------ 落盘 / 回调
 
+    def _stream(self, rec: Dict[str, Any]) -> None:
+        """收到别人的 @hd 进度帧：解密 → 回调给上层界面。
+
+        ⚠️ **不落盘、不进 _seen**：进度帧是过程数据，同一任务会来几百条，
+           存下来没意义（结束时会落一条完整的 ai 消息）。去重也交给前端按
+           mid + 序号聚合，不在这里拦。
+        """
+        key = H.group_key(self._gid)
+        body = H._open(key, rec.get("blob") or "") if key else None
+        if not isinstance(body, dict):
+            return
+        frame = {
+            "gid": self._gid,
+            "mid": rec.get("mid") or body.get("mid") or "",
+            "phase": body.get("phase") or "",
+            "delta": body.get("delta") or "",
+            "task": body.get("task") or {},
+            "seq_in": body.get("seq_in") or 0,
+            "ts": rec.get("ts") or time.time(),
+        }
+        if self.on_stream:
+            try:
+                self.on_stream(self._gid, frame)
+            except Exception:
+                pass
+
     def _store(self, rec: Dict[str, Any]) -> None:
         """把中继发来的密文解开，写进本地日志，并通知前端。"""
         mid = rec.get("mid") or ""
