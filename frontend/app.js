@@ -8697,6 +8697,9 @@
     function setMode(m) {
       mode = m;
       const isHive = m === "hive";
+      // 全局拖拽处理在 document 捕获阶段，它要知道现在是不是群聊模式，
+      // 才能把文件交给 addFiles 而不是单人模式的附件区。
+      window.__hiveMode = isHive;
       Array.prototype.forEach.call(tabs.querySelectorAll(".mode-tab"), (b) => {
         b.classList.toggle("on", b.getAttribute("data-mode") === m);
       });
