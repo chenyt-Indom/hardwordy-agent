@@ -10847,6 +10847,8 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
         _hd_emit(gid, mid, "start",
                  task={"asker": asker, "model": model, "hist": len(hist),
                        "prompt_chars": len(prompt),
+                       "images": len(images),
+                       "files": len(((body or {}).get("extra") or {}).get("files") or []),
                        "instruction": (instruction or "")[:120]})
         # 两条通道：本地 Ollama / 云端 DeepSeek。
         # ⚠️ 这个分支以前**不存在** —— 默认模型是 deepseek-flash 时，
