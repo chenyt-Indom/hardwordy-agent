@@ -3749,6 +3749,20 @@ html[data-theme="light"] select.pill-select option {
   color: var(--danger); cursor: pointer;
 }
 .hive-kick:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
+/* 成员区底部：退出群聊。刻意做低调，别和「踢人」一样显眼 */
+.hive-side-foot {
+  margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--border);
+}
+.hive-side-foot[hidden] { display: none; }
+.hive-leave {
+  width: 100%; padding: 6px 0; border-radius: 7px;
+  border: 1px solid var(--border); background: none;
+  color: var(--muted); font-size: 12px; cursor: pointer;
+}
+.hive-leave:hover { color: var(--danger); border-color: var(--danger); }
+.hive-leave[hidden] { display: none; }
+.hive-leave-tip { font-size: 11px; color: var(--muted); }
+.hive-leave-tip[hidden] { display: none; }
 
 /* ---------- 消息气泡 ---------- */
 .hive-msg { display: flex; flex-direction: column; gap: 3px; max-width: 76%; }
