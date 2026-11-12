@@ -9751,6 +9751,27 @@
             if (s > lastSeq) lastSeq = s;
             addMsg(d.msg);
           }
+          return;
+        }
+        // 别人的附件收齐了：那条消息原本可能显示「传输中」，现在能点开了。
+        // 直接重渲染那条消息节点（比局部替换附件区简单，也不会错位）。
+        if (d.type === "file" && d.gid === curGid && d.file) {
+          const fid = d.file.fid || "";
+          const mid = d.file.mid || "";
+          let hit = null;
+          Object.keys(msgIndex).forEach((k) => {
+            const m = msgIndex[k];
+            if (hit) return;
+            if (mid && k === mid) hit = m;
+            else if (!mid && (m.files || []).some((f) => f && f.fid === fid)) hit = m;
+          });
+          if (hit) {
+            (hit.files || []).forEach((f) => {
+              if (f && f.fid === fid) { f.local = true; f.size = d.file.size || f.size; }
+            });
+            const node = el("hiveMsgs").querySelector('[data-mid="' + (hit.id || "") + '"]');
+            if (node && node.parentNode) node.parentNode.replaceChild(msgNode(hit), node);
+          }
         }
       };
       ws.onclose = () => {
