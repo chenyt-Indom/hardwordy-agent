@@ -4898,6 +4898,22 @@ async def chat(req: ChatRequest,
         pass
     sys_prompt = _SystemPrompt.build(last_user, session, req.docs, no_tools=code_model_on)
     globals()["_LAST_SESSION"] = session   # 交接卡：重启前要读这个会话的历史（见 backend/handoff.py）
+
+    # ★ 2026-11-13：**图片跨轮可见**（用户报「图片只能当轮使用，下一轮模型就查不到」）。
+    #   两件事，缺一不可：
+    #     ① 把本轮附件落盘后的路径记进台账（按"用户消息内容哈希"索引，不怕消息序号错位）；
+    #     ② 把**之前轮次**的图片按哈希挂回对应的那条历史消息。
+    #   本轮图片仍走 images_b64 挂到最后一条 user 消息（attach 会跳过最后一条，不会重复）。
+    #   更早的图只留一行「文件路径」提示，不占图片 token（一张图约 1030 token）。
+    _hist_imgs: list = []
+    try:
+        if attach_paths:
+            chatimg.record(session, last_user, attach_paths)
+        _hist_imgs = chatimg.attach(messages, session)
+        if _hist_imgs:
+            logger.info("历史图片回挂：%d 张（session=%s）", len(_hist_imgs), session or "-")
+    except Exception:
+        logger.warning("历史图片回挂失败（本轮按无图继续）", exc_info=True)
     if attach_paths:
         # 把落盘路径交给模型 —— 这是"按用户提供的图片做文档/PPT"能成立的前提。
         # ⚠️ **代码模型那一轮也要注入**：用户说「做个 PPT」会命中造物规则、
