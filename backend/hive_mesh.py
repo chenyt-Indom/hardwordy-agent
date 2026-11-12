@@ -50,6 +50,7 @@ PROTO_VER = 3
 MESH_PORT = 8899
 MAX_FRAME = 8 * 1024 * 1024      # 单帧上限 8MB（消息/进度帧够用；大文件走 P2P 传输）
 TTL_DEFAULT = 3                   # 泛洪最大跳数
+BEACON_PORT = 45231               # UDP 发现端口（所有机器用同一个才能互相听到）
 BEACON_EVERY = 3.0                # UDP 广播间隔
 PEER_TIMEOUT = 45.0               # 多久没收到心跳算掉线
 
