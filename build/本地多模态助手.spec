@@ -29,7 +29,7 @@ def _collect(pkg):
 #   才回到 3.1GB，还差点把 models/vendor 一起删掉。
 #   现在从源头排掉，产物稳定在 3GB 量级。将来要恢复文生图，把下面
 #   _EXCLUDE_BIG 里对应的名字去掉、并把包加回 _pkgs 即可。
-_pkgs = ['webview', 'sherpa_onnx', 'sounddevice']
+_pkgs = ['webview', 'sherpa_onnx', 'sounddevice', 'edge_tts']
 
 _EXCLUDE_BIG = ['torch', 'torchvision', 'diffusers', 'transformers',
                 'accelerate', 'safetensors', 'tokenizers', 'huggingface_hub',
@@ -97,14 +97,29 @@ if os.path.isdir(_ASR_ROOT):
 all_hidden += [
     "backend.main", "backend.config", "backend.ollama_client", "backend.tools",
     "backend.t2i", "backend.memory", "backend.kb", "backend.file_tools",
-    "backend.video", "backend.web_tools", "backend.voice",
+    "backend.video", "backend.web_tools", "backend.voice", "backend.tts",
     "sounddevice", "sherpa_onnx",
+    # ⚠️ 2026-11-13：语音合成（backend/tts.py）用的是**函数内延迟导入** ——
+    #   `import edge_tts` 和 `import win32com.client` 都写在函数体里，
+    #   PyInstaller 的静态分析**抓不到**。实测：11.12a 那版打出来后
+    #   edge_tts 在 PYZ 里是 0 个模块、win32com 只有 shell 没有 client，
+    #   于是打包版的 TTS 直接用不了（源码跑却正常，最难查的那类）。
+    #   这里两头都堵：edge_tts 走 collect_all（见上面 _pkgs），
+    #   win32com 走 collect_submodules（见下面）。
+    "win32com", "pythoncom", "pywintypes",
     "uvicorn", "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
     "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on", "uvicorn.lifespan.off",
     "fastapi", "pydantic", "websockets", "multipart", "python_multipart",
     "clr", "pythonnet",
 ]
 all_hidden += collect_submodules("uvicorn", filter=lambda n: True)
+# pywin32 的 COM 客户端（win32com.client / win32com.shell 下的子模块）
+# 不显式收集的话只会带进空壳，SAPI 兜底朗读会 ImportError。
+for _m in ("win32com", "edge_tts"):
+    try:
+        all_hidden += collect_submodules(_m)
+    except Exception as _e:
+        print("[spec] collect_submodules(%s) 失败：%s" % (_m, _e))
 
 a = Analysis(
     [os.path.join(root, "run.py")],
