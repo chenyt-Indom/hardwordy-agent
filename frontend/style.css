@@ -76,6 +76,9 @@ html[data-theme="light"] {
   --accent: #1d5fd0;
   --green: #1f8f5f;
   --danger: #c93a34;
+  /* 浅色下青色要压深，否则白底上发白发飘、看不清 */
+  --kb-accent: #0f8a84;
+  --kb-accent-soft: rgba(15, 138, 132, .1);
 
   --btn-bg: #f0f0ed;
   --btn-bg-hover: #e2e2de;
