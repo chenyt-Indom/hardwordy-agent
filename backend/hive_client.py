@@ -507,6 +507,24 @@ class HiveClient:
         except Exception:
             return False
 
+    def send_cancel(self, gid: str, mid: str, by: str = "") -> bool:
+        """广播一条「取消这个任务」的请求。"""
+        if not self._connected or not self._loop or not self._ws:
+            return False
+        key = H.group_key(gid)
+        if not key:
+            return False
+        body = {"mid": mid, "by": by, "ts": time.time(), "ver": self._proto}
+        rec = {"t": "cancel", "gid": gid, "mid": mid,
+               "blob": H._seal(key, body), "ts": time.time(), "v": self._proto}
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._ws.send(json.dumps(rec, ensure_ascii=False)), self._loop
+            ).result(timeout=3)
+            return True
+        except Exception:
+            return False
+
     async def _flush_queue(self, ws) -> None:
         with self._lock:
             pending, self._queue = self._queue, []
