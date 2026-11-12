@@ -3692,6 +3692,21 @@ html[data-theme="light"] select.pill-select option {
 .hive-net.error #hiveNetText { color: var(--danger); }
 @keyframes netPulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 
+/* 身份冲突提示条：两台机器共用一个 user_id（拷贝了整个程序目录）。
+   用黄色警示条而不是弹窗 —— 不挡操作，但一眼看得见。 */
+.hive-warn {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 14px; font-size: 12px; line-height: 1.5;
+  background: rgba(241, 196, 15, .12);
+  border-bottom: 1px solid rgba(241, 196, 15, .35);
+  color: #d4a017;
+}
+.hive-warn[hidden] { display: none; }
+.hive-warn > span { flex: 1; min-width: 0; }
+.hive-warn .btn { flex: 0 0 auto; width: auto; margin: 0; }
+/* 同身份另一台设备的消息：名字后面那行小字 */
+.hmsg-dup { color: #d4a017; font-size: 11px; margin-left: 2px; }
+
 /* 成员在线状态点 + 状态文字 */
 .hive-mem .hm-dot {
   width: 6px; height: 6px; border-radius: 50%; flex: none;
