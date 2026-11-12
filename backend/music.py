@@ -343,6 +343,13 @@ def drum_kick(dur: float = 0.34, sr: int = SR) -> np.ndarray:
     ph = np.cumsum(f) / sr
     body = np.sin(2 * np.pi * ph) * np.exp(-t * 6.5)
     click = np.random.RandomState(11).randn(n) * np.exp(-t * 260.0) * 0.35
+    # ⚠️ 2026-11-12 用户报「噪声严重」：click 是白噪声，exp(-t*260) 在 t=0 恰为 1.0，
+    #    第一个采样点就是 randn 的满幅随机值，没有任何淡入 → 每个底鼓开头一次单样本
+    #    阶跃。实测 epicmaj 版有 47 处 >0.25 的相邻跳变（每 2 拍一次，正好是底鼓）。
+    #    补 1.5ms 淡入，把阶跃变成斜坡。
+    _a = max(1, int(0.0015 * sr))
+    if _a < n:
+        click[:_a] *= np.linspace(0.0, 1.0, _a)
     return _soft(body + click) * 0.9
 
 
