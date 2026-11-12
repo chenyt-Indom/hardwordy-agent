@@ -325,7 +325,9 @@ async def handler(ws: WebSocketServerProtocol) -> None:
 
 
 _START_TS = time.time()
-_RELAY_VER = "1.2"
+# 版本史：1.0 初始 / 1.1 加 /health / 1.2 版本协商+离线成员保留
+#         1.3 转发 file 帧（群附件分片，全员可见）
+_RELAY_VER = "1.3"
 # 中继支持的协议版本。客户端 join 时带自己的 v，双方各自比较，
 # 不一致也不拒绝 —— 只提示，能通的照样通（跨版本互通的底线）。
 PROTO_VER = 2
