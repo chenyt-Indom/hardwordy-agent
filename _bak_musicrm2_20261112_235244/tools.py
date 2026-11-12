@@ -1,0 +1,7274 @@
+# -*- coding: utf-8 -*-
+"""Agent 工具注册表 —— 让 Qwen 具备主动调用能力。
+
+工具分三类：
+- 文生图：generate_image（对话中让大模型调用；中文 prompt 自动翻译成英文解决偏离问题）
+- 文件系统：list_directory / read_file / search_files / write_file / append_file
+- 记忆：memory_store / memory_search
+
+每个工具执行后返回一段文本给模型（模型据此继续思考），
+若有需要前端展示的副作用（例如生成的图片），则推入 ui_events，
+由后端流式传给前端渲染。
+完全本地运行。
+"""
+from __future__ import annotations
+import io
+import os
+import re
+import sys
+import time
+import glob
+import json
+import logging
+import urllib.parse
+from .procwin import NOWIN as _NOWIN
+
+from . import config
+from . import t2i
+from . import file_tools
+from . import memory as memory_mod
+from . import doclib as library_mod
+from . import docx_write
+
+
+# =====================================================================
+#  工具 Schema（发给模型）
+# =====================================================================
+# =====================================================================
+#  开发工作区工具（人机协同开发）
+# =====================================================================
+# 为什么必须单独给"工作区"工具，而不是让模型用 read_file/write_file 传绝对路径：
+# 那样模型得先猜出工作区在哪，实测它猜不准，还会把文件写到应用安装目录里去。
+# 工作区工具的路径一律是**相对路径**，由后端拼，模型不可能写到外面。
+
+# 写代码被长度上限截断时，最多自动续写几次。
+# 为什么要有这个（2026-09-27 实测）：
+#   代码模型一次最多吐 `code_max_tokens`（默认 8192 ≈ 两三百行带注释），
+#   稍微大一点的文件必然撞上限，此时 `done_reason == "length"`。
+#   原来的实现**单跑一次、撞了就判失败**（"代码模型这次没有输出内容"），
+#   用户只能自己去点重试 —— 表现就是"生成到一半任务断了"。
+#   改成把已写出的部分回喂、让它从断点续写；3 次足够覆盖绝大多数单文件。
+_CODE_CONTINUE_MAX = 3
+
+_WS_PACK_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "workspace_pack",
+        "description": ("【打包】把当前项目的**所有文件**打成一个 zip，给用户一个能直接点的下载链接。"
+                        "用户说「打包 / 导出 / 我要拿走 / 发我一份」时用它。"
+                        "返回里带下载链接，**原样告诉用户**即可。"),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+# ---------- PPT 生成 ----------
+# 用户 2026-09-17 提的需求：「模型能生成 PPT 吗？面向各领域的都要能排。」
+# 设计要点：**模型只填内容，不写代码** —— 8B 模型即兴写 python-pptx 代码
+# 又慢又容易错，每次效果还不一样。这里让它输出「标题 + 要点」，排版交给
+# backend/pptx_maker.py，稳定性高一个量级。
+_MAKE_PPTX_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "make_pptx",
+        "description": (
+            "【做PPT】把内容排成一份真正的 .pptx 演示文稿，返回可直接点击的下载链接。"
+            "用户说「做个PPT / 写个演示稿 / 汇报材料 / 答辩PPT / 方案演示 / 讲解稿」时，"
+            "**第一个就该想到本工具**。\n"
+            "⚠️ 标题和内容**必须严格按用户这一轮说的主题**写，别被记忆或前文里的别的主题带跑。\n"
+            "⚠️ 生成后只把**下载链接**给用户，**不要描述界面操作步骤**（没有那些按钮）。\n"
+            "**你只管想内容**，排版由工具完成，不用写代码。\n"
+            "⚠️⚠️ **内容必须充实，这是最容易做砸的地方**（用户 2026-09-26 明确要求）：\n"
+            "  · 页数给够：常规主题 **8~15 页**（封面/结尾不算），别只给 3~4 页就交差；\n"
+            "  · **每页要点 3~6 条，每条写 15~40 字的完整句子** —— 要有信息量、有数据、有结论，不要只写「背景」「目标」这种两三个字的标签（那样出来的是空壳）；\n"
+            "  · 该上表格/图表/数据的地方就上（预算是表格、趋势是图表、指标是 stats），别把全是文字塞成流水账；\n"
+            "  · 用户给了素材（知识库、前文、附件）就**照着素材写实**，别自己编数字。\n"
+            "⚠️⚠️ **页数多的必须分批写**（2026-09-27 实测踩到）：把 8 页全塞进一个 slides "
+            "数组，JSON 太长很容易写坏 —— Ollama 直接报 "
+            "`invalid character ']' after object key:value pair`，连续两次重试都失败，"
+            "那一轮白跑（实测只落下一个 5 页的残缺文件）。正确做法是**分几次调用**：\n"
+            "   · 第 1 次 make_pptx 只给 **3~4 页**（封面 + 前几页），JSON 短、一次就过；\n"
+            "   · 剩下的页用 **edit_office** 补："
+            '`{"op":"add_slide","slide_spec":{...和这里的一页同格式...}}`，'
+            "**每次补 1~2 页**，逐次累加；\n"
+            "   · 这样每份 JSON 都短，**页数和内容量都不会缩水**，也不会把整轮搭进去。\n"
+            "⚠️⚠️ **硬性上限**（2026-09-28 又踩到一次）：不管用户要几页、内容多复杂，"
+            "**单次 make_pptx / edit_office 调用的 slides 数组都不许超过 4 页**；"
+            "用户要 6 页就 4+2，要 10 页就 4+2+2+2。"
+            "页数越多越要拆细 —— 宁可多调用几次，也不要让整轮因为一个超长 JSON 全废。\n"
+            "· 每页用 layout 选版式（不写就按内容自动判断）：\n"
+            "  content 标题+要点(默认) / two_col 左右两栏(用 left/right，可配 left_title/right_title)\n"
+            "  / image_right|image_left 图文并排 / image_full 整页大图\n"
+            "  / table 表格(给 table:{header,rows}) / **chart 图表**\n"
+            "    (给 chart:{kind:\"bar|barh|line|pie|doughnut|area\", categories:[...],\n"
+            "     series:[{name,values}], labels:true 显示数值, title 图表标题} —— 柱状/条形/折线/饼图/圆环/面积)\n"
+            "  / cards 卡片组(给 cards:[{title,text}])\n"
+            "  / stats 大数字(给 stats:[{value,label}]) / steps 流程步骤(给 steps:[{title,text}])\n"
+            "  / timeline 时间线(给 items:[{title,text}]) / quote 整页引言(给 quote:{text,from})\n"
+            "  / toc 目录(给 items 字符串数组) / section 章节过渡页(只要 title)\n"
+            "· 配图：每页写 image（本地路径 / 图片库 id / 网图网址），"
+            "**或者只写 image_query 让它自动联网搜一张合适的图插进去** ——\n"
+            "  用户说「配点图 / 图文并茂 / 找张图放上去」时，就给相关页写 image_query。\n"
+            "· 装饰：每页可加 decor，可选 page_number / band 侧边色带 / corner 角标圆 / dots 圆点；\n"
+            "  还可写 bg_image（整页背景图，会自动压一层半透明蒙版保证文字可读）、"
+            "logo（本页角落小图标）。全篇统一加 logo 用顶层 logo 参数。\n"
+            "· 微调：每页可直接写 accent 强调色 / bg 底色 / title_color / title_size / "
+            "body_size / card_bg / title_align（也可放进 style 对象里）。\n"
+            "· 单条要点微调：bullets 里可以写 {\"text\":\"...\",\"bold\":true,\"color\":\"C53030\","
+            "\"size\":18} 这样的对象，只影响那一条。\n"
+            "· **标注**（用户说「标出重点 / 加标注 / 突出一下」时用）："
+            "要点对象加 \"hl\": true 会加荧光笔高亮，想指定颜色就写 \"hl\":\"FFD9D9\"；"
+            "每页还能写 badge（右上角小标签，如「重点」「必考」「KPI」）、"
+            "caption（页脚小字题注，如「数据来源：…」「图 1 系统架构」）。\n"
+            "· 要点以「- 」或两个空格开头＝二级条目。配色 blue/green/warm/purple/mono/red。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "封面主标题"},
+                "subtitle": {"type": "string", "description": "封面副标题，可选，一句话点题"},
+                "author": {"type": "string", "description": "封面落款，如「姓名 · 单位 · 日期」，可选"},
+                "theme": {"type": "string",
+                          "description": "配色预设：blue(默认) / green / warm / purple / mono / red"},
+                "colors": {"type": "object",
+                           "description": "**自定义配色**（覆盖预设）。用户提到具体颜色就用它：「红金色系」「企业蓝」「莫兰迪色」「我们 VI 是 #0B5FA5」。键可只给一部分，其余走 theme 预设；值写十六进制，# 可带可不带。可用键：accent 主色（标题短横线/要点符号/表头底色）、cover_bg 封面与章节页底色、cover_fg 封面文字色、bg 内页底色、body 正文色、muted 次要文字色、card 卡片与斑马纹底。例：accent 给 #B8860B、cover_bg 给 #8B0000 就是红金配色。",
+                           "additionalProperties": {"type": "string"}},
+                "filename": {"type": "string",
+                             "description": "保存的文件名，不用带 .pptx 后缀；不给就用标题"},
+                "end_text": {"type": "string", "description": "结尾页文字，默认「谢谢观看」"},
+                "cover_image": {"type": "string",
+                                "description": "封面整页背景图（路径 / 图片库 id / 网址 / 搜索词）"},
+                "logo": {"type": "string",
+                         "description": "每页角落的 logo 小图（路径 / 图片库 id / 网址）"},
+                "logo_pos": {"type": "string",
+                             "description": "logo 位置：tr 右上(默认) / tl 左上 / br 右下 / bl 左下"},
+                "slides": {
+                    "type": "array",
+                    "description": "每一页，按顺序排。建议 5~15 页，每页要点 3~6 条。",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "这一页的标题"},
+                            "layout": {"type": "string",
+                                       "description": "版式，见工具说明；不写按内容自动判断"},
+                            "bullets": {
+                                "type": "array",
+                                "description": (
+                                    "要点列表；字符串，或 {text,bold,color,size,hl} 对象。"
+                                    "文字里可以用 **加粗** 和 ==高亮== 标重点"
+                                    "（会自动渲染，不会把符号印出来）；"
+                                    "以「- 」开头的字符串算二级要点。"),
+                                "items": {"type": "string"},
+                            },
+                            "left": {"type": "array", "items": {"type": "string"},
+                                     "description": "two_col 左栏要点"},
+                            "right": {"type": "array", "items": {"type": "string"},
+                                      "description": "two_col 右栏要点"},
+                            "left_title": {"type": "string", "description": "two_col 左栏小标题"},
+                            "right_title": {"type": "string", "description": "two_col 右栏小标题"},
+                            "image": {"type": "string",
+                                      "description": "图片：本地路径 / 图片库 id / 网图网址 / "
+                                                     "文库里的文件名"},
+                            "image_query": {"type": "string",
+                                            "description": "**没图但想要图**时的联网搜索词，"
+                                                           "如「校园 图书交换 活动」。"
+                                                           "系统会自动搜一张插进来"},
+                            "bg_image": {"type": "string",
+                                         "description": "整页背景图（同上来源）；"
+                                                        "会自动加蒙版，文字转白色"},
+                            "logo": {"type": "string", "description": "本页角落 logo，可选"},
+                            "image_caption": {"type": "string", "description": "图片说明，可选"},
+                            "badge": {"type": "string",
+                                      "description": "右上角小标签，如「重点」「必考」「KPI」，可选"},
+                            "caption": {"type": "string",
+                                        "description": "页脚小字题注，如「数据来源：…」"
+                                                       "「图 1 系统架构」，可选"},
+                            "table": {"type": "object",
+                                      "description": "layout=table 时用：{header:[...],rows:[[...]]}"},
+                            "chart": {"type": "object",
+                                      "description": "layout=chart 时用：{kind,categories,"
+                                                     "series:[{name,values}],labels,title}"},
+                            "cards": {"type": "array", "description":
+                                      "layout=cards 时用：[{title,text}]，2~4 张"},
+                            "stats": {"type": "array", "description":
+                                      "layout=stats 时用：[{value,label}]，2~4 个"},
+                            "steps": {"type": "array", "description":
+                                      "layout=steps 时用：[{title,text}]，2~5 步"},
+                            "items": {"type": "array",
+                                      "description": "layout=timeline/toc 时用，见工具说明"},
+                            "quote": {"type": "object",
+                                      "description": "layout=quote 时用：{text,from}"},
+                            "decor": {"type": "array", "items": {"type": "string"},
+                                      "description": "装饰：page_number/band/corner/dots"},
+                            "accent": {"type": "string", "description": "本页强调色，如 C53030"},
+                            "bg": {"type": "string", "description": "本页底色，如 FFF9F9"},
+                            "notes": {"type": "string", "description": "演讲者备注，可选"},
+                            "section": {"type": "boolean",
+                                        "description": "true＝章节过渡页（只有大标题）"},
+                        },
+                        "required": ["title"],
+                    },
+                },
+            },
+            "required": ["title", "slides"],
+        },
+    },
+}
+
+# ---------- Word 文档生成 ----------
+_MAP_PLAN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "map_plan",
+        "description": (
+            "【地图】查地点、规划路线，并把结果**画成一张地图卡片**发给用户看。\n"
+            "用户说「帮我规划路线 / 怎么走 / 从A到B多远多久 / 找一下某个地方在哪 / "
+            "这几个地方在地图上的位置」时用它。\n"
+            "· 只查地点：给 places:[\"广州塔\", \"汕头大学\"]（会自动找到坐标并在地图上打点）。\n"
+            "· 只规划路线：给 route:{\"from\":\"广州塔\",\"to\":\"广州白云机场\",\"mode\":\"driving\"}。\n"
+            "· 两者可以一起给：先把途经点标出来，再画路线。\n"
+            "· mode 可选 driving(驾车，默认) / foot(步行) / bike(骑行) / transit(公交)。\n"
+            "  · **transit** 走高德公交换乘，返回**具体线路、票价、换乘站** —— "
+            "用户问「坐几路车 / 怎么换乘 / 公交多久」时用它。\n"
+            "  · 配了高德 key 时：驾车带**实时路况**，步行/骑行是**真实路径**。\n"
+            "  · 没配 key（自动回退 OSRM）时：免费路网只给驾车路径、步行骑行时间是估算，"
+            "返回里会带 note，**必须把这话转告用户**，不能让他以为是真实步行路线。\n"
+            "· 中长途会自动给**多条备选路线**并挑一条推荐，返回里带 routes 与 reason。"
+            "把「为什么推荐这条」照实说出来（那是真实差距，别自己加戏）；只有一条可行路线时也别硬凑。\n"
+            "· 用户问天气、或要把出行情况讲清楚时给 weather:true。\n"
+            "· **用户说了在哪个城市时，一定把 city 填上**（比如「广州市内有什么商场」"
+            "→ city:\"广州\"）。不填的后果实测很离谱：往地图上标「天河城」会被解析到"
+            "「江西省南昌市进贤县天河城」—— 那儿真有个同名村子。\n"
+            "· 返回里有真实距离与用时，**照实念给用户，不要自己算**。\n"
+            "⚠️ **只有用 mode=transit 拿到的东西才能讲公共交通**。没走 transit 就"
+            "不许编「坐 X 路公交、票价 Y 元、每 Z 分钟一班」这种具体线路（实测模型真的会编）；"
+            "最多说一句「这段距离也可以考虑公共交通」。\n"
+            "⚠️ 驾车时间在配了高德 key 时**已经包含实时路况**，可以照实说「这个时间已含实时路况」；"
+            "但**不要**编「XX 路段现在堵」这种具体路况描述 —— 接口不给这个。"
+            "地图卡片会自己显示，你只要用一两句话把结论说清楚。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "places": {"type": "array", "items": {"type": "string"},
+                           "description": "要在地图上标出的地点名（中文即可），可选"},
+                "city": {"type": "string",
+                         "description": "限定城市（如「广州」）。用户提到具体城市时**务必填**，"
+                                        "用来防止同名地点被解析到外省，可选"},
+                "route": {"type": "object",
+                          "description": "{from: 起点地名（或 lat,lon）, to: 终点, "
+                                         "mode: driving/foot/bike}"},
+                "zoom": {"type": "integer", "description": "地图缩放级别 3~18，默认自动"},
+                "weather": {"type": "boolean",
+                            "description": "true＝同时查出发地此刻与预计抵达时段的天气"},
+            },
+            "required": [],
+        },
+    },
+}
+
+
+_NEARBY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "nearby_places",
+        "description": (
+            "【地图】查某个地点**周围**有哪些场所（按半径+类别），并在图上标出来。\n"
+            "用户说「附近有什么吃的 / 这周围有没有便利店 / 附近哪能买药 / "
+            "找一下附近的银行」这类**周边搜索**时用它。\n"
+            "· 和 map_plan 的分工：map_plan 是「我要去某地，怎么走」；"
+            "nearby_places 是「这一带有什么」。\n"
+            "· **凡是问「哪里有什么 XX / 有哪些 YY」的，都用这个工具去查真实数据**，"
+            "不要凭自己知道的城市地标凑几个扔给 map_plan —— 那是编的，而且经常给错。\n"
+            "  「广州市内有什么商场」→ place:\"广州市\", category:\"购物中心\", radius:30000；"
+            "「汕头有什么好吃的」→ place:\"汕头市\", category:\"餐厅\", radius:20000。\n"
+            "· 参数 {\"place\": \"汕头大学\", \"category\": \"餐厅\", \"radius\": 1500}；"
+            "place 也接受 \"23.35,116.68\" 这种坐标，也可以是城市名。\n"
+            "· category 用中文日常说法即可：餐厅 / 咖啡馆 / 便利店 / 超市 / 购物中心 / "
+            "药店 / 医院 / 银行 / 加油站 / 停车场 / 酒店 / 学校 / 公交站 / 公园 / 厕所…\n"
+            "· radius 单位米，默认 1500，最大 50000。\n"
+            "  问「整座城市」就给 20000~40000；问「XX 附近」给 1000~3000。\n"
+            "  「整个城市里有什么」填 20000~50000；「某学校附近有什么」填 1000~3000。\n"
+            "⚠️⚠️ **不要为了找「评分」改用 web_search** —— 本工具在高德模式下"
+            "**直接返回真实评分（rating）和人均消费（cost）**。"
+            "用户问「附近评分最高的餐厅 / 哪家评价好」时，"
+            "**就用本工具**（可以把 radius 放大到 3000 拿更多候选），"
+            "拿到结果后按 rating 从高到低排，**不要跑去联网搜点评网站**。\n"
+            "· 数据源：配了高德 key 时走**高德地图**（POI 全、**有真实评分和人均消费**）；"
+            "没配或离线时回退 OpenStreetMap（**没有评分**）。\n"
+            "⚠️ **返回里带 rating 就照实念** —— 那是真实评分，可以直接用来推荐和排序；"
+            "带 cost 的是人均消费。\n"
+            "⚠️ **没有 rating 字段时绝不许自己编评分、星级或评价**"
+            "（「评分 4.5」「口碑很好」「味道不错」这类就是编的）。\n"
+            "⚠️ **只准转述返回里确实有的字段**（名字/距离/评分/人均/地址/电话/营业时间），"
+            "**不要补数据里没有的东西** —— 实测模型会顺口加「校内主干道旁」"
+            "「校门对面」这类位置描述和「学生常去」这类评价，那全是编的。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "place": {"type": "string",
+                          "description": "中心地点名（中文即可），或 \"纬度,经度\""},
+                "category": {"type": "string",
+                             "description": "要找什么：餐厅/便利店/药店/银行…"},
+                "radius": {"type": "integer", "description": "半径（米），默认 1500"},
+                "limit": {"type": "integer", "description": "最多返回几个，默认 20"},
+            },
+            "required": ["place", "category"],
+        },
+    },
+}
+
+
+_MAKE_XLSX_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "make_xlsx",
+        "description": (
+            "【做表格】把数据排成一份真正的 .xlsx（Excel / WPS 都能打开），返回可点下载链接。\n"
+            "用户说「做个表格 / Excel / 统计表 / 对比表 / 数据表 / 报表 / 汇总表 / 台账 / 预算表」"
+            "或给了你一堆数据要整理时，用它。\n"
+            "**你只填数据，不用写代码。** 排版（表头配色、隔行底纹、冻结首行、筛选、合计行、"
+            "数字/货币/百分比格式、数据条、图表）都由工具做。\n"
+            "⚠️⚠️ **数据要给够**（用户 2026-09-26 明确要求）：明细表通常 **8~30 行**（用户给多少写多少，没给就该按主题把该有的行补全，别只写 2~3 行显得敷衍）；该汇总的给一张汇总表，该画的给 chart。\n"
+            "· 一个工作簿可放多张表：给 sheets 数组，每张表一个 name。\n"
+            "· 每张表：header（表头）+ rows（二维数组）。数字就写数字（别加千分位或￥符号）。\n"
+            "· formats：每列的格式关键字 —— text / int / number / money / percent / date；"
+            "也可以直接写 Excel 格式串。\n"
+            "· 想要合计行给 total_row:true（默认会跳过「单价/比率」这类不该求和的列，"
+            "也可以自己指定 total_cols:[列号…]）；\n"
+            "· 想要图表给 chart:{kind: column|line|pie|doughnut|area, title, "
+            "categories_col: 按哪列分类, value_cols:[数值列号…]}；\n"
+            "· 还有 freeze（冻结首行）/ autofilter（筛选）/ zebra（隔行底色）/ "
+            "conditional:{col,type:data_bar|3_color_scale|duplicate} / title（大标题，跨列合并）/ "
+            "note（表下方小字说明，如数据来源）。\n"
+            "配色主题 theme：blue(默认) / green / warm / purple / mono / red。"
+            "生成后把返回的下载链接**原样**给用户。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string",
+                             "description": "保存的文件名，不用带 .xlsx；不给就用 title"},
+                "theme": {"type": "string",
+                          "description": "配色预设：blue(默认) / green / warm / purple / mono / red"},
+                "colors": {"type": "object",
+                           "description": "**自定义配色**（覆盖预设）。用户提到具体颜色就用它：「红金色系」「企业蓝」「莫兰迪色」「我们 VI 是 #0B5FA5」。键可只给一部分，其余走 theme 预设；值写十六进制，# 可带可不带。可用键：accent 主色（标题短横线/要点符号/表头底色）、cover_bg 封面与章节页底色、cover_fg 封面文字色、bg 内页底色、body 正文色、muted 次要文字色、card 卡片与斑马纹底。例：accent 给 #B8860B、cover_bg 给 #8B0000 就是红金配色。",
+                           "additionalProperties": {"type": "string"}},
+                "sheets": {
+                    "type": "array",
+                    "description": "一个工作表一项，按顺序排。先给明细表、再给汇总表（可选）。",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "工作表名（页签名）"},
+                            "title": {"type": "string",
+                                      "description": "表内大标题（跨列合并的粗体一行），可选"},
+                            "header": {"type": "array", "items": {"type": "string"},
+                                       "description": "表头文字"},
+                            "rows": {"type": "array",
+                                     "description": "数据行，每行一个数组；数字写数字类型",
+                                     "items": {"type": "array"}},
+                            "formats": {"type": "array", "items": {"type": "string"},
+                                        "description": "每列格式：text/int/number/money/"
+                                                       "percent/date，或直接写 Excel 格式串"},
+                            "widths": {"type": "array", "items": {"type": "number"},
+                                       "description": "每列列宽（字符数），不给就自动估算"},
+                            "total_row": {"type": "boolean", "description": "是否加合计行"},
+                            "total_cols": {"type": "array", "items": {"type": "integer"},
+                                           "description": "只对这些列求和（列号从 0 开始）"},
+                            "total_label": {"type": "string", "description": "合计行文字，默认「合计」"},
+                            "note": {"type": "string", "description": "表下方小字说明，如「数据来源：…」"},
+                            "chart": {"type": "object",
+                                      "description": "{kind: column|line|pie|doughnut|area, "
+                                                     "title, categories_col, value_cols:[…], "
+                                                     "position:'A12' 可选（默认放表下方）}"},
+                            "conditional": {"type": "object",
+                                            "description": "{col: 列号, type: data_bar|"
+                                                           "3_color_scale|duplicate}"},
+                            "freeze": {"type": "boolean", "description": "冻结表头（默认 true）"},
+                            "autofilter": {"type": "boolean", "description": "加筛选（默认 true）"},
+                            "zebra": {"type": "boolean", "description": "隔行浅底色（默认 true）"},
+                        },
+                        "required": ["header", "rows"],
+                    },
+                },
+            },
+            "required": ["sheets"],
+        },
+    },
+}
+
+
+_MAKE_DOCX_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "make_docx",
+        "description": (
+            "【写文档】把内容排成一份真正的 .docx（Word）文档，返回可直接点击的下载链接。"
+            "用户说「写个文档 / 报告 / 方案 / 总结 / 说明书 / 通知 / 论文 / 材料 / 写成 Word」时，"
+            "**第一个就该想到本工具**。\n"
+            "⚠️ 不要用 `library` 先写 .md 再让用户自己导出 —— 本工具一次成型，直接给成品。\n"
+            "⚠️ 生成后只把**下载链接**给用户，**不要描述界面操作步骤**（没有那些按钮）。\n"
+            "**你只管想内容**，排版由工具完成，不用写代码。\n"
+            "⚠️⚠️ **内容必须写满，这是最容易做砸的地方**（用户 2026-09-26 明确要求）：\n"
+            "  · 一篇正经文档通常要 **8~20 个内容块**，别只给三四块就交差；\n"
+            "  · 每个 para **3~6 句、150~400 字**，讲清是什么/为什么/怎么做，不要只写一两句空话；\n"
+            "  · 需要分层时用 heading（1~4 级）+ bullet/number，结构清楚但不啰嗦；\n"
+            "  · 用户给了素材（知识库、前文、附件）就**照着素材写实**，别自己编数字。\n"
+            "blocks 是内容块列表，按顺序排，每块一个 type：\n"
+            "  heading 标题（配 level 1~4）/ para 段落（text）\n"
+            "  bullet 无序列表（items 数组）/ number 有序列表（items）\n"
+            "  quote 引用（text + 可选 from）/ callout 提示框（tag + text，带底色和色条）\n"
+            "  table 表格（header 数组 + rows 二维数组 + 可选 caption）\n"
+            "  image 图片（src 给路径/图片库 id/网图网址；**没有图就改给 query 搜索词**，\n"
+            "        系统会联网搜一张插进来，可配 caption 图注、style.width 控宽度 cm）\n"
+            "  / code 代码块（text）/ divider 分隔线\n"
+            "  pagebreak 分页 / toc 目录 / end 结束语\n"
+            "⚠️⚠️ **text 里只写纯文字 + 局部强调**（2026-09-28 实测踩坑）：\n"
+            "  · **不要**写 Markdown 块标记 —— `#`、`***`、`> `、`- ` 这些工具**不认**，"
+            "会原样排进 Word（实测正文里出现字面量 `***` 和 `&gt;`）。"
+            "要标题就建 heading 块、要引用就建 quote 块、要列表就建 bullet/number 块；\n"
+            "  · **不要**写 HTML 标签或实体（`<b>`、`<br>`、`&gt;`、`&nbsp;`）；\n"
+            "  · **一个 para 只放一段话**，不要在 text 里敲换行塞多段 —— 换行在 Word 里"
+            "只会变成软换行、段落全挤成一团。多段就多给几个 para 块。\n"
+            "· 正文里可用 **加粗**、*斜体*、`等宽`、==高亮== 做局部强调"
+            "（==高亮== 是荧光笔，用来标出重点句）。\n"
+            "· 列表里以「- 」或两个空格开头＝二级条目。\n"
+            "· 每一块都能带 style 做微调：size 字号 / color 颜色 / bold / align"
+            "(left|center|right|justify) / indent 缩进 / bg 底色 / line 行距。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "文档标题"},
+                "subtitle": {"type": "string", "description": "副标题，做封面时用"},
+                "author": {"type": "string", "description": "署名，如「姓名 · 单位」"},
+                "date_text": {"type": "string", "description": "落款日期文字，如「2026 年 9 月」"},
+                "theme": {"type": "string",
+                          "description": "配色预设：blue(默认) / green / warm / purple / mono / red"},
+                "colors": {"type": "object",
+                           "description": "**自定义配色**（覆盖预设）。用户提到具体颜色就用它：「红金色系」「企业蓝」「莫兰迪色」「我们 VI 是 #0B5FA5」。键可只给一部分，其余走 theme 预设；值写十六进制，# 可带可不带。可用键：accent 主色（标题短横线/要点符号/表头底色）、cover_bg 封面与章节页底色、cover_fg 封面文字色、bg 内页底色、body 正文色、muted 次要文字色、card 卡片与斑马纹底。例：accent 给 #B8860B、cover_bg 给 #8B0000 就是红金配色。",
+                           "additionalProperties": {"type": "string"}},
+                "font": {"type": "string",
+                         "description": "字体：yahei 雅黑(默认) / song 宋体正文+黑体标题 / kai 楷体"},
+                "filename": {"type": "string", "description": "文件名，不用带 .docx 后缀"},
+                "cover": {"type": "boolean", "description": "是否生成封面页（标题居中）"},
+                "header": {"type": "string", "description": "页眉文字，可选"},
+                "logo": {"type": "string",
+                         "description": "页眉右侧的 logo 小图（路径 / 图片库 id / 网址），可选"},
+                "toc": {"type": "boolean",
+                        "description": "是否插入目录页（打开文档时自动生成）"},
+                "blocks": {
+                    "type": "array",
+                    "description": "内容块列表，见工具说明",
+                    "items": {"type": "object",
+                              "properties": {"type": {"type": "string"}},
+                              "required": ["type"]},
+                },
+            },
+            "required": ["title", "blocks"],
+        },
+    },
+}
+
+# ---------- 已有文档 / PPT 的读取与修改 ----------
+_EDIT_OFFICE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "edit_office",
+        "description": (
+            "【改文档/改PPT】查看和修改生成文库里的 .docx / .pptx。"
+            "用户说「改一下这个PPT / 这份文档」「把第3页标题换掉」「加一页」「换个配色」"
+            "「标题改大一点」「正文加一段」时用它。\n"
+            "⚠️ **改之前必须先 action=inspect 看结构**：它会列出每一页/每一段的编号和现有文字，"
+            "ops 里的编号就用它给的那些，别自己猜（猜错就改到别的地方）。\n"
+            "action=edit 时给 ops，常用操作：\n"
+            "  {\"op\":\"replace_text\",\"find\":\"旧字\",\"replace\":\"新字\",\"slide\":3}  全文或指定页查找替换\n"
+            "  {\"op\":\"set_text\",\"slide\":3,\"shape\":1,\"text\":\"新文字\"}  改某个元素的文字\n"
+            "  {\"op\":\"set_text_style\",\"slide\":3,\"shape\":1,\"size\":34,\"color\":\"C53030\",\"bold\":true}\n"
+            "  {\"op\":\"add_text\",\"slide\":3,\"text\":\"...\",\"x\":0.9,\"y\":6.3,\"w\":6,\"h\":0.5,\"size\":16,\"color\":\"...\",\"align\":\"center\"}\n"
+            "  {\"op\":\"add_image\",\"slide\":3,\"src\":\"图片路径|图片库id|网图网址\",\"x\":1,\"y\":1.5,\"w\":5,\"h\":4}\n"
+            "    也可以不给 src 而给 {\"query\":\"搜索词\"} → 自动联网搜一张插进去\n"
+            "  {\"op\":\"add_shape\",\"slide\":3,\"kind\":\"rect|round|oval\",\"x\":1,\"y\":1,\"w\":2,\"h\":1,\"fill\":\"2E75B6\"}\n"
+            "  {\"op\":\"delete_shape\",\"slide\":3,\"shape\":2} / {\"op\":\"set_bg\",\"slide\":3,\"color\":\"FFF7E6\"}\n"
+            "  {\"op\":\"set_notes\",\"slide\":3,\"text\":\"备注\"} / {\"op\":\"set_theme\",\"theme\":\"green\"} 整份换配色\n"
+            "     ⚠️ 用户说「换成**红金色系 / 企业蓝 / 我们的 VI 色**」这类**具体颜色**时，"
+            "set_theme 要带上 colors，例如 {\"op\":\"set_theme\",\"theme\":\"red\","
+            "\"colors\":{\"accent\":\"#B8860B\",\"cover_bg\":\"#8B0000\"}}；"
+            "只挑个近似的预设**不算做到**。add_slide 也可以带 colors。\n"
+            "  {\"op\":\"duplicate_slide\",\"slide\":3} / {\"op\":\"move_slide\",\"slide\":3,\"to\":1} / {\"op\":\"delete_slide\",\"slide\":3}\n"
+            "  {\"op\":\"add_slide\",\"slide_spec\":{...和 make_pptx 的一页同格式...}}\n"
+            "Word 文档用它：\n"
+            "  {\"op\":\"replace_text\",\"find\":\"旧\",\"replace\":\"新\"} / {\"op\":\"set_para\",\"index\":12,\"text\":\"新内容\"}\n"
+            "  {\"op\":\"set_para_style\",\"index\":4,\"size\":26,\"color\":\"2D6A4F\",\"bold\":true,\"align\":\"center\"}\n"
+            "  {\"op\":\"insert_para\",\"after\":20,\"block\":{...和 make_docx 的块同格式...}}\n"
+            "  {\"op\":\"append\",\"block\":{...}} / {\"op\":\"delete_para\",\"index\":30} / "
+            "{\"op\":\"set_header\",\"text\":\"...\"}\n"
+            "改完把结果原样告诉用户（工具会返回改了什么）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "rel": {"type": "string",
+                        "description": "生成文库里的文件名，带扩展名，如「机器学习入门.pptx」"},
+                "action": {"type": "string",
+                           "description": "inspect＝只看结构（不改），edit＝执行修改"},
+                "ops": {"type": "array",
+                        "description": "修改操作清单，见工具说明",
+                        "items": {"type": "object"}},
+            },
+            "required": ["rel"],
+        },
+    },
+}
+
+_WS_LIST_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "workspace_list",
+        "description": ("【开发工作区】列出工作区里现有的文件（人机协同开发的项目目录）。"
+                        "要动某个已有文件之前，先用它看清有哪些文件。"),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+_WS_READ_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "workspace_read",
+        "description": ("【开发工作区】读取工作区里的一个文件（传**相对路径**，如 app.py）。"
+                        "⚠️ 修改任何已有文件之前**必须先读它**，在真实内容上改 —— "
+                        "用户可能刚在前端的开发台里手改过，凭记忆重写会把他的改动冲掉。"),
+        "parameters": {"type": "object",
+                       "properties": {"rel": {"type": "string",
+                                              "description": "工作区内的相对路径，如 src/app.py"}},
+                       "required": ["rel"]},
+    },
+}
+
+_WS_WRITE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "workspace_write",
+        "description": ("【开发工作区】把内容写进工作区文件（存在则覆盖，旧版自动进回收站）。"
+                        "**要给整份文件内容**，不要只给片段。写完用户会在「开发台」里看到。"
+                        "⚠️ **只用来写「非代码」内容（README、配置、数据、txt/md/json），"
+                        "或者你自己动手改一两行**；"
+                        "**要写/改一个代码文件（.py/.js/.ts/.html/.java…）请改用 write_code** ——"
+                        "由本机专用代码模型来写，代码质量和长度都更有保障。"),
+        "parameters": {"type": "object",
+                       "properties": {
+                           "rel": {"type": "string", "description": "工作区内的相对路径"},
+                           "text": {"type": "string", "description": "文件的完整内容"}},
+                       "required": ["rel", "text"]},
+    },
+}
+
+
+_WS_CODE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "write_code",
+        "description": (
+            "【写代码专用 · **只要目标文件是代码（.py/.js/.ts/.html/.java/.go/.rs…）就用它**】"
+            "把「要写什么」交给本机的**专用代码模型**，由它写出代码并**直接落到项目文件**。"
+            "**你不需要、也不应该自己把代码敲出来** —— 你只负责决定「写哪个文件、要什么功能」。"
+            "改已有文件时：先 workspace_read 读一遍，再在这里说明要改成什么样。"
+            "**写完它会顺手跑一遍并把真实输出一起还给你**，"
+            "所以你**不用再单独调 workspace_run**（多绕一轮要多花一分钟）。"
+            "只有它跑失败了、你要换个方式再试时才自己调。"
+            "⚠️ 报错要重写时：把**完整报错 + 要改成什么样**一次说清再调，"
+            "**最多重写 2 次**；之后如实说明哪里还不行，别无限重试。"
+            "（例外：只改一两个字符、或写 README/配置/数据这类非代码文件，才用 workspace_write。）"),
+        "parameters": {"type": "object",
+                       "properties": {
+                           "rel": {"type": "string",
+                                   "description": "要写入的项目内相对路径，如 app.py"},
+                           "instruction": {"type": "string",
+                                           "description": "需求：这个文件要做什么 / 要改成什么样。说清楚。"},
+                           "context": {"type": "string",
+                                       "description": "可选：补充背景（相关接口、数据格式、约束等）"},
+                           "run": {"type": "boolean",
+                                   "description": "写完是否顺手跑一遍（.py 默认 true）。"
+                                                  "真实运行结果会一并返回给你，"
+                                                  "所以**不要再单独调 workspace_run**。"}},
+                       "required": ["rel", "instruction"]},
+    },
+}
+
+
+_WS_RUN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "workspace_run",
+        "description": ("【开发工作区】运行工作区里的一个 .py 文件，拿到**真实输出与报错**。"
+                        "工作目录就是该文件所在目录，所以脚本里的相对路径是对的。"
+                        "写完文件后**用它验证**，不要凭空猜运行结果。"
+                        "⚠️ 它只能跑「算完就退出」的程序（默认最多 60 秒）。"
+                        "**计时器 / 服务器 / 游戏 / 图形界面这类要一直跑的程序不要用它跑完整** ——"
+                        "工具只会跑前几秒做冒烟测试，**那不是报错、也不说明代码有问题**，"
+                        "更**不要为了绕过它去改代码**（加线程、加 signal 都没用）。"
+                        "这种程序写好直接交给用户，让用户点代码卡片上的「▶ 运行」（那里不设时限）。"),
+        "parameters": {"type": "object",
+                       "properties": {
+                           "rel": {"type": "string",
+                                   "description": "工作区内的相对路径，如 app.py"},
+                           "args": {"type": "string",
+                                    "description": "可选：命令行参数（空格分隔），如 \"add 张三 138\"。"
+                                                   "argparse 这类工具**不给参数就什么都不做**，"
+                                                   "要验它们就得传参数。"},
+                           "stdin": {"type": "string",
+                                     "description": "可选：预先喂给程序的标准输入，**一行对应一次 input()**。"
+                                                    "程序里用了 input() 就必须给，否则会读到 EOF 而报错。"}},
+                       "required": ["rel"]},
+    },
+}
+
+
+_WEB_READ_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "web_read",
+        "description": ("【联网读页】把某个网址的**正文**抓下来读（搜索结果只给摘要，"
+                        "需要细节时用它点进去看）。可以一次给多个网址。"
+                        "查官方文档、看报错讨论、核对版本差异时用它。"),
+        "parameters": {"type": "object",
+                       "properties": {
+                           "urls": {"type": "array", "items": {"type": "string"},
+                                    "description": "要读的网址，1~5 个"},
+                           "limit": {"type": "integer",
+                                     "description": "每个页面最多取多少字，默认 1800"}},
+                       "required": ["urls"]},
+    },
+}
+
+_GITHUB_PUSH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "github_push",
+        "description": ("【上传到代码托管平台】把当前开发项目提交并推送到 GitHub / Gitee / "
+                        "自建 Git。仓库地址由用户提供（如 git@github.com:user/repo.git）。"
+                        "认证使用本机已配置的 git 凭据，应用不保存任何 token。"
+                        "**这是把代码发到外网的操作，必须先获得用户同意。**"),
+        "parameters": {"type": "object",
+                       "properties": {
+                           "repo": {"type": "string",
+                                    "description": "远端仓库地址（留空则沿用已有的 origin）"},
+                           "message": {"type": "string", "description": "本次提交说明"},
+                           "branch": {"type": "string", "description": "分支，默认 main"}},
+                       "required": []},
+    },
+}
+
+
+# ---------------------------------------------------------------- 项目管理
+# 「完全自动开发平台」的一组工具：建项目 / 列项目 / 切项目 / 建目录 / 删 / 移动。
+#
+# ⚠️⚠️ 这 6 个的**处理函数和 dispatch 路由早就写好了，但 schema 一直没加到这里** ——
+# 于是只有"代码模型的文本协议"（_TEXT_TOOL_DOCS）看得到它们，
+# **默认模型（原生工具调用）根本看不到**。
+# 用户反馈"模型没有全自动操作平台的能力"，根因就是这个：
+# 平时聊天用的是默认模型，它手里只有 list / read / run / write 四个工具，
+# 建项目、改名、删除这些它压根不知道有。
+# **教训：加一个工具要同时改四处 —— schema、dispatch、处理函数、以及
+#   对应的提示词（原生走 make_schemas，文本协议走 _TEXT_TOOL_DOCS）。漏一处就是白加。**
+_WS_PROJECT_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_new_project",
+            "description": ("【开发工作区】新建一个项目并**立刻切进去**，之后的相对路径都相对它。"
+                            "**从零开始做东西时第一步就调它**；同名项目已存在时会直接切过去，不会报错。"),
+            "parameters": {"type": "object",
+                           "properties": {"name": {"type": "string",
+                                                   "description": "项目名，如 todo-app"}},
+                           "required": ["name"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_projects",
+            "description": "【开发工作区】列出所有项目（· 是当前项目）。不确定现在在哪个项目里就先调它。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_use_project",
+            "description": "【开发工作区】切换到另一个已有项目。",
+            "parameters": {"type": "object",
+                           "properties": {"name": {"type": "string", "description": "项目名"}},
+                           "required": ["name"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_mkdir",
+            "description": ("【开发工作区】新建一个目录。"
+                            "注意：workspace_write 写文件时**父目录会自动创建**，"
+                            "只有确实要一个空目录时才需要它。"),
+            "parameters": {"type": "object",
+                           "properties": {"rel": {"type": "string",
+                                                  "description": "相对路径，如 assets"}},
+                           "required": ["rel"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_delete",
+            "description": ("【开发工作区】删除项目里的文件或目录（会进 _回收站，能捞回来）。"
+                            "清理临时文件、删掉写错的文件时用它。"),
+            "parameters": {"type": "object",
+                           "properties": {"rel": {"type": "string", "description": "相对路径"}},
+                           "required": ["rel"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_move",
+            "description": "【开发工作区】重命名或移动文件 / 目录。",
+            "parameters": {"type": "object",
+                           "properties": {
+                               "rel": {"type": "string", "description": "原路径"},
+                               "to": {"type": "string", "description": "新路径"}},
+                           "required": ["rel", "to"]},
+        },
+    },
+]
+
+
+def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
+                 code_exec: bool = False, writing: bool = False,
+                 ask_mode: str = "quick", office: bool = False,
+                 office_gen: bool = False, lean: bool = False) -> list:
+    """返回工具 schema 列表。
+
+    web_enabled=True 时才暴露联网搜索工具——保证"开关不开不联网"的约定：
+    关着的时候模型连工具都看不到，自然不会去联网。
+    kb_enabled 同理：关着就不给知识库工具。
+    code_exec 同理：关着就不给"本地跑代码"的工具（默认关，避免模型擅自执行代码）。
+
+    writing=True 是**长文创作**场景，只给最必要的几个工具（见下面）。
+    **office=True 是"要能打开的办公产物"场景**（PPT / Word / Excel）——
+    必须**保留生成工具**，详见下面那段注释。
+    ask_mode 会写进 ask_user 的**工具描述**（模型挑工具时先看它）：
+    深度模式要求一轮问 5~7 条、不够再问下一轮 —— 只写在系统提示里不够。
+    """
+    if writing and not office:
+        # 写作文/方案这类任务只需要「问细节」和「存文件」，
+        # 其余工具（画图、搜图、文件系统、跑代码…）这轮根本用不上。
+        # 砍掉它们的收益很实在：18 个工具的 schema ≈ 5800 token，
+        # 而长文生成既要思考又要写几百上千字，额度本来就很紧张。
+        #
+        # ⚠️⚠️ 2026-09-27 修：**联网工具必须留下**（用户报"写产品介绍时不联网就动笔"）。
+        #   长文里最容易出错的恰恰是**事实**：产品参数、公司背景、行业现状、
+        #   政策条款、专业术语、生僻概念 —— 凭记忆写就是在编。
+        #   原来这里把 web_search 一起砍掉了，模型**连工具都看不到**，
+        #   所以它不是"不肯搜"，是**根本没法搜**。
+        #   代价实测很小：web_search 303 + web_read 152 = **455 token**。
+        picked = [_ask_user_schema(ask_mode), _LIBRARY_SCHEMA]
+        if kb_enabled:
+            picked.insert(0, _KB_SCHEMA)      # 写东西时查用户资料是常见需求
+        if web_enabled:
+            # web_read 一起给：搜索只给摘要，写专业内容常要点进官网看正文。
+            picked.extend([_WEB_SEARCH_SCHEMA, _WEB_READ_SCHEMA])
+            picked.append(_WEATHER_SCHEMA)    # 写"出行建议/活动方案"要用真实天气
+        return picked
+    # ⚠️⚠️ office=True 必须**绕过上面那个精简分支**（2026-09-25 修）。
+    #   用户的请求常常同时命中"写作"和"办公产物"：
+    #     「帮我做一份建设**方案**PPT」——"方案"在 _WRITING_HINTS 里，
+    #     于是被判成"纯写作"→ 工具砍到只剩 3 个 → **make_pptx 没了** →
+    #     模型只能把内容写成一大段文字，用户根本拿不到 PPT。
+    #   这是"复杂内容的 PPT 做不出来"的直接原因，所以这里要**优先保住生成工具**：
+    #     留 make_pptx / make_docx / make_xlsx / edit_office + 文库 + 问细节，
+    #     其余（画图、地图、文件系统、跑代码…）照旧砍掉，省下的额度给长输出。
+    # ⚠️ 2026-09-27 补：**联网与天气也保留** —— 做 PPT/Word/Excel 经常要先查资料
+    #   （产品参数、行业数据、活动当天的天气），砍掉它们就只能凭记忆编内容。
+    if office_gen:
+        # ⚠️⚠️ 触发场景：**办公任务重试**时（见 main.py 的空回答重试）。
+        #   原来的重试统一换成"写作精简集"（writing=True），而那个集合里
+        #   **没有 make_pptx / make_docx / make_xlsx** —— 于是"首次尝试把额度
+        #   全烧在思考上"之后，重试这一轮模型**根本没法生成文件**，
+        #   最后只回一段文字：用户要 PPT，拿到的是一段话（2026-09-26 实测复现：
+        #   端到端跑出来 工具=[]、一个文件都没有）。
+        #   这里保留**三个生成工具**，砍掉「问细节 / 改文件 / 文库」，
+        #   省下约 2600 token 的窗口，同时守住"能做出文件"这条底线。
+        _keep = {"make_pptx", "make_docx", "make_xlsx"}
+    elif office:
+        _keep = {"make_pptx", "make_docx", "make_xlsx", "edit_office",
+                 "library", "ask_user"}
+        if kb_enabled:
+            _keep.add("search_knowledge")
+    if office or office_gen:
+        if web_enabled:
+            _keep.update({"web_search", "web_read", "get_weather"})
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": "web_image_search",
+                "description": (
+                    "【联网搜图】到网上找**已经存在**的真实图片并展示原图。\n"
+                    "用户说「找/搜/看看……的图」「……长什么样」「来点……壁纸」时用它。\n"
+                    "与 generate_image 的区别：本工具=找现成的真实图，不绘制；"
+                    "generate_image=AI 从零画。说「画/生成/绘制」时用 generate_image。\n"
+                    "⚠️⚠️ **不许抢 edit_image / generate_image 的活**（2026-09-22 用户实测踩过）：\n"
+                    "· 用户说「微改 / 改成 / 换成 / 加个 / 去掉 / 调一下」且**上文有图**"
+                    "（本轮附件、或刚生成/刚微改过的那张）→ 用 **edit_image**，不要搜图；\n"
+                    "· 用户说「画 / 生成 / 做张图」→ 用 **generate_image**，不要搜图；\n"
+                    "· 只有当用户**明确要现成的真实照片/素材**（「找张真的」「网上有没有」"
+                    "「长什么样」「壁纸」）时才用本工具。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "名词短语关键词，如「埃菲尔铁塔」「橘猫」。**越短越准**：1~2 个词最好；不要塞「详细特征/介绍/怎么样/高清大图」这类修饰词，那样会搜出无关内容。一次搜不到或结果不对时，**换个更常见的叫法/学名再搜一次**（如「维纳斯捕蝇草」→「捕蝇草」），而不是就此收工"},
+                        "n": {"type": "integer", "description": "想要几张，默认 4，最多 8。用户嫌少时可以调大或再搜一次"},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "save_image_to_library",
+                "description": "把刚刚搜到/生成的一张图片保存进本地图片库，供以后随时调用。一般在用户说「保存这张」「存起来」「收进图库」时调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer", "description": "要保存的是本轮展示的第几张图（从 1 开始），默认 1"},
+                        "name": {"type": "string", "description": "保存后的名称，可选，留空自动命名"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_image",
+                "description": "根据描述生成图片（文生图，**走云端 API**，不占本机显存）。prompt 中文/英文都可以，越具体越像；生成后直接展示给用户。\n"
+                               "⚠️ 用户只说了主体、没说风格/用途/氛围/尺寸时（例如「画一只狐狸」），"
+                               "**先调 ask_user 问一轮再画** —— 画一次要几十秒，风格选错就得重画；"
+                               "用户已经说清风格与用途时直接画，不要再问。\n"
+                               "⚠️⚠️ **prompt 写得越具体越像**（用户报过「偏离要求」「不够满意」）——"
+                               "必须凑齐这几样，缺哪样就按用户原话补：\n"
+                               "  ① 主体 + 动作/状态（a red fox **sitting and looking at camera**）\n"
+                               "  ② 场景/背景（in an autumn forest, fallen leaves on the ground）\n"
+                               "  ③ 光线与时间（golden hour backlight / soft window light）\n"
+                               "  ④ 镜头与画质（close-up portrait, shallow depth of field）\n"
+                               "  ⑤ **风格词必须写**：要写实就写 photorealistic, 35mm photograph, "
+                               "realistic texture（别只写 realistic 一个词）；"
+                               "要插画写 digital illustration；要卡通写 anime style。\n"
+                               "  ❌ 反例（太笼统，出来必然不像）：「a beautiful fox, high quality」\n"
+                               "  ✅ 正例：「a red fox sitting in an autumn forest, golden hour "
+                               "backlight, close-up portrait, shallow depth of field, "
+                               "photorealistic, 35mm photograph, realistic fur texture」\n"
+                               "⚠️ 用户要「写实」时，**negative_prompt 里排除绘画感**："
+                               "cartoon, anime, illustration, painting, 3d render, "
+                               "plastic, oversaturated, blurry, deformed, extra limbs。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string",
+                                   "description": "详细的图片描述（**中文或英文都行**，云端模型懂中文）。"
+                                                  "要写全：主体+动作、场景、光线、镜头、风格"
+                                                  "（写实类带上 photorealistic / 35mm photograph 更稳）"},
+                        "negative_prompt": {"type": "string",
+                                            "description": "不想要的东西（会转成 Avoid: ...）。"
+                                                           "写实类建议：cartoon, anime, illustration, "
+                                                           "painting, 3d render, blurry, deformed"},
+                        "n": {"type": "integer",
+                              "description": "生成几张（1~4，默认 1）。用户说「多来几张/给几个方案」时填 2~4"},
+                        "aspect": {"type": "string",
+                                   "enum": ["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"],
+                                   "description": ("画幅比例，默认 1:1。用户说「竖版/海报/手机壁纸」用 9:16 或 2:3；"
+                                                   "说「横版/宽屏/PPT 配图/Banner」用 16:9 或 3:2。"
+                                                   "云端按这档自动选 1024x1024 / 1024x1536 / 1536x1024。")},
+                    },
+                    "required": ["prompt"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_image",
+                "description": "对一张已有图片做**局部**修改（图生图），如「把背景改成夜晚」「戴上帽子」。\n"
+                               "⚠️ **要「只改这里、别的一律不动」时**：必须给 `regions`（矩形）"
+                               "或 `area`（预设名），或者让用户在界面上涂抹选区（系统会自动"
+                               "把蒙版传进来）—— 这时走的是**局部重绘（inpainting）**，"
+                               "圈外像素原样保留。**只写 prompt 不带区域**时走的是整图 img2img："
+                               "实测「换衣服颜色」「加眼镜」在 0.45/0.60/0.85 都**改不出来**，"
+                               "所以精确改元素**一定要给区域**，别空着手让用户等。\n"
+                               "⚠️ 这是「改现成的图」，**不是重画**：改动之外的构图/主体/光线应当保持原样。\n"
+                               "source 填本地路径；**若用户本轮拖入的图、或刚才生成/微改的那张要改，"
+                               "就不用填 source**（系统会自动拿「最近那张图」当底图）——"
+                               "用户说「微改这张图 / 把刚才那张改成…」时直接调用本工具即可，"
+                               "不要让他重新拖一次，也不要改用搜图。\n"
+                               "prompt 用英文，**第一句写「要改什么」**（比如 change the background to night），"
+                               "系统会自动补上「其余保持不变」的约束。\n"
+                               "⚠️ 用户要「写实/真实」时，prompt 里要点明 photorealistic / "
+                               "consistent with the original photo，别只在口头答应。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "英文描述要做的修改（只写「要改什么」，不用写「其余不变」）"},
+                        "source": {
+                            "type": "string",
+                            "description": "（可选）本地图片绝对路径；不填则使用用户本轮拖入对话的那张图"},
+                        "negative_prompt": {
+                            "type": "string",
+                            "description": "英文负面描述，可选，例如 'low quality, blurry, distorted'"},
+                        "mask": {
+                            "type": "string",
+                            "description": "（可选）**用户涂抹的蒙版**（白色=要改的地方）。"
+                                           "用户在界面上涂完选区再提要求时，系统会**自动**把它"
+                                           "传进来，**你不用填**。"},
+                        "regions": {
+                            "type": "array",
+                            "description": "（可选）要重绘的**矩形区域**列表，每项 "
+                                           "[x0,y0,x1,y1]，0~1 归一化（左上为原点）。"
+                                           "⚠️ **用户要「只改某处、别的一律不动」时必须给这个**"
+                                           "（或等用户涂抹）—— 否则改出来的位置和幅度都不受控。"
+                                           "例：人像换衣服颜色 → [[0.2,0.4,0.8,0.85]]；"
+                                           "换背景 → 先试 [[0.0,0.0,1.0,0.45]]（上半）。"},
+                        "area": {
+                            "type": "string",
+                            "description": "（可选）区域预设名，懒得分框就用它："
+                                           "**eyes（眼周，加眼镜/改表情用它）** / face 面部 / "
+                                           "torso 上半身（衣服）/ "
+                                           "upper-third, middle-third, lower-third 上中下三分之一 / "
+                                           "left, right, center / whole 整图。"
+                                           "⚠️ 实测提醒：框**别贪大** ——「加眼镜」用 face 会把"
+                                           "头发和眼睛一起重画（镜片后出乱纹），改用 eyes 一次就干净；"
+                                           "「换衣服颜色」框太大时模型可能改的是内衬而不是外衣，"
+                                           "**要最准就请用户在界面上涂一块**（涂抹最准）。"},
+                        "strength": {
+                            "type": "number",
+                            "description": "修改幅度 0~1，**默认 0.5**（走整图 img2img 时）。"
+                                           "⚠️ 若给了 mask / regions / area（走**局部重绘**），"
+                                           "这个值的含义不同：**0.75~1.0** 才是能真改动的档"
+                                           "（0.85 常用，1.0 ≈ 蒙版内完全重画）。"
+                                           "⚠️⚠️ **实测结论（2026-09-26，同一张写实人像逐档试过）**："
+                                           "当前底模（SDXL base，纯图生图、没有蒙版）**做不到"
+                                           "「精确改动某个元素」** ——\n"
+                                           "    · 0.45 / 0.60 / 0.85 三个档位试「换衣服颜色」「加眼镜」，"
+                                           "**全都没改出来**（人物倒是基本保住了）；\n"
+                                           "    · 0.85 试「换背景」，两次结果**一次换成了别的场景、"
+                                           "一次压根没换**（只把脸重画了）——改哪里、改成什么**不受控**。\n"
+                                           "    所以**别再用 strength 去承诺「一定改出某个效果」**。"
+                                           "正确用法是按用户的**意图类型**选，并把预期说清：\n"
+                                           "      · 0.4~0.55 = 「保持这张图，只做整体微调」"
+                                           "（提清晰度、轻微改氛围）—— 适合「别动主体」的诉求；\n"
+                                           "      · 0.6~0.8  = 「按新描述重绘，但大致留住构图/风格」"
+                                           "—— 结果会有变化，**不是精确的局部修改**；\n"
+                                           "      · 0.85~0.95= 「基本重画一版」—— 只在该诉求本身就是"
+                                           "「换个风格/氛围」时用。\n"
+                                           "    ⚠️ 用户要「**只把人/物的某个地方改掉、别的都不许动**」时："
+                                           "老实说明当前只有图生图、做不到像素级锁定，"
+                                           "**别假装改到了**；可以退一步用 generate_image 重画一版，"
+                                           "或建议用户换个做法。"},
+                    },
+                    "required": ["prompt"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "compose_images",
+                "description": "把**多张图片拼接/缝合**成一张（横排 / 竖排 / 网格），"
+                               "可选再统一风格。\n"
+                               "⚠️ 用户说「把这几张图拼起来 / 合在一起 / 拼成一张 / "
+                               "做个对比图 / 拼个长图」时用它。\n"
+                               "拼接是**像素级**的（不重绘），所以接缝天然无缝、内容不走样；"
+                               "只有给了 harmonize（>0）才会再跑一次图生图去统一色调/光线，"
+                               "那一步会**轻微重绘**（所以幅度默认 0，别乱给）。\n"
+                               "⚠️ 它做的是**排版式拼接**，**不会**把 A 图里的人/物搬到 B 图里 ——"
+                               "用户要那种「智能融合」时如实说明做不到，并建议改用 edit_image "
+                               "逐张微改，不要假装做到了。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "sources": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "要拼接的图片：本地绝对路径或文库文件名。"
+                                           "**留空则自动使用用户本轮拖进对话的全部图片**"
+                                           "（用户刚说「把这几张拼起来」时通常留空即可）"},
+                        "layout": {
+                            "type": "string",
+                            "enum": ["horizontal", "vertical", "grid"],
+                            "description": "拼接方式：horizontal 横排（默认）/ "
+                                           "vertical 竖排 / grid 网格"},
+                        "size": {
+                            "type": "integer",
+                            "description": "每张图统一到的长边像素，默认按当前底模原生档（1024）。"
+                                           "拼长图想让每张更大就写 1200~1600"},
+                        "gap": {
+                            "type": "integer",
+                            "description": "图片之间的间距像素（默认 0 紧贴）；"
+                                           "想要「白边分隔」的效果写 16~40"},
+                        "bg": {
+                            "type": "string",
+                            "description": "间距与补白的颜色（6 位十六进制，默认 FFFFFF 白）"},
+                        "cols": {
+                            "type": "integer",
+                            "description": "grid 网格时的列数（默认 √n 向上取整）；"
+                                           "横排/竖排时忽略"},
+                        "harmonize": {
+                            "type": "number",
+                            "description": "可选：拼完统一色调/光线的幅度 0~0.55（**默认 0 不重绘**）。"
+                                           "只应该在用户明确说「让它们看起来像一张图 / 色调统一」时"
+                                           "给 0.25~0.4；给太大（>0.45）画面会被重画、人物可能变形。"},
+                        "prompt": {
+                            "type": "string",
+                            "description": "（可选）harmonize 用的**英文**提示，如 "
+                                           "seamless single photo, consistent lighting and color"},
+                        "filename": {"type": "string",
+                                     "description": "（可选）成品文件名"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "cutout_image",
+                "description": "把图片的**主体抠出来**（去掉背景），产出带透明通道的 PNG。\n"
+                               "⚠️ 用户说「抠图 / 去背景 / 把背景去掉 / 只留人 / 抠出这个物体 / "
+                               "换个背景」时用它。\n"
+                               "用的是 **BiRefNet**（当前开源最强的抠图模型之一，MIT 许可），"
+                               "发丝、毛绒、镂空、半透明的边缘也抠得住 —— "
+                               "比老一代 u2net 那种“块状硬边”强一个档次。\n"
+                               "★ 它跑在 **CPU** 上，不占显存，所以**不会影响**正在对话的模型。\n"
+                               "抠完的结果会进图片库，也可以直接交给 composite_image 换背景。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "description": "要抠的图：本地绝对路径或文库文件名。"
+                                           "**留空则用用户本轮拖进对话的图**"},
+                        "model": {
+                            "type": "string",
+                            "enum": ["birefnet-general", "birefnet-portrait",
+                                     "birefnet-massive", "birefnet-general-lite",
+                                     "isnet-general-use", "u2net", "bria-rmbg"],
+                            "description": "模型档位。默认 birefnet-general（通用）；"
+                                           "**人像/头发多**用 birefnet-portrait；"
+                                           "要**最高质量**用 birefnet-massive（更慢）；"
+                                           "要快要省内存用 birefnet-general-lite。"
+                                           "（bria-rmbg 质量最强但非商业许可，别默认用它）"},
+                        "alpha_matting": {
+                            "type": "boolean",
+                            "description": "发丝级 alpha 估算。⚠️ BiRefNet 系**自带**柔和 alpha，"
+                                           "通常**不需要开**；只在“边缘形状本身就不对”时才设 true"
+                                           "（更慢，且干净背景上可能反而不如原生）"},
+                        "filename": {"type": "string",
+                                     "description": "（可选）成品文件名"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "composite_image",
+                "description": "把一张图的**主体合成到另一张背景图**上（**内容级合成**，俗称“换背景/把人放进场景”）。\n"
+                               "⚠️ 用户说「把这张图里的人/东西放到那张图里 / 换个背景 / "
+                               "把这个产品放进那个场景 / 帮我把这两张合成一张」时用它。\n"
+                               "★ 主体**一个像素都不重画** —— 不是让 AI 照着重画一张，"
+                               "而是真实的像素级合成，所以**长相、衣服、细节 100% 保留**。\n"
+                               "主体如果没抠过，会自动先抠（auto_cutout，默认开）。\n"
+                               "⚠️ 与 compose_images 的分工：compose_images 是**并排拼接**"
+                               "（几张图各占一格，互不重叠）；本工具是**叠上去**"
+                               "（主体坐在背景上面，可调位置/大小/投影）。别用错。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {
+                            "type": "string",
+                            "description": "**主体**（要放上去的那个）：抠好的透明 PNG，"
+                                           "或原图（会先自动抠）。本地路径 / 文库文件名"},
+                        "background": {
+                            "type": "string",
+                            "description": "**背景**：背景图路径/文库文件名，"
+                                           "或 6 位十六进制纯色（如 “FFFFFF” 白底）"},
+                        "position": {
+                            "type": "string",
+                            "description": "摆在哪：center（默认）/ top / bottom / left / right / "
+                                           "top-left / top-right / bottom-left / bottom-right；"
+                                           "也可直接给 “x,y” 像素坐标"},
+                        "scale": {
+                            "type": "number",
+                            "description": "主体缩放比例，1.0 = 保持原始像素大小。"
+                                           "主体明显比背景大或小时用它调整（0.05~8.0）"},
+                        "shadow": {
+                            "type": "boolean",
+                            "description": "给主体加柔和投影，让它“坐”在背景上而不是飘着。"
+                                           "贴人物/产品时建议开"},
+                        "feather": {
+                            "type": "number",
+                            "description": "边缘羽化像素（默认 0 不动）。"
+                                           "只在边缘有生硬切边时给 1~3；抠得好的图别给"},
+                        "shrink": {
+                            "type": "integer",
+                            "description": "**去白边**：把主体边缘向内收几像素（默认 2，实测最优）。"
+                                           "⚠️ 用户反馈「人周围有一圈白光/白边/像贴上去的」时"
+                                           "调到 3；给 0 关闭。上限就是 3（再多会啃掉发丝和轮廓）"},
+                        "auto_cutout": {
+                            "type": "boolean",
+                            "description": "主体没有透明通道时是否自动抠图（默认 true）"},
+                        "margin": {
+                            "type": "integer",
+                            "description": "距边缘留白像素（只对九宫格位置生效）"},
+                        "canvas": {
+                            "type": "string",
+                            "description": "背景是纯色时的画布尺寸，如 “1024x1024”；"
+                                           "不给则按主体放大后的 1.5 倍"},
+                        "model": {
+                            "type": "string",
+                            "description": "自动抠图用的模型档位（同 cutout_image）"},
+                        "filename": {
+                            "type": "string",
+                            "description": "（可选）成品文件名"},
+                    },
+                    "required": ["subject", "background"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "video_edit",
+                "description": (
+                    "【剪视频】裁剪 / 拼接 / 配音 / 加文字水印 / 烧字幕 / 抽音轨 / "
+                    "图片成片 / 压缩转码。底层是本机 ffmpeg，**能保留原声**。\n"
+                    "用户说「剪一下视频」「把这段裁出来」「把几段拼起来」「加背景音乐」"
+                    "「加个标题 / 水印」「加字幕」「把声音导出来」「压小一点」时用它。\n"
+                    "⚠️ 用 action 选动作：\n"
+                    "  trim=按时间裁剪（source + start + duration 或 end），保留原声\n"
+                    "  concat=多段拼接（sources 列表，至少两个）\n"
+                    "  audio=加背景音乐 / 换音轨（source + audio；mode=replace 换掉原声，"
+                    "mode=mix 和原声混在一起；volume 是背景音乐音量）\n"
+                    "  text=在画面上压字（source + text；position 选位置；box 是否加底框；"
+                    "opacity 透明度；start/end 只在某段时间显示）\n"
+                    "  subtitle=把 .srt 字幕烧进画面（source + subtitle）\n"
+                    "  extract_audio=导出音轨（source，fmt=mp3/m4a/wav）\n"
+                    "  images_to_video=多张图片做成轮播视频（images 列表 + seconds）\n"
+                    "  compress=压缩 / 转码 / 改分辨率（source + crf + width）\n"
+                    "  info=只看视频信息（时长 / 分辨率 / 有没有声音）\n"
+                    "  transition=**转场拼接**：多段之间加过渡特效（sources + trans + "
+                    "duration）。支持 58 种转场名，如 fade/wipeleft/circleopen/zoomin/"
+                    "slideup/pixelize/dissolve 等；音频默认交叉淡化\n"
+                    "  effect=**加特效**：整段视频套滤镜（source + effects 列表，可叠加）。"
+                    "可选 vignette 暗角 / warm 暖调 / cool 冷调 / mono 黑白 / vintage 复古 / "
+                    "highcontrast / vivid / blur / sharpen / edge / chroma 色差 / noise 噪点 / "
+                    "scanlines 扫描线 / kenburns_in 缓慢推近 / kenburns_out 缓慢拉远\n"
+                    "⚠️ source / sources / audio / subtitle 都可以给本地绝对路径，"
+                    "或生成文库里的文件名。\n"
+                    "⚠️ kenburns 推拉很慢（53 秒视频可能要好几分钟），用时先跟用户说一声。\n"
+                    "⚠️ **做不了**：多轨时间线编辑、AI 自动抠视频主体。"
+                    "用户要这些时如实说明做不到，别硬接。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["trim", "concat", "audio", "text", "subtitle",
+                                     "extract_audio", "images_to_video", "compress", "info",
+                                     "transition", "effect"],
+                            "description": "要做哪种操作，见工具说明"},
+                        "source": {"type": "string",
+                                   "description": "输入视频：本地绝对路径或文库文件名"},
+                        "sources": {"type": "array", "items": {"type": "string"},
+                                    "description": "concat 用：要拼接的多段视频，按顺序给"},
+                        "images": {"type": "array", "items": {"type": "string"},
+                                   "description": "images_to_video 用：图片路径列表"},
+                        "audio": {"type": "string",
+                                  "description": "audio 用：背景音乐 / 新音轨文件"},
+                        "subtitle": {"type": "string",
+                                     "description": "subtitle 用：.srt 字幕文件路径"},
+                        "start": {"type": "number",
+                                  "description": "trim 起点（秒）；text 的显示起始秒"},
+                        "end": {"type": "number",
+                                "description": "trim 终点（秒）；text 的显示结束秒"},
+                        "duration": {"type": "number",
+                                     "description": "trim 时长（秒），和 end 二选一"},
+                        "mode": {"type": "string", "enum": ["replace", "mix"],
+                                 "description": "audio 用：replace 换掉原声（默认），"
+                                                "mix 与原声混合"},
+                        "volume": {"type": "number",
+                                   "description": "audio 用：背景音乐音量，1.0 为原音量"},
+                        "text": {"type": "string",
+                                 "description": "text 用：要压在画面上的文字"},
+                        "position": {
+                            "type": "string",
+                            "enum": ["top", "bottom", "center", "top-left",
+                                     "top-right", "bottom-left", "bottom-right"],
+                            "description": "text 用：文字位置，默认 bottom"},
+                        "fontsize": {"type": "integer",
+                                     "description": "text 用：字号，默认 48"},
+                        "color": {"type": "string",
+                                  "description": "text 用：字色，如 white / yellow / 0xFFCC00"},
+                        "box": {"type": "boolean",
+                                "description": "text 用：是否加半透明底框"
+                                               "（默认 true；水印建议 false）"},
+                        "opacity": {"type": "number",
+                                    "description": "text 用：不透明度 0~1，水印常用 0.5~0.7"},
+                        "margin": {"type": "integer",
+                                   "description": "text 用：距画面边缘留白像素，默认 60"},
+                        "fmt": {"type": "string", "enum": ["mp3", "m4a", "wav"],
+                                "description": "extract_audio 用：导出格式，默认 mp3"},
+                        "seconds": {"type": "number",
+                                    "description": "images_to_video 用：每张停留秒数，默认 3"},
+                        "crf": {"type": "integer",
+                                "description": "compress 用：画质 18~32，越大越小越糊，默认 28"},
+                        "width": {"type": "integer",
+                                  "description": "compress / concat 用：目标宽度，高度自动"},
+                        "trans": {
+                            "description": "transition 用：转场名，给一个字符串（全部同一种）"
+                                           "或数组（每处不同）。常用 fade / wipeleft / "
+                                           "circleopen / zoomin / slideup / pixelize / "
+                                           "dissolve / fadewhite / hblur / radial",
+                            "anyOf": [{"type": "string"},
+                                      {"type": "array", "items": {"type": "string"}}]},
+                        "effects": {"type": "array", "items": {"type": "string"},
+                                    "description": "effect 用：特效名列表，按顺序叠加，"
+                                                   "如 [\"warm\",\"vignette\"]"},
+                        "strength": {"type": "number",
+                                     "description": "effect 用：kenburns 推拉幅度 0~1，"
+                                                    "默认 1.0（约放大 18%）"},
+                        "custom": {"type": "string",
+                                   "description": "effect 用：追加一段原生 ffmpeg 滤镜串"},
+                        "audio_join": {"type": "string", "enum": ["crossfade", "none"],
+                                       "description": "transition 用：音频接法，"
+                                                      "crossfade 交叉淡化（默认）或 none 去音轨"},
+                        "filename": {"type": "string",
+                                     "description": "（可选）成品文件名"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tts_speak",
+                "description": (
+                    "【文字转语音】把文本合成为音频（mp3 / wav），返回可直接播放和下载的链接。\n"
+                    "用户说「读一下这段」「把讲稿转成配音」「生成语音」「配个旁白」时用它。\n"
+                    "引擎默认自动：联网用微软神经语音（接近真人，14 个中文音色），"
+                    "断网或接口失败自动回退系统离线语音（机械但能用），返回里会说明。\n"
+                    "常用音色 id：zh-CN-XiaoxiaoNeural 晓晓（女，通用首选）、"
+                    "zh-CN-YunxiNeural 云希（男，年轻）、zh-CN-YunjianNeural 云健（男，浑厚解说）、"
+                    "zh-CN-YunyangNeural 云扬（男，播音腔）；离线用 sapi:Microsoft Huihui Desktop。\n"
+                    "rate 是语速百分比：0 原速，20 = 快 20%，-15 = 慢 15%。\n"
+                    "长文（几千字）会自动分段拼接，耗时几十秒，调用前先跟用户说一声。\n"
+                    "⚠️ 返回里的播放/下载链接要**原样**给用户，别自己改写或省略。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string",
+                                 "description": "要读的文字。Markdown 符号、代码块、链接会自动"
+                                                "清洗掉不念；几千字也可以，会自动分段"},
+                        "voice": {"type": "string",
+                                  "description": "音色 id，默认 zh-CN-XiaoxiaoNeural（晓晓）。"
+                                                 "用户说「男声」用 zh-CN-YunxiNeural，"
+                                                 "「播音腔」用 zh-CN-YunyangNeural，"
+                                                 "「浑厚/解说」用 zh-CN-YunjianNeural，"
+                                                 "「离线」用 sapi:Microsoft Huihui Desktop"},
+                        "rate": {"type": "integer",
+                                 "description": "语速百分比，0 原速；讲解稿建议 0~10，"
+                                                "有声书建议 -5"},
+                        "pitch": {"type": "integer",
+                                  "description": "音高偏移（Hz），0 原调，+15 更亮更年轻，"
+                                                 "-12 更沉更稳重。仅在线引擎有效"},
+                        "style": {"type": "string",
+                                  "description": "情感预设：neutral 自然 / cheerful 愉悦 / "
+                                                 "gentle 温柔 / serious 严肃 / sad 低沉 / "
+                                                 "news 播报 / excited 激动。"
+                                                 "注意这是用「语速+音高+音量」组合近似，"
+                                                 "不是真正的情感合成"},
+                        "engine": {"type": "string",
+                                   "enum": ["auto", "edge", "sapi"],
+                                   "description": "auto（默认，在线优先失败回退）/ edge 强制在线 / "
+                                                  "sapi 强制离线"},
+                        "filename": {"type": "string",
+                                     "description": "（可选）音频文件名，不给就自动命名"},
+                    },
+                    "required": ["text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "music_make",
+                "description": (
+                    "【音乐生成与改编】**纯本地算法合成**（numpy/scipy），不联网、秒级出结果，"
+                    "最长 300 秒。\n"
+                    "用户说「来一段 / 生成一首 / 做个曲子」「要古风 / 电子 / Lo-fi / 钢琴」"
+                    "「给视频配个背景音乐」时用它。\n"
+                    "action=generate 按风格生成；action=remix 改编已有曲子"
+                    "（换风格会自动做音阶映射，旋律骨架保留）；"
+                    "action=from_notes 把用户给的音符（音名 C4 D4 E4 或简谱 1 2 3 5）编成完整曲子；"
+                    "action=list 列出已生成的曲子。\n"
+                    "风格 id：pop 流行/轻快、gufeng 古风五声、lofi 学习背景、electronic 电子、"
+                    "chiptune 8bit、jazz 爵士、piano 纯钢琴、epic 史诗电影感。\n"
+                    "⚠️ 人声是**共振峰合成的吟唱**（啊/哦/咿），不是真人演唱、唱不出清晰歌词 —— "
+                    "用户要真人唱要如实说明做不到。\n"
+                    "⚠️ 返回的播放/下载链接要**原样**给用户。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string",
+                                   "enum": ["generate", "remix", "from_notes", "list"],
+                                   "description": "生成 / 改编 / 按音符编曲 / 列出现有的"},
+                        "style": {"type": "string",
+                                  "description": "风格 id：pop / gufeng / lofi / electronic / "
+                                                 "chiptune / jazz / piano / epic"},
+                        "bars": {"type": "integer",
+                                 "description": "小节数（每小节 4 拍）。118bpm 下 16 小节≈33 秒、"
+                                                "32 小节≈65 秒；最长 160"},
+                        "bpm": {"type": "number", "description": "速度，留空跟随风格"},
+                        "key": {"type": "integer", "description": "移调半音数，0=C"},
+                        "vocals": {"type": "boolean",
+                                   "description": "要不要人声吟唱（默认 true）"},
+                        "notes": {"type": "string",
+                                  "description": "旋律音符：音名「C4 D4 E4 G4」或简谱「1 2 3 5 6」"},
+                        "id": {"type": "string",
+                               "description": "remix 用：要改编哪一首的 id"},
+                        "key_shift": {"type": "integer",
+                                      "description": "remix 用：移调半音数，可为负"},
+                        "tempo": {"type": "number",
+                                  "description": "remix 用：速度倍率，1.2 = 快 20%"},
+                        "extend_bars": {"type": "integer",
+                                        "description": "remix 用：续写几小节"},
+                        "variation": {"type": "number",
+                                      "description": "remix 用：变奏幅度 0~1"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_directory",
+                "description": "列出指定目录下的一级内容（文件/子目录）。用于浏览用户本机文件系统。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "目录绝对路径，例如 C:\\Users\\xxx\\Documents"},
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "读取本机指定路径的文件（文本/代码/PDF）。仅当用户给出本地文件路径时用。图片/视频若已附在对话中，直接用视觉能力看，不要调用本工具。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "文件绝对路径"},
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_files",
+                "description": "在指定目录（递归）或单文件中按关键词搜索匹配的内容片段。用于帮用户在本机查找资料。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "目录或文件绝对路径"},
+                        "keyword": {"type": "string", "description": "要搜索的关键词"},
+                    },
+                    "required": ["path", "keyword"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "写入或覆盖创建用户本机的一个文本文件。返回写入结果。可用于创建/写入代码、文档等。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "文件绝对路径"},
+                        "content": {"type": "string", "description": "要写入的完整文本内容"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "append_file",
+                "description": "向已有文本文件末尾追加内容（不会覆盖原有内容），若无该文件则新建。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "文件绝对路径"},
+                        "content": {"type": "string", "description": "要追加的文本内容"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remember",
+                "description": "写入或**修改**记忆。**长期记忆**跨所有对话共享（身份、姓名、职业、长期偏好、约定、目标计划、他身边的人事物、以及他未来可能的意图）；**短期记忆**只在当前对话生效（正在做的项目、本次讨论的结论、临时设定）。\n⚠️ **长期记忆是「关于这个人」的档案**：写之前问一句，这条对了解他、或对他以后要做的事有用吗？\n· 不许存：寒暄、临时问答、**一次性查询的结果**（查到的天气/评分/路线/价格/比分…）、**本应用自己的操作说明**（某功能怎么用、文件放哪）—— 这些跟他无关，明天就过期。\n· 该存：由这次提问能看出的**他的偏好/处境/打算**（例：查了餐厅评分 → 记「挑餐厅在意评分」，而不是把评分本身记下来）。\n系统会自动去重，不需要你重写旧内容。\n特别注意 action：add=新增（默认）；update=**改写已有条目**；forget=作废删除（用户明确说不做了/弄错了）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "要记住的一条具体事实（第三人称、直接、可读，60 字以内）。action=update 时填**修改后**的新内容"},
+                        "scope": {
+                            "type": "string",
+                            "enum": ["long", "short"],
+                            "description": "long=长期记忆（跨对话通用，放身份/偏好/约定/目标计划）；short（默认）=短期记忆（只在这个对话用，放当前项目/本次结论）"},
+                        "action": {
+                            "type": "string",
+                            "enum": ["add", "update", "forget"],
+                            "description": "add（默认）=新增；update=改写已有条目；forget=删除已有条目"},
+                        "old": {
+                            "type": "string",
+                            "description": "action=update/forget 时必填：要改动的那条记忆的**原句**（照抄，至少前 10 个字），用来定位是哪一条"},
+                    },
+                    "required": ["content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_memory",
+                "description": "检索我已拥有的长期记忆和过往对话，把最相关的信息读出来，以便回答用户（例如“我之前想让你……”“你还记得……吗”）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "要检索的查询"},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_time",
+                "description": "返回当前本地日期与时间。",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+    # 知识库工具只在「知识库」开关打开时暴露 —— 与联网同样的约定：
+    # 开关关着，模型连工具都看不到，自然就不会去翻资料。
+    schemas.append(_LIBRARY_SCHEMA)
+    schemas.append(_ask_user_schema(ask_mode))
+    schemas.append(_CONNECT_AMAP_SCHEMA)
+    # 开发工作区：人机协同开发用（多文件项目，相对路径，后端拼绝对路径）
+    schemas.append(_WS_LIST_SCHEMA)
+    schemas.append(_WS_READ_SCHEMA)
+    schemas.append(_WS_WRITE_SCHEMA)
+    # 项目管理（建项目/切项目/建目录/删/改名）——「全自动开发平台」必需。
+    # ⚠️ 这几个以前**只给了代码模型的文本协议**，默认模型看不到，用户会觉得"它没这个能力"。
+    schemas.extend(_WS_PROJECT_SCHEMAS)
+    schemas.append(_WS_PACK_SCHEMA)
+    # 生成 PPT：纯本机操作（不联网、不执行用户代码），所以**不挂任何开关**，
+    # 始终可用 —— 和「记忆」「文库」一样的待遇。
+    schemas.append(_MAKE_PPTX_SCHEMA)
+    # 写 Word 文档 + 改已有的 Word/PPT（同样不联网、不跑用户代码，始终可用）。
+    schemas.append(_MAKE_DOCX_SCHEMA)
+    schemas.append(_MAKE_XLSX_SCHEMA)
+    schemas.append(_MAP_PLAN_SCHEMA)
+    schemas.append(_NEARBY_SCHEMA)
+    schemas.append(_EDIT_OFFICE_SCHEMA)
+    # ⚠️ `write_code`（让专用代码模型代写代码）**暂时不启用** ——
+    # 用户 2026-09-16 试过之后要求换回"按轮切换代码模型"的架构。
+    # 原因：这台机器 12GB 显存装不下两个模型，每调一次 write_code 就要重新加载大脑，
+    # 实测一个任务绕了 10 分钟。代码（`_do_write_code`）保留着，没删 ——
+    # 想启用只需把下面这行加回来：
+    #     schemas.append(_WS_CODE_SCHEMA)
+    if code_exec:
+        # 跑工作区文件同样属于"在本机执行代码"，跟着同一个开关走
+        schemas.append(_WS_RUN_SCHEMA)
+    if kb_enabled:
+        schemas.append(_KB_SCHEMA)
+    if code_exec:
+        schemas.append(_run_py_schema())
+    if web_enabled:
+        schemas.append(_WEATHER_SCHEMA)   # 天气走数据 API，比搜索可靠得多
+        schemas.append(_WEB_SEARCH_SCHEMA)
+        schemas.append(_WEB_READ_SCHEMA)  # 搜到之后点进去读正文
+    else:
+        # ⚠️ 联网搜图走的是外网，必须跟着「联网」开关一起关。
+        # 之前它写死在基础列表里，关着联网也能搜图 —— 与"关着不联网"的约定矛盾。
+        schemas = [s for s in schemas
+                   if s["function"]["name"] != "web_image_search"]
+    # 上传到代码托管平台：属于"对外发布"，始终暴露但执行前必须问用户
+    schemas.append(_GITHUB_PUSH_SCHEMA)
+    # ---------- 「眼睛」：截图 / 看图（2026-11-08）----------
+    schemas.extend(_vision_schemas())
+
+    # ---------- 定时任务（长期自动化）----------
+    # 常驻能力：用户说「每天早上帮我…」「每两小时盯一下…」就要用它。
+    schemas.extend(_schedule_schemas())
+
+    # ---------- 技能（用户自定义的做法/规范）----------
+    # 只有存在「启用的自动类技能」时才给 load_skill：
+    # 一个都没有的话这个工具白占 token，模型还会以为有东西可加载。
+    try:
+        from . import skills as _skills_mod
+        schemas.extend(_skill_schemas())          # save_skill / delete_skill：始终可用
+        if any(i["enabled"] and i["mode"] == "auto" for i in _skills_mod.load()):
+            schemas.append(_SKILL_LOAD_SCHEMA)    # 有「自动」类技能才给 load_skill
+    except Exception:
+        pass
+
+    # ---------- 自开发工具（改自己的源码）----------
+    # 只有用户在界面上打开「🛠 自开发」才给。关着时模型连这些工具都看不到，
+    # 自然不会去碰 backend/frontend。
+    try:
+        if (config.load_config() or {}).get("self_dev_enabled"):
+            schemas.extend(_selfdev_schemas())
+    except Exception:
+        pass
+
+    if office:
+        # 只留"能产出办公文件"的那几个（见函数开头 office 的说明）。
+        # 放在最后统一过滤：前面的 web/kb/code_exec 开关逻辑照旧，
+        # 这样既不用把整张大表复制一遍，也不会漏掉任何新加的工具。
+        schemas = [s for s in schemas
+                   if s.get("function", {}).get("name") in _keep]
+    elif lean:
+        # ⚠️⚠️ 2026-09-26 加：**带图轮的精简集**。
+        #   实测 Ollama 的真账：34~39 个工具的 schema 就要 **15595 token**，
+        #   加系统提示 + 1 张图 = 23244 —— num_ctx 24576 里只剩 **1332** 给
+        #   "思考 + 回答"，带 3 张图直接 400（`exceed_context_size_error`）。
+        #   这里砍掉本轮**几乎用不到**的几组（用户明说要用时不会走这条，见 main.py）：
+        #     地图 3 个（≈1900 token）+ 工作区 12 个（≈1429）+ 天气 + 上传代码托管
+        #   合计省 ≈3400 token —— 换来"带几张图也能正常回答"。
+        #   留在集合里的：图片 4 个、文档生成 4 个、文件操作、联网、知识库、记忆、
+        #   问细节、跑代码、时间 —— 该有的都有。
+        _drop = {"map_plan", "nearby_places", "connect_amap",
+                 "get_weather", "github_push"}
+        schemas = [s for s in schemas
+                   if (s.get("function", {}).get("name") not in _drop
+                       and not s.get("function", {}).get("name", "").startswith("workspace_"))]
+    return schemas
+
+
+# ---------- 「眼睛」：截图 / 看图 ----------
+def _vision_schemas() -> list:
+    return [
+        {"type": "function", "function": {
+            "name": "look_at_screen",
+            "description": ("**截图看当前界面**：无头浏览器截一张图 → 交给模型自己看。\n"
+                            "改完前端 / 样式 / 排版后**必须**调它自查：有没有重叠、错位、"
+                            "被裁切、横向挤压、文字看不清。返回的是它对画面的描述，"
+                            "你据此再决定要不要微调。"),
+            "parameters": {"type": "object", "properties": {
+                "question": {"type": "string", "description": "重点看什么（可空）"},
+                "width": {"type": "integer", "description": "视口宽，默认 1280"},
+                "height": {"type": "integer", "description": "视口高，默认 900"}},
+                "required": []}}},
+        {"type": "function", "function": {
+            "name": "look_at_image",
+            "description": ("看**一张已有的图片**（生成的图、截图、幻灯片预览等），"
+                            "判断成品质量：构图 / 文字 / 留白 / 是否糊 / 是否跑偏。"),
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "图片路径（绝对路径或项目内相对路径）"},
+                "question": {"type": "string", "description": "想问什么（可空）"}},
+                "required": ["path"]}}},
+    ]
+
+
+def _do_vision(name: str, arguments: dict, context: dict = None) -> str:
+    from . import vision as V
+    a = arguments or {}
+    ctx = context or {}
+    key = str(ctx.get("ds_key") or "")
+    model = str(ctx.get("model") or "") or "deepseek-flash"
+    try:
+        if name == "look_at_screen":
+            shot = V.screenshot(width=int(a.get("width") or 1280),
+                                height=int(a.get("height") or 900))
+            if not shot.get("ok"):
+                return "截图失败：%s" % shot.get("error")
+            d = V.describe(shot["path"], str(a.get("question") or ""),
+                           ds_key=key, model=model)
+            if not d.get("ok"):
+                return "截图成功（%s），但看不了：%s" % (shot["path"], d.get("error"))
+            return ("[当前界面截图 %s | %s]\n%s" %
+                    (shot["path"], d.get("model"), d.get("text")))
+        if name == "look_at_image":
+            raw = str(a.get("path") or "").strip()
+            if not raw:
+                return "要我看哪张图？给个路径。"
+            path = raw
+            if not os.path.isabs(path):
+                from . import selfdev as _sd
+                try:
+                    path = os.path.join(_sd.project_root(), raw.lstrip("/"))
+                except Exception:
+                    pass
+            d = V.describe(path, str(a.get("question") or ""),
+                           ds_key=key, model=model)
+            if not d.get("ok"):
+                return "看不了这张图：%s" % d.get("error")
+            return "[%s | %s]\n%s" % (path, d.get("model"), d.get("text"))
+    except Exception as e:                            # noqa: BLE001
+        return "看图工具出错：%s: %s" % (type(e).__name__, e)
+    return "未知的看图工具：%s" % name
+
+
+# ---------- 定时 / 长期自动化任务 ----------
+def _schedule_schemas() -> list:
+    return [
+        {"type": "function", "function": {
+            "name": "schedule_task",
+            "description": ("创建一个**定时任务**（长期自动化）：到点它会自己跑一遍，"
+                            "结果写回当前会话。适用于「每天早上九点帮我总结XX」"
+                            "「每两小时检查一下XX」这类需求。\n"
+                            "⚠️ 定时任务用**本机模型**执行（云端 Key 只在你浏览器里，"
+                            "半夜没人给它）；也**不会弹任何对话框**（没人点），"
+                            "所以任务描述要写成**自包含**的一句话，别指望它到时候再问你。"),
+            "parameters": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "任务名（短一点，好认）"},
+                "prompt": {"type": "string",
+                           "description": "到点要执行的内容（要自包含，写清做什么、输出什么）"},
+                "every_minutes": {"type": "integer",
+                                  "description": "每隔多少分钟跑一次（与 at_time 二选一）"},
+                "at_time": {"type": "string",
+                            "description": "每天几点跑，格式 HH:MM（如 09:00）"}},
+                "required": ["name", "prompt"]}}},
+        {"type": "function", "function": {
+            "name": "list_schedules",
+            "description": ("列出所有定时任务（含下次运行时间、上次结果摘要）。"
+                            "**全局共享**：不管在哪个对话里问，看到的都是同一批任务；"
+                            "用户问「我有哪些定时任务」「昨天那个任务跑完没」时用。"
+                            "要看某次运行的**完整结果正文**就传 with_result=true。"),
+            "parameters": {"type": "object", "properties": {
+                "with_result": {"type": "boolean",
+                                "description": "true = 附带每个任务最近一次的完整结果正文（较长）"}},
+                "required": []}}},
+        {"type": "function", "function": {
+            "name": "cancel_schedule",
+            "description": "按名字或 id 删除一个定时任务。",
+            "parameters": {"type": "object", "properties": {
+                "name_or_id": {"type": "string", "description": "任务名或 id"}},
+                "required": ["name_or_id"]}}},
+    ]
+
+
+def _do_schedule(name: str, arguments: dict) -> str:
+    from . import scheduler as _sch
+    a = arguments or {}
+    try:
+        if name == "schedule_task":
+            every = a.get("every_minutes") or 0
+            try:
+                every = int(every)
+            except Exception:
+                every = 0
+            r = _sch.add(str(a.get("name") or ""), str(a.get("prompt") or ""),
+                         every_minutes=every, at_time=str(a.get("at_time") or ""))
+            if not r.get("ok"):
+                return "创建失败：%s" % r.get("error")
+            j = r["job"]
+            return ("已创建定时任务「%s」：%s，下次 %s。"
+                    "到点会自动执行并把结果写回这个会话"
+                    "（界面顶栏「⏰ 定时」里能看到全部任务与结果）。"
+                    % (j["name"], _sch.describe(j),
+                       time.strftime("%m-%d %H:%M", time.localtime(float(j["next_run"])))))
+        if name == "list_schedules":
+            jobs = _sch.list_jobs()
+            if not jobs:
+                return "现在没有任何定时任务。"
+            with_res = bool(a.get("with_result"))
+            lines = ["现有 %d 个定时任务（全局共享，任何对话里看到的都是这一批）：" % len(jobs)]
+            for j in jobs:
+                lines.append("- %s（%s，%s）下次 %s｜上次 %s %s"
+                             % (j.get("name"), j.get("period"),
+                                "启用" if j.get("enabled") else "已暂停",
+                                j.get("next_human"),
+                                j.get("last_run") or "从未",
+                                (j.get("last_status") or "")[:40]))
+                if with_res:
+                    body = _sch.latest_result(str(j.get("id") or ""), 3000)
+                    lines.append("  最近一次结果正文：\n" +
+                                 (body.strip() if body.strip() else "（还没有结果）"))
+            return "\n".join(lines)
+        if name == "cancel_schedule":
+            key = str(a.get("name_or_id") or "").strip()
+            if not key:
+                return "要删哪个？给个名字或 id。"
+            jobs = _sch.list_jobs()
+            hit = next((j for j in jobs if j["id"] == key), None) or \
+                next((j for j in jobs if j.get("name") == key), None)
+            if not hit:
+                return "没找到叫「%s」的定时任务。" % key
+            r = _sch.remove(hit["id"])
+            return "已删除定时任务「%s」。" % hit.get("name") if r.get("ok") \
+                else "删除失败：%s" % r.get("error")
+    except Exception as e:                            # noqa: BLE001
+        return "定时任务工具出错：%s: %s" % (type(e).__name__, e)
+    return "未知的定时任务工具：%s" % name
+
+
+# ---------- 自开发：让模型改自己的源码 ----------
+def _selfdev_schemas() -> list:
+    """6 个自开发工具。**只在 self_dev_enabled 时暴露**（见 make_schemas）。"""
+    return [
+        {"type": "function", "function": {
+            "name": "selfdev_tree",
+            "description": ("列出**本应用自己的源码**目录（backend/ frontend/ …）。"
+                            "要改自己的代码前先看这个，别瞎猜路径。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string",
+                        "description": "子目录（可空；如 backend 或 frontend）"},
+                "depth": {"type": "integer",
+                          "description": "展开几层，1~4，默认 2"}},
+                "required": []}}},
+        {"type": "function", "function": {
+            "name": "selfdev_grep",
+            "description": ("在源码文件里**搜关键字**，返回行号 + 那一行。"
+                            "改代码前**先用它定位**，再去读那几十行 —— 比整份读完快十倍，"
+                            "也不会把上下文灌满。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "相对路径"},
+                "pattern": {"type": "string",
+                            "description": "要找的文字（原样匹配，如「每一轮先判一句」）"}},
+                "required": ["rel", "pattern"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_read",
+            "description": ("读源码文件，**按行分页**（默认只给前 200 行，带行号）。"
+                            "大文件务必配合 start/end，或用 selfdev_grep 先定位。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string",
+                        "description": "相对项目根的路径，如 backend/tools.py"},
+                "start": {"type": "integer", "description": "起始行（1 开始，可空）"},
+                "end": {"type": "integer", "description": "结束行（可空）"}},
+                "required": ["rel"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_write",
+            "description": ("**整份覆盖**写一个源码文件（会先自动备份）。"
+                            "⚠️ 只适合新建文件或整文件重写；改几行请用 selfdev_patch。"
+                            "⚠️ Python 文件会先做语法校验，不通过**不会写盘**。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "相对路径"},
+                "content": {"type": "string", "description": "完整的文件内容"},
+                "note": {"type": "string", "description": "这次改了什么（留痕用）"}},
+                "required": ["rel", "content"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_insert_after",
+            "description": ("**在某一行之后插入一段内容**（改代码最省事的方式）。"
+                            "只要给「那一行里独有的一句」当锚点，不用复述整段原文 —— "
+                            "比 selfdev_patch 容易得多，适合小模型。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "相对路径"},
+                "anchor": {"type": "string",
+                           "description": "锚点：那一行里独有的文字（必须只命中一行）"},
+                "text": {"type": "string",
+                         "description": "要插入的内容（多行用 \\n，缩进会自动跟随锚点行）"},
+                "note": {"type": "string", "description": "改动说明"}},
+                "required": ["rel", "anchor", "text"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_patch",
+            "description": ("**精确替换**源码里的某一段（最安全的改法）。"
+                            "find 必须和文件里的原文**一字不差**（含缩进换行），"
+                            "且只能命中一处；命中 0 处或多处都会被拒绝。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "相对路径"},
+                "find": {"type": "string", "description": "要被替换的原文"},
+                "replace": {"type": "string", "description": "替换成什么"},
+                "note": {"type": "string", "description": "改动说明"}},
+                "required": ["rel", "find", "replace"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_apply",
+            "description": ("把「改什么」交给**当前选定的代码模型**去写，再落到文件上。"
+                            "改整段逻辑/大改时用它；只改几行仍优先 selfdev_patch。"
+                            "会自动：读现有内容 → 代码模型重写 → 语法校验 → 备份 → 写盘。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "要改的文件（相对路径）"},
+                "instruction": {"type": "string",
+                                "description": "要改成什么样（写清楚，代码模型看不到聊天记录）"},
+                "note": {"type": "string", "description": "改动说明（留痕用）"}},
+                "required": ["rel", "instruction"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_run",
+            "description": ("在项目根目录跑一个 .py（验证自己刚写的东西）。"
+                            "返回真实 stdout/stderr。"),
+            "parameters": {"type": "object", "properties": {
+                "rel": {"type": "string", "description": "要跑的 .py 相对路径"},
+                "args": {"type": "string", "description": "命令行参数（可空）"}},
+                "required": ["rel"]}}},
+        {"type": "function", "function": {
+            "name": "selfdev_restart",
+            "description": ("**重启本应用**让改动生效。会先试 import 一遍 "
+                            "backend.main —— 导入失败就**拒绝重启**并告诉你错在哪。"
+                            "只做导入自检并通知用户「新版本已就绪」，**不会自己重启**；真正的重启由用户在前端点确认。"),
+            "parameters": {"type": "object", "properties": {
+                "reason": {"type": "string", "description": "为什么重启（留痕用）"}},
+                "required": []}}},
+    ]
+
+
+def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
+    """把"改了哪个文件、改了什么"作为**可折叠卡片**推给前端。
+
+    ⚠️ 关键：**不要把代码正文塞进聊天流**（用户明确要求"不要导致页面变形"）。
+    这里只推结构化的差异数据，前端默认折叠成一行摘要，点开才看 diff，
+    并且容器有固定最大高度 + 内部滚动。
+    """
+    # user requirement: after writing code, DO NOT auto-restart.
+    # just mark 'new version ready', let the user press the restart button.
+    try:
+        from . import pending as _pend
+        _pend.mark(str((r or {}).get("rel") or ""), act)
+        # ★ 用户要求（2026-11-11）：每一次改动都立刻进版本库，
+        #   这样连续改多个文件时也能精确退回任意一步。
+        _vc = _version_commit(act, r or {}, str(_SD_NOTE.get("note") or ""))
+        if isinstance(r, dict):
+            r["version"] = _vc
+    except Exception:
+        pass
+
+    if not isinstance(ui_events, list):
+        return
+    d = (r or {}).get("diff") or {}
+    ui_events.append({
+        "type": "selfdev",
+        "act": act,
+        "rel": r.get("rel") or "",
+        "added": d.get("added") or 0,
+        "removed": d.get("removed") or 0,
+        "diff": (d.get("diff") or "")[:20000],
+        "backup": os.path.basename(r.get("backup") or ""),
+        "who": who,
+        "is_new": bool(r.get("is_new")),
+    })
+
+
+# 自动自查的节流（同一次对话里别每改一行就截一次图，太贵）
+_AUTO_REVIEW = {"at": 0.0, "rounds": 0}
+_SD_NOTE = {"note": ""}   # 交接卡：暂存本次自开发工具的 note（见 backend/handoff.py）
+def _sd_patch_fixed(rel: str, find: str, replace: str, note: str = "") -> dict:
+    """修正版 selfdev.patch（2026-11-11 实测发现的严重 bug）。
+
+    原实现（backend/selfdev.py 里的 patch）用 `read(rel)` 取文本，而 read()
+    返回的是「带行号、且只给前 200 行」的**展示用**文本 —— 于是：
+      · 第 200 行以后的代码永远匹配不到（patch 只能改文件开头几屏）；
+      · 万一在前 200 行里命中，它会把这份带行号的 200 行文本写回文件，
+        文件后面几千行**直接被截断**（灾难级）。
+    selfdev.py 是回撤机制本身、被划成只读，所以这里在工具层提供一份正确
+    实现：读原始全文 → 命中唯一才替换 → 写回仍走 _sd.write
+    （自带备份 + Python 语法校验）。
+    """
+    from . import selfdev as _sd
+    try:
+        r = _sd.safe_rel(rel)
+    except Exception as e:                            # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    p = os.path.join(_sd.project_root(), r)
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError as e:
+        return {"ok": False, "error": "读取失败：%s" % e}
+    if not find:
+        return {"ok": False, "error": "find 不能为空"}
+    n = text.count(find)
+    if n == 0:
+        return {"ok": False,
+                "error": "没找到这段原文（空格/缩进/换行必须完全一致）"}
+    if n > 1:
+        return {"ok": False,
+                "error": "这段原文出现了 %d 次，为免改错地方，请给更长的一段上下文" % n}
+    return _sd.write(r, text.replace(find, replace, 1), note or "patch")
+
+
+def _version_commit(act: str, r: dict, note: str = "") -> dict:
+    """★ 用户要求（2026-11-11）：自开发的**每一次**文件改动都要进版本库。
+
+    以前只有「重启前」才自动打一次快照，中间连续改好几个文件时，
+    万一某一轮改坏了，用户没有中间点可退 —— 只能退回上一次重启，
+    那次重启之后的全部改动一起丢掉。现在改成：write / patch /
+    insert_after / apply 每成功一次就 commit 一次，版本列表里
+    就是一步步的脚印，可以精确退回到任意一步。
+
+    失败**不影响**这次改动本身（文件已经写进磁盘了），只是把原因
+    附在工具返回里，让用户知道这一版没进版本库。
+    """
+    try:
+        from . import version as _ver
+        rel = str(r.get("rel") or "")
+        msg = "自迭代 · %s %s" % (act, rel)
+        nt = (note or "").strip()
+        if nt:
+            msg += " · " + nt[:60]
+        res = _ver.snapshot(msg)
+    except Exception as e:                            # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    if not res.get("ok"):
+        return {"ok": False, "error": str(res.get("error") or "")[:200]}
+    if res.get("skipped"):
+        return {"ok": True, "skipped": True, "hash": res.get("hash") or ""}
+    return {"ok": True, "hash": res.get("hash") or "",
+            "files": int(res.get("files") or 0)}
+
+
+def _version_commit_line(v: dict) -> str:
+    """把 _version_commit 的结果拼成一行给模型/用户看的说明。"""
+    if not v:
+        return ""
+    if v.get("ok") and not v.get("skipped"):
+        return "已自动上传版本库：%s（这一版可单独退回）。" % (v.get("hash") or "")
+    if v.get("ok") and v.get("skipped"):
+        return "版本库无新增改动，本次未产生新快照。"
+    return ("⚠️ 本次改动**没能进版本库**：%s（文件已写入，但这一步无法单独退回）。"
+            % (v.get("error") or "未知原因"))
+
+
+def _auto_review(context: dict) -> str:
+    """改完前端 → **自动**截一张、让模型看一眼，把结论附在工具结果里。
+
+    为什么要做到"自动"而不是"提醒它自己调"：
+    用户要的是「模型自主查看成果并决定是否微调」。但实测下来，
+    只写进提示词的话，模型经常改完就收尾了 —— 它觉得自己改对了。
+    把截图结果**直接塞进它的工具返回里**，它就绕不过去：
+      · 看：由工具强制做（不花模型的选择成本）；
+      · 改不改：仍然由模型决定（这本来就该它判断）。
+    """
+    import time as _t
+    cfg = config.load_config() or {}
+    if not bool(cfg.get("auto_review_frontend", True)):
+        return ""
+    now = _t.time()
+    if now - _AUTO_REVIEW["at"] < 20:      # 20 秒内不重复截
+        return ""
+    _AUTO_REVIEW["at"] = now
+    try:
+        from . import vision as V
+        shot = V.screenshot(width=1280, height=900)
+        if not shot.get("ok"):
+            return "\n\n【自动自查】想帮你看一眼，但截图失败：%s" % shot.get("error")
+        d = V.describe(shot["path"],
+                       "这是刚改完的界面。请只挑**确实存在的问题**："
+                       "控件重叠 / 被裁切 / 横向挤压 / 文字看不清 / 大片空白。"
+                       "没有问题就直说「没有问题」。",
+                       ds_key=str((context or {}).get("ds_key") or ""),
+                       model=str((context or {}).get("model") or "") or "deepseek-flash")
+        if not d.get("ok"):
+            return "\n\n【自动自查】截图成功但看不了：%s" % d.get("error")
+        _why = ("（DeepSeek 看图失败：%s，已退回本地视觉模型）" % d.get("note")
+                if d.get("via") == "local" and d.get("note") else "")
+        return ("\n\n【自动自查 · %s】%s\n%s\n"
+                "→ 有问题就继续改；确认没问题就可以收尾（不用再截图）。"
+                % (d.get("model"), _why, d.get("text")))
+    except Exception as e:                            # noqa: BLE001
+        return "\n\n【自动自查】出错：%s: %s" % (type(e).__name__, e)
+
+
+def _do_selfdev(name: str, arguments: dict, context: dict = None,
+                ui_events: list = None) -> str:
+    # 服务器版：所有自开发工具一律拒绝（不只是写，读也关，避免被当文件浏览器）
+    try:
+        from . import selfdev as _sd0
+        if _sd0.locked():
+            return ("服务器版已锁定「自开发」：不允许读写服务端源码、也不允许重启服务。"
+                    "如需改动请在本地改完重新部署。")
+    except Exception:
+        pass
+    """执行自开发工具。统一在这里兜异常，返回给模型的永远是文本。"""
+    # ★ 记下这次调用的备注：改动成功后 _version_commit 会写进提交说明
+    _SD_NOTE["note"] = str((arguments or {}).get("note") or "")
+    # ★ 2026-11-11：selfdev.py 的 patch 会把文件截断（见 _sd_patch_fixed 注释），
+    #   （实测：修好后能改任意位置，且不会截断文件）
+    #   这里换成正确实现。selfdev.py 本身是只读的回撤机制，不在那儿改。
+    try:
+        from . import selfdev as _sd_fix
+        if not getattr(_sd_fix, "_patch_fixed", False):
+            _sd_fix.patch = _sd_patch_fixed
+            _sd_fix._patch_fixed = True
+    except Exception:
+        pass
+    from . import selfdev as _sd
+    if not _sd.enabled():
+        return ("自开发模式没打开。请让用户点顶栏「🛠 自开发」打开后再试 —— "
+                "没有这个开关我不会去改应用自己的代码。")
+    a = arguments or {}
+    try:
+        if name == "selfdev_apply":
+            # ★ 把"写代码"这件事交给**用户选定的代码模型**（默认 DeepSeek V4.1），
+            #   而不是让当前对话模型自己写 —— 大改用代码模型质量更稳，
+            #   也符合用户"代码生成用能自主切换的模型"的要求。
+            rel = str(a.get("rel") or "")
+            inst = str(a.get("instruction") or "").strip()
+            if not inst:
+                return "说明要改什么（instruction 不能为空）。"
+            cur = _sd.read(rel)
+            old = cur.get("text") if cur.get("ok") else ""
+            cfg = config.load_config() or {}
+            parts = [
+                "你是资深程序员。请修改下面这个文件的**完整内容**。",
+                "只输出改后的整份文件（可以带一个代码块），不要解释、不要写用法说明。",
+                "目标文件：%s" % rel,
+                "要求：%s" % inst,
+            ]
+            if rel.startswith("frontend/") or rel.endswith((".js", ".css", ".html")):
+                # 用户明确要求：前端改动要"保持页面简洁、别把页面撑变形"
+                parts.append(
+                    "⚠️ 前端改动纪律：只做**最小改动**（尽量 80 行以内）；"
+                    "只用现有 class / 现有容器，不要改布局骨架（顶栏/输入区/消息区的"
+                    "宽高与 flex）；不要写大段内联 style；新增可见控件一次最多一个；"
+                    "长内容必须用可折叠容器（默认收起 + max-height + overflow:auto）。")
+            if old:
+                parts.append("这是它**当前的内容**，在此基础上改：\n```\n%s\n```" % old[:12000])
+            else:
+                parts.append("这是新文件，按上面的要求从零写。")
+            try:
+                code = _code_gen_text("\n\n".join(parts), cfg, context,
+                                      max_tokens=int(cfg.get("code_max_tokens") or 8192))
+            except Exception as e:                    # noqa: BLE001
+                return ("代码模型调用失败：%s: %s。请把原因原样转告用户"
+                        "（很可能是没填 DeepSeek Key，或本地模型没装）"
+                        % (type(e).__name__, e))
+            code2 = _strip_code_fence(code or "").strip()
+            if not code2:
+                return "代码模型没有输出内容（可能被截断）。换个说法或换个代码模型再试。"
+            r = _sd.write(rel, code2, str(a.get("note") or inst))
+            if not r.get("ok"):
+                return "写入被拒绝：%s" % r.get("error")
+            _kind, _pick = code_model_pick(cfg, context)
+            who = ("DeepSeek " + _pick) if _kind == "cloud" else ("本地 " + (_pick or "默认"))
+            _selfdev_ui(ui_events, "apply", r, who)
+            from . import handoff as _hd; _hd.record_from_tool(r, "apply", str(a.get("note") or ""))
+            d = r.get("diff") or {}
+            return (("已用 %s 重写 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
+                     "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
+                     % (who, r["rel"], d.get("added", 0), d.get("removed", 0),
+                        r["chars"]))
+                    + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
+
+        if name == "selfdev_tree":
+            r = _sd.list_tree(str(a.get("rel") or ""),
+                              int(a.get("depth") or 2))
+            if not r.get("ok"):
+                return "列目录失败：%s" % r.get("error")
+            return ("项目根：%s\n（只列可改写的文件；data/models 等运行期目录不列）\n"
+                    % r["root"] + "\n".join(r["files"])
+                    + ("\n…（还有更多，用 rel 缩小范围）" if r.get("more") else ""))
+        if name == "selfdev_grep":
+            r = _sd.grep(str(a.get("rel") or ""), str(a.get("pattern") or ""))
+            return r.get("text") if r.get("ok") else ("搜索失败：%s" % r.get("error"))
+        if name == "selfdev_read":
+            try:
+                st = int(a.get("start") or 0)
+            except Exception:
+                st = 0
+            try:
+                en = int(a.get("end") or 0)
+            except Exception:
+                en = 0
+            r = _sd.read(str(a.get("rel") or ""), start=st, end=en)
+            if not r.get("ok"):
+                return "读取失败：%s" % r.get("error")
+            return r["text"]
+        if name == "selfdev_write":
+            r = _sd.write(str(a.get("rel") or ""), str(a.get("content") or ""),
+                          str(a.get("note") or ""))
+            if not r.get("ok"):
+                return "写入被拒绝：%s" % r.get("error")
+            _selfdev_ui(ui_events, "write", r)
+            from . import handoff as _hd; _hd.record_from_tool(r, "write", str(a.get("note") or ""))
+            d = r.get("diff") or {}
+            return (("已写入 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
+                     "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
+                     % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
+                    + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
+        if name == "selfdev_insert_after":
+            r = _sd.insert_after(str(a.get("rel") or ""),
+                                 str(a.get("anchor") or ""),
+                                 str(a.get("text") or ""),
+                                 str(a.get("note") or ""))
+            if not r.get("ok"):
+                return "插入失败：%s" % r.get("error")
+            _selfdev_ui(ui_events, "insert", r)
+            from . import handoff as _hd; _hd.record_from_tool(r, "insert", str(a.get("note") or ""))
+            d = r.get("diff") or {}
+            return (("已在 %s 插入一段（+%d −%d 行）。详情已作为卡片展示给用户。\n"
+                     "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
+                     % (r["rel"], d.get("added", 0), d.get("removed", 0)))
+                    + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
+        if name == "selfdev_patch":
+            r = _sd.patch(str(a.get("rel") or ""), str(a.get("find") or ""),
+                          str(a.get("replace") or ""), str(a.get("note") or ""))
+            if not r.get("ok"):
+                return "替换失败：%s" % r.get("error")
+            _selfdev_ui(ui_events, "patch", r)
+            from . import handoff as _hd; _hd.record_from_tool(r, "patch", str(a.get("note") or ""))
+            d = r.get("diff") or {}
+            return (("已修改 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
+                     "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
+                     % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
+                    + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
+        if name == "selfdev_run":
+            r = _sd.run_py(str(a.get("rel") or ""), str(a.get("args") or ""))
+            if not r.get("ok") and r.get("error"):
+                return "运行失败：%s" % r["error"]
+            return ("【运行 %s】退出码 %s，耗时 %ss\n标准输出：\n%s\n标准错误：\n%s"
+                    % (a.get("rel"), r.get("code"), r.get("cost_s"),
+                       (r.get("out") or "").strip()[-1500:] or "（空）",
+                       (r.get("err") or "").strip()[-1500:] or "（空）"))
+        if name == "selfdev_restart":
+            # ★ 用户明确要求：模型**不许自己重启**（会打断对话、用户毫不知情）。
+            #   这里只做「导入自检 + 打标记 + 通知前端」，
+            #   真正的重启由用户在前端点「立即重启」(/api/selfdev/apply_restart)。
+            v = _sd.verify_import()
+            if not v.get("ok"):
+                return ("导入自检没通过，先别重启：%s"
+                        % (v.get("error") or v.get("msg") or str(v)[:200]))
+            from . import pending as _pend
+            st = _pend.mark("", "模型请求重启，等待用户确认")
+            try:
+                from . import handoff as _hd2
+                _hd2.snapshot(str((context or {}).get("session") or ""), "模型请求重启")
+            except Exception:
+                pass
+            if isinstance(ui_events, list):
+                ui_events.append({"type": "restart_ready", **st})
+            return ("已自检通过，前端已弹出「新版本已就绪」提示。\n"
+                    "现在**不要自己重启**：等用户点「立即重启」才生效，"
+                    "在此之前应用仍跑旧代码。你可以继续把剩下的活干完，"
+                    "最后告诉用户「点一下重启按钮就生效」即可。")
+
+    except Exception as e:                        # noqa: BLE001
+        return "自开发工具出错：%s: %s" % (type(e).__name__, e)
+    return "未知的自开发工具：%s" % name
+
+
+# ---------- 本地代码执行（"离线计算"）：受「本地算代码」开关控制 ----------
+# 为什么要它：模型写代码不难，难的是**算对**。让它把代码真跑一遍，
+# 数字、日期、正则匹配结果都是真算出来的，而不是"看着像"。
+# 默认关闭 —— 打开后模型写的代码会在用户电脑上执行，风险由用户判断。
+_SCI_LIBS = ("numpy", "scipy", "pandas", "matplotlib", "sympy")
+_sci_cache = None
+
+
+def available_science_libs() -> list:
+    """当前环境里**真正能用**的科学计算库。
+
+    用 find_spec 探测而不是真的 import —— 只为判断有没有，不值得拖慢启动。
+    为什么要动态探测（实测）：源码环境和容器的库**不一样**，容器里就没有
+    scipy / matplotlib。描述里写死库名会让模型写出跑不起来的代码，
+    所以按本机实际能力告诉它。
+    """
+    global _sci_cache
+    if _sci_cache is None:
+        import importlib.util
+        ok = []
+        for m in _SCI_LIBS:
+            try:
+                if importlib.util.find_spec(m):
+                    ok.append(m)
+            except Exception:
+                pass
+        _sci_cache = ok
+    return _sci_cache
+
+
+def _run_py_schema() -> dict:
+    libs = available_science_libs()
+    libs_txt = "、".join(libs) if libs else "（本机没有额外的科学计算库，只能用标准库）"
+    return {
+        "type": "function",
+        "function": {
+            "name": "run_python",
+            "description": (
+                "【本地执行 Python】在用户电脑上**真跑**一段 Python 代码并返回输出。\n"
+                "什么时候用：需要精确计算、处理数据、验证自己写的算法对不对、"
+                "做日期/单位换算、正则匹配测试等 —— 凡是「算出来比想出来更可靠」的场景都用它。\n"
+                "怎么用：把完整可运行的代码放进去，用 print() 输出你要看的结果；\n"
+                "不要写文件以外的东西到磁盘（会在临时目录里执行）。\n"
+                "⚠️ 代码里**有 `input()` 又没给 `stdin`** → 程序会读到 EOF 直接报错，"
+                "**那不代表你的代码写错了**：要么用 stdin 把输入按行喂进去，"
+                "要么改成从命令行参数/常量取输入。\n"
+                "⚠️ 它**只能跑「算完就退出」的代码**（默认最多 60 秒）。"
+                "**计时器 / 服务器 / 游戏 / 图形界面这类要一直跑的程序不要用它跑完整** —— "
+                "工具只会跑前几秒做冒烟测试，那是**正常的、不是代码报错**；"
+                "这种程序写好交给用户，让用户点代码卡片上的「▶ 运行」（那里不设时限）。\n"
+                "可用库：标准库 + " + libs_txt + "。\n"
+                "拿到输出后**依据真实结果**回答用户，不要把输出原样贴给用户就完事。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string",
+                             "description": "完整可运行的 Python 代码，用 print() 打印要看的中间结果"},
+                    "stdin": {"type": "string",
+                              "description": "可选：预先喂给程序的标准输入，**一行对应一次 input()**。"
+                                             "代码里用了 input() 就必须给，否则会读到 EOF 而报错"
+                                             "（那不代表代码写错了）。"},
+                },
+                "required": ["code"],
+            },
+        },
+    }
+
+
+# ---------- 生成文库（模型自己的产出物）----------
+# 和知识库**严格分开**：知识库是用户的资料、只读；这里是模型产出、可读可写可删。
+_LIBRARY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "library",
+        "description": (
+            "【生成文库】存放**你自己产出的纯文本**文件（.md / .txt / .py / .json 等）。\n"
+            "🚫 **用户要 Word 文档或 PPT 时，不要用本工具。** 直接调 make_docx / make_pptx /\n"
+            "   edit_office —— 它们一次成型（封面/目录/表格/版式都有），比\"先写 .md、再让用户\n"
+            "   自己去导出\"好得多。**也不要指挥用户点界面按钮**（界面上没有那些按钮）。\n"
+            "   本工具的 export_docx 只用于补救：文库里的 .md **已经写好了**，现在要转成 Word。\n"
+            "⚠️ 和「知识库」是两个不同的地方，别搞混：\n"
+            "  · 知识库 = 用户的资料，**只能读、绝不能改**；\n"
+            "  · 生成文库 = 你的产出，**可以写、可以改、可以删**。\n"
+            "用 action 指定动作：\n"
+            "· list —— 列出文库的目录结构（按文件夹分组；不知道有什么就先列一下）\n"
+            "· read —— 读文件正文（name），name 可以是 `文件夹/文件名`\n"
+            "· write —— 写入/覆盖（name + content）；name 带 .md/.txt/.py/.json 等后缀\n"
+            "  ★ name 可以带**子文件夹**，如 `作文/议论文/环境.md`、`代码/爬虫/main.py`。\n"
+            "    文件多了就按文件夹归类（用户按课程/项目分组时，跟着它的结构走），\n"
+            "    别全堆在根目录 —— 也不用为了分层硬造文件夹，几个文件平铺就够了。\n"
+            "· append —— 追加到文件末尾（name + content）\n"
+            "· delete —— 删除（会移进回收站，可恢复）\n"
+            "· copy —— 复制成新文件（name + new_name）\n"
+            "· backup —— 整库备份\n"
+            "· export_docx —— 把**已经存在于文库里的文本文件**（.md/.txt）转成排版好的\n"
+            "  Word 文档（name，自动加 .docx 后缀；可选 theme / toc）。\n"
+            "  ⚠️ 只用于「先写好了正文、现在想转成 Word」的场景。\n"
+            "  如果用户一上来就要一份 Word（「写个报告/方案」），**直接用 make_docx**，\n"
+            "  它一次成型（封面/目录/表格/提示框都有），比先写文本再转更省事。\n"
+            "  Word 文档 WPS 也能直接打开，用户要「WPS 格式 / Word 文档」都能满足。\n"
+            "什么时候写进文库：用户**明确要一个文件**时（「写成文档」「给我一个 Python 模块」"
+            "「导出成 Word」「保存到文件」）。\n"
+            "什么时候不写：只是让你「写篇作文 / 拟个方案」→ **直接写在回答里**就行，"
+            "别自作主张建文件；不过长文写完可以问一句要不要存进文库。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string",
+                           "enum": ["list", "read", "write", "append", "delete",
+                                    "copy", "backup", "export_docx"]},
+                "name": {"type": "string",
+                         "description": "文件名（可带子目录，如 作文/我的大学.md）。不要写盘符或 .."},
+                "content": {"type": "string", "description": "write/append 时要写入的正文"},
+                "new_name": {"type": "string", "description": "copy 时的目标文件名"},
+                "theme": {"type": "string", "description":
+                          "export_docx 的配色：blue/green/warm/purple/mono/red"},
+                "toc": {"type": "boolean",
+                        "description": "export_docx 时是否插入目录页"},
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+
+# ---------- 请用户配置高德 key ----------
+_CONNECT_AMAP_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "connect_amap",
+        "description": (
+            "【连接高德地图】请用户把他的高德开放平台 key 填进来，填完**立刻生效**。\n"
+            "什么时候用：**用户要用地图，而本机还没配高德 key**（联网开着，但地图只能退回"
+            "OpenStreetMap —— 中国的店铺几乎查不到、也没有评分/路况/公交）。\n"
+            "这时**先调这个工具请他填**，不要直接说做不到，也不要默默用着弱底图不吭声。\n"
+            "话术要点（用户不知道为什么要填）：填了之后能搜到全国的小店、有**真实评分**、"
+            "有**实时路况**、有**公交换乘**、步行骑行是真实路径；不填也能用，只是数据很弱。\n"
+            "用户填完这个工具会**当场验证** key 是否可用，并把结果告诉你；"
+            "如果验证失败，按它给的原因再请他重填一次。\n"
+            "⚠️ 用户明确说「不用 / 就这样吧」时，就按没有 key 继续做事，别再反复问。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string",
+                           "description": "为什么现在需要它（一句话，会显示给用户看），可选"},
+            },
+            "required": [],
+        },
+    },
+}
+
+
+# ---------- 反问用户（材料不足时先把细节问清楚）----------
+# ⚠️ 这个工具的定位是**通用的**：任何"要产出东西"的任务（文档/文章/表格/PPT/代码/图片…）
+#    只要关键前提没说清都可以先问一次。以前描述里只写"创作类任务"，
+#    还明确写着"纯技术或计算任务别用" —— 结果是**做代码/画图时从来不问**
+#    （2026-09-21 用户反馈："生成内容时模型不会在前端二次询问"）。
+def _ask_user_schema(ask_mode: str = "quick") -> dict:
+    """构造 ask_user 的工具描述。
+
+    ⚠️ 2026-09-23：把"这一轮该问几条"写进**工具描述**（模型挑工具时先看 schema）。
+    用户报"开启深度询问时没有多轮提问、单轮问题数也不够"——只把要求写在系统提示里
+    不够；schema 里那句「宁可少而精，别凑数」反而在**劝它少问**。
+    这里按模式分别给出明确数量。
+    """
+    if str(ask_mode or "quick").lower() == "deep":
+        count_line = (
+            "\n⚠️⚠️ **当前是「深度询问」模式** —— 用户**主动打开**了这个模式，就是要你问透再动手：\n"
+            "  · 只要这一轮要产出东西（文章/文档、PPT/表格、代码/程序、图片、方案…），"
+            "**必须先问一轮**，**哪怕你觉得已经比较清楚**；\n"
+            "  · **本轮一次给出 5~7 个问题**，覆盖：用途/受众、范围与篇幅、风格或口径、"
+            "硬性约束与雷区、交付形式（格式/尺寸/页数）、有没有参考样例；\n"
+            "  · 拿到答复后**如果还有影响做法的空白，就再调用本工具问下一轮**"
+            "（通常 2~3 轮）—— 不要问一轮就动手，也不要复问已经答过的；\n"
+            "  · 用户答了「随便/你定」的方向就别再追。\n")
+    else:
+        count_line = (
+            "\n⚠️ **当前是「快速了解」模式**：只问最关键的 1~3 个问题，"
+            "拿到基本信息就开工。\n")
+    return {
+        "type": "function",
+        "function": {
+            "name": "ask_user",
+            "description": (
+            "【向用户提问】在界面上弹出一个问答框，让用户补充信息，他填完你继续做。\n"
+            "什么时候用：**这一轮要产出东西、而关键前提没说清**时 —— 先问清楚再动手，"
+            "比硬猜一个交付物强得多。适用于各类有交付物的任务：\n"
+            "  · 文章/作文/报告/总结 → 用途、给谁看、篇幅、文体、要突出的重点、时间或背景\n"
+            "  · Word/Excel 表格 → 给谁看、要哪些列、数据从哪来、统计口径\n"
+            "  · PPT/演示 → 讲给谁、多少页、侧重点、风格或配色\n"
+            "  · 代码/程序/小工具/网页 → 用什么语言、跑在什么环境、输入输出长什么样、"
+            "要不要界面、有没有样例数据\n"
+            "  · 图片/绘图 → 风格（写实/插画/扁平…）、画面主体与细节、尺寸或比例、用途\n"
+            "⚠️ **必须调用这个工具来问，不要在回答里用文字提问** ——"
+            "用户在弹框里填比在对话框里一条条回方便得多。\n"
+            "⚠️⚠️ **提问不会结束这一轮对话**：用户填完，答复会作为工具结果回到你手里，"
+            "你**接着把东西做出来**（该写的写、该做的做）；"
+            "不要停下来等用户再发一条消息，也不要只回一句「好的」就收工。\n"
+            "⚠️ **问题个数不限，也可以分多轮问**（用户 2026-09-22 明确要求）——但要守两条：\n"
+            "  · **绝不重复**：已经问过、用户已经答过的，一个字都别再问；\n"
+            "  · **每个都要是关键问题**：问了能改变你怎么做，才值得问；凑数的、"
+            "无关紧要的、你自己能查到或能合理默认的，都不要问。\n"
+            "  分多轮是允许的：拿到答复后如果**又冒出新的关键疑问**，可以再问一轮；"
+            "但不要没完没了 —— 该知道的都知道了就动手做。\n"
+            "⚠️ **也不要为了「少打扰」而跳过关键问题** —— 方向问错了，比多问一句代价大得多。\n"
+            "（当前「快速 / 深度」询问模式见系统提示：快速模式问最关键的几条就开工，"
+            "深度模式可以把每个方向都问透。）\n"
+            "什么时候**别问**（这几种直接做）：用户已经把要求说清楚了；"
+            "只是问个问题 / 查资料 / 解释概念；算个数这类一次性计算；"
+            "关键信息你自己查得到（search_knowledge / web_search）；"
+            "打招呼、闲聊、表达情绪的对话。\n"
+                "每题给 2-4 个选项（用户也可以不选、自己写）。"
+                + count_line
+            ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "description": "要问的问题（个数不限，按重要性从高到低排；宁可少而精，别凑数）",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string", "description": "要问的问题，一句话"},
+                            "header": {"type": "string", "description": "短标签，4-8 个字"},
+                            "options": {"type": "array", "items": {"type": "string"},
+                                        "description": "2-4 个候选答案"},
+                            "multi": {"type": "boolean", "description": "是否可多选"},
+                        },
+                        "required": ["question"],
+                    },
+                },
+            },
+            "required": ["questions"],
+        },
+    },
+}
+
+
+# 知识库检索工具（受「知识库」开关控制）
+_KB_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_knowledge",
+        "description": (
+            "检索本地知识库（用户导入的领域文档）。**这是用户自己的资料，"
+            "优先级高于联网搜索**：涉及专业领域、内部规范、项目/产品资料时，先来这里查。\n"
+            "· 建议先用 list_all=true 看**目录结构**（按文件夹分组、带开头摘要），"
+            "再针对性检索；\n"
+            "· 一次没查到就换关键词再查，允许多轮检索；\n"
+            "· 需要时效性信息时，可以**在同一轮里同时调用本工具和 web_search**，"
+            "用知识库答内部细节、用网络补最新情况。\n"
+            "（若系统提示里已出现「知识库资料」，说明自动检索已命中，不必重复查。）"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "检索关键词。用文档里可能出现的原词/术语效果最好"},
+                "list_all": {"type": "boolean",
+                             "description": "true = 列出全部文档的标题与开头（想先摸清有哪些资料时用）"},
+            },
+            "required": [],
+        },
+    },
+}
+
+
+# ⚠️ 兼容别名：原来是个常量 `_ASK_USER_SCHEMA`，2026-09-23 改成按询问模式生成的
+# 函数（`_ask_user_schema(mode)`）。保留这个名字，免得外部引用（测试/脚本）炸掉。
+_ASK_USER_SCHEMA = _ask_user_schema("quick")
+
+
+# 天气工具：走结构化数据源，不要用搜索引擎
+_WEATHER_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": (
+            "查询某地天气（实时 + 未来逐日预报）。"
+            "**天气一律用这个，不要用 web_search**（搜索引擎只给天气网站导航页，没有数值）。"
+            "支持中文城市名，**只覆盖中国大陆**。"
+            "⚠️ 数据源**只有中国气象局**（经高德地图）：实况是气象站观测、预报是气象台产品。"
+            "本机没配高德 key 时**查不了**（返回里会说明，请让用户点顶栏的「高德 key」填一个，"
+            "或调用 connect_amap），**不要改用搜索、也不要凭印象编天气**。"
+            "返回值里有「数据源」和「观测时间」，回答时要如实转述是几点观测的。"
+            "⚠️⚠️ 高德只提供 **4 天**预报，且**没有体感温度、降水概率、降水量** ——"
+            "结果**开头会写明「本次没有这些数据」**，那就**一个数字都不许编**，"
+            "连 0、未知这类占位数字也别写。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "description": "城市名，如「北京」「上海」，可带省份消歧：「广东 深圳」。",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": ("预报天数（**从今天起共几天，含今天**），默认 3、最多 16。"
+                                    "⚠️ 它**不是「你要哪一天」**：用户问「明天」「后天」时"
+                                    "**千万别填 1**（那会只剩今天），不填就行。"
+                                    "数据源最多只给 4 天，填大了也只有 4 天。"),
+                },
+            },
+            "required": ["city"],
+        },
+    },
+}
+
+
+# 联网搜索工具（仅当用户在前端打开"联网"开关时才注入给模型）
+_WEB_SEARCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "联网搜索最新信息：新闻时事、近期事件、实时数据（股价/汇率/比分）、"
+            "不确定或可能过时的内容、需要查证的事实。会真的联网检索并返回网页摘要。"
+            "查天气请用 get_weather；查机构公开信息时关键词带上**机构全称**效果最好。"
+            "闲聊、写作、翻译、代码等无需联网的任务不要调用。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "搜索关键词，2~4 个核心词，不要写成完整句子、不要塞年月日"
+                        "（会被带偏成日历类结果）。中文提问用中文关键词。"
+                        "限定官方来源可加 site:（如「深圳大学 招生章程 site:edu.cn」）。"
+                    ),
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "检索条数，默认 10（多引擎聚合）；想覆盖更广可调到 15~20",
+                },
+                "deep": {
+                    "type": "integer",
+                    "description": "对前 N 条结果抓取网页正文供精读，默认 4。"
+                                   "需要更深入的细节（条款、数字、名单）时可调大到 6~8；"
+                                   "只想快速了解概况可设 0。",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+# =====================================================================
+#  工具执行
+# ---------------------------------------------------------------------
+#  技能（skill）—— 用户自己配的「做法 / 规范」
+#  ⚠️ 只有 load_skill 一个工具，正文**不常驻**：
+#     系统提示里只放「名称 + 描述 + 触发词」的目录（见 skills.build_auto_catalog），
+#     模型判断本轮适用某个技能时再调这个工具取全文。
+#     这样技能再多也不会把上下文吃掉。
+_SKILL_LOAD_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "load_skill",
+        "description": (
+            "取出用户配置的某个技能的**完整内容**（具体做法 / 步骤 / 规范）。"
+            "系统提示里的【可用技能目录】列出了技能名、描述和触发词；"
+            "你判断本轮请求适用某个技能时，**先调这个工具取全文**，再严格照它执行。"
+            "不适用就不要调，也别向用户推销技能。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "技能名（目录里括号前那个名字）"},
+                "id": {"type": "string", "description": "技能 id（可选，比名字更准）"},
+            },
+        },
+    },
+}
+
+
+_SKILL_SAVE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "save_skill",
+        "description": (
+            "新增或修改用户的一个**技能**（用户自己配的做法 / 步骤 / 规范，"
+            "会长期保存并在以后按需生效）。"
+            "用户说「加一个XX技能」「以后都按这个格式做」「记住这个流程」时用它。"
+            "同名会直接覆盖更新。内容要写成**可直接照做的步骤**，"
+            "不要写「要认真仔细」这类空话。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "技能名，短一点，如「写周报」「审代码」"},
+                "content": {"type": "string",
+                            "description": "技能正文：具体怎么做（分几步、每步产出什么、有哪些禁忌）"},
+                "desc": {"type": "string", "description": "一句话描述，用于模型判断该不该用"},
+                "triggers": {"type": "array", "items": {"type": "string"},
+                             "description": "触发词，如 [\"周报\", \"工作总结\"]"},
+                "mode": {"type": "string", "enum": ["manual", "always", "auto"],
+                         "description": ("manual=用户点一下才用；always=每轮都生效；"
+                                         "auto=模型自己判断该不该用（默认 manual）")},
+                "enabled": {"type": "boolean", "description": "是否启用，默认 true"},
+            },
+            "required": ["name", "content"],
+        },
+    },
+}
+
+_SKILL_DELETE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "delete_skill",
+        "description": "删除用户的一个技能。用户说「删掉那个XX技能」时用它。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name_or_id": {"type": "string", "description": "技能名或 id"},
+            },
+            "required": ["name_or_id"],
+        },
+    },
+}
+
+
+def _skill_schemas():
+    """始终可用的技能工具：新建/修改 + 删除。
+
+    ⚠️ load_skill **不在这里** —— 只有存在「自动类技能」时才给（见调用处），
+    否则每个请求都白背一份用不上的 schema。
+    """
+    return [_SKILL_SAVE_SCHEMA, _SKILL_DELETE_SCHEMA]
+
+# =====================================================================
+def _ui(events, event):
+    """收集要推送给前端展示的副作用事件（直接存原始事件，由主循环包 {"ui":event}）。"""
+    events.append(event)
+
+
+def _tool_call_msg(name, args) -> str:
+    args_s = json_dumps(args)
+    return f"[工具已调用] {name}({args_s})"
+
+
+def json_dumps(o) -> str:
+    try:
+        return __import__("json").dumps(o, ensure_ascii=False)
+    except Exception:
+        return str(o)
+
+
+def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
+    """执行一个工具调用，返回给模型的文本。ui_events 收集前端副作用。"""
+    # ⚠️ 2026-09-28：统一还原「被模型 URL 编码的文件名」。
+    # 实测：模型会把 make_docx 返回的下载链接里的编码名
+    # （`%E5%B1%B1%E4%B8%9C%E8%88%B0...docx`）照抄到别的工具的 name/rel/path 上，
+    # 于是工具报「文件不存在」，用户看到的就是"上传的文件读不出来 / 乱读"。
+    # 在这里一次兜住，省得每个 _do_* 各自处理；只动下面这些**文件名类字段**，
+    # 绝不碰 content / text / 正文（正文里出现 `%20` 是用户自己的内容）。
+    if isinstance(arguments, dict):
+        for _k in ("name", "filename", "rel", "path", "new_name", "old_name",
+                   "to", "file", "src", "dst", "doc", "docx", "pptx", "xlsx"):
+            _v = arguments.get(_k)
+            if isinstance(_v, str) and "%" in _v:
+                arguments[_k] = _fix_filename(_v)
+    # ⚠️ 这里刻意写成三个**显式相等判断**，不用 `name in (...)`：
+    #   自检里的「工具调度」审计只认 `name == "x"` 和 `name.startswith("x")`，
+    #   用元组成员判断会让它误报"没有实现"（实测踩到）。
+    if name == "schedule_task":
+        return _do_schedule(name, arguments)
+    if name == "list_schedules":
+        return _do_schedule(name, arguments)
+    if name == "cancel_schedule":
+        return _do_schedule(name, arguments)
+    if name == "look_at_screen":
+        return _do_vision(name, arguments, context)
+    if name == "look_at_image":
+        return _do_vision(name, arguments, context)
+    if name.startswith("selfdev_"):
+        return _do_selfdev(name, arguments, context, ui_events)
+    if name == "workspace_list":
+        return _do_workspace_list()
+    if name == "load_skill":
+        # 技能全文不常驻：系统提示只给目录，模型判断适用时才来这里取。
+        from . import skills as _skills
+        return _skills.do_load_skill(arguments)
+    if name == "save_skill":
+        from . import skills as _skills
+        return _skills.do_save_skill(arguments)
+    if name == "delete_skill":
+        from . import skills as _skills
+        return _skills.do_delete_skill(arguments)
+    if name == "workspace_read":
+        return _do_workspace_read(arguments)
+    if name == "workspace_write":
+        return _do_workspace_write(arguments, ui_events)
+    if name == "workspace_run":
+        return _do_workspace_run(arguments, ui_events)
+    # 「写代码」单独交给专用代码模型（见 _do_write_code 的说明：那是实测出来的分工）
+    if name == "write_code":
+        return _do_write_code(arguments, ui_events, context)
+    # ---- 下面这组是"完全自动开发项目"必需的：建项目 / 建目录 / 删 / 移动 / 切项目 ----
+    # 这些能力 workspace 模块**早就有了**（create_project / mkdir / remove / rename），
+    # 只是以前没交给模型 —— 所以它只能改已有文件，没法从零把项目搭起来。
+    if name == "workspace_new_project":
+        return _do_workspace_new_project(arguments, ui_events)
+    if name == "workspace_projects":
+        return _do_workspace_projects()
+    if name == "workspace_use_project":
+        return _do_workspace_use_project(arguments, ui_events)
+    if name == "workspace_mkdir":
+        return _do_workspace_mkdir(arguments, ui_events)
+    if name == "workspace_delete":
+        return _do_workspace_delete(arguments, ui_events)
+    if name == "workspace_move":
+        return _do_workspace_move(arguments, ui_events)
+    if name == "workspace_pack":
+        return _do_workspace_pack(arguments)
+    if name == "make_pptx":
+        return _do_make_pptx(arguments, ui_events)
+    if name == "make_docx":
+        return _do_make_docx(arguments, ui_events)
+    if name == "make_xlsx":
+        return _do_make_xlsx(arguments, ui_events)
+    if name == "map_plan":
+        return _do_map_plan(arguments, ui_events, context)
+    if name == "nearby_places":
+        return _do_nearby_places(arguments, ui_events, context)
+    if name == "edit_office":
+        return _do_edit_office(arguments, ui_events)
+    if name == "web_read":
+        return _do_web_read(arguments)
+    if name == "github_push":
+        return _do_github_push(arguments, context)
+    if name == "web_image_search":
+        return _do_web_image_search(arguments, ui_events)
+    if name == "get_weather":
+        return _do_get_weather(arguments)
+    if name == "save_image_to_library":
+        return _do_save_image_to_library(arguments, context)
+    if name == "generate_image":
+        _gate = _img_ask_gate(arguments, context)
+        if _gate is not None:
+            return _gate
+        return _do_generate_image(arguments, ui_events, context)
+    if name == "edit_image":
+        return _do_edit_image(arguments, ui_events, context)
+    if name == "compose_images":
+        return _do_compose_images(arguments, ui_events, context)
+    if name == "cutout_image":
+        return _do_cutout_image(arguments, ui_events, context)
+    if name == "composite_image":
+        return _do_composite_image(arguments, ui_events, context)
+    if name == "video_edit":
+        return _do_video_edit(arguments, ui_events, context)
+    if name == "tts_speak":
+        return _do_tts_speak(arguments, ui_events, context)
+        if name == "music_make":
+            return _do_music_make(arguments, ui_events, context)
+    if name == "list_directory":
+        return _do_list_directory(arguments)
+    if name == "read_file":
+        return _do_read_file(arguments, ui_events)
+    if name == "search_files":
+        return _do_search_files(arguments)
+    if name == "write_file":
+        return _do_write_file(arguments)
+    if name == "append_file":
+        return _do_append_file(arguments)
+    if name == "remember":
+        return _do_remember(arguments, context)
+    if name == "search_memory":
+        return _do_search_memory(arguments)
+    if name == "search_knowledge":
+        return _do_search_knowledge(arguments)
+    if name == "run_python":
+        return _do_run_python(arguments, ui_events, context)
+    if name == "library":
+        return _do_library(arguments, ui_events)
+    if name == "ask_user":
+        return _do_ask_user(arguments, context)
+    if name == "connect_amap":
+        return _do_connect_amap(arguments, context)
+    if name == "get_time":
+        return time.strftime("%Y-%m-%d %H:%M:%S (%A)")
+    if name == "web_search":
+        return _do_web_search(arguments, ui_events)
+    return f"[未知工具] {name}"
+
+
+# ---------- 联网搜索 ----------
+# 查询里常见的"干扰词"：搜索引擎对这类限定词很敏感，会大幅降低召回质量
+_NOISE_PATTERNS = [
+    r"是公办还是民办", r"公办还是民办", r"公办\s*民办", r"是公办的吗", r"是民办的吗",
+    r"是什么", r"怎么样", r"怎样", r"怎么", r"有哪些", r"是多少", r"为什么",
+    r"怎么回事", r"如何",
+    r"的参数", r"参数配置", r"规格", r"详细介绍", r"介绍一下", r"请问",
+]
+
+# 用户口语化的"意图尾巴"：出现在句末时几乎没有检索价值，却会把引擎带偏。
+# 例如「2026年人工智能技术应用专业的就业前景如何？请详细分析」——
+# 不剥掉后半句时，引擎会去匹配"2026年…分析"，返回国务院节假日通知之类的垃圾；
+# 只留「人工智能技术应用专业的就业前景」，召回质量立刻正常。
+_TRAILING_INTENT = (
+    "请详细分析", "详细分析一下", "详细分析", "分析一下", "帮我分析",
+    "请详细说明", "详细说明一下", "详细说明", "说明一下",
+    "请详细介绍一下", "详细介绍一下", "请介绍一下", "介绍一下",
+    "解释一下", "讲讲", "说说", "谈谈", "聊一聊", "告诉我",
+    "帮我看看", "帮我看一下", "帮我查查", "帮我查一下", "我想知道", "想知道",
+    "怎么做", "怎么办", "要注意什么", "有什么建议",
+)
+
+
+# 意图从句的起始词：形如「并给出你的分析」「，请详细说明」这类尾巴要整段丢掉
+_INTENT_HEAD = (
+    "请", "帮我", "麻烦", "分析", "说明", "解释", "给出", "提供", "介绍",
+    "讲讲", "说说", "谈谈", "告诉我", "指出", "评价", "对比", "推荐",
+)
+_TRAILING_CLAUSE_SEP = r"[，,、；;。.]+|以及|并且|还有|并|和"
+
+
+def _strip_trailing_intent(s: str) -> str:
+    """反复剥掉句末的口语化意图短语 / 意图从句。
+
+    例：'深圳大学2026年招生有什么新变化？请详细说明并给出你的分析'
+        → 先按并列词切掉「并给出你的分析」→ 再剥掉「请详细说明」
+        → '深圳大学 招生有什么新变化'
+    """
+    import re
+    changed = True
+    while changed:
+        changed = False
+        t = (s or "").strip(" 　,，。.、；;：:！!？?")
+        # 1) 句末的并列意图从句（「并给出你的分析」这种）
+        parts = re.split("(" + _TRAILING_CLAUSE_SEP + ")", t)
+        while len(parts) >= 3:
+            last = parts[-1].strip()
+            if last and last.startswith(_INTENT_HEAD):
+                parts = parts[:-2]
+                changed = True
+            else:
+                break
+        t = "".join(parts).strip()
+        # 2) 句末的固定意图短语
+        for p in _TRAILING_INTENT:
+            if t.endswith(p):
+                t = t[: -len(p)].strip(" 　,，。.、；;：:！!？?")
+                changed = True
+        # 3) 句末的孤立问句助词
+        t2 = re.sub(r"[吗呢吧啊呀嘛]$", "", t).strip()
+        if t2 != t:
+            t, changed = t2, True
+        # 4) 空格分隔的孤立意图词：如「…就业前景 分析」。
+        #    要求**前面有空格**才剥，否则会误伤「数据分析」这类连写词。
+        m = re.match(r"^(.*\s)(\S{2,4})$", t)
+        if m and m.group(2) in _INTENT_HEAD:
+            t, changed = m.group(1).strip(), True
+        s = t
+    return s
+
+
+def _simplify_query(q: str) -> str:
+    """去掉年份/月日/疑问词/口语尾巴，得到更通用的检索词。
+
+    实测：搜索引擎对"广州民航职业技术学院 公办 民办"这类长查询召回很差，
+    而只留主体词"广州民航职业技术学院"时能正常返回官网与百科。
+    """
+    import re
+    s = _strip_trailing_intent(q)
+    s = re.sub(r"\d{4}\s*年", " ", s)
+    s = re.sub(r"\d{1,2}\s*月", " ", s)
+    s = re.sub(r"\d{1,2}\s*日", " ", s)
+    for pat in _NOISE_PATTERNS:
+        s = re.sub(pat, " ", s)
+    s = re.sub(r"[？?！!。，,、；;：:]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _dedupe(items: list) -> list:
+    """按标题前 18 个有效字符去重。"""
+    import re
+    seen, out = set(), []
+    for it in items:
+        key = re.sub(r"\W+", "", it.get("title", ""))[:18]
+        if key and key not in seen:
+            seen.add(key)
+            out.append(it)
+    return out
+
+
+def _relevant(query: str, results: list) -> bool:
+    """粗略判断检索结果是否与查询相关（看实词命中比例）。"""
+    import re
+    words = [w for w in re.split(r"[\s,，、/]+", query) if len(w) >= 2]
+    if not words:
+        return True
+    text = " ".join((r.get("title", "") + " " + r.get("desc", "")) for r in results)
+    hits = sum(1 for w in words if w in text)
+    return hits >= max(1, len(words) // 3)
+
+
+def _do_web_search(arguments, ui_events):
+    """联网检索：多引擎 + 多查询变体聚合 + 相关性过滤 + 深度阅读正文。
+
+    深度阅读（deep read）是关键一步：只给模型 140 字的搜索摘要，它写不出
+    有内容的回答；把前几条结果的**正文**抓下来喂给它，才有材料"总结 + 分析 + 展开"。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        return "联网搜索失败：未提供 query。"
+    try:
+        top_k = int(arguments.get("top_k") or 10)
+    except Exception:
+        top_k = 10
+    top_k = max(1, min(top_k, 20))
+
+    # 深度阅读前 N 条正文；正文字数上限
+    # 注意：这些量直接决定注入提示词的体积。单条正文每条几百 token，
+    # 抓太多会把上下文挤爆（也拖慢推理），因此克制：
+    #   4 篇 × 800 字 ≈ 2400 token，加上 8 条标题/链接/摘要 ≈ 1200 token，
+    #   合计约 3600 token —— 与主流程 _trim_history_to_budget 里的预留量对齐。
+    deep_n = max(0, min(int(arguments.get("deep") if arguments.get("deep") is not None else 4), 8))
+    deep_chars = 800
+
+    from . import web_tools
+
+    # 查询变体：原查询 + 精简主体词（+ 去数字版 + 机构类查询追加"官方站定向"）
+    variants = [query]
+    simple = _simplify_query(query)
+    if simple and simple != query and len(simple) >= 2:
+        variants.append(simple)
+
+    # 变体 3：把残留的数字也去掉。
+    # 「2026 人工智能技术应用 就业前景」这类查询里的年份会把引擎引向
+    # 「2026年政府工作报告」「2026年节假日安排」等政策新闻，而"去数字"版本
+    # 往往能召回真正讲专业前景的文章。实测对结果数量提升明显。
+    import re as _re
+    if _re.search(r"\d", simple or query):
+        nodigit = _re.sub(r"\d+\s*[年月日]?", " ", simple or query)
+        nodigit = _re.sub(r"\s+", " ", nodigit).strip()
+        if len(nodigit) >= 2 and nodigit not in variants:
+            variants.append(nodigit)
+
+    # 查"某单位对外公开情况"时，普通检索会被百科/聚合站/同名地名淹没。
+    # 这里额外跑一次 `主体词 site:gov.cn`（或 edu.cn / org.cn）定向检索，
+    # 结果基本就是官网本身。实测对机构类查询的提升最明显。
+    body = simple or query
+    official_hint = web_tools.official_site_hint(body)
+
+    jobs = [(v, "web") for v in variants]
+    if official_hint:
+        jobs.append((body, "official"))
+
+    def _run(job):
+        q, kind = job
+        if kind == "official":
+            return web_tools.search_official(q, top_k)
+        return web_tools.web_search(q, n=top_k)
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+            batches = list(pool.map(_run, jobs))
+    except Exception as exc:
+        return f"联网搜索失败：{exc}"
+
+    # 逐变体做相关性过滤（剔除"广州市_百度百科"这类泛化无关结果）
+    # keep_min 给到 6：材料太少时模型写不出有内容的回答。宁可多留几条让模型自己取舍
+    # —— 它已被明确告知"材料弱就如实说明"，比只给 3 条更好。
+    filtered = []
+    for (q, kind), b in zip(jobs, batches):
+        filtered.append(web_tools.filter_relevant(
+            q, b, keep_min=4 if kind == "official" else 6))
+
+    # 组装优先级：原查询 → 官方站定向 → 精简查询
+    order = [0] + [i for i, (_, k) in enumerate(jobs) if k == "official"] \
+        + [i for i in range(1, len(jobs)) if jobs[i][1] != "official"]
+    results, seen_idx = [], set()
+    for i in order:
+        if i in seen_idx or i >= len(filtered):
+            continue
+        seen_idx.add(i)
+        results = _dedupe(results + filtered[i])
+    # 扩大检索范围：不再只留 8 条，多给些材料让模型有得比、有得选
+    cap = max(top_k, 12)
+    results = results[:cap]
+
+    # 相关度偏低时，明确告诉模型"这次检索不可靠"，避免它硬编内容
+    confidence = web_tools.best_relevance(query, results)
+
+    used = f"{query}（含精简检索：{simple}）" if len(variants) > 1 else query
+    if official_hint:
+        used += f"；已定向官方站 site:{official_hint}"
+
+    # ---------- 深度阅读：抓前 N 条的正文 ----------
+    # 摘要只有一两百字，模型据此只能写得很短。抓正文才能"总结 + 分析 + 展开"。
+    pages = {}
+    if deep_n and results:
+        urls = [r.get("url") for r in results[:deep_n] if r.get("url")]
+        try:
+            pages = web_tools.fetch_pages(urls, limit=deep_chars, workers=5, timeout=8)
+        except Exception:
+            pages = {}
+
+    # ---------- 把来源清单作为独立事件发给前端（聊天气泡里不再重复列链接）----------
+    src_items = []
+    for i, r in enumerate(results, 1):
+        url = (r.get("url") or "").strip()
+        try:
+            site = urllib.parse.urlparse(url).netloc
+        except Exception:
+            site = ""
+        src_items.append({
+            "i": i,
+            "title": (r.get("title") or "").strip(),
+            "url": url,
+            "site": site,
+            "engine": r.get("engine") or "",
+            "read": url in pages,      # 是否已深度阅读（前端可标注）
+        })
+    _ui(ui_events, {"type": "sources", "query": used, "items": src_items})
+
+    # 输出给模型的材料：标题 + 完整链接 + 搜索摘要 + 正文节选
+    lines = [f"【联网检索结果】检索词：{used}　共 {len(results)} 条，"
+             f"其中 {len(pages)} 条已抓取网页正文供你精读。"]
+    useful = 0
+    for i, r in enumerate(results, 1):
+        title = (r.get("title") or "").strip()
+        url = (r.get("url") or "").strip()
+        desc = (r.get("desc") or "").strip()
+        if title and title not in ("搜索失败",) and "未获取到搜索结果" not in title and url:
+            useful += 1
+        lines.append(f"[{i}] {title}")
+        if url:
+            lines.append(f"    链接：{url}")
+        if desc:
+            lines.append(f"    摘要：{desc[:200]}")
+        body = pages.get(url)
+        if body:
+            lines.append(f"    正文：{body}")
+    if useful == 0:
+        lines.append("（未获取到有效搜索结果。请如实告诉用户本次联网检索失败，不要编造内容；"
+                     "可以建议用户换个更具体的说法再试。）")
+    else:
+        if confidence < 0.3:
+            lines.append("（注意：本次检索结果与问题的匹配度较低，可能没有命中要点。"
+                         "请如实说明「未检索到直接相关信息」，并建议用户换个关键词或提供更具体的名称，"
+                         "不要用这些弱相关结果硬凑答案。）")
+        lines.append(
+            "请基于以上检索结果，用中文写一份**充实、有分析的回答**。要求：\n"
+            "1. **篇幅要够**：不要只写两三句结论。一般 400~900 字，信息多的可更长。\n"
+            "2. **结构清晰**：用「小标题 + 分点」组织，便于阅读；\n"
+            "3. **先总结、再分析、后展开**：\n"
+            "   · 先用一两句给出核心结论；\n"
+            "   · 再把各条材料的**具体信息**（名称、数字、时间、条款、名单等）提炼出来，\n"
+            "     不要笼统概括，要落到细节；\n"
+            "   · 有「正文」字段的条目是已抓取的网页正文，**优先从中提取细节**；\n"
+            "   · 不同来源说法不一致时，指出来并说明差异所在；\n"
+            "4. **给出你自己的判断**：单独一小段「几点看法」或类似小标题，\n"
+            "   基于材料做推断和评价（如适用性、风险、值得注意之处）。\n"
+            "   **属于你的推断要明确说是推断**，不要和检索到的事实混为一谈；\n"
+            "5. **标注来源**：引用了哪条材料，就在该句末尾用 [序号] 标注（如「……[2]」）；\n"
+            "6. **不要再写「信息来源」「参考资料」这类列表** —— "
+            "界面已经在回答下方单独提供了可展开的来源清单，重复列出是冗余；\n"
+            "7. 只能引用上面真实出现过的条目，**绝不编造链接、数字或事实**。\n"
+            "   特别注意：**不要编造电话号码、地址、邮箱、文号、日期等联系方式或标识**。\n"
+            "   材料里没有就别写；更不要用「020-XXXXXXX」这种占位式写法凑数——\n"
+            "   要提供联系方式就写「建议从官网获取」，否则会误导用户；\n"
+            "8. 若材料确实不足以回答某部分，就如实说明「检索结果未涉及」，不要凭空补充。\n"
+            "注意：当前时间以系统提示中的时间为准；涉及时效的信息请说明材料日期。")
+    return "\n".join(lines)
+
+
+# ---------- 文生图 ----------
+_IMAGE_PROMPT_BOOST = (
+    "professional photography, highly detailed, sharp focus, "
+    "vivid colors, 8k, cinematic lighting, masterpiece, best quality"
+)
+# 没识别出风格时的中性加成（不含任何风格词，避免和用户要求打架）
+_IMAGE_PROMPT_NEUTRAL = "highly detailed, sharp focus, best quality, well composed"
+_IMAGE_NEG_DEFAULT = "low quality, blurry, watermark, text, deformed, extra limbs"
+
+# ⚠️⚠️ **按风格分别加强**（2026-09-23 修，用户报"要求写实的时候也不写实""没按用户要求改"）：
+# 原来**所有请求**都追加同一句 "professional photography, 8k, cinematic lighting" ——
+# 用户要"卡通/动漫/插画"时，这句正向词和需求**直接打架**：模型两头都占一点 →
+# 出来的是四不像（既不像照片也不像插画）。反过来，要"写实"时又缺真正的摄影系词
+# （35mm / natural lighting / realistic texture）；加上 SD-Turbo 本身 CFG=0
+# 没有分类器引导加成，全靠提示词 —— 提示词写歪了，成图就跟着歪。
+# ⇒ 按用户要的风格给**正向加成 + 负向排除**（负向同样关键：要写实就得排掉 cartoon / 3d render）。
+_STYLE_PRESETS = (
+    (("写实", "真实", "照片", "摄影", "实拍", "photorealistic", "photograph", "realistic"),
+     "photorealistic, 35mm photograph, natural lighting, realistic surface texture, "
+     "fine detail, sharp focus, depth of field",
+     "cartoon, anime, illustration, painting, drawing, 3d render, cgi, plastic, "
+     "doll, oversaturated, lowres, blurry, deformed, watermark, text, extra limbs"),
+    (("插画", "手绘", "绘本", "水彩", "illustration", "storybook"),
+     "digital illustration, clean linework, harmonious palette, richly detailed drawing",
+     "photo, photorealistic, 3d render, cgi, lowres, blurry, watermark, text"),
+    (("卡通", "动漫", "二次元", "anime", "cartoon", "comic"),
+     "anime style, clean cel shading, vivid colors, expressive character design",
+     "photo, photorealistic, realistic, 3d render, lowres, blurry, watermark, text"),
+    (("3d", "三维", "渲染", "c4d", "blender", "octane"),
+     "3d render, soft global illumination, clean materials, high detail",
+     "flat, sketch, lowres, blurry, watermark, text"),
+    (("油画", "国画", "水墨", "壁画", "painting"),
+     "oil painting, visible brush strokes, rich texture, artistic composition",
+     "photo, 3d render, lowres, blurry, watermark, text"),
+    (("海报", "封面", "logo", "图标", "扁平", "poster"),
+     "graphic design, clean composition, strong visual hierarchy",
+     "cluttered, messy, lowres, blurry, watermark, text"),
+)
+
+
+def _style_for(text: str) -> tuple:
+    """看用户/模型写的内容里有没有风格线索 → 返回 (正向加成, 负向排除)。
+
+    中文需求与模型写的英文 prompt 都会扫一遍（英文 prompt 里通常带
+    photorealistic / illustration 这类词），两边都认不出来就返回空串，
+    由调用方退化成中性加成 —— **不要瞎猜风格**，猜错比不加更糟。
+    """
+    t = str(text or "").lower()
+    for keys, pos, neg in _STYLE_PRESETS:
+        for k in keys:
+            if k in t:
+                return pos, neg
+    return "", ""
+
+
+# ---------- 联网搜图（找现成的真实图片，区别于文生图）----------
+def _do_get_weather(arguments):
+    """查天气：走结构化数据 API，不经过搜索引擎。"""
+    from . import web_tools
+    city = (arguments.get("city") or "").strip()
+    if not city:
+        return "请提供要查询的城市名。"
+    try:
+        days = int(arguments.get("days") or 3)
+    except Exception:
+        days = 3
+    return web_tools.format_weather(web_tools.weather(city, days))
+
+
+def _do_web_image_search(arguments, ui_events):
+    """联网搜索真实图片，下载原图后展示给前端。"""
+    import base64 as _b64
+    from . import web_tools
+
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        return "联网搜图失败：未提供搜索关键词（query）。"
+    try:
+        n = int(arguments.get("n") or 4)
+    except Exception:
+        n = 4
+    n = max(1, min(n, 8))
+
+    # 多要一些候选再筛：搜索结果里总有一部分因为**防盗链或链接失效**下载不下来，
+    # 只按 n 条去取的话，实际能展示的会明显少于预期 —— 用户反馈过"搜图图片太少"。
+    try:
+        results = web_tools.image_search(query, n=max(n * 3, 12))
+    except Exception as exc:
+        return f"联网搜图失败：{exc}"
+    if not results:
+        return (f"联网搜图没有找到「{query}」的图片。"
+                "请**如实**告诉用户没搜到，不要凭印象去描述图片长什么样。")
+
+    shown, tried, lines = 0, 0, [f"【联网搜图】关键词：{query}"]
+    for r in results:
+        if shown >= n:
+            break
+        tried += 1
+        # ⚠️ 用结果自带的 referer（各图库的自家 referer，如 image.so.com），
+        # 拿不到才退回来源页 —— 360 的图只认前者，给来源页会 403。
+        referer = r.get("referer") or r.get("source") or None
+        raw = web_tools.download_image(r["url"], referer=referer)
+        if not raw and r.get("thumb"):
+            # 原图被防盗链挡住时退一步用缩略图 —— 缩略图通常挂在允许外链的 CDN 上，
+            # 虽然小一些，但总比"一张都显示不出来"强。
+            raw = web_tools.download_image(r["thumb"], referer=referer)
+        if not raw:
+            continue
+        shown += 1
+        mime = "image/png"
+        if raw[:3] == b"\xff\xd8\xff":
+            mime = "image/jpeg"
+        elif raw[:4] == b"RIFF":
+            mime = "image/webp"
+        elif raw[:3] == b"GIF":
+            mime = "image/gif"
+        _ui(ui_events, {
+            "type": "image", "mime": mime,
+            "b64": _b64.b64encode(raw).decode("utf-8"),
+            "prompt": r.get("title") or query,
+            "url": r.get("url") or "",
+            "source": r.get("source") or "",
+            "origin": "web",              # ← 前端据此标注「网上搜到的」
+        })
+        lines.append(f"[{shown}] {r.get('title') or '(无标题)'}")
+        if r.get("source"):
+            lines.append(f"    来源页：{r['source']}")
+        lines.append(f"    图片直链：{r['url']}")
+
+    if shown == 0:
+        return (f"联网搜图失败：找到 {len(results)} 个候选，但图片都没能下载下来"
+                "（多为目标站点的防盗链）。请**如实**说明没取到图片，"
+                "不要改口去描述图片内容，也不要编造物种特征。")
+
+    lines.append(
+        f"已把 {shown} 张**网上搜索到的真实原图**展示给用户（这是搜索结果，不是你画的）。"
+        f"（本轮共检查 {tried} 个候选，其余因防盗链或链接失效未能取到。）"
+        "请用中文简要说明找到了什么内容，并提示：可点图片下方「保存到图库」留存。"
+        "**只描述实际看到的内容，不要补充未经核实的事实**（搜图搜不到生物学特征）。")
+    return "\n".join(lines)
+
+
+def _do_save_image_to_library(arguments, context):
+    """把本轮展示过的某张图片存入本地图片库。"""
+    from . import image_library
+
+    try:
+        idx = max(1, int(arguments.get("index") or 1))
+    except Exception:
+        idx = 1
+
+    pool = (context or {}).get("shown_images") or []
+    if not pool:
+        return "保存失败：本轮还没有展示过任何图片。请先搜图或生成图片再来保存。"
+    if idx > len(pool):
+        return f"保存失败：本轮只展示了 {len(pool)} 张图，不存在第 {idx} 张。"
+
+    item = pool[idx - 1]
+    meta = image_library.save_image(
+        item.get("b64") or item.get("url") or "",
+        name=arguments.get("name") or "",
+        source=item.get("source") or item.get("prompt") or "",
+        origin=item.get("origin") or "web")
+    if not meta.get("ok", True):
+        return f"保存失败：{meta.get('error')}"
+    return (f"已保存第 {idx} 张图到图片库，名称为「{meta['name']}」（id={meta['id']}）。"
+            "用户可在左侧「图片库」面板随时查看、调用或删除。")
+
+
+# 画幅比例 → 宽高。**保持像素面积与方形一致**，这样显存/耗时基本不变。
+# ⚠️ 2026-09-26 加：原来只有方形（size × size），用户说"竖版海报""16:9 横图"
+#    根本做不到 —— 而 t2i.generate 本来就支持 width/height 分开传。
+#    尺寸都取 8 的倍数（SD 的 VAE 下采样要求）。
+# 出图尺寸表：(短边档, 长边档, SDXL 档)
+# ⚠️⚠️ 2026-09-26 补第三层。尺寸必须**贴着模型原生**来，用错一档就明显糊：
+#     SD1.5/SD2.1 原生 512（前两层），SDXL 原生 1024（第三层 = 第一层 ×2，
+#     面积都落在 1.0MP 上下，正好是 SDXL 的舒适区）。
+#     以前只有前两层，换成 SDXL 后会一直喂 512/768 的画布 → 又糊又飘。
+_IMG_ASPECTS = {
+    "1:1": ((512, 512), (768, 768), (1024, 1024)),
+    "4:3": ((584, 448), (888, 664), (1168, 896)),
+    "3:4": ((448, 584), (664, 888), (896, 1168)),
+    "16:9": ((680, 384), (1024, 576), (1360, 768)),
+    "9:16": ((384, 680), (576, 1024), (768, 1360)),
+    "3:2": ((624, 416), (936, 624), (1248, 832)),
+    "2:3": ((416, 624), (624, 936), (832, 1248)),
+}
+
+
+def _img_wh(size, aspect, native=None):
+    """把 (size, aspect) 解析成 (width, height)。不认识的比例按 1:1。
+
+    native：文生图模型的**原生边长**。None = 按当前加载的模型自动判断
+    （见 t2i.native_side）：SD2.1 是 512、SDXL 是 1024。
+    ⚠️ SDXL 下**基础分辨率固定走 1024 档**：它的训练分辨率就是 1024，
+    喂 512/768 会明显糊；要更大更细就用 hd=true（精修 + 超分）。
+    """
+    try:
+        base = int(size or 512)
+    except Exception:
+        base = 512
+    key = str(aspect or "1:1").strip().lower().replace("x", ":").replace("：", ":")
+    key = {"square": "1:1", "wide": "16:9", "tall": "9:16",
+           "竖版": "9:16", "竖图": "9:16", "横版": "16:9", "横图": "16:9",
+           "方形": "1:1", "正方": "1:1"}.get(key, key)
+    pair = _IMG_ASPECTS.get(key)
+    if not pair:
+        return base, base
+    if native is None:
+        try:
+            from . import t2i
+            native = t2i.native_side()
+        except Exception:
+            native = 512
+    if int(native) >= 1024 and len(pair) > 2:
+        return pair[2]
+    return pair[1] if base >= 768 else pair[0]
+
+
+# ---------- 中文提示词兜底 ----------
+# ⚠️⚠️ 2026-09-26 实测（换 SDXL 后暴露出来的真问题）：
+#    底模的文本编码器（CLIP）**上限 77 token**，而中文一个字要拆成好几个 token ——
+#    中文提示词会被**直接截断**（diffusers 日志原话：
+#      "The following part of your input was truncated because CLIP can only handle
+#       sequences up to 77 tokens"），模型等于没拿到条件，画出来完全对不上：
+#        「一个苹果放在木桌上」        → 湖边石栏杆
+#        「一位女性站在实验室里微笑」  → 日式房间里的三个古装女子
+#    同一句翻成英文则完全正常（橘猫、人像都画对）。
+#    用户天然说中文、模型也不保证每次翻英文 ⇒ 这里加一道**代码级兜底**。
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _needs_en(text) -> bool:
+    """是否需要翻成英文（有 4 个以上汉字才翻；纯英文/数字不动它）。"""
+    return len(_CJK_RE.findall(str(text or ""))) >= 4
+
+
+# 翻译用模型的选择结果（缓存 2 分钟，避免每次生图都去问一遍 /api/tags）
+_TRANS_MODEL = {"ts": 0.0, "name": ""}
+
+
+def _translate_model(cfg: dict) -> str:
+    """挑一个**真装了**的模型做中译英。
+
+    ⚠️ 2026-11-08 修：原来直接用 `cfg["default_model"]`，而它现在是
+    `qwen3-vl:30b`（18GB，用户没下）→ 翻译请求 404 → 中文提示词原样送进 CLIP
+    → 中文被截断、画面跑偏。这里改成"配置里有就用，没有就退到已装的 qwen3-vl"。
+    """
+    now = time.time()
+    if _TRANS_MODEL["name"] and now - _TRANS_MODEL["ts"] < 120:
+        return _TRANS_MODEL["name"]
+    want = str((cfg or {}).get("default_model") or "")
+    url = str((cfg or {}).get("ollama_url") or "http://127.0.0.1:11434").rstrip("/")
+    pick = want
+    try:
+        import urllib.request
+        with urllib.request.urlopen(url + "/api/tags", timeout=5) as r:
+            have = [str(m.get("name") or "") for m in
+                    (json.loads(r.read().decode("utf-8", "ignore")).get("models") or [])]
+        if want and (want in have or (want + ":latest") in have):
+            pick = want
+        else:
+            pick = (next((n for n in have if "qwen3-vl" in n), "")
+                    or (have[0] if have else want))
+    except Exception:
+        pass
+    _TRANS_MODEL.update({"ts": now, "name": pick})
+    return pick
+
+
+def _to_english(text: str, cfg: dict, timeout: float = 30.0) -> str:
+    """用本机对话模型把中文画面描述翻成英文提示词。**任何失败都原样返回**，
+    绝不因为翻译失败就把用户的请求搞挂。"""
+    s = str(text or "").strip()
+    if not s or not _needs_en(s):
+        return s
+    _log = logging.getLogger("uvicorn.error")
+    try:
+        import urllib.request
+        url = str(cfg.get("ollama_url") or "http://127.0.0.1:11434").rstrip("/") + "/api/chat"
+        body = {
+            "model": _translate_model(cfg),
+            "stream": False,
+            "options": {"temperature": 0.2, "num_predict": 220},
+            "messages": [
+                {"role": "system", "content": (
+                    "你是文生图提示词翻译器。把用户给的中文画面描述翻成**英文提示词**："
+                    "只输出英文，用逗号分隔的关键词/短语，保留主体、动作、场景、光线、镜头、"
+                    "风格，不要解释、不要引号、不要换行、不要加标题。")},
+                {"role": "user", "content": s},
+            ],
+        }
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            out = json.loads(r.read().decode("utf-8", "replace"))
+        txt = str((out.get("message") or {}).get("content") or "").strip()
+        txt = txt.strip("`\"' \n")
+        if txt and not _needs_en(txt):
+            return txt
+        _log.warning("[t2i] 提示词翻译没拿到英文，按原样使用：%r", txt[:80])
+    except Exception:
+        _log.warning("[t2i] 提示词翻译失败，按原样使用", exc_info=True)
+    return s
+
+
+# ================= 画图前「必须先问」的代码级闸门（2026-11-08）=================
+# 用户实测：输入「生成一张狐狸的图片」，模型**直接开画**，一句都没问。
+# 提示词里其实早写了「画图是个例外，宁问勿猜」（见 main.py 的 _ask_rules），
+# 但那是**软约束** —— 8B 和云端模型都可能不理。画一张几十秒，风格选错就得重画，
+# 所以这里在**工具层**硬拦一道：细节不全就先弹问答框，拿到答复再画。
+#
+# 判据用的是**用户原话**（context["user_text"]），不是模型写的英文 prompt ——
+# 因为模型即使只听到"狐狸"，也会自作主张写成 "a photorealistic fox, 85mm…"，
+# 从 prompt 反推"它问过风格了"就会永远不成立。
+_IMG_STYLE_WORDS = (
+    "写实", "真实", "照片", "摄影", "实拍", "卡通", "动漫", "二次元", "插画", "绘画",
+    "水彩", "油画", "国风", "水墨", "像素", "赛博", "3d", "立体", "素描", "线稿",
+    "扁平", "简笔", "厚涂", "cg", "手绘", "涂鸦", "朋克", "复古", "极简",
+)
+_IMG_SHAPE_WORDS = (
+    "竖版", "竖屏", "横版", "横屏", "方形", "方图", "宽屏", "长图", "壁纸", "海报",
+    "头像", "封面", "9:16", "16:9", "4:3", "3:4", "1:1", "21:9", "比例", "分辨率",
+    "高清", "4k", "8k",
+)
+_IMG_USE_WORDS = (
+    "做", "用于", "用来", "当成", "当作", "配图", "宣传", "广告", "ppt", "演示",
+    "文档", "店铺", "详情页", "banner", "朋友圈", "公众号", "小红书", "课件", "绘本",
+)
+
+# 用户答选项 → 直接拼进英文提示词（自己映射，不依赖翻译，稳定且快）
+_IMG_STYLE_MAP = {
+    "写实摄影": "photorealistic, professional photography, natural light, 85mm lens",
+    "日系插画": "japanese anime illustration, soft colors, clean lineart",
+    "3d 渲染": "3d render, octane, soft studio lighting, pixar style",
+    "水彩手绘": "watercolor painting, hand drawn, textured paper",
+    "油画质感": "oil painting, thick brush strokes, canvas texture",
+}
+_IMG_SHAPE_MAP = {
+    "手机壁纸": ("9:16", "vertical composition, mobile wallpaper"),
+    "电脑桌面": ("16:9", "horizontal composition, desktop wallpaper"),
+    "方图": ("1:1", "square composition"),
+    "海报/竖版": ("2:3", "poster layout, vertical"),
+    "横版配图": ("16:9", "wide banner composition"),
+}
+
+
+def _img_missing_dims(user_text: str, arguments: dict) -> list:
+    """这句话里还缺哪些关键维度（风格 / 画幅用途）。
+
+    空列表 = 用户已经说清了，可以直接画。
+    """
+    t = str(user_text or "").strip()
+    if not t:
+        return []
+    low = t.lower()
+    miss = []
+    if not any(w in low for w in _IMG_STYLE_WORDS):
+        miss.append("style")
+    has_shape = (any(w in low for w in _IMG_SHAPE_WORDS)
+                 or bool(str((arguments or {}).get("aspect") or "").strip())
+                 or bool(str((arguments or {}).get("size") or "").strip()))
+    has_use = any(w in low for w in _IMG_USE_WORDS)
+    if not (has_shape or has_use):
+        miss.append("shape")
+    return miss
+
+
+def _img_ask_gate(arguments: dict, context: dict):
+    """画图前的硬闸门。返回 None = 放行；返回字符串 = 先别画。
+
+    设计取舍：
+      · 只有**能弹框**（context["ask"] 可调用）时才问 —— 没有界面通道就放行，
+        不能因为拦不到人就把功能卡死；
+      · 每轮只问一次（context["img_asked"]），问完不再纠缠；
+      · 用户跳过/一条没填 → 按最合理的默认继续画，不让他白等。
+    """
+    if not isinstance(arguments, dict):
+        return None
+    ctx = context or {}
+    if ctx.get("img_asked"):
+        return None
+    user_text = str(ctx.get("user_text") or "")
+    miss = _img_missing_dims(user_text, arguments)
+    if not miss:
+        return None
+    ask = ctx.get("ask")
+    if not callable(ask):
+        return None
+    if not str(arguments.get("prompt") or "").strip():
+        return None                      # 连 prompt 都没有，交给原逻辑报错
+
+    qs = []
+    if "style" in miss:
+        qs.append({"header": "风格",
+                   "question": "这张图想要什么风格？（选错就要重画一遍）",
+                   "options": list(_IMG_STYLE_MAP.keys())})
+    if "shape" in miss:
+        qs.append({"header": "画幅/用途",
+                   "question": "用在哪？我按这个定画幅比例。",
+                   "options": list(_IMG_SHAPE_MAP.keys())})
+    qs.append({"header": "细节",
+               "question": "画面里还想要什么？（不填就按我的理解画）",
+               "options": []})
+
+    ctx["img_asked"] = True              # 只问一次
+    answers = ask({"questions": qs,
+                   "hint": "🎨 画一张要几十秒，先确认这两点，画出来才不返工。"})
+    if not answers:
+        return None                      # 关了弹框 → 按默认画
+
+    bits, aspect = [], ""
+    for a in answers:
+        if not isinstance(a, dict):
+            continue
+        ans = str(a.get("answer") or "").strip()
+        if not ans:
+            continue
+        key = ans.replace(" ", "").lower()
+        hit_style = next((v for k, v in _IMG_STYLE_MAP.items()
+                          if k.replace(" ", "").lower() == key), "")
+        hit_shape = next(((v[0], v[1]) for k, v in _IMG_SHAPE_MAP.items()
+                          if k.replace(" ", "").lower() == key), None)
+        if hit_style:
+            bits.append(hit_style)
+        elif hit_shape:
+            aspect, extra = hit_shape[0], hit_shape[1]
+            bits.append(extra)
+        else:
+            bits.append(ans)             # 自由填的细节，原样拼（后面会被翻成英文）
+    if not bits:
+        return None
+    arguments["prompt"] = (str(arguments.get("prompt") or "").strip().rstrip(",")
+                           + ", " + ", ".join(bits))
+    if aspect and not str(arguments.get("aspect") or "").strip():
+        arguments["aspect"] = aspect
+    return None
+
+
+def _region_mask_b64(image_b64: str, regions: list, area: str = "") -> str:
+    """把「矩形区域 / area 关键词」画成一张黑白蒙版（白=要改的地方）。
+
+    云端 /images/edits 只认**蒙版**，不认矩形坐标 —— 所以这里在本地把坐标
+    画成 PNG 蒙版再发过去。PIL 画几个方块，毫秒级，不占显存。
+    """
+    import base64 as _b64
+    from PIL import Image, ImageDraw
+
+    raw = image_b64.split(",", 1)[1] if image_b64.startswith("data:") else image_b64
+    base = Image.open(io.BytesIO(_b64.b64decode(raw))).convert("RGB")
+    w, h = base.size
+    mask = Image.new("L", (w, h), 0)
+    d = ImageDraw.Draw(mask)
+
+    boxes = []
+    for r in (regions or []):
+        try:
+            if isinstance(r, dict):
+                r = r.get("box") or r.get("region") or r
+            if isinstance(r, (list, tuple)) and len(r) == 4:
+                boxes.append([float(x) for x in r])
+        except Exception:
+            continue
+    a = (area or "").strip().lower()
+    if not boxes and a:
+        preset = {
+            "face": (0.30, 0.08, 0.70, 0.42),
+            "torso": (0.22, 0.34, 0.78, 0.80),
+            "upper-third": (0.0, 0.0, 1.0, 0.34),
+            "upper": (0.0, 0.0, 1.0, 0.34),
+            "center": (0.25, 0.25, 0.75, 0.75),
+            "background": None,      # 背景交给模型自己判断，用整图重绘更好
+        }.get(a)
+        if preset:
+            boxes.append(list(preset))
+    if not boxes:
+        return ""
+    for x0, y0, x1, y1 in boxes:
+        d.rectangle([int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)], fill=255)
+    buf = io.BytesIO()
+    mask.save(buf, format="PNG")
+    return _b64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _autosave_image(b64: str, prompt: str, origin: str, extra: str = "") -> dict:
+    """生成/微改完**自动存进图片库**，返回 {id, path, w, h}。
+
+    ⚠️ 2026-11-08 为什么加：原来生成的图只以 base64 推给前端，
+    **磁盘上什么都没落** —— 关掉页面就没了，用户点"保存到图库"才有文件。
+    用户明确要求"保存路径要正常"，所以改成后端直接落盘（图库 = data/image_library/）。
+    """
+    try:
+        from . import image_library as _lib
+        meta = _lib.save_image(
+            b64,
+            name=(prompt or "").strip()[:30] or "AI 图片",
+            source=(extra or ("AI 生成" if origin == "gen" else "AI 微改"))[:200],
+            origin=origin)
+        if not meta.get("ok") is False and meta.get("id"):
+            return {"id": meta["id"],
+                    "path": _lib.get_path(meta["id"]) or "",
+                    "w": meta.get("w") or 0, "h": meta.get("h") or 0,
+                    "size": meta.get("size") or 0}
+    except Exception:
+        pass
+    return {}
+
+
+def _gen_local(arguments, ui_events):
+    """本地权重出图（SDXL / SDXL-Turbo / SD-Turbo 都走这里）。
+
+    ⚠️ 2026-11-08：这是**可选后端**。默认仍走云端（不占显存、不用下载）；
+    用户在 🎨 里显式选了本地模型才会进来。选之前会先把对话模型从显存请出去，
+    否则 12GB 卡装不下两套。
+    """
+    prompt = (arguments.get("prompt") or "").strip()
+    cfg = config.load_config() or {}
+    style_pos, style_neg = _style_for(prompt)
+    # 本地是 CLIP 文本编码器，中文会被截断 → 必须翻英文
+    prompt_en = _to_english(prompt, cfg)
+    user_neg = (arguments.get("negative_prompt") or "").strip()
+    if _needs_en(user_neg):
+        user_neg = _to_english(user_neg, cfg)
+    negative = ", ".join(x for x in (user_neg, style_neg or _IMAGE_NEG_DEFAULT) if x)
+    try:
+        size = int(arguments.get("size") or 1024)
+    except Exception:
+        size = 1024
+    hd = bool(arguments.get("hd"))
+    width, height = _img_wh(size, arguments.get("aspect"))
+    boosted = ", ".join(x for x in (prompt_en, style_pos or _IMAGE_PROMPT_NEUTRAL) if x)
+
+    t2i.unload()                     # 先把对话模型请出显存
+    start = time.time()
+    result = t2i.generate(boosted, negative_prompt=negative,
+                          steps=t2i.base_steps(),
+                          width=width, height=height, hd=hd)
+    cost = time.time() - start
+    if not result.get("ok"):
+        return ("图片生成失败（本地）：%s。请把冒号后的原因**原样**转告用户。"
+                % result.get("error"))
+    _saved = _autosave_image(result["b64"], prompt, "gen", "AI 生成（本地）")
+    _ui(ui_events, {"type": "image", "mime": "image/png", "b64": result["b64"],
+                    "prompt": prompt, "device": result.get("device"),
+                    "model": result.get("model"), "cost_s": round(cost, 1),
+                    "size": result.get("size"), "origin": "gen",
+                    "saved": _saved})
+    try:
+        t2i.unload()                 # 画完立刻放掉，别让它占着显卡
+    except Exception:
+        pass
+    return ("已生成图片（本地 %s，%s，%.1f 秒），已展示给用户。"
+            % (result.get("model") or "", result.get("size") or "", cost))
+
+
+def _do_generate_image(arguments, ui_events, context=None):
+    """文生图 —— 按配置走**云端 API** 或**本地权重**。"""
+    from . import cloud_image
+
+    prompt = (arguments.get("prompt") or "").strip()
+    if not prompt:
+        return "错误：未提供图片描述（prompt）。"
+    ctx = context or {}
+    key = str(ctx.get("image_key") or "")
+    cfg = config.load_config() or {}
+    if str(cfg.get("image_backend") or "cloud").lower() == "local":
+        return _gen_local(arguments, ui_events)
+
+    # ⚠️ 云端模型（gpt-image 系）**天生懂中文**，不再翻英文 ——
+    #    原来那句 _to_english 是为了绕开 CLIP 的中文截断，现在没那个问题了，
+    #    少一次本机模型调用（以前还会因为默认模型没下载而失败）。
+    style_pos, _style_neg = _style_for(prompt)
+    boosted = ", ".join(x for x in (prompt, style_pos) if x)
+    neg_words = (arguments.get("negative_prompt") or "").strip()
+    avoid = ", ".join(x for x in (neg_words, "low quality, blurry, watermark, deformed") if x)
+    if avoid:
+        boosted += ". Avoid: " + avoid
+
+    aspect = str(arguments.get("aspect") or "")
+    size = str(arguments.get("size") or "")
+    try:
+        n = int(arguments.get("n") or 1)
+    except Exception:
+        n = 1
+
+    start = time.time()
+    try:
+        imgs = cloud_image.generate(boosted, key, size=size, aspect=aspect, n=n,
+                                    cfg=cfg, model=str(ctx.get("image_model") or ""))
+    except cloud_image.CloudImageError as e:
+        return ("图片生成失败：%s。请把冒号后的原因**原样**转告用户。"
+                "如果里面包含「没有可用通道 / no available channel」，说明是"
+                "**他这个 Key 的分组没有该模型的通道**（充钱解决不了），"
+                "让他打开右上角 🎨 点「自动选」挑一个该分组真能用的模型；"
+                "如果是 401/403 就让他重填 Key；402 才是余额问题。"
+                "不要改写成「暂时无法使用」这种笼统说法。" % str(e))
+
+    cost = time.time() - start
+    _paths = []
+    for b64 in imgs:
+        _saved = _autosave_image(b64, prompt, "gen", "AI 生成（云端）")
+        if _saved.get("path"):
+            _paths.append(_saved["path"])
+        _ui(ui_events, {"type": "image", "mime": "image/png", "b64": b64,
+                        "prompt": prompt, "device": "cloud",
+                        "model": cfg.get("image_api_model") or "",
+                        "cost_s": round(cost, 1),
+                        "size": cloud_image.size_for(aspect, size),
+                        "origin": "gen", "saved": _saved})
+    return ("已生成 %d 张图片（云端，%.1f 秒，尺寸 %s），已经展示给用户。"
+            "若用户还想调整，直接按新描述重画即可（不用他再做什么）。"
+            % (len(imgs), cost, cloud_image.size_for(aspect, size)))
+
+
+def _edit_local(arguments, ui_events, context):
+    """本地权重微改：有蒙版/区域走 inpaint（只改圈内），否则走 img2img。"""
+    import base64 as _b64
+    prompt = (arguments.get("prompt") or "").strip()
+    ctx = context or {}
+    cfg = config.load_config() or {}
+    style_pos, style_neg = _style_for(prompt)
+    prompt_en = _to_english(prompt, cfg)
+    negative = ", ".join(x for x in (
+        (arguments.get("negative_prompt") or "").strip(),
+        style_neg) if x) or _IMAGE_NEG_DEFAULT
+
+    # 底图：source 路径 或 本轮那张
+    init = None
+    src = (arguments.get("source") or "").strip()
+    if src:
+        if not os.path.isfile(src):
+            return f"错误：source 不是有效图片路径：{src}"
+        init = src
+    else:
+        imgs = ctx.get("images") or ([ctx["last_image"]] if ctx.get("last_image") else [])
+        if imgs:
+            raw = imgs[0]
+            if isinstance(raw, bytes):
+                init = raw
+            else:
+                s_ = str(raw)
+                try:
+                    init = _b64.b64decode(s_.split(",", 1)[1] if s_.startswith("data:") else s_)
+                except Exception:
+                    init = None
+    if init is None:
+        return "错误：无法确定要修改的图片（请把图拖进对话，或用 source 给路径）。"
+
+    mask = str(arguments.get("mask") or ctx.get("mask") or "")
+    if mask.startswith("data:"):
+        mask = mask.split(",", 1)[1]
+    regions = arguments.get("regions") or []
+    if isinstance(regions, dict):
+        regions = [regions]
+    area = str(arguments.get("area") or "").strip()
+    try:
+        strength = float(arguments.get("strength") or 0.0)
+    except Exception:
+        strength = 0.0
+
+    t2i.unload()
+    start = time.time()
+    if mask or regions or area:
+        if not t2i.inpaint_ready():
+            return ("错误：本地没装「局部重绘」模型（%s）。请让用户去 🎨 里下载 "
+                    "SDXL Inpaint，或切到云端微改。" % t2i.inpaint_model_dir())
+        st = strength if strength >= 0.5 else 0.85
+        r = t2i.inpaint(init, ", ".join([prompt_en, style_pos]).strip(", "),
+                        mask=(mask or None), regions=(regions or None), area=area,
+                        negative_prompt=negative, steps=t2i.base_steps(), strength=st)
+        how = "按指定区域重绘（圈外不动）"
+    else:
+        keep = "keep the original composition, lighting and everything else unchanged"
+        boosted = ", ".join(x for x in (prompt_en, keep, style_pos) if x)
+        st = strength or 0.5
+        r = t2i.edit_image(init, boosted, negative_prompt=negative,
+                           steps=t2i.base_steps(), strength=st)
+        how = "整图重绘"
+    cost = time.time() - start
+    if not r.get("ok"):
+        return "图片微改失败（本地）：%s。请把原因**原样**转告用户。" % r.get("error")
+    _saved_e = _autosave_image(r["b64"], prompt, "edit", "AI 微改（本地）")
+    _ui(ui_events, {"type": "image", "mime": "image/png", "b64": r["b64"],
+                    "prompt": prompt, "device": r.get("device"),
+                    "model": r.get("model"), "cost_s": round(cost, 1),
+                    "origin": "edit", "saved": _saved_e})
+    try:
+        t2i.unload()
+    except Exception:
+        pass
+    return "已%s（本地，%.1f 秒），已展示给用户。" % (how, cost)
+
+
+def _do_edit_image(arguments, ui_events, context):
+    """图片微改 —— 按配置走**云端 /images/edits** 或**本地权重**。"""
+    import base64 as _b64
+    from . import cloud_image
+
+    prompt = (arguments.get("prompt") or "").strip()
+    if not prompt:
+        return "错误：未提供修改描述（prompt）。"
+    ctx = context or {}
+    cfg = config.load_config() or {}
+    if str(cfg.get("image_backend") or "cloud").lower() == "local":
+        return _edit_local(arguments, ui_events, context)
+    key = str(ctx.get("image_key") or "")
+    source = (arguments.get("source") or "").strip()
+
+    # ---------- 1) 找到底图，统一成 base64 ----------
+    img_b64 = ""
+    if source:
+        if not os.path.isfile(source):
+            return f"错误：source 不是有效图片路径：{source}"
+        try:
+            with open(source, "rb") as f:
+                img_b64 = _b64.b64encode(f.read()).decode("ascii")
+        except Exception as e:                       # noqa: BLE001
+            return f"错误：读取底图失败（{type(e).__name__}）。"
+    else:
+        imgs = ctx.get("images") or []
+        if not imgs:
+            _last = ctx.get("last_image")
+            if _last:
+                imgs = [_last]
+        if imgs:
+            raw = imgs[0]
+            if isinstance(raw, bytes):
+                img_b64 = _b64.b64encode(raw).decode("ascii")
+            else:
+                s = str(raw)
+                img_b64 = s.split(",", 1)[1] if s.startswith("data:") else s
+    if not img_b64:
+        return ("错误：无法确定要修改的图片。请把要改的图片拖入对话（作为本轮附件）后再让我微改，"
+                "或通过 source 指定本地图片路径。")
+
+    # ---------- 2) 蒙版：用户涂抹的 / 模型给的 regions/area ----------
+    mask_b64 = str(arguments.get("mask") or ctx.get("mask") or "")
+    if mask_b64.startswith("data:"):
+        mask_b64 = mask_b64.split(",", 1)[1]
+    regions = arguments.get("regions") or []
+    if isinstance(regions, dict):
+        regions = [regions]
+    area = str(arguments.get("area") or "").strip()
+    if not mask_b64 and (regions or area):
+        try:
+            mask_b64 = _region_mask_b64(img_b64, regions, area)
+        except Exception:                            # noqa: BLE001
+            mask_b64 = ""
+
+    style_pos, _style_neg = _style_for(prompt)
+    keep = ("keep the original composition, lighting and everything else unchanged"
+            if not mask_b64 else
+            "only change the masked area, keep everything outside the mask pixel-identical")
+    boosted = ", ".join(x for x in (prompt, keep, style_pos) if x)
+
+    start = time.time()
+    try:
+        # 微改可以单独指定模型（有的服务商 edits 只对某几个模型开放）
+        _edit_model = (str(cfg.get("image_api_model_edit") or "").strip()
+                       or str(ctx.get("image_model") or ""))
+        imgs = cloud_image.edit(boosted, key, img_b64, mask_b64=mask_b64,
+                                size=str(arguments.get("size") or ""),
+                                cfg=cfg, model=_edit_model)
+    except cloud_image.CloudImageError as e:
+        return ("图片微改失败：%s。请把原因**原样**转告用户（不要笼统化）。"
+                "若是「没有可用通道」→ 分组没开该模型，让他去 🎨 点「自动选」；"
+                "401/403 → 重填 Key；402 → 余额不足。" % str(e))
+
+    cost = time.time() - start
+    for b64 in imgs:
+        _saved_e = _autosave_image(
+            b64, prompt, "edit",
+            "AI 微改（云端）" + ("·局部重绘" if mask_b64 else ""))
+        _ui(ui_events, {"type": "image", "mime": "image/png", "b64": b64,
+                        "prompt": ("局部重绘：" if mask_b64 else "微改：") + prompt,
+                        "device": "cloud",
+                        "model": cfg.get("image_api_model") or "",
+                        "cost_s": round(cost, 1), "origin": "edit",
+                        "saved": _saved_e})
+    how = "按**指定区域**重绘（圈外不动）" if mask_b64 else "整图重绘"
+    return ("已%s（云端，%.1f 秒），新图已展示给用户。"
+            "若还要继续调整，直接说新的修改点即可，不用再拖一次图。"
+            % (how, cost))
+
+
+def _do_compose_images(arguments, ui_events, context):
+    """把多张图**缝合成一张**（可选再统一风格）。
+
+    ⚠️ 2026-09-26 新增：用户问「我给几张图让它进行缝合并微改」，而此前只有
+    edit_image（改单张），"缝合"完全没有。
+    ★ 分工：拼接交给 PIL（像素级、无缝、快、不走样）；
+      "微改/统一风格"是**可选的第二步**（img2img，有幅度上限）。
+    """
+    import base64 as _b64
+    from . import doclib, image_library
+    srcs = arguments.get("sources") or []
+    if isinstance(srcs, str):
+        srcs = [x for x in re.split(r"[,\n]", srcs) if x.strip()]
+    imgs, missing = [], []
+    for x in (srcs or []):
+        p = str(x or "").strip()
+        if not p:
+            continue
+        if os.path.isfile(p):
+            imgs.append(p)
+            continue
+        # 也认「生成文库」里的文件名（用户通常说的是界面上看到的名字）
+        try:
+            fp = doclib.file_path(p)
+            if os.path.isfile(fp):
+                imgs.append(fp)
+                continue
+        except Exception:
+            pass
+        # ⚠️ 也许它本身就是 base64 / data URL（前端有时这么传）——
+        #    只有这种情况才交给 t2i；否则**直接算"找不到"**。
+        #    不判这一下的话，一个拼错的路径会被当 base64 去解码，报出
+        #    "string argument should contain only ASCII characters" 这种
+        #    用户和模型都看不懂的错误（实测踩到）。
+        if p.startswith("data:image/") or (
+                len(p) > 512 and not any(ch in p for ch in "\\/:*?\"<>|")):
+            imgs.append(p)
+            continue
+        missing.append(p)
+    if not imgs:
+        # 没给 sources（或全找不到）→ 用本轮拖进对话的图
+        imgs = list((context or {}).get("images") or [])
+    if len(imgs) < 2:
+        _hint = ("（你给的这几张我找不到：%s）" % "、".join(missing[:3])) if missing else ""
+        return ("错误：至少要两张图片才能缝合%s。请让用户把图片拖进对话"
+                "（一次可以拖多张），或用 sources 给出本地路径。" % _hint)
+
+    layout = str(arguments.get("layout") or "horizontal").strip().lower()
+    # 2026-11-08：本地 SD 已下线，拼接不再依赖它的原生边长（原来读 t2i.native_side）
+    try:
+        size = int(arguments.get("size") or 1024)
+    except Exception:
+        size = 1024
+    try:
+        gap = max(0, int(arguments.get("gap") or 0))
+    except Exception:
+        gap = 0
+    try:
+        cols = int(arguments.get("cols")) if arguments.get("cols") else None
+    except Exception:
+        cols = None
+    t2i.unload()                       # 先把显存腾出来（拼接本身不吃显存）
+    start = time.time()
+    r = t2i.compose(imgs, layout=layout, size=size, gap=gap,
+                    bg=arguments.get("bg") or "FFFFFF", cols=cols)
+    if not r.get("ok"):
+        return "图片缝合失败：%s" % r.get("error")
+    out = r["image"]
+    stitch_cost = time.time() - start
+    note = "拼接完成（%d 张，%s，%d×%d，像素级无缝，%.1f 秒）" % (
+        r["count"], r["layout"], r["size"][0], r["size"][1], stitch_cost)
+
+    # ---- 可选的第二步：统一风格（会轻微重绘）----
+    harm = 0.0
+    try:
+        harm = float(arguments.get("harmonize") or 0.0)
+    except Exception:
+        harm = 0.0
+    harm = max(0.0, min(0.45, harm))       # 硬上限：再大就是把整张重画了
+    if harm > 0:
+        # 2026-11-08：统一风格改走**云端 edits**（本地 SD 已下线）
+        from . import cloud_image
+        pr = str(arguments.get("prompt") or "").strip() or (
+            "make it look like a single seamless photograph: consistent lighting, "
+            "color grading and white balance, natural blending between parts, high quality")
+        t0 = time.time()
+        try:
+            _buf0 = io.BytesIO()
+            out.save(_buf0, format="PNG")
+            _one = cloud_image.edit(
+                pr, str((context or {}).get("image_key") or ""),
+                _b64.b64encode(_buf0.getvalue()).decode("ascii"),
+                cfg=config.load_config() or {})
+            from PIL import Image
+            out = Image.open(io.BytesIO(_b64.b64decode(_one[0]))).convert("RGB")
+            note += "；已按 harmonize=%.2f 统一风格（云端，%.0f 秒）" % (harm, time.time() - t0)
+        except Exception as _e:                       # noqa: BLE001
+            note += "；统一风格这步没做成（%s），**已保留未重绘的拼接版**" % _e
+
+    # ---- 落盘：进生成文库（可下载）+ 图片库（可在「图片库」面板看到）----
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
+    png = buf.getvalue()
+    rel = ""
+    try:
+        rel = (str(arguments.get("filename") or "").strip()
+               or "拼图_%s.png" % time.strftime("%H%M%S"))
+        if not rel.lower().endswith(".png"):
+            rel += ".png"
+        doclib.save_bytes(rel, png)
+    except Exception:
+        rel = ""
+    b64 = _b64.b64encode(png).decode("ascii")
+    try:
+        image_library.save_image(b64, name=os.path.splitext(os.path.basename(rel))[0]
+                                 if rel else "", source="多图缝合", origin="compose")
+    except Exception:
+        pass
+    _ui(ui_events, {"type": "image", "mime": "image/png", "b64": b64,
+                    "prompt": "缝合：%d 张图 / %s" % (r["count"], r["layout"]),
+                    "size": "%d x %d" % (out.size[0], out.size[1]),
+                    "cost_s": round(time.time() - start, 1),
+                    "origin": "compose"})
+    link = ""
+    if rel:
+        link = ("\n下载链接（**原样给用户**）：\n/api/doclib/download?rel=%s"
+                % urllib.parse.quote(rel))
+    return (note + "。" + ("图片已展示给用户。" if not link else "")
+            + link
+            + "\n※ 拼接不会重绘内容；若用户想要「把 A 图里的人放进 B 图」这类智能融合，"
+              "如实说明本工具只做排版式拼接，需要的话用 edit_image 逐张微改。")
+
+
+def _do_tts_speak(arguments, ui_events, context):
+    """文字转语音。产物落 data/tts/，返回播放 + 下载链接（模型要原样转给用户）。
+
+    ⚠️ 长文会分段逐段合成再拼接，几千字要几十秒 —— 先发一条 status，
+       让界面上有「正在合成」的反馈，别让用户以为卡死了。
+    """
+    from . import tts
+
+    text = str(arguments.get("text") or "")
+    if not text.strip():
+        return "错误：text 是空的。把要读的文字给我（几千字也行）。"
+
+    voice = str(arguments.get("voice") or "")
+    engine = str(arguments.get("engine") or "auto")
+    try:
+        rate = int(arguments.get("rate") or 0)
+    except Exception:
+        rate = 0
+
+    chars = len(tts.clean_text(text))
+    _ui(ui_events, {"type": "status",
+                    "text": "正在合成语音（%d 字）…长文要等几十秒" % chars})
+
+    try:
+        pitch = int(arguments.get("pitch") or 0)
+    except Exception:
+        pitch = 0
+
+    r = tts.synth(text, voice=voice, rate=rate, engine=engine,
+                  filename=str(arguments.get("filename") or ""),
+                  pitch=pitch, style=str(arguments.get("style") or ""))
+    if not r.get("ok"):
+        return "语音合成失败：%s" % (r.get("error") or "未知原因")
+
+    url = r.get("url") or ""
+    kind = "在线神经语音" if r.get("engine") == "edge" else "离线系统语音"
+    style_note = ""
+    if r.get("style") and r.get("style") != "neutral":
+        style_note = " · " + str(r.get("style_name") or "")
+    lines = [
+        "语音已生成：**%s**（%s · %s%s）"
+        % (r.get("name"), r.get("voice_name") or r.get("voice") or "", kind, style_note),
+        "约 %.0f 秒，文件 %.1f KB。" % (float(r.get("est_seconds") or 0),
+                                       float(r.get("bytes") or 0) / 1024.0),
+        "[在线播放](%s)" % url,
+        "[下载音频](%s)" % url,
+    ]
+    for w in (r.get("warnings") or []):
+        lines.append("⚠️ %s" % w)
+    return "\n".join(lines)
+
+
+def _do_music_make(arguments, ui_events, context=None):
+    """音乐生成 / 改编。产物落 data/music/，返回播放 + 下载链接。
+
+    ⚠️ 能力边界（别对用户夸大）：这是**算法合成** —— 振荡器 + Karplus-Strong
+       拨弦 + FM 钢琴 + 共振峰人声，不是 MusicGen 那类神经网络模型
+       （本机 Python 3.14 没 torch，跑不了）。音色偏电子；人声是"吟唱"，
+       元音可辨、有颤音，但唱不出清晰歌词。
+    """
+    from . import music as music_mod
+
+    action = str(arguments.get("action") or "generate").strip().lower()
+    try:
+        bars = int(arguments.get("bars") or 16)
+    except Exception:                                  # noqa: BLE001
+        bars = 16
+    try:
+        bpm = float(arguments.get("bpm") or 0)
+    except Exception:                                  # noqa: BLE001
+        bpm = 0.0
+    try:
+        key = int(arguments.get("key") or 0)
+    except Exception:                                  # noqa: BLE001
+        key = 0
+
+    if action == "list":
+        files = music_mod.list_music(20)
+        if not files:
+            return "还没有生成过曲子。说个风格（古风 / 电子 / 钢琴 / Lo-fi…）我就生成一首。"
+        lines = ["已有 %d 首：" % len(files)]
+        for f in files[:10]:
+            lines.append("- %s（%s，%.0f 秒）[播放](%s)"
+                         % (f.get("title"), f.get("style_name") or f.get("style"),
+                            float(f.get("duration") or 0), f.get("url")))
+        return "\n".join(lines)
+
+    if action == "remix":
+        mid = str(arguments.get("id") or "")
+        if not mid:
+            return "错误：remix 需要 id。先用 action=list 看有哪些曲子。"
+        _ui(ui_events, {"type": "status", "text": "正在改编…"})
+        try:
+            ks = int(arguments.get("key_shift") or 0)
+        except Exception:                              # noqa: BLE001
+            ks = 0
+        try:
+            tempo = float(arguments.get("tempo") or 1.0)
+        except Exception:                              # noqa: BLE001
+            tempo = 1.0
+        try:
+            ext = int(arguments.get("extend_bars") or 0)
+        except Exception:                              # noqa: BLE001
+            ext = 0
+        try:
+            var = float(arguments.get("variation") or 0)
+        except Exception:                              # noqa: BLE001
+            var = 0.0
+        voc = arguments.get("vocals")
+        r = music_mod.remix(
+            mid, style=str(arguments.get("style") or ""), key_shift=ks,
+            tempo=tempo, extend_bars=ext, variation=var,
+            vocals=(None if voc is None else bool(voc)))
+    elif action == "from_notes":
+        notes = str(arguments.get("notes") or "")
+        if not notes.strip():
+            return "错误：from_notes 需要 notes（如「C4 D4 E4 G4」或简谱「1 2 3 5」）。"
+        _ui(ui_events, {"type": "status", "text": "正在按音符编曲…"})
+        r = music_mod.from_notes(
+            notes, style=str(arguments.get("style") or "piano"), bars=bars,
+            bpm=bpm, key=key, vocals=bool(arguments.get("vocals", False)))
+    else:
+        _ui(ui_events, {"type": "status", "text": "正在生成音乐…"})
+        r = music_mod.generate(
+            style=str(arguments.get("style") or "pop"), bars=bars, bpm=bpm,
+            key=key, vocals=bool(arguments.get("vocals", True)),
+            notes=str(arguments.get("notes") or ""))
+
+    if not r.get("ok"):
+        return "音乐生成失败：%s" % (r.get("error") or "未知原因")
+
+    m = r.get("music") or {}
+    url = m.get("url") or r.get("url") or ""
+    lines = [
+        "音乐已生成：**%s**（%s · %.0f bpm · %.0f 秒）"
+        % (m.get("title"), m.get("style_name") or m.get("style"),
+           float(m.get("bpm") or 0), float(m.get("duration") or 0)),
+        "文件：%s（%.1f KB）" % (r.get("name"), float(m.get("size_kb") or 0)),
+        "[▶ 在线播放](%s)" % url,
+        "[⬇ 下载 WAV](%s)" % url,
+    ]
+    if m.get("ops"):
+        lines.insert(1, "改编操作：%s" % m["ops"])
+    if m.get("vocals"):
+        lines.append("人声是**共振峰合成的吟唱**（元音可辨、带颤音），"
+                     "不是真人演唱，唱不出清晰歌词。")
+    return "\n".join(lines)
+
+
+def _do_video_edit(arguments, ui_events, context):
+    """视频处理：裁剪 / 拼接 / 配音 / 加字 / 字幕 / 抽音轨 / 图片成片 / 压缩。
+
+    底层走 backend/video.py（调 imageio-ffmpeg 自带的 ffmpeg，**不依赖系统 PATH**），
+    产物直接落到**生成文库**，返回下载链接 —— 链接要模型原样给用户。
+
+    ⚠️ 能力边界（别对用户夸大）：只做「单轨、线性」的处理。
+       多轨时间线编辑、AI 自动抠视频主体没有，用户要就如实说做不到。
+       转场（xfade 58 种）和画面特效（暗角/调色/故障风/Ken Burns）**有**。
+    """
+    from . import doclib, video
+
+    if not video.available():
+        return ("错误：本机没有可用的 ffmpeg，剪不了视频。"
+                "装一个就行（约 100 MB）：pip install imageio-ffmpeg")
+
+    action = str(arguments.get("action") or "").strip().lower()
+    _known = ("trim", "concat", "audio", "text", "subtitle",
+              "extract_audio", "images_to_video", "compress", "info",
+              "transition", "effect")
+    if action not in _known:
+        return ("错误：不认识的 action「%s」。可用的是：%s"
+                % (action, " / ".join(_known)))
+
+    def _resolve(p):
+        """本地绝对路径 → 生成文库里的文件名 → 原样返回（后面会报找不到）。"""
+        p = p.strip() if isinstance(p, str) else ""
+        if not p:
+            return ""
+        if os.path.isfile(p):
+            return p
+        try:
+            fp = doclib.file_path(p)
+            if os.path.isfile(fp):
+                return fp
+        except Exception:
+            pass
+        return p
+
+    def _target(ext):
+        """给成品算一个文库内的文件名 + 绝对路径。
+
+        ⚠️ 判断「用户给的文件名带没带扩展名」**不能只看 splitext** ——
+           文件名里出现小数点太常见了（「测试_1.5秒」「v2.0 版本」），
+           splitext 会把 `.5秒` 当成扩展名，于是不再追加 `.mp4`，
+           ffmpeg 直接报 "Unable to choose an output format"（2026-11-11 实测踩到）。
+           所以只认真正的媒体扩展名。
+        """
+        _EXTS = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv", ".wmv",
+                 ".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg")
+        name = str(arguments.get("filename") or "").strip()
+        if not name:
+            name = "视频_%s%s" % (time.strftime("%H%M%S"), ext)
+        elif os.path.splitext(name)[1].lower() not in _EXTS:
+            name += ext
+        try:
+            full = doclib.file_path(name)
+        except Exception:
+            name = "视频_%s%s" % (time.strftime("%H%M%S"), ext)
+            full = doclib.file_path(name)
+        os.makedirs(os.path.dirname(full) or doclib.LIB_DIR, exist_ok=True)
+        return name, full
+
+    # ---------------- info：只看信息，不产出文件 ----------------
+    if action == "info":
+        src = _resolve(arguments.get("source"))
+        i = video.info(src)
+        if not i.get("ok"):
+            return "读不出这个视频：%s" % i.get("error")
+        return ("视频信息：时长 %.2f 秒，分辨率 %d×%d，帧率 %.0f fps，%s。"
+                % (i["duration"], i["width"], i["height"], i["fps"],
+                   "有声音" if i["has_audio"]
+                   else "**没有音轨**（加音乐时只能整条替换）"))
+
+    ext = ".mp4"
+    if action == "extract_audio":
+        fmt = str(arguments.get("fmt") or "mp3").lower().lstrip(".")
+        ext = "." + (fmt if fmt in ("mp3", "m4a", "wav") else "mp3")
+
+    rel, out = _target(ext)
+
+    _ui(ui_events, {"type": "status",
+                    "text": "正在处理视频（%s），大文件可能要等一两分钟…" % action})
+
+    note, r = "", None
+
+    if action == "trim":
+        src = _resolve(arguments.get("source"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        start = float(arguments.get("start") or 0)
+        dur = arguments.get("duration")
+        end = arguments.get("end")
+        if dur is None and end is None:
+            return "错误：裁剪要给出 duration（裁多长）或 end（裁到第几秒）。"
+        r = video.trim(src, out, start=start, duration=dur, end=end)
+        real = (float(dur) if dur is not None
+                else (float(end) - start if end is not None else 0))
+        note = "裁剪完成（从第 %.1f 秒起，共约 %.1f 秒，原声保留）" % (start, real)
+
+    elif action == "concat":
+        srcs = [_resolve(p) for p in (arguments.get("sources") or [])]
+        srcs = [p for p in srcs if p]
+        if len(srcs) < 2:
+            return "错误：拼接至少要给两个视频（sources 列表）。"
+        r = video.concat(srcs, out, width=arguments.get("width"))
+        if r.get("ok"):
+            note = ("拼接完成（%d 段，统一到 %d×%d，%s）"
+                    % (r["count"], r["width"], r["height"],
+                       "保留原声" if r.get("audio")
+                       else "**有段没有音轨，已整体去音**"))
+
+    elif action == "audio":
+        src = _resolve(arguments.get("source"))
+        aud = _resolve(arguments.get("audio"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        if not os.path.isfile(aud):
+            return "错误：找不到音频文件：%s" % (arguments.get("audio") or "（没给）")
+        mode = str(arguments.get("mode") or "replace").lower()
+        r = video.add_audio(src, aud, out, mode=mode,
+                            volume=arguments.get("volume"))
+        if r.get("ok"):
+            note = ("配乐完成（%s，音乐音量 %.2f，音乐比视频短时会循环垫满）"
+                    % ("替换原声" if mode != "mix" else "与原声混合",
+                       float(arguments.get("volume") or 1.0)))
+
+    elif action == "text":
+        src = _resolve(arguments.get("source"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        txt = str(arguments.get("text") or "").strip()
+        if not txt:
+            return "错误：没给要加的文字。"
+        r = video.add_text(src, out, txt,
+                           position=arguments.get("position") or "bottom",
+                           fontsize=arguments.get("fontsize") or 48,
+                           color=arguments.get("color") or "white",
+                           box=arguments.get("box") is not False,
+                           opacity=arguments.get("opacity"),
+                           start=arguments.get("start"),
+                           end=arguments.get("end"),
+                           margin=arguments.get("margin") or 60)
+        if r.get("ok"):
+            note = "文字已压上画面（%s，字号 %d）" % (
+                arguments.get("position") or "bottom",
+                int(arguments.get("fontsize") or 48))
+
+    elif action == "subtitle":
+        src = _resolve(arguments.get("source"))
+        srt = _resolve(arguments.get("subtitle"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        if not os.path.isfile(srt):
+            return ("错误：找不到字幕文件（要 .srt）：%s"
+                    % (arguments.get("subtitle") or "（没给）"))
+        r = video.add_subtitle(src, out, srt,
+                               fontsize=arguments.get("fontsize") or 22)
+        if r.get("ok"):
+            note = "字幕已烧进画面（硬字幕，任何播放器都能显示）"
+
+    elif action == "extract_audio":
+        src = _resolve(arguments.get("source"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        r = video.extract_audio(src, out, fmt=ext.lstrip("."))
+        if r.get("ok"):
+            note = "音轨已导出（%s）" % ext.lstrip(".").upper()
+
+    elif action == "images_to_video":
+        imgs = [_resolve(p) for p in (arguments.get("images") or [])]
+        imgs = [p for p in imgs if p and os.path.isfile(p)]
+        if not imgs:
+            return "错误：没给能读到的图片（images 列表）。"
+        r = video.images_to_video(imgs, out,
+                                  seconds=arguments.get("seconds") or 3,
+                                  width=arguments.get("width") or 1920)
+        if r.get("ok"):
+            note = ("图片成片完成（%d 张，每张 %.1f 秒，%d×%d）"
+                    % (r["count"], float(arguments.get("seconds") or 3),
+                       r["width"], r["height"]))
+
+    elif action == "compress":
+        src = _resolve(arguments.get("source"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        before = os.path.getsize(src)
+        r = video.compress(src, out, crf=arguments.get("crf") or 28,
+                           width=arguments.get("width"))
+        if r.get("ok"):
+            after = os.path.getsize(out)
+            note = ("压缩完成（CRF %d，%.1f MB → %.1f MB，%s）"
+                    % (int(arguments.get("crf") or 28),
+                       before / 1048576.0, after / 1048576.0,
+                       "减小 %.0f%%" % (100 - after * 100.0 / before)
+                       if before > 0 else "已生成"))
+
+    elif action == "transition":
+        srcs = [_resolve(p) for p in (arguments.get("sources") or [])]
+        srcs = [p for p in srcs if p]
+        if len(srcs) < 2:
+            return "错误：转场拼接至少要给两个视频（sources 列表）。"
+        trans = arguments.get("trans") or "fade"
+        dur = arguments.get("duration")
+        dur = 1.0 if dur is None else max(0.1, float(dur))
+        _ui(ui_events, {"type": "status",
+                        "text": "正在做转场（%d 段，每处 %.1f 秒）…" % (len(srcs), dur)})
+        r = video.transition(srcs, out, trans=trans, duration=dur,
+                             width=arguments.get("width"),
+                             audio=str(arguments.get("audio_join") or "crossfade"))
+        if r.get("ok"):
+            note = ("转场拼接完成（%d 段，转场 %s，每处 %.1f 秒，成品 %.2f 秒，%s）"
+                    % (r["count"], " → ".join(r["transitions"]), dur,
+                       float(r.get("duration") or 0),
+                       "音频交叉淡化" if r.get("audio")
+                       else "**有段没有音轨，已整体去音**"))
+
+    elif action == "effect":
+        src = _resolve(arguments.get("source"))
+        if not os.path.isfile(src):
+            return "错误：找不到视频文件：%s" % (arguments.get("source") or "（没给）")
+        effs = arguments.get("effects") or []
+        if isinstance(effs, str):
+            effs = [effs]
+        effs = [str(e).strip() for e in effs if str(e).strip()]
+        if not effs and not arguments.get("custom"):
+            return "错误：没给特效。可选：%s" % "、".join(video.EFFECT_PRESETS)
+        if any(e.lower() in ("kenburns_in", "kenburns_out") for e in effs):
+            _ui(ui_events, {"type": "status",
+                            "text": "Ken Burns 推拉比较慢，长视频可能要等好几分钟…"})
+        r = video.effect(src, out, presets=effs,
+                         custom=arguments.get("custom"),
+                         strength=arguments.get("strength") or 1.0,
+                         width=arguments.get("width"))
+        if r.get("ok"):
+            note = ("特效已应用（%s，%d×%d，时长 %.2f 秒，%s）"
+                    % ("、".join(r["effects"]) or "自定义",
+                       r["width"], r["height"],
+                       float(r.get("duration") or 0),
+                       "原声保留" if r.get("audio") else "无音轨"))
+
+    if not r:
+        return "错误：这个动作没有执行（action=%s）" % action
+    if not r.get("ok"):
+        return "视频处理失败：%s" % r.get("error")
+
+    try:
+        size_mb = os.path.getsize(out) / 1048576.0
+    except Exception:
+        size_mb = 0
+    link = ("\n下载链接（**原样给用户**）：\n/api/doclib/download?rel=%s"
+            % urllib.parse.quote(rel))
+    return ("%s。成品 %.1f MB，已存进生成文库（%s）。%s"
+            % (note, size_mb, rel, link))
+
+
+def _do_cutout_image(arguments, ui_events, context):
+    """抠图：去掉背景，产出带透明通道的 PNG。
+
+    模型走 cutout（rembg + BiRefNet），**在 CPU 上跑** —— 不占显存，
+    不跟正在对话的模型抢那 12GB。
+    """
+    import base64 as _b64
+    from . import cutout, doclib, image_library
+
+    src = arguments.get("source")
+    src = src.strip() if isinstance(src, str) else src
+    if not src:
+        imgs = list((context or {}).get("images") or [])
+        if not imgs:
+            return ("错误：没有指定要抠的图。请让用户把图片拖进对话，"
+                    "或用 source 给出本地路径 / 文库文件名。")
+        src = imgs[0]
+
+    # 路径解析：本地文件 → 文库文件名 → 原样（可能是 base64 / data URL）
+    if isinstance(src, str) and not src.startswith("data:image/"):
+        if not os.path.isfile(src):
+            try:
+                fp = doclib.file_path(src)
+                if os.path.isfile(fp):
+                    src = fp
+            except Exception:
+                pass
+        looks_b64 = len(src) > 512 and not any(ch in src for ch in "\\/:*?\"<>|")
+        if not os.path.isfile(src) and not looks_b64:
+            return "错误：找不到要抠的图片：%s" % src
+
+    model = str(arguments.get("model") or "").strip() or cutout.MODEL_DEFAULT
+    if not cutout.is_downloaded(model):
+        _ui(ui_events, {"type": "status",
+                        "text": "首次使用，正在下载抠图模型 %s（约 1GB，需几分钟）…" % model})
+
+    r = cutout.cutout(src, model=model,
+                      alpha_matting=bool(arguments.get("alpha_matting")))
+    if not r.get("ok"):
+        return "抠图失败：%s" % r.get("error")
+
+    png = r["png"]
+    b64 = _b64.b64encode(png).decode("ascii")
+    rel = ""
+    try:
+        rel = (str(arguments.get("filename") or "").strip()
+               or "抠图_%s.png" % time.strftime("%H%M%S"))
+        if not rel.lower().endswith(".png"):
+            rel += ".png"
+        doclib.save_bytes(rel, png)
+    except Exception:
+        rel = ""
+    try:
+        image_library.save_image(
+            b64,
+            name=os.path.splitext(os.path.basename(rel))[0] if rel else "",
+            source="抠图", origin="cutout")
+    except Exception:
+        pass
+
+    _ui(ui_events, {"type": "image", "mime": "image/png", "b64": b64,
+                    "prompt": "抠图（%s）" % r["model"],
+                    "size": "%d x %d" % (r["width"], r["height"]),
+                    "cost_s": r.get("seconds"), "origin": "cutout"})
+
+    note = ("抠图完成（%s，%d×%d，透明背景已就绪，%.1f 秒）"
+            % (r["model"], r["width"], r["height"], r.get("seconds") or 0))
+    if not r.get("has_alpha"):
+        note += ("；⚠️ 结果里没检测到透明区域 —— 主体可能被当成了整张图，"
+                 "可改用 birefnet-portrait（人像）或开 alpha_matting 再试")
+    link = ""
+    if rel:
+        link = ("\\n下载链接（**原样给用户**）：\\n/api/doclib/download?rel=%s"
+                % urllib.parse.quote(rel))
+    return (note + "。图片已展示给用户。" + link
+            + "\\n※ 想换背景就把这张图交给 composite_image 做合成。")
+
+
+def _do_composite_image(arguments, ui_events, context):
+    """内容级合成：把主体贴到背景上。**主体不重画**，像素级保真。"""
+    import base64 as _b64
+    from . import composite as _comp, doclib, image_library
+
+    def _resolve(x):
+        if not isinstance(x, str):
+            return x
+        s = x.strip()
+        if not s or s.startswith("data:image/"):
+            return s
+        if os.path.isfile(s):
+            return s
+        try:
+            fp = doclib.file_path(s)
+            if os.path.isfile(fp):
+                return fp
+        except Exception:
+            pass
+        return s
+
+    subject = _resolve(arguments.get("subject"))
+    background = _resolve(arguments.get("background"))
+    if not subject:
+        imgs = list((context or {}).get("images") or [])
+        if imgs:
+            subject = imgs[0]
+        else:
+            return ("错误：缺少 subject（要放上去的主体）。"
+                    "请让用户拖入图片，或给出本地路径 / 文库文件名。")
+    if not background:
+        return "错误：缺少 background（背景图路径，或纯色如 FFFFFF）。"
+
+    r = _comp.composite(
+        subject, background,
+        position=str(arguments.get("position") or "center"),
+        scale=arguments.get("scale") or 1.0,
+        feather=arguments.get("feather") or 0.0,
+        shadow=bool(arguments.get("shadow")),
+        auto_cutout=bool(arguments.get("auto_cutout", True)),
+        margin=int(arguments.get("margin") or 0),
+        canvas=str(arguments.get("canvas") or ""),
+        model=str(arguments.get("model") or ""),
+        shrink=(int(arguments["shrink"]) if arguments.get("shrink") is not None else 1),
+    )
+    if not r.get("ok"):
+        return "图片合成失败：%s" % r.get("error")
+
+    png = r["png"]
+    b64 = _b64.b64encode(png).decode("ascii")
+    rel = ""
+    try:
+        rel = (str(arguments.get("filename") or "").strip()
+               or "合成_%s.png" % time.strftime("%H%M%S"))
+        if not rel.lower().endswith(".png"):
+            rel += ".png"
+        doclib.save_bytes(rel, png)
+    except Exception:
+        rel = ""
+    try:
+        image_library.save_image(
+            b64,
+            name=os.path.splitext(os.path.basename(rel))[0] if rel else "",
+            source="图片合成", origin="composite")
+    except Exception:
+        pass
+
+    _ui(ui_events, {"type": "image", "mime": "image/png", "b64": b64,
+                    "prompt": "图片合成（位置 %s）" % (r.get("position"),),
+                    "size": "%d x %d" % (r["width"], r["height"]),
+                    "cost_s": r.get("seconds"), "origin": "composite"})
+
+    note = ("合成完成（%d×%d，%.1f 秒）"
+            % (r["width"], r["height"], r.get("seconds") or 0))
+    if r.get("cutout"):
+        note += "；主体原本没有透明通道，已自动先抠图"
+    link = ""
+    if rel:
+        link = ("\\n下载链接（**原样给用户**）：\\n/api/doclib/download?rel=%s"
+                % urllib.parse.quote(rel))
+    return (note + "。图片已展示给用户。" + link
+            + "\\n※ 主体是**像素级真实合成**，长相 / 衣服 / 细节都没有被重画。"
+              "若主体相对背景过大过小或位置不合适，调 scale / position 再来一次即可。")
+
+
+# ---------- 文件系统 ----------
+def _do_list_directory(arguments):
+    path = arguments.get("path") or ""
+    if not path:
+        return "错误：未提供目录路径。"
+    if not os.path.isdir(path):
+        return f"错误：不是有效目录：{path}（若它是文件，请用 read_file）"
+    try:
+        items = sorted(os.listdir(path))
+    except PermissionError as e:
+        return f"错误：无权限访问该目录：{e}"
+    lines = []
+    for it in items:
+        full = os.path.join(path, it)
+        kind = "[目录]" if os.path.isdir(full) else "  文件"
+        try:
+            size = os.path.getsize(full) if os.path.isfile(full) else ""
+        except Exception:
+            size = ""
+        size_s = f"{size:,}B" if isinstance(size, int) else ""
+        lines.append(f"{kind} {it} {size_s}")
+    head = "\n".join(lines[:300])
+    if len(lines) > 300:
+        head += f"\n……（共 {len(lines)} 项，仅显示前 300 项）"
+    return f"目录 {path} 的内容：\n{head}"
+
+
+_VIDEO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".flv", ".wmv", ".m4v", ".ts"}
+
+
+def _do_read_file(arguments, ui_events):
+    path = arguments.get("path") or ""
+    if not path:
+        return "错误：未提供文件路径。"
+    # 视频：抽帧展示（让模型能“看”视频）
+    if os.path.splitext(path)[1].lower() in _VIDEO_EXTS:
+        from . import video as video_mod
+        res = video_mod.extract_frames(path)
+        if not res.get("ok"):
+            return f"错误：{res.get('error')}"
+        frames = res.get("frames", [])
+        for i, b64 in enumerate(frames):
+            _ui(ui_events, {"type": "image", "mime": "image/jpeg", "b64": b64,
+                            "from": path, "frame": i + 1, "total": len(frames)})
+        return (f"已读取视频并抽取 {len(frames)} 个关键帧展示给用户"
+                f"（时长约{res.get('duration')}秒）。请综合这些画面描述视频内容。")
+    result = file_tools.read_file(path)
+    if not result.get("ok"):
+        return f"错误：{result.get('error')}"
+    if result.get("type") == "image":
+        _ui(ui_events, {"type": "image", "mime": "image/jpeg", "b64": result["b64"], "from": path})
+        return f"已读取图片并展示给用户：{path}。请基于这张图片回答。"
+    # 文本/目录
+    if result.get("type") == "dir":
+        return f"这是目录，内容如下：\n{result.get('content','')}"
+    text = result.get("content", "")
+    if len(text) > 6000:
+        text_short = text[:6000]
+        return f"文件 {path} 的内容（截取前6000字符，共{len(text)}字符）：\n{text_short}"
+    return f"文件 {path} 的内容：\n{text}"
+
+
+def _do_search_files(arguments):
+    path = arguments.get("path") or ""
+    keyword = (arguments.get("keyword") or "").strip()
+    if not path or not keyword:
+        return "错误：需要同时提供 path 与 keyword。"
+    if os.path.isfile(path):
+        paths = [path]
+    elif os.path.isdir(path):
+        paths = []
+        try:
+            for ext in file_tools.TEXT_EXTS:
+                paths += glob.glob(os.path.join(path, "**", "*" + ext), recursive=True)
+        except Exception as e:
+            return f"错误：扫描目录失败：{e}"
+        paths = paths[:200]
+    else:
+        return f"错误：路径不存在：{path}"
+    hits = []
+    kws = [k.lower() for k in keyword.split()]
+    for p in paths[:200]:
+        text = file_tools.read_text(p)
+        if not text:
+            continue
+        low = text.lower()
+        if kws and any(k in low for k in kws):
+            idx = min((low.find(k) for k in kws if k in low), default=0)
+            seg = text[max(0, idx - 80): idx + 220].replace("\n", " ")
+            hits.append(f"--- {p} ---\n…{seg}…")
+    if not hits:
+        return f"在 {path} 下未找到包含“{keyword}”的文件。"
+    return "找到的匹配内容（最多返回30条）：\n\n" + "\n\n".join(hits[:30])
+
+
+def _do_write_file(arguments):
+    path = str(arguments.get("path") or "").strip()
+    content = arguments.get("content") or ""
+    if not path:
+        return "错误：未提供文件路径。"
+    # ⚠️ **必须绝对路径**。实测模型会传相对路径（"番茄钟/自定义时长深色模式.html"），
+    # 而相对路径是按**进程当前目录**解析的 —— 结果文件被扔进应用的安装目录里
+    # （实测：直接在源码仓库根目录下建了个「番茄钟/」文件夹）。
+    # 更坑的是工具还回了「已写入文件：…（3580 字节）」，看起来像保存成功了，
+    # 用户却根本找不着这个文件。宁可直接拒绝并告诉他该用哪个工具。
+    if not os.path.isabs(path):
+        return ("错误：write_file 只接受**绝对路径**（例如 D:\\项目\\out.py）。"
+                "如果用户是想让你把内容存进「生成文库」，"
+                "请改用 library 工具（action=write, name=文件名）。")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        size = os.path.getsize(path)
+        return f"已写入文件：{path}（{size} 字节）"
+    except Exception as e:
+        return f"写入失败：{e}"
+
+
+def _do_append_file(arguments):
+    path = str(arguments.get("path") or "").strip()
+    content = arguments.get("content") or ""
+    if not path:
+        return "错误：未提供文件路径。"
+    # 同 write_file：相对路径会落到进程 CWD（应用安装目录）去，必须挡掉
+    if not os.path.isabs(path):
+        return ("错误：append_file 只接受**绝对路径**（例如 D:\\项目\\log.txt）。"
+                "想写进「生成文库」请改用 library 工具（action=append）。")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(content)
+        return f"已追加内容到：{path}"
+    except Exception as e:
+        return f"追加失败：{e}"
+
+
+# ---------- 记忆工具 ----------
+def _do_remember(arguments, context=None):
+    """写入 / 改写 / 删除记忆。
+
+    scope=long 动长期记忆（跨对话共享），否则动当前对话的短期记忆。
+    短期记忆按对话隔离，所以必须从 context 拿 session —— 拿不到就拒绝，
+    免得内容写进了不知道哪个对话（等于丢失）。
+
+    action 三种：
+      add（默认）—— 新增一条
+      update      —— 把已有条目改成新内容（**目标的进展就靠它**）
+      forget      —— 删掉已有条目
+    update/forget 必须给 old（原句），用来定位是哪一条；
+    old 可以少写几个字（匹配是模糊的，见 memory._locate）。
+    """
+    content = (arguments.get("content") or arguments.get("section") or "").strip()
+    action = (arguments.get("action") or "add").strip().lower()
+    old = (arguments.get("old") or "").strip()
+    scope = (arguments.get("scope") or "").strip().lower()
+    if action in ("update", "forget") and not old:
+        # 没给原句就没法定位 —— 直接把新内容当新条目存，总比丢掉强
+        action, old = "add", ""
+    if not content and action != "forget":
+        return "错误：内容为空。"
+    is_long = scope in ("long", "global")
+
+    if is_long:
+        if action == "update":
+            r = memory_mod.update_long(old, content)
+            return {"replaced": "已更新长期记忆里的那条。",
+                    "added": "长期记忆里没找到那条，已作为新内容记下。",
+                    "skipped": "内容和原来一样，没有改动。"}.get(r, "已处理。")
+        if action == "forget":
+            return ("已从长期记忆里删除那条。" if memory_mod.drop_long(old)
+                    else "长期记忆里没找到那条，未改动。")
+        ok = memory_mod.merge_long(content)
+        return ("已记入长期记忆（所有对话都通用）。" if ok
+                else "这条已经在长期记忆里了，没有重复记。")
+
+    session = str(((context or {}).get("session")) or "").strip()
+    if not session:
+        return "错误：无法确定当前对话，记忆未写入。"
+    if action == "update":
+        r = memory_mod.update_short(session, old, content)
+        return {"replaced": "已更新本对话记忆里的那条。",
+                "added": "本对话记忆里没找到那条，已作为新内容记下。",
+                "skipped": "内容和原来一样，没有改动。"}.get(r, "已处理。")
+    if action == "forget":
+        return ("已从本对话记忆里删除那条。" if memory_mod.drop_short(session, old)
+                else "本对话记忆里没找到那条，未改动。")
+    ok = memory_mod.merge_short(session, content)
+    return ("已记入本次对话的短期记忆。" if ok else "这条已经在本对话记忆里了，没有重复记。")
+
+
+# ---------- 本地代码执行（"离线计算"）----------
+# 「一次性计算」的兜底上限（秒）。可在 config.json 里用 run_timeout 覆盖（5~600）。
+# ⚠️ 必须封顶：一个死循环就能把智能体挂住。
+RUN_TIMEOUT = 60
+# 「持续运行」型程序（计时器 / 服务器 / 图形界面 …）只给一个**冒烟测试窗口**：
+# 够证明它正常启动、前几秒的输出是对的，又不会让工具白等。
+RUN_PROBE = 8
+
+
+def run_timeout() -> int:
+    """当前生效的一次性计算上限（秒）。读 config，读不到就用默认值。"""
+    try:
+        from . import config as _cfg
+        v = int((_cfg.load_config() or {}).get("run_timeout") or RUN_TIMEOUT)
+    except Exception:
+        v = RUN_TIMEOUT
+    return max(5, min(v, 600))
+
+
+# ⚠️⚠️ **「跑不完」不等于「代码有问题」**（真实踩坑，必须记住）：
+# 用户让模型写了个番茄钟，模型用工具跑它 → 时限到了被强杀 → 工具原话是
+# "执行超过 25 秒，已被强制中止" → 模型**以为自己的代码写错了**，于是加线程、
+# 加 signal.SIGALRM 反复重写（而 signal.alarm 在 Windows 上根本不存在），
+# 三版代码越改越烂 —— 其实用户的原版代码一行都没错，番茄钟本来就该跑 2 小时。
+# 所以：能一眼看出"这程序要一直跑"时，就只做几秒冒烟测试，
+# 而且**必须把结论说成"这不是报错"**，并明确禁止模型去"绕过超时"。
+_PERSIST_PATS = (
+    (("while true", "while 1:", "while 1 :"),
+     "里面有个不会结束的循环（while True）"),
+    (("mainloop()", "mainloop ()", "turtle.done()"),
+     "是图形界面程序（进入事件循环后不会返回）"),
+    (("serve_forever", "http.server", "socketserver", "httpserver(",
+      "uvicorn.run", "app.run(", "run_simple("),
+     "是常驻服务器"),
+    (("pygame.", "cv2.imshow", "cv2.videocapture"),
+     "是窗口 / 摄像头程序"),
+    (("schedule.every", "asyncio.start_server"),
+     "是常驻的调度 / 服务程序"),
+)
+
+
+def looks_persistent(code: str) -> str:
+    """这段代码是不是「要一直跑」的程序？是就返回人话原因，不是返回空串。
+
+    判断**宁漏勿误**：漏判只是照旧按上限跑（和以前一样），
+    误判却会把一次正常的长计算当成常驻程序、几秒就砍掉。
+    """
+    body = "\n".join(ln for ln in (code or "").splitlines()
+                     if not ln.strip().startswith("#"))
+    low = body.lower()
+    for pats, reason in _PERSIST_PATS:
+        if any(p in low for p in pats):
+            return reason
+    # 循环里在 sleep → 计时器 / 轮询（进程不会自己结束）。
+    # 只在有 while 时才这么判：`for i in range(3): sleep(1)` 是有次数的等待，
+    # 会自己结束，误判成常驻就会白砍掉。
+    if "sleep(" in low and "while " in low:
+        return "是计时器 / 轮询程序（循环里在 sleep，进程不会自己结束）"
+    return ""
+
+
+def _timeout_result(out, err, risky, persistent: str, limit: int, t0: float) -> dict:
+    """被时限强杀后的统一结论。
+
+    ⚠️ 对「持续运行」型程序，措辞必须让人**一眼看出不是报错**，
+    并且顺带把"别改代码、别重跑"说死 —— 少了这句，模型就会去加线程、
+    用 Windows 上不存在的 signal.alarm 重写（实测踩过）。
+    """
+    if persistent:
+        note = ("（已运行 %d 秒仍在继续 —— 这是**持续运行**型的程序，"
+                "**不是报错**，代码没有问题。）" % limit)
+    else:
+        note = ("执行超过 %d 秒，已被强制中止（上面是中止前已经打印的内容）。\n"
+                "多半是死循环或卡住了，请检查循环的退出条件。" % limit)
+    err = ((err or "").strip() + "\n" + note).strip()
+    return {"needs_confirm": False, "risky": risky,
+            "out": (out or "").strip(), "err": err, "rc": None,
+            "seconds": round(time.time() - t0, 2),
+            # persistent 只在"被冒烟窗口截断"时才有值，跑完了就一定是空
+            "persistent": persistent,
+            "seconds_limit": limit}
+
+# 需要"先问用户"的操作。**不再一律拦截** ——
+# 用户明确要求：发现危险操作先问一句，批准了就执行，而不是直接拒绝。
+# 每项配一句人话理由，前端弹窗直接展示给用户看。
+# 说明：这不是滴水不漏的沙箱（真正的沙箱要上容器/权限隔离），
+# 而是一道"明显危险就先问一句"的闸门；开关默认关闭，风险由用户自己权衡。
+_PY_RISKY = (
+    (("shutil.rmtree", "os.removedirs", "os.rmdir", "os.remove", "os.unlink",
+      "del /f", "del /s", "rmdir /s", "rm -rf", "format c:", "format d:"), "会删除文件或目录"),
+    (("subprocess", "os.system", "os.popen", "os.exec", "os.startfile",
+      "os.spawn", "os.fork"), "会启动外部程序"),
+    (("winreg", "reg delete", "reg add"), "会修改 Windows 注册表"),
+    (("shutdown", "reboot"), "可能影响系统开关机"),
+    (("socket", "urllib", "requests", "httpx", "urlopen", "ftplib", "smtplib"),
+     "会联网（这个模块本来是给'离线计算'用的）"),
+    (("ctypes",), "会直接调用系统底层接口"),
+    (("eval(", "exec("), "会动态执行字符串代码"),
+)
+
+
+def scan_risky(code: str) -> list:
+    """返回代码里命中的风险项（人话描述）。空列表 = 没发现风险。
+
+    注释行先剔掉 —— 免得"注释里提了一句 subprocess"也被当成风险。
+    """
+    scanned = "\n".join(ln for ln in (code or "").splitlines()
+                         if not ln.strip().startswith("#"))
+    low = scanned.lower()
+    hits = []
+    for pats, label in _PY_RISKY:
+        if any(p in low for p in pats):
+            hits.append(label)
+    return hits
+
+
+def run_code(code: str, allow_risky: bool = False, stdin_text: str = "") -> dict:
+    """执行一段 Python，返回**结构化**结果（工具与前端接口共用）。
+
+    字段：needs_confirm / risky / out / err / rc / seconds / persistent
+    needs_confirm=True 表示"检测到风险但还没获批准"，**没有执行**。
+    persistent 非空 = 这段代码是"要一直跑"的那种，只做了几秒冒烟测试，
+    **时限到了不是报错**（见 looks_persistent 上面的说明）。
+
+    stdin_text：**预先喂给程序的标准输入**（一行对应一次 input()）。
+        ⚠️ 这个口子必须有：程序里有 `input()` 时没人喂就会立刻拿到 EOF ——
+        实测模型写了个计时器，一问"请输入秒数"就直接
+        `ValueError: invalid literal for int() with base 10: ''`，
+        然后它误以为自己的代码写错了。
+        不喂（空串）时管道会立刻关闭 → 照旧是 EOF，不会把智能体挂住。
+    """
+    code = str(code or "").strip()
+    if not code:
+        return {"needs_confirm": False, "risky": [], "out": "", "err": "代码为空",
+                "rc": -1, "seconds": 0, "persistent": ""}
+    risky = scan_risky(code)
+    if risky and not allow_risky:
+        return {"needs_confirm": True, "risky": risky, "out": "", "err": "",
+                "rc": None, "seconds": 0, "persistent": ""}
+    import tempfile
+    import subprocess as _sp
+    t0 = time.time()
+    # 识别"要一直跑"的程序 → 只跑几秒冒烟测试，结论按"不是报错"说
+    persistent = looks_persistent(code)
+    limit = RUN_PROBE if persistent else run_timeout()
+    with tempfile.TemporaryDirectory(prefix="mm_run_") as d:
+        path = os.path.join(d, "snippet.py")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(code)
+        except Exception as exc:
+            return {"needs_confirm": False, "risky": risky, "out": "", "rc": -1,
+                    "seconds": 0, "persistent": "", "err": "无法写入临时文件：%s" % exc}
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        # 不让被执行的代码摸到应用的数据目录
+        env.pop("MM_DATA_DIR", None)
+        try:
+            # ⚠️ 用 Popen 而不是 subprocess.run：**run 的 TimeoutExpired 会把
+            # 已经打印出来的内容一起丢掉**（实测：跑满时限的计时器在界面上
+            # 显示成"（没有输出）"）。Popen 在强杀之后还能把已产出的输出收回来。
+            # stdin 接管道（不是 DEVNULL）：程序里 input() 时要能喂进去；
+            # 空输入时 communicate 会关掉它 → 仍是 EOF。
+            p = _sp.Popen([sys.executable, "-X", "utf8", "-u", "snippet.py"],
+                          cwd=d, env=env, stdin=_sp.PIPE,
+                          creationflags=_NOWIN,
+                          stdout=_sp.PIPE, stderr=_sp.PIPE,
+                          text=True, encoding="utf-8", errors="replace")
+        except Exception as exc:
+            return {"needs_confirm": False, "risky": risky, "out": "", "rc": -1,
+                    "seconds": round(time.time() - t0, 2), "persistent": "",
+                    "err": "无法启动：%s: %s" % (type(exc).__name__, exc)}
+        try:
+            _stdin = str(stdin_text or "").replace("\r\n", "\n")
+            # 结尾补一个换行：程序里最后一次 input() 才不会一直等
+            if _stdin and not _stdin.endswith("\n"):
+                _stdin += "\n"
+            out, err = p.communicate(input=_stdin, timeout=limit)
+            rc = p.returncode
+        except _sp.TimeoutExpired:
+            p.kill()
+            try:
+                out, err = p.communicate()      # 收尸并取回已产出的输出
+            except Exception:
+                out, err = "", ""
+            return _timeout_result(out, err, risky, persistent, limit, t0)
+        except Exception as exc:
+            return {"needs_confirm": False, "risky": risky, "out": "", "rc": -1,
+                    "seconds": round(time.time() - t0, 2), "persistent": "",
+                    "err": "%s: %s" % (type(exc).__name__, exc)}
+    return {"needs_confirm": False, "risky": risky, "out": (out or "").strip(),
+            "err": (err or "").strip(), "rc": rc, "persistent": "",
+            "seconds": round(time.time() - t0, 2)}
+
+
+def run_file(path: str, allow_risky: bool = False, args: str = "",
+             stdin_text: str = "") -> dict:
+    """运行**磁盘上真实存在的** .py 文件（工作区里的项目文件）。
+
+    和 `run_code` 的区别：这里 **cwd 设成文件所在目录**，并且直接跑原文件 ——
+    这样脚本里的相对路径（`open("data.txt")`）、`__file__` 都是对的。
+    协同开发时"脚本 + 它的输入数据"就摆在同一个目录里，这样才跑得通；
+    以前塞进临时目录跑，一律说"找不到文件"。
+
+    风险扫描同样保留：检测到危险操作先问用户，不静默放行。
+    """
+    p = os.path.abspath(str(path or ""))
+    if not os.path.isfile(p):
+        return {"needs_confirm": False, "risky": [], "out": "", "rc": -1,
+                "seconds": 0, "err": "文件不存在"}
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            code = f.read()
+    except Exception as exc:
+        return {"needs_confirm": False, "risky": [], "out": "", "rc": -1,
+                "seconds": 0, "err": "读取失败：%s" % exc}
+    risky = scan_risky(code)
+    if risky and not allow_risky:
+        return {"needs_confirm": True, "risky": risky, "out": "", "err": "",
+                "rc": None, "seconds": 0, "persistent": ""}
+    import subprocess as _sp
+    t0 = time.time()
+    # 计时器 / 服务器这类"要一直跑"的程序：只给几秒冒烟测试，
+    # 并把结论说成"不是报错"（理由见 looks_persistent 上面的说明）。
+    persistent = looks_persistent(code)
+    limit = RUN_PROBE if persistent else run_timeout()
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env.pop("MM_DATA_DIR", None)      # 被跑的代码不该摸到应用数据目录
+    # 让子目录里的脚本也能 import 项目根的模块（Python 默认只把**脚本所在目录**
+    # 放进 sys.path，而 AI 生成的项目常把工具模块放根目录、脚本放子目录）。
+    try:
+        from . import workspace as _ws2
+        _pp = _ws2.root(_ws2.active_project())
+        _old_pp = env.get("PYTHONPATH") or ""
+        env["PYTHONPATH"] = _pp + (os.pathsep + _old_pp if _old_pp else "")
+    except Exception:
+        pass
+    try:
+        # 用 Popen + communicate（而不是 subprocess.run）：超时分支里还能
+        # **拿到已经打印出来的内容**。run 的 TimeoutExpired 会把缓冲一起丢掉，
+        # 于是"跑满时限的计时器"在界面上显示成"（没有输出）"—— 实测踩过。
+        # 命令行参数：像 argparse 这种工具，**不给参数就什么都不做** ——
+        # 模型会以为"跑通了没问题"，其实根本没验到东西。让它可以传参。
+        import shlex as _shlex
+        _extra = []
+        if str(args or "").strip():
+            try:
+                _extra = _shlex.split(str(args), posix=True)
+            except ValueError:
+                _extra = []
+        pr = _sp.Popen([sys.executable, "-X", "utf8", "-u", os.path.basename(p)] + _extra,
+                       cwd=os.path.dirname(p) or ".", env=env,
+                       creationflags=_NOWIN,
+                       # stdin 也接管道：模型可以**预先喂输入**来测 input() 程序
+                       # （communicate 结束时会把管道关掉，所以没喂输入的程序
+                       #   会照旧拿到 EOF，不会挂住智能体）。
+                       stdin=_sp.PIPE,
+                       stdout=_sp.PIPE, stderr=_sp.PIPE,
+                       text=True, encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return {"needs_confirm": False, "risky": risky, "out": "", "rc": -1,
+                "seconds": round(time.time() - t0, 2), "persistent": "",
+                "err": "无法启动：%s: %s" % (type(exc).__name__, exc)}
+    try:
+        _stdin = str(stdin_text or "").replace("\r\n", "\n")
+        # 结尾补一个换行：程序里最后一次 input() 才不会一直等
+        if _stdin and not _stdin.endswith("\n"):
+            _stdin += "\n"
+        out, err = pr.communicate(input=_stdin, timeout=limit)
+        rc = pr.returncode
+    except _sp.TimeoutExpired:
+        pr.kill()
+        try:
+            out, err = pr.communicate()          # 收尸并取回已产出的输出
+        except Exception:
+            out, err = "", ""
+        return _timeout_result(out, err, risky, persistent, limit, t0)
+    return {"needs_confirm": False, "risky": risky, "persistent": "",
+            "out": (out or "").strip(), "err": (err or "").strip(),
+            "rc": rc, "seconds": round(time.time() - t0, 2)}
+
+
+def _do_workspace_list() -> str:
+    from . import workspace as _ws
+    t = _ws.tree()
+    files = t.get("files") or []
+    head = "【当前项目：%s】" % t.get("project")
+    if not files:
+        return head + "\n项目里还没有任何文件。可以直接用 workspace_write 新建。"
+    lines = [head + "共 %d 个文件：" % len(files)]
+    lines += ["· %s（%d 字节）" % (f["rel"], f["size"]) for f in files[:200]]
+    if len(files) > 200:
+        lines.append("…（只列了前 200 个）")
+    return "\n".join(lines)
+
+
+def _do_workspace_read(arguments) -> str:
+    from . import workspace as _ws
+    rel = str((arguments or {}).get("rel") or "").strip()
+    r = _ws.read_text(rel)
+    if not r.get("ok"):
+        return "读取失败：%s" % r.get("error")
+    text = r.get("text") or ""
+    tip = "" if len(text) <= 6000 else "\n\n（文件较长，这里只显示前 6000 字）"
+    return "【工作区文件 %s】共 %d 字：\n\n%s%s" % (rel, len(text), text[:6000], tip)
+
+
+def _do_workspace_write(arguments, ui_events=None) -> str:
+    from . import workspace as _ws
+    args = arguments or {}
+    rel = str(args.get("rel") or args.get("name") or "").strip()
+    text = args.get("text")
+    if text is None:
+        text = args.get("content") or ""
+    try:
+        # by="ai" → 前端只把"AI 的改动"列进待审阅，可一键撤销
+        r = _ws.write_text(rel, str(text), by="ai")
+    except ValueError as e:
+        return "写入失败：%s" % e
+    if not r.get("ok"):
+        return "写入失败：%s" % r.get("error")
+    if isinstance(ui_events, list):
+        # 让前端开发台刷新文件树/打开的内容，并把这条改动标成"待审阅"
+        ui_events.append({"type": "workspace", "act": "write", "rel": r["rel"],
+                          "chars": r.get("chars", 0),
+                          "change_id": r.get("change_id") or "",
+                          "project": _ws.active_project()})
+    return "已写入工作区文件：%s（%d 字）%s" % (
+        r["rel"], r.get("chars", 0),
+        "；旧版已备份进回收站" if r.get("backup") else "")
+
+
+def _do_workspace_run(arguments, ui_events=None) -> str:
+    """跑工作区里的 .py（cwd = 文件所在目录），把真实输出回给模型。"""
+    from . import workspace as _ws
+    rel = str((arguments or {}).get("rel") or "").strip()
+    try:
+        p = _ws.abs_path(rel)
+    except ValueError as e:
+        return "运行失败：%s" % e
+    if not os.path.isfile(p):
+        return "运行失败：工作区里没有这个文件 → %s" % rel
+    if not rel.lower().endswith(".py"):
+        return ("当前只能直接运行 .py 文件。如果你想验证网页，"
+                "写好后让用户点开发台上的「🌐 预览」。")
+    r = run_file(p, allow_risky=False, args=str((arguments or {}).get("args") or ""),
+                 stdin_text=str((arguments or {}).get("stdin") or ""))
+    if r.get("needs_confirm"):
+        risk = "、".join(r.get("risky") or [])
+        return ("这段代码里有需要用户确认的操作（%s），**没有执行**。"
+                "请换成不涉及这些操作的写法，或先跟用户说明再试。" % risk)
+    if isinstance(ui_events, list):
+        # ⚠️ 一定要带 `rel`：前端要显示「AI 运行结果 · xxx.py」，
+        # 不带的话用户不知道模型刚才跑的是哪个文件（实测反馈过）。
+        ui_events.append({"type": "code", "rel": rel, "code": _read_text_safe(p),
+                          "out": r.get("out") or "", "err": r.get("err") or "",
+                          "rc": r.get("rc"), "seconds": r.get("seconds"),
+                          "risky": r.get("risky") or []})
+    head = "【运行 %s】\n" % rel
+    text = head + _format_py_result(r)
+    # 同上：有 input() 又没喂 stdin → 说清"不是代码错了"
+    if "input(" in _read_text_safe(p) and not str((arguments or {}).get("stdin") or ""):
+        text += ("\n\n⚠️ 这个程序里有 `input()`，而这次**没喂 stdin** —— "
+                 "它读到的是 EOF（不是代码写错了）。要验证就重跑一次并带上 `stdin`"
+                 "（一行对应一次输入），或者让用户点代码卡片上的 ▶ 运行、在输入框里自己输。")
+    return text
+
+
+# ---------------------------------------------------------------- 项目管理
+# 「完全自动开发项目」必需的一组工具：建项目 / 列项目 / 切项目 / 建目录 / 删 / 移动。
+# 底层能力 workspace 模块早就有（create_project / mkdir / remove / rename），
+# 以前只是没交给模型 —— 结果它只能改已有文件，**没法从零把项目搭起来**。
+# 有了这组，用户一句话就能让它自建项目、铺目录、写文件、跑、报错自己修。
+
+def _do_workspace_projects() -> str:
+    from . import workspace as _ws
+    ps = _ws.projects()
+    if not ps:
+        return "现在一个项目都没有。可以直接用 workspace_new_project 建一个。"
+    cur = _ws.active_project()
+    lines = ["【开发工作区里的项目】（· 标记的是当前项目）"]
+    for p in ps:
+        mark = "· " if p.get("name") == cur else "  "
+        lines.append("%s%s（%d 个文件）" % (mark, p.get("name"), p.get("files", 0)))
+    return "\n".join(lines)
+
+
+def _do_workspace_new_project(arguments, ui_events=None) -> str:
+    from . import workspace as _ws
+    name = str((arguments or {}).get("name") or "").strip()
+    if not name:
+        return "建项目失败：要给一个项目名（如 todo-app）。"
+    r = _ws.create_project(name)
+    if not r.get("ok"):
+        # ⚠️⚠️ **同名项目已经存在时，必须"切过去"，绝不能"报错返回"。**
+        # 这是实测抓到的真 bug（原来就是直接 return 错误）：
+        # 模型随后照常调 workspace_write，而当前项目**压根没切**，
+        # 于是文件全落进了上一个项目 —— 用户看到的正是
+        # "项目建了、里面是空的，文件跑到别的项目去了"。
+        # 而用户/模型的意图很明确：叫这个名字的，就用它。
+        if "已存在" in str(r.get("error") or ""):
+            real = _ws.set_active_project(name)
+            if isinstance(ui_events, list):
+                ui_events.append({"type": "workspace", "act": "project",
+                                  "project": real})
+            return ("项目「%s」已经存在，已**直接切过去使用**（没有新建）。"
+                    "接着用 workspace_write 往里写文件即可，路径相对项目根。"
+                    % real)
+        return "建项目失败：%s" % r.get("error")
+    real = r.get("name") or name
+    _ws.set_active_project(real)          # 建完就切过去，后续文件都写进新项目
+    if isinstance(ui_events, list):
+        ui_events.append({"type": "workspace", "act": "project",
+                          "project": real})
+    return ("已新建项目「%s」并切入。接下来用 workspace_write 往里写文件"
+            "（路径是**相对项目根**的，例如 main.py、src/util.py；"
+            "父目录会自动创建，不用单独建目录）。" % real)
+
+
+def _do_workspace_use_project(arguments, ui_events=None) -> str:
+    from . import workspace as _ws
+    name = str((arguments or {}).get("name") or "").strip()
+    try:
+        real = _ws.set_active_project(name)
+    except Exception as e:
+        return "切项目失败：%s" % e
+    if isinstance(ui_events, list):
+        ui_events.append({"type": "workspace", "act": "project", "project": real})
+    return "已切到项目「%s」。之后的相对路径都相对于它。" % real
+
+
+def _do_workspace_mkdir(arguments, ui_events=None) -> str:
+    from . import workspace as _ws
+    rel = str((arguments or {}).get("rel") or "").strip()
+    try:
+        r = _ws.mkdir(rel)
+    except ValueError as e:
+        return "建目录失败：%s" % e
+    if not r.get("ok"):
+        return "建目录失败：%s" % r.get("error")
+    if isinstance(ui_events, list):
+        ui_events.append({"type": "workspace", "act": "mkdir", "rel": r.get("rel")})
+    return "已新建目录：%s" % r.get("rel")
+
+
+def _do_workspace_delete(arguments, ui_events=None) -> str:
+    from . import workspace as _ws
+    rel = str((arguments or {}).get("rel") or "").strip()
+    try:
+        r = _ws.remove(rel)
+    except ValueError as e:
+        return "删除失败：%s" % e
+    if not r.get("ok"):
+        return "删除失败：%s" % r.get("error")
+    if isinstance(ui_events, list):
+        ui_events.append({"type": "workspace", "act": "delete", "rel": rel})
+    return "已删除 %s（进了 _回收站，需要时能捞回来）" % rel
+
+
+def _do_workspace_move(arguments, ui_events=None) -> str:
+    from . import workspace as _ws
+    a = arguments or {}
+    rel = str(a.get("rel") or "").strip()
+    to = str(a.get("to") or a.get("new") or "").strip()
+    try:
+        r = _ws.rename(rel, to)
+    except ValueError as e:
+        return "移动失败：%s" % e
+    if not r.get("ok"):
+        return "移动失败：%s" % r.get("error")
+    if isinstance(ui_events, list):
+        ui_events.append({"type": "workspace", "act": "move",
+                          "rel": rel, "to": r.get("rel")})
+    return "已把 %s 移到 %s" % (rel, r.get("rel"))
+
+
+def _do_workspace_pack(arguments=None) -> str:
+    """把当前项目打包成 zip，给用户一个能直接点的下载链接。
+
+    用户要求「通过 AI 打包」—— 所以做成工具，而不是界面按钮：
+    界面上那个「📦 打包」随开发台一起去掉了，**能力保留在这里**。
+    """
+    from . import workspace as _ws
+    a = arguments or {}
+    proj = str(a.get("project") or "").strip() or _ws.active_project()
+    try:
+        data, name = _ws.export_zip(proj)
+    except Exception as e:
+        return "打包失败：%s" % e
+    # 同时在磁盘上留一份：用户想直接在文件管理器里拿也行
+    saved = ""
+    try:
+        out_dir = os.path.join(os.path.dirname(_ws.root(proj)), "_导出")
+        os.makedirs(out_dir, exist_ok=True)
+        fp = os.path.join(out_dir, name)
+        with open(fp, "wb") as f:
+            f.write(data)
+        saved = fp
+    except Exception:
+        pass
+    lines = ["已把项目「%s」打包好：%s（%.1f KB）。" % (proj, name, len(data) / 1024.0)]
+    lines.append("下载链接（直接点就能存下来）：/api/ws/zip?proj=%s" % proj)
+    if saved:
+        lines.append("文件也在：%s" % saved)
+    return "\n".join(lines)
+
+
+# Windows 文件名里不允许的字符 —— 标题里常带「？」「：」这类，必须洗掉
+_BAD_FN = re.compile(r'[\\/:*?"<>|\r\n\t]')
+
+
+def _pptx_text_chars(slides) -> int:
+    """粗略统计一份 PPT 规格里的**正文字数**（判断内容够不够充实用）。
+
+    只求量级正确：把各版式里承载文字的那些字段加起来即可。
+    """
+    n = 0
+    for sl in (slides or []):
+        if not isinstance(sl, dict):
+            n += len(str(sl))
+            continue
+        for k in ("title", "text", "subtitle", "name", "value", "unit", "note"):
+            n += len(str(sl.get(k) or ""))
+        q = sl.get("quote")
+        if isinstance(q, dict):                      # quote 版式是嵌套对象
+            n += len(str(q.get("text") or "")) + len(str(q.get("from") or ""))
+        elif q:
+            n += len(str(q))
+        for k in ("bullets", "items", "left", "right", "cards", "stats",
+                  "steps", "nodes", "series"):
+            v = sl.get(k)
+            if not isinstance(v, list):
+                continue
+            for it in v:
+                if isinstance(it, dict):
+                    for kk in ("text", "title", "label", "value", "unit",
+                               "desc", "name", "quote"):
+                        n += len(str(it.get(kk) or ""))
+                else:
+                    n += len(str(it))
+        for k in ("header", "rows"):
+            v = sl.get(k)
+            if isinstance(v, list):
+                for it in v:
+                    if isinstance(it, (list, tuple)):
+                        n += sum(len(str(x)) for x in it)
+                    elif isinstance(it, dict):
+                        n += sum(len(str(x)) for x in it.values())
+                    else:
+                        n += len(str(it))
+    return n
+
+
+# 这些字段一出现，说明这一页是靠**表格 / 图表 / 配图 / 卡片**撑起来的 ——
+# 它们的"字数"天然就少，但页面并不空，不该算进"内容密度"。
+# ⚠️ 2026-09-26 加（踩过的坑）：只按字数判密度时，一份 11 页的稿子里
+# 表格页(15 字)/图表页(10 字)/配图页(13 字) 全被算成"很薄"，
+# 工具于是反复喊"请再调一次"，模型连改 7 版把额度耗光 ——
+# 用户拿到的反而是一份"改到最后没写完"的稿子。
+_STRUCTURED_PAGE_KEYS = ("table", "chart", "diagram", "image", "image_query",
+                         "image_prompt", "bg_image", "cover_image", "gallery")
+
+
+def _page_is_structured(sl) -> bool:
+    """这一页是不是靠表格/图表/配图构成（而不是靠文字）？"""
+    if not isinstance(sl, dict):
+        return False
+    for k in _STRUCTURED_PAGE_KEYS:
+        v = sl.get(k)
+        if isinstance(v, dict):
+            if any(v.values()):
+                return True
+        elif isinstance(v, (list, tuple)):
+            if v:
+                return True
+        elif str(v or "").strip():
+            return True
+    return False
+
+
+def _pptx_text_density(slides) -> tuple:
+    """返回 (正文字数, 纯文字页数) —— **表格/图表/配图页不计**。
+
+    这样"密度"反映的才是"该写字的地方写够了没有"，
+    而不是把结构化的页面当成偷懒。
+    """
+    # 封面/结尾页天然字少，也不算（它们是版式，不是内容页）。
+    # ⚠️ 只在该页确实"只有标题没有正文"时才剥掉，并且首尾**各自判断** ——
+    #    不能因为第一页像封面就把最后一页也无条件砍掉（那会白丢一页的分母）。
+    body = [sl for sl in (slides or []) if not _page_is_structured(sl)]
+    if len(body) > 4 and _is_plain_coverish(body[0]):
+        body = body[1:]
+    if len(body) > 4 and _is_plain_coverish(body[-1]):
+        body = body[:-1]
+    text_pages = len(body)
+    chars = _pptx_text_chars(body)
+    return chars, text_pages
+
+
+def _is_plain_coverish(sl) -> bool:
+    """像封面/结尾那样"只有标题+副标题、没有正文"的页？"""
+    if not isinstance(sl, dict):
+        return False
+    has_body = any(sl.get(k) for k in ("bullets", "items", "cards", "stats",
+                                       "steps", "left", "right", "quote",
+                                       "table", "chart"))
+    return not has_body
+
+
+# HTML 实体 → 真字符。
+# ⚠️ 2026-09-28 实测：模型把正文当 Markdown 写时，会顺手把行首的 `>` 转义成
+# `&gt;`（它以为在写 HTML），而文档工具只当纯文本排进去 —— 用户就在 Word 里
+# 看到字面量 "&gt; 某个瞬间突然意识到…"。必须在**进 docx 之前**还原。
+# ⚠️ 顺序：`&amp;` 必须放最后，否则 `&amp;gt;` 会被二次还原成 `>`。
+_HTML_ENTITY_MAP = (
+    ("&nbsp;", " "), ("&#160;", " "),
+    ("&lt;", "<"), ("&gt;", ">"),
+    ("&quot;", '"'), ("&#34;", '"'),
+    ("&apos;", "'"), ("&#39;", "'"),
+    ("&mdash;", "—"), ("&ndash;", "–"), ("&hellip;", "…"),
+    ("&middot;", "·"), ("&times;", "×"), ("&laquo;", "«"), ("&raquo;", "»"),
+    ("&amp;", "&"),
+)
+
+
+def unescape_html_entities(s):
+    """把常见 HTML 实体还原成真字符（`&` 放最后，避免二次还原）。"""
+    if not s or "&" not in s:
+        return s
+    for k, v in _HTML_ENTITY_MAP:
+        if k in s:
+            s = s.replace(k, v)
+    return s
+
+
+def _fix_filename(s):
+    """把模型误传的 **URL 编码文件名**还原成真实文件名。
+
+    ⚠️ 2026-09-28 实测踩到：模型调 `library` 读文件时，name 传的是
+    `%E5%B1%B1%E4%B8%9C%E8%88%B0%E4%B8%93%E9%A2%98%E6%8A%A5%E5%91%8A.docx`
+    （"山东舰专题报告.docx" 的 URL 编码）—— 因为它**照抄了 make_docx /
+    export 返回的下载链接**，而那个链接里的文件名是 `urllib.parse.quote(base)`
+    编码过的。结果工具直接报「文件不存在」，用户看到的就是
+    "上传的文件读不出来 / 乱读一遍"。
+
+    这里统一容错：看着像 URL 编码就解一次；解不出合法结果就原样返回。
+    工具侧兜住，不指望模型每次都传对。
+    """
+    s = str(s or "").strip()
+    # ⚠️ 2026-09-28 实测：模型会连"引用文件名时的包裹符号"一起抄进来 ——
+    # 用户说「读一下《山东舰专题报告.md》」，它就把 name 传成 `《山东舰专题报告.md》`
+    # （有时还带反引号、中英文引号、尖括号）。这些显然不是文件名的一部分，去掉。
+    s = s.strip('《》〈〉「」『』“”"\'`<>【】[]').strip()
+    if not s or "%" not in s:
+        return s
+    try:
+        d = urllib.parse.unquote(s)
+    except Exception:
+        return s
+    # 只在"确实变了、且没解出替换字符"时才采用
+    if d and d != s and "\ufffd" not in d:
+        return d
+    return s
+
+
+def _clean_stray_inline_html(obj):
+    """递归清理模型误写进内容里的 HTML 内联标签（**保留标签里的文字**）。
+
+    ⚠️ 2026-09-27 实测踩到：让模型「查天气，据此写份出行建议，**做成 Word 文档**」，
+    它把正文写成这样：
+        • <b>校内日常</b>
+        • 上课前务必涂抹 SPF50+ 防晒霜<br><small>(推荐：…)</small>
+    文档工具不认这些标签，会**当纯文本原样排进 docx** ——
+    用户在正式文档里看到一堆字面量 `<b>` / `<br>` / `<small>`（实测 docx 里就是这样）。
+
+    只清理**实测出现过的那几种内联标签**，不做通用 HTML 解析 ——
+    免得把"用户真的在讲 HTML"的内容也吃掉（那种多半写 `<div>` / `<span>`，
+    而且通常放在代码块里）。
+    """
+    if isinstance(obj, str):
+        s = unescape_html_entities(obj)                # 先还原实体，再清标签
+        if "<" not in s:
+            return s
+        s = re.sub(r"(?i)<br\s*/?>", "\n", s)          # 换行标签 → 真换行
+        for t in ("b", "strong", "i", "em", "u", "s", "small", "sub", "sup", "mark"):
+            s = re.sub(r"(?i)</?%s\s*/?>" % t, "", s)   # 成对/单个都去掉，只留文字
+        return s
+    if isinstance(obj, list):
+        return [_clean_stray_inline_html(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _clean_stray_inline_html(v) for k, v in obj.items()}
+    return obj
+
+
+def _do_make_pptx(arguments=None, ui_events=None) -> str:
+    """把结构化内容生成 .pptx，存进生成文库，返回可点下载链接。
+
+    ⚠️ 生成的是**二进制**文件，所以走 `doclib.save_bytes` + `/api/doclib/download`，
+    不能用 `doclib.write_file`（那个是给文本用的，二进制会被当文字写坏）。
+    """
+    import tempfile
+
+    from . import doclib as _dl
+    from . import pptx_maker as _pp
+
+    a = _clean_stray_inline_html(arguments or {})
+    title = str(a.get("title") or "").strip()
+    slides = _pick_slides(a)
+    if not title:
+        # 同上：模型忘给 title 时，用第一页的标题兜底，别让它反复重试
+        for sl in slides:
+            if str(sl.get("title") or "").strip():
+                title = str(sl["title"]).strip()
+                break
+        if not title:
+            title = str(a.get("filename") or "").strip() or "演示文稿"
+    if not slides:
+        return ("错误：缺少 slides（至少要有一页内容）。"
+                "请先想好大纲：每页给一个 title 和几条 bullets。")
+
+    base = str(a.get("filename") or title).strip()
+    base = _BAD_FN.sub("", base).strip(" .")[:60] or "演示文稿"
+    if not base.lower().endswith(".pptx"):
+        base += ".pptx"
+
+    tmp = os.path.join(tempfile.gettempdir(),
+                       "mm_pptx_%d.pptx" % int(time.time() * 1000))
+    r = _pp.build_pptx(
+        tmp, title, slides,
+        subtitle=str(a.get("subtitle") or ""),
+        author=str(a.get("author") or ""),
+        theme=str(a.get("theme") or "blue"),
+        end_text=str(a.get("end_text") or "谢谢观看"),
+        font=str(a.get("font") or "yahei"),
+        img_bases=_img_bases(),
+        logo=str(a.get("logo") or ""),
+        cover_image=str(a.get("cover_image") or ""),
+        logo_pos=str(a.get("logo_pos") or "tr"),
+        logo_size=float(a.get("logo_size") or 0.5),
+        colors=a.get("colors"),
+    )
+    if not r.get("ok"):
+        return "生成 PPT 失败：%s" % r.get("error")
+
+    try:
+        with open(tmp, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        return "读取生成的临时文件失败：%s" % e
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+    w = _dl.save_bytes(base, data)
+    if not w.get("ok"):
+        return "写入生成文库失败：%s" % w.get("error")
+
+    if isinstance(ui_events, list):
+        # 让「生成文库」面板**立刻**刷新并选中这个文件。
+        # ⚠️ 不推这个事件的话，文件明明已经落盘了、界面还停在旧列表，
+        #    用户会以为"没存进文件库"（实测反馈）。
+        ui_events.append({"type": "library", "act": "write", "rel": base})
+
+    n_pages = r.get("slides") or len(slides)
+    tip = ""
+    if r.get("warnings"):
+        tip = "\n（提示：%s）" % "；".join(r["warnings"][:3])
+    # 把**实测内容密度**回传给模型（2026-09-26 用户要求「太简单要修正」）。
+    # 8B 模型常常只写三四条短句就交差，而工具描述里的"丰富度要求"它未必照做；
+    # 给它一个数字，它才知道自己写得够不够、要不要再补一版。
+    _chars, _text_pages = _pptx_text_density(slides)
+    if _text_pages >= 4:
+        _dense = _chars / float(_text_pages)
+        # ⚠️ 2026-09-26 收紧判据。原来 < 55 才算"偏薄"，实测出现过
+        #    **8 页 / 平均 85 字** 被判定为"合格"—— 可我们要的是
+        #    "每页 3~6 条、每条 15~40 字"（即 45~240，目标 ~120）。
+        #    85 落在下沿，成稿明显单薄。现在两个维度分开说，模型才知道差在哪：
+        _thin = _dense < 110
+        _few = n_pages < 8
+        if _thin or _few:
+            _why = []
+            if _few:
+                _why.append("页数偏少（%d 页，这类汇报一般 8~15 页）" % n_pages)
+            if _thin:
+                _why.append("纯文字页平均仅 %.0f 字（内容充实的话应在 110 字以上）" % _dense)
+            tip += ("\n（自检：%s。**请再补一次**：每页 3~6 条要点、每条 15~40 字的"
+                    "完整句子，别只是重发一份一样的。⚠️ **只补这一次**，补完就交差 —— "
+                    "表格 / 图表 / 配图页不算薄，别为它们反复重做。）"
+                    % "；".join(_why))
+        else:
+            tip += ("\n（自检：%d 页 / %d 张纯文字页平均约 %.0f 字，内容密度合格。）"
+                    "\n※ 表格页、图表页、配图页**不计入密度**（它们内容不在字数上），"
+                    "所以这里合格就**不要再重做**了。" % (n_pages, _text_pages, _dense))
+    return ("已生成 PPT《%s》——共 %d 页，%.0f KB。\n"
+            "下载链接（**直接点就能存下来，原样给用户**）：\n"
+            "/api/doclib/download?rel=%s\n"
+            "（源文件也放在「生成文库」里，文件名 %s。"
+            "之后要改它，用 edit_office 传这个文件名。）%s"
+            % (title, n_pages, len(data) / 1024.0,
+               urllib.parse.quote(base), base, tip))
+
+
+def _img_bases() -> list:
+    """图片搜索目录：模型给的图片常常只说个文件名。
+
+    素材可能来自生成文库、当前工作区项目、图片库、用户存图、下载缓存 ——
+    统一由 img_fetch 给出（顺序即优先级）。
+    """
+    from . import img_fetch
+    return img_fetch.default_bases()
+
+
+def _pick_blocks(a: dict) -> list:
+    """取文档内容块，**容错字段名**。
+
+    ⚠️ 实测模型经常不写 `blocks`，而是写它更习惯的 `content`（library 工具
+    就是那个字段名）。只认 `blocks` 的话它会**反复重试同一个错** ——
+    实测连续调了 5 次 make_docx 都因为参数名不对被拒。
+    这里统一收口：content / sections / body / paragraphs 都当 blocks；
+    给的是字符串就按 Markdown 解析（模型很爱整篇贴 Markdown）。
+    """
+    from . import docx_maker as _dm
+    for key in ("blocks", "content", "sections", "body", "paragraphs"):
+        v = a.get(key)
+        if not v:
+            continue
+        if isinstance(v, str):
+            if v.strip().startswith("{") or v.strip().startswith("["):
+                try:
+                    v = json.loads(v)
+                except Exception:
+                    pass
+            if isinstance(v, str):
+                return _dm.markdown_blocks(v)
+        if isinstance(v, dict):
+            v = [v]
+        if isinstance(v, list):
+            out = [x for x in v if isinstance(x, dict)]
+            # 模型有时给 {"title":..,"content":..} 这种，补一个 type
+            for x in out:
+                if not x.get("type"):
+                    x["type"] = ("table" if x.get("header") or x.get("rows")
+                                 else "bullet" if x.get("items")
+                                 else "para")
+            return out
+    return []
+
+
+def _pick_slides(a: dict) -> list:
+    """取 PPT 每页，同样容错字段名（pages / content / items）。"""
+    for key in ("slides", "pages", "content", "items"):
+        v = a.get(key)
+        if not v:
+            continue
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except Exception:
+                continue
+        if isinstance(v, dict):
+            v = [v]
+        if isinstance(v, list):
+            return [x for x in v if isinstance(x, dict)]
+    return []
+
+
+def _do_make_docx(arguments=None, ui_events=None) -> str:
+    """把结构化内容生成 .docx，存进生成文库，返回可点下载链接。
+
+    ⚠️ 生成的是**二进制**，必须走 `doclib.save_bytes` + `/api/doclib/download`，
+    不能走 `doclib.write_file`（那是给文本用的，二进制会被写坏）。
+    """
+    import tempfile
+
+    from . import doclib as _dl
+    from . import docx_maker as _dm
+
+    a = _clean_stray_inline_html(arguments or {})
+    title = str(a.get("title") or "").strip()
+    blocks = _pick_blocks(a)
+    if not title:
+        # ⚠️ 模型常常只给正文、忘了给 title，只报错会让它**反复重试同一个错**
+        # （实测连试 3 次都因为没 title 被拒）。这里从第一个标题兜底取。
+        for b in blocks:
+            if str(b.get("type") or "").lower() in ("heading", "title", "h1") \
+                    and str(b.get("text") or "").strip():
+                title = str(b["text"]).strip()[:60]
+                break
+        if not title:
+            title = str(a.get("filename") or "").strip() or "文档"
+    if not blocks:
+        return ("错误：缺少 blocks（文档内容），至少要有一个内容块。"
+                "例如 [{\"type\":\"heading\",\"level\":1,\"text\":\"一、背景\"},"
+                "{\"type\":\"para\",\"text\":\"正文…\"}]")
+
+    base = str(a.get("filename") or title).strip()
+    base = _BAD_FN.sub("", base).strip(" .")[:60] or "文档"
+    if not base.lower().endswith(".docx"):
+        base += ".docx"
+
+    tmp = os.path.join(tempfile.gettempdir(),
+                       "mm_docx_%d.docx" % int(time.time() * 1000))
+    r = _dm.build_docx(
+        tmp, title, blocks,
+        subtitle=str(a.get("subtitle") or ""),
+        author=str(a.get("author") or ""),
+        date_text=str(a.get("date_text") or ""),
+        theme=str(a.get("theme") or "blue"),
+        font=str(a.get("font") or "yahei"),
+        cover=bool(a.get("cover")),
+        header=str(a.get("header") or ""),
+        toc=bool(a.get("toc")),
+        bases=_img_bases(),
+        logo=str(a.get("logo") or ""),
+        colors=a.get("colors"),
+    )
+    if not r.get("ok"):
+        return "生成文档失败：%s" % r.get("error")
+
+    try:
+        with open(tmp, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        return "读取生成的临时文件失败：%s" % e
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+    w = _dl.save_bytes(base, data)
+    if not w.get("ok"):
+        return "写入生成文库失败：%s" % w.get("error")
+
+    if isinstance(ui_events, list):
+        # 同 make_pptx：让「生成文库」面板立刻刷新并选中它
+        ui_events.append({"type": "library", "act": "write", "rel": base})
+
+    tip = ""
+    if r.get("warnings"):
+        tip = "\n（提示：%s）" % "；".join(r["warnings"][:3])
+    return ("已生成文档《%s》——共 %d 个内容块，%.0f KB。\n"
+            "下载链接（**直接点就能存下来，原样给用户**）：\n"
+            "/api/doclib/download?rel=%s\n"
+            "⚠️ 真实文件名就是 `%s`（原样，含中文）。**链接里那串 %%XX 是 URL 编码，"
+            "不要拿它去调 library / edit_office**，否则会报「文件不存在」。\n"
+            "之后要改这份文档，用 edit_office 传 `%s`。%s"
+            % (title, r.get("blocks") or len(blocks), len(data) / 1024.0,
+               urllib.parse.quote(base), base, base, tip))
+
+
+def _do_make_xlsx(arguments=None, ui_events=None) -> str:
+    """把模型给的数据排成 xlsx，存进生成文库并给下载链接。"""
+    import tempfile
+    from . import doclib as _dl          # 同其它 maker：函数内导入
+    from . import xlsx_maker as _xl
+    a = _clean_stray_inline_html(arguments or {})
+    sheets = a.get("sheets") or []
+    # 容错：模型可能写成 sheets 以外的名字，或者直接把单张表塞在顶层
+    if not sheets:
+        for k in ("data", "tables", "worksheets", "list"):
+            if isinstance(a.get(k), list) and a[k]:
+                sheets = a[k]
+                break
+    if not sheets and (a.get("header") or a.get("rows")):
+        sheets = [{"name": a.get("sheet_name") or a.get("name") or "数据",
+                   "header": a.get("header") or [], "rows": a.get("rows") or []}]
+    for _i, _sh in enumerate(sheets):
+        if isinstance(_sh, dict) and not str(_sh.get("name") or "").strip():
+            _sh["name"] = "工作表%d" % (_i + 1)
+    if not sheets:
+        return ("错误：缺少 sheets（至少要有一张表）。例如 "
+                '{"sheets":[{"name":"明细","header":["项目","数量","金额"],'
+                '"rows":[["A",3,120.5]],"formats":["text","int","money"],"total_row":true}]}')
+
+    # 标题兜底：没给 filename 就从第一张表的 title / name 取
+    title = str(a.get("title") or a.get("filename") or "").strip()
+    if not title:
+        first = sheets[0] if isinstance(sheets[0], dict) else {}
+        title = str(first.get("title") or first.get("name") or "数据表").strip()
+    base = str(a.get("filename") or title).strip()
+    base = _BAD_FN.sub("", base).strip(" .")[:60] or "数据表"
+
+    if not base.lower().endswith(".xlsx"):
+        base += ".xlsx"          # 扩展名必须带上，否则下载回来是个没法双击打开的文件
+
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        r = _xl.build_xlsx(tmp, sheets,
+                           theme=str(a.get("theme") or "blue"),
+                           author="Hardwordy Agent",
+                           colors=a.get("colors"))
+        if not r.get("ok"):
+            return "生成表格失败：%s" % r.get("error")
+        with open(tmp, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        return "生成表格失败：%s: %s" % (type(e).__name__, e)
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+    w = _dl.save_bytes(base, data)
+    if not w.get("ok"):
+        return "写入生成文库失败：%s" % w.get("error")
+
+    if isinstance(ui_events, list):
+        # 让「生成文库」面板立刻刷新并选中它（同 make_pptx / make_docx）
+        ui_events.append({"type": "library", "act": "write", "rel": base})
+
+    tip = ""
+    if r.get("warnings"):
+        tip = "\n（提示：%s）" % "；".join(r["warnings"][:3])
+    return ("已生成表格《%s》——%d 张工作表、共 %d 行数据，%.0f KB。\n"
+            "下载链接（**直接点就能存下来，原样给用户**）：\n"
+            "/api/doclib/download?rel=%s\n"
+            "（源文件也放在「生成文库」里，文件名 %s。之后要改它，用 edit_office 传这个文件名。）%s"
+            % (title, r.get("sheets") or 0, r.get("rows") or 0, len(data) / 1024.0,
+               urllib.parse.quote(base), base, tip))
+
+
+def _do_transit(route: dict, ui_events, net: bool) -> str:
+    """公交换乘结果 → 文本 + 地图卡片。
+
+    ⚠️ 公交数据只有高德有。没配 key 或离线时**如实说查不了**，
+       绝对不要编线路号、票价、班次（实测模型真会编「302路 票价2元」）。
+    """
+    from . import map_tools as _mt
+
+    frm = str(route.get("from") or "")
+    to = str(route.get("to") or "")
+    r = _mt.plan_transit(frm, to, allow_net=net)
+    if not r.get("ok"):
+        return ("公交换乘没查成：%s\n"
+                "⚠️ 如实告诉用户原因，**不要编造公交线路号和票价**。"
+                % r.get("error")) + _amap_nudge(net)
+
+    plans = r.get("plans") or []
+    lines = ["· **%s → %s** 公交换乘方案（共 %d 个）："
+             % (r["from"]["name"], r["to"]["name"], len(plans))]
+    for i, p in enumerate(plans[:3]):
+        lines.append("  %d）约 %.0f 分钟，票价 %.1f 元，步行 %d 米，换乘 %d 次%s"
+                     % (i + 1, p["duration_s"] / 60.0, p["cost"], p["walking_m"],
+                        p["transfers"], "　← **推荐**" if i == 0 else ""))
+        for s in p["segments"][:8]:
+            if s["type"] == "bus":
+                alts = ("（也可坐 %s）" % "、".join(s["alts"])) if s.get("alts") else ""
+                lines.append("       %s：%s → %s%s"
+                             % (s["line"], s["from"] or "?", s["to"] or "?", alts))
+            else:
+                lines.append("       步行 %d 米" % s["distance_m"])
+
+    if isinstance(ui_events, list):
+        best = plans[0] if plans else {"points": []}
+        ui_events.append({
+            "type": "map", "online": net,
+            # 底图用哪个（联网+有高德 key → 高德）。前端据此选瓦片端点，
+            # 并决定打点要不要做 WGS-84 → GCJ-02 的换算。
+            "tile_source": _mt.tile_source(net),
+            "center": [r["from"]["lat"], r["from"]["lon"]],
+            "zoom": 12,
+            "markers": [{"name": r["from"]["name"], "lat": r["from"]["lat"],
+                         "lon": r["from"]["lon"], "addr": "", "role": "from"},
+                        {"name": r["to"]["name"], "lat": r["to"]["lat"],
+                         "lon": r["to"]["lon"], "addr": "", "role": "to"}],
+            "route": {"points": best.get("points") or [], "distance": "",
+                      "duration": _mt.fmt_duration(best.get("duration_s") or 0),
+                      "mode": "公交", "from": r["from"]["name"], "to": r["to"]["name"],
+                      "routes": [], "straight": False, "transit": True},
+            "transit": {"plans": [{"duration": _mt.fmt_duration(p["duration_s"]),
+                                   "cost": p["cost"], "walking": p["walking_m"],
+                                   "transfers": p["transfers"],
+                                   "segments": p["segments"]} for p in plans[:3]]},
+        })
+
+    return ("公交换乘（卡片会显示给用户，把方案说清楚）：\n" + "\n".join(lines) +
+            "\n· 上面这些线路、票价、换乘站都是高德返回的**真实数据**，可以照实说。")
+
+
+def _amap_broken_prefix() -> str:
+    """key 配了但**不可用**时，给工具结果**开头**加一句必须转告用户的话。
+
+    ⚠️ 为什么放开头：实测 qwen3-vl:8b 对"结果末尾的附注"基本视而不见，
+    但对开头的强指令会照做。key 坏了是用户**必须知道**的事 ——
+    不然他只看到"地图怎么变难用了"，永远不知道要去重配。
+    """
+    try:
+        from . import amap as _am
+        h = _am.check_health(online=True)
+    except Exception:
+        return ""
+    # 没配 / 用户主动断开 / 正常 → 都不用报警
+    if not h.get("configured") or not h.get("enabled", True) or h.get("ok"):
+        return ""
+    msg = h.get("message") or "原因未知"
+    return ("⚠️⚠️ **先跟用户说这件事**：他的高德 key 现在**用不了**（%s）——"
+            "这次的结果只能退而用 OpenStreetMap 查，数据会弱一些。"
+            "请**在回答开头用一两句话提醒他**，并让他点界面顶栏的「高德 key」重新配置，"
+            "然后再讲结果。\n\n----------\n\n" % msg)
+
+
+def _amap_nudge(net: bool) -> str:
+    """联网但没配高德 key 时，在工具结果末尾塞一句强提醒。
+
+    ⚠️ 为什么非得塞在这里、而不是只写在系统提示里：实测光在系统提示里写
+    "先请用户填 key"，模型会**直接跳过**、拿 OSM 的弱数据就把活干完了
+    （它觉得答案已经齐了）。而工具返回的文本是它紧接着要读的东西，
+    写在这儿才真的会被照做。
+    """
+    if not net:
+        return ""
+    try:
+        from . import amap as _am
+        # ⚠️ 用 has_stored_key：用户**主动断开**时 key 还在，就别再催他填了
+        if _am.has_stored_key():
+            return ""
+    except Exception:
+        return ""
+    L = chr(10)
+    return (L + L + "⚠️ **本机还没配高德 key**，上面的数据来自 OpenStreetMap："
+            "中国的店铺覆盖很稀、也没有评分（所以可能只有零星几条）。" + L +
+            "请**先调用 connect_amap 请用户填一个 key**（他填完可以立刻重查，不用重启）；" + L +
+            "回答里也提一句「现在用的是弱数据源，填个 key 能查到更多、还有评分」。" + L +
+            "用户要是说不用，就按现状把结果给他，别再反复追问。")
+
+
+# 每个进程只主动问一次 key。用户跳过之后就不再打扰 ——
+# 反复弹同一个框比不弹更烦人。
+_AMAP_ASKED = {"done": False}
+
+
+def _ask_amap_key_once(context, net: bool) -> str:
+    """联网、没配 key、而且还没问过 → 弹一次输入框请用户填，填完当场验证生效。
+
+    返回一句"这次发生了什么"的说明（没发生就返回空串），会拼进工具结果里。
+
+    ⚠️ 为什么由**工具**来问、而不是让模型自己调 connect_amap：实测把"先请用户填 key"
+    写进系统提示、甚至塞进工具结果，qwen3-vl:8b 都会**直接无视**，
+    拿 OpenStreetMap 的弱数据把活干完就算完。而这句问话必须真的弹出来，
+    所以改成工具在干活前自己弹 —— ask 通道本来就是阻塞式的，正好能用。
+    """
+    if not net or _AMAP_ASKED["done"]:
+        return ""
+    try:
+        from . import amap as _am
+        if _am.has_stored_key():
+            return ""
+    except Exception:
+        return ""
+    ask = (context or {}).get("ask")
+    if not callable(ask):
+        return ""
+    _AMAP_ASKED["done"] = True          # 先置位：即使用户跳过，也不再问第二次
+    try:
+        answers = ask({
+            "title": "🗺️ 填一个高德 key，地图能力会好很多",
+            "hint": ("本机还没配高德 key，现在只能查到 OpenStreetMap 的数据 —— "
+                     "中国的店铺覆盖很稀、也没有评分，所以结果可能只有零星几条。" + chr(10) +
+                     "填了之后：全国的小店都能搜到，还有真实评分、实时路况、公交换乘，"
+                     "步行骑行也是真实路径。不填也能用，就是数据弱。" + chr(10) + chr(10) +
+                     "申请（1 分钟）：console.amap.com → 手机号注册+实名 → 建应用 → 加 Key → "
+                     "服务平台必须选「Web 服务」。不想填就直接关掉这个框。"),
+            "questions": [{"question": "请粘贴高德开放平台的 key（32 位）：",
+                            "header": "高德 key"}],
+            "freeInput": True,
+        })
+    except Exception:
+        return ""
+    ans = ""
+    for a in (answers or []):
+        if isinstance(a, dict):
+            ans = (a.get("answer") or "").strip() or ans
+        else:
+            ans = str(a or "").strip() or ans
+    if not ans:
+        return (chr(10) + "（用户没有填高德 key，本次结果来自 OpenStreetMap —— "
+                "回答里如实说明数据源比较弱即可，别再追问。）")
+    try:
+        from . import config as _cfg
+        ok, msg = _am.verify_key(ans)
+        if not ok:
+            return (chr(10) + chr(10)
+                    + "（用户填的 key 没通过验证：%s" % msg
+                    + chr(10)
+                    + "请把这个原因原样告诉他，让他重新复制一个；"
+                    + "本次结果仍是 OpenStreetMap 的。）")
+        cfg = _cfg.load_config()
+        cfg["amap_key"] = ans
+        _cfg.save_config(cfg)
+    except Exception as e:
+        return (chr(10) + "（保存 key 时出错：%s）" % str(e)[:60])
+    return (chr(10) + chr(10) + "✅ 用户刚填好了高德 key，**已经生效**（%s）。"
+            "下面这些结果已经是用高德查的，直接照实说就行。" % msg)
+
+
+def _do_map_plan(arguments=None, ui_events=None, context=None) -> str:
+    """查地点 / 规划路线，并把地图数据推给前端画成卡片。
+
+    **两种跑法**（一起跟随前端的「联网」开关）：
+      · 联网 —— 实时上网查（**查完不留任何本地数据**）；
+      · 离线 —— 只认本地：以前查过的地名/算过的路线 + 内置常用地名表，
+               **一个网络请求都不发**。算不出真路线时只给直线距离，并说明白。
+    """
+    from . import map_tools as _mt
+
+    a = arguments or {}
+    places = a.get("places") or a.get("地点") or []
+    if isinstance(places, str):
+        places = [places]
+    route = a.get("route") or {}
+    if not isinstance(route, dict):
+        route = {}
+    # 容错：模型可能写成 from/to 平铺在顶层
+    if not route and (a.get("from") or a.get("origin")):
+        route = {"from": a.get("from") or a.get("origin"),
+                 "to": a.get("to") or a.get("dest") or a.get("destination"),
+                 "mode": a.get("mode") or a.get("travel_mode") or "driving"}
+    if not places and not route:
+        return ("错误：至少要给 places（要找的地点）或 route（要规划的路线）。"
+                '例如 {"places":["广州塔"],"route":{"from":"广州塔","to":"白云机场"}}')
+
+    net = _mt.online()
+    # ⚠️ 干活之前先问一次高德 key（没配、联网、且本进程还没问过时）。
+    #    必须放在这里：key 一旦填上，下面这次查询就直接走高德了。
+    _key_note = _ask_amap_key_once(context, net)
+    # 限定城市（模型从"广州市内有什么商场"里看出来就填 广州）。
+    # ⚠️ 不填的后果实测很离谱：查「天河城」会被高德按**地址**解析到
+    #    "江西省南昌市进贤县天河城"，而广州的正主反而出不来。
+    city = str(a.get("city") or a.get("城市") or "").strip()
+    markers, lines = [], []
+
+    for q in [p for p in places if str(p).strip()][:12]:
+        one = _mt.geocode_one(str(q), allow_net=net, city=city)
+        if not one:
+            if net:
+                lines.append("· 「%s」没找到（换个更完整的名字试试，比如加上城市名）" % q)
+            else:
+                lines.append("· 「%s」没找到。现在是离线模式，只能查本地记录过的地点；"
+                             "打开「联网」开关就能查到。" % q)
+            continue
+        if one.get("kind") == "builtin":
+            src = "内置地名表"
+        elif one.get("kind") == "amap_geocode" or one.get("kind") == "poi":
+            src = "联网查到的"
+        else:
+            src = ""
+        markers.append({"name": one["name"], "lat": one["lat"], "lon": one["lon"],
+                        "addr": one.get("addr") or "", "query": str(q)})
+        lines.append("· **%s** —— %s（%.5f, %.5f）%s"
+                     % (one["name"], one.get("addr") or "—", one["lat"], one["lon"],
+                        ("  〔%s〕" % src.strip()) if src.strip() else ""))
+        if one.get("loose"):
+            # 这不是"查到了"，是"按地址猜的"——同名地点会被猜错省份，必须说出来
+            lines.append("  ⚠️ 「%s」**没有精确匹配到地点名**，上面这个地址是"
+                         "**按地址解析**出来的，很可能只是同名的地方。"
+                         "请把地图卡片上的位置跟用户核对一下；"
+                         "要更准的话，让用户补上所在城市（或下次调用时把 city 填上）。"
+                         % q)
+
+    rinfo, approx, mode_cmp = None, None, None
+    if route and route.get("from") and route.get("to"):
+        # 公交换乘：高德有独立接口，和驾车/步行完全不是一回事，单独走一条路
+        if str(route.get("mode") or "").strip().lower() in (
+                "transit", "bus", "public", "公交", "地铁", "公共交通", "公交车"):
+            return _do_transit(route, ui_events, net)
+        r = _mt.plan_route(str(route.get("from")), str(route.get("to")),
+                           str(route.get("mode") or "driving"), allow_net=net,
+                           want_weather=bool(a.get("weather") or a.get("天气")),
+                           city=city)
+        mode_cn = {"driving": "驾车", "foot": "步行", "bike": "骑行"}.get(
+            r.get("mode"), r.get("mode"))
+        for k in ("from", "to"):
+            if r.get(k):
+                markers.append({"name": r[k]["name"], "lat": r[k]["lat"],
+                                "lon": r[k]["lon"], "addr": "", "role": k})
+        if r.get("ok"):
+            rinfo = r
+            routes = r.get("routes") or []
+            tail = ""
+            if len(routes) > 1:
+                lines.append("· **从 %s 到 %s**（%s）共 %d 条可选路线%s"
+                             % (r["from"]["name"], r["to"]["name"], mode_cn,
+                                len(routes), tail))
+                for rt in routes:
+                    star = "　← **推荐**" if rt.get("recommended") else ""
+                    lines.append("    %d）%s，约 %s%s"
+                                 % (rt["idx"] + 1, _mt.fmt_distance(rt["distance_m"]),
+                                    _mt.fmt_duration(rt["duration_s"]), star))
+                rec = next((x for x in routes if x.get("recommended")), routes[0])
+                if rec.get("reason"):
+                    lines.append("    **为什么推荐这条**：%s" % rec["reason"])
+            else:
+                lines.append("· **从 %s 到 %s**：%s，约 %s（%s）%s"
+                             % (r["from"]["name"], r["to"]["name"],
+                                _mt.fmt_distance(r["distance_m"]),
+                                _mt.fmt_duration(r["duration_s"]), mode_cn, tail))
+            if r.get("estimated") and r.get("note"):
+                lines.append("    ⚠️ %s" % r["note"])
+
+            # 出行方式对比：用户选的不一定最合适（800 米也要开车、20 公里想走路）。
+            # 复用同一套路网数据，三种都算一遍再比 —— 只有真数据才敢给建议。
+            try:
+                mode_cmp = _mt.compare_modes(str(route.get("from")),
+                                             str(route.get("to")), allow_net=net)
+            except Exception:
+                mode_cmp = None
+            if mode_cmp and mode_cmp.get("ok"):
+                for k, v in (mode_cmp.get("modes") or {}).items():
+                    lines.append("    · %s：%s，约 %s"
+                                 % (_mt._MODE_CN.get(k, k),
+                                    _mt.fmt_distance(v["distance_m"]),
+                                    _mt.fmt_duration(v["duration_s"])))
+                if mode_cmp.get("suggest") != r.get("mode"):
+                    lines.append("    **出行方式建议**：这段路其实 %s 更合适 —— %s"
+                                 % (mode_cmp["suggest_cn"], mode_cmp["suggest_reason"]))
+                elif mode_cmp.get("suggest_reason"):
+                    lines.append("    **你选的这个方式就是合适的**：%s"
+                                 % mode_cmp["suggest_reason"])
+                if mode_cmp.get("note"):
+                    lines.append("    （%s）" % mode_cmp["note"])
+
+            w = r.get("weather") or {}
+            fw = (w.get("from") or {}).get("now") or {}
+            tw = (w.get("to") or {}).get("day") or {}
+            day_label = (w.get("to") or {}).get("day_label") or "当天"
+            if fw.get("desc") or tw.get("desc"):
+                parts = []
+                if fw.get("desc"):
+                    parts.append("出发地此刻 %s%s"
+                                 % (fw["desc"],
+                                    "、%.0f℃" % fw["temp"] if fw.get("temp") is not None else ""))
+                if tw.get("desc"):
+                    rng = ""
+                    if tw.get("low") is not None and tw.get("high") is not None:
+                        rng = "、%.0f~%.0f℃" % (tw["low"], tw["high"])
+                    parts.append("抵达那天（%s）%s%s" % (day_label, tw["desc"], rng))
+                lines.append("    **天气**：%s" % "；".join(parts))
+                # ⚠️ 必须说清"抵达"给的是**当天**的预报，不是那个小时 ——
+                #    高德没有逐小时接口，含糊过去模型就会编出"抵达时几点几分下雨"。
+                lines.append("    （数据来自**中国气象局**：此刻是气象站实况，"
+                             "抵达给的是**当天**的逐日预报，不是那一小时的确切天气；"
+                             "转述时别把「当天」说成「到达时那一刻」）")
+        else:
+            approx = r.get("approx")
+            lines.append("· **从 %s 到 %s**：%s"
+                         % (r.get("from", {}).get("name", route.get("from")),
+                            r.get("to", {}).get("name", route.get("to")),
+                            r.get("error") or "没规划出来"))
+            if approx:
+                lines.append("  两地**直线**距离 %s，终点在起点的**%s**方向。"
+                             "⚠️ 这是直线距离、不是实际道路距离，只能当大致参考。"
+                             % (_mt.fmt_distance(approx["distance_m"]), approx["bearing"]))
+            if r.get("hint"):
+                lines.append("  %s" % r["hint"])
+
+    if not markers:
+        return "地图（%s）：什么都没查到。\n" % _mt.mode_text() + "\n".join(lines)
+
+    # 地图卡片数据：中心点 + 缩放级别
+    lats = [m["lat"] for m in markers]
+    lons = [m["lon"] for m in markers]
+    center = [sum(lats) / len(lats), sum(lons) / len(lons)]
+    span = max(max(lats) - min(lats), max(lons) - min(lons))
+    zoom = int(a.get("zoom") or 0)
+    if not zoom:
+        zoom = 14 if span < 0.02 else 13 if span < 0.06 else 11 if span < 0.3 \
+               else 9 if span < 1.2 else 7 if span < 5 else 5
+
+    if isinstance(ui_events, list):
+        ui_events.append({
+            "type": "map",
+            "online": net,
+            # 底图用哪个（联网+有高德 key → 高德）。前端据此选瓦片端点，
+            # 并决定打点要不要做 WGS-84 → GCJ-02 的换算。
+            "tile_source": _mt.tile_source(net),
+            "center": center,
+            "zoom": zoom,
+            "markers": [{"name": m["name"], "lat": m["lat"], "lon": m["lon"],
+                         "addr": m.get("addr") or ""} for m in markers],
+            "route": ({"points": rinfo["points"],
+                       "distance": _mt.fmt_distance(rinfo["distance_m"]),
+                       "duration": _mt.fmt_duration(rinfo["duration_s"]),
+                       "mode": {"driving": "驾车", "foot": "步行",
+                                "bike": "骑行"}.get(rinfo["mode"], rinfo["mode"]),
+                       "from": rinfo["from"]["name"],
+                       "to": rinfo["to"]["name"],
+                       "estimated": bool(rinfo.get("estimated")),
+                       "note": rinfo.get("note") or "",
+                       # 多条候选：前端按这个列表画多条线，推荐的那条高亮
+                       "routes": [{"points": x["points"],
+                                   "distance": _mt.fmt_distance(x["distance_m"]),
+                                   "duration": _mt.fmt_duration(x["duration_s"]),
+                                   "recommended": bool(x.get("recommended")),
+                                   "reason": x.get("reason") or ""}
+                                  for x in (rinfo.get("routes") or [])],
+                       "weather": ({"from_name": ((rinfo.get("weather") or {}).get("from") or {}).get("name") or "",
+                                    "from_now": ((rinfo.get("weather") or {}).get("from") or {}).get("now") or {},
+                                    "to_name": ((rinfo.get("weather") or {}).get("to") or {}).get("name") or "",
+                                    # ⚠️ 给的是**抵达那天的逐日预报**（不是那一小时）——
+                                    #    高德没有逐小时接口，卡片上必须这么写。
+                                    "to_day": ((rinfo.get("weather") or {}).get("to") or {}).get("day") or {},
+                                    "to_day_label": ((rinfo.get("weather") or {}).get("to") or {}).get("day_label") or "",
+                                    # 两个数都是**中国气象局**的（实况 + 逐日预报）
+                                    "src": ((rinfo.get("weather") or {}).get("from") or {}).get("src") or ""}
+                                   if rinfo.get("weather") else None),
+                       "modes": [{"mode": _mt._MODE_CN.get(k, k),
+                                  "distance": _mt.fmt_distance(v["distance_m"]),
+                                  "duration": _mt.fmt_duration(v["duration_s"]),
+                                  "estimated": bool(v.get("estimated")),
+                                  "suggest": (k == (mode_cmp or {}).get("suggest"))}
+                                 for k, v in ((mode_cmp or {}).get("modes") or {}).items()]
+                                if (mode_cmp and mode_cmp.get("ok")) else [],
+                       "suggest_reason": (mode_cmp or {}).get("suggest_reason") or "",
+                       "straight": False} if rinfo else
+                      ({"points": [], "straight": True,
+                        "distance": _mt.fmt_distance(approx["distance_m"]),
+                        "bearing": approx["bearing"],
+                        "from": r["from"]["name"], "to": r["to"]["name"],
+                        "mode": mode_cn} if approx else None)),
+        })
+
+    head = (_amap_broken_prefix() + "地图结果（%s；卡片会自动显示给用户，你只要把结论说清楚）：\n"
+            "⚠️ 只能基于上面的数据说话。三种出行方式的对比数据都有，"
+            "但**我们没有任何公交/地铁线路数据** —— "
+            "不许编「坐 X 路公交 / 票价 Y 元 / 每 Z 分钟一班」这种具体线路信息，"
+            "最多说一句「这段距离也可以考虑公共交通」。"
+            % _mt.mode_text())
+    return head + "\n" + "\n".join(lines) + _amap_nudge(net) + _key_note
+
+
+def _do_nearby_places(arguments=None, ui_events=None, context=None) -> str:
+    """查某个地点**周围**的场所，推给前端画成「场所清单 + 地图」。
+
+    ⚠️ **刻意不输出任何评分** —— OSM 没有评分/评论数据。
+       每条只带一句「这条记录全不全」的人话说明（info_note），
+       前端也不显示分数，免得被当成口碑分。
+    """
+    from . import map_tools as _mt
+
+    a = arguments or {}
+    place = str(a.get("place") or a.get("地点") or a.get("center") or "").strip()
+    category = str(a.get("category") or a.get("类别") or a.get("what") or "").strip()
+    if not place:
+        return '错误：缺少 place（中心地点），比如 "汕头大学" 或 "23.35,116.68"。'
+    if not category:
+        return '错误：缺少 category（要找什么），比如 "餐厅" "便利店" "药店"。'
+    try:
+        radius = int(a.get("radius") or a.get("半径") or 1500)
+    except (TypeError, ValueError):
+        radius = 1500
+    try:
+        limit = int(a.get("limit") or 20)
+    except (TypeError, ValueError):
+        limit = 20
+
+    net = _mt.online()
+    # ⚠️ 干活之前先问一次高德 key（没配、联网、且本进程还没问过时）。
+    #    必须放在这里：key 一旦填上，下面这次查询就直接走高德了。
+    _key_note = _ask_amap_key_once(context, net)
+    c = _mt.geocode_one(place, allow_net=net)
+    if not c:
+        hint = ("现在是离线模式，本地没有这个地点的记录；打开「联网」开关就能查。"
+                if not net else "换个更完整的名字试试（比如加上城市名）")
+        return "没找到中心地点「%s」—— %s" % (place, hint)
+
+    r = _mt.nearby(c["lat"], c["lon"], category, radius=radius, limit=limit,
+                   allow_net=net)
+    if not r.get("ok"):
+        return "周边查询失败：%s" % (r.get("error"))
+
+    items = r.get("items") or []
+    rad = r.get("radius")
+    head = (_amap_broken_prefix() + "周边搜索（要找：%s；中心：%s；半径 %d 米）"
+            % (r.get("category"), c["name"], rad))
+    if not items:
+        return (head + "\n· 这一类在 %d 米内**一个都没查到**。\n"
+                "  ⚠️ OpenStreetMap 是志愿者测绘，中国的小微店铺覆盖很稀疏，"
+                "「查不到」不等于「没有」。可以换个说法、或把 radius 调大再试。" % rad)
+
+    lines = []
+    for it in items[:limit]:
+        nm = it["name"] or "（这个点没有名字）"
+        lines.append("· **%s** —— 距离 %s" % (nm, _mt.fmt_distance(it["dist_m"])))
+        extra = []
+        # 走高德时**有真实评分**，这是最该给用户看的东西，放最前面
+        if it.get("rating"):
+            extra.append("**评分 %s**" % it["rating"])
+        if it.get("cost"):
+            extra.append("人均 %s 元" % it["cost"])
+        if it.get("addr"):
+            extra.append("地址：" + it["addr"])
+        if it.get("phone"):
+            extra.append("电话：" + it["phone"])
+        if it.get("hours"):
+            extra.append("营业时间：" + it["hours"])
+        if it.get("website"):
+            extra.append("官网：" + it["website"])
+        if extra:
+            lines.append("  " + "；".join(extra))
+        if it.get("info_note"):
+            lines.append("  %s" % it["info_note"])
+
+    tail = ("\n⚠️ **有评分就照实念**：返回里带 rating 字段的是**真实评分**（来自高德地图），"
+            "直接告诉用户「评分 4.7」就行，也可以用来排序推荐；"
+            "带 cost 的是人均消费。\n"
+            "⚠️ **没有 rating 字段时绝不许自己编评分、星级或评价** —— "
+            "OpenStreetMap 不提供评分数据（比如「口碑很好」「味道不错」这类都是编的）。\n"
+            "⚠️ **只准转述返回里确实有的信息**（名字、距离、评分、人均、地址、电话、营业时间）。"
+            "不要补数据里没有的东西 —— 实测模型会顺口加上「校内主干道旁」「校门对面」"
+            "这类位置描述和「学生常去」这类评价，那都是编的。\n"
+            "· 「没查到」不等于「没有」：换个别说法或把 radius 调大再试。")
+
+    if isinstance(ui_events, list):
+        ui_events.append({
+            "type": "map",
+            "online": net,
+            # 底图用哪个（联网+有高德 key → 高德）。前端据此选瓦片端点，
+            # 并决定打点要不要做 WGS-84 → GCJ-02 的换算。
+            "tile_source": _mt.tile_source(net),
+            "center": [c["lat"], c["lon"]],
+            "zoom": 15 if rad <= 1200 else 14 if rad <= 3000 else 13 if rad <= 8000 else 12,
+            "markers": [{"name": c["name"], "lat": c["lat"], "lon": c["lon"],
+                         "addr": "", "role": "center"}] +
+                       [{"name": m["name"] or "（无名）", "lat": m["lat"], "lon": m["lon"],
+                         "addr": m.get("addr") or "",
+                         "dist": _mt.fmt_distance(m["dist_m"]),
+                         "rating": m.get("rating") or ""} for m in items[:limit]],
+            "route": None,
+            "nearby": {
+                "category": r.get("category"),
+                "center_name": c["name"],
+                "radius": rad,
+                "total": r.get("total"),
+                "source": r.get("source") or "",
+                "items": [{"name": m["name"] or "（无名）", "lat": m["lat"], "lon": m["lon"],
+                           "dist": _mt.fmt_distance(m["dist_m"]),
+                           "addr": m.get("addr") or "",
+                           "phone": m.get("phone") or "",
+                           "hours": m.get("hours") or "",
+                           "rating": m.get("rating") or "",
+                           "cost": m.get("cost") or "",
+                           "note": m.get("info_note") or ""} for m in items[:limit]],
+            },
+        })
+
+    return head + "\n" + "\n".join(lines) + tail + _amap_nudge(net) + _key_note
+
+
+def _do_edit_office(arguments=None, ui_events=None) -> str:
+    """查看 / 修改生成文库里的 .docx 或 .pptx。"""
+    from . import doclib as _dl
+    from . import office_edit as _oe
+
+    a = arguments or {}
+    rel = str(a.get("rel") or "").strip().strip('"')
+    if not rel:
+        return "错误：缺少 rel（要改的文件名，如「机器学习入门.pptx」）。"
+
+    ext = os.path.splitext(rel)[1].lower()
+    if ext not in (".docx", ".pptx"):
+        # 只给了名字没给后缀时，去文库目录里找一个同名的
+        cands = [f for f in _dl.list_files()
+                 if os.path.splitext(str(f.get("rel") or f.get("name") or ""))[0] == rel
+                 or str(f.get("name") or "").startswith(rel)]
+        hit = ""
+        for c in cands:
+            n = str(c.get("rel") or c.get("name") or "")
+            if os.path.splitext(n)[1].lower() in (".docx", ".pptx"):
+                hit = n
+                break
+        if not hit:
+            return ("错误：rel 要带 .docx 或 .pptx 后缀，或者在生成文库里有同名文件。"
+                    "当前文库里的文档/PPT：%s"
+                    % ("、".join(f.get("name") or f.get("rel") or ""
+                                 for f in _dl.list_files()
+                                 if str(f.get("name") or "").lower().endswith(
+                                     (".docx", ".pptx"))) or "（还没有）"))
+        rel = hit
+        ext = os.path.splitext(rel)[1].lower()
+
+    path = _dl.file_path(rel)
+    if not os.path.exists(path):
+        return ("找不到文件「%s」。生成文库里的文档/PPT有：%s"
+                % (rel, "、".join(f.get("name") or f.get("rel") or ""
+                                  for f in _dl.list_files()
+                                  if str(f.get("name") or "").lower().endswith(
+                                      (".docx", ".pptx"))) or "（还没有）"))
+
+    action = str(a.get("action") or "inspect").strip().lower()
+    if action in ("inspect", "read", "看", "查看", ""):
+        return (_oe.inspect(path)
+                + "\n\n（要改哪一处，就把上面方括号里的编号填进 ops 的 "
+                  "slide/shape（PPT）或 index（Word）里。）")
+
+    ops = a.get("ops") or []
+    if not ops:
+        return "错误：action=edit 时必须要给 ops（修改操作清单）。"
+
+    # 改之前先备份一份 —— 改坏了用户还能捞回来
+    try:
+        _dl.copy_file(rel, "改前备份_%s" % os.path.basename(rel))
+    except Exception:
+        pass
+
+    ok, msg, warns = _oe.edit(path, ops, img_bases=_img_bases())
+
+    name = os.path.basename(rel)
+    link = "/api/doclib/download?rel=%s" % urllib.parse.quote(rel)
+    if not ok:
+        return "修改失败：%s%s" % (msg, ("\n警告：" + "；".join(warns)) if warns else "")
+    if isinstance(ui_events, list):
+        # 改成功了才刷新文库面板（失败就不动，免得闪一下又没变化）
+        ui_events.append({"type": "library", "act": "write", "rel": rel})
+    out = ("已修改《%s》：%s。\n下载链接（原样给用户）：%s"
+           % (name, msg, link))
+    if warns:
+        out += "\n⚠️ 有几处没做成：%s" % "；".join(warns[:5])
+    out += "\n（改前版本备份在文库里，名字以「改前备份_」开头。）"
+    return out
+
+
+def _strip_code_fence(text: str) -> str:
+    """去掉模型爱加的 ```python … ``` 外壳，拿到纯代码。"""
+    t = (text or "").strip()
+    if not t.startswith("```"):
+        return t
+    lines = t.splitlines()
+    if lines and lines[0].lstrip().startswith("```"):
+        lines = lines[1:]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+# 用户可选的代码模型（2026-11-08）
+# 值形如 "deepseek-flash" / "deepseek-v4-pro" / "local:qwen3-vl:8b" / "auto"
+CODE_MODEL_CHOICES = [
+    {"id": "auto", "name": "⌨ 自动（有 Key 用 V4.1）"},
+    {"id": "deepseek-flash", "name": "☁ DS V4.1"},
+    {"id": "deepseek-flash-think", "name": "☁ DS V4.1（思考）"},
+    {"id": "deepseek-v4-pro", "name": "☁ DS V4 Pro"},
+    {"id": "local:qwen3-vl:8b", "name": "💻 本地 8B"},
+    {"id": "local:qwen3-vl:30b", "name": "💻 本地 30B"},
+    {"id": "local:qwen3-coder:30b", "name": "💻 本地 Coder 30B"},
+]
+
+
+def code_model_pick(cfg: dict, context: dict = None) -> tuple:
+    """决定这次用哪个模型写代码。
+
+    返回 (kind, model)：
+      · ("cloud", "deepseek-flash")  → 走 DeepSeek API（用户选了云端且带了 Key）
+      · ("local", "qwen3-vl:8b")     → 走本机 Ollama（model 为空 = 交给调用方兜底）
+    """
+    cfg = cfg or {}
+    ctx = context or {}
+    has_key = bool(str(ctx.get("ds_key") or "").strip())
+    choice = str(cfg.get("code_model_choice") or "auto").strip()
+
+    if choice.startswith("local:"):
+        return "local", choice.split(":", 1)[1]
+    if choice.startswith("deepseek"):
+        if has_key:
+            return "cloud", choice
+        # 选了云端但没填 Key：退回本地已装模型，调用方会如实说明
+        return "local", ""
+    # auto：有 Key 走 V4.1，否则本地
+    if has_key:
+        return "cloud", str(cfg.get("code_model_ds") or "deepseek-flash")
+    return "local", ""
+
+
+def _code_gen_text(prompt: str, cfg: dict, context: dict,
+                   max_tokens: int = 8192, temperature: float = 0.2) -> str:
+    """用**选中的代码模型**生成一段文本（代码）。返回正文，失败抛异常。"""
+    kind, model = code_model_pick(cfg, context)
+    if kind == "cloud":
+        from . import deepseek_client as _ds
+        buf = []
+        for k, piece in _ds.chat_stream(
+                [{"role": "user", "content": prompt}],
+                model or "deepseek-flash",
+                str((context or {}).get("ds_key") or ""),
+                temperature=temperature, max_tokens=max_tokens,
+                thinking=False):
+            if k == "content" and piece:
+                buf.append(piece)
+        return "".join(buf)
+
+    # 本地：挑一个已装的
+    from . import main as _main
+    try:
+        have = _main._installed_models()
+    except Exception:
+        have = []
+    use = model or str(cfg.get("code_model") or "").strip()
+    if have and use not in have:
+        use = (next((n for n in have if "qwen3-vl" in n), "")
+               or (have[0] if have else use))
+    if not use:
+        raise RuntimeError("没有可用的本地模型")
+    # ⚠️ 代码生成**关掉思考**：实测 qwen3-vl 先思考，max_tokens=1200 时
+    #   思考就把它吃光 → content 为空、done_reason=length。
+    #   写代码不需要思维链，直接出活更快更稳。
+    resp = _main.client.chat([{"role": "user", "content": prompt}],
+                             model=use, stream=False,
+                             params={"temperature": temperature,
+                                     "max_tokens": max(4096, int(max_tokens or 0)),
+                                     "think": False,
+                                     "num_ctx": int(cfg.get("num_ctx") or 8192)})
+    data = resp.json() if hasattr(resp, "json") else resp
+    return str(((data.get("message") or {}).get("content")) or "")
+
+
+def _do_write_code(arguments, ui_events=None, context=None) -> str:
+    """把"要写什么"交给**专用代码模型**，由它写出代码并直接落盘。
+
+    为什么要有这么个工具（**这是实测出来的架构结论，别改回去**）：
+      · `qwen2.5-coder` **不支持 Ollama 的原生工具调用通道**，只能走"文本协议"
+        （让它自己吐 ```tool 块）。实测多轮对话里它会**不吐工具块**、还会
+        声称「我无法读取本地文件系统」，越聊越跑偏；
+      · `qwen3-vl` / 默认模型是**原生支持工具调用**的，读文件、跑代码、做决策都稳。
+    所以分工是：**大脑用默认模型（原生工具），写代码这一步单独交给代码模型。**
+    额外的好处：整份代码不经过大脑的上下文 —— 省 token，也不会被转述时丢掉细节。
+
+    **边收边落盘**：代码模型是流式回来的，每收到一块就先写进文件（预览），
+    编辑器（内置 VS Code）盯着磁盘，于是照样能看到代码一个个字长出来。
+    """
+    from . import workspace as _ws
+    from . import config as _config
+    # ⚠️ ollama 客户端实例是 main.py 里的**单例**（`main.client`），
+    # ollama_client 模块本身只有类 —— 直接写 `ollama_client.client` 会 AttributeError。
+    # 用**函数内延迟导入**拿它：模块级导入会形成 tools ↔ main 的循环导入。
+    from . import main as _main
+
+    a = arguments or {}
+    rel = str(a.get("rel") or "").strip()
+    inst = str(a.get("instruction") or a.get("task") or "").strip()
+    extra = str(a.get("context") or "").strip()
+    if not rel:
+        return "写代码失败：必须给出要写入的相对路径 rel（如 app.py）。"
+    if not inst:
+        return "写代码失败：必须说明要写什么 instruction，比如「一个倒计时脚本，从10数到0」。"
+    try:
+        rel = _ws.safe_rel(rel)
+    except ValueError as e:
+        return "写代码失败：%s" % e
+
+    cfg = _config.load_config()
+    # ★ 2026-11-08：用**用户在界面上选的**代码模型（默认 DeepSeek V4.1）。
+    _ctx = context or {}
+    ds_key = str(_ctx.get("ds_key") or "").strip()
+    _kind, _pick = code_model_pick(cfg, _ctx)
+    use_ds = (_kind == "cloud")
+    ds_model = _pick or "deepseek-flash"
+    if str(cfg.get("code_model_choice") or "").startswith("deepseek") and not ds_key:
+        _fallback_note = ("（⚠️ 你选的是 %s，但没填 DeepSeek Key，这次用本地 %s 写的）"
+                          % (cfg.get("code_model_choice"), "%s"))
+    else:
+        _fallback_note = ""
+    model = ("" if use_ds else _pick) or str(cfg.get("code_model") or "").strip() \
+        or cfg.get("default_model")
+    # ⚠️ 必须用 main._installed_models()（它把 /api/tags 的**字典列表**转成了名字列表）。
+    # 直接 `model not in client.list_models()` 会因为拿字典跟字符串比而**永远不相等**，
+    # 于是模型被悄悄换成默认模型（思考型）—— 输出额度全烧在思考上，最后一个字都没有，
+    # 症状是"写代码失败：代码模型这次没有输出内容"。实测踩过。
+    try:
+        installed = _main._installed_models()
+    except Exception:
+        installed = []
+    if installed and model not in installed:
+        # ⚠️ 2026-11-08 修：原来直接退回 default_model，而它可能**根本没下载**
+        #    （本机 default_model=qwen3-vl:30b 未下）→ 返回 404，
+        #    用户看到的就是"写代码失败（调用代码模型出错）"。
+        #    改成：优先退到已装的 qwen3-vl，再不行用列表里第一个。
+        _fallback = str(cfg.get("default_model") or "")
+        if _fallback not in installed:
+            _fallback = (next((n for n in installed if "qwen3-vl" in n), "")
+                         or (installed[0] if installed else _fallback))
+        model = _fallback
+
+    # 改已有文件 → 把原内容一并给代码模型，让它"在真实内容上改"
+    old = ""
+    try:
+        r = _ws.read_text(rel)
+        if r.get("ok"):
+            old = (r.get("text") or "").strip()
+    except Exception:
+        old = ""
+
+    lang = os.path.splitext(rel)[1].lstrip(".").lower() or "python"
+    parts = ["你是资深程序员。请直接输出**完整、可运行**的代码，不要解释、不要 Markdown 说明。",
+             "目标文件：%s（%s）" % (rel, lang), "需求：%s" % inst]
+    if extra:
+        parts.append("补充背景：%s" % extra)
+    if old:
+        parts.append("这是该文件**当前的内容**，请在此基础上修改，并输出修改后的**整份**内容：\n"
+                     "```\n%s\n```" % old[:6000])
+    parts.append("只输出代码本身（一个代码块或纯代码均可），不要写用法说明。")
+    prompt = "\n\n".join(parts)
+
+    params = {"temperature": 0.2,
+              "max_tokens": int(cfg.get("code_max_tokens") or 8192),
+              "num_ctx": int(cfg.get("num_ctx") or 8192)}
+    buf, wrote_any, last_t, last_n = "", False, 0.0, 0
+
+    def _once(msgs):
+        """跑一次流式请求：边收边把"已生成的部分"预览落盘。
+
+        返回 (本次新增正文, done_reason)。done_reason 由 Ollama 给：
+        `length` = 撞到输出长度上限被截断（要续写），`stop` = 正常写完。
+        """
+        nonlocal wrote_any, last_t, last_n
+        got, reason = "", ""
+        if use_ds:
+            # ---- 云端：DeepSeek V4.1（不开思考，写代码要的是稳定输出）----
+            from . import deepseek_client as _ds
+            for kind, piece in _ds.chat_stream(
+                    msgs, ds_model, ds_key,
+                    temperature=float(cfg.get("code_temperature") or 0.2),
+                    max_tokens=int(cfg.get("code_max_tokens") or 8192),
+                    thinking=False):
+                if kind != "content" or not piece:
+                    continue
+                got += piece
+                _whole = buf + got
+                now = time.time()
+                if now - last_t >= 0.30 or len(_whole) - last_n >= 60:
+                    prev = _strip_code_fence(_whole)
+                    if prev:
+                        try:
+                            _ws.stream_write(rel, prev)
+                            wrote_any = True
+                        except Exception:
+                            pass
+                    last_t, last_n = now, len(_whole)
+            return got, "stop"
+        resp = _main.client.chat(msgs, model=model, stream=True, params=params)
+        for raw in resp.iter_lines():
+            if not raw:
+                continue
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", "replace")
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            piece = ((o.get("message") or {}).get("content") or "")
+            if piece:
+                got += piece
+                _whole = buf + got
+                now = time.time()
+                # 节流预览：同文件每 60 字或每 0.3 秒写一次
+                if now - last_t >= 0.30 or len(_whole) - last_n >= 60:
+                    prev = _strip_code_fence(_whole)
+                    if prev:
+                        try:
+                            _ws.stream_write(rel, prev)
+                            wrote_any = True
+                        except Exception:
+                            pass
+                    last_t, last_n = now, len(_whole)
+            if o.get("done"):
+                reason = str(o.get("done_reason") or "")
+                break
+        return got, reason
+
+    try:
+        _got, done_reason = _once([{"role": "user", "content": prompt}])
+        buf += _got
+    except Exception as e:
+        if not wrote_any:
+            return "写代码失败（调用代码模型出错）：%s" % e
+        done_reason = ""
+
+    # ★★ 被长度上限截断 → **自动续写**（2026-09-27 修）。
+    #   实测症状正是用户报的"生成到一半任务断了 / 说没有输出内容"：
+    #   代码模型单次输出到顶就停，而这里原来**单跑一次、撞了就放弃**。
+    #   现在把已写出的部分回喂给它，让它从断点接着写（最多 _CODE_CONTINUE_MAX 次）。
+    cont = 0
+    while done_reason == "length" and buf.strip() and cont < _CODE_CONTINUE_MAX:
+        cont += 1
+        logging.getLogger("uvicorn.error").warning(
+            "[write_code] 输出被截断，自动续写第 %d 次（已 %d 字）", cont, len(buf))
+        try:
+            _more, done_reason = _once([
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": _strip_code_fence(buf)},
+                {"role": "user", "content": (
+                    "上面这份代码因为输出长度限制被**截断**了。"
+                    "请**从断点往后接着写**：不要重复已经写过的内容、不要解释、"
+                    "不要重新输出整个文件，直接续上剩下的代码。")},
+            ])
+        except Exception:
+            logging.getLogger("uvicorn.error").warning(
+                "[write_code] 续写请求失败", exc_info=True)
+            break
+        _clean = _strip_code_fence(_more)
+        if not _clean:
+            break
+        buf = buf.rstrip() + "\n" + _clean
+        try:
+            _ws.stream_write(rel, _strip_code_fence(buf))
+            wrote_any = True
+        except Exception:
+            pass
+
+    code = _strip_code_fence(buf)
+    if not code.strip():
+        return ("写代码失败：代码模型这次没有输出内容（可能是被截断）。"
+                "把需求说得更具体一点，或换个文件名重试。")
+    # 续写到头还是截断 → 如实标注，**别把半成品当成品**（半成品冒充成品最坑）
+    _trunc_note = ""
+    if done_reason == "length":
+        _trunc_note = ("\n⚠️ 注意：连续续写 %d 次后仍然撞到长度上限，"
+                       "这份代码**可能还不完整**。想接着写完，"
+                       "回一句「继续写完 %s」即可。" % (cont, rel))
+
+    w = _ws.write_text(rel, code, by="ai")
+    if not w.get("ok"):
+        return "写代码失败：%s" % w.get("error")
+    if isinstance(ui_events, list):
+        ui_events.append({"type": "workspace", "act": "write", "rel": rel,
+                          "chars": len(code), "project": _ws.active_project()})
+    head = code.splitlines()[0][:60] if code.splitlines() else ""
+    _used = ("DeepSeek " + ds_model) if use_ds else model
+    if _fallback_note:
+        _fallback_note = _fallback_note % model
+    out = ("已把代码写进 %s（%d 字，模型=%s）。首行：%s%s%s\n"
+           % (rel, len(code), _used, head, _trunc_note, _fallback_note))
+    # 【为什么把"跑一遍"并进来】两个模型在 12GB 显存里**装不下**，
+    # 每调一次代码模型就会把大脑挤出去、下一轮大脑得**重新加载**（十几秒起）。
+    # 原流程是 write_code → 大脑 → workspace_run → 大脑 ——
+    # **一轮循环 = 两次模型切换 + 两轮大脑生成**，实测一个小工具绕了 5 轮、花了 10 分钟。
+    # 写完顺手跑掉，等于把每轮的开销砍掉一半。
+    want_run = a.get("run")
+    if want_run is None:
+        want_run = rel.lower().endswith(".py")
+    if want_run and rel.lower().endswith(".py"):
+        try:
+            out += "\n【顺手跑了一遍，真实输出如下 —— **不用再单独调 workspace_run**】\n"
+            out += _do_workspace_run({"rel": rel})
+        except Exception as e:
+            out += "\n（自动运行失败：%s，你可以用 workspace_run 手动再试）" % e
+    return out
+
+
+def _do_web_read(arguments) -> str:
+    """联网读网页**正文**（搜索结果只给摘要，这一步才是"点进去看"）。"""
+    from . import web_tools
+    args = arguments or {}
+    urls = args.get("urls") or args.get("url") or []
+    if isinstance(urls, str):
+        urls = [urls]
+    urls = [str(u).strip() for u in urls if str(u).strip()][:5]
+    if not urls:
+        return "错误：没有给网址（urls）。"
+    try:
+        limit = int(args.get("limit") or 1800)
+    except Exception:
+        limit = 1800
+    try:
+        pages = web_tools.fetch_pages(urls, limit=limit)
+    except Exception as e:
+        return "抓取失败：%s" % e
+    if not pages:
+        return ("这些网址都没抓到正文（可能需要登录、纯 JS 渲染，或被反爬拦了）。"
+                "换别的来源再试。")
+    return "\n\n".join("【%s】\n%s" % (u, t) for u, t in pages.items())[:9000]
+
+
+def _do_github_push(arguments, context=None) -> str:
+    """把项目上传到代码托管平台 —— **对外发布，必须先经用户同意**。"""
+    from . import workspace as _ws
+    args = arguments or {}
+    repo = str(args.get("repo") or "").strip()
+    message = str(args.get("message") or "").strip()
+    branch = str(args.get("branch") or "main").strip() or "main"
+    ask = (context or {}).get("confirm")
+    if not callable(ask):
+        return ("上传到代码托管平台需要用户确认，但当前没有确认通道，**没有上传**。"
+                "请让用户点开发台上的「⬆ 上传」按钮。")
+    allowed = ask({"kind": "git_push",
+                   "reason": "把当前项目上传到 %s（分支 %s）"
+                             % (repo or "已有的 origin", branch)})
+    if not allowed:
+        return ("用户**拒绝了**这次上传，没有推送任何内容。"
+                "如实说明即可，**不要**假装已经上传。")
+    r = _ws.git_push(repo=repo, message=message, branch=branch)
+    if not r.get("ok"):
+        return "上传失败：\n%s" % r.get("error")
+    return "上传成功（分支 %s）：\n%s" % (r.get("branch"),
+                                        "\n".join(r.get("logs") or [])[-900:])
+
+
+def _read_text_safe(p: str) -> str:
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def _format_py_result(r: dict) -> str:
+    """把执行结果整理成给模型看的文本。"""
+    lines = ["【代码执行结果】"]
+    out = r.get("out") or ""
+    err = r.get("err") or ""
+    # ⚠️ 这段必须放在**最前面**（实测：放结尾 qwen3-vl 根本不看）。
+    # 真实踩坑：番茄钟被时限强杀 → 模型以为是自己的代码错了 → 加线程、加
+    # signal.SIGALRM 重写了三版（signal 在 Windows 上根本不存在），
+    # 其实原代码一行都没错。所以这里把"不是报错、别改它、交给用户跑"说死。
+    persistent = str(r.get("persistent") or "")
+    if persistent:
+        # ⚠️ 「有输出」和「一个字都没有」必须分开说：前者说明它启动正常，
+        # 后者是真卡住（死循环）的典型征兆 —— 一律说成"没问题"会放过真 bug。
+        smoke = ("冒烟测试里它已经跑出了下面的输出，说明**启动正常、在正常干活**。"
+                 if out else
+                 "这 %s 秒里它**一个字都没打印**。如果它本来就该有输出"
+                 "（比如倒计时、日志），那**很可能是卡住了（比如死循环）**，"
+                 "要查一下循环的退出条件；如果它本来就不打印，那是正常的。"
+                 % (r.get("seconds_limit") or RUN_PROBE))
+        lines.append(
+            "⏱ **先说结论：这算不上报错，代码大概率没问题。**\n"
+            "这段程序**没能在 %s 秒的冒烟窗口里结束**（%s），工具里等不到它跑完 —— "
+            "这类程序本来就该一直跑，冒烟测试只是为了确认它能正常启动。%s\n"
+            "⛔ **不要为了让它更快结束去改结构**（加线程、加 signal 都不会让它变快），"
+            "也**不要反复重跑**同一个程序。\n"
+            "（唯一的例外：你**确定**它本该几秒内就结束 —— 那才去检查循环的退出条件。）\n"
+            "✅ 把这个程序交给用户：告诉用户「代码已写好，点代码卡片上的 ▶ 运行 就能完整跑」"
+            "—— 那里不设时限，会一直跑、随时能停。"
+            % (r.get("seconds_limit") or RUN_PROBE, persistent, smoke))
+    if out:
+        if len(out) > 4000:
+            out = "（输出过长，只保留最后 4000 字）\n" + out[-4000:]
+        lines.append("标准输出：\n" + out)
+    if err:
+        head = "运行提示：\n" if r.get("rc") in (0, None) else "报错信息：\n"
+        lines.append(head + err[-1500:])
+    if not out and not err:
+        lines.append("（代码没有输出任何内容 —— 别忘了用 print() 把结果打出来）")
+    if r.get("rc") not in (0, None):
+        lines.append("（退出码 %s，说明代码报错了；请先修正再给出结论）" % r.get("rc"))
+    if r.get("risky"):
+        lines.append("（这次执行包含用户已批准的操作：%s）" % "、".join(r["risky"]))
+    if persistent:
+        lines.append("请如实告诉用户「程序本身没问题，工具里只能跑前几秒；"
+                     "点 ▶ 运行 就能完整跑」，**不要去改它**。")
+    else:
+        lines.append("请**依据上面的真实输出**回答用户；如果代码报错，先说清错在哪并给出修正后的代码。")
+    return "\n\n".join(lines)
+
+
+def _do_run_python(arguments, ui_events=None, context=None):
+    """在本机真跑一段 Python，把 stdout 拿回来。
+
+    为什么要真跑：模型"心算"很容易出错（数字、日期、正则尤其明显），
+    而代码跑一遍的结果是**确定的**。这也是"离线计算"的落点。
+
+    ⚠️ 检测到危险操作时**不是直接拒绝，而是先问用户**（用户明确要求）：
+    批准了就执行，拒绝才放弃。没有确认通道时（例如脚本里直接调用）默认**不执行**。
+    """
+    a = arguments or {}
+    code = str(a.get("code") or "").strip()
+    # `stdin`：把程序里 input() 要读的内容**预先喂进去**（一行一次）。
+    # ⚠️ 没有这个口子的话，凡是带 input() 的程序一跑就是
+    # `EOFError` / `ValueError: invalid literal for int(): ''`，
+    # 模型会误以为自己的代码写错了（实测就是这么绕了好几轮的）。
+    _stdin = str(a.get("stdin") or "")
+    r = run_code(code, allow_risky=False, stdin_text=_stdin)
+    if r.get("needs_confirm"):
+        ask = (context or {}).get("confirm")
+        risk = "、".join(r.get("risky") or [])
+        if not callable(ask):
+            return ("这段代码里有需要用户确认的操作（%s），但当前没有可用的确认通道，**没有执行**。\n"
+                    "请改成不涉及这些操作的写法。" % risk)
+        allowed = ask({"kind": "python", "code": code,
+                       "risky": r.get("risky") or [],
+                       "reason": "检测到：" + risk})
+        if not allowed:
+            return ("用户**拒绝了**这次执行（原因：%s）。\n"
+                    "请换一种不涉及这些操作的写法；如果确实必须这么做，"
+                    "先把你要做什么、为什么这么做说清楚，等用户同意再试。\n"
+                    "⚠️ **绝对不要编造执行结果或用模拟数据冒充真实输出** ——"
+                    "那会让用户以为结果是真的。如实说明「被拒绝了」即可。" % risk)
+        r = run_code(code, allow_risky=True, stdin_text=_stdin)
+    # 把这次执行的代码与结果推给前端 → 界面渲染成"可直接编辑重跑"的代码卡片
+    if isinstance(ui_events, list):
+        ui_events.append({"type": "code", "code": code, "stdin": _stdin,
+                          "out": r.get("out") or "", "err": r.get("err") or "",
+                          "rc": r.get("rc"), "seconds": r.get("seconds"),
+                          "risky": r.get("risky") or []})
+    text = _format_py_result(r)
+    # 程序里有 input() 而这次没喂输入（或喂了还报 EOF）→ 把原因说清楚，
+    # 免得模型又去"修"一份本来没错的代码。
+    if "input(" in code and (not _stdin or r.get("rc") not in (0, None)):
+        text += ("\n\n⚠️ 这段代码里有 `input()`。工具运行的时候**没人在旁边打字**，"
+                 "所以要么把要输入的内容按行放进 **stdin** 参数再跑一次，"
+                 "要么就告诉用户「点代码卡片上的 ▶ 运行，运行当中可以随时输入」"
+                 "（那边的输入框就是给交互程序用的）。**不要**因此断定代码写错了。")
+    return text
+
+
+# =====================================================================
+#  生成文库工具
+# =====================================================================
+def _do_library(arguments, ui_events=None):
+    """生成文库的增删改查 + 导出 Word。"""
+    action = str((arguments or {}).get("action") or "list").strip().lower()
+    # ⚠️ 模型常把 URL 编码的文件名直接传进来（照抄下载链接），统一还原（见 _fix_filename）
+    name = _fix_filename((arguments or {}).get("name"))
+    content = (arguments or {}).get("content")
+    new_name = _fix_filename((arguments or {}).get("new_name"))
+    content = "" if content is None else str(content)
+
+    def _notify(kind, **kw):
+        if isinstance(ui_events, list):
+            ui_events.append(dict(type="library", act=kind, **kw))
+
+    try:
+        if action == "list":
+            return ("【生成文库】目录结构（按文件夹分组）：\n"
+                    + library_mod.tree_text(max_items=120)
+                    + "\n\n写文件时 name 可以带子文件夹（如 `作文/第二版.md`），"
+                      "用文件夹归类更好找。")
+
+        if action == "read":
+            r = library_mod.read_file(name)
+            if not r.get("ok"):
+                return "读取失败：%s" % r.get("error")
+            _notify("read", rel=r["rel"], content=r.get("text") or "")
+            head = r.get("text") or ""
+            if r.get("chars", 0) > 20000:
+                head = head[:20000] + "\n……（内容很长，已截断）"
+            return "【%s】共 %d 字：\n\n%s" % (r["rel"], r.get("chars", 0), head)
+
+        if action in ("write", "append"):
+            r = library_mod.write_file(name, content,
+                                       "append" if action == "append" else "overwrite")
+            if not r.get("ok"):
+                return "写入失败：%s" % r.get("error")
+            _notify("write", rel=r["rel"], chars=r.get("chars", 0))
+            tip = "（原有内容已自动备份）" if r.get("backup") else ""
+            return ("已%s到生成文库：%s（%d 字）%s。\n"
+                    "告诉用户文件已经存好了、存在生成文库面板里，他可以在那里打开、编辑、"
+                    "导出 Word 或删除。" % ("追加" if action == "append" else "写入",
+                                            r["rel"], r.get("chars", 0), tip))
+
+        if action == "delete":
+            r = library_mod.delete_file(name)
+            if not r.get("ok"):
+                return "删除失败：%s" % r.get("error")
+            _notify("delete", rel=r["rel"])
+            return "已删除 %s（实际移到了回收站 _回收站/，需要的话可以恢复）。" % r["rel"]
+
+        if action == "copy":
+            r = library_mod.copy_file(name, new_name)
+            if not r.get("ok"):
+                return "复制失败：%s" % r.get("error")
+            _notify("write", rel=r["to"], chars=0)
+            return "已复制：%s → %s" % (r["from"], r["to"])
+
+        if action == "backup":
+            r = library_mod.backup_all()
+            if not r.get("ok"):
+                return "备份失败：%s" % r.get("error")
+            return "已备份 %d 个文件到 %s" % (r.get("count", 0), r.get("path", ""))
+
+        if action == "export_docx":
+            rd = library_mod.read_file(name)
+            if not rd.get("ok"):
+                return "导出失败：%s" % rd.get("error")
+            base = rd["rel"]
+            out = re.sub(r"\.(md|markdown|txt|text)$", "", base, flags=re.I) + ".docx"
+            if out == base:
+                out = base + ".docx"
+            doc_title = os.path.splitext(os.path.basename(base))[0]
+            text = rd.get("text") or ""
+            # 优先走完整排版模块（认 Markdown 的标题/列表/表格/引用，样式统一）；
+            # 万一它不可用，退回原来的纯标准库实现，保证这条路永远不断。
+            try:
+                import tempfile
+
+                from . import docx_maker as _dm
+                tmp = os.path.join(tempfile.gettempdir(),
+                                   "mm_exp_%d.docx" % int(time.time() * 1000))
+                r = _dm.build_docx_text(tmp, doc_title, text,
+                                        theme=str((arguments or {}).get("theme")
+                                                  or "blue"),
+                                        font=str((arguments or {}).get("font")
+                                                 or "yahei"),
+                                        toc=bool((arguments or {}).get("toc")))
+                if not r.get("ok"):
+                    raise RuntimeError(r.get("error") or "生成失败")
+                with open(tmp, "rb") as f:
+                    data = f.read()
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+            except Exception as e:
+                logging.getLogger("uvicorn.error").warning(
+                    "排版模块导出失败，退回简易版：%s", e, exc_info=True)
+                data = docx_write.text_to_docx(text, title=doc_title)
+            w = library_mod.save_bytes(out, data)
+            if not w.get("ok"):
+                return "导出失败：%s" % w.get("error")
+            _notify("write", rel=w["rel"], chars=0)
+            return ("已导出 Word 文档：%s（%d 字节）。WPS 和 Word 都能直接双击打开。\n"
+                    "告诉用户去生成文库面板下载/打开它。" % (w["rel"], w.get("bytes", 0)))
+
+        return "未知的 action：%s（可用 list/read/write/append/delete/copy/backup/export_docx）" % action
+    except Exception as e:
+        return "文库操作失败：%s: %s" % (type(e).__name__, e)
+
+
+# =====================================================================
+#  请用户配置高德 key
+# =====================================================================
+def _do_connect_amap(arguments, context=None):
+    """弹一个输入框请用户填高德 key，填完**当场验证**、通过就存下、立刻生效。
+
+    为什么不直接让用户去改 config.json：那要求他找到文件、改 JSON、再重启应用，
+    对新机器上手来说太重了。这里复用"问用户"那条通道，在界面上填一下就行。
+    """
+    from . import amap as _am
+    from . import config as _cfg
+
+    if _am.has_key():
+        return "已经配好高德 key 了，直接用地图工具查就行，不用再问用户。"
+
+    reason = str((arguments or {}).get("reason") or "").strip()
+    ask = (context or {}).get("ask")
+    if not callable(ask):
+        return ("用户界面没连上，没法请他填 key。请直接告诉用户："
+                "去 https://console.amap.com/dev/key/app 申请一个"
+                "「**Web服务**」类型的 key，然后点界面顶栏的「高德 key」按钮填进去。")
+
+    questions = [{
+        "question": "请粘贴高德开放平台的 key（32 位，服务平台要选「Web 服务」）：",
+        "header": "高德 key",
+    }]
+    answers = ask({
+        "title": "🗺️ 填一个高德 key，地图能力会好很多",
+        "hint": (reason + "\n" if reason else "") +
+                "填了之后：能搜到全国的小店、有真实评分、有实时路况、有公交换乘，"
+                "步行骑行也是真实路径。不填也能用，只是数据很弱（用的是 OpenStreetMap）。\n"
+                "申请：console.amap.com → 实名 → 建应用 → 加 Key → "
+                "**服务平台必须选「Web 服务」**。\n"
+                "不想填就直接关掉这个框，我按没有 key 继续做。",
+        "questions": questions,
+        "freeInput": True,
+    })
+    ans = ""
+    for a in (answers or []):
+        if isinstance(a, dict):
+            ans = (a.get("answer") or "").strip() or ans
+        else:
+            ans = str(a or "").strip() or ans
+    if not ans:
+        return ("用户没有填（可能直接关了弹框）。**按没有高德 key 继续做事** ——"
+                "地图会退回 OpenStreetMap：能查大城市/道路/机场车站，但小店、评分、"
+                "路况、公交都没有。在回答里如实说明这一点，不要再反复追问。")
+
+    ok, msg = _am.verify_key(ans)
+    if not ok:
+        return ("用户填的 key 没通过验证：%s\n"
+                "请把这个原因原样告诉他，并请他重新申请/重新复制一个 ——"
+                "他也可以选择不填，那就按没有 key 继续。" % msg)
+    cfg = _cfg.load_config()
+    cfg["amap_key"] = ans
+    _cfg.save_config(cfg)
+    return ("✅ %s\n"
+            "（key 已经保存并**立刻生效**，不用重启。接下来直接用 map_plan / nearby_places "
+            "查就行；结果里会带真实评分、实时路况和公交换乘。）" % msg)
+
+
+# =====================================================================
+#  反问用户
+# =====================================================================
+# ⚠️ 只防"模型发疯"用的兜底上限，不是产品限制 —— 用户要求问题个数不限制。
+# 20 个问题已经远超任何真实任务的需要，真到这一步说明模型在凑数，
+# 提示词里已经写明"每个都要是关键问题"。
+_ASK_HARD_CAP = 20
+
+# 深度询问模式下"**第一轮**至少要问几个"。⚠️ 见 _do_ask_user 的说明：实测同一个需求连跑多次，
+# 8B 模型给出的问题数在 3~5 之间飘 —— 光靠提示词保证不了，所以做**代码层兜底**。
+# ⚠️⚠️ **只对第一轮生效**：第二、三轮本来就是"追问"，问 1~3 个才正常
+# （每轮都逼它问 5 个 = 逼它重复问，正是用户讨厌的"没完没了"）。
+ASK_DEEP_MIN = 5
+
+# 每轮的询问守卫（按 session）：calls = 已经弹过几次框，rejected = 被驳回要求补全几次。
+# 每轮对话开始时由 _ask_guard_reset 清零。
+_ASK_GUARD: dict = {}
+
+
+def ask_guard_reset(session: str) -> None:
+    """新一轮用户消息开始时清零。"""
+    _ASK_GUARD[str(session or "")] = {"calls": 0, "rejected": 0, "asked": []}
+
+
+def _q_norm(text: str) -> str:
+    """问题文本归一化：去掉标点/空白/常见虚词，便于判"是不是同一个问题"。"""
+    t = str(text or "")
+    for ch in "？?。.，,、！!：:；;（）()【】[]「」\"'“”‘’ 　\n\t":
+        t = t.replace(ch, "")
+    for w in ("请问", "您", "你", "的", "吗", "呢", "这份", "希望", "想要"):
+        t = t.replace(w, "")
+    return t
+
+
+# 问题的**话题分类**：判"是不是在复问同一个方向"用它，比单纯比字面准得多。
+# 实测（2026-09-23）：模型第二轮把"页数"换个说法又问了一遍
+#（"希望控制在几页左右？" / "希望控制多少页？"）—— 字面差异大、但是同一个问题；
+# 反过来"用于什么场合"和"面向哪些人"字面像、却是两个不同的问题。
+_Q_TOPICS = (
+    ("受众", ("受众", "给谁", "面向", "观众", "读者", "谁看", "哪些人", "群体", "人群", "讲给")),
+    ("篇幅", ("页", "篇幅", "字数", "多少字", "长度", "几页", "多长")),
+    ("风格", ("风格", "配色", "色彩", "颜色", "色调", "基调", "视觉", "样式", "美术", "美感")),
+    ("用途", ("用途", "场景", "场合", "目的", "用来", "做什么用")),
+    ("交付", ("格式", "尺寸", "比例", "导出", "横版", "竖版", "文件类型")),
+    ("约束", ("必须", "不要", "避免", "禁忌", "限制", "硬性", "雷区")),
+)
+
+
+def _q_topic(text: str) -> str:
+    t = str(text or "")
+    for name, keys in _Q_TOPICS:
+        for k in keys:
+            if k in t:
+                return name
+    return ""
+
+
+def _q_similar(a: str, b: str) -> bool:
+    """两个问题是不是"在问同一件事"（= 复问用户已经答过的方向）。
+
+    两条判据，任一命中就算重复：
+      ① **话题相同**（都问受众 / 都问篇幅 / 都问风格…）—— 主力判据；
+      ② 字面高度相似（中文按字符二元组 Jaccard ≥0.7）—— 兜住没有话题词的措辞。
+    ⚠️ 宁可判"不重复"：误删一个真问题 = 用户少答一个关键点，比多问一句糟。
+    """
+    ta, tb = _q_topic(a), _q_topic(b)
+    if ta and tb and ta == tb:
+        return True
+    x, y = _q_norm(a), _q_norm(b)
+    if not x or not y:
+        return False
+    if x in y or y in x:
+        return True
+    gx = {x[i:i + 2] for i in range(len(x) - 1)} or {x}
+    gy = {y[i:i + 2] for i in range(len(y) - 1)} or {y}
+    inter = len(gx & gy)
+    return inter / float(len(gx | gy) or 1) >= 0.7
+
+
+def _do_ask_user(arguments, context=None):
+    """把问题弹到界面上，等用户回答。复用"确认弹窗"那条通道。"""
+    qs = (arguments or {}).get("questions") or []
+    if not isinstance(qs, list) or not qs:
+        return "错误：没有可问的问题。"
+    norm = []
+    # ⚠️ 这里**不再截断成 4 个**。用户 2026-09-22 明确要求"每次询问的问题个数也可以不限制"。
+    # 以前写 `qs[:4]`，第 5 个之后的问题会被**静默丢掉**（模型以为问了、用户根本没看到），
+    # 比"问得多"糟得多。现在的约束放在**提示词**里：不许重复、每个都要是关键问题。
+    # 兜底只防"模型发疯"（几十上百个问题会把弹框撑爆），给一个很高的上限。
+    for q in qs[:_ASK_HARD_CAP]:
+        if not isinstance(q, dict):
+            continue
+        text = str(q.get("question") or "").strip()
+        if not text:
+            continue
+        opts = [str(o).strip() for o in (q.get("options") or []) if str(o).strip()][:4]
+        norm.append({"question": text,
+                     "header": str(q.get("header") or "").strip()[:12],
+                     "options": opts, "multi": bool(q.get("multi"))})
+    if not norm:
+        return "错误：问题的格式不对，至少要有一个非空 question。"
+
+    # ---------- 深度询问的两道代码层兜底（见函数说明）----------
+    session = str((context or {}).get("session") or "")
+    deep = str((context or {}).get("ask_mode") or "").lower() == "deep"
+    g = _ASK_GUARD.setdefault(session, {"calls": 0, "rejected": 0, "asked": []})
+    # ⚠️⚠️ **第二轮起：不许重复问**（2026-09-23 实测：模型第二轮把"受众/页数/风格"又问了一遍，
+    #    用户最烦的就是这个 —— 提示词里明明写了"绝不复问已经答过的"，它仍然会犯）。
+    #    这里做轻量去重：新问题里有过半和之前问过的"是一回事" → 驳回，让它只问真正的空白。
+    #    ⚠️ 只在**已经问过一轮之后**生效，且最多驳 1 次（第二次放行，免得卡住）。
+    if deep and g["calls"] > 0 and g.get("asked") and not g.get("dup_rejected"):
+        dup = sum(1 for q in norm
+                  if any(_q_similar(q["question"], old) for old in g["asked"]))
+        if dup * 2 >= len(norm):
+            g["dup_rejected"] = True
+            return ("⚠️ 你这几个问题和**上一轮已经问过的**重复了（用户已经答过）—— "
+                    "用户明确讨厌被反复问同一件事。请**只问上一轮答复之后仍然空着的**"
+                    "关键点（比如上一轮没答到的交付形式/篇幅/约束）；"
+                    "如果确实**没有**新的关键疑问，就**不要再调用本工具**，直接动手做。")
+    # ⚠️⚠️ **下限只管第一轮**（g["calls"] == 0）。第二、三轮是"追问"，
+    #    问 1~3 个才正常 —— 实测第一版没加这个条件时，模型第二轮想追问 2 个被驳回，
+    #    结果那一轮**根本没弹出来**（用户少问了一轮，越修越糟）。
+    # ⚠️ 2026-11-08：拒绝次数从 2 降到 1。
+    #   原来模型问 3 个也被驳回两次，两轮下来它干脆放弃 ask_user、
+    #   改成在正文里写「你选一个」——用户就再也看不到弹框了（实测）。
+    #   现在只驳一次：第二次它给多少就问多少，宁可问得少也不要问不出来。
+    if deep and g["calls"] == 0 and len(norm) < ASK_DEEP_MIN and g["rejected"] < 1:
+        g["rejected"] += 1
+        return ("⚠️ 现在是**深度询问**模式，用户明确要求第一轮就把信息问透："
+                "一次**至少 %d 个**关键问题（5~7 个最佳，覆盖：用途/受众、范围与篇幅、"
+                "风格或口径、硬性约束、交付形式、有没有参考样例）。"
+                "你这次只给了 %d 个 —— **请补充到 5~7 个后重新调用 ask_user**"
+                "（要弹框，别改成在正文里问；也别复问用户已经答过的）。"
+                % (ASK_DEEP_MIN, len(norm)))
+
+    ask = (context or {}).get("ask")
+    if not callable(ask):
+        return ("现在没有可用的提问通道（用户界面没连上），先把最合理的默认方案做出来，"
+                "并在回答里说明你假设了什么、哪些地方需要他补充。")
+    g["calls"] += 1
+    # 记下这一轮问过什么 —— 下一轮的"不许复问"就靠它比对（见上面的去重）
+    g.setdefault("asked", []).extend([q["question"] for q in norm])
+    answers = ask({"questions": norm,
+                   "hint": ("🔍 深度询问：模型可以多轮追问，问透为止。"
+                            "填完它就接着做；不想答的直接跳过。"
+                            if deep
+                            else "💬 快速了解：只问最关键的几条，答完就开工。"
+                                 "不想答的直接跳过。")})
+    if not answers:
+        return ("用户没有回答（可能直接关掉了弹框）。请**按最合理的默认假设继续做**，"
+                "并在回答开头明确写出你替他假设了哪些条件，方便他纠正。")
+    # ⚠️ 2026-09-28 实测：用户"打开了提问框但一条都没填"时，answers 是**非空列表**、
+    # 只是每条 answer 都是空串 —— 于是生成出「1. 问题 → 」（箭头后什么都没有），
+    # 模型拿到一串空答案，会以为"用户答了但什么都没说"，原地打转或自己乱编。
+    # 这和"完全没答"其实是一回事，按同一套兜底处理。
+    if isinstance(answers, (list, tuple)):
+        _filled = [a for a in answers
+                   if str((a.get("answer") if isinstance(a, dict) else a) or "").strip()]
+        if not _filled:
+            return ("用户打开了提问框但**一条都没填**。请**按最合理的默认假设继续做**，"
+                    "并在回答开头写明你替他假设了什么，方便他纠正 —— "
+                    "不要停下来等，也不要重复问同样的问题。")
+    lines = ["【用户补充的信息】"]
+    for i, a in enumerate(answers, 1):
+        if isinstance(a, dict):
+            lines.append("%d. %s → %s" % (i, a.get("question", ""), a.get("answer", "")))
+        else:
+            lines.append("%d. %s" % (i, a))
+    lines.append("⚠️ **这一轮还没有结束** —— 请**接着把东西做出来**"
+                 "（该写的写、该做的做），不要只回一句「好的」"
+                 "或停下来等用户再发一条消息。")
+    lines.append("基于这些信息接着做。")
+    # ⚠️ 不要写成"不要再问了" —— 用户 2026-09-22 明确要求**允许多轮询问**，
+    # 只是不许问**重复的**。写死"只问一次"会逼模型在信息不足时硬做。
+    if deep:
+        # ⚠️ 2026-09-23：把"该不该再问一轮"的**自查**直接放在工具返回值里 ——
+        #    模型此刻正好在决定下一步做什么，比写在系统提示里有效得多。
+        #    实测：只写系统提示时，同一个需求连跑两次都是"问一轮就动手"。
+        if g["calls"] == 1:
+            lines.append("🔍 **深度询问模式 · 请先自查再动手**：上面这些答复之外，"
+                         "**还有没有会影响你怎么做的关键点**（比如交付形式、篇幅、"
+                         "受众、风格、硬性约束）是你还不确定的？\n"
+                         "  · **有** → 再调用一次 ask_user 问第二轮（要弹框），把这些问清；\n"
+                         "  · **没有** → 直接动手做，别再问。")
+        elif g["calls"] >= 3:
+            lines.append("（已经问到第 %d 轮了，信息足够 —— **现在就动手做**，不要再问。）"
+                         % g["calls"])
+    lines.append("⚠️ 上面这些**已经问过、用户已经答过**的，一个字都不要再问。"
+                 "但如果你根据答复**发现了新的关键疑问**（影响你怎么做的那种），"
+                 "可以**再调用一次 ask_user 问一轮** —— 别硬猜着做；"
+                 "没有新的关键疑问就一次做完。")
+    return "\n".join(lines)
+
+
+def _do_search_knowledge(arguments):
+    """检索本地知识库。让模型**自己决定**要不要查、查什么。
+
+    以前只有"每轮自动注入前 top_k 篇"，模型没法在需要时多查几轮；
+    现在给它这个工具，它可以：先列目录看有哪些资料 → 再按关键词精查 →
+    必要时换关键词再查一遍，甚至与联网搜索同时使用。
+    """
+    from . import kb as kb_mod
+    docs = kb_mod.list_documents()
+    if not docs:
+        return ("知识库是空的。请告诉用户：把 .txt/.md 文档放进知识库文件夹即可，"
+                "之后就能自动检索。")
+
+    # 先摸清有哪些资料
+    if arguments.get("list_all"):
+        # 用树形输出（按文件夹分组）。原来的实现有两个毛病：
+        #   · 只显示 basename，看不出文件在哪个子文件夹里
+        #   · 用 os.path.join(KB_DIR, fn) 直接打开 —— 子目录里的文件**打不开**，
+        #     开头摘要永远是空的（静默失败，最难查）
+        return ("知识库的目录结构（按文件夹分组，`·` 后面是开头摘要）：\n"
+                + kb_mod.tree_text()
+                + "\n\n需要细节时用 query 针对性检索；"
+                  "也可以按文件夹找 —— 文件名可带路径，如 `课程A/第一章/讲义.md`。")
+
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        return ("请给出 query 参数（检索关键词），或用 list_all=true 先列出知识库有哪些文档。")
+
+    hits = kb_mod.search(query, top_k=int(arguments.get("top_k") or 6))
+    if not hits:
+        return (f"知识库里没有与「{query}」相关的内容。"
+                f"（当前共 {len(docs)} 篇文档；可换关键词再试，或 list_all=true 看看都有什么）")
+    lines = [f"知识库检索结果（关键词：{query}）："]
+    for i, h in enumerate(hits, 1):
+        # 带上所在文件夹，模型才能说清"出自哪一篇"，也能据此去翻同目录的其他资料
+        title = h.get("rel") or h.get("filename") or h.get("doc_id") or "?"
+        body = (h.get("content") or "").strip()
+        lines.append(f"\n[{i}] 《{title}》\n{body[:1200]}")
+    lines.append("\n（以上来自用户自己的知识库，比联网结果更贴合其领域；"
+                 "回答时请优先采用，并注明出自哪一篇。）")
+    return "\n".join(lines)
+
+
+def _do_search_memory(arguments):
+    query = arguments.get("query") or ""
+    hits = memory_mod.search_all(query, top_k=5)
+    if not hits:
+        return "没有找到相关记忆信息。"
+    lines = ["检索到的历史记忆："]
+    for i, h in enumerate(hits, 1):
+        lines.append(f"{i}. [{h.get('level','?')}]{h.get('content','')}")
+    return "\n".join(lines)
