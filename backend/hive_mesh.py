@@ -624,6 +624,29 @@ class MeshNode:
             if ttl > 0:
                 self._fanout(gid, T_MSG, {"msg": saved, "ttl": ttl}, skip=peer)
             return
+        if typ == T_GONE:
+            # 群主删了群：本地这份也下线（移到 _deleted，不是真删）。
+            # 转发给其他成员 —— 有人可能没直连群主，靠中间人传过去。
+            nm = str(obj.get("name") or "")
+            try:
+                if H.load_group(gid):
+                    H.delete_group(gid, force=True)
+            except Exception:
+                pass
+            with _LOCK:
+                self.groups.discard(gid)
+                self.vts.pop(gid, None)
+                self.gnames.pop(gid, None)
+                self.beacons.pop(gid, None)
+            if self.on_gone:
+                try:
+                    self.on_gone(gid, nm)
+                except Exception:
+                    pass
+            ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
+            if ttl > 0:
+                self._fanout(gid, T_GONE, {"name": nm, "ttl": ttl}, skip=peer)
+            return
         if typ == T_STREAM:
             if self.on_stream:
                 try:
