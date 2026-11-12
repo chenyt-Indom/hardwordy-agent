@@ -1002,10 +1002,29 @@ def render_score(score: dict, sr: int = SR, progress=None) -> np.ndarray:
                           size=0.75 if send > 0.3 else 0.55,
                           seed=17 + ti)
             buf = ((1.0 - send * 0.5) * buf + send * 0.55 * wet).astype(np.float32)
-        # 声像（等功率）
+        # 声像（等功率）+ Haas 宽度
+        # ⚠️ 只做等功率声像的话，左右两声道内容完全相同（实测相关度 0.999，
+        #    等于单声道）。给"远离中轴"的那一侧混入 8~14ms 延迟信号（Haas 效应），
+        #    人耳听不出延迟，但声场立刻变宽。
         th = (pan + 1.0) * math.pi / 4.0
-        left += buf * (math.cos(th) * gain)
-        right += buf * (math.sin(th) * gain)
+        gl = math.cos(th) * gain
+        gr = math.sin(th) * gain
+        dly = int((0.008 + 0.006 * abs(pan)) * sr)
+        if 0 < dly < n:
+            delayed = np.concatenate([np.zeros(dly, dtype=np.float32), buf[:-dly]])
+        else:
+            delayed = buf
+        if pan < -0.02:                       # 偏左：右声道用延迟
+            l_sig = buf
+            r_sig = buf * 0.35 + delayed * 0.65
+        elif pan > 0.02:                      # 偏右：左声道用延迟
+            l_sig = buf * 0.35 + delayed * 0.65
+            r_sig = buf
+        else:                                 # 中轴：两侧都给一点延迟差
+            l_sig = buf * 0.6 + delayed * 0.4
+            r_sig = buf * 0.85 + delayed * 0.15
+        left += l_sig * gl
+        right += r_sig * gr
         if progress:
             try:
                 progress((ti + 1) / float(total))
