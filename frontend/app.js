@@ -7678,6 +7678,7 @@
   loadMemory();
   loadKb();
   loadDoclib();
+  loadAudioLib();
   loadLibrary();
   loadDevice();
   setInterval(refreshHealth, 5000);
