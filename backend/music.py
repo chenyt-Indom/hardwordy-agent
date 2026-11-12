@@ -1568,7 +1568,7 @@ def _rebuild_bass(score: dict, cfg: dict) -> list:
 
 def _rebuild_pad(score: dict, bars: int) -> list:
     beat = 60.0 / float(score.get("bpm") or 120)
-    bar_s = beat * 4
+    bar_s = beat * float(score.get("beats_per_bar") or 4)
     out = []
     for b, ch in enumerate(score.get("chords") or []):
         for p in ch:
