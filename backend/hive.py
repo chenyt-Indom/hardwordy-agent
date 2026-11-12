@@ -669,6 +669,133 @@ def add_system_message(gid: str, text: str) -> Dict[str, Any]:
     return msg
 
 
+# ---------------------------------------------------------------- 附件
+#
+# 用户要求：「所有东西全员都要能看到」。做法**不是**让其他人来你这台机器下载
+# （发送者一关机就没了），而是发送时就把文件广播给每个成员、各存一份。
+# 这样任何人离线再上线，历史附件仍在本地，不依赖发送者是否在线。
+#
+# 存储：data/hive/groups/<gid>/files/<fid>__<安全文件名>
+# 索引：data/hive/groups/<gid>/files.json   （fid -> 元信息）
+
+MAX_FILE = 20 * 1024 * 1024      # 单文件上限 20MB（走中继分片广播，再大不现实）
+
+
+def files_dir(gid: str) -> str:
+    return os.path.join(_gdir(gid), "files")
+
+
+def _files_index_path(gid: str) -> str:
+    return os.path.join(_gdir(gid), "files.json")
+
+
+def _safe_name(name: str) -> str:
+    """只留文件名本身：去掉路径分隔符、控制字符和 Windows 非法字符。
+
+    ⚠️ 必须做这一步 —— 附件名来自网络，`../../x.py` 这种名字不处理就能写到
+    群目录外面去（路径穿越）。中文/括号等正常字符要保留，别一刀切成下划线。
+    """
+    base = os.path.basename(str(name or "file").replace("\\", "/"))
+    bad = '<>:"|?*\r\n\t\x00'
+    base = "".join(c for c in base if c not in bad and c.isprintable())
+    base = base.strip(" .") or "file"
+    return base[:120]
+
+
+def kind_of(mime: str, name: str) -> str:
+    """附件归类 —— 决定前端显示成缩略图、播放器还是一张文件卡片。"""
+    m = (mime or "").lower()
+    ext = os.path.splitext(str(name or ""))[1].lower()
+    if m.startswith("image/") or ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"):
+        return "image"
+    if m.startswith("video/") or ext in (".mp4", ".mov", ".webm", ".mkv", ".avi"):
+        return "video"
+    if m.startswith("audio/") or ext in (".mp3", ".wav", ".m4a", ".ogg", ".flac"):
+        return "audio"
+    return "doc"
+
+
+def save_file(gid: str, name: str, data: bytes, mime: str = "") -> Dict[str, Any]:
+    """把本机要发的附件存进群目录，返回元信息（随后写进消息的 files 字段）。"""
+    if not data:
+        raise ValueError("文件是空的")
+    if len(data) > MAX_FILE:
+        raise ValueError("文件太大（%.1f MB），单个文件上限 %d MB"
+                         % (len(data) / 1048576.0, MAX_FILE // 1048576))
+    if not load_group(gid):
+        raise ValueError("群不存在")
+    me = profile()
+    fid = "f_" + secrets.token_hex(8)
+    safe = _safe_name(name)
+    d = files_dir(gid)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, fid + "__" + safe), "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    meta = {
+        "fid": fid, "name": safe, "size": len(data),
+        "mime": mime or "", "kind": kind_of(mime, safe),
+        "sha": hashlib.sha256(data).hexdigest()[:16],
+        "by": me["user_id"], "by_name": me["name"], "ts": time.time(),
+    }
+    with _LOCK:
+        idx = _read_json(_files_index_path(gid), {}) or {}
+        idx[fid] = meta
+        _write_json(_files_index_path(gid), idx)
+    return meta
+
+
+def get_file_meta(gid: str, fid: str) -> Dict[str, Any]:
+    idx = _read_json(_files_index_path(gid), {}) or {}
+    if fid not in idx:
+        raise ValueError("文件不存在")
+    return idx[fid]
+
+
+def file_path(gid: str, fid: str) -> str:
+    """按索引里登记的名字拼路径 —— **绝不用前端传来的名字拼路径**。"""
+    m = get_file_meta(gid, fid)
+    return os.path.join(files_dir(gid), fid + "__" + m["name"])
+
+
+def read_file_bytes(gid: str, fid: str) -> bytes:
+    p = file_path(gid, fid)
+    if not os.path.exists(p):
+        raise ValueError("文件已被删除")
+    with open(p, "rb") as f:
+        return f.read()
+
+
+def store_incoming(gid: str, meta: Dict[str, Any], data: bytes) -> Dict[str, Any]:
+    """收到别人通过中继发来的附件，在本机也存一份（fid 保持不变）。
+
+    这样「全员可见」不依赖发送者在线：谁收到谁就有一份完整副本。
+    """
+    fid = str(meta.get("fid") or "")
+    if not fid:
+        raise ValueError("缺少 fid")
+    d = files_dir(gid)
+    os.makedirs(d, exist_ok=True)
+    name = _safe_name(meta.get("name") or "file")
+    path = os.path.join(d, fid + "__" + name)
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+    out = dict(meta)
+    out["fid"] = fid
+    out["name"] = name
+    out["size"] = len(data)
+    out["kind"] = out.get("kind") or kind_of(out.get("mime", ""), name)
+    with _LOCK:
+        idx = _read_json(_files_index_path(gid), {}) or {}
+        idx[fid] = out
+        _write_json(_files_index_path(gid), idx)
+    return out
+
+
 # ---------------------------------------------------------------- 邀请 / 二维码
 
 def invite_payload(gid: str, host: str = "") -> Dict[str, Any]:
