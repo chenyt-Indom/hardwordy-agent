@@ -8794,10 +8794,18 @@
     avBox.addEventListener("pointercancel", endDrag);
 
     // ② 恢复上次的位置 / 隐藏状态
+    // ⚠️ 没存过位置时，别用 CSS 里写死的 bottom —— 输入框会随文字长高，
+    //    写死就一定会压住它（实测压住了输入框和发送按钮）。按实际高度算。
+    let avRestored = false;
     try {
       const p = JSON.parse(localStorage.getItem(AV_POS_KEY) || "null");
-      if (p && typeof p.l === "number") avPlace(p.l, p.t);
+      if (p && typeof p.l === "number") { avPlace(p.l, p.t); avRestored = true; }
     } catch (e) { /* ignore */ }
+    if (!avRestored) {
+      const comp = document.querySelector(".composer");
+      const ch = comp ? comp.getBoundingClientRect().height : 120;
+      avBox.style.bottom = Math.round(ch + 18) + "px";
+    }
     try {
       if (localStorage.getItem(AV_HIDE_KEY) === "1" && avTab) {
         avBox.hidden = true;
