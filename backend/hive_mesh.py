@@ -881,12 +881,30 @@ class MeshNode:
                 continue
             if o.get("svc") != "hive-mesh":
                 continue
-            if o.get("uid") == self.uid:
+            if o.get("uid") == self.uid and (o.get("dev") or "") == self.dev:
                 continue                      # 自己发的广播，忽略
             gid = str(o.get("gid") or "")
+            if not gid:
+                continue
+            # 不管是不是我的群，先记下来 —— 「只输密码」的人要靠它去搜群。
+            # 广播里只有 gid / 验证标签 / 群名，没有密钥，所以记下来也不泄密。
             with _LOCK:
+                self.beacons[gid] = {
+                    "gid": gid,
+                    "vt": str(o.get("vt") or ""),
+                    "gn": str(o.get("gn") or ""),
+                    "host": addr[0],
+                    "port": int(o.get("port") or 0),
+                    "uid": str(o.get("uid") or ""),
+                    "name": str(o.get("name") or ""),
+                    "ts": time.time(),
+                }
                 if gid not in self.groups:
-                    continue                  # 不是同一个群
+                    continue                  # 不是我的群：只记，不连
+                mine = self.vts.get(gid) or ""
+                theirs = str(o.get("vt") or "")
+                if mine and theirs and mine != theirs:
+                    continue                  # 同群号但密钥不同（群主换过密码），别乱连
                 for p in self.peers:
                     if p.alive and p.uid == o.get("uid"):
                         break
