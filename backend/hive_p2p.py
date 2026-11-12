@@ -838,8 +838,8 @@ def _beacon_listener() -> None:
             d = json.loads(data[len(BEACON_MAGIC):].decode("utf-8"))
         except Exception:
             continue
-        if d.get("from") == me:
-            continue          # 自己发的，忽略
+        if me and d.get("uid") == me:
+            continue          # 自己发的，忽略（比的是 uid，不是 IP）
         fid = str(d.get("fid") or "")
         if not fid:
             continue
