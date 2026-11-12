@@ -832,6 +832,35 @@ class MeshNode:
                     self.on_peer()
                 except Exception:
                     pass
+            # 自动重连：知道地址但当前没连上的人，定期再试一次。
+            # 没有这一步，跨公网（收不到对方 UDP 广播）一旦断线就永远连不回去，
+            # 只能重新传一次连接码 —— 群主不在、只剩两个非群主时最难受的正是这里。
+            try:
+                self._retry_known()
+            except Exception:
+                pass
+
+    def _retry_known(self) -> None:
+        """把 known 里「知道地址但没连上」的人重新连一遍（每人 20 秒最多一次）。"""
+        now = time.time()
+        todo: List[Tuple[str, str, int, str]] = []
+        with _LOCK:
+            alive = {p.uid for p in self.peers if p.alive and p.uid}
+            for uid, k in self.known.items():
+                if not uid or uid == self.uid or uid in alive:
+                    continue
+                host = str(k.get("host") or "")
+                port = int(k.get("port") or 0)
+                gid = str(k.get("gid") or "")
+                if not host or not port or not gid or gid not in self.groups:
+                    continue
+                if now - float(self._retry.get(uid) or 0) < 20.0:
+                    continue
+                self._retry[uid] = now
+                todo.append((uid, host, port, gid))
+        for uid, host, port, gid in todo:
+            threading.Thread(target=self.connect, args=(host, port, gid),
+                             daemon=True).start()
 
 
 # ---------------------------------------------------------------- 单例
