@@ -1117,6 +1117,12 @@ def render_score(score: dict, sr: int = SR, progress=None) -> np.ndarray:
 # 七、存储
 # ============================================================
 def _base() -> str:
+    """乐谱 / meta 的目录（data/music）。
+
+    ⚠️ 2026-11-12 用户要求「音乐放在音频那个文件夹里」：**成品 wav 不再放这里**，
+    改由 _wav_dir() 落到 data/tts（界面「🎵 音频」库读的就是那个目录）。
+    本函数只管 scores/ 和 meta.json —— 音频库只认扩展名，不关心乐谱在哪。
+    """
     d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      "data", "music")
     os.makedirs(d, exist_ok=True)
@@ -1124,8 +1130,34 @@ def _base() -> str:
     return d
 
 
+def _wav_dir() -> str:
+    """成品 wav 的存放目录 = data/tts（与 TTS 语音同一个文件夹）。
+
+    这样生成的曲子会直接出现在界面的「🎵 音频」库里，能试听、能下载、
+    能点 📁 打开所在文件夹，不用再单独记一个 data/music 路径。
+    """
+    d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "data", "tts")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _wav_path(name: str) -> str:
-    return os.path.join(_base(), os.path.basename(name))
+    return os.path.join(_wav_dir(), os.path.basename(name))
+
+
+def _is_music_id(mid: str) -> bool:
+    """判断文件名是不是本引擎生成的曲子 id（`风格_YYYYMMDD_HHMMSS_4位随机`）。
+
+    用途：data/tts 里还躺着 TTS 的语音文件，万一以后 TTS 也输出 .wav，
+    不能让语音混进音乐列表。id 格式是 new_id() 定的，不会变。
+    """
+    parts = (mid or "").split("_")
+    if len(parts) != 4 or parts[0] not in STYLES:
+        return False
+    return (len(parts[1]) == 8 and parts[1].isdigit()
+            and len(parts[2]) == 6 and parts[2].isdigit()
+            and parts[3].isdigit())
 
 
 def _score_path(mid: str) -> str:
