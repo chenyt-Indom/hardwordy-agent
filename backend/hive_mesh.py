@@ -840,6 +840,51 @@ class MeshNode:
             return {"ok": False, "error": "端口不是数字"}
         return {"ok": True, "host": host.strip("[]"), "port": port_i}
 
+    def probe(self, host: str, port: int, timeout: float = 3.0) -> Dict[str, Any]:
+        """连到对方端口问一句「你有哪些群」，拿回 [{gid, vt, gn}]。
+
+        只用来给「密码 + 地址」的人确认密码对不对，拿不到任何内容。
+        """
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect((host, int(port)))
+            body = json.dumps({"svc": "hive-probe", "ver": PROTO_VER}).encode("utf-8")
+            s.sendall(bytes([T_PROBE]) + b"\x00\x00\x00\x00"
+                      + struct.pack(">I", len(body)) + body)
+            fr = _read_frame(s)
+            if not fr:
+                return {"ok": False, "error": "对方没有回应（可能不是群聊端口）"}
+            _typ, _rk, raw = fr
+            try:
+                o = json.loads(raw.decode("utf-8", "ignore"))
+            except Exception:
+                return {"ok": False, "error": "对方返回的内容看不懂"}
+            groups = o.get("groups") if isinstance(o, dict) else None
+            return {"ok": True, "host": host, "port": int(port),
+                    "groups": groups or []}
+        except socket.timeout:
+            return {"ok": False, "error": "连接超时：%s:%s 没有响应" % (host, port)}
+        except Exception as e:
+            return {"ok": False, "error": "连不上 %s:%s（%s）" % (host, port, e)}
+        finally:
+            try:
+                if s:
+                    s.close()
+            except Exception:
+                pass
+
+    def seen_beacons(self, gid: str = "") -> List[Dict[str, Any]]:
+        """局域网里听到的群（不限自己所在的群）—— 密码入群靠它搜。"""
+        now = time.time()
+        with _LOCK:
+            items = list(self.beacons.values())
+        out = [dict(b) for b in items if (not gid or b.get("gid") == gid)
+               and now - float(b.get("ts") or 0) < 120]
+        out.sort(key=lambda b: -float(b.get("ts") or 0))
+        return out
+
     # ------------------------------------------------------------ UDP 发现
 
     def _beacon_loop(self) -> None:
