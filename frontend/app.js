@@ -9534,7 +9534,6 @@
         }
         p2pCurShare = d.code || "";
         if (code) code.value = d.code || "";
-        if (qr && d.qr) qr.src = d.qr;
         if (fn) fn.textContent = name || "文件";
         if (addr) {
           const up = d.upnp || {};
