@@ -9882,8 +9882,12 @@ def music_delete(body: dict):
 
 @app.post("/api/music/open_folder")
 def music_open_folder():
-    """打开音乐存放目录。"""
-    d = music._base()
+    """打开音乐存放目录。
+
+    ⚠️ 2026-11-12 起曲子 wav 存在 data/tts（与界面「🎵 音频」库同一个文件夹），
+    这里必须跟着走 —— 否则打开的是 data/music，用户看到的是空的（只有 scores/）。
+    """
+    d = music._wav_dir()
     try:
         os.startfile(d)                                # noqa: S606  (Windows)
     except Exception as e:                             # noqa: BLE001
