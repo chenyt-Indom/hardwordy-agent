@@ -1656,7 +1656,8 @@
     try {
       const r = await api("/api/tts/synth", {
         method: "POST",
-        body: JSON.stringify({ text, voice: ttsVoice(), rate: ttsRate() }),
+        body: JSON.stringify({ text, voice: ttsVoice(), rate: ttsRate(),
+                               pitch: ttsPitch(), style: ttsStyle() }),
       });
       if (!r || !r.ok) throw new Error((r && r.error) || "合成失败");
       const a = new Audio(r.url);
