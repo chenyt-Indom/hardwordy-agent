@@ -10684,6 +10684,7 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
        非流式要等模型全部算完才拿到结果，中间几十秒群里一片死寂。
     """
     t0 = time.time()
+    _hd_waiting.pop(mid, None)      # 轮到它了，从等待表移出
     # 复用入队时建的那个 Event：如果排队期间已经有人取消，这里能直接看到
     ev = _hd_cancel.setdefault(mid, threading.Event())
     if ev.is_set():
