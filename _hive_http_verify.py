@@ -40,7 +40,11 @@ print("=" * 70)
 
 st, d = call("/api/hive/status")
 chk("GET /api/hive/status 200", st == 200 and d.get("ok", True) is not False, st)
-chk("status 返回 user_id", bool(d.get("user_id")), d.get("user_id"))
+chk("status 返回 user_id", bool((d.get("hive") or {}).get("user_id")),
+    (d.get("hive") or {}).get("user_id"))
+chk("status 带中继与客户端状态",
+    "relay" in (d.get("hive") or {}) and isinstance(d.get("client"), dict),
+    list((d.get("hive") or {}).keys()))
 
 st, d = call("/api/hive/groups")
 chk("GET /api/hive/groups 200", st == 200, st)
