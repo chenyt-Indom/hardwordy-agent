@@ -4026,6 +4026,103 @@ def _do_tts_speak(arguments, ui_events, context):
     return "\n".join(lines)
 
 
+def _do_music_make(arguments, ui_events, context=None):
+    """音乐生成 / 改编。产物落 data/music/，返回播放 + 下载链接。
+
+    ⚠️ 能力边界（别对用户夸大）：这是**算法合成** —— 振荡器 + Karplus-Strong
+       拨弦 + FM 钢琴 + 共振峰人声，不是 MusicGen 那类神经网络模型
+       （本机 Python 3.14 没 torch，跑不了）。音色偏电子；人声是"吟唱"，
+       元音可辨、有颤音，但唱不出清晰歌词。
+    """
+    from . import music as music_mod
+
+    action = str(arguments.get("action") or "generate").strip().lower()
+    try:
+        bars = int(arguments.get("bars") or 16)
+    except Exception:                                  # noqa: BLE001
+        bars = 16
+    try:
+        bpm = float(arguments.get("bpm") or 0)
+    except Exception:                                  # noqa: BLE001
+        bpm = 0.0
+    try:
+        key = int(arguments.get("key") or 0)
+    except Exception:                                  # noqa: BLE001
+        key = 0
+
+    if action == "list":
+        files = music_mod.list_music(20)
+        if not files:
+            return "还没有生成过曲子。说个风格（古风 / 电子 / 钢琴 / Lo-fi…）我就生成一首。"
+        lines = ["已有 %d 首：" % len(files)]
+        for f in files[:10]:
+            lines.append("- %s（%s，%.0f 秒）[播放](%s)"
+                         % (f.get("title"), f.get("style_name") or f.get("style"),
+                            float(f.get("duration") or 0), f.get("url")))
+        return "\n".join(lines)
+
+    if action == "remix":
+        mid = str(arguments.get("id") or "")
+        if not mid:
+            return "错误：remix 需要 id。先用 action=list 看有哪些曲子。"
+        _ui(ui_events, {"type": "status", "text": "正在改编…"})
+        try:
+            ks = int(arguments.get("key_shift") or 0)
+        except Exception:                              # noqa: BLE001
+            ks = 0
+        try:
+            tempo = float(arguments.get("tempo") or 1.0)
+        except Exception:                              # noqa: BLE001
+            tempo = 1.0
+        try:
+            ext = int(arguments.get("extend_bars") or 0)
+        except Exception:                              # noqa: BLE001
+            ext = 0
+        try:
+            var = float(arguments.get("variation") or 0)
+        except Exception:                              # noqa: BLE001
+            var = 0.0
+        voc = arguments.get("vocals")
+        r = music_mod.remix(
+            mid, style=str(arguments.get("style") or ""), key_shift=ks,
+            tempo=tempo, extend_bars=ext, variation=var,
+            vocals=(None if voc is None else bool(voc)))
+    elif action == "from_notes":
+        notes = str(arguments.get("notes") or "")
+        if not notes.strip():
+            return "错误：from_notes 需要 notes（如「C4 D4 E4 G4」或简谱「1 2 3 5」）。"
+        _ui(ui_events, {"type": "status", "text": "正在按音符编曲…"})
+        r = music_mod.from_notes(
+            notes, style=str(arguments.get("style") or "piano"), bars=bars,
+            bpm=bpm, key=key, vocals=bool(arguments.get("vocals", False)))
+    else:
+        _ui(ui_events, {"type": "status", "text": "正在生成音乐…"})
+        r = music_mod.generate(
+            style=str(arguments.get("style") or "pop"), bars=bars, bpm=bpm,
+            key=key, vocals=bool(arguments.get("vocals", True)),
+            notes=str(arguments.get("notes") or ""))
+
+    if not r.get("ok"):
+        return "音乐生成失败：%s" % (r.get("error") or "未知原因")
+
+    m = r.get("music") or {}
+    url = m.get("url") or r.get("url") or ""
+    lines = [
+        "音乐已生成：**%s**（%s · %.0f bpm · %.0f 秒）"
+        % (m.get("title"), m.get("style_name") or m.get("style"),
+           float(m.get("bpm") or 0), float(m.get("duration") or 0)),
+        "文件：%s（%.1f KB）" % (r.get("name"), float(m.get("size_kb") or 0)),
+        "[▶ 在线播放](%s)" % url,
+        "[⬇ 下载 WAV](%s)" % url,
+    ]
+    if m.get("ops"):
+        lines.insert(1, "改编操作：%s" % m["ops"])
+    if m.get("vocals"):
+        lines.append("人声是**共振峰合成的吟唱**（元音可辨、带颤音），"
+                     "不是真人演唱，唱不出清晰歌词。")
+    return "\n".join(lines)
+
+
 def _do_video_edit(arguments, ui_events, context):
     """视频处理：裁剪 / 拼接 / 配音 / 加字 / 字幕 / 抽音轨 / 图片成片 / 压缩。
 
