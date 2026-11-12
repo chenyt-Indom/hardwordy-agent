@@ -58,7 +58,17 @@ class HiveClient:
         m.on_cancel = self._on_cancel
         m.on_file = self._on_file
         m.on_peer = self._on_peer
+        m.on_members = self._on_members
         self._hooked = True
+
+    def _on_members(self, gid: str) -> None:
+        """别人同步了成员表过来 —— 让界面刷新一下成员列表。"""
+        cb = getattr(self, "on_members", None)
+        if cb:
+            try:
+                cb(gid)
+            except Exception:
+                pass
 
     def _on_msg(self, gid: str, msg: Dict[str, Any]) -> None:
         if self.on_message:
