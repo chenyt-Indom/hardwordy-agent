@@ -208,18 +208,24 @@ class HiveClient:
                     self._emit_status()
                     await self._flush_queue(ws)
                     hb = asyncio.create_task(self._heartbeat(ws))
-                    async for raw in ws:
-                        try:
-                            m = json.loads(raw)
-                        except Exception:
-                            continue
-                        await self._handle(ws, m)
+                    try:
+                        async for raw in ws:
+                            try:
+                                m = json.loads(raw)
+                            except Exception:
+                                continue
+                            await self._handle(ws, m)
+                    finally:
+                        hb.cancel()
             except Exception as e:
                 self._last_error = f"{type(e).__name__}: {e}"
+                self._last_error_at = time.time()
                 self._connected = False
+                self._latency = 0.0
                 self._emit_status()
             else:
                 self._connected = False
+                self._latency = 0.0
             if not self._running:
                 break
             await asyncio.sleep(backoff)
