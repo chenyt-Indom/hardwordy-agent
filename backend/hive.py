@@ -703,8 +703,7 @@ def password_candidates(pw: str) -> Dict[str, Any]:
     """
     pw = norm_password(pw)
     hits = []
-    for item in list_groups():
-        gid = item.get("gid") or ""
+    for gid in all_group_ids():
         g = load_group(gid) or {}
         try:
             key = derive_key(pw, gid)
