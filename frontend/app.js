@@ -9224,7 +9224,10 @@
       } else if (ph === "thinking") {
         c.phase.textContent = "思考中… " + (t.chars || 0) + " 字";
         // 有思考内容了才展开，避免一开始就是一个空的折叠框
-        if (!c.details.hasAttribute("open")) c.details.setAttribute("open", "");
+        if (!c.think.classList.contains("open")) {
+          c.think.classList.add("open");
+          c.details.querySelector(".arrow").textContent = "▾";
+        }
         c.think.innerHTML += hEsc(f.delta || "").replace(/\n/g, "<br>");
       } else if (ph === "content") {
         c.phase.textContent = "正在输出… " + (t.chars || 0) + " 字";
