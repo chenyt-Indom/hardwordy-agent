@@ -190,17 +190,24 @@ class HiveClient:
                 ) as ws:
                     self._ws = ws
                     self._connected = True
+                    self._ever_connected = True
+                    self._connected_at = time.time()
                     self._retry = 0
                     backoff = 1.0
                     me = H.profile()
                     since = max(self._since.values()) if self._since else 0
+                    # v / caps：版本协商。老中继不认这两个字段也没关系，
+                    # 它按 v1 处理，消息照样通 —— 这就是"只增不改"的好处。
                     await ws.send(json.dumps({
                         "t": "join", "gid": self._gid,
                         "uid": me["user_id"], "name": me["name"],
                         "since": since,
+                        "v": self._proto, "caps": H.CAPS,
                     }, ensure_ascii=False))
+                    self._state = "online"
                     self._emit_status()
                     await self._flush_queue(ws)
+                    hb = asyncio.create_task(self._heartbeat(ws))
                     async for raw in ws:
                         try:
                             m = json.loads(raw)
