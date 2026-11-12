@@ -214,6 +214,8 @@ class MeshNode:
     def __init__(self) -> None:
         self.port = 0
         self.started = False
+        self.uid = ""
+        self.uname = ""
         self.groups: Set[str] = set()
         self.peers: List[Peer] = []
         self.seen: Dict[str, Set[str]] = {}       # gid -> 见过的 mid
