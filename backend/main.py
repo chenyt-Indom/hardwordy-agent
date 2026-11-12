@@ -10478,12 +10478,56 @@ def hive_messages(gid: str, since: int = 0, limit: int = 200):
 
 
 @app.get("/api/hive/{gid}/invite")
-def hive_invite(gid: str, host: str = ""):
-    """生成二维码（返回可直接显示的 PNG data URL）。"""
+def hive_invite(gid: str):
+    """邀请信息：现在是 12 位密码（二维码已删除 —— 电脑扫不了）。"""
     try:
-        return {"ok": True, **hive.invite_payload(gid, host)}
+        r = hive.group_password(gid)
+        g = hive.load_group(gid) or {}
+        return {"ok": True, "gid": gid, "name": g.get("name") or "",
+                "password": r.get("password") or "",
+                "need_set": bool(r.get("need_set")),
+                "owner_only": bool(r.get("owner_only")),
+                "kfp": g.get("kfp") or "",
+                "is_owner": bool(g.get("is_owner_here"))}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/hive/{gid}/password")
+def hive_password_get(gid: str):
+    """查看入群密码（只有群主本机有明文）。"""
+    try:
+        return hive.group_password(gid)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/password")
+def hive_password_set(gid: str, body: dict = None):
+    """群主设置 / 重置入群密码。
+
+    ⚠️ 换密码 = 换群密钥，老成员必须用新密码重新进群。前端会先提示。
+    """
+    b = body or {}
+    try:
+        r = hive.set_password(gid, str(b.get("password") or ""))
+    except PermissionError as e:
+        return {"ok": False, "error": str(e)}
+    except ValueError as e:
+        return {"ok": False, "stage": "format", "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    # 密钥变了：网络层要换新标签，并把「换密码」这件事广播出去
+    try:
+        full = hive.load_group(gid) or {}
+        hive_client.client().start("", gid)
+        hive_client.client().send(gid, "群主更新了入群密码（老成员需要用新密码重新进群）",
+                                  mtype="system")
+        hive_client.client().broadcast_members(gid)
+        r["vt"] = full.get("vt") or ""
+    except Exception as e:
+        r["warn"] = str(e)
+    return r
 
 
 @app.post("/api/hive/{gid}/kick")
