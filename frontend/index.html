@@ -432,6 +432,36 @@
            哪天想加回手动选择，前端补一个下拉、把 model 字段带上即可。 -->
     </div>
 
+    <!-- 群聊主界面（2026-11-13）：切到群聊模式时替换掉下面的单机消息区。
+         结构上放在 main 里、和 .messages 平级，靠 hidden 切换 —— 不动原来的布局骨架。 -->
+    <div class="hive-main" id="hiveMain" hidden>
+      <div class="hive-head">
+        <div class="hive-title">
+          <b id="hiveGroupName">未选择群</b>
+          <span class="hive-meta" id="hiveGroupMeta"></span>
+        </div>
+        <span class="head-acts">
+          <button class="btn sm ghost" id="hiveQrBtn" title="显示二维码，别人扫码就能进群">🔗 邀请</button>
+          <button class="btn sm ghost" id="hiveMembersBtn" title="成员列表 / 踢人">👥 成员</button>
+        </span>
+      </div>
+      <div class="hive-body">
+        <div class="hive-msgs" id="hiveMsgs">
+          <p class="hint hive-empty">左边选一个群，或者点「＋ 建群」开一个新的。</p>
+        </div>
+        <aside class="hive-side" id="hiveSide" hidden>
+          <div class="hive-side-head">成员 <span id="hiveMemCount"></span></div>
+          <div class="hive-mem-list" id="hiveMemList"></div>
+        </aside>
+      </div>
+      <div class="hive-composer">
+        <textarea id="hiveText" rows="2"
+          placeholder="说点什么…  输入 @hd + 指令 唤醒模型干活（例：@hd 帮我写一个登录接口）"></textarea>
+        <button class="btn primary" id="hiveSendBtn">发送</button>
+      </div>
+      <p class="tip">普通聊天不会调用模型，只有 @hd 才会唤醒。模型跑在群主的机器上。</p>
+    </div>
+
     <div class="messages" id="messages">
       <div class="msg bot">
         <div class="bubble">
