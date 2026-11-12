@@ -8885,7 +8885,8 @@
       } catch (e) {
         el("hiveMsgs").innerHTML = '<p class="hint">读消息失败：' + hEsc(e.message) + "</p>";
       }
-      // 连中继（没配地址就静默失败，不影响本地聊天）
+      // 启动 P2P 网络：不传地址 = 局域网模式（UDP 广播自动发现同群的人）。
+      // 完全不需要服务器，也不会有「没配地址就收不到」这种事。
       try { await api("/api/hive/connect", { gid: gid }); } catch (e) { /* 忽略 */ }
       loadStatus();
       connectWs();
