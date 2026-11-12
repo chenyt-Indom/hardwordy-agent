@@ -494,7 +494,11 @@ def read_messages(gid: str, since: int = 0, limit: int = 200) -> List[Dict[str, 
                 except Exception:
                     continue
                 if (m.get("seq") or 0) > since:
-                    out.append(m)
+                    # 统一过一遍 normalize：老版本写的日志可能缺字段、
+                    # 也可能有本版本不认识的消息类型，这里都要能安全读出来。
+                    nm = normalize_msg(m)
+                    if nm:
+                        out.append(nm)
     except Exception:
         return out
     out.sort(key=lambda x: x.get("seq") or 0)
