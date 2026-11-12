@@ -11245,9 +11245,13 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             # 有图时走 OpenAI 的多模态 content 数组（DeepSeek-VL 接口格式）
             if images:
                 content = [{"type": "text", "text": prompt}]
-                for _b64 in images:
+                for _i, _b64 in enumerate(images):
+                    # mime 用真实类型：原来一律写死 image/jpeg，
+                    # 传 PNG/WebP 时声明和内容不符，部分接口会直接拒图。
+                    _mt = (image_mimes[_i] if _i < len(image_mimes)
+                           else "image/png")
                     content.append({"type": "image_url", "image_url": {
-                        "url": "data:image/jpeg;base64," + _b64}})
+                        "url": "data:" + _mt + ";base64," + _b64}})
                 ds_msgs = [{"role": "user", "content": content}]
             else:
                 ds_msgs = [{"role": "user", "content": prompt}]
