@@ -1621,6 +1621,19 @@
     try { return parseInt(localStorage.getItem("tts_rate") || "0", 10) || 0; }
     catch (e) { return 0; }
   }
+  // 情感预设：后端用「语速+音高+音量」组合近似，不是真正的情感合成
+  const TTS_STYLES = [
+    ["neutral", "自然"], ["cheerful", "愉悦"], ["gentle", "温柔"],
+    ["serious", "严肃"], ["sad", "低沉"], ["news", "播报"], ["excited", "激动"],
+  ];
+  function ttsStyle() {
+    try { return localStorage.getItem("tts_style") || "neutral"; }
+    catch (e) { return "neutral"; }
+  }
+  function ttsPitch() {
+    try { return parseInt(localStorage.getItem("tts_pitch") || "0", 10) || 0; }
+    catch (e) { return 0; }
+  }
   function attachSpeak(bubble, text) {
     const raw = String(text == null ? "" : text).trim();
     if (!bubble || raw.length < 2) return;
