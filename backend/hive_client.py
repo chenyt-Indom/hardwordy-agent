@@ -151,10 +151,12 @@ class HiveClient:
 
         u = self._url
         if u.startswith(("ws://", "wss://")):
-            # 旧的中继地址：不静默失败，明确告诉用户该怎么改
-            self._state = "error"
-            self._error = ("中继服务器已经移除（群聊不再经过任何服务器）。"
-                           "这里请留空走局域网，或填对方的连接码 hive3://IP:端口")
+            # 老群信息里存着中继地址。中继已经删了，这里**自动忽略并走局域网**，
+            # 不报错 —— 否则用户升级后打开旧群会看到「连不上」，以为功能坏了。
+            # 用户什么都不用做，同一 WiFi 下会自动发现彼此。
+            self._url = ""
+            self._state = "online"
+            self._last_ok = time.time()
             return self.status()
 
         if u.startswith(("hive3://", "hive2://", "hive://")):
