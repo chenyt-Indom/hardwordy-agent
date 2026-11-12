@@ -110,10 +110,11 @@ class Room:
         self.clients.add(ws)
         self.members[uid] = {"uid": uid, "name": name, "joined": time.time()}
 
-    def leave(self, ws: WebSocketServerProtocol, uid: str) -> None:
+    def leave(self, ws: Any, uid: str) -> None:
         self.clients.discard(ws)
-        # 还有别的连接挂着这个 uid 才保留
-        still = any(getattr(c, "_hive_uid", None) == uid for c in self.clients)
+        CONN_UID.pop(ws, None)
+        # 还有别的连接挂着这个 uid 才保留（同一人可能开了两个窗口）
+        still = any(CONN_UID.get(c) == uid for c in self.clients)
         if not still:
             self.members.pop(uid, None)
 
