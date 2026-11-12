@@ -218,6 +218,8 @@ class MeshNode:
         self.started = False
         self.uid = ""
         self.uname = ""
+        self.dev = ""            # 本机设备标识（见 H.dev_id）
+        self.uid_conflict = None  # 发现「同 user_id 的另一台机器」时记在这里
         self._beacon_port = BEACON_PORT
         self.groups: Set[str] = set()
         self.peers: List[Peer] = []
