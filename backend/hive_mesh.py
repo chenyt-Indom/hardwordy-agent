@@ -92,6 +92,21 @@ def _rk(gid: str) -> bytes:
     return hashlib.sha256(gid.encode("utf-8")).digest()[:4]
 
 
+def _prefer_out(my_uid: str, peer_uid: str) -> bool:
+    """一对 uid 之间，本机是否应该保留「自己主动连出去」的那条连接。
+
+    规则：uid 字典序较小的一方保留 out 连接（也就是由它发起）。
+
+    ⚠️ 2026-11-13 修：这条规则必须**双方算出来是同一条 TCP**，否则会出事。
+    原来只是「同 uid 已有连接就关掉新来的」，结果两边各自关掉了不同方向的
+    那一条：A 留下 A→B，B 留下 B→A，两条连接的「另一半」都被关掉了。
+    于是双方都往对方已经关闭的 socket 里写 —— sendall 成功、对端永远收不到，
+    消息、AI 回答、附件全部静默丢失。实测：peer 显示 alive，broadcast 返回 1，
+    但对端 seen 为空、一条都没落盘。
+    """
+    return str(my_uid or "") < str(peer_uid or "")
+
+
 def _send_frame(sock: socket.socket, typ: int, rk: bytes, key: bytes, obj: Any) -> bool:
     if AESGCM is None:
         return False
