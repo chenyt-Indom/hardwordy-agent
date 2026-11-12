@@ -9453,7 +9453,7 @@
       if (!confirm("确定退出「" + nm + "」？\\n\\n"
         + "· 群里其他人会看到一条「你退出了群」的提示\\n"
         + "· 这个群会从你的列表里消失\\n"
-        + "· 历史消息仍留在本机，重新扫码可以再回来")) return;
+        + "· 历史消息仍留在本机，重新用密码进群可以再回来")) return;
       const gid = curGid;
       try {
         const d = await api("/api/hive/" + encodeURIComponent(gid) + "/leave", {});
