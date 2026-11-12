@@ -747,7 +747,11 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
                     add("drums", base + (3 + i * 0.25) * beat, 0.1, 0, 0.6)
 
     # --- 贝斯 ---
-    if "bass" in cfg["inst"]:
+    # ⚠️ chiptune 的配器里写的是 chip_bass，原来只判断 "bass"，
+    #    结果 8bit 风格**整轨没有低音**（实测 tracks 里确实没有贝斯）。
+    _bass_inst = "bass" if "bass" in cfg["inst"] else (
+        "chip_bass" if "chip_bass" in cfg["inst"] else "")
+    if _bass_inst:
         for b in range(bars):
             base = b * bar_s
             ch = chords[b]
@@ -755,16 +759,16 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
             if style == "jazz":
                 for i in range(4):                      # 行走贝斯
                     p = _deg_to_pitch(root, scale_name, (b * 4 + i) % 7) - 24
-                    add("bass", base + i * beat, beat * 0.9, p, 0.8)
+                    add(_bass_inst, base + i * beat, beat * 0.9, p, 0.8)
             elif style in ("electronic", "chiptune"):
                 for i in range(8):                      # 八分音符驱动
                     p = rootp if i % 4 != 3 else rootp + 7
-                    add("bass", base + i * beat * 0.5, beat * 0.42, p, 0.85)
+                    add(_bass_inst, base + i * beat * 0.5, beat * 0.42, p, 0.85)
             else:
-                add("bass", base, beat * 1.8, rootp, 0.85)
-                add("bass", base + beat * 2, beat * 1.6, rootp, 0.75)
+                add(_bass_inst, base, beat * 1.8, rootp, 0.85)
+                add(_bass_inst, base + beat * 2, beat * 1.6, rootp, 0.75)
                 if rng.random() < 0.4:
-                    add("bass", base + beat * 3.5, beat * 0.4, rootp + 7, 0.6)
+                    add(_bass_inst, base + beat * 3.5, beat * 0.4, rootp + 7, 0.6)
 
     # --- pad / 和声垫 ---
     if "pad" in cfg["inst"]:
