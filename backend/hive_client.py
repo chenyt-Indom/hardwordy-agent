@@ -267,6 +267,14 @@ class HiveClient:
             self._state = "online"
         return {"ok": True, "msg": msg, "peers": n, "queued": 0 if n else 1}
 
+    def broadcast_members(self, gid: str) -> int:
+        """把本地成员表广播出去。加群/踢人/改角色/退群后调用。"""
+        self._hook()
+        try:
+            return MESH.node().broadcast_members(gid)
+        except Exception:
+            return 0
+
     def send_stream(self, gid: str, mid: str, phase: str, delta: str = "",
                     task: Optional[Dict[str, Any]] = None, seq_in: int = 0) -> Dict[str, Any]:
         """@hd 实时进度。不落盘，直接泛洪 —— 刷屏内容没必要写进日志。"""
