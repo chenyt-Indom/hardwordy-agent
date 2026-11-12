@@ -791,6 +791,41 @@
     </div>
   </div>
 
+  <!-- 建群向导（2026-11-13）：群主在这里填中继地址并**当场验证**。
+       中继可以留空 —— 留空就是本机模式（只有自己能看到消息），以后能补填。 -->
+  <div class="hive-modal" id="hiveSetup" hidden>
+    <div class="hive-modal-in wide">
+      <div class="hm-head">
+        <b>新建协作群</b>
+        <button type="button" class="hm-x" id="hsClose" title="关闭">✕</button>
+      </div>
+      <p class="hint">建群的人自动成为群主，可以踢人、分配工作。</p>
+
+      <label class="hs-label" for="hsName">群名</label>
+      <input id="hsName" class="hive-code" placeholder="比如「官网改版」" />
+
+      <label class="hs-label" for="hsRelay">
+        中继服务器 <span class="hs-dim">（可选；留空 = 本机模式，以后能补填）</span>
+      </label>
+      <div class="hs-last" id="hsLast" hidden>
+        <span>上次用的：<b id="hsLastUrl"></b></span>
+        <button type="button" class="btn sm ghost" id="hsUseLast">沿用这台</button>
+      </div>
+      <input id="hsRelay" class="hive-code" spellcheck="false"
+             placeholder="ws://服务器IP:8765  或  wss://你的域名/hive" />
+      <div class="hs-row">
+        <button type="button" class="btn sm" id="hsProbe">🔍 检测连通</button>
+        <button type="button" class="btn sm ghost" id="hsBundle">📦 部署包</button>
+        <button type="button" class="btn sm ghost" id="hsGuide">🤖 让模型给步骤</button>
+      </div>
+      <div class="hs-log" id="hsLog" hidden></div>
+
+      <div class="hm-acts">
+        <button type="button" class="btn sm primary" id="hsCreate">建群</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     (function () {
       var v = String(Date.now());
