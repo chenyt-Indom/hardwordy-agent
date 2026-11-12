@@ -3922,9 +3922,18 @@ html[data-theme="light"] select.pill-select option {
      限成 min(76%, 880px)，于是气泡靠右时贴的是 76% 的边界（屏幕中间），
      系统消息也被挤成两行。单人模式是「整行铺满、气泡自己限宽」，
      这里改成同一套：行占满、气泡靠 align-self 对齐、宽度由 .bubble 的 max-width 管。 */
-  flex-direction: column; align-items: flex-start; gap: 3px;
+  /* ★ 2026-11-13 第二次修（用户：「思考过程的框和单人模式风格不一样，任何风格都不能变」）：
+     上一版这里写的是 align-items: flex-start + gap: 3px，实测 computed style 对比：
+       单人模式 think-body 宽 885px（stretch 拉满）/ 群聊只有 297px（flex-start 收缩）
+       单人模式 gap 10px / 群聊 3px
+     所以思考正文在群聊里是「一条窄条」，单人模式是「整块面板」，观感完全不同。
+     现在 align-items 和 gap 都跟 .msg.bot 完全对齐（stretch + 10px），
+     子项限宽交给各元素自己的 max-width，和单人模式一模一样。 */
+  flex-direction: column; align-items: stretch; gap: 10px;
   max-width: 100%; min-width: 0;
 }
+/* 与单人模式 .msg.bot > * { max-width: 100%; min-width: 0 } 保持一致 */
+.hive-msgs .msg > * { max-width: 100%; min-width: 0; }
 .hive-msgs .msg.user { align-items: flex-end; }
 .hive-msgs .msg > .bubble { align-self: flex-start; }
 .hive-msgs .msg.user > .bubble { align-self: flex-end; }
