@@ -9916,14 +9916,19 @@
 
     el("hiveJoinBtn").addEventListener("click", () => {
       openModal({
-        title: "扫码入群",
-        hint: "把别人给你的口令（hive://join?…）粘进来。手机扫码的话会直接打开入群链接。",
+        title: "密码入群",
+        hint: "输入群主给你的 12 位密码（字母和数字，不含 0、1、I、L、O）。\n"
+          + "同一个 WiFi 下会自动找到群；跨网络请先要群主的连接码。",
         input: "",
-        placeholder: "hive://join?g=…",
+        placeholder: "XXXX-XXXX-XXXX",
+        okText: "进群",
         onOk: async (v) => {
-          const payload = (v || "").trim();
-          if (!payload) { alert("口令不能为空"); return false; }
-          const d = await api("/api/hive/join", { payload: payload });
+          const pw = (v || "").trim();
+          if (!pw) { alert("密码不能为空"); return false; }
+          let d;
+          try {
+            d = await api("/api/hive/join_password", { password: pw });
+          } catch (e) { alert("入群失败：" + e.message); return false; }
           if (!d.ok) { alert(d.error || "入群失败"); return false; }
           await loadGroups();
           openGroup(d.group.gid);
