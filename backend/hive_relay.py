@@ -214,6 +214,41 @@ async def handler(ws: WebSocketServerProtocol) -> None:
             print(f"[leave] {room.gid} {uid} 在线 {len(room.clients)} 人")
 
 
+_START_TS = time.time()
+_RELAY_VER = "1.1"
+
+
+async def _process_request(connection: Any, request: Any) -> Any:
+    """处理 HTTP 请求：只提供 /health，用来让客户端验证「中继是否活着」。
+
+    普通 WS 握手（Upgrade: websocket）直接放行，返回 None 交给 websockets 自己处理。
+    """
+    try:
+        path = (getattr(request, "path", "") or "").split("?")[0]
+        if path not in ("/health", "/healthz", "/"):
+            return None
+        hdrs = str(getattr(request, "headers", "")).lower()
+        if "upgrade" in hdrs and "websocket" in hdrs:
+            return None          # 这是 WS 握手，交给 websockets
+        body = json.dumps({
+            "ok": True, "svc": "hive-relay", "ver": _RELAY_VER,
+            "rooms": len(ROOMS), "uptime": round(time.time() - _START_TS, 1),
+            "ts": time.time(),
+        }, ensure_ascii=False).encode("utf-8")
+        try:
+            from websockets.datastructures import Headers
+            from websockets.http11 import Response
+            h = Headers()
+            h["Content-Type"] = "application/json; charset=utf-8"
+            h["Access-Control-Allow-Origin"] = "*"
+            h["Content-Length"] = str(len(body))
+            return Response(200, "OK", h, body)
+        except Exception:
+            return connection.respond(200, body.decode("utf-8"))
+    except Exception:
+        return None
+
+
 async def main() -> None:
     global _DATA
     ap = argparse.ArgumentParser(description="Hive 中继服务")
