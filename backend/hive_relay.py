@@ -199,18 +199,24 @@ async def handler(ws: WebSocketServerProtocol) -> None:
                     continue
                 CONN_UID[ws] = uid
                 room = _room(gid)
-                room.join(ws, uid, name)
+                # 版本协商：老客户端不带 v，按 v1 处理（完全兼容）；
+                # 比中继新的客户端也照收，只是标记出来让界面提示。
+                ver = int(m.get("v") or 1)
+                room.join(ws, uid, name, ver, m.get("caps"))
                 since = int(m.get("since") or 0)
                 hist = _read_since(gid, since)
                 await ws.send(json.dumps({
                     "t": "joined", "gid": gid, "seq": room.seq,
-                    "members": list(room.members.values()),
+                    "members": room.presence(),
                     "msgs": hist,
+                    "proto": PROTO_VER,            # 中继自己支持的协议版本
+                    "relay_ver": _RELAY_VER,
+                    "your_v": ver,
                 }, ensure_ascii=False))
                 await room.broadcast({
-                    "t": "presence", "members": list(room.members.values()),
+                    "t": "presence", "members": room.presence(),
                 }, skip=ws)
-                print(f"[join] {gid} {name}({uid}) 在线 {len(room.clients)} 人")
+                print(f"[join] {gid} {name}({uid}) v{ver} 在线 {len(room.clients)} 人")
 
             elif t == "msg" and room is not None:
                 # 消息体是密文，服务器不解析、只定序
