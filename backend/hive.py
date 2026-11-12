@@ -457,8 +457,14 @@ def join_group(payload: str, name: str = "") -> Dict[str, Any]:
             # 已经有这个群（重复扫码）：核对指纹，别把密钥换掉
             if g.get("kfp") != key_fingerprint(key):
                 raise ValueError("这个群号已存在，但二维码里的密钥不匹配")
+            if g.get("left"):
+                # 之前主动退出过，现在重新加入 —— 清掉标记，群重新出现在列表里
+                g["left"] = False
+                g.pop("left_at", None)
+                _write_json(_group_path(gid), g)
 
         members = load_members(gid)
+        joined_new = me["user_id"] not in members
         if me["user_id"] not in members:
             members[me["user_id"]] = {
                 "user_id": me["user_id"],
