@@ -666,11 +666,10 @@ class MeshNode:
             return {"ok": False, "error": "连不上 %s:%s —— %s" % (host, port, e)}
         peer = Peer(s, (host, port), gid, out=True)
         peer.key = key
-        me = H.profile()
         try:
             if not _send_frame(s, T_HELLO, _rk(gid), key, {
-                "uid": me.get("user_id", ""),
-                "name": me.get("name", ""),
+                "uid": self.uid,
+                "name": self.uname,
                 "ver": PROTO_VER,
                 "port": self.port,
                 "gid": gid,
