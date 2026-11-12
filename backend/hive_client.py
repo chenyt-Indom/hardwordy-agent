@@ -1,202 +1,127 @@
-"""Hive 客户端 —— 连中继、收发消息、断线自动重连。
+"""Hive 客户端 —— 门面层。
 
-运行在**应用自己的进程里**（不占额外端口），和单机模式共用同一个 FastAPI。
+**这个文件已经不再连中继了。** 中继（hive_relay.py）已按需求删除，群聊改走
+纯 P2P 的 `hive_mesh`：局域网自动发现、跨网络靠连接码、消息泛洪 + 去重。
 
-几个刻意的设计：
+保留这个文件是为了**不破坏 main.py 的调用**：路由层只认 `client()` 上的
+8 个方法，换掉内部实现后路由一行都不用改。对外接口完全兼容：
 
-1. **后台线程 + asyncio**：FastAPI 是同步/异步混合的，这里用一个独立线程跑
-   asyncio 事件循环，前端要发消息时用 `call_soon_threadsafe` 塞进去，互不阻塞。
-2. **seq 以中继为准**：消息发出去后不立刻落盘，等中继回执（带全局 seq）再写，
-   这样多台机器看到的顺序完全一致。
-3. **断线不丢**：连不上时消息进内存队列，重连后按原 mid 补发；中继侧按 mid 去重。
-4. **不解析内容**：客户端只做「加密 → 发」「收 → 解密 → 落盘」，没有别的逻辑。
+    start(url, gid) / stop() / status()
+    send / send_stream / send_file / send_cancel
+    on_message / on_stream / on_cancel / on_file
+
+url 的含义变了：
+    "" 或 "lan"            → 局域网模式（UDP 广播自动找同群的人）
+    "hive3://1.2.3.4:8899" → 主动连这个人（跨网络，人工传一次码）
+    "ws://..." / "wss://..." → 旧的中继地址，明确报错提示改法
 """
 from __future__ import annotations
 
-import asyncio
 import base64
-import json
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import backend.hive as H
+import backend.hive_mesh as MESH
 
-try:
-    import websockets
-except Exception:  # pragma: no cover
-    websockets = None
-
-
-def _is_ip_host(host: str) -> bool:
-    """纯 IPv4/IPv6 字面量？"""
-    h = (host or "").strip("[]")
-    if not h:
-        return False
-    if h.count(".") == 3:
-        try:
-            parts = [int(x) for x in h.split(".")]
-            return len(parts) == 4 and all(0 <= p <= 255 for p in parts)
-        except Exception:
-            return False
-    return ":" in h          # IPv6
-
-
-def _ssl_for(url: str):
-    """给 wss 连接准备 SSL 上下文；ws 返回 None。
-
-    **为什么对纯 IP 关掉证书校验**（2026-11-13 实测踩到）：
-    公网 IP 几乎不可能有有效证书（CA 不给裸 IP 签），自己配的 nginx
-    十有八九是自签、或者签给了域名。浏览器会弹「继续访问」，但 Python 的
-    websockets 不会 —— 直接 `CERTIFICATE_VERIFY_FAILED: IP address mismatch`，
-    表现就是「地址明明能打开网页，应用却说连不上」。
-
-    安全性上可以接受：中继只转发 AES-GCM 密文，群密钥走二维码在成员之间
-    传递、从不上服务器。就算证书不校验、被中间人接了，他拿到的也是密文。
-    域名走正常校验，不降级。
-    """
-    if not (url or "").startswith("wss://"):
-        return None
-    try:
-        import ssl
-        host = url.split("://", 1)[1].split("/", 1)[0].rsplit("@", 1)[-1]
-        if host.startswith("["):                    # [::1]:443
-            host = host.split("]", 1)[0].strip("[")
-        elif host.count(":") == 1:                  # host:port
-            host = host.split(":", 1)[0]
-        ctx = ssl.create_default_context()
-        if _is_ip_host(host):
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        return ctx
-    except Exception:
-        return None
-
-
-def _norm_members(ms: Any) -> List[Dict[str, Any]]:
-    """把中继发来的成员列表规整成统一结构。
-
-    不同版本字段名可能不同（`uid` / `user_id`），缺字段补默认 ——
-    这样界面永远只处理一种格式，不用管对面是老版本还是新版本。
-    """
-    out: List[Dict[str, Any]] = []
-    if not isinstance(ms, list):
-        return out
-    for m in ms:
-        if not isinstance(m, dict):
-            continue
-        uid = str(m.get("uid") or m.get("user_id") or "")
-        if not uid:
-            continue
-        out.append({
-            "uid": uid,
-            "user_id": uid,                       # 兼容前端旧字段名
-            "name": str(m.get("name") or "成员")[:32],
-            "online": bool(m.get("online")),
-            "last_seen": float(m.get("last_seen") or 0),
-            "joined": float(m.get("joined") or 0),
-            "v": int(m.get("v") or 1),
-            "caps": m.get("caps") or [],
-        })
-    out.sort(key=lambda x: (not x["online"], x["name"]))
-    return out
+PROTO_VER = MESH.PROTO_VER
 
 
 class HiveClient:
     def __init__(self) -> None:
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
-        self._ws = None
-        self._running = False
-        self._connected = False
+        self.on_message = None      # Callable[[str, dict], None]
+        self.on_stream = None
+        self.on_cancel = None
+        self.on_file = None
+        self.on_status = None
+
+        self._state = "offline"
         self._gid = ""
         self._url = ""
-        self._since: Dict[str, int] = {}
-        self._queue: List[Dict[str, Any]] = []   # 待补发
-        self._seen: set = set()                  # 已落盘的 mid，用于去重
-        self._members: List[Dict[str, Any]] = []
-        self._last_error = ""
-        self._last_error_at = 0.0
-        self._retry = 0
-        self.on_message: Optional[Callable[[str, Dict[str, Any]], None]] = None
-        self.on_status: Optional[Callable[[Dict[str, Any]], None]] = None
-        # @hd 执行进度帧的回调。和 on_message 分开：
-        # 进度帧是**过程数据**，不落盘、不进 seq，只用于界面实时刷新。
-        self.on_stream: Optional[Callable[[str, Dict[str, Any]], None]] = None
-        self.on_file: Optional[Callable[[str, Dict[str, Any]], None]] = None
-        # 附件分片缓冲：fid -> {total, parts{idx: bytes}, meta}
-        # 一个 20MB 文件约 54 片（384KB/片），收齐才落盘 —— 免得半截文件被当成完整文件
-        self._file_buf: Dict[str, Dict[str, Any]] = {}
-        self.on_cancel: Optional[Callable[[str, Dict[str, Any]], None]] = None
-        self._lock = threading.RLock()
+        self._error = ""
+        self._latency = 0.0
+        self._started_at = 0.0
+        self._last_ok = 0.0
+        self._files: Dict[str, Dict[str, Any]] = {}   # fid -> 攒片状态
+        self._flock = threading.Lock()
+        self._hooked = False
 
-        # ---- 跨版本 / 状态显示相关（2026-11-13）----
-        # state 是给界面直接用的四态，比「connected 布尔」信息量大：
-        #   idle      没配中继，本机模式
-        #   connecting  正在连（首次连接或重连中）
-        #   online    连上了，能收发
-        #   offline   曾经连上过、现在断了（会自动重试）
-        #   error     连不上，且拿到了明确原因（DNS/端口/协议不符…）
-        self._state = "idle"
-        self._proto = H.PROTO_VER          # 本机协议版本
-        self._relay_proto = 0              # 中继报告的协议版本（0=不知道）
-        self._relay_ver = ""               # 中继软件版本号，如 1.2
-        self._latency = 0.0                # 最近一次心跳 RTT（毫秒）
-        self._last_recv = 0.0              # 最后一次收到任何帧的时间
-        self._connected_at = 0.0           # 本次连上的时刻
-        self._last_ping = 0.0
-        self._ever_connected = False
+    # ------------------------------------------------------------ 回调挂接
 
-    # ------------------------------------------------------------ 状态
+    def _hook(self) -> None:
+        if self._hooked:
+            return
+        m = MESH.node()
+        m.on_msg = self._on_msg
+        m.on_stream = self._on_stream
+        m.on_cancel = self._on_cancel
+        m.on_file = self._on_file
+        m.on_peer = self._on_peer
+        self._hooked = True
 
-    def _calc_state(self) -> str:
-        if not self._running:
-            return "idle"
-        if self._connected:
-            return "online"
-        # 连过又断了 → offline（会自动重连）；从没连上且报过错 → error
-        if self._ever_connected or self._retry <= 1:
-            return "offline"
-        return "error"
+    def _on_msg(self, gid: str, msg: Dict[str, Any]) -> None:
+        if self.on_message:
+            try:
+                self.on_message(gid, msg)
+            except Exception:
+                pass
 
-    def _compat(self) -> str:
-        """本机协议版本 vs 中继协议版本。
+    def _on_stream(self, gid: str, obj: Dict[str, Any]) -> None:
+        if self.on_stream:
+            try:
+                self.on_stream(gid, obj)
+            except Exception:
+                pass
 
-        不一致**不影响通讯**（协议是只增不改的），只是让用户知道
-        「对面比我老/新，某些新功能可能没有」。
-        """
-        if not self._relay_proto:
-            return "unknown"
-        if self._relay_proto == self._proto:
-            return "same"
-        return "relay_older" if self._relay_proto < self._proto else "relay_newer"
+    def _on_cancel(self, gid: str, obj: Dict[str, Any]) -> None:
+        if self.on_cancel:
+            try:
+                self.on_cancel(gid, obj)
+            except Exception:
+                pass
 
-    def status(self) -> Dict[str, Any]:
-        online = [m for m in self._members if m.get("online")]
-        now = time.time()
-        return {
-            "running": self._running,
-            "connected": self._connected,
-            "state": self._calc_state(),
-            "url": self._url,
-            "gid": self._gid,
-            "members": self._members,
-            "online_count": len(online),
-            "total_count": len(self._members),
-            "queued": len(self._queue),
-            "last_error": self._last_error,
-            "last_error_at": self._last_error_at,
-            "retry": self._retry,
-            # ---- 跨版本 ----
-            "proto": self._proto,
-            "relay_proto": self._relay_proto,
-            "relay_ver": self._relay_ver,
-            "compat": self._compat(),
-            # ---- 健康度 ----
-            "latency_ms": round(self._latency, 1),
-            "last_recv_ts": self._last_recv,
-            "connected_secs": round(now - self._connected_at, 0) if self._connected_at else 0,
-        }
+    def _on_file(self, gid: str, obj: Dict[str, Any]) -> None:
+        """附件分片到达：攒齐了才落盘（半截文件会被当成完整文件，很坑）。"""
+        fid = str(obj.get("fid") or "")
+        if not fid:
+            return
+        total = int(obj.get("total") or 0)
+        idx = int(obj.get("idx") or 0)
+        if total <= 0:
+            return
+        with self._flock:
+            st = self._files.get(fid)
+            if st is None:
+                st = {"parts": {}, "total": total, "meta": obj.get("meta") or {},
+                      "ts": time.time(), "gid": gid}
+                self._files[fid] = st
+            try:
+                st["parts"][idx] = base64.b64decode(obj.get("data") or "")
+            except Exception:
+                return
+            ready = len(st["parts"]) >= st["total"]
+            if ready:
+                self._files.pop(fid, None)
+        if ready:
+            meta = st["meta"] or {}
+            data = b"".join(st["parts"][i] for i in range(st["total"]))
+            try:
+                rec = H.store_incoming(gid, meta, data)
+            except Exception:
+                return
+            if self.on_file:
+                try:
+                    self.on_file(gid, rec)
+                except Exception:
+                    pass
+
+    def _on_peer(self) -> None:
+        m = MESH.node()
+        st = m.status()
+        self._state = "online" if (m.started and st["peers"] > 0) else (
+            "online" if m.started else "offline")
+        self._emit_status()
 
     def _emit_status(self) -> None:
         if self.on_status:
@@ -205,445 +130,217 @@ class HiveClient:
             except Exception:
                 pass
 
-    # ------------------------------------------------------------ 启停
+    # ------------------------------------------------------------ 生命周期
 
     def start(self, url: str, gid: str) -> Dict[str, Any]:
-        """连接中继。重复调用会先停掉旧的连接。"""
-        url = (url or "").strip()
-        if not url:
-            return {"ok": False, "error": "没有填中继地址"}
-        if websockets is None:
-            return {"ok": False, "error": "缺少 websockets 库"}
-        if self._running and url == self._url and gid == self._gid:
-            return {"ok": True, "already": True, **self.status()}
-        self.stop()
-        self._url, self._gid = url, gid
-        self._running = True
-        self._last_error = ""
-        self._last_error_at = 0.0
-        self._retry = 0
-        self._state = "connecting"
-        self._emit_status()
-        self._thread = threading.Thread(target=self._run, name="hive-client", daemon=True)
-        self._thread.start()
-        # 等最多 3 秒，让状态尽快反映到界面
-        for _ in range(30):
-            if self._connected:
-                break
-            time.sleep(0.1)
-        return {"ok": True, **self.status()}
+        self._hook()
+        g = H.load_group(gid)
+        if not g:
+            self._error = "群不存在"
+            self._state = "error"
+            return self.status()
+
+        m = MESH.node()
+        if not m.started:
+            m.start(0, [gid])
+        m.add_group(gid)
+        self._gid = gid
+        self._url = (url or "").strip()
+        self._error = ""
+        self._started_at = self._started_at or time.time()
+
+        u = self._url
+        if u.startswith(("ws://", "wss://")):
+            # 旧的中继地址：不静默失败，明确告诉用户该怎么改
+            self._state = "error"
+            self._error = ("中继服务器已经移除（群聊不再经过任何服务器）。"
+                           "这里请留空走局域网，或填对方的连接码 hive3://IP:端口")
+            return self.status()
+
+        if u.startswith(("hive3://", "hive2://", "hive://")):
+            p = m.parse_code(u)
+            if not p.get("ok"):
+                self._state = "error"
+                self._error = p.get("error", "连接码格式不对")
+                return self.status()
+            t0 = time.time()
+            r = m.connect(p["host"], p["port"], gid)
+            if not r.get("ok"):
+                self._state = "error"
+                self._error = r.get("error", "连不上")
+                return self.status()
+            self._latency = round((time.time() - t0) * 1000, 1)
+            self._state = "online"
+            self._last_ok = time.time()
+            return self.status()
+
+        # 局域网模式：什么都不用填，靠 UDP 广播自动发现
+        self._state = "online"
+        self._last_ok = time.time()
+        return self.status()
 
     def stop(self) -> Dict[str, Any]:
-        self._running = False
-        loop = self._loop
-        if loop and self._ws is not None:
-            try:
-                asyncio.run_coroutine_threadsafe(self._ws.close(), loop)
-            except Exception:
-                pass
-        self._connected = False
-        self._ws = None
-        self._state = "idle"
-        self._latency = 0.0
-        self._emit_status()
-        return {"ok": True}
+        m = MESH.node()
+        m.stop()
+        self._state = "offline"
+        self._gid = ""
+        self._url = ""
+        return self.status()
 
-    # ------------------------------------------------------------ 线程主体
+    # ------------------------------------------------------------ 状态
 
-    def _run(self) -> None:
-        loop = asyncio.new_event_loop()
-        self._loop = loop
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self._forever())
-        finally:
-            try:
-                loop.close()
-            except Exception:
-                pass
-            self._connected = False
+    def status(self) -> Dict[str, Any]:
+        m = MESH.node()
+        st = m.status()
+        peers = int(st.get("peers") or 0)
+        state = self._state
+        if state == "error":
+            pass
+        elif not m.started:
+            state = "offline"
+        elif peers > 0:
+            state = "online"
+        else:
+            state = "online" if self._gid else "offline"
 
-    async def _forever(self) -> None:
-        backoff = 1.0
-        while self._running:
-            try:
-                async with websockets.connect(
-                    self._url, ping_interval=20, ping_timeout=20,
-                    max_size=8 * 1024 * 1024, open_timeout=8,
-                    ssl=_ssl_for(self._url),
-                ) as ws:
-                    self._ws = ws
-                    self._connected = True
-                    self._ever_connected = True
-                    self._connected_at = time.time()
-                    self._retry = 0
-                    backoff = 1.0
-                    me = H.profile()
-                    since = max(self._since.values()) if self._since else 0
-                    # v / caps：版本协商。老中继不认这两个字段也没关系，
-                    # 它按 v1 处理，消息照样通 —— 这就是"只增不改"的好处。
-                    await ws.send(json.dumps({
-                        "t": "join", "gid": self._gid,
-                        "uid": me["user_id"], "name": me["name"],
-                        "since": since,
-                        "v": self._proto, "caps": H.CAPS,
-                    }, ensure_ascii=False))
-                    self._state = "online"
-                    self._emit_status()
-                    await self._flush_queue(ws)
-                    hb = asyncio.create_task(self._heartbeat(ws))
-                    try:
-                        async for raw in ws:
-                            try:
-                                m = json.loads(raw)
-                            except Exception:
-                                continue
-                            await self._handle(ws, m)
-                    finally:
-                        hb.cancel()
-            except Exception as e:
-                self._last_error = f"{type(e).__name__}: {e}"
-                self._last_error_at = time.time()
-                self._connected = False
-                self._latency = 0.0
-                self._emit_status()
-            else:
-                self._connected = False
-                self._latency = 0.0
-            if not self._running:
-                break
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30.0)
+        # compat：用对端上报的协议版本判断，不同版本只提示不拦
+        vers = [int(x.get("ver") or 0) for x in (st.get("members") or [])]
+        compat = "same"
+        if vers:
+            if any(v < PROTO_VER for v in vers):
+                compat = "older"
+            elif any(v > PROTO_VER for v in vers):
+                compat = "newer"
 
-    async def _heartbeat(self, ws) -> None:
-        """每 15 秒 ping 一次。
-
-        两个作用：算 RTT（界面显示「12ms」）、尽早发现"连接假死"
-        （网络断了但 socket 还没报错时，ping 失败会触发重连）。
-        """
-        while self._running and self._ws is ws:
-            try:
-                self._last_ping = time.time()
-                await ws.send(json.dumps({"t": "ping", "ts": self._last_ping}))
-            except Exception:
-                return
-            await asyncio.sleep(15)
-
-    async def _handle(self, ws, m: Dict[str, Any]) -> None:
-        t = m.get("t")
-        self._last_recv = time.time()
-        if t == "joined":
-            self._members = _norm_members(m.get("members"))
-            self._connected = True
-            # 中继报告的协议版本 —— 用来判断"对面比我老还是新"
-            self._relay_proto = int(m.get("proto") or 0)
-            self._relay_ver = str(m.get("relay_ver") or "")
-            for rec in (m.get("msgs") or []):
-                self._store(rec)
-            self._emit_status()
-        elif t == "presence":
-            self._members = _norm_members(m.get("members"))
-            self._emit_status()
-        elif t == "msg":
-            self._store(m)
-        elif t == "stream":
-            self._stream(m)
-        elif t == "file":
-            self._file(m)
-        elif t == "cancel":
-            # 别人请求取消：解密后交给上层判断（只有真正在跑的机器知道该不该停）
-            key = H.group_key(self._gid)
-            body = H._open(key, m.get("blob") or "") if key else None
-            if isinstance(body, dict) and self.on_cancel:
-                try:
-                    self.on_cancel(self._gid, body)
-                except Exception:
-                    pass
-        elif t == "pong":
-            if self._last_ping:
-                self._latency = (time.time() - self._last_ping) * 1000.0
-            if m.get("proto"):
-                self._relay_proto = int(m.get("proto") or self._relay_proto)
-            self._emit_status()
-        elif t == "welcome":
-            self._relay_proto = int(m.get("proto") or 0)
-            self._relay_ver = str(m.get("relay_ver") or "")
-            self._emit_status()
-        elif t == "error":
-            self._last_error = str(m.get("msg") or "")
-            self._last_error_at = time.time()
-            self._emit_status()
-        # 其它类型：不认识就忽略 —— 跨版本时对方可能发来新帧，
-        # 不能因为不认识就断开连接。
-
-    # ------------------------------------------------------------ 落盘 / 回调
-
-    def _stream(self, rec: Dict[str, Any]) -> None:
-        """收到别人的 @hd 进度帧：解密 → 回调给上层界面。
-
-        ⚠️ **不落盘、不进 _seen**：进度帧是过程数据，同一任务会来几百条，
-           存下来没意义（结束时会落一条完整的 ai 消息）。去重也交给前端按
-           mid + 序号聚合，不在这里拦。
-        """
-        key = H.group_key(self._gid)
-        body = H._open(key, rec.get("blob") or "") if key else None
-        if not isinstance(body, dict):
-            return
-        frame = {
+        return {
+            "ok": state != "error",
+            "state": state,
+            "connected": peers > 0,
+            "url": self._url or ("局域网" if m.started else ""),
             "gid": self._gid,
-            "mid": rec.get("mid") or body.get("mid") or "",
-            "phase": body.get("phase") or "",
-            "delta": body.get("delta") or "",
-            "task": body.get("task") or {},
-            "seq_in": body.get("seq_in") or 0,
-            "ts": rec.get("ts") or time.time(),
+            "latency_ms": self._latency,
+            "proto": PROTO_VER,
+            "relay_ver": "",           # 中继已移除，字段保留避免前端报错
+            "compat": compat,
+            "peers": peers,
+            "members": st.get("members") or [],
+            "port": st.get("port") or 0,
+            "lan_ip": st.get("lan_ip") or "",
+            "queued": st.get("queued") or 0,
+            "error": self._error,
+            "mode": "mesh",
+            "uptime": st.get("uptime") or 0,
         }
-        if self.on_stream:
-            try:
-                self.on_stream(self._gid, frame)
-            except Exception:
-                pass
-
-    def _file(self, rec: Dict[str, Any]) -> None:
-        """收到附件分片：攒齐所有片后落盘，再通知前端「来了个文件」。
-
-        ⚠️ 必须**攒齐才落盘**。中途落盘的话，网络抖动导致的半截文件会被
-           当成完整文件存下来，用户打开就是损坏的（而且不会自愈，因为
-           文件名已存在）。这里用 fid 做 key 缓存分片，收齐才写。
-        """
-        key = H.group_key(self._gid)
-        body = H._open(key, rec.get("blob") or "") if key else None
-        if not isinstance(body, dict):
-            return
-        fid = str(body.get("fid") or rec.get("fid") or "")
-        if not fid:
-            return
-        try:
-            idx = int(body.get("idx") or 0)
-            total = int(body.get("total") or 1)
-            piece = base64.b64decode(body.get("data") or "")
-        except Exception:
-            return
-        now = time.time()
-        with self._lock:
-            # 清掉 2 分钟还没收齐的残留：对端中途掉线时这些片永远不会到齐，
-            # 不清就会一直占着内存（20MB 文件 × 几个 = 几十 MB 白占）。
-            for k in [k for k, v in self._file_buf.items()
-                      if now - (v.get("t0") or now) > 120]:
-                self._file_buf.pop(k, None)
-            slot = self._file_buf.get(fid)
-            if not slot:
-                slot = {"total": total, "parts": {}, "meta": body.get("meta") or {},
-                        "t0": now}
-                self._file_buf[fid] = slot
-            slot["parts"][idx] = piece
-            if len(slot["parts"]) < slot["total"]:
-                return
-            self._file_buf.pop(fid, None)
-        try:
-            data = b"".join(slot["parts"][i] for i in sorted(slot["parts"]))
-        except Exception:
-            return
-        meta = slot["meta"] or {"fid": fid, "name": "file"}
-        try:
-            out = H.store_incoming(self._gid, meta, data)
-        except Exception:
-            return
-        if self.on_file:
-            try:
-                self.on_file(self._gid, out)
-            except Exception:
-                pass
-
-    def _store(self, rec: Dict[str, Any]) -> None:
-        """把中继发来的密文解开，写进本地日志，并通知前端。"""
-        mid = rec.get("mid") or ""
-        if mid and mid in self._seen:
-            return
-        gid = self._gid
-        key = H.group_key(gid)
-        body = H._open(key, rec.get("blob") or "") if key else None
-        if not isinstance(body, dict):
-            return
-        # 合并信封（rec）和正文（body），再统一过 normalize_msg。
-        # 跨版本时 body 里可能有本版本不认识的字段 —— normalize 会原样保留，
-        # 不会在传输环节被吃掉；类型不认识则降级成 unknown，而不是丢掉整条。
-        merged: Dict[str, Any] = dict(rec)
-        merged.update(body)
-        if isinstance(body.get("extra"), dict):
-            merged.update(body["extra"])
-        merged.pop("blob", None)            # 密文没必要留在本地日志里
-        merged["id"] = mid or ("m_" + str(rec.get("seq")))
-        merged["from"] = rec.get("uid") or body.get("from") or "?"
-        merged["ts"] = rec.get("ts") or body.get("ts") or time.time()
-        merged["ver"] = int(rec.get("v") or body.get("ver") or 1)
-        msg = H.normalize_msg(merged)
-        if not msg:
-            return
-        with self._lock:
-            if mid:
-                self._seen.add(mid)
-            try:
-                H._append_raw(gid, msg)
-                g = H.load_group(gid)
-                if g and (rec.get("seq") or 0) > (g.get("seq") or 0):
-                    g["seq"] = rec["seq"]
-                    H._write_json(H._group_path(gid), g)
-            except Exception:
-                pass
-        if self.on_message:
-            try:
-                self.on_message(gid, msg)
-            except Exception:
-                pass
 
     # ------------------------------------------------------------ 发送
 
     def send(self, gid: str, text: str, mtype: str = "text",
-             extra: Optional[Dict[str, Any]] = None,
-             ref: str = "") -> Dict[str, Any]:
-        me = H.profile()
-        key = H.group_key(gid)
-        if not key:
-            return {"ok": False, "error": "这个群没有密钥，无法加密发送"}
-        mid = "m_" + str(int(time.time() * 1000))[-9:] + str(abs(hash(text)) % 10000)
-        body = {"name": me["name"], "type": mtype, "text": text,
-                "from": me["user_id"], "ts": time.time(), "ver": self._proto}
-        if ref:
-            body["ref"] = ref
-        if extra:
-            body["extra"] = extra
-        rec = {"t": "msg", "gid": gid, "mid": mid,
-               "blob": H._seal(key, body), "ts": time.time(), "v": self._proto}
-
-        if not self._connected or not self._loop or not self._ws:
-            # 离线：先进队列，重连后补发；同时本地先落一条（标 pending）
-            with self._lock:
-                self._queue.append(rec)
-            msg = {
-                "seq": -1, "id": mid, "from": me["user_id"], "name": me["name"],
-                "type": mtype, "text": text, "ts": time.time(), "pending": True,
-            }
-            if ref:
-                msg["ref"] = ref
-            if extra:
-                msg.update(extra)
-            try:
-                H._append_raw(gid, msg)
-            except Exception:
-                pass
-            return {"ok": True, "queued": True, "mid": mid, "msg": msg}
-
+             ref: Optional[str] = None, extra: Optional[Dict] = None) -> Dict[str, Any]:
+        """发一条消息：先本地落盘（拿本地 seq），再泛洪给所有在线成员。"""
+        self._hook()
         try:
-            asyncio.run_coroutine_threadsafe(
-                self._ws.send(json.dumps(rec, ensure_ascii=False)), self._loop
-            ).result(timeout=5)
+            msg = H.send_message(gid, text, mtype=mtype, ref=ref, extra=extra)
         except Exception as e:
-            with self._lock:
-                self._queue.append(rec)
-            return {"ok": True, "queued": True, "error": str(e), "mid": mid}
-        return {"ok": True, "mid": mid, "sent": True}
+            return {"ok": False, "error": str(e)}
+        m = MESH.node()
+        if not m.started:
+            m.start(0, [gid])
+        m.add_group(gid)
+        n = m.broadcast(gid, MESH.T_MSG, {"msg": msg})
+        self._last_ok = time.time()
+        if n == 0:
+            self._state = "offline"
+        else:
+            self._state = "online"
+        return {"ok": True, "msg": msg, "peers": n, "queued": 0 if n else 1}
 
     def send_stream(self, gid: str, mid: str, phase: str, delta: str = "",
-                    task: Optional[Dict[str, Any]] = None,
-                    seq_in: int = 0) -> bool:
-        """推一帧 @hd 执行进度给群里其他人。
-
-        ⚠️ **离线时直接丢，不排队**：进度帧是有时效的，等重连后补发
-           一堆过期增量毫无意义（结束时会发一条完整的 ai 消息兜底）。
-        """
-        if not self._connected or not self._loop or not self._ws:
-            return False
-        key = H.group_key(gid)
-        if not key:
-            return False
-        body = {"mid": mid, "phase": phase, "delta": delta,
-                "task": task or {}, "seq_in": seq_in,
-                "ts": time.time(), "ver": self._proto}
-        rec = {"t": "stream", "gid": gid, "mid": mid,
-               "blob": H._seal(key, body), "ts": time.time(), "v": self._proto}
-        try:
-            asyncio.run_coroutine_threadsafe(
-                self._ws.send(json.dumps(rec, ensure_ascii=False)), self._loop
-            ).result(timeout=3)
-            return True
-        except Exception:
-            return False
-
-    def send_file(self, gid: str, meta: Dict[str, Any], data: bytes,
-                  chunk: int = 384 * 1024) -> bool:
-        """把附件本体**分片广播**给群里每个成员，各存一份。
-
-        ⚠️ 为什么不是「别人需要时再来你这取」：
-           发送者一关机，别人就永远拿不到了。广播一份到各机器上，
-           历史附件才真正属于每个人，不依赖任何人长期在线。
-        """
-        if not self._connected or not self._loop or not self._ws:
-            return False
-        key = H.group_key(gid)
-        if not key:
-            return False
-        fid = str(meta.get("fid") or "")
-        if not fid:
-            return False
-        total = max(1, (len(data) + chunk - 1) // chunk)
-        ws = self._ws
-
-        async def _push() -> bool:
-            for i in range(total):
-                body = {"fid": fid, "meta": meta, "idx": i, "total": total,
-                        "data": base64.b64encode(
-                            data[i * chunk:(i + 1) * chunk]).decode("ascii"),
-                        "ts": time.time(), "ver": self._proto}
-                rec = {"t": "file", "gid": gid, "fid": fid,
-                       "blob": H._seal(key, body), "ts": time.time(), "v": self._proto}
-                await ws.send(json.dumps(rec, ensure_ascii=False))
-                # ⚠️ 片之间必须让一下（实测踩到）：连续猛发几个 500KB+ 的帧时，
-                #    中间那几片会被 nginx / 网络缓冲吞掉 —— 对端永远收不齐，
-                #    文件就卡在「传输中」不动。20ms 足够让链路喘口气。
-                if i + 1 < total:
-                    await asyncio.sleep(0.02)
-            return True
-
-        try:
-            return bool(asyncio.run_coroutine_threadsafe(
-                _push(), self._loop).result(timeout=120))
-        except Exception:
-            return False
+                    task: Optional[Dict[str, Any]] = None, seq_in: int = 0) -> Dict[str, Any]:
+        """@hd 实时进度。不落盘，直接泛洪 —— 刷屏内容没必要写进日志。"""
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return {"ok": False, "error": "网络未启动"}
+        me = H.profile()
+        obj = {
+            "mid": mid, "phase": phase, "delta": delta or "",
+            "task": task or {}, "seq": seq_in,
+            "from": me.get("user_id", ""), "name": me.get("name", ""),
+            "ts": time.time(), "ttl": MESH.TTL_DEFAULT,
+        }
+        n = m.broadcast(gid, MESH.T_STREAM, obj)
+        return {"ok": True, "peers": n}
 
     def send_cancel(self, gid: str, mid: str, by: str = "") -> bool:
-        """广播一条「取消这个任务」的请求。"""
-        if not self._connected or not self._loop or not self._ws:
+        self._hook()
+        m = MESH.node()
+        if not m.started:
             return False
-        key = H.group_key(gid)
-        if not key:
-            return False
-        body = {"mid": mid, "by": by, "ts": time.time(), "ver": self._proto}
-        rec = {"t": "cancel", "gid": gid, "mid": mid,
-               "blob": H._seal(key, body), "ts": time.time(), "v": self._proto}
-        try:
-            asyncio.run_coroutine_threadsafe(
-                self._ws.send(json.dumps(rec, ensure_ascii=False)), self._loop
-            ).result(timeout=3)
-            return True
-        except Exception:
-            return False
+        n = m.broadcast(gid, MESH.T_CANCEL, {"mid": mid, "by": by, "ttl": MESH.TTL_DEFAULT})
+        return n > 0
 
-    async def _flush_queue(self, ws) -> None:
-        with self._lock:
-            pending, self._queue = self._queue, []
-        for rec in pending:
-            try:
-                await ws.send(json.dumps(rec, ensure_ascii=False))
-            except Exception:
-                with self._lock:
-                    self._queue.append(rec)
-                break
+    def send_file(self, gid: str, meta: Dict[str, Any], data: bytes,
+                  mime: str = "", name: str = "") -> Dict[str, Any]:
+        """附件分片泛洪。单文件上限由 main.py 卡，这里只负责拆包和广播。
+
+        为什么不用大帧一次发完：mesh 的帧上限 8MB，而且一帧太大时一个丢包
+        就得整帧重来。512KB 一片，丢一片补一片。
+        """
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return {"ok": False, "error": "网络未启动"}
+        fid = str(meta.get("id") or "")
+        if not fid:
+            return {"ok": False, "error": "缺少文件 id"}
+        CH = 512 * 1024
+        total = max(1, (len(data) + CH - 1) // CH)
+        sent = 0
+        for i in range(total):
+            chunk = data[i * CH:(i + 1) * CH]
+            obj = {
+                "fid": fid, "idx": i, "total": total,
+                "meta": meta, "data": base64.b64encode(chunk).decode("ascii"),
+                "ttl": MESH.TTL_DEFAULT,
+            }
+            if m.broadcast(gid, MESH.T_FILE, obj) > 0:
+                sent += 1
+            time.sleep(0.02)   # 片之间留间隔，否则中间几片会被网络缓冲吞掉
+        return {"ok": True, "fid": fid, "total": total, "sent": sent}
+
+    # ------------------------------------------------------------ 附加能力
+
+    def connect_code(self, gid: str) -> Dict[str, Any]:
+        self._hook()
+        return MESH.node().connect_code(gid or self._gid)
+
+    def connect_to(self, gid: str, code: str) -> Dict[str, Any]:
+        self._hook()
+        m = MESH.node()
+        p = m.parse_code(code)
+        if not p.get("ok"):
+            return p
+        return m.connect(p["host"], p["port"], gid)
+
+    def lan_beacons(self, gid: str) -> List[Dict[str, Any]]:
+        """局域网里发现的同群成员（不含自己）。"""
+        m = MESH.node()
+        out = []
+        for p in m.peers_of(gid):
+            out.append({
+                "user_id": p.uid, "name": p.name or p.uid,
+                "host": p.addr[0], "port": p.port,
+                "ver": p.ver, "online": p.alive,
+                "last_seen": p.last_seen,
+            })
+        return out
 
 
-# 全局单例
-_client = HiveClient()
+_CLIENT: Optional[HiveClient] = None
 
 
 def client() -> HiveClient:
-    return _client
+    global _CLIENT
+    if _CLIENT is None:
+        _CLIENT = HiveClient()
+    return _CLIENT
