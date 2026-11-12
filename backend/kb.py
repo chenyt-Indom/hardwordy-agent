@@ -718,6 +718,29 @@ def _bm25(q_tokens, tokens_list, post=None, lens=None, k1=1.5, b=0.75):
         for i, f in plist:
             denom = f + k1 * (1.0 - b + b * lens[i] / avgdl)
             scores[i] += idf * f * (k1 + 1.0) / denom
+
+
+            def _coverage(q_tokens, n: int, post) -> np.ndarray:
+                """查询词在每块里的**覆盖比例**（0~1，有绝对意义）。
+
+                这是阈值判断的依据。为什么不用 BM25 归一化分：
+                BM25 分是"相对当前查询最大值"归一化的，命中一个常见词就能拿满分，
+                跟"这段真的回答了问题"没关系 —— 实测查「年龄要求」时，
+                一段讲"我学的东西将来要用到什么地方去"的无关段落，因为撞上"要求"
+                两个字拿了 kw=1.000 排到第一。覆盖率则要求**查询里的词真的都在**，
+                命中越多分越高，才有资格当阈值。
+                """
+                qset = set(q_tokens)
+                if not qset:
+                    return np.zeros(n, dtype=np.float32)
+                hit = {}
+                for t in qset:
+                    for i, _f in post.get(t, ()):
+                        hit[i] = hit.get(i, 0) + 1
+                cov = np.zeros(n, dtype=np.float32)
+                for i, h in hit.items():
+                    cov[i] = h / float(len(qset))
+                return cov
     return scores
 
 
