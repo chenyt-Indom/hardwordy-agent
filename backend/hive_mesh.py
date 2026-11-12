@@ -412,13 +412,24 @@ class MeshNode:
             peer.key = key
             peer.uid = str(info.get("uid") or "")
             peer.name = str(info.get("name") or "")
+            peer.dev = str(info.get("dev") or "")
             peer.ver = int(info.get("ver") or 0)
             peer.port = int(info.get("port") or 0)
             peer.last_seen = time.time()
 
+            # 同一个 user_id、但不是这台机器 —— 说明对方拿的是拷贝过去的目录。
+            # 这时候两台机器在群里没法区分，必须让用户知道（否则消息会显示成自己发的）。
+            if peer.uid and peer.uid == self.uid and peer.dev and peer.dev != self.dev:
+                self.uid_conflict = {
+                    "uid": peer.uid, "dev": peer.dev, "my_dev": self.dev,
+                    "addr": "%s:%s" % addr, "name": peer.name,
+                    "ts": time.time(),
+                }
+
             peer.send(T_HELLO, {
                 "uid": self.uid,
                 "name": self.uname,
+                "dev": self.dev,
                 "ver": PROTO_VER,
                 "port": self.port,
                 "gid": gid,
