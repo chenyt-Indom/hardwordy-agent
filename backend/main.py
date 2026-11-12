@@ -10227,6 +10227,14 @@ def _hive_on_message(gid: str, msg: dict) -> None:
 hive_client.client().on_message = _hive_on_message
 
 
+def _hive_on_stream(gid: str, frame: dict) -> None:
+    """别人的 @hd 进度帧 → 转给本机前端（不落盘，只刷新界面）。"""
+    _broadcast_hive({"type": "hd_stream", "gid": gid, "frame": frame})
+
+
+hive_client.client().on_stream = _hive_on_stream
+
+
 @app.websocket("/hive")
 async def hive_relay_ws(ws: WebSocket):
     """**内置中继** —— 让本应用自己就能当群里那台中转站。
