@@ -2528,12 +2528,55 @@
     } catch (e) { /* 静默 */ }
   }
 
+  // 索引状态：后端 / 模型 / 维度 / 块数。放在知识库面板里，
+  // 让用户一眼看出「向量检索到底有没有生效」，而不是猜。
+  async function loadKbIndexStatus() {
+    const el = $("#kbIndexStatus");
+    if (!el) return;
+    try {
+      const d = await api("/api/kb/index_status");
+      const s = (d && d.status) || {};
+      if (!s.chunks) {
+        el.textContent = "🧠 索引未建立" + (s.error ? "：" + s.error : "");
+        return;
+      }
+      el.textContent = "🧠 向量索引 " + s.chunks + " 块 / " + s.docs + " 篇 · " +
+        (s.embed_ok === false || !s.backend ? "仅关键词"
+          : (s.backend + " · " + s.model + " · " + s.dim + " 维"));
+    } catch (e) {
+      el.textContent = "";
+    }
+  }
+
   (function bindKbPanel() {
     const open = $("#kbOpenFolder");
     if (open) open.onclick = () =>
       openFolderRequest("/api/kb/open_folder", { method: "POST" });
     const rf = $("#kbRefresh");
     if (rf) rf.onclick = loadKb;
+    const rx = $("#kbReindex");
+    if (rx) rx.onclick = async () => {
+      const old = rx.textContent;
+      rx.disabled = true;
+      rx.textContent = "⏳ 构建中…";
+      try {
+        const d = await api("/api/kb/reindex", { method: "POST" });
+        const s = (d && d.stats) || {};
+        if (s.ok) {
+          showToast("索引已重建：" + s.chunks + " 块 / " + s.docs + " 篇 / " + s.ms + "ms",
+                    "ok");
+        } else {
+          showToast("重建失败：" + (s.error || "未知原因"), "warn");
+        }
+      } catch (e) {
+        showToast("重建失败：" + String(e.message || e), "warn");
+      } finally {
+        rx.disabled = false;
+        rx.textContent = old;
+        loadKbIndexStatus();
+      }
+    };
+    loadKbIndexStatus();
   })();
 
 
