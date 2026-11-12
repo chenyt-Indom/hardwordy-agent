@@ -2656,8 +2656,8 @@
       btn.setAttribute("aria-expanded", closed ? "false" : "true");
       if (remember) { try { localStorage.setItem(KEY, closed ? "1" : "0"); } catch (e) {} }
     };
-    let saved = "0";
-    try { saved = localStorage.getItem(KEY) || "0"; } catch (e) {}
+    let saved = "1";
+    try { saved = localStorage.getItem(KEY) || "1"; } catch (e) {}
     if (saved === "1") apply(true, false);
     btn.onclick = () => apply(!panel.classList.contains("collapsed"), true);
     btn.onkeydown = (ev) => {
