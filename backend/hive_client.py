@@ -342,6 +342,15 @@ class HiveClient:
             self._store(m)
         elif t == "stream":
             self._stream(m)
+        elif t == "cancel":
+            # 别人请求取消：解密后交给上层判断（只有真正在跑的机器知道该不该停）
+            key = H.group_key(self._gid)
+            body = H._open(key, m.get("blob") or "") if key else None
+            if isinstance(body, dict) and self.on_cancel:
+                try:
+                    self.on_cancel(self._gid, body)
+                except Exception:
+                    pass
         elif t == "pong":
             if self._last_ping:
                 self._latency = (time.time() - self._last_ping) * 1000.0
