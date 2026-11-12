@@ -10691,8 +10691,70 @@ def hive_send(gid: str, body: dict):
     return {"ok": True, "sent": r, "woke_model": instr is not None}
 
 
+# 待补发的附件：发的时候群里一个人都不在线，就先记下来，等有人连上来再补发。
+# 否则对方上线后消息里有附件卡片，但文件本体永远拿不到（实测确认过）。
+_pending_files: list = []          # [{gid, meta, ts}]
+_pending_files_lock = threading.Lock()
+_PENDING_MAX = 30                  # 最多记 30 个，防止内存无限涨
+
+
+def _queue_pending_file(gid: str, meta: dict) -> None:
+    with _pending_files_lock:
+        if len(_pending_files) >= _PENDING_MAX:
+            _pending_files.pop(0)
+        _pending_files.append({"gid": gid, "meta": meta, "ts": time.time()})
+
+
+def _flush_pending_files() -> None:
+    """有新成员连上来 → 把之前没发成功的附件补发一遍（接收端按 fid+片号去重）。"""
+    with _pending_files_lock:
+        todo = list(_pending_files)
+    if not todo:
+        return
+    cli = hive_client.client()
+    left: list = []
+    for it in todo:
+        try:
+            gid, meta = it["gid"], it["meta"]
+            fid = (meta or {}).get("fid") or ""
+            if not fid:
+                continue
+            data = hive.read_file_bytes(gid, fid)
+            r = cli.send_file(gid, meta, data) or {}
+            if not r.get("ok") or int(r.get("sent") or 0) <= 0:
+                left.append(it)
+        except Exception:
+            left.append(it)
+    with _pending_files_lock:
+        _pending_files[:] = left
+
+
+def _hive_on_peer() -> None:
+    """有人连上/断开：补发积压的附件，并让前端立刻刷新在线人数。"""
+    try:
+        _flush_pending_files()
+    except Exception:
+        logger.warning("补发附件失败", exc_info=True)
+    try:
+        _broadcast_hive({"type": "peers", "client": hive_client.client().status()})
+    except Exception:
+        pass
+
+
+def _hive_on_members(gid: str) -> None:
+    """成员表变了（有人进群/退群/被踢）→ 立刻推前端，不用等 4 秒轮询。"""
+    try:
+        _broadcast_hive({"type": "members", "gid": gid})
+    except Exception:
+        pass
+
+
 def _hive_send_files(gid: str, files: list) -> None:
-    """把本机刚发的附件逐个广播给群里其他人。失败不重试（下条消息会重发）。"""
+    """把本机刚发的附件逐个广播给群里其他人。
+
+    发不出去（没人在线 / 网络未启动）就进补发队列，等有人上线由
+    `_hive_on_peer` 重发 —— 附件没有 outbox，不这么做对方上线后拿不到文件。
+    """
     cli = hive_client.client()
     for f in files:
         try:
@@ -10700,7 +10762,9 @@ def _hive_send_files(gid: str, files: list) -> None:
             if not fid:
                 continue
             data = hive.read_file_bytes(gid, fid)
-            cli.send_file(gid, f, data)
+            r = cli.send_file(gid, f, data) or {}
+            if not r.get("ok") or int(r.get("sent") or 0) <= 0:
+                _queue_pending_file(gid, dict(f))
         except Exception:
             continue
 
