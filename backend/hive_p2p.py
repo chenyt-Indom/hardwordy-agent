@@ -563,6 +563,19 @@ def _recv_worker(tid: str, gid: str, fid: str, host: str, port: int,
         st = H._read_json(spath, {}) or {}
         if not isinstance(st, dict):
             st = {}
+        # 上次已经传完了（.part 已被移进 files 目录）：直接判定完成。
+        # ⚠️ 不判这一步会出错：part 文件已不存在，后面算 SHA 时会报
+        #    「文件校验失败」，让用户以为文件坏了。
+        if st.get("finished"):
+            try:
+                m = H.get_file_meta(gid, fid)
+            except Exception:
+                m = None
+            if m and int(m.get("size") or 0) == int(st.get("size") or -1):
+                _upd(tid, state="done", done=int(st.get("size") or 0),
+                     total=int(st.get("size") or 0), name=st.get("name") or "",
+                     speed=0.0, eta=0, fid_out=fid)
+                return
         # 群密钥换了或 token 变了，旧位图作废
         if st.get("token") != token:
             st = {}
