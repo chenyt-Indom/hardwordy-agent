@@ -43,7 +43,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 
-import hive as H
+import backend.hive as H
 
 MAGIC = b"HVp2"
 PROTO = 1
