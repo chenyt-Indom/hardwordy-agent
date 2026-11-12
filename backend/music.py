@@ -896,20 +896,22 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
         # 用户给的音符：按拍对齐，直接当主旋律（可循环到满长度）
         bar_beats_total = bar_s
         src = notes_in
-        loop_len = max(1.0, sum(max(0.05, nt["d"]) for nt in src))
+        # 循环长度按「最后一个音的结束拍」算，保留乐句内部的休止和小节线
+        loop_len = max(1.0, max(float(nt["t"]) + max(0.05, nt["d"]) for nt in src))
         total_beats = bars * bar_beats
-        t_beats = 0.0
-        while t_beats < total_beats:
+        t_base = 0.0
+        while t_base < total_beats - 1e-9:
             for nt in src:
-                if t_beats >= total_beats:
+                pos = t_base + float(nt["t"])
+                if pos >= total_beats - 1e-9:
                     break
-                tt = t_beats * beat
-                melody.append({"t": round(tt, 4), "d": round(max(0.08, nt["d"] * beat * 0.95), 4),
+                melody.append({"t": round(pos * beat, 4),
+                               "d": round(max(0.08, nt["d"] * beat * 0.95), 4),
                                "p": int(nt["p"]), "v": 0.8})
-                t_beats += max(0.05, nt["d"])
+            t_base += loop_len
             # 下一遍回到小节线，否则每遍错开一点、越走越乱
             if bar_beats and bar_beats > 0:
-                t_beats = (math.floor(t_beats / bar_beats + 1e-9) + 1) * bar_beats
+                t_base = math.ceil(t_base / bar_beats - 1e-9) * bar_beats
             if loop_len <= 0:
                 break
     else:
