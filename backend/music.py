@@ -224,7 +224,10 @@ def inst_piano(f: float, dur: float, vel: float = 0.8, sr: int = SR) -> np.ndarr
     sig += 0.55 * np.sin(2 * np.pi * f * t) * np.exp(-t * 1.6)
     sig += 0.35 * np.sin(2 * np.pi * f * 3.0 * t) * np.exp(-t * 6.0)
     sig += 0.18 * np.sin(2 * np.pi * f * 4.01 * t) * np.exp(-t * 9.0)
-    env = np.exp(-t * (2.4 + 1.6 / max(0.25, dur))) * _adsr(n, 0.004, 0.05, 0.9, 0.08, sr)
+    # 衰减速率随音高变化：低音延音长（真实钢琴低音能响 3~5 秒），
+    # 高音衰减快。原来固定 2.4+1.6/dur，130Hz 的音 1 秒后就只剩 5%。
+    decay = (2.4 + 1.6 / max(0.25, dur)) * min(1.45, max(0.42, (f / 261.6) ** 0.5))
+    env = np.exp(-t * decay) * _adsr(n, 0.004, 0.05, 0.9, 0.08, sr)
     return _soft(sig * env) * vel * 0.6
 
 
