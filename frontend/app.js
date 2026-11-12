@@ -8853,6 +8853,9 @@
           meta.textContent = (g.kfp ? "指纹 " + g.kfp + " · " : "")
             + (g.owner === myId ? "我是群主" : "群主 " + (g.owner_name || "?"))
             + " · " + (g.members || 0) + " 人";
+          // 身份/角色可能变（换身份、被转成管理员），按钮可见性跟着刷
+          const db = el("hiveDelBtn");
+          if (db) db.hidden = !(g.owner === myId);
         }
       }
     }
