@@ -11144,7 +11144,11 @@ def _hive_collect_attachments(gid: str, body: dict, hist: list):
                     continue
                 n_img += 1
                 images.append(info["b64"])
-                image_mimes.append(str(f.get("mime") or "image/png"))
+                # ⚠️ 必须写 image/jpeg，不能用原始 mime：
+                #    file_tools.read_image_b64 一律把图片转成 JPEG 再编码
+                #    （quality=85、长边≤1024），声明 png 而内容 jpeg 会让部分
+                #    接口直接拒图。实测确认（base64 头是 /9j/ 即 JPEG 魔数）。
+                image_mimes.append("image/jpeg")
                 note += "\n[附件·图片] " + str(f.get("name") or "")
             else:
                 if n_doc >= 3:
