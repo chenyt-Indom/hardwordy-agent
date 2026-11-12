@@ -10545,6 +10545,59 @@ def hive_send(gid: str, body: dict):
     return {"ok": True, "sent": r, "woke_model": instr is not None}
 
 
+# ---------------------------------------------------------------- 群附件
+#
+# 前端把文件读成 base64 传上来（单文件 ≤ 20MB），后端落盘到群目录。
+# 随后：
+#   · 本机消息带 files 元信息；
+#   · 若连着中继，**附件本体也会广播给每个成员**（分片），各存一份 ——
+#     这样「全员可见」不依赖发送者在线（他关机了别人照样能看）。
+
+@app.post("/api/hive/{gid}/upload")
+def hive_upload(gid: str, body: dict):
+    """上传一个附件到群目录。body: {name, mime, data(base64)}"""
+    b = body or {}
+    try:
+        raw = b.get("data") or ""
+        if isinstance(raw, str) and raw.startswith("data:"):
+            # 允许直接传 dataURL（前端 FileReader 的默认产物）
+            raw = raw.split(",", 1)[-1]
+        data = base64.b64decode(raw)
+        meta = hive.save_file(gid, b.get("name") or "file", data, b.get("mime") or "")
+        return {"ok": True, "file": meta, "max": hive.MAX_FILE}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/hive/{gid}/files/{fid}")
+def hive_file_get(gid: str, fid: str, download: int = 0):
+    """取回附件本体。图片/视频直接内联显示，其它默认当附件下载。"""
+    try:
+        meta = hive.get_file_meta(gid, fid)
+        data = hive.read_file_bytes(gid, fid)
+    except Exception as e:
+        return PlainTextResponse(str(e), status_code=404)
+    mime = meta.get("mime") or "application/octet-stream"
+    headers = {}
+    # 中文文件名要走 RFC 5987 编码，否则浏览器拿到乱码文件名
+    fn = meta.get("name") or "file"
+    quoted = urllib.parse.quote(fn)
+    if download or meta.get("kind") not in ("image", "video", "audio"):
+        headers["Content-Disposition"] = "attachment; filename*=UTF-8''" + quoted
+    else:
+        headers["Content-Disposition"] = "inline; filename*=UTF-8''" + quoted
+    return Response(content=data, media_type=mime, headers=headers)
+
+
+@app.get("/api/hive/{gid}/files")
+def hive_file_list(gid: str):
+    try:
+        idx = hive._read_json(hive._files_index_path(gid), {}) or {}
+        return {"ok": True, "files": list(idx.values()), "max": hive.MAX_FILE}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/hive/{gid}/hd/status")
 def hive_hd_status(gid: str):
     """当前 @hd 执行状态：谁在跑、排队几个、我能不能取消。"""
