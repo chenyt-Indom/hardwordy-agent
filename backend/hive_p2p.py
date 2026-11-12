@@ -481,10 +481,14 @@ def share(gid: str, fid: str, port: int = 0, want_upnp: bool = True,
             raise ValueError("文件不在本机")
     size = os.path.getsize(path)
 
+    # 复用判定：有 fid 比 fid；共享「本机文件」（fid 为空）比源文件绝对路径。
+    # 只比 fid 的话，两个不同的本机文件都是空 fid，会被当成同一个文件，
+    # 第二个直接复用第一个的发送端（端口、token、内容全是第一个的）。
+    _skey = fid or (os.path.abspath(src_path) if src_path else "")
     with _LOCK:
         for tid, r in _TRANSFERS.items():
-            if (r.get("gid") == gid and r.get("fid") == fid
-                    and r.get("dir") == "send" and r.get("port")
+            if (r.get("gid") == gid and r.get("dir") == "send" and r.get("port")
+                    and (r.get("fid") or r.get("src") or "") == _skey
                     and r.get("state") in ("listening", "transferring", "paused")):
                 return {
                     "ok": True, "tid": tid, "code": r.get("code"),
