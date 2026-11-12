@@ -2570,6 +2570,7 @@
         '<span class="au-name" title="' + escapeHtml(f.name) + '">' + escapeHtml(f.name) + "</span>" +
         '<span class="dl-meta">' + escapeHtml(f.modified) + " · " + kb + "KB</span>" +
         '<a class="au-dl" href="' + escapeHtml(f.url) + '" download title="下载">⬇</a>' +
+        '<button type="button" class="au-loc" title="在文件夹中显示这个文件">📁</button>' +
         '<button type="button" class="au-ren" title="重命名">✏️</button>' +
         '<button type="button" class="dl-del" title="删除">🗑</button>' +
         "</div>";
