@@ -3566,6 +3566,10 @@ html[data-theme="light"] select.pill-select option {
   pointer-events: none;
 }
 .av-ph small { opacity: .7; font-size: 11px; }
+/* ⚠️ 上面的 .av-ph{display:flex} / .av-img{display:block} 是作者样式，
+   优先级高于浏览器默认的 [hidden]{display:none}。
+   不加这条，占位文字会一直压在形象图上（图片其实已经加载了）。 */
+.av-box [hidden] { display: none !important; }
 .av-bubble {
   position: absolute;
   left: 50%;
