@@ -935,10 +935,22 @@ body.dragging .drop-overlay,
 }
 
 .kb-item.bad { border-color: rgba(229, 83, 75, .45); }
-.kb-item .kb-ico { font-size: 15px; flex: none; }
-.kb-item .kb-body { display: flex; flex-direction: column; flex: 1; min-width: 0; line-height: 1.3; }
-.kb-item .kb-sub { font-size: 10px; color: var(--muted); }
+.kb-item .kb-ico { font-size: 15px; flex: none; width: 16px; text-align: center; }
+.kb-item .kb-body { display: flex; flex-direction: column; flex: 1; min-width: 0; line-height: 1.3; gap: 1px; }
+.kb-item .kb-sub {
+  font-size: 10px; color: var(--muted);
+  /* 字数/块数这一行也别撑破卡片：超了就省略，悬停看 title */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .kb-item.bad .kb-sub { color: #e08a80; }
+
+/* 状态点：绿=能检索，红=读不出文字。
+   比原来只靠边框变红直观 —— 用户扫一眼就知道哪篇有问题。 */
+.kb-item .kb-dot {
+  flex: none; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--green);
+}
+.kb-item.bad .kb-dot { background: var(--danger); }
 
 /* ---------- 「■ 终止」按钮（生成中才出现）---------- */
 /* 注意：.btn 默认是 width:100% + margin-top:10px（那是给侧栏"整行按钮"用的），
