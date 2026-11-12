@@ -8764,6 +8764,7 @@
   window.addEventListener("avatar-changed", () => avLoad());
 
   (function avInit() {
+    if (avPh) avPh.textContent = avBox ? "DIAG:BOX_OK" : "DIAG:NO_BOX";
     if (!avBox) return;
     avApplyMouth();
     avLoad();
