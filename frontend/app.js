@@ -9440,6 +9440,7 @@
     function renderMsgs(list) {
       const box = el("hiveMsgs");
       box.innerHTML = "";
+      hvLastMsgs = Array.isArray(list) ? list : [];   // 上下文环要用
       // ⚠️ 索引必须**先**建好再渲染：引用块要靠它找回被引用的原文，
       //    边渲染边建的话，前面那条引用后面才渲染的消息就查不到了。
       msgIndex = {};
