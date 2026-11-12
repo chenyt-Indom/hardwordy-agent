@@ -8444,7 +8444,7 @@
   // 眨眼同理——眼睛区域纵向压缩，压缩后空出的地方用下眼睑以下的皮肤补。
   // 这些都是"形变"不是"重绘"，做不出 b/p/m 那种闭唇音素，这点不吹。
   const AV_W = 270, AV_H = 360;                    // canvas 内部分辨率（3:4）
-  const AV_EYE_TOP = 0.362, AV_EYE_BOT = 0.408;
+  const AV_EYE_TOP = 0.365, AV_EYE_BOT = 0.405;
   const AV_EYE_RECT = [[0.330, 0.494], [0.506, 0.670]];
   const AV_BROW_TOP = 0.330, AV_BROW_BOT = 0.364;
   const AV_EMO = {
