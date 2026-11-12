@@ -235,7 +235,8 @@ class HiveClient:
     # ------------------------------------------------------------ 发送
 
     def send(self, gid: str, text: str, mtype: str = "text",
-             ref: Optional[str] = None, extra: Optional[Dict] = None) -> Dict[str, Any]:
+             extra: Optional[Dict] = None,
+             ref: Optional[str] = None) -> Dict[str, Any]:
         """发一条消息：先本地落盘（拿本地 seq），再泛洪给所有在线成员。"""
         self._hook()
         try:
