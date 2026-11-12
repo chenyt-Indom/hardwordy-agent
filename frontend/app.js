@@ -9659,6 +9659,12 @@
         if (ev.target === el("p2pMask")) p2pClose();   // 点遮罩关闭
       });
     }
+    if (el("p2pOpenFile")) el("p2pOpenFile").addEventListener("click", p2pOpenFile);
+    if (el("p2pPath")) {
+      el("p2pPath").addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") { ev.preventDefault(); p2pOpenFile(); }
+      });
+    }
     if (el("p2pGo")) el("p2pGo").addEventListener("click", p2pReceive);
     if (el("p2pInput")) {
       el("p2pInput").addEventListener("keydown", (ev) => {
