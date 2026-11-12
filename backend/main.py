@@ -37,7 +37,7 @@ from . import (config, ollama_client, deepseek_client, cloud_image, image_models
                selfdev, scheduler, perf, model_manager, selftest, memory, kb,
                file_tools, video, web_tools,
                t2i, tools, voice, sessions, image_library, doclib, docx_write, tts,
-               workspace, actlog, chatimg, hive, hive_client)
+               workspace, actlog, chatimg, hive, hive_client, hive_deploy)
 
 app = FastAPI(title="hardwordy", version="1.0.0")
 
