@@ -1335,5 +1335,6 @@ def status() -> Dict[str, Any]:
         # 中继已按需求删除：群聊走纯 P2P，不存在「服务器地址」这个概念了。
         "relay": None,
         "data_dir": _DATA,
-        "qr_ok": _qr_data_url("test") != "",
+        # 二维码已删除，改成检查密码模块是否可用
+        "password_ok": len(PW_ALPHABET) > 0 and PW_LEN == 12,
     }
