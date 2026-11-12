@@ -2481,6 +2481,97 @@
     if (rf) rf.onclick = loadKb;
   })();
 
+  // ---------- 音频库（TTS 产物）----------
+  // 数据来自 /api/audio/list（data/tts 目录）；播放走 /api/tts/audio/{name}。
+  let __auAudio = null;      // 当前正在播的 Audio 对象
+  let __auPlaying = "";      // 正在播的文件名（用来切 ▶ / ⏸）
+
+  async function loadAudioLib() {
+    const box = $("#audioList");
+    if (!box) return;
+    let d;
+    try {
+      d = await api("/api/audio/list");
+    } catch (e) {
+      box.innerHTML = '<div class="hint">读取失败：' + escapeHtml(String(e.message || e)) + "</div>";
+      return;
+    }
+    const files = (d && d.files) || [];
+    if (!files.length) {
+      box.innerHTML = '<div class="hint">还没有音频。让我「读一下这段」就会生成到这里。</div>';
+      return;
+    }
+    box.innerHTML = files.map((f) => {
+      const kb = (f.bytes / 1024).toFixed(1);
+      const playing = __auPlaying === f.name;
+      return '<div class="list-item au-item" data-name="' + escapeHtml(f.name) + '">' +
+        '<button type="button" class="au-play" title="试听">' + (playing ? "⏸" : "▶") + "</button>" +
+        '<span class="au-name" title="' + escapeHtml(f.name) + '">' + escapeHtml(f.name) + "</span>" +
+        '<span class="dl-meta">' + escapeHtml(f.modified) + " · " + kb + "KB</span>" +
+        '<a class="au-dl" href="' + escapeHtml(f.url) + '" download title="下载">⬇</a>' +
+        '<button type="button" class="au-ren" title="重命名">✏️</button>' +
+        '<button type="button" class="dl-del" title="删除">🗑</button>' +
+        "</div>";
+    }).join("");
+  }
+
+  function auPlay(url, name) {
+    if (__auAudio) { __auAudio.pause(); __auAudio = null; }
+    if (__auPlaying === name) { __auPlaying = ""; loadAudioLib(); return; }   // 再点一次 = 停
+    __auPlaying = name;
+    __auAudio = new Audio(url);
+    __auAudio.onended = () => { __auPlaying = ""; __auAudio = null; loadAudioLib(); };
+    __auAudio.play().catch(() => {
+      __auPlaying = ""; __auAudio = null; loadAudioLib(); showToast("播放失败", "warn");
+    });
+    loadAudioLib();
+  }
+
+  (() => {
+    const box = $("#audioList"), rf = $("#audioRefresh");
+    if (rf) rf.onclick = () => loadAudioLib();
+    if (!box) return;
+    box.addEventListener("click", async (ev) => {
+      const item = ev.target.closest(".au-item");
+      if (!item) return;
+      const name = item.getAttribute("data-name") || "";
+      if (ev.target.closest(".au-play")) {
+        try {
+          const d = await api("/api/audio/list");
+          const hit = ((d && d.files) || []).find((x) => x.name === name);
+          if (hit) auPlay(hit.url, name);
+        } catch (e) { showToast("读取失败", "warn"); }
+        return;
+      }
+      if (ev.target.closest(".au-ren")) {
+        const nn = prompt("新的文件名（扩展名会保留）", name.replace(/\.[^.]+$/, ""));
+        if (!nn) return;
+        try {
+          const r = await api("/api/audio/rename",
+            { method: "POST", body: JSON.stringify({ name: name, new_name: nn }) });
+          showToast(r && r.ok ? "已重命名" : ((r && r.error) || "重命名失败"), r && r.ok ? "ok" : "warn");
+          loadAudioLib();
+        } catch (e) { showToast(String(e.message || e), "warn"); }
+        return;
+      }
+      if (ev.target.closest(".dl-del")) {
+        if (!confirm("删除这个音频？删掉找不回来。")) return;
+        try {
+          const r = await api("/api/audio/delete",
+            { method: "POST", body: JSON.stringify({ name: name }) });
+          if (r && r.ok) {
+            if (__auPlaying === name) {
+              if (__auAudio) __auAudio.pause();
+              __auPlaying = ""; __auAudio = null;
+            }
+            showToast("已删除", "ok"); loadAudioLib();
+          } else showToast((r && r.error) || "删除失败", "warn");
+        } catch (e) { showToast(String(e.message || e), "warn"); }
+        return;
+      }
+    });
+  })();
+
   // ---------- 生成文库（模型产出的文件）----------
   // 刻意和知识库分开：知识库是用户的资料、只读；这里是模型的产出，可改可删可导出。
   let dlCurrent = "";
