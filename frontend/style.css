@@ -3732,7 +3732,9 @@ html[data-theme="light"] select.pill-select option {
   color: var(--text); font: inherit; font-size: 13px; line-height: 1.5;
 }
 .hive-composer textarea:focus { outline: none; border-color: var(--accent); }
-.hive-composer .btn { flex: none; }
+/* ⚠️ 必须同时压掉 `.btn { width: 100% }`（同 1727 行那个坑）：
+   只写 flex:none 时按钮基准宽度仍是整行，textarea 会被挤成一条竖线。 */
+.hive-composer .btn { flex: 0 0 auto; width: auto; margin: 0; padding: 10px 22px; }
 .hive-main > .tip { flex: none; padding: 0 18px 8px; margin: 0; }
 
 /* ---------- 二维码 / 输入浮层 ---------- */
