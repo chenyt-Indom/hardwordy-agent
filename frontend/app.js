@@ -8613,6 +8613,7 @@
     let members = [];
     let myId = "";
     let myName = "";
+    let myProto = 0;      // 本机协议版本，用来标出「对方版本比我老」
     let lastSeq = 0;
     let ws = null;
     let wsRetry = 0;
