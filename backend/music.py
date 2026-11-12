@@ -797,6 +797,10 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
             elif hi == "organ":
                 add("organ", base, bar_s * 0.96, ch[0] + 12, lvl * 0.8)
             else:
+                # 没有贝斯轨的风格（纯钢琴），用左手低八度根音补低频。
+                # ⚠️ 实测：不补的话 piano 风格低频占比是 0.0%，整首飘在中高频。
+                if not _bass_inst:
+                    add(hi, base, beat * 2.0, ch[0] - 12, lvl * 0.85)
                 # 柱式和弦：钢琴 1/2.5 拍两下，电钢琴走二四拍（comping）
                 spots = (0.0, 2.0) if hi == "epiano" else (0.0, 2.5)
                 for sp in spots:
