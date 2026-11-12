@@ -16,8 +16,8 @@ from PIL import Image
 BASE = "http://127.0.0.1:11434"
 
 
-def get(url, timeout=10):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+def get(path, timeout=10):
+    with urllib.request.urlopen(BASE + path, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
