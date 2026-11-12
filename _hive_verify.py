@@ -102,7 +102,7 @@ hist = [
     {"name": "乙", "text": "用 JWT 吧", "type": "text"},
     {"name": "甲", "text": "@hd 写个登录接口", "type": "text"},
 ]
-pr = hive.build_hd_prompt("写个登录接口，用 JWT", hist)
+pr = hive.build_hd_prompt("写个登录接口，用 JWT", hist, "验证员甲")
 chk("提示词是字符串", isinstance(pr, str), type(pr).__name__)
 chk("提示词含当前指令", "写个登录接口，用 JWT" in pr)
 chk("提示词含上下文", "JWT" in pr or "登录页" in pr)
