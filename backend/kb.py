@@ -672,6 +672,12 @@ def reindex(force: bool = True):
 
 def index_status():
     """索引状态（前端显示用）。"""
+    # ⚠️ 先尝试从磁盘加载：应用刚启动时内存里是空的，
+    # 不加载就报 chunks=0，界面上会显示"索引未建立"——
+    # 可实际上索引好好躺在磁盘上（实测踩到，纯属误导用户）。
+    with _idx_lock:
+        if not _idx.get("chunks"):
+            _load_index()
     with _idx_lock:
         chunks = len(_idx.get("chunks") or [])
         vectors = _idx.get("vectors")
