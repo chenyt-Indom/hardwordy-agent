@@ -828,13 +828,22 @@ def search(query: str, top_k: int = 6, min_score: float = None):
     cand_docs = len({chunks[i].get("doc_id") for _f, i, _v, _c, _b in picked})
     per_doc = int(top_k) if cand_docs <= 1 else max(2, int(top_k) // 2)
     used = {}
+    picked_texts = []
     results = []
     for f, i, v, k, bm in picked:
         c = chunks[i]
         did = c.get("doc_id") or ""
         if used.get(did, 0) >= per_doc:
             continue
+        txt = c.get("text", "")
+        # 相邻块之间有 70 字重叠，top_k 小的时候会把"同一段话"返回两遍
+        # （实测：查「入团需要什么条件」，第 1、2 条内容有一半是重复的）。
+        # 开头 120 字相同就认为是同一段，跳过。
+        if any(txt[:120] and (txt[:120] in pt or pt[:120] in txt)
+               for pt in picked_texts):
+            continue
         used[did] = used.get(did, 0) + 1
+        picked_texts.append(txt)
         rel = c.get("rel") or ""
         results.append({
             "doc_id": did,
