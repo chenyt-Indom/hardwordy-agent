@@ -8982,25 +8982,59 @@
     atBtnSync();
 
     // ---------------------------------------------------------- 成员
+    // 「3 分钟前」这种相对时间 —— 离线的人要能看出离开了多久
+    function fmtAgo(ts) {
+      if (!ts) return "";
+      const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+      if (s < 60) return "刚刚";
+      if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+      if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+      return Math.floor(s / 86400) + " 天前";
+    }
+
     function renderMembers() {
       const box = el("hiveMemList");
       if (!box) return;
-      el("hiveMemCount").textContent = "(" + members.length + ")";
+      const onN = members.filter((m) => m.online).length;
+      el("hiveMemCount").textContent = "(" + onN + "/" + members.length + ")";
       if (!members.length) {
         box.innerHTML = '<p class="hint">暂无成员</p>';
         return;
       }
       const amOwner = members.some((m) => m.user_id === myId && m.role === "owner");
       box.innerHTML = members.map((m) => {
+        const uid = m.uid || m.user_id;
+        const isMe = uid === myId;
+        const st = m.state || (m.online ? "online" : "offline");
         const role = m.role === "owner" ? "群主" : (m.role === "admin" ? "管理" : "");
-        const kick = (amOwner && m.user_id !== myId)
-          ? '<button class="hive-kick" data-uid="' + hEsc(m.user_id) + '"'
+        // 状态文字：在线 / 离线 3 分钟前 / 异常
+        let stTxt, tip;
+        if (st === "online") {
+          stTxt = "在线";
+          tip = m.name + " · 在线";
+        } else if (st === "error") {
+          stTxt = "异常";
+          tip = m.name + " · 异常（连过但报错了，可能是版本或网络问题）";
+        } else {
+          stTxt = m.last_seen ? fmtAgo(m.last_seen) : "离线";
+          tip = m.name + " · 离线" + (m.last_seen ? "（最后在线 " + fmtAgo(m.last_seen) + "）" : "");
+        }
+        // 对方协议版本比本机老 → 标 vN，省得奇怪"他怎么没有新功能"
+        const vTag = (m.v && myProto && m.v < myProto)
+          ? '<span class="hm-v" title="对方客户端协议 v' + m.v
+            + "，比你老，可能没有最新功能\">v" + m.v + "</span>"
+          : "";
+        const kick = (amOwner && !isMe)
+          ? '<button class="hive-kick" data-uid="' + hEsc(uid) + '"'
             + ' data-name="' + hEsc(m.name) + '" title="移出群">踢</button>'
           : "";
-        return '<div class="hive-mem">'
-          + '<span class="hm-name" title="' + hEsc(m.name) + '">'
-          + (m.user_id === myId ? "★ " : "") + hEsc(m.name) + "</span>"
+        return '<div class="hive-mem' + (m.online ? "" : " off") + '" title="' + hEsc(tip) + '">'
+          + '<i class="hm-dot ' + st + '"></i>'
+          + '<span class="hm-name">'
+          + (isMe ? "★ " : "") + hEsc(m.name) + "</span>"
           + (role ? '<span class="hm-role">' + role + "</span>" : "")
+          + vTag
+          + '<span class="hm-st ' + st + '">' + hEsc(stTxt) + "</span>"
           + kick + "</div>";
       }).join("");
       Array.prototype.forEach.call(box.querySelectorAll(".hive-kick"), (b) => {
