@@ -3946,8 +3946,8 @@ def _do_tts_speak(arguments, ui_events, context):
         % (r.get("name"), r.get("voice_name") or r.get("voice") or "", kind),
         "约 %.0f 秒，文件 %.1f KB。" % (float(r.get("est_seconds") or 0),
                                        float(r.get("bytes") or 0) / 1024.0),
-        "[▶ 播放](%s)" % url,
-        "[⬇ 下载](%s)" % url,
+        "[在线播放](%s)" % url,
+        "[下载音频](%s)" % url,
     ]
     for w in (r.get("warnings") or []):
         lines.append("⚠️ %s" % w)
