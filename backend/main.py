@@ -10773,9 +10773,12 @@ def _hive_send_files(gid: str, files: list) -> None:
 # 挂上之后：
 #   · 有人连上来 → 补发积压附件 + 前端立刻刷新在线人数；
 #   · 成员表变化 → 前端立刻刷新成员列表（原来只能靠 4 秒轮询）。
+# ⚠️ 必须挂在 **HiveClient 实例**上，不能挂 MESH.node()：
+#    客户端 start() 时 _hook() 会把 mesh 的回调整个重设一遍，
+#    直接挂 mesh 的话会被静默覆盖掉（实测踩过：补发队列一直不触发）。
 try:
-    hive_client.MESH.node().on_peer = _hive_on_peer
-    hive_client.MESH.node().on_members = _hive_on_members
+    hive_client.client().on_peer = _hive_on_peer
+    hive_client.client().on_members = _hive_on_members
 except Exception:
     logger.warning("群聊回调注册失败", exc_info=True)
 
