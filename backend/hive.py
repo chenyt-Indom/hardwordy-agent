@@ -1102,7 +1102,12 @@ def send_message(gid: str, text: str, mtype: str = "text",
     """发一条消息（本地落盘 + 返回给前端广播）。"""
     me = profile()
     text = (text or "").strip()
-    if not text and mtype == "text":
+    # ⚠️ 允许「只发附件、不写字」：前端就是按这个规则放行的
+    #    （`if (!text && !files.length) return;`），但这里以前只认文字，
+    #    结果「拖一张图直接发」被后端拒成「消息不能为空」——
+    #    图片根本没发出去，模型自然也说没收到。实测确认。
+    _has_files = bool(((extra or {}).get("files") or []))
+    if not text and mtype == "text" and not _has_files:
         raise ValueError("消息不能为空")
     with _LOCK:
         g = load_group(gid)
