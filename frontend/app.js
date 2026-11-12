@@ -9785,7 +9785,10 @@
     // ---------------------------------------------------------- 启动
     let saved = "single";
     try { saved = localStorage.getItem("ui_mode") || "single"; } catch (e) { /* 忽略 */ }
-    setMode(saved === "hive" ? "hive" : "single");
+    setMode("hive");
+    window.__openFirstGroup = () => {
+      if (groups && groups.length) openGroup(groups[0].gid);
+    };
   })();
 
 })();
