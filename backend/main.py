@@ -10526,6 +10526,56 @@ def hive_send(gid: str, body: dict):
     return {"ok": True, "sent": r, "woke_model": instr is not None}
 
 
+@app.get("/api/hive/{gid}/hd/status")
+def hive_hd_status(gid: str):
+    """当前 @hd 执行状态：谁在跑、排队几个、我能不能取消。"""
+    try:
+        info = dict(_hd_running.get(gid) or {})
+        me = hive.profile()
+        g = hive.load_group(gid) or {}
+        can = bool(info) and (me["user_id"] == info.get("asker_id")
+                              or me["user_id"] == g.get("owner"))
+        if info:
+            info["elapsed_ms"] = int((time.time() - (info.get("since") or 0)) * 1000)
+        return {"ok": True, "running": bool(info), "task": info,
+                "queued": _hd_q.qsize(), "can_cancel": can}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/hd/cancel")
+def hive_hd_cancel(gid: str, body: dict = None):
+    """取消正在跑（或排队中）的 @hd 任务。
+
+    权限：**发起人本人或群主**。其他人点了会被拒绝 —— 否则群里任何人
+    都能把别人正在跑的长任务掐掉。
+    """
+    try:
+        b = body or {}
+        me = hive.profile()
+        info = _hd_running.get(gid) or {}
+        if not info:
+            return {"ok": False, "error": "当前没有正在执行的任务"}
+        mid = b.get("task_id") or info.get("task_id")
+        if mid != info.get("task_id"):
+            return {"ok": False, "error": "任务号对不上（可能已经跑完了）"}
+        g = hive.load_group(gid) or {}
+        if me["user_id"] != info.get("asker_id") and me["user_id"] != g.get("owner"):
+            return {"ok": False, "error": "只有发起人或群主能取消"}
+        ev = _hd_cancel.get(mid)
+        if not ev:
+            return {"ok": False, "error": "任务状态已失效（可能刚好跑完）"}
+        ev.set()
+        # 告诉其他成员「这次任务被取消了」，否则他们那边进度卡片会一直转
+        try:
+            hive_client.client().send_cancel(gid, mid, me["user_id"])
+        except Exception:
+            pass
+        return {"ok": True, "task_id": mid}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _hive_post(gid: str, text: str, mtype: str, extra: dict | None = None) -> None:
     """把一条消息发出去（连着中继就发中继，否则本地落盘 + 推前端）。"""
     cli = hive_client.client()
