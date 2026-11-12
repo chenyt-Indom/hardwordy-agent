@@ -471,6 +471,32 @@ class HiveClient:
             return {"ok": True, "queued": True, "error": str(e), "mid": mid}
         return {"ok": True, "mid": mid, "sent": True}
 
+    def send_stream(self, gid: str, mid: str, phase: str, delta: str = "",
+                    task: Optional[Dict[str, Any]] = None,
+                    seq_in: int = 0) -> bool:
+        """推一帧 @hd 执行进度给群里其他人。
+
+        ⚠️ **离线时直接丢，不排队**：进度帧是有时效的，等重连后补发
+           一堆过期增量毫无意义（结束时会发一条完整的 ai 消息兜底）。
+        """
+        if not self._connected or not self._loop or not self._ws:
+            return False
+        key = H.group_key(gid)
+        if not key:
+            return False
+        body = {"mid": mid, "phase": phase, "delta": delta,
+                "task": task or {}, "seq_in": seq_in,
+                "ts": time.time(), "ver": self._proto}
+        rec = {"t": "stream", "gid": gid, "mid": mid,
+               "blob": H._seal(key, body), "ts": time.time(), "v": self._proto}
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._ws.send(json.dumps(rec, ensure_ascii=False)), self._loop
+            ).result(timeout=3)
+            return True
+        except Exception:
+            return False
+
     async def _flush_queue(self, ws) -> None:
         with self._lock:
             pending, self._queue = self._queue, []
