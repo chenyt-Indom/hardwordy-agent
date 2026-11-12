@@ -2557,7 +2557,7 @@
     __auDir = (d && d.dir) || __auDir;
     const hintEl = $("#audioHint");
     if (hintEl && __auDir) {
-      hintEl.textContent = "语音合成的音频都放这里，点 ▶ 试听。保存位置：" + __auDir;
+      hintEl.textContent = "语音合成和音乐生成的音频都放这里，点 ▶ 试听。保存位置：" + __auDir;
     }
     if (!files.length) {
       box.innerHTML = '<div class="hint">还没有音频。让我「读一下这段」就会生成到这里。</div>';
