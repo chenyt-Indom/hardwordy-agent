@@ -353,12 +353,13 @@ def parse_code(code: str) -> Dict[str, Any]:
 
 # ---------------------------------------------------------------- 发送端
 def _sender_worker(tid: str, gid: str, fid: str, path: str,
-                   token: str, srv: socket.socket, stop_evt: threading.Event) -> None:
+                   token: str, srv: socket.socket, stop_evt: threading.Event,
+                   disp_name: str = "") -> None:
     key = _key(gid, token)
     size = os.path.getsize(path)
     count = max(1, (size + CHUNK - 1) // CHUNK)
-    meta = H.get_file_meta(gid, fid)
-    name = meta.get("name") or os.path.basename(path)
+    # ⚠️ 不能在这里查索引：共享「本机任意文件」时它并不在群索引里
+    name = disp_name or os.path.basename(path)
     sha = _file_sha(path)
     _upd(tid, total=size, count=count, name=name, state="listening", sha=sha)
 
