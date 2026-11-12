@@ -8911,7 +8911,20 @@
       }
       // 启动 P2P 网络：不传地址 = 局域网模式（UDP 广播自动发现同群的人）。
       // 完全不需要服务器，也不会有「没配地址就收不到」这种事。
-      try { await api("/api/hive/connect", { gid: gid }); } catch (e) { /* 忽略 */ }
+      try {
+        const cn = await api("/api/hive/connect", { gid: gid });
+        // 老群（二维码时代）迁移到密码体系时会顺手生成密码，这里提醒一次，
+        // 否则群主根本不知道密码是多少，也没法告诉别人。
+        const mg = (cn && cn.migrate) || {};
+        if (mg.migrated && mg.password) {
+          setTimeout(() => {
+            alert("这个群已启用「12 位密码进群」✅\n\n"
+              + "入群密码：" + mg.password + "\n\n"
+              + "把它告诉对方，他点「🔑 密码入群」输进去就能进。\n"
+              + "（随时可以点右上角「🔑 密码」再看一次或重置）");
+          }, 400);
+        }
+      } catch (e) { /* 忽略 */ }
       loadStatus();
       connectWs();
     }
