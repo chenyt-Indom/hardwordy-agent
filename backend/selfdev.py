@@ -1011,15 +1011,33 @@ def restart(delay: float = 1.2) -> dict:
     ]
     proc = None
     last_err = ""
-    for fl in flags_try:
+    _via_start = False
+    # ★★ 2026-11-12：**要自己开窗口时，必须走 shell 的 start**。
+    #   实测（pid 55624）：同样参数直接用 Popen 拉 pythonw.exe，进程活得好好的、
+    #   run.py 也走到了「准备创建窗口」、webview.start() 也进去了，但
+    #   MainWindowHandle 始终是 0 —— 窗口建在了一个看不见的桌面上。
+    #   用户看到的就是「点重启后没反应，退出了没重进」。
+    #   而 `start` 走的是 ShellExecute，和**双击快捷方式完全同一条路径**，能正常出窗。
+    #   注意：cmd 会秒退，所以这条分支不能用 proc.poll() 判断子进程死活。
+    if os.name == "nt" and not frozen and env.get("MM_NO_WINDOW") != "1":
         try:
-            proc = subprocess.Popen(cmd, cwd=cwd, env=env, close_fds=True,
-                                    creationflags=fl if os.name == "nt" else 0)
-            break
+            subprocess.Popen('start "" "%s" "%s"' % (sys.executable, entry),
+                             shell=True, cwd=cwd, env=env,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            _via_start = True
+            journal("restart_via_start", "-")
         except Exception as e:                        # noqa: BLE001
             last_err = "%s: %s" % (type(e).__name__, e)
-            proc = None
-    if proc is None:
+    if not _via_start:
+        for fl in flags_try:
+            try:
+                proc = subprocess.Popen(cmd, cwd=cwd, env=env, close_fds=True,
+                                        creationflags=fl if os.name == "nt" else 0)
+                break
+            except Exception as e:                    # noqa: BLE001
+                last_err = "%s: %s" % (type(e).__name__, e)
+                proc = None
+    if (not _via_start) and proc is None:
         return {"ok": False, "error": "拉不起新进程（%s），已保持当前进程继续运行"
                                       % last_err}
 
@@ -1027,7 +1045,7 @@ def restart(delay: float = 1.2) -> dict:
     # 以前是"先 os._exit(0)"，结果子进程一出生就死（Job 被连带清理），
     # 应用直接没了 —— 用户只看到"重启了一下就再也没起来"。
     time.sleep(max(1.0, delay + 1.0))
-    if proc.poll() is not None:
+    if (not _via_start) and proc.poll() is not None:
         log = ""
         try:
             log = (proc.stdout.read() if proc.stdout else "")[-600:]
@@ -1039,7 +1057,9 @@ def restart(delay: float = 1.2) -> dict:
                          "（服务没断）。多半是端口没空出来或代码有问题。%s"
                          % (proc.returncode, ("\n" + log) if log else "")}
 
-    journal("restart", "-", cmd=" ".join(cmd)[:200], pid=proc.pid)
+    _newpid = 0 if _via_start else proc.pid
+    journal("restart", "-", cmd=" ".join(cmd)[:200], pid=_newpid,
+            via=("start" if _via_start else "popen"))
 
     def _bye() -> None:
         time.sleep(0.3)
@@ -1048,5 +1068,7 @@ def restart(delay: float = 1.2) -> dict:
     import threading
     threading.Thread(target=_bye, daemon=True).start()
     return {"ok": True,
-            "msg": "已拉起新进程（PID %d）并通过导入校验，正在切换…"
-                   "约 10 秒后刷新页面即可。" % proc.pid}
+            "msg": ("已通过 start 拉起新实例（窗口会自己出现），正在切换…"
+                    if _via_start else
+                    "已拉起新进程（PID %d）并通过导入校验，正在切换…" % _newpid)
+                   + "约 10 秒后刷新页面即可。"}
