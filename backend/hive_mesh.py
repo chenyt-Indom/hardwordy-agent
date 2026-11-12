@@ -729,9 +729,20 @@ class MeshNode:
             u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             u.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             u.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            u.bind(("", 0))
+            # 必须绑在**广播端口**上：发到 45231 却绑随机端口的话，
+            # 别人发的广播永远收不到（这是实测踩到的坑）。
+            try:
+                u.bind(("", BEACON_PORT))
+            except Exception:
+                # 端口被占（比如开了两个实例）：降级到随机端口，
+                # 只能主动连别人，不能被别人自动发现。
+                u.bind(("", 0))
             u.settimeout(0.5)
             self._udp = u
+            try:
+                self._beacon_port = u.getsockname()[1]
+            except Exception:
+                self._beacon_port = BEACON_PORT
         except Exception as e:
             self._last_err = "UDP 广播启动失败：%s" % e
             return
