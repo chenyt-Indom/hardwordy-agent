@@ -558,6 +558,37 @@ class HiveClient:
         except Exception:
             return False
 
+    def send_file(self, gid: str, meta: Dict[str, Any], data: bytes,
+                  chunk: int = 384 * 1024) -> bool:
+        """把附件本体**分片广播**给群里每个成员，各存一份。
+
+        ⚠️ 为什么不是「别人需要时再来你这取」：
+           发送者一关机，别人就永远拿不到了。广播一份到各机器上，
+           历史附件才真正属于每个人，不依赖任何人长期在线。
+        """
+        if not self._connected or not self._loop or not self._ws:
+            return False
+        key = H.group_key(gid)
+        if not key:
+            return False
+        fid = str(meta.get("fid") or "")
+        if not fid:
+            return False
+        total = max(1, (len(data) + chunk - 1) // chunk)
+        for i in range(total):
+            body = {"fid": fid, "meta": meta, "idx": i, "total": total,
+                    "data": base64.b64encode(data[i * chunk:(i + 1) * chunk]).decode("ascii"),
+                    "ts": time.time(), "ver": self._proto}
+            rec = {"t": "file", "gid": gid, "fid": fid,
+                   "blob": H._seal(key, body), "ts": time.time(), "v": self._proto}
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._ws.send(json.dumps(rec, ensure_ascii=False)), self._loop
+                ).result(timeout=10)
+            except Exception:
+                return False
+        return True
+
     def send_cancel(self, gid: str, mid: str, by: str = "") -> bool:
         """广播一条「取消这个任务」的请求。"""
         if not self._connected or not self._loop or not self._ws:
