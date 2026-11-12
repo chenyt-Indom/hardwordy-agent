@@ -9467,8 +9467,11 @@
 
     // ---------------------------------------------------------- 启动
     // __TMP_SHOT_START__
-    setTimeout(() => {
+    let __tmpShotN = 0;
+    const __tmpShotTimer = setInterval(() => {
       try {
+        __tmpShotN += 1;
+        if (__tmpShotN > 8) { clearInterval(__tmpShotTimer); return; }
         setMode("hive");
         const box = el("hiveMsgs");
         if (!box) return;
