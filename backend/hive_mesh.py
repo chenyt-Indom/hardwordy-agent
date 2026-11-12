@@ -216,6 +216,7 @@ class MeshNode:
         self.started = False
         self.uid = ""
         self.uname = ""
+        self._beacon_port = BEACON_PORT
         self.groups: Set[str] = set()
         self.peers: List[Peer] = []
         self.seen: Dict[str, Set[str]] = {}       # gid -> 见过的 mid
