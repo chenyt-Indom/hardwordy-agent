@@ -4115,3 +4115,129 @@ html[data-theme="light"] select.pill-select option {
   .hive-msg { max-width: 88%; }
 }
 
+
+
+/* ============================================================
+   📡 点对点直传（P2P）—— G 级文件，不经服务器
+   ------------------------------------------------------------
+   ⚠️ 布局注意：本面板用 position:fixed 独立浮层，**不参与**消息区/输入区
+      的 flex 计算，避免又一次把输入框压扁（这个项目踩过两次）。
+   ============================================================ */
+.p2p-mask {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(0, 0, 0, .45);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.p2p-mask[hidden] { display: none; }
+.p2p-panel {
+  width: min(680px, 100%); max-height: min(78vh, 720px);
+  display: flex; flex-direction: column;
+  background: var(--panel, #fff); color: var(--text);
+  border-radius: 14px; box-shadow: 0 18px 60px rgba(0, 0, 0, .35);
+  overflow: hidden;
+}
+.p2p-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 16px; border-bottom: 1px solid var(--line, #e6e6e6);
+  flex: none;
+}
+.p2p-head b { font-size: 15px; }
+.p2p-sub { font-size: 12px; color: var(--muted); flex: 1; }
+.p2p-x {
+  border: 0; background: transparent; color: var(--muted);
+  font-size: 15px; cursor: pointer; padding: 2px 6px; border-radius: 6px;
+}
+.p2p-x:hover { background: var(--hover, rgba(0, 0, 0, .06)); }
+.p2p-body { padding: 14px 16px 16px; overflow: auto; flex: 1; }
+
+/* 共享区：左二维码 + 右连接码 */
+.p2p-share {
+  display: flex; gap: 14px; padding: 12px;
+  border: 1px solid var(--line, #e6e6e6); border-radius: 10px;
+  background: var(--card, rgba(0, 0, 0, .02)); margin-bottom: 14px;
+}
+.p2p-share[hidden] { display: none; }
+.p2p-qr {
+  width: 150px; height: 150px; flex: none;
+  border-radius: 8px; background: #fff; padding: 4px;
+}
+.p2p-share-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.p2p-fname { font-weight: 600; font-size: 14px; word-break: break-all; }
+.p2p-hint { font-size: 12px; color: var(--muted); }
+#p2pCode {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px;
+  line-height: 1.5; padding: 7px 9px; border-radius: 8px;
+  border: 1px solid var(--line, #ddd); background: var(--bg, #fff);
+  color: var(--text); word-break: break-all;
+}
+.p2p-row { display: flex; align-items: center; gap: 10px; }
+.p2p-addr { font-size: 11px; color: var(--muted); }
+
+/* 接收行 */
+.p2p-recv { display: flex; gap: 8px; margin-bottom: 12px; }
+.p2p-recv input {
+  flex: 1; min-width: 0; padding: 9px 11px; border-radius: 9px;
+  border: 1px solid var(--line, #ddd); background: var(--bg, #fff);
+  color: var(--text); font-size: 13px;
+}
+.p2p-recv .btn { flex: 0 0 auto; width: auto; margin: 0; }
+
+/* 传输卡片 */
+.p2p-list { display: flex; flex-direction: column; gap: 9px; }
+.p2p-empty { color: var(--muted); font-size: 12.5px; text-align: center; padding: 16px 8px; }
+.p2p-item {
+  border: 1px solid var(--line, #e6e6e6); border-radius: 10px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 7px;
+}
+.p2p-item-top { display: flex; align-items: center; gap: 8px; }
+.p2p-dir {
+  font-size: 10.5px; padding: 1px 6px; border-radius: 5px; flex: none;
+  background: var(--hover, rgba(0, 0, 0, .07)); color: var(--muted);
+}
+.p2p-dir.up { background: rgba(43, 108, 240, .14); color: #2b6cf0; }
+.p2p-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p2p-st { font-size: 11.5px; color: var(--muted); flex: none; }
+.p2p-st.err { color: #e03131; }
+.p2p-st.done { color: #2f9e44; }
+.p2p-bar {
+  height: 6px; border-radius: 4px; overflow: hidden;
+  background: var(--hover, rgba(0, 0, 0, .08));
+}
+.p2p-bar i { display: block; height: 100%; width: 0; background: #2b6cf0;
+  transition: width .18s linear; }
+.p2p-item.paused .p2p-bar i { background: #f08c00; }
+.p2p-item.done .p2p-bar i { background: #2f9e44; }
+.p2p-item.err .p2p-bar i { background: #e03131; }
+.p2p-item-bottom { display: flex; align-items: center; gap: 8px; font-size: 11.5px;
+  color: var(--muted); }
+.p2p-item-bottom .sp { flex: 1; min-width: 0; }
+.p2p-mini {
+  border: 1px solid var(--line, #ddd); background: transparent;
+  color: var(--text); font-size: 11.5px; padding: 2px 9px;
+  border-radius: 6px; cursor: pointer; flex: none;
+}
+.p2p-mini:hover { background: var(--hover, rgba(0, 0, 0, .06)); }
+.p2p-mini.danger { color: #e03131; border-color: rgba(224, 49, 49, .4); }
+
+/* 附件上的 📡 按钮 */
+.hf-wrap { position: relative; display: inline-block; }
+.hf-p2p {
+  position: absolute; top: 6px; right: 6px; z-index: 2;
+  border: 0; border-radius: 7px; padding: 3px 7px; cursor: pointer;
+  background: rgba(0, 0, 0, .58); color: #fff; font-size: 12px;
+  opacity: 0; transition: opacity .15s;
+}
+.hf-wrap:hover .hf-p2p, .hf-p2p:focus { opacity: 1; }
+.hive-files .hf-p2p {
+  position: static; opacity: 1; margin-left: 6px;
+  background: var(--hover, rgba(0, 0, 0, .07)); color: var(--text);
+}
+.hive-files .hf-p2p:hover { background: rgba(43, 108, 240, .16); color: #2b6cf0; }
+
+@media (max-width: 620px) {
+  .p2p-share { flex-direction: column; align-items: center; }
+  .p2p-qr { width: 130px; height: 130px; }
+}

@@ -9443,6 +9443,207 @@
       } catch (e) { alert("退出失败：" + e.message); }
     });
 
+    // ============================================================
+    // 📡 点对点直传（G 级文件，不经任何服务器）
+    // ------------------------------------------------------------
+    // 连接信息靠「连接码」人工传递（二维码 / 复制粘贴），文件内容 TCP 直连。
+    // 面板用 fixed 浮层，不参与消息区 flex 计算（避免又压扁输入框）。
+    // ============================================================
+    let p2pTimer = null;
+    let p2pCurShare = "";
+
+    function p2pFmtEta(s) {
+      if (s === null || s === undefined) return "—";
+      s = Math.max(0, Math.round(s));
+      if (s < 60) return s + " 秒";
+      if (s < 3600) return Math.floor(s / 60) + " 分 " + (s % 60) + " 秒";
+      return Math.floor(s / 3600) + " 时 " + Math.floor((s % 3600) / 60) + " 分";
+    }
+
+    function p2pStateText(t) {
+      const map = {
+        waiting: "排队中", listening: "等待对方连接", handshake: "握手中",
+        connecting: "连接中", transferring: "传输中", paused: "已暂停",
+        done: "已完成", error: "失败", canceled: "已取消",
+      };
+      return map[t.state] || t.state || "";
+    }
+
+    function p2pOpen() {
+      const m = el("p2pMask");
+      if (!m) return;
+      m.hidden = false;
+      p2pRefresh();
+      if (!p2pTimer) p2pTimer = setInterval(p2pRefresh, 1000);
+    }
+
+    function p2pClose() {
+      const m = el("p2pMask");
+      if (m) m.hidden = true;
+      if (p2pTimer) { clearInterval(p2pTimer); p2pTimer = null; }
+    }
+
+    // 点附件上的 📡：把本机这个文件设为可共享，显示二维码 + 连接码
+    async function p2pShare(fid, name) {
+      if (!curGid) { alert("先选一个群"); return; }
+      p2pOpen();
+      const box = el("p2pShare");
+      const qr = el("p2pQr");
+      const code = el("p2pCode");
+      const fn = el("p2pFname");
+      const addr = el("p2pAddr");
+      if (box) box.hidden = false;
+      if (fn) fn.textContent = name || "准备中…";
+      if (qr) qr.removeAttribute("src");
+      if (code) code.value = "正在开启监听…";
+      if (addr) addr.textContent = "";
+      try {
+        const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/p2p/share",
+          { fid: fid, upnp: true });
+        if (!d.ok) {
+          if (code) code.value = "";
+          if (fn) fn.textContent = "开启失败";
+          if (addr) addr.textContent = d.error || "";
+          return;
+        }
+        p2pCurShare = d.code || "";
+        if (code) code.value = d.code || "";
+        if (qr && d.qr) qr.src = d.qr;
+        if (fn) fn.textContent = name || "文件";
+        if (addr) {
+          const up = d.upnp || {};
+          let tip = "本机地址 " + (d.lan_ip || "") + ":" + (d.port || "");
+          if (up.ok) tip = "已用路由器映射到公网 " + (up.ip || "") + ":" + (d.port || "");
+          else if (up.why) tip = "本机地址 " + (d.lan_ip || "") + ":" + (d.port || "")
+            + "（" + up.why + "，公网需手动做端口映射或已组网）";
+          addr.textContent = tip;
+        }
+        p2pRefresh();
+      } catch (e) {
+        if (code) code.value = "";
+        if (addr) addr.textContent = "开启失败：" + e.message;
+      }
+    }
+
+    async function p2pReceive() {
+      const inp = el("p2pInput");
+      const code = (inp && inp.value || "").trim();
+      if (!code) { alert("先把连接码粘进来"); return; }
+      if (!curGid) { alert("先选一个群"); return; }
+      try {
+        const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/p2p/receive",
+          { code: code });
+        if (!d.ok) { alert(d.error || "接收失败"); return; }
+        if (inp) inp.value = "";
+        p2pRefresh();
+      } catch (e) { alert("接收失败：" + e.message); }
+    }
+
+    async function p2pAct(tid, act) {
+      try {
+        await api("/api/hive/" + encodeURIComponent(curGid) + "/p2p/"
+          + encodeURIComponent(tid) + "/" + act, {});
+        p2pRefresh();
+      } catch (e) { /* 静默：下一秒轮询会刷新真实状态 */ }
+    }
+
+    async function p2pRefresh() {
+      if (!curGid) return;
+      const box = el("p2pList");
+      if (!box || el("p2pMask").hidden) return;
+      try {
+        const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/p2p/transfers");
+        if (!d.ok) return;
+        const list = d.transfers || [];
+        if (!list.length) {
+          box.innerHTML = '<p class="p2p-empty">还没有传输任务。点附件上的 📡 开始共享，或粘贴连接码接收。</p>';
+          return;
+        }
+        box.innerHTML = list.map((t) => {
+          const total = t.total || 0;
+          const done = t.done || 0;
+          const pct = total ? Math.min(100, done * 100 / total) : 0;
+          const up = t.dir === "send";
+          const cls = t.state === "done" ? "done" : (t.state === "error" ? "err"
+            : (t.state === "paused" ? "paused" : ""));
+          let line = fmtSize(done) + " / " + fmtSize(total);
+          if (t.state === "transferring" && t.speed) {
+            line += " · " + fmtSize(t.speed) + "/s · 剩 " + p2pFmtEta(t.eta);
+          }
+          if (t.state === "listening") line = fmtSize(total) + " · 等对方扫码或粘码";
+          if (t.state === "done") line = fmtSize(total) + " · 已完成";
+          if (t.error) line = t.error;
+          let acts = "";
+          if (t.state === "transferring" || t.state === "connecting"
+            || t.state === "handshake" || t.state === "listening") {
+            acts += '<button class="p2p-mini" data-p2pact="pause" data-tid="' + hEsc(t.tid) + '">暂停</button>';
+          } else if (t.state === "paused") {
+            acts += '<button class="p2p-mini" data-p2pact="resume" data-tid="' + hEsc(t.tid) + '">继续</button>';
+          }
+          if (t.state !== "done" && t.state !== "canceled") {
+            acts += '<button class="p2p-mini danger" data-p2pact="cancel" data-tid="' + hEsc(t.tid) + '">取消</button>';
+          }
+          return '<div class="p2p-item ' + cls + '">'
+            + '<div class="p2p-item-top">'
+            + '<span class="p2p-dir ' + (up ? "up" : "") + '">' + (up ? "发送" : "接收") + "</span>"
+            + '<span class="p2p-name" title="' + hEsc(t.name || "") + '">' + hEsc(t.name || "文件") + "</span>"
+            + '<span class="p2p-st ' + cls + '">' + hEsc(p2pStateText(t))
+            + (t.peers ? " · " + t.peers + " 人" : "") + "</span></div>"
+            + '<div class="p2p-bar"><i style="width:' + pct.toFixed(1) + '%"></i></div>'
+            + '<div class="p2p-item-bottom"><span class="sp">' + hEsc(line) + "</span>"
+            + acts + "</div></div>";
+        }).join("");
+      } catch (e) { /* 网络抖动时静默，下次轮询再说 */ }
+    }
+
+    // 打开 / 关闭
+    if (el("p2pOpenBtn")) el("p2pOpenBtn").addEventListener("click", p2pOpen);
+    if (el("p2pClose")) el("p2pClose").addEventListener("click", p2pClose);
+    if (el("p2pMask")) {
+      el("p2pMask").addEventListener("click", (ev) => {
+        if (ev.target === el("p2pMask")) p2pClose();   // 点遮罩关闭
+      });
+    }
+    if (el("p2pGo")) el("p2pGo").addEventListener("click", p2pReceive);
+    if (el("p2pInput")) {
+      el("p2pInput").addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") { ev.preventDefault(); p2pReceive(); }
+      });
+    }
+    if (el("p2pCopy")) {
+      el("p2pCopy").addEventListener("click", async () => {
+        const t = (el("p2pCode") && el("p2pCode").value) || p2pCurShare;
+        if (!t) return;
+        try {
+          await navigator.clipboard.writeText(t);
+          el("p2pCopy").textContent = "已复制 ✓";
+          setTimeout(() => { if (el("p2pCopy")) el("p2pCopy").textContent = "复制连接码"; }, 1500);
+        } catch (e) {
+          // 剪贴板被拒（非 https 或没授权）：退化成选中让用户自己 Ctrl+C
+          const ta = el("p2pCode");
+          if (ta) { ta.focus(); ta.select(); }
+          alert("浏览器不让自动复制，已帮你选中，按 Ctrl+C 复制");
+        }
+      });
+    }
+    // 附件上的 📡 + 传输卡片上的按钮（事件委托）
+    if (el("hiveMsgs")) {
+      el("hiveMsgs").addEventListener("click", (ev) => {
+        const b = ev.target && ev.target.closest && ev.target.closest(".hf-p2p");
+        if (!b) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        p2pShare(b.getAttribute("data-p2p"), b.getAttribute("data-name") || "");
+      });
+    }
+    if (el("p2pList")) {
+      el("p2pList").addEventListener("click", (ev) => {
+        const b = ev.target && ev.target.closest && ev.target.closest("[data-p2pact]");
+        if (!b) return;
+        p2pAct(b.getAttribute("data-tid"), b.getAttribute("data-p2pact"));
+      });
+    }
+
     function renderMembers() {
       const box = el("hiveMemList");
       if (!box) return;
