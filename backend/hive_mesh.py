@@ -354,6 +354,19 @@ class MeshNode:
                 "uid_conflict": self.uid_conflict,
             }
 
+    def refresh_identity(self) -> Dict[str, Any]:
+        """换身份后重新读一次（user_id 变了要立刻生效，否则还按老身份发消息）。"""
+        _me = H.profile()
+        self.uid = str(_me.get("user_id") or "")
+        self.uname = str(_me.get("name") or "")
+        self.uid_conflict = None
+        for gid in list(self.groups):
+            try:
+                self.broadcast_members(gid)
+            except Exception:
+                pass
+        return self.status()
+
     def peers_of(self, gid: str) -> List[Peer]:
         with _LOCK:
             return [p for p in self.peers if p.alive and p.gid == gid]
