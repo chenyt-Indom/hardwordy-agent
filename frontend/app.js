@@ -8715,6 +8715,7 @@
         avImg.src = r.url;
         avImg.hidden = false;
         if (avPh) avPh.hidden = true;
+        avInitCanvas(r.url);
       } else {
         avImg.hidden = true;
         if (avPh) avPh.hidden = false;
