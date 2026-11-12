@@ -452,12 +452,18 @@ def search(query: str, sid: str = "", top_k: int = 5,
         seen.add(k)
         res.append(h)
 
+    # 名额分配：**记忆占前 top_k-1 位，转录固定留 1 个**。
+    # 为什么不让两边一起排序：实测查「我在哪个学校读书」时，转录里一段
+    # 「帮我做份学校图书馆的PPT」分数 0.478，高于真正的答案
+    # 「学校：广州民航职业技术学院…」的 0.375，一起排序会把答案挤出去。
+    # 而完全不查转录又会让「我说过什么关于PPT的事」永远看不到历史对话。
+    # 分开占名额两头都能顾到。
+    n_mem = top_k - 1 if (with_transcripts and top_k > 1) else top_k
+    res = res[:n_mem]
+
     if with_transcripts:
-        # 始终查转录：原来只在「记忆结果不够 top_k」时才查，
-        # 实测记忆里几条噪声就把名额占满，用户问「我说过什么关于PPT的事」
-        # 永远看不到真正的 PPT 对话。现在两边都查，按分数统一排序。
         try:
-            for h in _search_transcripts(q, top_k=TRANS_TOP):
+            for h in _search_transcripts(q, top_k=1):
                 k = h["content"][:80]
                 if k in seen:
                     continue
@@ -466,7 +472,6 @@ def search(query: str, sid: str = "", top_k: int = 5,
         except Exception as e:
             _LOG.warning("历史会话检索失败：%s", e)
 
-    res.sort(key=lambda x: x["score"], reverse=True)
     return res[:top_k]
 
 
