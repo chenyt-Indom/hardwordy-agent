@@ -463,6 +463,15 @@ def list_groups() -> List[Dict[str, Any]]:
     return out
 
 
+def all_group_ids() -> List[str]:
+    """磁盘上所有群号（含已退出的）—— 用密码重进群时要能对上本地记录。"""
+    _ensure()
+    try:
+        return sorted(os.listdir(_GROUPS))
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------- 成员
 
 def load_members(gid: str) -> Dict[str, Any]:
