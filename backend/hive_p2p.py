@@ -725,6 +725,16 @@ def _adopt_big_file(gid: str, fid: str, name: str, part: str,
     d = H.files_dir(gid)
     os.makedirs(d, exist_ok=True)
     safe = H._safe_name(name)
+    # ⚠️ 共享「本机文件」时（share 的 fid 传空），连接码里没有 fid，
+    #    这里必须自己生成一个。否则索引 key 是空字符串：
+    #    前端拿到的 fid_out 为空 → 下载不了，而且第二个文件会覆盖第一个。
+    #    只有 >MAX_FILE 的文件走这条分支，而这正是 P2P 的主要用途（G 级文件）。
+    try:
+        _idx = H._read_json(H._files_index_path(gid), {}) or {}
+    except Exception:
+        _idx = {}
+    if not fid or fid in _idx:
+        fid = "f_" + secrets.token_hex(8)
     dst = os.path.join(d, fid + "__" + safe)
     if os.path.exists(dst):
         os.remove(dst)
