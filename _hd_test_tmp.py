@@ -149,6 +149,18 @@ try:
 except Exception:
     pass
 
+print("\n[8] 排队中的任务也能取消")
+mid_q = "hd_queue_test"
+M._hd_waiting[mid_q] = {"task_id": mid_q, "asker": "测试者",
+                        "asker_id": "u_test", "gid": gid, "since": time.time()}
+M._hd_cancel[mid_q] = threading.Event()
+st = M.hive_hd_status(gid)
+chk("状态接口能报出排队任务", any(w.get("task_id") == mid_q for w in st.get("waiting", [])), st.get("waiting"))
+r3 = M.hive_hd_cancel(gid, {"task_id": mid_q})
+chk("排队中的任务能取消", r3.get("ok") is True, r3)
+chk("取消事件已置位", M._hd_cancel.get(mid_q) is not None and M._hd_cancel[mid_q].is_set())
+chk("取消后移出等待表", mid_q not in M._hd_waiting, list(M._hd_waiting))
+
 print("\n[7] 权限：只有发起人或群主能取消")
 M._hd_running[gid] = {"task_id": "hd_x", "asker": "别人", "asker_id": "u_other", "since": time.time()}
 M._hd_cancel["hd_x"] = threading.Event()
