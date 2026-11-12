@@ -317,8 +317,17 @@ def candidates(u: str) -> List[str]:
         port = m2.group(2) or ""
         path = (m2.group(3) or "").strip("/")
 
-    if port or path:
-        return [normalize_url(s)]          # 写全了，尊重用户
+    if path:
+        return [normalize_url(s)]          # 写了路径，尊重用户
+
+    if port:
+        # 带了端口但没写路径：最常见的是「局域网直连群主电脑」，
+        # 而本应用的内置中继在 /hive 上，所以先试带路径的。
+        scheme = "wss" if (m and m.group(1) in ("wss", "https")) else "ws"
+        return [
+            f"{scheme}://{host}:{port}/hive",
+            f"{scheme}://{host}:{port}",
+        ]
 
     # 只给了主机：三种部署形态，按实测常见程度排
     return [
