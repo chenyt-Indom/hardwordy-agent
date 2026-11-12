@@ -10108,23 +10108,6 @@
     let saved = "single";
     try { saved = localStorage.getItem("ui_mode") || "single"; } catch (e) { /* 忽略 */ }
     setMode(saved === "hive" ? "hive" : "single");
-
-    // 【临时截图，马上删除】
-    setTimeout(() => {
-      setMode("hive");
-      openModal({
-        title: "密码入群",
-        hint: "输入群主给你的 12 位密码（字母数字，不含 0、1、I、L、O）。\n"
-          + "· 同一个 WiFi：只填密码就够了，会自动找到群\n"
-          + "· 不在同一个网络：再把群主的地址填到下面（点「🔗 连接码」能看到）",
-        input: "",
-        placeholder: "XXXX-XXXX-XXXX",
-        extra: "",
-        extraPlaceholder: "对方地址（跨网络才填），如 192.168.1.5:8899",
-        okText: "进群",
-        onOk: async () => false,
-      });
-    }, 700);
   })();
 
 })();
