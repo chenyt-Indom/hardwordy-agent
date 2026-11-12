@@ -1614,6 +1614,9 @@ def list_music(limit: int = 60) -> list:
         if not fn.lower().endswith(".wav"):
             continue
         mid = fn[:-4]
+        # data/tts 里还放着 TTS 语音：只认本引擎的 id 格式，别把语音当曲子
+        if not _is_music_id(mid):
+            continue
         p = os.path.join(d, fn)
         info = dict(meta.get(mid) or {})
         info.setdefault("id", mid)
