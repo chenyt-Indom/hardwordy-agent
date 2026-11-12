@@ -10476,22 +10476,30 @@ def hive_leave(gid: str, body: dict = None):
     try:
         me = hive.profile()
         notice = f"{me['name']} 退出了群"
-        # ① 趁着还连着中继，把提示广播给其他人（没连就跳过，本地照样记）
+        cli = hive_client.client()
+        # ① 先广播提示：send 要求自己还在成员表里，所以必须赶在 leave 之前。
+        #    ⚠️ 判断条件原来用 cs["connected"]，那是「连没连中继」的旧字段，
+        #    P2P 下恒为 False —— 退出提示永远发不出去。改成看有没有在线 peer。
         sent_remote = False
         try:
-            cs = hive_client.client().status()
-            if cs.get("connected") and cs.get("gid") == gid:
-                r = hive_client.client().send(gid, notice, mtype="system")
-                sent_remote = bool(r.get("sent"))
+            cs = cli.status()
+            if (cs.get("peers") or 0) > 0 or cs.get("connected"):
+                r0 = cli.send(gid, notice, mtype="system")
+                sent_remote = bool(r0.get("sent"))
         except Exception:
             pass
         # ② 本地退出：移出成员表 + 记系统消息 + 打 left 标记
         r = hive.leave_group(gid)
-        # ③ 断开中继，别让退出的人继续收消息
+        # ③ 名单变了，趁连接还在把新成员表发出去（别人那边才会少一个人）
         try:
-            cs = hive_client.client().status()
+            cli.broadcast_members(gid)
+        except Exception:
+            pass
+        # ④ 断开，别让退出的人继续收消息
+        try:
+            cs = cli.status()
             if cs.get("gid") == gid:
-                hive_client.client().stop()
+                cli.stop()
         except Exception:
             pass
         return {"ok": True, "sent_remote": sent_remote, **r}
