@@ -7989,7 +7989,11 @@
   function avPaintFrame() {
     if (!avReady2) return;
     const emo = AV_EMO[avEmoName] || AV_EMO.neutral;
-    const src = avSrcData, dst = avDstData;
+    // ⚠️ 2026-11-12 修：avDstData 是 ImageData，它**没有** set() 方法，
+    //    像素读写必须走它的 .data（Uint8ClampedArray）。原来直接 dst.set(...)
+    //    第一帧就抛 TypeError，渲染循环当场停掉，画布永远是空的 ——
+    //    表现就是「形象加载了但面板一片黑」。
+    const src = avSrcData, dst = avDstData.data;
     const cxM = avMouthCfg.x * AV_W;
     const cyM = avMouthCfg.y * AV_H;
     const syM = Math.max(3, avMouthCfg.h * AV_H * 0.42);   // 嘴的垂直影响范围
