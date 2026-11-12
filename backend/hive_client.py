@@ -148,6 +148,14 @@ class HiveClient:
         self._state = "online" if (m.started and st["peers"] > 0) else (
             "online" if m.started else "offline")
         self._emit_status()
+        # ⚠️ 2026-11-13 修：原来只更新内部状态，不通知上层 ——
+        #    于是「有人上线 → 补发积压附件 / 前端刷新在线人数」这条链断了。
+        #    （main.py 之前挂到 MESH.node().on_peer 上，会被 _hook() 覆盖掉。）
+        if self.on_peer:
+            try:
+                self.on_peer()
+            except Exception:
+                pass
 
     def _emit_status(self) -> None:
         if self.on_status:
