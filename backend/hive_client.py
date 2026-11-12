@@ -287,6 +287,17 @@ class HiveClient:
         except Exception:
             return 0
 
+    def broadcast_gone(self, gid: str, name: str = "") -> int:
+        """群主删群后通知成员：本地那份也下线（不然列表里挂着一个打不开的群）。"""
+        self._hook()
+        try:
+            m = MESH.node()
+            if not m.started:
+                return 0
+            return m.broadcast(gid, MESH.T_GONE, {"name": name, "ttl": MESH.TTL_DEFAULT})
+        except Exception:
+            return 0
+
     def send_stream(self, gid: str, mid: str, phase: str, delta: str = "",
                     task: Optional[Dict[str, Any]] = None, seq_in: int = 0) -> Dict[str, Any]:
         """@hd 实时进度。不落盘，直接泛洪 —— 刷屏内容没必要写进日志。"""
