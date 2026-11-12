@@ -555,16 +555,17 @@ def join_with_key(gid: str, key: bytes, name: str = "",
             # 我是被邀请方：本地只存必要信息，消息靠群主同步过来
             g = {
                 "gid": gid,
-                "name": (q.get("n") or ["协作群"])[0][:40],
-                "owner": (q.get("o_id") or [""])[0],
-                "owner_name": (q.get("o") or ["群主"])[0][:24],
+                "name": str(meta.get("n") or "协作群")[:40],
+                "owner": str(meta.get("o_id") or ""),
+                "owner_name": str(meta.get("o") or "群主")[:24],
                 "created": now,
                 "key": _key_b64(key),
                 "kfp": key_fingerprint(key),
+                "vt": verify_tag(key, gid),
                 "seq": 0,
                 "invite": "",
                 "is_owner_here": False,
-                "host": (q.get("h") or [""])[0],
+                "host": str(meta.get("h") or ""),
             }
             os.makedirs(_gdir(gid), exist_ok=True)
             _write_json(_group_path(gid), g)
