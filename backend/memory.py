@@ -66,6 +66,21 @@ def _write_json(path, data):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)          # 原子替换，避免写一半断电把记忆写坏
+    # 记忆一改，向量索引就得跟着更新（后台增量同步，不阻塞调用方）。
+    # 挂在 _write_json 这一处收口，长期/短期/清空/释放全都覆盖到，
+    # 不用在每个写函数里各加一行 —— 少一处遗漏的机会。
+    if os.path.abspath(path) in (os.path.abspath(LONG_FILE),
+                                 os.path.abspath(SHORT_FILE)):
+        _index_touch()
+
+
+def _index_touch():
+    """通知向量索引：数据变了。任何失败都不影响记忆本身的读写。"""
+    try:
+        from . import memvec
+        memvec.touch()
+    except Exception:
+        pass
 
 
 def _size(path) -> int:
