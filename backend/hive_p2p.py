@@ -670,14 +670,17 @@ def _recv_worker(tid: str, gid: str, fid: str, host: str, port: int,
         meta2 = H.save_file(gid, name, _read_all(part),
                             meta.get("mime") or "") if size <= H.MAX_FILE else None
         if meta2 is None:
-            # 超过旧上限：直接搬进 files 目录并登记索引
+            # 超过旧上限：直接搬进 files 目录并登记索引（os.replace，不进内存）
             meta2 = _adopt_big_file(gid, fid, name, part, size, sha_want)
-        else:
-            try:
-                os.remove(part)
-                os.remove(spath)
-            except Exception:
-                pass
+        # 留一份「已完成」标记：重复点接收时直接判定完成，不必再连一次
+        H._write_json(spath, {
+            "token": token, "size": size, "count": count, "chunk": chunk,
+            "sha": sha_want, "name": name, "bm": _bm_b64(bm), "finished": True,
+        })
+        try:
+            os.remove(part)      # 大文件已被 os.replace 移走，小文件在这删
+        except Exception:
+            pass
         _upd(tid, state="done", done=size, speed=0.0, eta=0, fid_out=meta2["fid"])
     except ConnectionAbortedError:
         _upd(tid, state="canceled", speed=0.0)
