@@ -1600,10 +1600,10 @@ def from_notes(notes: str, style: str = "piano", bars: int = 8,
 
 
 def list_music(limit: int = 60) -> list:
-    d = _base()
+    d = _wav_dir()                 # 曲子（wav）在 data/tts
     out = []
     meta = {}
-    mp = os.path.join(d, "meta.json")
+    mp = os.path.join(_base(), "meta.json")   # 元数据仍在 data/music
     if os.path.isfile(mp):
         try:
             with open(mp, encoding="utf-8") as f:
