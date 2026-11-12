@@ -547,6 +547,18 @@ class MeshNode:
             if ttl > 0:
                 self._fanout(gid, T_CANCEL, dict(obj, ttl=ttl), skip=peer)
             return
+        if typ == T_FILE:
+            # 附件分片：先交给上层攒（攒齐才落盘），再继续转发给其他成员。
+            # 不去重 —— 每片有自己的 idx，重复到达由上层按 idx 覆盖，天然幂等。
+            if self.on_file:
+                try:
+                    self.on_file(gid, obj)
+                except Exception:
+                    pass
+            ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
+            if ttl > 0:
+                self._fanout(gid, T_FILE, dict(obj, ttl=ttl), skip=peer)
+            return
 
     def _known_list(self) -> List[Dict[str, Any]]:
         me = H.profile().get("user_id", "")
