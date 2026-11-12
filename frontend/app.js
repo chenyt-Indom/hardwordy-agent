@@ -9059,6 +9059,7 @@
           + '<span class="hm-st ' + st + '">' + hEsc(stTxt) + "</span>"
           + kick + "</div>";
       }).join("");
+      syncLeaveBtn(amOwner);
       Array.prototype.forEach.call(box.querySelectorAll(".hive-kick"), (b) => {
         b.addEventListener("click", async () => {
           const uid = b.getAttribute("data-uid");
