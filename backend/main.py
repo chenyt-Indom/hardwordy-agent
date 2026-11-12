@@ -10326,9 +10326,11 @@ def hive_join(body: dict):
 @app.get("/api/hive/{gid}/messages")
 def hive_messages(gid: str, since: int = 0, limit: int = 200):
     """增量拉消息。since = 上次见到的最大 seq，100 人群也不会卡。"""
+    cs = hive_client.client().status()
+    peers = cs.get("members") if cs.get("gid") == gid else []
     return {"ok": True,
             "messages": hive.read_messages(gid, since, limit),
-            "members": list(hive.load_members(gid).values()),
+            "members": hive.merged_members(gid, peers),
             "group": hive.load_group(gid) or {}}
 
 
