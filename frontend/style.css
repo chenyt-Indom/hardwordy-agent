@@ -3392,3 +3392,62 @@ html[data-theme="light"] select.pill-select option {
   transition: none !important;
 }
 .anim-h { overflow: hidden; }
+
+/* ---------- 朗读按钮（TTS） ----------
+   放在气泡内容之后、靠右的一枚小胶囊：平时半透明不抢眼，hover 才实。
+   用 display:block + margin-left:auto 而不是绝对定位 —— 绝对定位会盖住
+   最后一行文字，气泡窄的时候尤其难看。 */
+.bubble .tts-btn {
+  display: block;
+  margin: 6px 0 0 auto;
+  padding: 0 7px;
+  height: 20px;
+  font-size: 12px;
+  line-height: 18px;
+  border: 1px solid var(--border, #3a3f47);
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  opacity: .45;
+  cursor: pointer;
+  transition: opacity .15s, border-color .15s;
+}
+.bubble .tts-btn:hover { opacity: 1; border-color: var(--accent, #4a9eff); }
+.bubble .tts-btn:disabled { cursor: default; opacity: .8; }
+
+/* 右键音色菜单（fixed 定位，由 app.js 按按钮位置摆） */
+.tts-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 178px;
+  padding: 6px;
+  background: var(--panel2, #23262d);
+  border: 1px solid var(--border, #3a3f47);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+}
+.tts-menu-item {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text, #e6e6e6);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.tts-menu-item:hover { background: rgba(127, 127, 127, .16); }
+.tts-menu-item.on { font-weight: 600; color: var(--accent, #4a9eff); }
+.tts-menu-rate {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 4px 8px 2px;
+  border-top: 1px solid rgba(127, 127, 127, .22);
+  font-size: 12px;
+  opacity: .85;
+}
+.tts-menu-rate .tts-menu-item { width: auto; padding: 3px 7px; font-size: 12px; }
