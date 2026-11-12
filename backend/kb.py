@@ -811,8 +811,11 @@ def search(query: str, top_k: int = 6, min_score: float = None):
     picked.sort(key=lambda x: (x[0], x[4]), reverse=True)
 
     # 同一篇文档最多占 top_k 的一半名额：否则一个长文档的相邻块会把
-    # 其他同样相关的文档全挤掉，用户看到"怎么全是同一篇"
-    per_doc = max(2, int(top_k) // 2)
+    # 其他同样相关的文档全挤掉，用户看到"怎么全是同一篇"。
+    # ⚠️ 但**库里只有一篇文档时不能这么限**：6 个块全是它的，
+    # 限成 2 条等于把最相关的块直接截掉（实测就是这样漏掉第 0 块的）。
+    cand_docs = len({chunks[i].get("doc_id") for _f, i, _v, _c, _b in picked})
+    per_doc = int(top_k) if cand_docs <= 1 else max(2, int(top_k) // 2)
     used = {}
     results = []
     for f, i, v, k, bm in picked:
