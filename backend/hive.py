@@ -483,7 +483,9 @@ def join_group(payload: str, name: str = "") -> Dict[str, Any]:
             })
             g["seq"] = (g.get("seq") or 0) + 1
             _write_json(_group_path(gid), g)
-    return _public_group(load_group(gid) or {})
+    out = _public_group(load_group(gid) or {})
+    out["joined_new"] = joined_new
+    return out
 
 
 def leave_group(gid: str) -> Dict[str, Any]:
