@@ -8894,12 +8894,18 @@
     // 点一下在开头插入「@hd 」，再点一下撤掉。手输 @hd 时按钮也会自动高亮，
     // 免得用户以为没生效又点一次（那就把刚写的指令撤掉了）。
     const HD_TAG = "@hd";
+    // 判断开头是不是真的 @hd —— 后面紧跟字母数字的不算（@hdx / @hd2），
+    // 否则点一下会把 @hd 削掉、剩下「x 干活」这种残句。和后端 parse_hd 一致。
+    function hdAtStart(body) {
+      if (body.slice(0, HD_TAG.length).toLowerCase() !== HD_TAG) return false;
+      const nxt = body.slice(HD_TAG.length, HD_TAG.length + 1);
+      return !(/[a-z0-9_]/i.test(nxt));
+    }
     function atBtnSync() {
       const b = el("hiveAtBtn");
       const ta = el("hiveText");
       if (!b || !ta) return;
-      const body = (ta.value || "").replace(/^\s+/, "");
-      const on = body.slice(0, HD_TAG.length).toLowerCase() === HD_TAG;
+      const on = hdAtStart((ta.value || "").replace(/^\s+/, ""));
       b.classList.toggle("on", on);
       b.setAttribute("aria-pressed", on ? "true" : "false");
     }
@@ -8908,7 +8914,7 @@
       const ta = el("hiveText");
       if (!ta) return;
       const body = (ta.value || "").replace(/^\s+/, "");
-      if (body.slice(0, HD_TAG.length).toLowerCase() === HD_TAG) {
+      if (hdAtStart(body)) {
         // 撤掉 @hd，连同紧跟的空白 / 标点，避免留下「 帮我写…」开头的空格
         ta.value = body.slice(HD_TAG.length).replace(/^[\s，,：:、]+/, "");
       } else {
