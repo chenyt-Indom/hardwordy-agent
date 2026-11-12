@@ -864,8 +864,8 @@
     </div>
   </div>
 
-  <!-- 建群向导（2026-11-13）：群主在这里填中继地址并**当场验证**。
-       中继可以留空 —— 留空就是本机模式（只有自己能看到消息），以后能补填。 -->
+  <!-- 建群向导（2026-11-13 改）：不再需要任何服务器。
+       群聊走纯 P2P —— 同一 WiFi 自动发现，跨网络靠连接码人工牵线一次。 -->
   <div class="hive-modal" id="hiveSetup" hidden>
     <div class="hive-modal-in wide">
       <div class="hm-head">
@@ -877,19 +877,16 @@
       <label class="hs-label" for="hsName">群名</label>
       <input id="hsName" class="hive-code" placeholder="比如「官网改版」" />
 
-      <label class="hs-label" for="hsRelay">
-        中继服务器 <span class="hs-dim">（可选；留空 = 本机模式，以后能补填）</span>
-      </label>
-      <div class="hs-last" id="hsLast" hidden>
-        <span>上次用的：<b id="hsLastUrl"></b></span>
-        <button type="button" class="btn sm ghost" id="hsUseLast">沿用这台</button>
+      <label class="hs-label">其他人怎么加进来</label>
+      <div class="hs-mode">
+        <b>✅ 同一个 WiFi</b>
+        <div class="hs-dim">什么都不用填。建完群把邀请码发给对方，
+          同一个网络下会自动发现彼此。</div>
       </div>
-      <input id="hsRelay" class="hive-code" spellcheck="false"
-             placeholder="ws://服务器IP:8765  或  wss://你的域名/hive" />
-      <div class="hs-row">
-        <button type="button" class="btn sm" id="hsProbe">🔍 检测连通</button>
-        <button type="button" class="btn sm ghost" id="hsBundle">📦 部署包</button>
-        <button type="button" class="btn sm ghost" id="hsGuide">🤖 让模型给步骤</button>
+      <div class="hs-mode">
+        <b>🌍 不在同一个网络</b>
+        <div class="hs-dim">建完群点右上角「🔗 连接码」，把码发给对方粘一下即可。
+          消息只在你们两台机器之间直连，不经过任何服务器。</div>
       </div>
       <div class="hs-log" id="hsLog" hidden></div>
 
