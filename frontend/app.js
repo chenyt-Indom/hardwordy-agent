@@ -8747,26 +8747,26 @@
     // 四态：online（绿）/ connecting（黄闪）/ offline（灰）/ error（红）。
     // 「离线」和「异常」必须分开：前者是正常断线会自愈，后者是连不上、要人管。
     function netInfo(c) {
-      const st = c.state || (c.connected ? "online"
-        : (c.running ? "connecting" : "idle"));
+      // 2026-11-13：没有服务器了，这里说的是「直连了几个人」。
+      // peers = 当前真实建连的对端数（不是成员总数 —— 成员可能没上线）。
+      const st = c.state || (c.connected ? "online" : "offline");
       const lat = c.latency_ms ? " · " + Math.round(c.latency_ms) + "ms" : "";
-      const ppl = (c.online_count != null)
-        ? " · " + c.online_count + "/" + (c.total_count || c.online_count) + " 人在线" : "";
-      if (st === "online") {
-        let s = "已联网" + lat + ppl;
-        if (c.compat === "relay_older") s += " · 服务器较老";
-        else if (c.compat === "relay_newer") s += " · 服务器较新";
+      const n = Number(c.peers || 0);
+      if (st === "error") {
+        return { cls: "error", text: "连不上" + (c.error ? "：" + c.error : "") };
+      }
+      if (st === "online" && n > 0) {
+        let s = "已直连 · " + n + " 人在线" + lat;
+        if (c.compat === "older") s += " · 对方版本较老";
+        else if (c.compat === "newer") s += " · 对方版本较新";
         return { cls: "online", text: s };
       }
-      if (st === "connecting") return { cls: "connecting", text: "正在连接…" };
-      if (st === "error") {
-        return { cls: "error", text: "连不上" + (c.last_error ? "：" + c.last_error : "") };
-      }
-      if (st === "offline") {
+      if (c.queued) {
         return { cls: "offline",
-          text: "已断开 · 重试中" + (c.queued ? " · " + c.queued + " 条待发" : "") };
+          text: "还没有人在线 · " + c.queued + " 条待发" };
       }
-      return { cls: "idle", text: "本机模式（没连服务器，别人收不到）" };
+      return { cls: "idle",
+        text: "还没有人连上（同一 WiFi 会自动发现，跨网络用连接码）" };
     }
 
     function paintStatus(d) {
