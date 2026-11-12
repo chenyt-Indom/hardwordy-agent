@@ -539,7 +539,8 @@ def _nearest_scale_index(pitch: int, root: int, scale_name: str) -> int:
     return octv * L + best_deg
 
 
-def parse_notes(text: str, key: int = 0, scale_name: str = "major") -> list:
+def parse_notes(text: str, key: int = 0, scale_name: str = "major",
+                bar_beats: float = 4.0) -> list:
     """把用户给的音符串解析成 [{"t":拍,"d":拍,"p":midi}, ...]。
 
     支持三种写法：
