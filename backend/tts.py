@@ -294,7 +294,7 @@ def synth(text: str, voice: str = "", rate: int = 0, engine: str = "auto",
     if engine == "edge" and not vid.startswith("sapi:"):
         try:
             path = os.path.join(OUT_DIR, base + ".mp3")
-            _edge_synth(t, vid, f"{rate:+d}%", "+0%", path)
+            _edge_synth(t, vid, f"{rate:+d}%", f"{vol_pct:+d}%", path, f"{pitch:+d}Hz")
             if os.path.getsize(path) < 1000:
                 raise RuntimeError("生成的音频过小")
             used = "edge"
