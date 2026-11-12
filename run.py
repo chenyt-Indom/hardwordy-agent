@@ -264,6 +264,23 @@ def _kill_pid(pid: int) -> bool:
         return False
 
 
+def _wlog(msg: str) -> None:
+    """窗口诊断日志。pythonw 没有控制台，出问题时这是唯一能留下的痕迹。
+
+    2026-11-12：为查「点重启后进程活着但没窗口」加的。写完就不删了 ——
+    以后凡是"有没有窗口"的疑难，直接看 data/window_debug.log。
+    """
+    try:
+        import time as _t
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "data", "window_debug.log")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("%s pid=%d %s\n" % (_t.strftime("%H:%M:%S"), os.getpid(), msg))
+    except Exception:
+        pass
+
+
 def main() -> None:
     config.load_config()
     if os.environ.get("MM_WAIT_PORT") == "1":
@@ -335,8 +352,11 @@ def main() -> None:
     try:
         import webview  # 延迟导入，避免源码环境未安装时阻塞后端
     except ImportError as exc:
+        _wlog("导入 pywebview 失败: %r" % (exc,))
         _alert("缺少桌面窗口组件 pywebview：\n" + str(exc))
         raise
+
+    _wlog("准备创建窗口 NO_WINDOW=%s 标题=%s" % (NO_WINDOW, WINDOW_TITLE))
 
     window = webview.create_window(
         WINDOW_TITLE,
@@ -356,6 +376,10 @@ def main() -> None:
                      name="voice-autostart").start()
     try:
         webview.start(private_mode=False)
+        _wlog("webview.start 正常返回（窗口被关闭或启动失败）")
+    except BaseException as exc:
+        _wlog("webview.start 抛异常: %r" % (exc,))
+        raise
     finally:
         server.should_exit = True
         t.join(timeout=5)
