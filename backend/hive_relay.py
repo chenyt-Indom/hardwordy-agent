@@ -272,13 +272,15 @@ async def handler(ws: WebSocketServerProtocol) -> None:
     finally:
         if room is not None:
             room.leave(ws, uid)
-            await room.broadcast({"t": "presence",
-                                  "members": list(room.members.values())})
+            await room.broadcast({"t": "presence", "members": room.presence()})
             print(f"[leave] {room.gid} {uid} 在线 {len(room.clients)} 人")
 
 
 _START_TS = time.time()
-_RELAY_VER = "1.1"
+_RELAY_VER = "1.2"
+# 中继支持的协议版本。客户端 join 时带自己的 v，双方各自比较，
+# 不一致也不拒绝 —— 只提示，能通的照样通（跨版本互通的底线）。
+PROTO_VER = 2
 
 
 async def _process_request(connection: Any, request: Any) -> Any:
