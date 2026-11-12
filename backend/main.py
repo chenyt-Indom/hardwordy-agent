@@ -9867,6 +9867,31 @@ def tts_audio(name: str):
                         headers={"Content-Disposition": "inline"})
 
 
+@app.get("/api/tts/styles")
+def tts_styles():
+    """情感预设清单（用 rate/pitch/volume 组合近似，不是真情感合成）。"""
+    return {"ok": True, "styles": tts.style_list()}
+
+
+@app.get("/api/audio/list")
+def audio_list():
+    """音频库：data/tts 下所有音频，新的在前。"""
+    return {"ok": True, "files": tts.list_audio(), "dir": tts.OUT_DIR}
+
+
+@app.post("/api/audio/delete")
+def audio_delete(body: dict):
+    body = body or {}
+    return tts.delete_audio(str(body.get("name") or ""))
+
+
+@app.post("/api/audio/rename")
+def audio_rename(body: dict):
+    body = body or {}
+    return tts.rename_audio(str(body.get("name") or ""),
+                            str(body.get("new_name") or ""))
+
+
 # ---------- 前端 ----------
 _NO_CACHE = "no-store, no-cache, must-revalidate, max-age=0"
 
