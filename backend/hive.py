@@ -480,6 +480,43 @@ def join_group(payload: str, name: str = "") -> Dict[str, Any]:
     return _public_group(load_group(gid) or {})
 
 
+def leave_group(gid: str) -> Dict[str, Any]:
+    """成员主动退出群。
+
+    三条规则：
+      · 群主不能直接退出（群会没有主人），要先移交或解散；
+      · 从本地成员表移除自己，名单立刻变化；
+      · 记一条系统消息「XX 退出了群」，本地可见；
+        其他人靠调用方通过中继广播同一条提示（见 main.py 的 /leave 路由）。
+    历史消息**保留**，只是 group.json 打 left 标记，群列表里不再显示。
+    """
+    me = profile()
+    with _LOCK:
+        g = load_group(gid)
+        if not g:
+            raise ValueError("群不存在")
+        if g.get("owner") == me["user_id"]:
+            raise ValueError("你是群主，不能直接退出。请先把群主移交给别人，或解散群。")
+        members = load_members(gid)
+        if me["user_id"] not in members:
+            raise ValueError("你不在这个群里")
+        name = (members.pop(me["user_id"]) or {}).get("name") or me["name"]
+        _save_members(gid, members)
+        seq = (g.get("seq") or 0) + 1
+        msg = {
+            "seq": seq, "id": "m_" + secrets.token_hex(6),
+            "from": "system", "name": "系统", "type": "system",
+            "text": f"{name} 退出了群", "ts": time.time(), "ver": PROTO_VER,
+        }
+        _append_raw(gid, msg)
+        g["seq"] = seq
+        g["left"] = True
+        g["left_at"] = time.time()
+        _write_json(_group_path(gid), g)
+    return {"ok": True, "gid": gid, "name": name, "message": msg,
+            "members": merged_members(gid)}
+
+
 def kick_member(gid: str, user_id: str) -> Dict[str, Any]:
     """踢人。只有群主能踢，且不能踢自己。"""
     me = profile()
