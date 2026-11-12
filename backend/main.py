@@ -10419,6 +10419,9 @@ def hive_join(body: dict):
             me = hive.profile()
             hive_client.client().send(g["gid"], f"{me['name']} 加入了群",
                                       mtype="system")
+            # 成员表也同步出去 —— 否则别人只知道「有人加入」，
+            # 名单里却没有这个人（这是之前「N 人永远显示 1」的根因）
+            hive_client.client().broadcast_members(g["gid"])
     except Exception as e:
         relay["error"] = f"{type(e).__name__}: {e}"
     return {"ok": True, "group": g, "relay": relay}
