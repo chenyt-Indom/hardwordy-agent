@@ -718,50 +718,95 @@ def _bm25(q_tokens, tokens_list, post=None, lens=None, k1=1.5, b=0.75):
     return scores
 
 
-def search(query: str, top_k: int = 6):
-    """检索知识库，返回相关文档片段。TF-IDF 计算 + 中文子串匹配兜底。"""
-    documents, idf, raw_len = _build_index()
-    if not documents:
+def search(query: str, top_k: int = 6, min_score: float = None):
+    """混合检索（语义向量 + BM25），返回最相关的**文档片段**（块级）。
+
+    召回率的提升来自三件事：
+      ① **块级检索** —— 不再拿整篇文档的平均向量去比，长文档里的一段话
+         不会被整篇稀释掉（这是原来最大的问题）；
+      ② **语义向量** —— 「发动机」能召回「引擎」，换个说法问也不再漏；
+      ③ **BM25 兜底** —— 专有名词、条款编号、数字这类语义模型反而不敏感，
+         靠关键词精确匹配补回来。
+
+    返回字段兼容旧版（doc_id / score / content / filename / rel / folder），
+    另外新增 vec_score / kw_score / chunk，方便排查"为什么这条排第一"。
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+    ensure_index()
+    with _idx_lock:
+        chunks = list(_idx.get("chunks") or [])
+        vectors = _idx.get("vectors")
+        tokens_list = list(_idx.get("tokens") or [])
+    if not chunks:
         return []
     q_tokens = _tokenize(query)
     if not q_tokens:
         return []
-    q_tfidf = {}
-    for t in set(q_tokens):
-        q_tfidf[t] = q_tfidf.get(t, 0) + idf.get(t, 1.0)
-    scored = []
-    for did, tf in documents.items():
-        doc_tfidf = {t: (freq / max(raw_len[did], 1)) * idf.get(t, 1.0) for t, freq in tf.items()}
-        s = _cosine(q_tfidf, doc_tfidf)
-        # 中文子串匹配兜底：查询关键词若出现在正文任何位置都给予基础分，
-        # 弥补 TF-IDF 切词对中文短语召回不足的问题
-        raw = _read(find_doc_path(did))
-        raw = raw or ""
-        substr_hits = sum(1 for t in q_tokens if t in raw)
-        bonus = substr_hits / max(len(q_tokens), 1) * 1.5
-        total = s + bonus
-        if total > 0:
-            scored.append((total, did, s, substr_hits))
-    scored.sort(key=lambda x: x[0], reverse=True)
+    n = len(chunks)
+
+    # ① 关键词分（BM25，只扫命中的倒排链）
+    post, lens = _build_postings(tokens_list)
+    kw = _bm25(q_tokens, tokens_list, post, lens)
+    kw_max = float(kw.max()) if kw.size else 0.0
+    kw_norm = (kw / kw_max) if kw_max > 0 else kw
+
+    # ② 语义分（向量已 L2 归一化，余弦 = 点积）
+    vec = None
+    if vectors is not None and len(vectors) == n:
+        qv = embed_mod.embed_texts([query], is_query=True)
+        if qv is not None and getattr(qv, "shape", (0,))[0] == 1:
+            vec = vectors @ qv[0]
+
+    # ③ 融合
+    if vec is not None:
+        final = VEC_WEIGHT * vec + KW_WEIGHT * kw_norm
+    else:
+        final = kw_norm.copy()
+
+    # ④ 阈值过滤：分数太低的不返回（用户要求）
+    lo_final = MIN_FINAL if min_score is None else float(min_score)
+    picked = []
+    for i in range(n):
+        f = float(final[i])
+        if f < lo_final:
+            continue
+        v = float(vec[i]) if vec is not None else 0.0
+        k = float(kw_norm[i])
+        # 语义和关键词**至少有一个**像样，才收 —— 两个都低说明是真的不相关
+        if vec is not None and v < MIN_VEC and k < MIN_KW:
+            continue
+        if vec is None and k < MIN_KW:
+            continue
+        picked.append((f, i, v, k))
+    picked.sort(key=lambda x: x[0], reverse=True)
+
+    # 同一篇文档最多占 top_k 的一半名额：否则一个长文档的相邻块会把
+    # 其他同样相关的文档全挤掉，用户看到"怎么全是同一篇"
+    per_doc = max(2, int(top_k) // 2)
+    used = {}
     results = []
-    for total, did, s, hits in scored[:top_k]:
-        path = find_doc_path(did)
-        text = _read(path)
-        # 抽取命中片段
-        snippet = text[:800]
-        if hits > 0 and text:
-            positions = []
-            for t in q_tokens:
-                idx = text.find(t)
-                if idx >= 0:
-                    positions.append(idx)
-            if positions:
-                anchor = min(positions)
-                snippet = text[max(0, anchor - 60): anchor + 400]
-        rel = _rel(path)
-        results.append({"doc_id": did, "score": round(total, 4),
-                        "content": snippet, "filename": os.path.basename(rel),
-                        "rel": rel, "folder": os.path.dirname(rel)})
+    for f, i, v, k in picked:
+        c = chunks[i]
+        did = c.get("doc_id") or ""
+        if used.get(did, 0) >= per_doc:
+            continue
+        used[did] = used.get(did, 0) + 1
+        rel = c.get("rel") or ""
+        results.append({
+            "doc_id": did,
+            "score": round(f, 4),
+            "vec_score": round(v, 4),
+            "kw_score": round(k, 4),
+            "chunk": c.get("idx"),
+            "content": c.get("text", ""),
+            "filename": os.path.basename(rel),
+            "rel": rel,
+            "folder": os.path.dirname(rel),
+        })
+        if len(results) >= int(top_k):
+            break
     return results
 
 
