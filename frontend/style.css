@@ -3735,6 +3735,19 @@ html[data-theme="light"] select.pill-select option {
 /* ⚠️ 必须同时压掉 `.btn { width: 100% }`（同 1727 行那个坑）：
    只写 flex:none 时按钮基准宽度仍是整行，textarea 会被挤成一条竖线。 */
 .hive-composer .btn { flex: 0 0 auto; width: auto; margin: 0; padding: 10px 22px; }
+/* @hd 开关：同样要压掉 width:100%，否则输入框又被挤扁 */
+.hive-composer .hive-at {
+  flex: 0 0 auto; width: auto; margin: 0;
+  padding: 10px 14px; font-size: 13px; font-weight: 600; letter-spacing: .3px;
+  background: var(--field-bg); color: var(--meta-fg);
+  border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.hive-composer .hive-at:hover { color: var(--text); border-color: var(--accent); }
+.hive-composer .hive-at.on {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(93, 156, 236, .22);
+}
 .hive-main > .tip { flex: none; padding: 0 18px 8px; margin: 0; }
 
 /* ---------- 二维码 / 输入浮层 ---------- */
