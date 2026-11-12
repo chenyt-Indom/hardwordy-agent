@@ -704,6 +704,7 @@ def _recv_worker(tid: str, gid: str, fid: str, host: str, port: int,
         H._write_json(spath, {
             "token": token, "size": size, "count": count, "chunk": chunk,
             "sha": sha_want, "name": name, "bm": _bm_b64(bm), "finished": True,
+            "fid_out": str(meta2.get("fid") or ""),
         })
         try:
             os.remove(part)      # 大文件已被 os.replace 移走，小文件在这删
