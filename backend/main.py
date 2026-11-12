@@ -80,6 +80,7 @@ client = ollama_client.OllamaClient()
 # 用户看到的现象是"打开开发台还是要干等十几秒"，
 # 而代码里明明写着预热。是启动器把后端 stdout 落到 %TEMP%\mm_backend.log 后才抓到。
 logger = logging.getLogger("uvicorn.error")
+logger.info("[procwin] 黑窗防护状态：%s", _NOWIN_STATUS)
 
 # 启动时就把知识库目录建好 —— 用户可以直接往里拷 .txt / .md，
 # 不用先"导入"一次才知道往哪放。
