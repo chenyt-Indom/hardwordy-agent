@@ -9200,6 +9200,7 @@
       });
       node.querySelector(".hd-cancel").addEventListener("click", () => hdCancel(mid));
       hdCards[mid] = c;
+      hvDock(node);          // 「跟随视角」开着就浮到左上角（和单人模式一致）
       return c;
     }
 
