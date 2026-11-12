@@ -352,22 +352,26 @@ def _trans_items():
 
 
 def _search_transcripts(query: str, top_k: int = TRANS_TOP) -> list:
+    """历史会话：先按字面预筛（便宜），再只给候选算向量（贵）。"""
     items = _trans_items()
     if not items:
         return []
+    qc, qt = _q_sets(query)
+
     scored = []
     for it in items:
-        cov = _coverage(query, it["text"])
+        c, b = _cov_pair(qc, qt, it.get("_chars") or set(), it.get("_tok") or set())
+        cov = max(c, b)
         if cov >= MIN_COV:
-            scored.append((cov, it))
+            scored.append((cov, 0.6 * c + 0.4 * b, it))
     if not scored:
         return []
-    scored.sort(key=lambda x: x[0], reverse=True)
+    scored.sort(key=lambda x: x[1], reverse=True)
     cand = scored[:TRANS_CANDIDATES]
 
-    vecs = None
+    vecs, qv = None, None
     try:
-        vecs = embed.embed_texts([it["text"] for _, it in cand])
+        vecs = embed.embed_texts([it["text"] for _, _, it in cand])
         qv = embed.embed_texts([query], is_query=True)
         if vecs is None or qv is None:
             vecs = None
@@ -375,13 +379,15 @@ def _search_transcripts(query: str, top_k: int = TRANS_TOP) -> list:
         vecs = None
 
     out = []
-    for i, (cov, it) in enumerate(cand):
+    for i, (cov, rank_cov, it) in enumerate(cand):
         vec = 0.0
         if vecs is not None:
             vec = float(np.dot(vecs[i], qv[0]))
-            if vec < MIN_VEC and cov < 0.75:
-                continue          # 语义也不像、字面也只是勉强 → 不要
-        score = (W_VEC * vec + W_COV * cov) if vecs is not None else cov
+            # 门槛收紧：实测原来「语义 0.34 + 字面 0.80」也能过，
+            # 结果查「挑餐厅」把一段系统提示词捞了出来。转录必须语义也像。
+            if not (vec >= 0.45 or (vec >= 0.38 and cov >= 0.85)):
+                continue
+        score = (W_VEC * vec + W_COV * rank_cov) if vecs is not None else rank_cov
         out.append({"level": "历史会话", "section": it["section"],
                     "content": it["text"], "source": "transcript",
                     "score": round(float(score), 4),
