@@ -62,7 +62,7 @@ if client is None:
 
 resp = client.chat(
     messages,
-    model="qwen3-vl:8b",
+    model="qwen2.5vl:3b",
     stream=False,
     images_base64=[cur],
     params={"max_tokens": 200, "temperature": 0.1},
