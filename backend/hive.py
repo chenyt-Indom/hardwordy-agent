@@ -40,6 +40,90 @@ _CFG = os.path.join(_DATA, "relay.json")
 _LOCK = threading.RLock()
 
 
+# ---------------------------------------------------------------- 协议版本
+#
+# 「不同版本也能在同一个群里说话」靠三条纪律，**只增不改**：
+#
+#   1. 新版本可以加字段、加消息类型，**老版本必须能"看不懂但不崩、不丢"**；
+#   2. 缺字段一律补默认值，不因为少一个键就整条丢弃；
+#   3. 不认识的消息类型降级成 `unknown` 原样显示，而不是静默忽略。
+#
+# 版本史：
+#   v1  2026-11-13  初始版：text / system / ai，AES-GCM 密文，since 增量拉取
+#   v2  2026-11-13  加入版本协商（join.v）+ 能力声明（caps）+ 成员在线状态
+PROTO_VER = 2
+PROTO_MIN = 1            # 低于这个版本不再兼容（目前没有，留作以后断代用）
+
+# 本机支持的消息类型。收到不在表里的 → 降级为 unknown 并标 orig_type。
+KNOWN_TYPES = {"text", "system", "ai", "unknown"}
+
+# 本机支持的能力。别人按这个表决定"要不要发给你"（比如以后加了文件传输）。
+CAPS = ["text", "system", "ai", "ref", "edit"]
+
+
+def _as_int(v: Any, default: int = 0) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+
+def _as_float(v: Any, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def normalize_msg(raw: Any, ver: int = 0) -> Optional[Dict[str, Any]]:
+    """把**任意版本**发来的消息规整成本机内部格式。
+
+    这是跨版本互通的关键函数。做法是「保留一切、只补默认」：
+    · 不删任何字段 —— 未来版本加的字段（比如 `diff`、`files`）原样留着，
+      前端不认识就忽略，但信息不会在传输环节被吃掉；
+    · 缺字段补默认值，不因为少一个键就整条丢；
+    · `type` 不认识就降级成 `unknown` 并记下 `orig_type`，
+      界面会显示「这条是更新版本发的」，而不是让它凭空消失。
+    """
+    if not isinstance(raw, dict):
+        return None
+    out: Dict[str, Any] = dict(raw)          # 先全量保留
+    out["seq"] = _as_int(raw.get("seq"), 0)
+    out["id"] = str(raw.get("id") or raw.get("mid") or ("m_" + str(out["seq"])))
+    out["from"] = str(raw.get("from") or raw.get("uid") or "?")
+    out["name"] = str(raw.get("name") or "成员")[:32]
+    t = str(raw.get("type") or "text")
+    if t not in KNOWN_TYPES:
+        out["type"] = "unknown"
+        out["orig_type"] = t
+    else:
+        out["type"] = t
+    if raw.get("text") is None:
+        out["text"] = ""
+    else:
+        out["text"] = str(raw.get("text"))
+    out["ts"] = _as_float(raw.get("ts"), 0.0)
+    out["ver"] = _as_int(raw.get("ver"), ver or 1)
+    return out
+
+
+def peer_state(last_seen: float, now: float = 0.0,
+               online: bool = False, err: str = "") -> str:
+    """把「最后见到的时间」换算成界面要显示的状态。
+
+    离线不等于异常：主动退出就是离线；连不上中继才是异常。
+    """
+    now = now or time.time()
+    if err:
+        return "error"
+    if online:
+        return "online"
+    if not last_seen:
+        return "offline"
+    # 5 分钟内算「刚离开」，仍然显示离线但带时间
+    return "offline"
+
+
 def _ensure() -> None:
     os.makedirs(_GROUPS, exist_ok=True)
 
