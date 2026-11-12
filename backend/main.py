@@ -10402,34 +10402,23 @@ def hive_join(body: dict):
         g = hive.join_group(b.get("payload") or "", b.get("name") or "")
     except Exception as e:
         return {"ok": False, "error": str(e)}
-    # 加入后自动连中继，并把「XX 加入了群」广播给其他人 ——
+    # 加入后启动 P2P 网络，并把「XX 加入了群」告诉大家 ——
     # 否则只有自己看得到提示，别人只知道名单多了一个人。
-    relay = {"configured": False, "connected": False, "error": ""}
+    relay = {"configured": False, "connected": False, "error": "", "mode": "mesh"}
     try:
         full = hive.load_group(g.get("gid") or "") or {}
-        host = (full.get("host") or "").strip()
-        if host:
-            st = hive_client.client().start(host, g["gid"])
-            # 连不上就自动重找一次：群主当初存的地址可能是错的
-            # （比如只存了 IP、没存成 https 的 /hive 路径）。
-            # 找到了就顺手写回群信息，下次直接用对的。
-            if not st.get("connected"):
-                try:
-                    pr = hive_deploy.probe_auto(host, timeout=3.0)
-                    good = pr.get("url") or ""
-                    if pr.get("ok") and good and good != host:
-                        host = good
-                        hive.set_relay(host, "", True)
-                        st = hive_client.client().start(host, g["gid"])
-                except Exception:
-                    pass
-            relay = {"configured": True, "url": host,
-                     "connected": bool(st.get("connected")),
-                     "error": st.get("last_error") or ""}
-            if st.get("connected") and g.get("joined_new"):
-                me = hive.profile()
-                hive_client.client().send(g["gid"], f"{me['name']} 加入了群",
-                                          mtype="system")
+        code = (full.get("host") or "").strip()
+        st = hive_client.client().start(code, g["gid"])
+        relay = {
+            "configured": bool(code), "url": code or "局域网",
+            "connected": bool(st.get("connected")),
+            "mode": "mesh", "error": st.get("error") or "",
+            "port": st.get("port") or 0, "lan_ip": st.get("lan_ip") or "",
+        }
+        if g.get("joined_new"):
+            me = hive.profile()
+            hive_client.client().send(g["gid"], f"{me['name']} 加入了群",
+                                      mtype="system")
     except Exception as e:
         relay["error"] = f"{type(e).__name__}: {e}"
     return {"ok": True, "group": g, "relay": relay}
