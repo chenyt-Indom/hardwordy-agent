@@ -677,6 +677,33 @@ def set_password(gid: str, pw: str = "") -> Dict[str, Any]:
             "raw": new_pw, "kfp": g["kfp"], "key_changed": changed}
 
 
+def ensure_password(gid: str) -> Dict[str, Any]:
+    """老群迁移到「密码进群」体系。
+
+    老群的密钥是随机的，没有验证标签 —— 别人就算拿到密码也算不出它的密钥，
+    所以**必须**重新用密码派生一次密钥。什么时候可以自动做：
+      · 我是群主，且群里只有我一个人 —— 换了也没人会掉线，直接做；
+      · 群里还有别人 —— 换了会让所有人掉线，只能提示群主手动点「重置密码」。
+    """
+    me = profile()
+    g = load_group(gid)
+    if not g:
+        return {"ok": False, "error": "群不存在"}
+    if g.get("pw") and g.get("vt"):
+        return {"ok": True, "migrated": False, "password": format_password(g["pw"])}
+    if g.get("owner") != me["user_id"]:
+        return {"ok": True, "migrated": False, "need_set": True, "owner_only": True,
+                "note": "这个群还没设过密码，请让群主点「🔑 密码」生成一个。"}
+    members = load_members(gid)
+    if len(members) > 1:
+        return {"ok": True, "migrated": False, "need_set": True, "too_many": True,
+                "note": "这个群还没设过密码。生成密码会更换群密钥，"
+                        "现在的 %d 位成员都要用新密码重新进群。" % len(members)}
+    r = set_password(gid, "")
+    return {"ok": True, "migrated": True, "password": r["password"],
+            "note": "已为这个群生成入群密码。"}
+
+
 def group_password(gid: str) -> Dict[str, Any]:
     """查看入群密码。只有群主本机存着明文，成员那边没有。"""
     me = profile()
