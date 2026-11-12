@@ -10737,7 +10737,6 @@ def hive_p2p_open(gid: str, body: dict = None):
         fid = "f_" + os.urandom(8).hex()
         r = hive_p2p.share(gid, fid, port=0, want_upnp=True,
                            src_path=path, name=os.path.basename(path))
-        r["qr"] = hive._qr_data_url(r.get("code") or "")
         r["name"] = os.path.basename(path)
         return {"ok": True, **r}
     except Exception as e:
