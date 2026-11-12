@@ -45,6 +45,13 @@
       </div>
     </div>
 
+    <!-- 模式切换（2026-11-13）：单机 = 现在这套；群聊 = 多人协作。
+         放侧栏最上面，因为它决定下面显示哪一组面板、主区显示哪个界面。 -->
+    <div class="mode-tabs" id="modeTabs">
+      <button type="button" class="mode-tab on" data-mode="single">💻 单机</button>
+      <button type="button" class="mode-tab" data-mode="hive">👥 群聊</button>
+    </div>
+
     <div class="status-card" id="statusCard">
       <span class="dot" id="statusDot"></span>
       <div>
