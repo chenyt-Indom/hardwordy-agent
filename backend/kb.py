@@ -212,10 +212,26 @@ _RADICAL_MAP = str.maketrans({
 
 
 def _norm_text(text: str) -> str:
-    """把 PDF 提取出的康熙部首等兼容字符转回正常汉字。"""
+    """把 PDF 提取出的康熙部首等兼容字符转回正常汉字。
+
+    ⚠️ **不能整篇 normalize("NFKC")**：NFKC 会顺手把中文全角标点
+    （，。？！：）转成半角，RAG 上下文喂给模型后看起来就不像中文了。
+    实测改完「敬爱的团组织：」变成「敬爱的团组织:」—— 检索没问题，
+    但显示变味。所以只对 U+2E80~U+2FDF（部首 / 部首补充区）逐字转换。
+    """
     if not text:
         return text or ""
-    return unicodedata.normalize("NFKC", text).translate(_RADICAL_MAP)
+    # 绝大多数文本里一个部首字符都没有，先整体判断一次，避免无谓的逐字循环
+    if not any(0x2E80 <= ord(c) <= 0x2FDF for c in text):
+        return text
+    out = []
+    for ch in text:
+        o = ord(ch)
+        if 0x2E80 <= o <= 0x2FDF:
+            out.append(unicodedata.normalize("NFKC", ch))
+        else:
+            out.append(ch)
+    return "".join(out).translate(_RADICAL_MAP)
 
 
 # 文档内容缓存：{文件名: (mtime, 文本)}
