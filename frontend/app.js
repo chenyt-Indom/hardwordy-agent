@@ -8889,6 +8889,39 @@
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); }
     });
 
+    // ---------------------------------------------------------- @hd 快捷开关
+    // 点一下在开头插入「@hd 」，再点一下撤掉。手输 @hd 时按钮也会自动高亮，
+    // 免得用户以为没生效又点一次（那就把刚写的指令撤掉了）。
+    const HD_TAG = "@hd";
+    function atBtnSync() {
+      const b = el("hiveAtBtn");
+      const ta = el("hiveText");
+      if (!b || !ta) return;
+      const body = (ta.value || "").replace(/^\s+/, "");
+      const on = body.slice(0, HD_TAG.length).toLowerCase() === HD_TAG;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+
+    function atBtnToggle() {
+      const ta = el("hiveText");
+      if (!ta) return;
+      const body = (ta.value || "").replace(/^\s+/, "");
+      if (body.slice(0, HD_TAG.length).toLowerCase() === HD_TAG) {
+        // 撤掉 @hd，连同紧跟的空白 / 标点，避免留下「 帮我写…」开头的空格
+        ta.value = body.slice(HD_TAG.length).replace(/^[\s，,：:、]+/, "");
+      } else {
+        ta.value = HD_TAG + " " + body;
+      }
+      atBtnSync();
+      ta.focus();
+      try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) { /* 忽略 */ }
+    }
+
+    el("hiveAtBtn").addEventListener("click", atBtnToggle);
+    el("hiveText").addEventListener("input", atBtnSync);
+    atBtnSync();
+
     // ---------------------------------------------------------- 成员
     function renderMembers() {
       const box = el("hiveMemList");
