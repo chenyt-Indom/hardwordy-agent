@@ -8591,4 +8591,494 @@
     setTimeout(() => refresh(true), 800);
   })();
 
+  /* ============================================================
+     多人协作群（Hive）· 2026-11-13
+     ------------------------------------------------------------
+     和单机模式共用一个页面，靠「模式标签」切换：
+       单机 → 侧栏 6 个原有面板 + 主区聊天
+       群聊 → 侧栏只有群列表 + 主区群聊界面
+     ⚠️ 切换只改 hidden，不动任何布局骨架（避免又出现"页面被撑变形"）。
+     ============================================================ */
+  (function () {
+    const tabs = document.getElementById("modeTabs");
+    if (!tabs) return;
+
+    const SINGLE_PANELS = ["kbPanel", "doclibPanel", "audioPanel",
+                           "libraryPanel", "sessionsPanel", "memoryPanel"];
+    const el = (id) => document.getElementById(id);
+
+    let mode = "single";
+    let curGid = "";
+    let groups = [];
+    let members = [];
+    let myId = "";
+    let myName = "";
+    let lastSeq = 0;
+    let ws = null;
+    let wsRetry = 0;
+    let hiveTimer = null;
+
+    function hEsc(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    // 统一请求：body 有就是 POST，没有就是 GET
+    async function api(path, body) {
+      const opt = { method: body ? "POST" : "GET", headers: {} };
+      if (body) {
+        opt.headers["Content-Type"] = "application/json";
+        opt.body = JSON.stringify(body);
+      }
+      const r = await fetch(path, opt);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return await r.json();
+    }
+
+    // ---------------------------------------------------------- 浮层
+    const modal = el("hiveModal");
+    let modalOnOk = null;
+
+    function openModal(opt) {
+      el("hiveModalTitle").textContent = opt.title || "";
+      el("hiveModalHint").textContent = opt.hint || "";
+      const img = el("hiveQrImg");
+      if (opt.qr) { img.src = opt.qr; img.hidden = false; } else { img.hidden = true; }
+      const ta = el("hiveModalInput");
+      if (opt.input != null) {
+        ta.value = opt.input;
+        ta.placeholder = opt.placeholder || "";
+        ta.hidden = false;
+      } else { ta.hidden = true; }
+      const code = el("hiveModalCode");
+      if (opt.code) { code.value = opt.code; code.hidden = false; }
+      else { code.hidden = true; }
+      el("hiveModalCopy").hidden = !opt.code;
+      const ok = el("hiveModalOk");
+      ok.hidden = !!opt.noOk;
+      ok.textContent = opt.okText || "确定";
+      modalOnOk = opt.onOk || null;
+      modal.hidden = false;
+      if (opt.input != null) setTimeout(() => ta.focus(), 50);
+    }
+
+    function closeModal() {
+      modal.hidden = true;
+      modalOnOk = null;
+    }
+
+    el("hiveModalClose").addEventListener("click", closeModal);
+    modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
+    el("hiveModalCopy").addEventListener("click", async () => {
+      const v = el("hiveModalCode").value;
+      try { await navigator.clipboard.writeText(v); }
+      catch (e) {
+        const t = el("hiveModalCode"); t.select(); document.execCommand("copy");
+      }
+      const b = el("hiveModalCopy");
+      const old = b.textContent;
+      b.textContent = "已复制 ✓";
+      setTimeout(() => { b.textContent = old; }, 1400);
+    });
+    el("hiveModalOk").addEventListener("click", async () => {
+      const fn = modalOnOk;
+      const v = el("hiveModalInput").hidden ? "" : el("hiveModalInput").value;
+      if (fn) {
+        const keep = await fn(v);
+        if (keep === false) return;
+      }
+      closeModal();
+    });
+
+    // ---------------------------------------------------------- 模式切换
+    function setMode(m) {
+      mode = m;
+      const isHive = m === "hive";
+      Array.prototype.forEach.call(tabs.querySelectorAll(".mode-tab"), (b) => {
+        b.classList.toggle("on", b.getAttribute("data-mode") === m);
+      });
+      SINGLE_PANELS.forEach((id) => {
+        const p = el(id);
+        if (p) p.hidden = isHive;
+      });
+      el("hivePanel").hidden = !isHive;
+      el("hiveMain").hidden = !isHive;
+      const msgs = document.querySelector(".messages");
+      const comp = document.querySelector(".composer");
+      if (msgs) msgs.hidden = isHive;
+      if (comp) comp.hidden = isHive;
+      try { localStorage.setItem("ui_mode", m); } catch (e) { /* 隐私模式 */ }
+
+      if (isHive) {
+        loadGroups();
+        loadStatus();
+        connectWs();
+        if (!hiveTimer) hiveTimer = setInterval(loadStatus, 4000);
+      } else if (hiveTimer) {
+        clearInterval(hiveTimer);
+        hiveTimer = null;
+      }
+    }
+
+    Array.prototype.forEach.call(tabs.querySelectorAll(".mode-tab"), (b) => {
+      b.addEventListener("click", () => setMode(b.getAttribute("data-mode")));
+    });
+
+    // ---------------------------------------------------------- 状态
+    async function loadStatus() {
+      try {
+        const d = await api("/api/hive/status");
+        paintStatus(d);
+      } catch (e) { /* 后端没起来就保持原样 */ }
+    }
+
+    function paintStatus(d) {
+      if (!d || !d.ok) return;
+      myId = d.hive.user_id;
+      myName = d.hive.name;
+      const c = d.client || {};
+      const line = el("hiveStatusLine");
+      if (line) {
+        const bits = [];
+        bits.push(c.connected ? "🟢 已连接中继" : "⚪ 未连接中继");
+        if (c.url) bits.push(c.url);
+        if (c.queued) bits.push(c.queued + " 条待发");
+        if (c.last_error && !c.connected) bits.push("上次错误：" + c.last_error);
+        line.textContent = bits.join(" · ");
+      }
+      if (curGid) {
+        const meta = el("hiveGroupMeta");
+        const g = (d.hive.group_list || []).find((x) => x.gid === curGid);
+        if (meta && g) {
+          meta.textContent = (g.kfp ? "指纹 " + g.kfp + " · " : "")
+            + (g.owner === myId ? "我是群主" : "群主 " + (g.owner_name || "?"))
+            + " · " + (g.members || 0) + " 人";
+        }
+      }
+    }
+
+    // ---------------------------------------------------------- 群列表
+    async function loadGroups() {
+      try {
+        const d = await api("/api/hive/groups");
+        groups = d.groups || [];
+        renderGroups();
+        if (!curGid && groups.length) openGroup(groups[0].gid);
+      } catch (e) { /* 忽略 */ }
+    }
+
+    function renderGroups() {
+      const box = el("hiveGroupList");
+      if (!box) return;
+      if (!groups.length) {
+        box.innerHTML = '<p class="hint">还没有群。点「＋ 建群」开一个，'
+          + '或者用别人给的二维码「扫码入群」。</p>';
+        return;
+      }
+      box.innerHTML = groups.map((g) => {
+        const on = g.gid === curGid ? " on" : "";
+        const owner = g.owner === myId ? "群主" : (g.owner_name || "");
+        return '<div class="hive-item' + on + '" data-gid="' + hEsc(g.gid) + '">'
+          + '<span class="hi-dot' + (g.gid === curGid ? " live" : "") + '"></span>'
+          + '<span class="hi-name" title="' + hEsc(g.name) + '">' + hEsc(g.name) + "</span>"
+          + '<span class="hi-meta">' + hEsc(owner) + " · " + (g.members || 0) + "人</span>"
+          + "</div>";
+      }).join("");
+      Array.prototype.forEach.call(box.querySelectorAll(".hive-item"), (it) => {
+        it.addEventListener("click", () => openGroup(it.getAttribute("data-gid")));
+      });
+    }
+
+    // ---------------------------------------------------------- 打开群
+    async function openGroup(gid) {
+      curGid = gid;
+      lastSeq = 0;
+      renderGroups();
+      const g = groups.find((x) => x.gid === gid);
+      el("hiveGroupName").textContent = g ? g.name : gid;
+      el("hiveMsgs").innerHTML = '<p class="hint">正在读取消息…</p>';
+      try {
+        const d = await api("/api/hive/" + encodeURIComponent(gid)
+          + "/messages?since=0&limit=200");
+        members = d.members || [];
+        const list = d.messages || [];
+        lastSeq = list.reduce((a, m) => Math.max(a, m.seq || 0), 0);
+        renderMsgs(list);
+        renderMembers();
+      } catch (e) {
+        el("hiveMsgs").innerHTML = '<p class="hint">读消息失败：' + hEsc(e.message) + "</p>";
+      }
+      // 连中继（没配地址就静默失败，不影响本地聊天）
+      try { await api("/api/hive/connect", { gid: gid }); } catch (e) { /* 忽略 */ }
+      loadStatus();
+      connectWs();
+    }
+
+    // ---------------------------------------------------------- 消息
+    function fmtBody(t) {
+      const parts = String(t || "").split("```");
+      let out = "";
+      parts.forEach((p, i) => {
+        if (i % 2 === 1) {
+          out += "<pre>" + hEsc(p.replace(/^[a-zA-Z0-9+#-]*\n/, "")) + "</pre>";
+        } else {
+          out += hEsc(p).replace(/\n/g, "<br>");
+        }
+      });
+      return out;
+    }
+
+    function msgNode(m) {
+      const wrap = document.createElement("div");
+      const type = m.type || "text";
+      let cls = "hive-msg";
+      if (type === "system") cls += " sys";
+      else if (type === "ai") cls += " ai";
+      else if (m.from === myId) cls += " mine";
+      wrap.className = cls;
+      const who = type === "system" ? ""
+        : '<span class="hmsg-who">' + hEsc(m.name || m.from || "?")
+          + (type === "ai" && m.by ? "（由 " + hEsc(m.by) + " 唤醒）" : "")
+          + (m.pending ? " · 待发送" : "") + "</span>";
+      const ts = m.ts ? new Date(m.ts * 1000).toLocaleTimeString("zh-CN",
+        { hour: "2-digit", minute: "2-digit" }) : "";
+      wrap.innerHTML = who + '<div class="hmsg-bubble">' + fmtBody(m.text)
+        + "</div>" + (ts ? '<span class="hmsg-ts">' + ts + "</span>" : "");
+      return wrap;
+    }
+
+    function renderMsgs(list) {
+      const box = el("hiveMsgs");
+      box.innerHTML = "";
+      if (!list.length) {
+        box.innerHTML = '<p class="hint hive-empty">还没有消息，说点什么吧。</p>';
+        return;
+      }
+      list.forEach((m) => box.appendChild(msgNode(m)));
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function addMsg(m) {
+      const box = el("hiveMsgs");
+      const empty = box.querySelector(".hive-empty");
+      if (empty) empty.remove();
+      box.appendChild(msgNode(m));
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function sendMsg() {
+      const ta = el("hiveText");
+      const text = (ta.value || "").trim();
+      if (!text) return;
+      if (!curGid) { alert("先在左边选一个群"); return; }
+      ta.value = "";
+      try {
+        const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/send",
+          { text: text });
+        if (!d.ok) { alert(d.error || "发送失败"); return; }
+        // 没连中继时后端会本地落盘并推送；连了中继则等 WS 回执，避免重复显示
+        if (d.sent && d.sent.msg && d.sent.local) { /* 已由广播推送 */ }
+      } catch (e) {
+        alert("发送失败：" + e.message);
+      }
+    }
+
+    el("hiveSendBtn").addEventListener("click", sendMsg);
+    el("hiveText").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+    });
+
+    // ---------------------------------------------------------- 成员
+    function renderMembers() {
+      const box = el("hiveMemList");
+      if (!box) return;
+      el("hiveMemCount").textContent = "(" + members.length + ")";
+      if (!members.length) {
+        box.innerHTML = '<p class="hint">暂无成员</p>';
+        return;
+      }
+      const amOwner = members.some((m) => m.user_id === myId && m.role === "owner");
+      box.innerHTML = members.map((m) => {
+        const role = m.role === "owner" ? "群主" : (m.role === "admin" ? "管理" : "");
+        const kick = (amOwner && m.user_id !== myId)
+          ? '<button class="hive-kick" data-uid="' + hEsc(m.user_id) + '"'
+            + ' data-name="' + hEsc(m.name) + '" title="移出群">踢</button>'
+          : "";
+        return '<div class="hive-mem">'
+          + '<span class="hm-name" title="' + hEsc(m.name) + '">'
+          + (m.user_id === myId ? "★ " : "") + hEsc(m.name) + "</span>"
+          + (role ? '<span class="hm-role">' + role + "</span>" : "")
+          + kick + "</div>";
+      }).join("");
+      Array.prototype.forEach.call(box.querySelectorAll(".hive-kick"), (b) => {
+        b.addEventListener("click", async () => {
+          const uid = b.getAttribute("data-uid");
+          const nm = b.getAttribute("data-name");
+          if (!confirm("确定把「" + nm + "」移出群？")) return;
+          try {
+            const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/kick",
+              { user_id: uid });
+            if (!d.ok) { alert(d.error || "踢人失败"); return; }
+            if (curGid) openGroup(curGid);
+          } catch (e) { alert("踢人失败：" + e.message); }
+        });
+      });
+    }
+
+    el("hiveMembersBtn").addEventListener("click", () => {
+      const side = el("hiveSide");
+      side.hidden = !side.hidden;
+      if (!side.hidden) renderMembers();
+    });
+
+    // ---------------------------------------------------------- 邀请二维码
+    el("hiveQrBtn").addEventListener("click", async () => {
+      if (!curGid) { alert("先选一个群"); return; }
+      try {
+        const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/invite");
+        if (!d.ok) { alert(d.error || "生成失败"); return; }
+        openModal({
+          title: "邀请加入「" + (el("hiveGroupName").textContent || "群") + "」",
+          hint: "手机扫码可直接打开入群链接；电脑端请把下面的口令发给对方，"
+            + "粘贴到「扫码入群」里即可。群密钥只在这张码里，别公开发出去。",
+          qr: d.qr_png || "",
+          code: d.payload || "",
+          noOk: true,
+        });
+      } catch (e) { alert("生成二维码失败：" + e.message); }
+    });
+
+    // ---------------------------------------------------------- 建群 / 入群
+    el("hiveCreateBtn").addEventListener("click", () => {
+      openModal({
+        title: "新建协作群",
+        hint: "建群的人自动成为群主，可以踢人、分配工作。",
+        input: "",
+        placeholder: "群名，比如「官网改版」",
+        onOk: async (v) => {
+          const name = (v || "").trim();
+          if (!name) { alert("群名不能为空"); return false; }
+          const d = await api("/api/hive/create", { name: name });
+          if (!d.ok) { alert(d.error || "建群失败"); return false; }
+          await loadGroups();
+          openGroup(d.group.gid);
+          return true;
+        },
+      });
+    });
+
+    el("hiveJoinBtn").addEventListener("click", () => {
+      openModal({
+        title: "扫码入群",
+        hint: "把别人给你的口令（hive://join?…）粘进来。手机扫码的话会直接打开入群链接。",
+        input: "",
+        placeholder: "hive://join?g=…",
+        onOk: async (v) => {
+          const payload = (v || "").trim();
+          if (!payload) { alert("口令不能为空"); return false; }
+          const d = await api("/api/hive/join", { payload: payload });
+          if (!d.ok) { alert(d.error || "入群失败"); return false; }
+          await loadGroups();
+          openGroup(d.group.gid);
+          return true;
+        },
+      });
+    });
+
+    // ---------------------------------------------------------- 更多菜单
+    const moreBtn = el("hiveMore");
+    const menu = el("hiveMenu");
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      menu.hidden = !menu.hidden;
+      moreBtn.setAttribute("aria-expanded", menu.hidden ? "false" : "true");
+    });
+    document.addEventListener("click", (e) => {
+      if (menu.hidden) return;
+      if (menu.contains(e.target) || moreBtn.contains(e.target)) return;
+      menu.hidden = true;
+      moreBtn.setAttribute("aria-expanded", "false");
+    });
+
+    el("hiveNameBtn").addEventListener("click", () => {
+      openModal({
+        title: "我的群昵称",
+        hint: "群里其他人看到的名字。改完对之后的消息生效。",
+        input: myName || "",
+        placeholder: "昵称",
+        onOk: async (v) => {
+          const name = (v || "").trim();
+          if (!name) { alert("昵称不能为空"); return false; }
+          const d = await api("/api/hive/profile", { name: name });
+          if (!d.ok) { alert("修改失败"); return false; }
+          myName = d.profile.name;
+          loadGroups();
+          return true;
+        },
+      });
+    });
+
+    el("hiveRelayBtn").addEventListener("click", async () => {
+      let cur = "";
+      try {
+        const d = await api("/api/hive/relay");
+        cur = (d.relay && d.relay.url) || "";
+      } catch (e) { /* 忽略 */ }
+      openModal({
+        title: "云端中继地址",
+        hint: "填你自己服务器上的中继地址，比如 ws://1.2.3.4:8765。"
+          + "不填就只能本机看消息（别人收不到）。留空表示不用中继。",
+        input: cur,
+        placeholder: "ws://你的服务器IP:8765",
+        onOk: async (v) => {
+          const url = (v || "").trim();
+          try {
+            const d = await api("/api/hive/relay", { url: url, enabled: !!url });
+            if (!d.ok) { alert(d.error || "保存失败"); return false; }
+          } catch (e) { alert("保存失败：" + e.message); return false; }
+          if (url && curGid) {
+            try { await api("/api/hive/connect", { gid: curGid }); } catch (e) { /* 忽略 */ }
+          }
+          loadStatus();
+          return true;
+        },
+      });
+    });
+
+    // ---------------------------------------------------------- WebSocket
+    function connectWs() {
+      if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      try {
+        ws = new WebSocket(proto + "//" + location.host + "/ws/hive");
+      } catch (e) { return; }
+      ws.onopen = () => { wsRetry = 0; };
+      ws.onmessage = (ev) => {
+        let d = null;
+        try { d = JSON.parse(ev.data); } catch (e) { return; }
+        if (d.type === "hello") { paintStatus(d); return; }
+        if (d.type === "msg" && d.gid === curGid && d.msg) {
+          const s = d.msg.seq || 0;
+          // 去重：seq 比当前小的说明已经显示过；-1 是本地待发，允许显示
+          if (s > lastSeq || s === -1) {
+            if (s > lastSeq) lastSeq = s;
+            addMsg(d.msg);
+          }
+        }
+      };
+      ws.onclose = () => {
+        ws = null;
+        wsRetry += 1;
+        if (mode === "hive") setTimeout(connectWs, Math.min(1000 * wsRetry, 10000));
+      };
+      ws.onerror = () => { try { ws.close(); } catch (e) { /* 忽略 */ } };
+    }
+
+    // ---------------------------------------------------------- 启动
+    let saved = "single";
+    try { saved = localStorage.getItem("ui_mode") || "single"; } catch (e) { /* 忽略 */ }
+    setMode(saved === "hive" ? "hive" : "single");
+  })();
+
 })();
