@@ -3598,6 +3598,13 @@ html[data-theme="light"] select.pill-select option {
    ============================================================ */
 
 /* ---------- 模式切换（侧栏最上面） ---------- */
+/* ⚠️ 必须让 hidden 压过 display:flex。
+   `.messages` 自己设了 display:flex，作者样式优先级高于 UA 的 [hidden]{display:none}，
+   所以单机消息区在群聊模式下**根本藏不住** —— 两个界面同时占高度，
+   表现就是"群聊输入框被压成一条缝"。2026-11-13 实测踩到。 */
+.messages[hidden],
+.composer[hidden] { display: none !important; }
+
 .mode-tabs { display: flex; gap: 6px; margin: 10px 0 12px; }
 .mode-tab {
   flex: 1; padding: 7px 8px; font-size: 12.5px; cursor: pointer;
