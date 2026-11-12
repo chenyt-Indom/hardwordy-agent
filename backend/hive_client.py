@@ -66,15 +66,53 @@ class HiveClient:
 
     # ------------------------------------------------------------ 状态
 
+    def _calc_state(self) -> str:
+        if not self._running:
+            return "idle"
+        if self._connected:
+            return "online"
+        # 连过又断了 → offline（会自动重连）；从没连上且报过错 → error
+        if self._ever_connected or self._retry <= 1:
+            return "offline"
+        return "error"
+
+    def _compat(self) -> str:
+        """本机协议版本 vs 中继协议版本。
+
+        不一致**不影响通讯**（协议是只增不改的），只是让用户知道
+        「对面比我老/新，某些新功能可能没有」。
+        """
+        if not self._relay_proto:
+            return "unknown"
+        if self._relay_proto == self._proto:
+            return "same"
+        return "relay_older" if self._relay_proto < self._proto else "relay_newer"
+
     def status(self) -> Dict[str, Any]:
+        online = [m for m in self._members if m.get("online")]
+        now = time.time()
         return {
             "running": self._running,
             "connected": self._connected,
+            "state": self._calc_state(),
             "url": self._url,
             "gid": self._gid,
             "members": self._members,
+            "online_count": len(online),
+            "total_count": len(self._members),
             "queued": len(self._queue),
             "last_error": self._last_error,
+            "last_error_at": self._last_error_at,
+            "retry": self._retry,
+            # ---- 跨版本 ----
+            "proto": self._proto,
+            "relay_proto": self._relay_proto,
+            "relay_ver": self._relay_ver,
+            "compat": self._compat(),
+            # ---- 健康度 ----
+            "latency_ms": round(self._latency, 1),
+            "last_recv_ts": self._last_recv,
+            "connected_secs": round(now - self._connected_at, 0) if self._connected_at else 0,
         }
 
     def _emit_status(self) -> None:
