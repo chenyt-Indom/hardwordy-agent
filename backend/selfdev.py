@@ -994,9 +994,21 @@ def restart(delay: float = 1.2) -> dict:
     #     CREATE_NEW_PROCESS_GROUP—— 独立进程组，Ctrl+C 不波及
     #     CREATE_BREAKAWAY_FROM_JOB —— 逃出父进程所在的 Job 对象
     #   最后一个在某些环境会直接报错（Job 不允许 breakaway），所以要有退路。
-    flags_try = [0x00000008 | 0x00000200 | 0x01000000,   # 全套
-                 0x00000008 | 0x00000200,                # 去掉 breakaway
-                 0x00000008]                             # 最保守
+    # ⚠️⚠️ 2026-11-12：**不能带 DETACHED_PROCESS(0x8)**。
+    #   实测 pid 31808：带 DETACHED 重启出来的进程活得好好的，
+    #   /api/health 自报 `window=True`（说明它认为该有窗口、也确实执行了
+    #   pywebview），但 `MainWindowHandle=0`、进程里一个窗口都枚举不到 ——
+    #   窗口被建在了**不可见的窗口站/桌面**上，用户永远看不到。
+    #   这就是「点前端重启后没反应、退出了没重进」的真身。
+    #
+    #   pythonw.exe 本来就没有控制台，DETACHED 对我们**毫无用处**，
+    #   只带来这个副作用。能保证子进程活下来的是 BREAKAWAY（逃出父进程的 Job），
+    #   而它对窗口没有任何影响。
+    flags_try = [
+        0x01000000 | 0x00000200,   # BREAKAWAY + NEW_PROCESS_GROUP（首选：能逃 Job，又能正常开窗）
+        0x00000200,                # Job 不允许 breakaway 时的退路
+        0,                         # 最保守
+    ]
     proc = None
     last_err = ""
     for fl in flags_try:
