@@ -1598,6 +1598,7 @@
         bubble.style.whiteSpace = "pre-wrap";
       }
     } catch (e) { /* 忽略 */ }
+    if (!silent) { try { avOnAnswer(raw); } catch (e) { /* ignore */ } }
   }
 
   // ---------- 朗读（TTS）----------
