@@ -1289,8 +1289,13 @@ def _finish(score: dict, mid: str, title: str, sr: int = SR) -> dict:
 def generate(style: str = "pop", bars: int = 16, bpm: float = 0,
              key: int = 0, seed: int | None = None,
              vocals: bool = True, title: str = "",
-             notes: str = "", lyrics: str = "") -> dict:
-    """生成一首。style 见 STYLES；bars 每小节 4 拍；notes 可给旋律音符串。"""
+             notes: str = "", lyrics: str = "",
+             bar_beats: float = 4.0) -> dict:
+    """生成一首。style 见 STYLES；notes 可给旋律音符串。
+
+    bar_beats：每小节几拍，默认 4（4/4）。2/4 的曲子传 2。
+    notes 里可以用「|」标小节线，乐句会被对齐到小节开头。
+    """
     if style not in STYLES:
         return {"ok": False,
                 "error": "没有这个风格：%s（可选：%s）"
