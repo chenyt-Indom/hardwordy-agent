@@ -8775,6 +8775,9 @@
       myName = d.hive.name;
       const c = d.client || {};
       myProto = c.proto || myProto;
+      myDev = c.dev || "";
+      // 身份冲突：对方和本机 user_id 一样但不是这台机器（拷贝了整个目录）
+      paintIdConflict(c.uid_conflict);
 
       // 头部状态灯
       const ni = netInfo(c);
