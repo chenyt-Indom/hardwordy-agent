@@ -9073,9 +9073,17 @@
       //   所以这里直接复用单人模式的 class（.msg.bot / .msg.user / .bubble），
       //   不再另起一套 .hive-msg / .hmsg-bubble —— 两套样式迟早走样。
       //   只有系统消息保留 .hive-msg.sys：单人模式没有系统消息，它必须居中。
-      const isMine = m.from === myId && (!m.dev || !myDev || m.dev === myDev);
+      // ★ 2026-11-13 用户反馈：「ai 的回答为什么会在右边？右边只能是用户的回答」。
+      //   根因：AI 消息的 m.from 记的是**唤醒者**（谁 @ 的 hd），所以
+      //   `m.from === myId` 成立 → 被判成「自己发的」→ 靠右绿气泡。
+      //   正确规则：AI 回答**永远靠左**；只有「我自己说的话」靠右。
+      //   剩下的人（其他成员）靠左，但用白底黑字气泡与 AI 区分开。
+      const isAI = (type === "ai");
+      const isMine = !isAI && m.from === myId && (!m.dev || !myDev || m.dev === myDev);
       let cls = (type === "system") ? "hive-msg sys"
-        : ("msg " + (isMine ? "user" : "bot"));
+        : isAI ? "msg bot"
+        : isMine ? "msg user"
+        : "msg member";
       if (type === "unknown") cls += " unknown";
       wrap.className = cls;
       wrap.setAttribute("data-mid", m.id || m.mid || "");
