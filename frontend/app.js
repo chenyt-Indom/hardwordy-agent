@@ -8906,6 +8906,9 @@
       renderGroups();
       const g = groups.find((x) => x.gid === gid);
       el("hiveGroupName").textContent = g ? g.name : gid;
+      // 删除群只有群主能点：不是群主就干脆不显示（比点了报错友好）
+      const delBtn = el("hiveDelBtn");
+      if (delBtn) delBtn.hidden = !(g && g.owner === myId);
       el("hiveMsgs").innerHTML = '<p class="hint">正在读取消息…</p>';
       try {
         const d = await api("/api/hive/" + encodeURIComponent(gid)
