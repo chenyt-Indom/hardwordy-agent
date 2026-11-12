@@ -973,7 +973,11 @@ def render_score(score: dict, sr: int = SR, progress=None) -> np.ndarray:
                 pass
     # 总线：轻微高通去直流 + 软限幅 + 归一
     out = np.stack([left, right], axis=1)
-    out = _hp(out, 28.0).astype(np.float32)
+    # ⚠️ 必须逐声道滤波：lfilter 默认 axis=-1，对 (n,2) 会沿**声道**轴滤，
+    #    等于把左右两声道互相混，低频会全乱。
+    for _c in range(out.shape[1]):
+        out[:, _c] = _hp(out[:, _c], 28.0)
+    out = out.astype(np.float32)
     # 淡入淡出，避免首尾爆音
     fade = int(0.02 * sr)
     if out.shape[0] > fade * 2:
