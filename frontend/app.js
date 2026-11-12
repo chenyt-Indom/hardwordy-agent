@@ -9383,6 +9383,24 @@
     });
 
     // ③ 上下文环：按群聊消息估算占用（群聊的「上下文」= 最近这些消息）
+    setTimeout(() => {
+      const box = el("hiveMsgs");
+      if (!box) return;
+      box.innerHTML = "";
+      const a = document.createElement("div");
+      a.className = "msg bot";
+      a.innerHTML = '<span class="hmsg-who">成员a3f2</span>'
+        + '<div class="bubble think-hdr"><span>🧠 思考过程（12 字 · 耗时 0.8s）</span><span class="arrow">▸</span></div>'
+        + '<div class="think-body">先看看用户要什么，再决定怎么答。</div>'
+        + '<div class="bubble hmsg-body">这是对方发来的消息，用来检查气泡是否靠左对齐。</div>';
+      const b2 = document.createElement("div");
+      b2.className = "msg user";
+      b2.innerHTML = '<span class="hmsg-who">我</span>'
+        + '<div class="bubble hmsg-body">这是我的消息，应该靠右贴边，而不是停在屏幕中间。</div>';
+      box.appendChild(a);
+      box.appendChild(b2);
+      box.scrollTop = box.scrollHeight;
+    }, 900);
     (function hvCtx() {
       const btn = el("hvCtxRing"), fg = el("hvCtxRingFg"), txt = el("hvCtxRingTxt");
       if (!btn || !fg || !txt) return;
