@@ -9107,11 +9107,22 @@
         { hour: "2-digit", minute: "2-digit" }) : "";
 
       wrap.innerHTML = who + think + refBlock(m)
-        + '<div class="hmsg-bubble"></div>'
+        + '<div class="bubble hmsg-body"></div>'
         + '<div class="hive-acts"></div>'
         + (ts ? '<span class="hmsg-ts">' + ts + "</span>" : "");
 
-      const bubble = wrap.querySelector(".hmsg-bubble");
+      // 思考卡片：点一下展开/收起（交互和单人模式一致，带 CSS 过渡）
+      const th = wrap.querySelector(".think-hdr");
+      if (th) {
+        const tb = wrap.querySelector(".think-body");
+        th.addEventListener("click", () => {
+          const open = tb.classList.contains("open");
+          tb.classList.toggle("open", !open);
+          th.querySelector(".arrow").textContent = open ? "▸" : "▾";
+        });
+      }
+
+      const bubble = wrap.querySelector(".hmsg-body");
       const raw = String(m.text == null ? "" : m.text);
       if (type === "system" || type === "unknown" || m.pending) {
         bubble.textContent = raw;
