@@ -8614,6 +8614,7 @@
     let myId = "";
     let myName = "";
     let myProto = 0;      // 本机协议版本，用来标出「对方版本比我老」
+    let netCls = "idle";  // 当前连接状态类别（online/connecting/offline/error/idle）
     let lastSeq = 0;
     let ws = null;
     let wsRetry = 0;
