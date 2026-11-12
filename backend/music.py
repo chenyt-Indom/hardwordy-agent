@@ -986,7 +986,7 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
     return {
         "style": style, "style_name": cfg["name"],
         "bpm": round(bpm, 2), "key": int(key), "scale": scale_name,
-        "bars": bars, "beats_per_bar": 4, "duration": round(duration, 3),
+        "bars": bars, "beats_per_bar": int(bar_beats), "duration": round(duration, 3),
         "chords": chords, "tracks": tracks, "vocals": bool(vocals),
         "lyrics": lyrics or "", "title": title or "", "seed": seed,
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
