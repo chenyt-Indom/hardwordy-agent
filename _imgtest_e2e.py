@@ -43,7 +43,7 @@ chatimg.record(sid, turn1, [red])
 messages = [
     {"role": "user", "content": turn1},
     {"role": "assistant", "content": "好的，我记住了。"},
-    {"role": "user", "content": "现在再看这一张。"},
+    {"role": "user", "content": "现在再看这一张。请分别说出：第一条消息里的图是什么颜色？这一条消息里的图是什么颜色？"},
 ]
 
 hist = chatimg.attach(messages, sid)
