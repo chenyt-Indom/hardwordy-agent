@@ -242,7 +242,18 @@ class HiveClient:
             "error": self._error,
             "mode": "mesh",
             "uptime": st.get("uptime") or 0,
+            "dev": st.get("dev") or "",
+            "uid_conflict": st.get("uid_conflict"),
         }
+
+    def refresh_identity(self) -> Dict[str, Any]:
+        """换了 user_id 之后立刻生效（否则还会按老身份发消息）。"""
+        try:
+            MESH.node().refresh_identity()
+        except Exception:
+            pass
+        self._emit_status()
+        return self.status()
 
     # ------------------------------------------------------------ 发送
 
