@@ -3911,6 +3911,49 @@ def _do_compose_images(arguments, ui_events, context):
               "如实说明本工具只做排版式拼接，需要的话用 edit_image 逐张微改。")
 
 
+def _do_tts_speak(arguments, ui_events, context):
+    """文字转语音。产物落 data/tts/，返回播放 + 下载链接（模型要原样转给用户）。
+
+    ⚠️ 长文会分段逐段合成再拼接，几千字要几十秒 —— 先发一条 status，
+       让界面上有「正在合成」的反馈，别让用户以为卡死了。
+    """
+    from . import tts
+
+    text = str(arguments.get("text") or "")
+    if not text.strip():
+        return "错误：text 是空的。把要读的文字给我（几千字也行）。"
+
+    voice = str(arguments.get("voice") or "")
+    engine = str(arguments.get("engine") or "auto")
+    try:
+        rate = int(arguments.get("rate") or 0)
+    except Exception:
+        rate = 0
+
+    chars = len(tts.clean_text(text))
+    _ui(ui_events, {"type": "status",
+                    "text": "正在合成语音（%d 字）…长文要等几十秒" % chars})
+
+    r = tts.synth(text, voice=voice, rate=rate, engine=engine,
+                  filename=str(arguments.get("filename") or ""))
+    if not r.get("ok"):
+        return "语音合成失败：%s" % (r.get("error") or "未知原因")
+
+    url = r.get("url") or ""
+    kind = "在线神经语音" if r.get("engine") == "edge" else "离线系统语音"
+    lines = [
+        "语音已生成：**%s**（%s · %s）"
+        % (r.get("name"), r.get("voice_name") or r.get("voice") or "", kind),
+        "约 %.0f 秒，文件 %.1f KB。" % (float(r.get("est_seconds") or 0),
+                                       float(r.get("bytes") or 0) / 1024.0),
+        "[▶ 播放](%s)" % url,
+        "[⬇ 下载](%s)" % url,
+    ]
+    for w in (r.get("warnings") or []):
+        lines.append("⚠️ %s" % w)
+    return "\n".join(lines)
+
+
 def _do_video_edit(arguments, ui_events, context):
     """视频处理：裁剪 / 拼接 / 配音 / 加字 / 字幕 / 抽音轨 / 图片成片 / 压缩。
 
