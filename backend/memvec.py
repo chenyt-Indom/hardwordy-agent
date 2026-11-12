@@ -55,7 +55,7 @@ MAX_ITEMS = 4000                 # 记忆条目上限
 TRANS_PASSAGE = 600              # 一段对话最多多少字
 TRANS_MAX = 2500                 # 最多收集多少段（按文件 mtime 从新到旧）
 TRANS_PER_FILE = 400             # 单个文件最多取多少段（防止一个巨型测试会话吃掉全部名额）
-TRANS_CANDIDATES = 14            # 预筛出来送去向量重排的候选数
+TRANS_CANDIDATES = 8             # 预筛出来送去向量重排的候选数（实测 14 条要 400ms+）
 TRANS_TOP = 2                    # 转录最多挤进结果几条
 
 _lock = threading.RLock()
