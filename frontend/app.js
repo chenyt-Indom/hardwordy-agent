@@ -1600,6 +1600,126 @@
     } catch (e) { /* 忽略 */ }
   }
 
+  // ---------- 朗读（TTS）----------
+  // 每条助手回答末尾一个 🔊：点了合成并播放。
+  //   · 音色 / 语速存 localStorage；右键 🔊 弹小菜单换（含离线兜底那个）
+  //   · 后端 /api/tts/synth 对长文要几十秒 → 按钮先 ⏳ 再 ⏹，有反馈不装死
+  //   · 按钮必须挂在 bubble.innerHTML 渲染**之后**，否则会被冲掉（见 renderFinal）
+  let _ttsAudio = null;
+  const TTS_VOICES = [
+    ["zh-CN-XiaoxiaoNeural", "晓晓 · 女 · 通用"],
+    ["zh-CN-YunxiNeural", "云希 · 男 · 年轻"],
+    ["zh-CN-YunjianNeural", "云健 · 男 · 解说"],
+    ["zh-CN-YunyangNeural", "云扬 · 男 · 播音"],
+    ["sapi:Microsoft Huihui Desktop", "慧慧 · 离线兜底"],
+  ];
+  function ttsVoice() {
+    try { return localStorage.getItem("tts_voice") || TTS_VOICES[0][0]; }
+    catch (e) { return TTS_VOICES[0][0]; }
+  }
+  function ttsRate() {
+    try { return parseInt(localStorage.getItem("tts_rate") || "0", 10) || 0; }
+    catch (e) { return 0; }
+  }
+  function attachSpeak(bubble, text) {
+    const raw = String(text == null ? "" : text).trim();
+    if (!bubble || raw.length < 2) return;
+    const old = bubble.querySelector(".tts-btn");
+    if (old) old.remove();
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "tts-btn";
+    b.textContent = "🔊";
+    b.title = "朗读这段（右键换音色 / 语速）";
+    b.onclick = (e) => { e.stopPropagation(); ttsPlay(raw, b); };
+    b.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); pickVoice(b); };
+    bubble.appendChild(b);
+  }
+  async function ttsPlay(text, btn) {
+    if (_ttsAudio) { try { _ttsAudio.pause(); } catch (e) { /* ignore */ } _ttsAudio = null; }
+    const orig = btn.onclick;
+    btn.textContent = "⏳";
+    btn.disabled = true;
+    try {
+      const r = await api("/api/tts/synth", {
+        method: "POST",
+        body: JSON.stringify({ text, voice: ttsVoice(), rate: ttsRate() }),
+      });
+      if (!r || !r.ok) throw new Error((r && r.error) || "合成失败");
+      const a = new Audio(r.url);
+      _ttsAudio = a;
+      btn.disabled = false;
+      btn.textContent = "⏹";
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        try { a.pause(); } catch (err) { /* ignore */ }
+        btn.textContent = "🔊";
+        btn.onclick = orig;
+      };
+      a.onended = () => { btn.textContent = "🔊"; btn.onclick = orig; };
+      a.onerror = () => {
+        btn.textContent = "🔊"; btn.onclick = orig;
+        showToast("播放失败", "warn");
+      };
+      await a.play();
+      if (r.warnings && r.warnings.length) showToast(r.warnings.join("；"), "warn");
+    } catch (e) {
+      btn.textContent = "🔊";
+      btn.disabled = false;
+      showToast("朗读失败：" + String((e && e.message) || e), "warn");
+    }
+  }
+  function pickVoice(anchor) {
+    document.querySelectorAll(".tts-menu").forEach((n) => n.remove());
+    const menu = document.createElement("div");
+    menu.className = "tts-menu";
+    const cur = ttsVoice();
+    TTS_VOICES.forEach((pair) => {
+      const id = pair[0], label = pair[1];
+      const it = document.createElement("button");
+      it.type = "button";
+      it.className = "tts-menu-item" + (id === cur ? " on" : "");
+      it.textContent = label;
+      it.onclick = () => {
+        try { localStorage.setItem("tts_voice", id); } catch (e) { /* ignore */ }
+        menu.remove();
+        showToast("朗读音色：" + label, "ok");
+      };
+      menu.appendChild(it);
+    });
+    const rateRow = document.createElement("div");
+    rateRow.className = "tts-menu-rate";
+    const tag = document.createElement("span");
+    tag.textContent = "语速";
+    rateRow.appendChild(tag);
+    [-15, 0, 15].forEach((v) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "tts-menu-item" + (v === ttsRate() ? " on" : "");
+      b.textContent = v > 0 ? "+" + v + "%" : (v === 0 ? "原速" : v + "%");
+      b.onclick = () => {
+        try { localStorage.setItem("tts_rate", String(v)); } catch (e) { /* ignore */ }
+        rateRow.querySelectorAll(".tts-menu-item").forEach((n) => n.classList.remove("on"));
+        b.classList.add("on");
+      };
+      rateRow.appendChild(b);
+    });
+    menu.appendChild(rateRow);
+    document.body.appendChild(menu);
+    const r = anchor.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 200)) + "px";
+    menu.style.top = Math.min(r.bottom + 6, window.innerHeight - 220) + "px";
+    setTimeout(() => {
+      const off = (ev) => {
+        if (!menu.contains(ev.target)) {
+          menu.remove();
+          document.removeEventListener("mousedown", off);
+        }
+      };
+      document.addEventListener("mousedown", off);
+    }, 0);
+  }
+
   function addMsg(role, text) {
     const el = document.createElement("div");
     el.className = "msg " + role;
