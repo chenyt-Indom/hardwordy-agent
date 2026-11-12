@@ -123,6 +123,10 @@ class HiveClient:
         # @hd 执行进度帧的回调。和 on_message 分开：
         # 进度帧是**过程数据**，不落盘、不进 seq，只用于界面实时刷新。
         self.on_stream: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        self.on_file: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        # 附件分片缓冲：fid -> {total, parts{idx: bytes}, meta}
+        # 一个 20MB 文件约 54 片（384KB/片），收齐才落盘 —— 免得半截文件被当成完整文件
+        self._file_buf: Dict[str, Dict[str, Any]] = {}
         self.on_cancel: Optional[Callable[[str, Dict[str, Any]], None]] = None
         self._lock = threading.RLock()
 
