@@ -84,17 +84,43 @@ def _char_cov(query: str, text: str) -> float:
     return sum(1 for c in qc if c in tc) / float(len(qc))
 
 
-def _coverage(query: str, text: str) -> float:
-    """综合覆盖率：字级覆盖为主，2-gram 覆盖为辅，取较大值。"""
+def _cov_parts(query: str, text: str):
+    """返回 (字级覆盖, 2-gram 覆盖)。
+
+    门槛用两者**较大值**（只要一种说得通就收），
+    排序用加权（2-gram 更能区分「后端」和「前端」这类近义边界）。
+    """
     q = (query or "").strip()
     if not q:
-        return 0.0
-    best = _char_cov(q, text)
+        return 0.0, 0.0
+    c = _char_cov(q, text)
     qt = set(memory._tokenize(q))
+    b = 0.0
     if qt:
         it = set(memory._tokenize(text))
-        best = max(best, len(qt & it) / float(len(qt)))
-    return best
+        b = len(qt & it) / float(len(qt))
+    return c, b
+
+
+def _coverage(query: str, text: str) -> float:
+    """综合覆盖率（用于门槛）：取字级与 2-gram 的较大值。"""
+    c, b = _cov_parts(query, text)
+    return max(c, b)
+
+
+def _cov_rank(query: str, text: str, pre=None) -> float:
+    """排序用的覆盖率：字级 0.6 + 2-gram 0.4。
+
+    实测动机：查「我的项目用什么后端框架」时，纯字级覆盖对
+    「前端框架：原生JS」和「后端框架：FastAPI」都算 0.67（打平），
+    2-gram 才能分出 0.2 vs 0.3 —— 加权后后端那条排前面。
+    """
+    if pre is not None:
+        c = sum(1 for ch in pre[0] if ch in pre[2]) / float(max(1, len(pre[0])))
+        b = (len(pre[1] & pre[3]) / float(len(pre[1]))) if pre[1] else 0.0
+        return 0.6 * c + 0.4 * b
+    c, b = _cov_parts(query, text)
+    return 0.6 * c + 0.4 * b
 
 
 # =====================================================================
