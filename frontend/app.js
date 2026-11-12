@@ -9267,6 +9267,165 @@
       if (!on) stopMid = "";
     }
 
+    // ---------------------------------------------------------- 底部工具条
+    // ★ 2026-11-13 用户反馈「跟随视角这些按钮好像也没了」。
+    //   单人模式输入框下面那一排（上下文环 / 采样 / 跟随最新 / 跟随视角）群聊里
+    //   一个都没有。按钮已经补进 HTML，这里让它们**真的生效**，不是摆设：
+    //   ① 跟随最新 → 接管 hiveMsgs 的滚动（做法和单人模式完全一致）
+    //   ② 跟随视角 → 把正在跑的实时卡片浮到视口左上角
+    //   ③ 上下文环 → 按群聊消息算占用
+    //   采样按钮走 onclick="__showSampling()"，和单人模式共用一个面板，无需额外代码。
+    let hvLastMsgs = [];        // 最近一次渲染的群消息（上下文环要用）
+
+    // ① 跟随最新
+    let hvFreeView = false, hvKeepTop = 0;
+    function hvSyncFree() {
+      const b = el("hvFreeViewBtn");
+      if (!b) return;
+      b.classList.toggle("fv-on", hvFreeView);
+      b.textContent = hvFreeView ? "📌 自由查看中" : "⬇ 跟随最新";
+      b.title = hvFreeView
+        ? "已暂停自动滚动 —— 可以停在任意位置慢慢看。点一下恢复跟随最新"
+        : "AI 有新内容时自动滚到最新。点一下暂停，就能停在某一步慢慢看";
+    }
+    (function bindHvFree() {
+      const box = el("hiveMsgs");
+      const b = el("hvFreeViewBtn");
+      if (!box) return;
+      // 和单人模式同一招：直接接管 scrollTop 的写入。
+      // 群聊里有 4 处 `box.scrollTop = box.scrollHeight`，逐个改容易漏，
+      // 拦截写入能一次全兜住（自由查看期间一律写回用户停留的位置）。
+      const _d = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
+      if (_d && _d.set) {
+        Object.defineProperty(box, "scrollTop", {
+          configurable: true,
+          get() { return _d.get.call(this); },
+          set(v) {
+            if (hvFreeView) {
+              const max = Math.max(0, box.scrollHeight - box.clientHeight);
+              _d.set.call(this, Math.min(hvKeepTop, max));
+              return;
+            }
+            _d.set.call(this, v);
+          },
+        });
+      }
+      if (b) {
+        b.onclick = () => {
+          hvFreeView = !hvFreeView;
+          if (hvFreeView) hvKeepTop = box.scrollTop;
+          hvSyncFree();
+          if (!hvFreeView) box.scrollTop = box.scrollHeight;
+        };
+      }
+      // 用户自己往上滚 → 自动进入自由查看，否则刚滚上去就被拽回底部
+      box.addEventListener("scroll", () => {
+        const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+        if (!hvFreeView && gap > 60) { hvFreeView = true; hvSyncFree(); }
+        if (hvFreeView) hvKeepTop = box.scrollTop;
+      }, { passive: true });
+      hvSyncFree();
+    })();
+
+    // ② 跟随视角：正在跑的实时卡片浮到视口左上角
+    //    和单人模式共用同一个偏好（localStorage.think_follow），
+    //    这样两种模式里选一次，切过去还是同一个行为。
+    let hvThinkFollow = localStorage.getItem("think_follow") !== "0";
+    function hvSyncThink() {
+      const b = el("hvThinkFollowBtn");
+      if (!b) return;
+      b.classList.toggle("tf-on", hvThinkFollow);
+      b.textContent = hvThinkFollow ? "🧠 跟随视角" : "📍 回到原位";
+      b.setAttribute("aria-pressed", hvThinkFollow ? "true" : "false");
+      b.title = hvThinkFollow
+        ? "当前：跟随视角 —— 思考框固定在视口左上角，滚到哪都看得到。点一下改为「回到原位」"
+        : "当前：回到原位 —— 思考框待在消息流原来的位置。点一下改为「跟随视角」";
+    }
+    // 把某张实时卡片按当前偏好摆好（.think-dock 的 fixed 样式与单人模式共用）
+    function hvDock(node) {
+      if (!node || !node.isConnected) return;
+      if (!hvThinkFollow) {
+        if (node.classList.contains("think-dock")) {
+          node.classList.remove("think-dock");
+          node.style.left = node.style.top = node.style.width = "";
+          const box = el("hiveMsgs");
+          if (box) box.appendChild(node);
+        }
+        return;
+      }
+      if (!node.classList.contains("think-dock")) {
+        node.classList.add("think-dock");
+        document.body.appendChild(node);
+      }
+      try { placeThinkDock(node); } catch (e) { /* 顶层函数不可用时忽略 */ }
+    }
+    (function bindHvThink() {
+      const b = el("hvThinkFollowBtn");
+      if (b) {
+        b.onclick = () => {
+          hvThinkFollow = !hvThinkFollow;
+          try { localStorage.setItem("think_follow", hvThinkFollow ? "1" : "0"); } catch (e) { /* 隐私模式 */ }
+          hvSyncThink();
+          // 已存在的实时卡片立刻跟着动
+          Object.keys(hdCards).forEach((k) => hvDock(hdCards[k] && hdCards[k].node));
+          if (typeof showToast === "function") {
+            showToast(hvThinkFollow ? "跟随视角：思考框固定在视口左上角" : "回到原位：思考框已放回消息流", "");
+          }
+        };
+      }
+      hvSyncThink();
+    })();
+    window.addEventListener("resize", () => {
+      document.querySelectorAll("body > .hd-live.think-dock").forEach((n) => {
+        try { placeThinkDock(n); } catch (e) { /* 忽略 */ }
+      });
+    });
+
+    // ③ 上下文环：按群聊消息估算占用（群聊的「上下文」= 最近这些消息）
+    (function hvCtx() {
+      const btn = el("hvCtxRing"), fg = el("hvCtxRingFg"), txt = el("hvCtxRingTxt");
+      if (!btn || !fg || !txt) return;
+      const C = 2 * Math.PI * 15.5;
+      let busy = false, lastN = -1;
+      const colorOf = (r) => {
+        const g = [34, 197, 94], o = [245, 158, 11], rd = [239, 68, 68];
+        const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+        const c = r <= 0.7 ? mix(g, o, Math.max(0, r) / 0.7)
+                           : mix(o, rd, Math.min(1, (r - 0.7) / 0.3));
+        return "rgb(" + c.join(",") + ")";
+      };
+      const kk = (n) => (Number(n) >= 10000 ? (Number(n) / 10000).toFixed(1) + "万" : String(Number(n) || 0));
+      async function refresh(force) {
+        const msgs = hvLastMsgs.map((m) => ({
+          role: (m.from === myId) ? "user" : "assistant",
+          content: String(m.text || ""),
+        }));
+        if (busy) return;
+        if (!force && msgs.length === lastN) return;
+        busy = true;
+        try {
+          const res = await fetch("/api/context/usage", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ messages: msgs, session: "" }),
+          });
+          const d = await res.json();
+          if (!d || !d.ok) return;
+          lastN = msgs.length;
+          const r = Math.max(0, Math.min(1, Number(d.ratio) || 0));
+          fg.style.strokeDashoffset = String(C * (1 - r));
+          fg.style.stroke = colorOf(r);
+          txt.textContent = r >= 0.995 ? "满" : Math.round(r * 100) + "%";
+          txt.style.color = r >= 0.85 ? colorOf(r) : "#9a9aa2";
+          btn.title = "群聊上下文占用 " + (r * 100).toFixed(1) + "%\n"
+            + "已用 " + kk(d.used) + " / " + kk(d.limit) + " token\n"
+            + "· 按群里的 " + msgs.length + " 条消息估算";
+        } catch (e) { /* 后端忙时忽略，下次轮询再来 */ }
+        finally { busy = false; }
+      }
+      setInterval(() => refresh(false), 3000);
+      setTimeout(() => refresh(true), 1200);
+    })();
+
     const stopEl = el("hiveStopBtn");
     if (stopEl) {
       stopEl.addEventListener("click", () => {
