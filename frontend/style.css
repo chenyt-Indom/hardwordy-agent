@@ -2336,33 +2336,6 @@ body.topbar-collapsed .top-bar.tools-bar { padding: 4px 16px 8px; }
 }
 .sched-float[hidden] { display: none; }
 
-/* 🎼 音乐工坊（2026-11-12）—— 复用 .sched-float 的浮层外观，这里只加内部排版 */
-.mu-float { width: 434px; max-height: min(78vh, 700px); }
-.mu-body { padding: 10px 12px 12px; overflow-y: auto; }
-.mu-form { display: flex; flex-direction: column; gap: 7px; margin-bottom: 9px; }
-.mu-row { display: flex; gap: 6px; align-items: center; }
-.mu-row > select { flex: 1; min-width: 0; }
-.mu-row > input[type="number"] { width: 62px; min-width: 0; }
-.mu-wide { flex: 1; min-width: 0; }
-.mu-ck {
-  display: flex; align-items: center; gap: 4px;
-  font-size: 12px; white-space: nowrap; cursor: pointer;
-}
-.mu-status-row { justify-content: space-between; }
-.mu-status { font-size: 11px; opacity: .62; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.mu-list .mu-item {
-  display: flex; align-items: center; gap: 6px;
-  padding: 7px 4px; border-bottom: 1px solid var(--border);
-}
-.mu-list .mu-item:last-child { border-bottom: 0; }
-.mu-item .mu-title {
-  flex: 1; min-width: 0; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; font-size: 12px;
-}
-.mu-item .mu-meta { font-size: 10px; opacity: .55; white-space: nowrap; }
-.mu-item .mu-remix { font-size: 11px; max-width: 96px; flex: none; }
-.mu-item .mu-btn { flex: none; padding: 2px 6px; font-size: 11px; cursor: pointer; }
-.mu-empty { font-size: 12px; opacity: .58; padding: 8px 2px; line-height: 1.65; }
 .sched-float-head {
   display: flex;
   align-items: center;
