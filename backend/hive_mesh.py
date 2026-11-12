@@ -512,8 +512,15 @@ class MeshNode:
             if not peer.uid:
                 peer.uid = str(obj.get("uid") or "")
                 peer.name = str(obj.get("name") or "")
+                peer.dev = str(obj.get("dev") or "")
                 peer.ver = int(obj.get("ver") or 0)
                 peer.port = int(obj.get("port") or 0)
+            if peer.uid and peer.uid == self.uid and peer.dev and peer.dev != self.dev:
+                self.uid_conflict = {
+                    "uid": peer.uid, "dev": peer.dev, "my_dev": self.dev,
+                    "addr": "%s:%s" % peer.addr, "name": peer.name,
+                    "ts": time.time(),
+                }
             for k in (obj.get("known") or []):
                 if isinstance(k, dict) and k.get("uid"):
                     self._learn(k, gid)
