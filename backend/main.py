@@ -37,7 +37,7 @@ from . import (config, ollama_client, deepseek_client, cloud_image, image_models
                selfdev, scheduler, perf, model_manager, selftest, memory, kb,
                file_tools, video, web_tools,
                t2i, tools, voice, sessions, image_library, doclib, docx_write, tts,
-               workspace, actlog, avatar)
+               workspace, actlog)
 
 app = FastAPI(title="hardwordy", version="1.0.0")
 
@@ -9748,57 +9748,6 @@ def library_delete(iid: str):
 
 # ⚠️ 和 TTS 一样，这些**必须是模块顶层路由**。用 insert_after 插在函数体里
 #    会被自动缩进，装饰器在函数内执行 → 路由一个都不注册（导入不报错，全 404）。
-@app.get("/api/avatar/info")
-def avatar_info():
-    """当前形象、嘴部矩形、存盘目录。前端启动时调它。"""
-    return avatar.info()
-
-
-@app.get("/api/avatar/raw")
-def avatar_raw():
-    """形象图字节流（<img> 直接加载，避免 base64 膨胀）。"""
-    p = os.path.join(avatar._dir(), "avatar.png")
-    if not os.path.isfile(p):
-        return Response(status_code=404)
-    with open(p, "rb") as f:
-        return Response(content=f.read(), media_type="image/png")
-
-
-@app.post("/api/avatar/save")
-def avatar_save(body: dict):
-    """保存形象。body: {b64} 或 {path}（本地图片绝对路径）或 {iid}（图库里的图）。"""
-    body = body or {}
-    if body.get("b64"):
-        return avatar.save_from_b64(str(body["b64"]), source=body.get("source") or "")
-    if body.get("iid"):
-        p = image_library.get_path(str(body["iid"]))
-        if not p:
-            return {"ok": False, "error": "图库里没有这张图"}
-        return avatar.save_from_path(p, source="library:" + str(body["iid"]))
-    if body.get("path"):
-        return avatar.save_from_path(str(body["path"]), source=body.get("source") or "")
-    return {"ok": False, "error": "需要 b64 / path / iid 之一"}
-
-
-@app.post("/api/avatar/mouth")
-def avatar_mouth(body: dict):
-    """校准嘴部位置。body: {x,y,w,h}，0~1 归一化，只传要改的键也行。"""
-    return {"ok": True, "mouth": avatar.set_mouth(body or {})}
-
-
-@app.post("/api/avatar/reset")
-def avatar_reset():
-    """清掉当前形象（回到"没有形象"的空状态）。"""
-    return avatar.reset()
-
-
-@app.post("/api/avatar/look")
-def avatar_look(body: dict):
-    """唤醒时"看看你在干嘛"：截本应用页面 → 视觉模型给一句口语描述。"""
-    body = body or {}
-    return avatar.look(question=str(body.get("question") or ""),
-                       ds_key=str(body.get("ds_key") or ""))
-
 
 _voice_clients: set = set()
 _voice_loop = None
