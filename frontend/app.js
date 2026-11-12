@@ -8863,7 +8863,7 @@
       if (!box) return;
       if (!groups.length) {
         box.innerHTML = '<p class="hint">还没有群。点「＋ 建群」开一个，'
-          + '或者用别人给的二维码「扫码入群」。</p>';
+          + '或者用群主给的 12 位密码「密码入群」。</p>';
         return;
       }
       box.innerHTML = groups.map((g) => {
