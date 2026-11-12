@@ -103,12 +103,25 @@ class Room:
     def __init__(self, gid: str):
         self.gid = gid
         self.clients: Set[WebSocketServerProtocol] = set()
-        self.members: Dict[str, Dict[str, Any]] = {}  # uid -> {name, joined}
+        # uid -> {uid, name, joined, online, last_seen, v, caps}
+        # ⚠️ 离线成员**不立刻删** —— 删了界面上就分不清「他离线了」
+        #    和「这个人从没进过群」，也没法显示「最后在线 3 分钟前」。
+        self.members: Dict[str, Dict[str, Any]] = {}
         self.seq = _load_seq(gid)
 
-    def join(self, ws: WebSocketServerProtocol, uid: str, name: str) -> None:
+    def join(self, ws: WebSocketServerProtocol, uid: str, name: str,
+             ver: int = 1, caps: Any = None) -> None:
         self.clients.add(ws)
-        self.members[uid] = {"uid": uid, "name": name, "joined": time.time()}
+        old = self.members.get(uid) or {}
+        self.members[uid] = {
+            "uid": uid,
+            "name": name,
+            "joined": old.get("joined") or time.time(),
+            "last_seen": time.time(),
+            "online": True,
+            "v": int(ver or 1),          # 对方客户端协议版本
+            "caps": list(caps or [])[:16],
+        }
 
     def leave(self, ws: Any, uid: str) -> None:
         self.clients.discard(ws)
@@ -116,7 +129,22 @@ class Room:
         # 还有别的连接挂着这个 uid 才保留（同一人可能开了两个窗口）
         still = any(CONN_UID.get(c) == uid for c in self.clients)
         if not still:
-            self.members.pop(uid, None)
+            m = self.members.get(uid)
+            if m:
+                m["online"] = False
+                m["last_seen"] = time.time()
+            # 超过 7 天的离线成员才真正移除，避免 members 无限增长
+            cutoff = time.time() - 7 * 86400
+            for k in [k for k, v in self.members.items()
+                      if not v.get("online")
+                      and (v.get("last_seen") or 0) < cutoff]:
+                self.members.pop(k, None)
+
+    def presence(self) -> List[Dict[str, Any]]:
+        """给界面用的成员快照：在线/离线 + 版本，按在线优先排序。"""
+        ms = list(self.members.values())
+        ms.sort(key=lambda x: (not x.get("online"), x.get("name") or ""))
+        return ms
 
     async def broadcast(self, payload: Dict[str, Any], skip: Any = None) -> None:
         if not self.clients:
