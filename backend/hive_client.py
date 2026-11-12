@@ -41,10 +41,28 @@ class HiveClient:
         self._seen: set = set()                  # 已落盘的 mid，用于去重
         self._members: List[Dict[str, Any]] = []
         self._last_error = ""
+        self._last_error_at = 0.0
         self._retry = 0
         self.on_message: Optional[Callable[[str, Dict[str, Any]], None]] = None
         self.on_status: Optional[Callable[[Dict[str, Any]], None]] = None
         self._lock = threading.RLock()
+
+        # ---- 跨版本 / 状态显示相关（2026-11-13）----
+        # state 是给界面直接用的四态，比「connected 布尔」信息量大：
+        #   idle      没配中继，本机模式
+        #   connecting  正在连（首次连接或重连中）
+        #   online    连上了，能收发
+        #   offline   曾经连上过、现在断了（会自动重试）
+        #   error     连不上，且拿到了明确原因（DNS/端口/协议不符…）
+        self._state = "idle"
+        self._proto = H.PROTO_VER          # 本机协议版本
+        self._relay_proto = 0              # 中继报告的协议版本（0=不知道）
+        self._relay_ver = ""               # 中继软件版本号，如 1.2
+        self._latency = 0.0                # 最近一次心跳 RTT（毫秒）
+        self._last_recv = 0.0              # 最后一次收到任何帧的时间
+        self._connected_at = 0.0           # 本次连上的时刻
+        self._last_ping = 0.0
+        self._ever_connected = False
 
     # ------------------------------------------------------------ 状态
 
