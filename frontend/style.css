@@ -3765,25 +3765,32 @@ html[data-theme="light"] select.pill-select option {
 .hive-leave-tip[hidden] { display: none; }
 
 /* ---------- 消息气泡 ---------- */
-.hive-msg { display: flex; flex-direction: column; gap: 3px; max-width: 76%; }
+/* 气泡尺寸/圆角/行高**照单人模式**（用户要求「完全统一甚至更好」）：
+   单人模式 .bubble 是 max-width min(76%,880px) / padding 13px 16px /
+   radius 14px / line-height 1.78，这里保持一致，群里看起来才像同一个应用。 */
+.hive-msg {
+  display: flex; flex-direction: column; gap: 3px;
+  max-width: min(76%, 880px); min-width: 0;
+}
 .hive-msg .hmsg-who { font-size: 11px; color: var(--muted); }
 .hive-msg .hmsg-bubble {
-  padding: 8px 12px; border-radius: 11px;
+  padding: 13px 16px; border-radius: 14px;
   background: var(--panel2); border: 1px solid var(--border);
-  font-size: 13.5px; line-height: 1.55;
+  font-size: 14px; line-height: 1.78;
   white-space: pre-wrap; word-break: break-word;
 }
-.hive-msg .hmsg-bubble pre {
-  margin: 6px 0 0; padding: 8px 10px; border-radius: 8px;
-  background: var(--think-bg); border: 1px solid var(--border);
-  overflow-x: auto; font-size: 12px; line-height: 1.5;
-}
+/* 别人的消息靠左、自己的靠右（同单人模式 user/bot 的区分） */
 .hive-msg.mine { align-self: flex-end; align-items: flex-end; }
 .hive-msg.mine .hmsg-bubble {
-  background: var(--accent); border-color: var(--accent); color: #fff;
+  background: linear-gradient(135deg, var(--accent), #6d7cf5);
+  border-color: transparent; color: #fff;
+  border-bottom-right-radius: 4px;
+  box-shadow: 0 3px 14px rgba(79, 139, 249, .22);
 }
 .hive-msg.ai .hmsg-bubble {
-  border-color: var(--accent); background: rgba(79, 139, 249, .10);
+  background: color-mix(in srgb, var(--panel2) 92%, transparent);
+  border-color: color-mix(in srgb, var(--border) 88%, transparent);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .12);
 }
 .hive-msg.sys { align-self: center; align-items: center; max-width: 92%; }
 .hive-msg.sys .hmsg-bubble {
@@ -3797,6 +3804,98 @@ html[data-theme="light"] select.pill-select option {
 }
 .hive-msg.unknown .hmsg-who { color: var(--meta-fg); }
 .hive-msg .hmsg-ts { font-size: 10.5px; color: var(--meta-fg); }
+
+/* ---------- 消息里的 Markdown 排版（复用单人模式那套观感） ---------- */
+.hive-msg .hmsg-bubble .md-p { margin: 7px 0; line-height: 1.8; }
+.hive-msg .hmsg-bubble .md-gap { height: 4px; }
+.hive-msg .hmsg-bubble .md-h { margin: 14px 0 7px; font-size: 14.5px; }
+.hive-msg .hmsg-bubble .md-h::before {
+  content: ""; display: inline-block; width: 3px; height: 12px; margin-right: 7px;
+  border-radius: 2px; background: var(--accent); vertical-align: -1px;
+}
+.hive-msg .hmsg-bubble .md-ul,
+.hive-msg .hmsg-bubble .md-ol { margin: 6px 0 6px 22px; padding: 0; }
+.hive-msg .hmsg-bubble .md-ul li,
+.hive-msg .hmsg-bubble .md-ol li { margin: 4px 0; line-height: 1.8; }
+.hive-msg .hmsg-bubble .md-ul li::marker { color: var(--accent); }
+.hive-msg .hmsg-bubble .md-quote {
+  background: var(--chip-bg); border-left: 3px solid var(--border);
+  margin: 6px 0; padding: 4px 10px; border-radius: 0 6px 6px 0;
+  color: var(--muted);
+}
+.hive-msg .hmsg-bubble .md-code {
+  color: var(--accent); background: var(--chip-bg);
+  border: 1px solid var(--chip-border); border-radius: 4px;
+  padding: 1px 5px; font-size: 12.5px;
+}
+.hive-msg .hmsg-bubble .md-hr {
+  border: none; border-top: 1px solid var(--border); margin: 10px 0;
+}
+.hive-msg .hmsg-bubble a { color: var(--accent); text-decoration: none; }
+.hive-msg .hmsg-bubble a:hover { text-decoration: underline; }
+.hive-msg.mine .hmsg-bubble a { color: #fff; text-decoration: underline; }
+/* 自己的气泡是深色底：把 Markdown 里的强调色改成白色系，否则看不清 */
+.hive-msg.mine .hmsg-bubble .md-h::before { background: #fff; }
+.hive-msg.mine .hmsg-bubble .md-code { color: #fff; background: rgba(255, 255, 255, .18); border-color: transparent; }
+.hive-msg.mine .hmsg-bubble .md-quote { color: rgba(255, 255, 255, .85); border-left-color: rgba(255, 255, 255, .5); }
+
+/* 代码块：和单人模式一样带语言标签和复制按钮（由 renderAnswerWithCode 生成） */
+.hive-msg .hmsg-bubble .code-card,
+.hive-msg .hmsg-bubble .code-group { margin: 8px 0; }
+
+/* ---------- 附件卡片 ---------- */
+.hive-files { display: flex; flex-direction: column; gap: 7px; margin-top: 7px; }
+.hive-files:first-child { margin-top: 0; }
+.hive-file-img {
+  display: block; max-width: 320px; max-height: 320px;
+  border-radius: 9px; border: 1px solid var(--border); cursor: zoom-in;
+}
+.hive-file-video { max-width: 340px; border-radius: 9px; border: 1px solid var(--border); }
+.hive-file-doc {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 11px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--panel2);
+  text-decoration: none; color: var(--text); max-width: 340px;
+}
+.hive-file-doc:hover { background: var(--hover-bg); border-color: var(--accent); }
+.hive-file-doc .hf-ico { font-size: 20px; flex: none; }
+.hive-file-doc .hf-meta { min-width: 0; }
+.hive-file-doc .hf-name {
+  font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hive-file-doc .hf-size { font-size: 10.5px; color: var(--meta-fg); }
+.hive-file-doc .hf-dl { margin-left: auto; flex: none; font-size: 12px; color: var(--accent); }
+.hive-file-wait {
+  font-size: 11.5px; color: var(--muted);
+  padding: 5px 9px; border: 1px dashed var(--border); border-radius: 8px;
+}
+
+/* ---------- 消息操作条（复制 / 引用 / 朗读） ---------- */
+.hive-acts {
+  display: flex; gap: 4px; margin-top: 2px;
+  opacity: 0; transition: opacity .14s;
+}
+.hive-msg:hover .hive-acts { opacity: 1; }
+.hive-acts button {
+  flex: none; width: auto; margin: 0;
+  padding: 2px 7px; font-size: 11px; border-radius: 6px;
+  background: none; border: 1px solid var(--border);
+  color: var(--muted); cursor: pointer;
+}
+.hive-acts button:hover { color: var(--text); border-color: var(--accent); }
+/* 消息内嵌的引用块：显示被引用的那条消息摘要 */
+.hive-ref {
+  border-left: 3px solid var(--accent); background: var(--chip-bg);
+  border-radius: 0 7px 7px 0; padding: 4px 9px; margin-bottom: 6px;
+  font-size: 11.5px; color: var(--muted);
+  max-height: 66px; overflow: hidden;
+}
+.hive-ref b { color: var(--text); font-weight: 600; }
+.hive-msg.mine .hive-ref {
+  background: rgba(255, 255, 255, .16); border-left-color: #fff;
+  color: rgba(255, 255, 255, .85);
+}
+.hive-msg.mine .hive-ref b { color: #fff; }
 
 /* ---------- @hd 思考过程与实时进度 ---------- */
 /* 思考过程：默认收起（可能几千字），点开看全文 */
