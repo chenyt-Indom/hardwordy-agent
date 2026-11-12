@@ -269,75 +269,95 @@ def touch():
 # =====================================================================
 #  历史会话：预筛 + 向量重排（不进大索引）
 # =====================================================================
-def _trans_items():
-    """把转录文件切成「一段对话」的候选，按文件新→旧收集，有上限。"""
-    with _lock:
-        dsig = _data_sig()
-        if _trans["sig"] == dsig:
-            return _trans["items"]
-
-    d = memory.TRANSCRIPT_DIR
+def _parse_trans_file(path: str, fn: str) -> list:
+    """把一个 .jsonl 切成「一段对话」的条目列表。"""
     out = []
-    if os.path.isdir(d):
-        files = []
-        for fn in os.listdir(d):
-            if not fn.endswith(".jsonl"):
-                continue
-            p = os.path.join(d, fn)
-            try:
-                files.append((os.path.getmtime(p), fn, p))
-            except Exception:
-                pass
-        files.sort(reverse=True)          # 新的优先
+    buf, buf_len = [], 0
 
-        for _, fn, path in files:
+    def _flush():
+        if not buf or len(out) >= TRANS_PER_FILE:
+            return
+        txt = "\n".join("%s：%s" % (r, c) for r, c in buf)[:TRANS_PASSAGE]
+        ch, tk = _text_sets(txt)
+        out.append({"key": "T:%s:%d" % (fn, len(out)),
+                    "level": "历史会话", "sid": fn[:-6],
+                    "section": fn[:-6], "text": txt, "source": "transcript",
+                    "_chars": ch, "_tok": tk})
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                role = o.get("role")
+                if role == "sep":
+                    _flush()
+                    buf, buf_len = [], 0
+                    continue
+                if role not in ("user", "assistant"):
+                    continue
+                c = str(o.get("content") or "").strip()
+                if not c:
+                    continue
+                buf.append(("用户" if role == "user" else "助手", c[:400]))
+                buf_len += len(c)
+                if buf_len >= TRANS_PASSAGE:
+                    _flush()
+                    buf, buf_len = [], 0
+        _flush()
+    except Exception as e:
+        _LOG.warning("读转录失败（%s）：%s", fn, e)
+    return out
+
+
+def _trans_items():
+    """把转录文件切成「一段对话」的候选，按文件新→旧收集，有上限。
+
+    ⚠️ **按文件增量缓存**：转录每轮对话都会追加，如果每次都重扫全部 19.6MB，
+    每次 search_memory 都要 1 秒。这里按 (mtime, size) 判断哪个文件变了，
+    只重解析变了的那个，其余复用上次结果。
+    """
+    d = memory.TRANSCRIPT_DIR
+    if not os.path.isdir(d):
+        return []
+    files = []
+    for fn in os.listdir(d):
+        if not fn.endswith(".jsonl"):
+            continue
+        p = os.path.join(d, fn)
+        try:
+            st = os.stat(p)
+            files.append((st.st_mtime, fn, p, st.st_size))
+        except Exception:
+            pass
+    files.sort(reverse=True)          # 新的优先
+
+    with _lock:
+        cache = dict(_trans.get("files") or {})
+
+    new_cache, out = {}, []
+    for mt, fn, path, size in files:
+        if len(out) >= TRANS_MAX:
+            break
+        stamp = (int(mt), size)
+        got = cache.get(fn)
+        if got and got[0] == stamp:
+            items = got[1]
+        else:
+            items = _parse_trans_file(path, fn)
+        new_cache[fn] = (stamp, items)
+        for it in items:
             if len(out) >= TRANS_MAX:
                 break
-            taken = 0
-            buf, buf_len = [], 0
-
-            def _flush():
-                if not buf or taken >= TRANS_PER_FILE:
-                    return
-                txt = "\n".join("%s：%s" % (r, c) for r, c in buf)[:TRANS_PASSAGE]
-                ch, tk = _text_sets(txt)
-                out.append({"key": "T:" + fn + ":" + str(len(out)),
-                            "level": "历史会话", "sid": fn[:-6],
-                            "section": fn[:-6], "text": txt, "source": "transcript",
-                            "_chars": ch, "_tok": tk})
-
-            try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            o = json.loads(line)
-                        except Exception:
-                            continue
-                        role = o.get("role")
-                        if role == "sep":
-                            _flush()
-                            buf, buf_len = [], 0
-                            continue
-                        if role not in ("user", "assistant"):
-                            continue
-                        c = str(o.get("content") or "").strip()
-                        if not c:
-                            continue
-                        buf.append(("用户" if role == "user" else "助手", c[:400]))
-                        buf_len += len(c)
-                        if buf_len >= TRANS_PASSAGE:
-                            _flush()
-                            buf, buf_len = [], 0
-                            taken += 1
-                    _flush()
-            except Exception as e:
-                _LOG.warning("读转录失败（%s）：%s", fn, e)
+            out.append(it)
 
     with _lock:
-        _trans.update({"sig": dsig, "items": out})
+        _trans.update({"files": new_cache, "items": out})
     return out
 
 
