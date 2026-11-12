@@ -9444,6 +9444,10 @@
         let d = null;
         try { d = JSON.parse(ev.data); } catch (e) { return; }
         if (d.type === "hello") { paintStatus(d); return; }
+        if (d.type === "hd_stream" && d.gid === curGid && d.frame) {
+          hdStream(d.frame);
+          return;
+        }
         if (d.type === "msg" && d.gid === curGid && d.msg) {
           const s = d.msg.seq || 0;
           // 去重：seq 比当前小的说明已经显示过；-1 是本地待发，允许显示
