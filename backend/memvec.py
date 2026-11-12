@@ -452,9 +452,12 @@ def search(query: str, sid: str = "", top_k: int = 5,
         seen.add(k)
         res.append(h)
 
-    if with_transcripts and len(res) < top_k:
+    if with_transcripts:
+        # 始终查转录：原来只在「记忆结果不够 top_k」时才查，
+        # 实测记忆里几条噪声就把名额占满，用户问「我说过什么关于PPT的事」
+        # 永远看不到真正的 PPT 对话。现在两边都查，按分数统一排序。
         try:
-            for h in _search_transcripts(q, top_k=min(TRANS_TOP, top_k - len(res))):
+            for h in _search_transcripts(q, top_k=TRANS_TOP):
                 k = h["content"][:80]
                 if k in seen:
                     continue
@@ -463,6 +466,7 @@ def search(query: str, sid: str = "", top_k: int = 5,
         except Exception as e:
             _LOG.warning("历史会话检索失败：%s", e)
 
+    res.sort(key=lambda x: x["score"], reverse=True)
     return res[:top_k]
 
 
