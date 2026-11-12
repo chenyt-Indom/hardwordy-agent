@@ -33,18 +33,37 @@ _LOG = logging.getLogger("uvicorn.error")
 # 模型目录：data/models/embed/<模型名>/
 _MODEL_DIR = config.data("data", "models", "embed")
 
-# Ollama 候选模型，**中文场景优先**：
-#   bge-m3 中文最强（1.2GB）；nomic-embed-text 体积适中（274MB）中英都不差
-OLLAMA_CANDIDATES = [
-    "bge-m3",
-    "nomic-embed-text",
-    "mxbai-embed-large",
-    "qwen3-embedding:0.6b",
-    "snowflake-arctic-embed2",
+# 后端候选，**按优先级从上到下**尝试。
+#
+# ⚠️ 中文专用模型必须排在前面，这是有实测依据的，不是拍脑袋：
+#    nomic-embed-text 对中文几乎没有区分度 —— 查询「入团需要什么条件」时，
+#    完全无关的「今天天气晴朗」相似度 0.708，反而**高于**真正相关的
+#    「入团申请人需要年满十四周岁」0.664，相关/无关差距是 -0.007。
+#    也就是说它给中文排序等于随机。中文知识库用它会让召回率不升反降，
+#    所以只能放在最后给英文库兜底。
+BACKENDS = [
+    ("ollama", "bge-m3"),             # 中文最强（1.2GB）
+    ("onnx", "bge-base-zh-v1.5"),     # 中文专用（约 400MB）
+    ("onnx", "bge-small-zh-v1.5"),    # 中文专用，95MB，速度精度平衡最好
+    ("ollama", "mxbai-embed-large"),  # 英文强
+    ("ollama", "nomic-embed-text"),   # 仅英文兜底（中文实测无效）
 ]
 
-# ONNX 候选（目录名），中文专用小模型
-ONNX_CANDIDATES = ["bge-small-zh-v1.5", "bge-base-zh-v1.5"]
+ONNX_CANDIDATES = [c for b, c in BACKENDS if b == "onnx"]
+
+
+def _match_model(names, cand: str) -> str:
+    """在已装模型里找 cand（允许 `cand:tag` 形式），返回完整模型名。"""
+    if not names:
+        return ""
+    base = cand.split(":")[0]
+    for n in names:
+        if n == cand:
+            return n
+    for n in names:
+        if n.split(":")[0] == base:
+            return n
+    return ""
 
 # bge 中文系列做**检索**时建议给查询加这个指令前缀，实测能提升召回。
 # 只加在 query 上，文档侧不加。
