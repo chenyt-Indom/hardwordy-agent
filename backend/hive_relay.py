@@ -297,6 +297,7 @@ async def _process_request(connection: Any, request: Any) -> Any:
             return None          # 这是 WS 握手，交给 websockets
         body = json.dumps({
             "ok": True, "svc": "hive-relay", "ver": _RELAY_VER,
+            "proto": PROTO_VER,
             "rooms": len(ROOMS), "uptime": round(time.time() - _START_TS, 1),
             "ts": time.time(),
         }, ensure_ascii=False).encode("utf-8")
