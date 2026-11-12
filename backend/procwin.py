@@ -71,14 +71,28 @@ def install_nowin_patch():
 
     _orig_init = _sp.Popen.__init__
 
-    # 调用方若明确要下面这些，就不覆盖（它们和 CREATE_NO_WINDOW 语义冲突）
-    _KEEP = 0x00000010 | 0x00000008   # CREATE_NEW_CONSOLE | DETACHED_PROCESS
+    # 调用方若明确要「新控制台窗口」，尊重它 —— 那是真的要看得见的窗口。
+    # ⚠️ DETACHED_PROCESS 不在此列（2026-11-12 用户报「迭代时反复弹黑窗」）：
+    #    backend/selfdev.py 重启后端时用的是
+    #       DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
+    #    实测（本机 EnumWindows 前后对比）：
+    #       · 带 DETACHED_PROCESS               → 必然弹一个黑窗，
+    #         窗口类 CASCADIA_HOSTING_WINDOW_CLASS，即 Win11 默认终端接管；
+    #       · DETACHED | CREATE_NO_WINDOW       → 照样弹（这个组合压不住）；
+    #       · 去掉 DETACHED、只留 CREATE_NO_WINDOW → 窗口数为 0。
+    #    所以这里把 DETACHED_PROCESS 剥掉再补 CREATE_NO_WINDOW。
+    #    不影响「独立于父进程」的语义：CREATE_NO_WINDOW 本身就会给新进程
+    #    一个**自己的隐藏控制台**（不继承父进程的），父进程退出也不牵连它；
+    #    CREATE_BREAKAWAY_FROM_JOB 等其它标志一律原样保留。
+    _KEEP = 0x00000010   # CREATE_NEW_CONSOLE：调用方明确要窗口，不覆盖
+    _DETACHED = 0x00000008   # DETACHED_PROCESS：必须剥掉，否则必弹窗
 
     def _patched_init(self, *args, **kwargs):
         try:
             cf = int(kwargs.get("creationflags", 0) or 0)
             if not (cf & _KEEP):
-                kwargs["creationflags"] = cf | CREATE_NO_WINDOW
+                cf = (cf & ~_DETACHED) | CREATE_NO_WINDOW
+                kwargs["creationflags"] = cf
                 # 第二道保险（2026-11-11 用户报「一叠叠 Terminal 窗口」）：
                 # Win11 若把默认终端设成 Windows Terminal，CREATE_NO_WINDOW
                 # 并不能完全阻止它接管控制台 —— 会拉起 OpenConsole.exe 开窗口，
