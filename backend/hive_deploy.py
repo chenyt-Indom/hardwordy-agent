@@ -149,7 +149,8 @@ def classify(err: str, url: str = "") -> Dict[str, Any]:
         # 本机回环不可能被防火墙挡：超时基本就是端口上没服务
         return {
             "code": "refused", "title": "本机这个端口没有服务在监听",
-            "reason": f"连 {host}:{host and ''}本机端口超时，通常说明中继没启动。",
+            "reason": f"连接 {host} 的端口超时。本机回环地址不会被防火墙挡，"
+                      "基本可以确定是那个端口上没有服务在监听。",
             "advice": ["确认中继进程在跑：ps aux | grep hive_relay",
                        "确认端口号填的和启动参数一致",
                        "先 curl http://127.0.0.1:端口/health 试试"],
