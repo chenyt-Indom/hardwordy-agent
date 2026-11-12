@@ -46,7 +46,11 @@ VEC_FILE = os.path.join(memory.MEM_DIR, "_vec.npy")
 META_FILE = os.path.join(memory.MEM_DIR, "_vec_meta.json")
 
 # 门槛：按实测校准（bge-small-zh：相关条目 vec 约 0.45~0.78，无关约 0.15~0.35）
-MIN_VEC = 0.42
+# 实测对比（12 条已知答案的查询 + 6 条无关查询）：
+#   0.42 → top3 12/12，无关查询误召 2/6
+#   0.46 → top3 12/12，无关查询误召 1/6   ← 取这个
+#   0.50 → top3 11/12（开始漏），误召 1/6
+MIN_VEC = 0.46
 MIN_COV = 0.50
 W_VEC, W_COV = 0.75, 0.25        # 只用于排序，不参与拦截
 
