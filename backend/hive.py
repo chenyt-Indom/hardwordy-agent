@@ -287,7 +287,7 @@ def create_group(name: str, owner_name: str = "") -> Dict[str, Any]:
             "seq": 1, "id": "m_" + secrets.token_hex(6),
             "from": "system", "name": "系统", "type": "system",
             "text": f"{me['name']} 创建了群「{g['name']}」",
-            "ts": now,
+            "ts": now, "ver": PROTO_VER,
         })
         g["seq"] = 1
         _write_json(_group_path(gid), g)
