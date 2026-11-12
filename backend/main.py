@@ -10354,6 +10354,41 @@ def hive_kick(gid: str, body: dict):
         return {"ok": False, "error": str(e)}
 
 
+@app.post("/api/hive/{gid}/leave")
+def hive_leave(gid: str, body: dict = None):
+    """成员主动退出群。
+
+    顺序很重要：**先广播、再退出**。因为广播要靠中继连接，
+    一旦先 stop 了客户端，消息就发不出去了，其他人看不到「XX 退出了群」。
+    """
+    try:
+        me = hive.profile()
+        notice = f"{me['name']} 退出了群"
+        # ① 趁着还连着中继，把提示广播给其他人（没连就跳过，本地照样记）
+        sent_remote = False
+        try:
+            cs = hive_client.client().status()
+            if cs.get("connected") and cs.get("gid") == gid:
+                r = hive_client.client().send(gid, notice, mtype="system")
+                sent_remote = bool(r.get("sent"))
+        except Exception:
+            pass
+        # ② 本地退出：移出成员表 + 记系统消息 + 打 left 标记
+        r = hive.leave_group(gid)
+        # ③ 断开中继，别让退出的人继续收消息
+        try:
+            cs = hive_client.client().status()
+            if cs.get("gid") == gid:
+                hive_client.client().stop()
+        except Exception:
+            pass
+        return {"ok": True, "sent_remote": sent_remote, **r}
+    except PermissionError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/api/hive/{gid}/send")
 def hive_send(gid: str, body: dict):
     """发消息。文本里带 @hd 时，异步唤醒模型干活。"""
