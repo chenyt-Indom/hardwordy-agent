@@ -10890,17 +10890,21 @@ def hive_hd_cancel(gid: str, body: dict = None):
 
 
 def _hive_post(gid: str, text: str, mtype: str, extra: dict | None = None) -> None:
-    """把一条消息发出去（连着中继就发中继，否则本地落盘 + 推前端）。"""
-    cli = hive_client.client()
+    """把一条消息发出去（本地落盘 + 泛洪给在线成员；没人在线时进补发队列）。
+
+    ⚠️ 2026-11-13 修：原来是「connected 就 send，否则只本地落盘」。
+    P2P 下 connected 表示「当前有 peer 在线」，于是**没人在线时**@hd 的回答
+    只写进了本机磁盘 —— 既没进 outbox 补发队列，也不会被 T_SYNC 补发，
+    其他成员上线后**永远看不到这条 AI 回复**。实测确认。
+    统一走 client.send：本地落盘 + 泛洪 + 无人在线时进 outbox，一个都不漏。
+    """
     try:
-        if cli.status().get("connected"):
-            cli.send(gid, text, mtype, extra)
+        r = hive_client.client().send(gid, text, mtype, extra)
+        if not r.get("ok"):
+            logger.warning("群消息发送失败: %s", r.get("error"))
             return
-    except Exception:
-        pass
-    try:
-        m = hive.send_message(gid, text, mtype, extra=extra)
-        _broadcast_hive({"type": "msg", "gid": gid, "msg": m})
+        if r.get("msg"):
+            _broadcast_hive({"type": "msg", "gid": gid, "msg": r["msg"]})
     except Exception:
         logger.warning("群消息落盘失败", exc_info=True)
 
