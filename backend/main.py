@@ -10373,6 +10373,32 @@ def hive_profile_renew():
 
 
 @app.post("/api/hive/create")
+def _hive_after_join(g: dict, target: str) -> dict:
+    """入群后的收尾：启动 P2P 网络、广播「XX 加入了群」、同步成员表。
+
+    target 为空表示只走局域网（靠 UDP 广播发现）；
+    否则是 hive3://IP:端口 形式的直连地址。
+    """
+    relay = {"configured": False, "connected": False, "error": "", "mode": "mesh"}
+    try:
+        cli = hive_client.client()
+        st = cli.start(target, g["gid"])
+        relay = {
+            "configured": bool(target), "url": target or "局域网",
+            "connected": bool(st.get("connected")),
+            "mode": "mesh", "error": st.get("error") or "",
+            "port": st.get("port") or 0, "lan_ip": st.get("lan_ip") or "",
+        }
+        if g.get("joined_new"):
+            me = hive.profile()
+            cli.send(g["gid"], f"{me['name']} 加入了群", mtype="system")
+            # 成员表同步出去 —— 否则别人只知道「有人加入」，名单里却没有这个人
+            cli.broadcast_members(g["gid"])
+    except Exception as e:
+        relay["error"] = f"{type(e).__name__}: {e}"
+    return {"ok": True, "group": g, "relay": relay}
+
+
 def hive_create(body: dict):
     """建群 —— 建群的人就是群主。
 
