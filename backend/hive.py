@@ -410,7 +410,9 @@ def create_group(name: str, owner_name: str = "") -> Dict[str, Any]:
         })
         g["seq"] = 1
         _write_json(_group_path(gid), g)
-    return _public_group(g)
+    out = _public_group(g)
+    out["password"] = format_password(pw)   # 只给建群的人看一次，之后可再查
+    return out
 
 
 def _public_group(g: Dict[str, Any]) -> Dict[str, Any]:
