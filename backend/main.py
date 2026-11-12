@@ -10404,7 +10404,8 @@ def hive_create(body: dict):
         }
     except Exception as e:
         relay_info["error"] = f"{type(e).__name__}: {e}"
-    return {"ok": True, "group": g, "relay": relay_info}
+    return {"ok": True, "group": g, "relay": relay_info,
+            "password": g.get("password") or ""}
 
 
 @app.get("/api/hive/groups")
