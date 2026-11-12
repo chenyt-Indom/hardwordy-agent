@@ -1840,7 +1840,16 @@ def api_selftest(run: int = 0, model: str = ""):
 
 @app.get("/api/health")
 def health():
-    return client.health()
+    d = client.health()
+    # ★ 2026-11-12：额外报告「本进程有没有自己的窗口」。
+    #   run.py 双击启动时靠这两个字段判断对面是不是一个无窗口后端：
+    #   是 → 接管（杀掉它、自己建窗口），否则用户看到的就是「双击没反应」。
+    #   背景见 backend/selfdev.py 的 _window_owner_alive()。
+    if isinstance(d, dict):
+        d = dict(d)
+        d["pid"] = os.getpid()
+        d["window"] = os.environ.get("MM_SELF_WINDOW") == "1"
+    return d
 
 
 @app.get("/api/config")

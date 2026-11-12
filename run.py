@@ -55,6 +55,10 @@ URL = f"http://{HOST}:{PORT}/"
 # 由外部启动器（桌面快捷方式用的「启动窗口.pyw」）拉起时置 1：
 # 此时本进程只负责后端服务，窗口交给启动器显示，避免弹出两个窗口。
 NO_WINDOW = os.environ.get("MM_NO_WINDOW") == "1"
+# ★ 2026-11-12：把「本进程会不会建窗口」写进环境，供 /api/health 报告。
+#   另一个实例（双击启动的那个）拿到 window=False 就知道对面是无窗口后端，
+#   于是可以接管，而不是傻乎乎地「已有实例 → 打开浏览器 → 退出」。
+os.environ["MM_SELF_WINDOW"] = "0" if NO_WINDOW else "1"
 
 
 def _serve(server: uvicorn.Server) -> None:
@@ -200,6 +204,19 @@ def _voice_watchdog(main_mod) -> None:
             fails += 1
 
 
+def _running_health(timeout: float = 2.0) -> dict | None:
+    """端口上那个实例的 /api/health；不是本应用（或连不上）返回 None。"""
+    import json
+    import urllib.request
+    try:
+        req = urllib.request.Request(URL.rstrip("/") + "/api/health")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8", "ignore"))
+        return d if isinstance(d, dict) and "online" in d else None
+    except Exception:
+        return None
+
+
 def _already_running() -> bool:
     """已经有实例在跑吗（端口上的 /api/health 能通且是本应用的应答）。
 
@@ -210,15 +227,7 @@ def _already_running() -> bool:
         · 它持有旧代码、旧线程（实测还锁着模型目录，导致"卸载模型"报拒绝访问）。
       所以：发现已在运行 → 本实例直接退出，把注意力交给已经跑着的那个。
     """
-    import json
-    import urllib.request
-    try:
-        req = urllib.request.Request(URL.rstrip("/") + "/api/health")
-        with urllib.request.urlopen(req, timeout=2) as r:
-            d = json.loads(r.read().decode("utf-8", "ignore"))
-        return isinstance(d, dict) and "online" in d
-    except Exception:
-        return False
+    return _running_health() is not None
 
 
 def _wait_port_free(timeout: float = 40.0) -> bool:
@@ -239,22 +248,51 @@ def _wait_port_free(timeout: float = 40.0) -> bool:
     return False
 
 
+def _kill_pid(pid: int) -> bool:
+    """结束指定进程（只在「接管无窗口后端」时用）。"""
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import subprocess
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           capture_output=True, timeout=10)
+        else:
+            os.kill(pid, 15)
+        return True
+    except Exception:
+        return False
+
+
 def main() -> None:
     config.load_config()
     if os.environ.get("MM_WAIT_PORT") == "1":
         _wait_port_free()
     # 自开发触发的重启：新进程起来时旧进程可能还占着端口，别把自己挡回去
-    if os.environ.get("MM_SKIP_ALREADY_CHECK") != "1" and _already_running():
-        print("[run] 已有实例在运行（%s），本实例退出。" % URL)
-        # ⚠️ 只 print 的话，从桌面快捷方式启动（没有控制台）会表现为
-        #   "双击了没反应"。这里把已经跑着的界面打开到默认浏览器，
-        #   用户至少能立刻看到窗口。
-        try:
-            import webbrowser
-            webbrowser.open(URL)
-        except Exception:
-            pass
-        return
+    if os.environ.get("MM_SKIP_ALREADY_CHECK") != "1":
+        _h = _running_health()
+        if _h is not None:
+            # ★★ 2026-11-12：对面是个**没有窗口**的后端（多半是自迭代重启留下的，
+            #   它继承了 MM_NO_WINDOW=1 却没人给它开窗口）→ 接管：结束它，自己开窗。
+            #   以前这里一律「已有实例 → 打开浏览器 → 退出」，于是桌面窗口永远不出现，
+            #   用户看到的就是「自迭代之后双击打不开」。
+            #   对面窗口是好的，或者本进程本来就该无窗口 → 保持原来的行为。
+            if (not NO_WINDOW) and (_h.get("window") is False):
+                _old = int(_h.get("pid") or 0)
+                print("[run] 检测到无窗口实例（PID %s），正在接管…" % _old)
+                _kill_pid(_old)
+                _wait_port_free(20.0)
+            else:
+                print("[run] 已有实例在运行（%s），本实例退出。" % URL)
+                # ⚠️ 只 print 的话，从桌面快捷方式启动（没有控制台）会表现为
+                #   "双击了没反应"。这里把已经跑着的界面打开到默认浏览器，
+                #   用户至少能立刻看到窗口。
+                try:
+                    import webbrowser
+                    webbrowser.open(URL)
+                except Exception:
+                    pass
+                return
     # log_level="info" → 打开 **access log**（每个请求一行，含状态码）。
     # 原来用 "warning"，后端一个字都不记请求 —— 排查"界面第一次打开某项是空的/
     # 灰的"这类问题时，完全看不到前端到底发没发请求、请求是成功还是失败，
