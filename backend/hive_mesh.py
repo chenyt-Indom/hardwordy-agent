@@ -603,6 +603,27 @@ class MeshNode:
                             "gid": k.get("gid", "")})
         return out
 
+    def _members_of(self, gid: str) -> List[Dict[str, Any]]:
+        """本机记的成员表（发给对方做同步）。群不存在就返回空。"""
+        try:
+            return H.members_snapshot(gid)
+        except Exception:
+            return []
+
+    def _merge_members(self, gid: str, arr: Any) -> None:
+        """收到别人的成员表就合并。变了就通知上层刷新界面。"""
+        if not isinstance(arr, list) or not arr:
+            return
+        try:
+            n = H.merge_members(gid, arr)
+        except Exception:
+            return
+        if n and self.on_members:
+            try:
+                self.on_members(gid)
+            except Exception:
+                pass
+
     def _learn(self, k: Dict[str, Any], gid: str) -> None:
         """记住一个人的地址；如果还不认识，主动连过去（peer exchange 的核心）。"""
         uid = str(k.get("uid") or "")
