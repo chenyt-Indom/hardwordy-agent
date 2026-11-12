@@ -9065,11 +9065,14 @@
     function msgNode(m) {
       const wrap = document.createElement("div");
       const type = m.type || "text";
-      let cls = "hive-msg";
-      if (type === "system") cls += " sys";
-      else if (type === "ai") cls += " ai";
-      else if (type === "unknown") cls += " unknown";
-      else if (m.from === myId && (!m.dev || !myDev || m.dev === myDev)) cls += " mine";
+      // ★ 2026-11-13 用户要求：「单人和群聊的版式必须完全一样」。
+      //   所以这里直接复用单人模式的 class（.msg.bot / .msg.user / .bubble），
+      //   不再另起一套 .hive-msg / .hmsg-bubble —— 两套样式迟早走样。
+      //   只有系统消息保留 .hive-msg.sys：单人模式没有系统消息，它必须居中。
+      const isMine = m.from === myId && (!m.dev || !myDev || m.dev === myDev);
+      let cls = (type === "system") ? "hive-msg sys"
+        : ("msg " + (isMine ? "user" : "bot"));
+      if (type === "unknown") cls += " unknown";
       wrap.className = cls;
       wrap.setAttribute("data-mid", m.id || m.mid || "");
       // 跨版本：对方用更新版本发来的类型，本机不认识 —— **照样显示原文**，
