@@ -9021,7 +9021,7 @@
       if (type === "system") cls += " sys";
       else if (type === "ai") cls += " ai";
       else if (type === "unknown") cls += " unknown";
-      else if (m.from === myId) cls += " mine";
+      else if (m.from === myId && (!m.dev || !myDev || m.dev === myDev)) cls += " mine";
       wrap.className = cls;
       wrap.setAttribute("data-mid", m.id || m.mid || "");
       // 跨版本：对方用更新版本发来的类型，本机不认识 —— **照样显示原文**，
