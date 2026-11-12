@@ -10601,6 +10601,10 @@ _hd_worker_lock = threading.Lock()
 _hd_worker_up = False
 _hd_cancel: dict = {}       # task_id -> threading.Event
 _hd_running: dict = {}      # gid -> {"task_id","asker","since"}
+# 排队中的任务：**必须单独登记**，否则「排在别人后面等着」的那个任务
+# 取消接口查不到它（_hd_running 只有正在跑的那个），用户点了取消会被告知
+# 「当前没有正在执行的任务」—— 但他明明看到自己在排队。
+_hd_waiting: dict = {}      # task_id -> {"task_id","asker","asker_id","gid","since"}
 _HD_PUSH_GAP = 0.15         # 进度节流：最快 0.15 秒推一帧（约 6~7 帧/秒）
 _HD_PUSH_CHARS = 400        # 或者攒够 400 字就推，长段落不会拖太久
 
