@@ -9521,7 +9521,6 @@
       const addr = el("p2pAddr");
       if (box) box.hidden = false;
       if (fn) fn.textContent = name || "准备中…";
-      if (qr) qr.removeAttribute("src");
       if (code) code.value = "正在开启监听…";
       if (addr) addr.textContent = "";
       try {
