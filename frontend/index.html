@@ -458,6 +458,11 @@
         <aside class="hive-side" id="hiveSide" hidden>
           <div class="hive-side-head">成员 <span id="hiveMemCount"></span></div>
           <div class="hive-mem-list" id="hiveMemList"></div>
+          <!-- 退出群聊：放在成员区底部，不占头部按钮位；群主不显示 -->
+          <div class="hive-side-foot" id="hiveSideFoot">
+            <button class="hive-leave" id="hiveLeaveBtn" hidden>退出群聊</button>
+            <span class="hive-leave-tip" id="hiveLeaveTip" hidden>群主不能退出</span>
+          </div>
         </aside>
       </div>
       <div class="hive-composer">
