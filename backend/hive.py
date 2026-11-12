@@ -571,6 +571,89 @@ def set_role(gid: str, user_id: str, role: str) -> Dict[str, Any]:
     return {"ok": True, "members": list(members.values())}
 
 
+# ---------------------------------------------------------------- 成员同步
+#
+# 用户报过：A 建群只看到自己、B 加群后连群主都不认识、踢人不生效。
+# 根因是成员表**只写在本机**，P2P 下从来没同步过 —— 界面上的「N 人」
+# 其实只是本地那一份，别人离线后就从名单里消失。
+# 做法：每次成员表变化就广播一份出去，收到后按下面的规则合并。
+
+_ROLE_RANK = {"owner": 3, "admin": 2, "member": 1}
+
+
+def members_snapshot(gid: str) -> List[Dict[str, Any]]:
+    """导出成员表，用于广播给别人。只带必要字段。"""
+    out = []
+    for uid, m in load_members(gid).items():
+        out.append({
+            "uid": uid,
+            "name": m.get("name") or "",
+            "role": m.get("role") or "member",
+            "joined": _as_float(m.get("joined"), 0.0),
+            "last_seen": _as_float(m.get("last_seen"), 0.0),
+        })
+    return out
+
+
+def merge_members(gid: str, incoming: List[Dict[str, Any]]) -> int:
+    """把别人报来的成员表合并进本地。返回发生变化的条数。
+
+    规则（重点是防篡改，不能谁说什么就信什么）：
+      · 被踢过的人（group.json 的 kicked 名单）**不复活**；
+      · 只有 group.json 里记的 owner 能是 owner，别人自称 owner 一律降级；
+      · 本地已有的角色**只升不降**（避免别人把我这边降权）；
+      · 名字以对方报的为准 —— 本人最清楚自己叫什么。
+    """
+    if not incoming:
+        return 0
+    changed = 0
+    with _LOCK:
+        g = load_group(gid)
+        if not g:
+            return 0
+        kicked = set(g.get("kicked") or [])
+        members = load_members(gid)
+        owner = str(g.get("owner") or "")
+        for it in incoming:
+            if not isinstance(it, dict):
+                continue
+            uid = str(it.get("uid") or it.get("user_id") or "")
+            if not uid or uid in kicked:
+                continue
+            role = str(it.get("role") or "member")
+            if role not in _ROLE_RANK:
+                role = "member"
+            # 只有登记的群主能是 owner，其余自称 owner 的一律降级
+            if role == "owner" and uid != owner:
+                role = "admin"
+            cur = members.get(uid)
+            if not cur:
+                members[uid] = {
+                    "user_id": uid,
+                    "name": str(it.get("name") or "")[:24] or "成员",
+                    "role": "owner" if uid == owner else role,
+                    "joined": _as_float(it.get("joined"), time.time()),
+                    "last_seen": _as_float(it.get("last_seen"), 0.0),
+                }
+                changed += 1
+                continue
+            # 已存在：角色只升不降，名字以对方为准
+            new_role = cur.get("role") or "member"
+            if uid == owner:
+                new_role = "owner"
+            elif _ROLE_RANK.get(role, 1) > _ROLE_RANK.get(new_role, 1):
+                new_role = role
+            name = str(it.get("name") or "").strip()[:24]
+            if new_role != cur.get("role") or (name and name != cur.get("name")):
+                cur["role"] = new_role
+                if name:
+                    cur["name"] = name
+                changed += 1
+        if changed:
+            _save_members(gid, members)
+    return changed
+
+
 # ---------------------------------------------------------------- 消息
 
 def _append_raw(gid: str, msg: Dict[str, Any]) -> None:
