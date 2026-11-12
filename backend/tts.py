@@ -186,7 +186,7 @@ def _edge_synth(text: str, voice: str, rate: str, volume: str, path: str,
         last = None
         for attempt in range(3):
             try:
-                _run_async(_edge_one(p, voice, rate, volume, fp))
+                _run_async(_edge_one(p, voice, rate, volume, fp, pitch))
                 if os.path.exists(fp) and os.path.getsize(fp) > 500:
                     break
                 raise RuntimeError("音频为空")
