@@ -695,10 +695,14 @@ def parse_hd(text: str) -> Optional[str]:
         if i < 0:
             break
         nxt = low[i + len(HD_TAG):i + len(HD_TAG) + 1]
+        prev = low[i - 1:i] if i > 0 else ""
         # 只有 **ASCII** 字母/数字/下划线才算「紧贴 @hd」（那是 @hdx / @hd2 这种误写）。
         # 中文紧跟是正常写法（「@hd帮我写」），必须唤醒 —— 注意 "帮".isalnum() 是 True，
         # 不额外限定 isascii() 的话中文用户永远唤不醒模型。
-        if not (nxt.isascii() and (nxt.isalnum() or nxt == "_")):
+        # 另外 @hd 前面紧贴 ASCII 字母数字的是邮箱（a@hd.com），也不算唤醒。
+        tail_ok = not (nxt.isascii() and (nxt.isalnum() or nxt == "_"))
+        head_ok = not (prev.isascii() and prev.isalnum())
+        if tail_ok and head_ok:
             idx = i
             break
         start = i + len(HD_TAG)
