@@ -250,6 +250,99 @@ def _ws_check(url: str, timeout: float) -> Tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
+def candidates(u: str) -> List[str]:
+    """从一个「随手填的地址」推出所有可能的可用地址，按可能性排序。
+
+    **为什么需要它**（2026-11-13 实际踩到）：
+    群主通常只知道一个 IP，并不知道自己的服务器上中继到底是哪种部署形态
+    —— 独立进程监听 8765？挂在 hardwordy 应用里走 /hive？nginx 反代到根路径？
+    让他猜是没道理的。更糟的是 `ws://1.2.3.4` 这种写法看着"填了"，
+    实际按 ws 默认端口连 80，而 80 通常被 nginx 301 到 https，
+    WebSocket 不跟随重定向，于是永远连不上。
+
+    所以：写得完整的（带端口或带路径）就照用户的来；只给了主机的，
+    把这三种常见形态都列出来，交给 probe_auto 逐个试。
+    """
+    s = (u or "").strip()
+    if not s:
+        return []
+
+    host = ""
+    port = ""
+    path = ""
+
+    m = re.match(r"^(wss?|https?)://([^/:]+)(?::(\d+))?(/.*)?$", s)
+    if m:
+        host = m.group(2)
+        port = m.group(3) or ""
+        path = (m.group(4) or "").strip("/")
+    else:
+        m2 = re.match(r"^([^/:]+)(?::(\d+))?(/.*)?$", s)
+        if not m2:
+            return [normalize_url(s)]
+        host = m2.group(1)
+        port = m2.group(2) or ""
+        path = (m2.group(3) or "").strip("/")
+
+    if port or path:
+        return [normalize_url(s)]          # 写全了，尊重用户
+
+    # 只给了主机：三种部署形态，按实测常见程度排
+    return [
+        f"wss://{host}/hive",     # 挂在应用里 / nginx 反代到 /hive（443，最稳）
+        f"ws://{host}:8765",      # 独立中继进程默认端口
+        f"wss://{host}",          # 直接反代到根路径
+    ]
+
+
+def probe_auto(raw: str, timeout: float = 4.0) -> Dict[str, Any]:
+    """先算出候选地址，逐个探测，返回第一个通的。
+
+    探测日志会**合并**：前端能看到「试了哪些地址、哪个成功」，
+    而不是只看到最后一个失败原因 —— 否则用户会以为"试的最后一个就是答案"。
+    """
+    cands = candidates(raw)
+    if not cands:
+        return probe(raw, timeout)
+    if len(cands) == 1:
+        return probe(cands[0], timeout)
+
+    head: List[Dict[str, Any]] = [{
+        "level": "info",
+        "text": f"「{raw}」没写端口/路径，自动尝试 {len(cands)} 种可能的地址",
+        "t": 0,
+    }]
+    first_fail: Optional[Dict[str, Any]] = None
+
+    for c in cands:
+        head.append({"level": "info", "text": f"→ 试 {c}", "t": 0})
+        r = probe(c, timeout=timeout)
+        if r.get("ok"):
+            r["steps"] = head + (r.get("steps") or [])
+            r["auto"] = True
+            r["tried"] = cands
+            r["steps"].append({
+                "level": "ok",
+                "text": f"选定 {c}（其余 {len(cands) - 1} 个不用试了）",
+                "t": 0,
+            })
+            return r
+        if first_fail is None:
+            first_fail = r
+
+    out = first_fail or {"ok": False, "url": cands[0], "health": None,
+                         "error": None, "latency_ms": 0}
+    out["steps"] = head + (out.get("steps") or [])
+    out["tried"] = cands
+    out["auto"] = True
+    out["steps"].append({
+        "level": "err",
+        "text": f"试过的 {len(cands)} 个地址都不通。第一个失败原因见上（其余类似）。",
+        "t": 0,
+    })
+    return out
+
+
 def probe(url: str, timeout: float = 6.0) -> Dict[str, Any]:
     """五层探测。每一步都记进 steps，前端拿去做滚动日志。"""
     steps: List[Dict[str, Any]] = []
