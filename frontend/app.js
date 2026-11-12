@@ -8724,9 +8724,13 @@
       Array.prototype.forEach.call(tabs.querySelectorAll(".mode-tab"), (b) => {
         b.classList.toggle("on", b.getAttribute("data-mode") === m);
       });
+      // ★ 2026-11-13 用户要求：「群聊模式左侧的工具栏，生成文库、图片库等等都没了」。
+      //   原来这里在群聊模式下把 6 个面板全藏了（p.hidden = isHive），
+      //   侧栏只剩「协作群」一块，看起来就像工具栏消失了。
+      //   现在两种模式左侧**完全一致**，群聊只是多一块「协作群」在最上面。
       SINGLE_PANELS.forEach((id) => {
         const p = el(id);
-        if (p) p.hidden = isHive;
+        if (p) p.hidden = false;
       });
       el("hivePanel").hidden = !isHive;
       el("hiveMain").hidden = !isHive;
