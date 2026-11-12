@@ -1783,7 +1783,7 @@
     el.innerHTML = `<div class="bubble"></div>`;
     // 助手的历史回答也走一遍链接渲染 —— 否则程序重启后恢复出来的对话里，
     // 之前给过的下载链接又变回不能点的纯文本了（实测踩到）。
-    if (role === "assistant") renderFinal(el.querySelector(".bubble"), text);
+    if (role === "assistant") renderFinal(el.querySelector(".bubble"), text, "", true);
     else el.querySelector(".bubble").textContent = text;
     messagesEl.appendChild(el);
     messagesEl.scrollTop = messagesEl.scrollHeight;
