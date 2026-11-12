@@ -10537,8 +10537,10 @@ def hive_hd_status(gid: str):
                               or me["user_id"] == g.get("owner"))
         if info:
             info["elapsed_ms"] = int((time.time() - (info.get("since") or 0)) * 1000)
+        waiting = [w for w in _hd_waiting.values() if w.get("gid") == gid]
         return {"ok": True, "running": bool(info), "task": info,
-                "queued": _hd_q.qsize(), "can_cancel": can}
+                "queued": _hd_q.qsize(), "waiting": waiting,
+                "can_cancel": can}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
