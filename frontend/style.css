@@ -3607,6 +3607,24 @@ html[data-theme="light"] select.pill-select option {
 /* 休眠：压暗 + 略降饱和，不真的闭眼（照片做不到） */
 .av-box.sleep .av-img { filter: brightness(.68) saturate(.75); }
 .av-bar { display: flex; gap: 4px; margin-top: 4px; }
+.av-bar button.on {
+  background: #2563eb;
+  color: #fff;
+}
+.av-say { width: 100%; margin-top: 4px; }
+.av-say input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(148, 163, 184, .45);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .92);
+  color: #1f2937;
+  font-size: 12px;
+  outline: none;
+}
+.av-say input:focus { border-color: #2563eb; }
 .av-bar button {
   width: 22px;
   height: 22px;
