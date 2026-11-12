@@ -10509,34 +10509,199 @@ def _hive_post(gid: str, text: str, mtype: str, extra: dict | None = None) -> No
         logger.warning("群消息落盘失败", exc_info=True)
 
 
+# ---------- @hd 执行队列与进度推送 ----------
+# 为什么要排队：一次 @hd 会占满显存跑几十秒。多人同时 @ 时并行跑会互相抢显存
+# （实测 Ollama 直接 cudaMalloc 失败），群里也会同时冒出好几个进度条，谁也看不清。
+# 串行 + 告诉每个人「你排第几个」反而更清楚。
+_hd_q: "queue.Queue" = queue.Queue()
+_hd_worker_lock = threading.Lock()
+_hd_worker_up = False
+_hd_cancel: dict = {}       # task_id -> threading.Event
+_hd_running: dict = {}      # gid -> {"task_id","asker","since"}
+_HD_PUSH_GAP = 0.15         # 进度节流：最快 0.15 秒推一帧（约 6~7 帧/秒）
+_HD_PUSH_CHARS = 400        # 或者攒够 400 字就推，长段落不会拖太久
+
+
+def _hd_emit(gid: str, mid: str, phase: str, delta: str = "",
+             task: dict | None = None, seq_in: int = 0) -> None:
+    """推一帧 @hd 执行进度。
+
+    两条路都要走：
+      · `_broadcast_hive` —— 本机前端立刻看到（不依赖中继，本机模式下也能看）；
+      · `send_stream` —— 通过中继广播给其他成员（没连中继时静默失败）。
+    """
+    frame = {"mid": mid, "phase": phase, "delta": delta,
+             "task": task or {}, "seq_in": seq_in, "ts": time.time()}
+    try:
+        _broadcast_hive({"type": "hd_stream", "gid": gid, "frame": frame})
+    except Exception:
+        pass
+    try:
+        hive_client.client().send_stream(gid, mid, phase, delta, task or {}, seq_in)
+    except Exception:
+        pass
+
+
+def _hd_start_worker() -> None:
+    """懒启动唯一的 @hd 执行线程（进程内只起一次）。"""
+    global _hd_worker_up
+    with _hd_worker_lock:
+        if _hd_worker_up:
+            return
+        _hd_worker_up = True
+
+    def loop():
+        while True:
+            job = _hd_q.get()
+            try:
+                _hive_run_model_now(*job)
+            except Exception:
+                logger.warning("@hd 任务异常", exc_info=True)
+            finally:
+                _hd_q.task_done()
+
+    threading.Thread(target=loop, daemon=True, name="hive-hd").start()
+
+
 def _hive_run_model(gid: str, instruction: str, body: dict) -> None:
-    """@hd 唤起的模型任务。
+    """@hd 唤起的模型任务 —— **入队**，由单个 worker 串行执行。
 
     指令来源就是 @ 模型的那个人（**不一定是群主**），
     所以这里不检查身份 —— 群里任何人都能唤醒，谁唤醒就以谁的指令为准。
     但「指令优先、上下文只作参考」这条由 build_hd_prompt 在提示词里钉死。
     """
+    _hd_start_worker()
     me = hive.profile()
     asker = me["name"]
+    mid = "hd_" + os.urandom(4).hex()
+    ahead = _hd_q.qsize() + (1 if _hd_running else 0)
+    # 入队就推一帧：让群里的人**立刻**知道「有人 @ 了模型、正在排队」，
+    # 而不是等轮到才有动静 —— 否则前面的人跑 40 秒，后面的人以为没反应。
+    _hd_emit(gid, mid, "queued",
+             task={"asker": asker, "ahead": ahead,
+                   "instruction": (instruction or "")[:120]})
+    _hd_q.put((gid, instruction, body or {}, mid, asker))
+
+
+def _hive_run_model_now(gid: str, instruction: str, body: dict,
+                        mid: str, asker: str) -> None:
+    """真正跑一次模型，全程流式推送思考和正文。
+
+    ⚠️ 用流式不是为了「好看」，是因为**思考过程要实时给全员看**：
+       非流式要等模型全部算完才拿到结果，中间几十秒群里一片死寂。
+    """
+    t0 = time.time()
+    ev = threading.Event()
+    _hd_cancel[mid] = ev
+    _hd_running[gid] = {"task_id": mid, "asker": asker, "since": t0}
+    thinking = ""
+    text = ""
+    model = ""
+    err = ""
+    cancelled = False
+    resp = None
     try:
-        _hive_post(gid, f"{asker} 唤醒了模型，正在处理…", "system")
         hist = hive.read_messages(gid, 0, 60)
         prompt = hive.build_hd_prompt(instruction, hist, asker)
         cfg = config.load_config() or {}
         model = cfg.get("default_model") or ""
         if not model:
             raise RuntimeError("没有配置默认模型（先在设置里选一个）")
+        # 「工作全过程」的起点：把这次任务的输入条件也播出去
+        # （注入了多少条历史、提示词多长），让人看得出模型是基于什么在干。
+        _hd_emit(gid, mid, "start",
+                 task={"asker": asker, "model": model, "hist": len(hist),
+                       "prompt_chars": len(prompt),
+                       "instruction": (instruction or "")[:120]})
         resp = client.chat([{"role": "user", "content": prompt}],
-                           model=model, stream=False,
-                           params={"temperature": 0.3, "max_tokens": 1600})
-        data = resp.json()
-        text = ((data.get("message") or {}).get("content") or "").strip()
-        if not text:
-            think = ((data.get("message") or {}).get("thinking") or "").strip()
-            raise RuntimeError("模型没有返回正文" + ("（只有思考内容）" if think else ""))
+                           model=model, stream=True,
+                           params={"temperature": 0.3, "max_tokens": 2400})
+        last_push = 0.0
+        seq_in = 0
+        pend_t = ""
+        pend_c = ""
+        for raw in resp.iter_lines(chunk_size=64, decode_unicode=False):
+            if ev.is_set():
+                cancelled = True
+                break
+            line = (raw.decode("utf-8", "ignore") if isinstance(raw, bytes)
+                    else str(raw)).strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            msg = obj.get("message") or {}
+            th = msg.get("thinking") or ""
+            ct = msg.get("content") or ""
+            if th:
+                thinking += th
+                pend_t += th
+            if ct:
+                text += ct
+                pend_c += ct
+            now = time.time()
+            if (now - last_push >= _HD_PUSH_GAP
+                    or len(pend_t) + len(pend_c) >= _HD_PUSH_CHARS):
+                base = {"asker": asker, "model": model}
+                if pend_t:
+                    seq_in += 1
+                    _hd_emit(gid, mid, "thinking", pend_t,
+                             {**base, "chars": len(thinking)}, seq_in)
+                    pend_t = ""
+                if pend_c:
+                    seq_in += 1
+                    _hd_emit(gid, mid, "content", pend_c,
+                             {**base, "chars": len(text)}, seq_in)
+                    pend_c = ""
+                last_push = now
+            if obj.get("done"):
+                break
+        # 收尾：把最后没推完的一小段推掉，别让界面卡在倒数第二句
+        if not cancelled:
+            base = {"asker": asker, "model": model}
+            if pend_t:
+                seq_in += 1
+                _hd_emit(gid, mid, "thinking", pend_t,
+                         {**base, "chars": len(thinking)}, seq_in)
+            if pend_c:
+                seq_in += 1
+                _hd_emit(gid, mid, "content", pend_c,
+                         {**base, "chars": len(text)}, seq_in)
     except Exception as e:
-        text = f"⚠️ 模型执行失败：{e}"
-    _hive_post(gid, text, "ai", {"by": asker, "model": cfg.get("default_model") or ""})
+        err = f"{type(e).__name__}: {e}" if not str(e) else str(e)
+    finally:
+        try:
+            if resp is not None:
+                resp.close()      # 关连接 = 告诉 Ollama 别再算了
+        except Exception:
+            pass
+
+    dur = int((time.time() - t0) * 1000)
+    # 落盘一条完整消息：**思考过程也要存**，这样后来进群 / 重开应用的人
+    # 回看历史时仍能看到当时的完整思考，而不是只剩一个结论。
+    if cancelled:
+        final = ((text.strip() + "\n\n（任务已被取消）").strip()
+                 if text.strip() else "（任务已被取消）")
+    elif err:
+        final = f"⚠️ 模型执行失败：{err}"
+    else:
+        final = text.strip() or "（模型没有返回正文）"
+    extra = {"by": asker, "model": model, "thinking": thinking,
+             "dur_ms": dur, "task_id": mid, "cancelled": cancelled,
+             "think_chars": len(thinking), "out_chars": len(text),
+             "error": err}
+    try:
+        _hive_post(gid, final, "ai", extra)
+    except Exception:
+        logger.warning("@hd 结果落盘失败", exc_info=True)
+    # 结束帧：前端据此把「进度卡片」替换成正式消息
+    _hd_emit(gid, mid, "done",
+             task={"dur_ms": dur, "cancelled": cancelled, "error": err,
+                   "think_chars": len(thinking), "out_chars": len(text)})
+    _hd_cancel.pop(mid, None)
+    _hd_running.pop(gid, None)
 
 
 @app.get("/api/hive/relay")
