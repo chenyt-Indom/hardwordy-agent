@@ -10376,6 +10376,19 @@ def hive_join(body: dict):
         host = (full.get("host") or "").strip()
         if host:
             st = hive_client.client().start(host, g["gid"])
+            # 连不上就自动重找一次：群主当初存的地址可能是错的
+            # （比如只存了 IP、没存成 https 的 /hive 路径）。
+            # 找到了就顺手写回群信息，下次直接用对的。
+            if not st.get("connected"):
+                try:
+                    pr = hive_deploy.probe_auto(host, timeout=3.0)
+                    good = pr.get("url") or ""
+                    if pr.get("ok") and good and good != host:
+                        host = good
+                        hive.set_relay(host, "", True)
+                        st = hive_client.client().start(host, g["gid"])
+                except Exception:
+                    pass
             relay = {"configured": True, "url": host,
                      "connected": bool(st.get("connected")),
                      "error": st.get("last_error") or ""}
