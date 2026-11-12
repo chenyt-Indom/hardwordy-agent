@@ -695,7 +695,10 @@ def parse_hd(text: str) -> Optional[str]:
         if i < 0:
             break
         nxt = low[i + len(HD_TAG):i + len(HD_TAG) + 1]
-        if not (nxt.isalnum() or nxt == "_"):
+        # 只有 **ASCII** 字母/数字/下划线才算「紧贴 @hd」（那是 @hdx / @hd2 这种误写）。
+        # 中文紧跟是正常写法（「@hd帮我写」），必须唤醒 —— 注意 "帮".isalnum() 是 True，
+        # 不额外限定 isascii() 的话中文用户永远唤不醒模型。
+        if not (nxt.isascii() and (nxt.isalnum() or nxt == "_")):
             idx = i
             break
         start = i + len(HD_TAG)
