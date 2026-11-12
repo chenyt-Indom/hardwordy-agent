@@ -874,12 +874,12 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
                     pos += d_b
                 else:
                     pos += 0.5
-    if "lead" in cfg["inst"]:
-        tracks["lead"] = melody
-    if "flute" in cfg["inst"]:
-        tracks["flute"] = melody
-    if "chip_lead" in cfg["inst"]:
-        tracks["chip_lead"] = melody
+    m_inst = _pick_melody_inst(cfg)
+    if m_inst in ("piano", "epiano", "organ", "pluck"):
+        # 这些乐器已经承担了和弦伴奏，旋律**叠加**上去
+        tracks[m_inst] = list(tracks.get(m_inst) or []) + melody
+    else:
+        tracks[m_inst] = melody
 
     # --- 人声 ---
     if vocals and melody:
