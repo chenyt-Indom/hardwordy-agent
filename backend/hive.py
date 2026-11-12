@@ -743,44 +743,6 @@ def password_candidates(pw: str) -> Dict[str, Any]:
             "local_hits": hits}
 
 
-def match_password(pw: str, beacons: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """用 12 位密码在局域网广播里找群 —— 「输密码就进群」的关键一步。
-
-    广播里只有 群号(gid) + 验证标签(vt) + 群名，**没有密钥**。
-    所以：密码 + gid → 派生密钥 → 算出 vt → 和广播里的 vt 比对。
-    对得上就说明这个密码属于这个群；整个过程密钥没有上过网络。
-
-    这样做的意义：别人只需要把 12 位密码口头/微信告诉你，
-    你在同一 WiFi 下输入就能找到群，不需要再传一串长长的口令。
-    """
-    import hmac as _hmac
-
-    pw = norm_password(pw)
-    hits: List[Dict[str, Any]] = []
-    seen = set()
-    for b in beacons or []:
-        gid = str(b.get("gid") or "")
-        vt = str(b.get("vt") or "")
-        if not gid or not vt or gid in seen:
-            continue
-        key = derive_key(pw, gid)
-        if not _hmac.compare_digest(verify_tag(key, gid), vt):
-            continue
-        seen.add(gid)
-        hits.append({
-            "gid": gid,
-            "name": str(b.get("gn") or "协作群"),
-            "vt": vt,
-            "local": False,
-            "host": str(b.get("host") or ""),
-            "port": int(b.get("port") or 0),
-            "peer": str(b.get("name") or ""),
-            "key": _key_b64(key),
-        })
-    return {"ok": True, "password": pw, "fmt": format_password(pw),
-            "lan_hits": hits}
-
-
 def leave_group(gid: str) -> Dict[str, Any]:
     """成员主动退出群。
 
