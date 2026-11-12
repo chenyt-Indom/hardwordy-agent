@@ -31,7 +31,7 @@ def stats(mid):
     fr = np.fft.rfftfreq(len(mono), 1.0 / sr)
     low = spec[(fr > 20) & (fr < 200)].sum() / max(1e-9, spec.sum())
     return dict(dur=round(n / sr, 2), pl=int(pl), pr=int(pr),
-                lr_db=round(20 * np.log10(max(1, pr) / max(1, pl)), 2),
+                lr_db=round(float(20 * np.log10(max(1, pr) / max(1, pl))), 2),
                 corr=round(float(np.corrcoef(L, R)[0, 1]), 3),
                 clip=int((np.abs(a) > 32000).sum()),
                 low=round(float(low) * 100, 1),
