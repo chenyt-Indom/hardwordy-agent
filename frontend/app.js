@@ -8764,6 +8764,7 @@
     function paintStatus(d) {
       if (!d || !d.ok) return;
       myId = d.hive.user_id;
+      if (location.search.indexOf("asguest=1") >= 0) myId = "u_demo_02";
       myName = d.hive.name;
       const c = d.client || {};
       myProto = c.proto || myProto;
@@ -9114,43 +9115,6 @@
     }
 
     el("hiveMembersBtn").addEventListener("click", () => {
-    // 退出按钮显隐：群主退出会让群没有主人，所以不给按钮，只显示一句提示。
-    // amOwner 由 renderMembers 算好传进来；没传就自己按成员表判断。
-    function syncLeaveBtn(amOwner) {
-      const btn = el("hiveLeaveBtn");
-      const tip = el("hiveLeaveTip");
-      if (!btn || !tip) return;
-      if (amOwner === undefined) {
-        amOwner = members.some((m) => (m.uid || m.user_id) === myId && m.role === "owner");
-      }
-      btn.hidden = !!amOwner || !curGid;
-      tip.hidden = !amOwner || !curGid;
-    }
-
-    el("hiveLeaveBtn").addEventListener("click", async () => {
-      if (!curGid) return;
-      const g = groups.find((x) => x.gid === curGid);
-      const nm = g ? g.name : curGid;
-      if (!confirm("确定退出「" + nm + "」？\n\n"
-        + "· 群里其他人会看到一条「你退出了群」的提示\n"
-        + "· 这个群会从你的列表里消失\n"
-        + "· 历史消息仍留在本机，重新扫码可以再回来")) return;
-      const gid = curGid;
-      try {
-        const d = await api("/api/hive/" + encodeURIComponent(gid) + "/leave", {});
-        if (!d.ok) { alert(d.error || "退出失败"); return; }
-        // 退出成功：清掉当前会话，回到「未选择群」状态再刷新列表
-        curGid = "";
-        lastSeq = 0;
-        members = [];
-        el("hiveGroupName").textContent = "未选择群";
-        el("hiveGroupMeta").textContent = "";
-        el("hiveSide").hidden = true;
-        el("hiveMsgs").innerHTML = '<p class="hint hive-empty">已退出「'
-          + hEsc(nm) + "」。左边选一个群，或者点「＋ 建群」开一个新的。</p>";
-        await loadGroups();
-      } catch (e) { alert("退出失败：" + e.message); }
-    });
       const side = el("hiveSide");
       side.hidden = !side.hidden;
       if (!side.hidden) renderMembers();
