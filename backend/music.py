@@ -216,8 +216,12 @@ def inst_piano(f: float, dur: float, vel: float = 0.8, sr: int = SR) -> np.ndarr
     n = _n(dur, sr)
     t = np.arange(n) / sr
     mod_env = np.exp(-t * 3.5)
-    mod = np.sin(2 * np.pi * f * 2.0 * t) * (2.2 * mod_env)
+    # 调制指数按音高缩放：固定 2.2 时低音区基频被 Bessel 分量摊薄
+    # （J0(2.2)≈0.11），130Hz 的音几乎听不到基频，纯钢琴曲会显得没有低频。
+    mod_idx = 2.2 * min(1.0, (f / 440.0) ** 0.55)
+    mod = np.sin(2 * np.pi * f * 2.0 * t) * (mod_idx * mod_env)
     sig = np.sin(2 * np.pi * f * t + mod)
+    sig += 0.55 * np.sin(2 * np.pi * f * t) * np.exp(-t * 1.6)
     sig += 0.35 * np.sin(2 * np.pi * f * 3.0 * t) * np.exp(-t * 6.0)
     sig += 0.18 * np.sin(2 * np.pi * f * 4.01 * t) * np.exp(-t * 9.0)
     env = np.exp(-t * (2.4 + 1.6 / max(0.25, dur))) * _adsr(n, 0.004, 0.05, 0.9, 0.08, sr)
