@@ -656,6 +656,14 @@ STYLES = {
         "density": 0.4, "reverb": 0.45, "swing": 0.0, "seventh": False,
         "kick": "epic", "hat": "none", "desc": "厚重弦乐+定音鼓+慢速推进",
     },
+    "epicmaj": {
+        "name": "史诗大调/颂歌", "bpm": 72, "scale": "major",
+        "prog": [[0, 4, 5, 3], [0, 5, 2, 6]],
+        "inst": ["pad", "bass", "drums", "lead", "pluck"],
+        "density": 0.4, "reverb": 0.45, "swing": 0.0, "seventh": False,
+        "kick": "epic", "hat": "none",
+        "desc": "厚重弦乐+定音鼓，大调色彩，配颂歌/进行曲类旋律不打架",
+    },
 }
 
 INSTRUMENTS = {
