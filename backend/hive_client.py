@@ -404,6 +404,50 @@ class HiveClient:
             except Exception:
                 pass
 
+    def _file(self, rec: Dict[str, Any]) -> None:
+        """收到附件分片：攒齐所有片后落盘，再通知前端「来了个文件」。
+
+        ⚠️ 必须**攒齐才落盘**。中途落盘的话，网络抖动导致的半截文件会被
+           当成完整文件存下来，用户打开就是损坏的（而且不会自愈，因为
+           文件名已存在）。这里用 fid 做 key 缓存分片，收齐才写。
+        """
+        key = H.group_key(self._gid)
+        body = H._open(key, rec.get("blob") or "") if key else None
+        if not isinstance(body, dict):
+            return
+        fid = str(body.get("fid") or rec.get("fid") or "")
+        if not fid:
+            return
+        try:
+            idx = int(body.get("idx") or 0)
+            total = int(body.get("total") or 1)
+            piece = base64.b64decode(body.get("data") or "")
+        except Exception:
+            return
+        with self._lock:
+            slot = self._file_buf.get(fid)
+            if not slot:
+                slot = {"total": total, "parts": {}, "meta": body.get("meta") or {}}
+                self._file_buf[fid] = slot
+            slot["parts"][idx] = piece
+            if len(slot["parts"]) < slot["total"]:
+                return
+            self._file_buf.pop(fid, None)
+        try:
+            data = b"".join(slot["parts"][i] for i in sorted(slot["parts"]))
+        except Exception:
+            return
+        meta = slot["meta"] or {"fid": fid, "name": "file"}
+        try:
+            out = H.store_incoming(self._gid, meta, data)
+        except Exception:
+            return
+        if self.on_file:
+            try:
+                self.on_file(self._gid, out)
+            except Exception:
+                pass
+
     def _store(self, rec: Dict[str, Any]) -> None:
         """把中继发来的密文解开，写进本地日志，并通知前端。"""
         mid = rec.get("mid") or ""
