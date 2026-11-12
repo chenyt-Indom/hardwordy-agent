@@ -1857,6 +1857,21 @@ def health():
     return d
 
 
+@app.get("/api/diag/nowin")
+def diag_nowin():
+    """自检「黑窗防护」到底有没有生效。
+
+    为什么需要这个接口：用户报过三次「黑窗反复闪」，每次都不是没改代码，
+    而是"改了但没真生效"。补丁状态必须在**运行中的主进程**里看才准 ——
+    在子进程里测是测不出来的（子进程根本不装这个补丁）。
+    """
+    try:
+        from . import procwin
+        return {"ok": True, "status": procwin.status(), "probe": procwin.probe()}
+    except Exception as exc:                   # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+
+
 @app.get("/api/config")
 def get_config():
     return {"config": config.load_config(), "defaults": config.DEFAULT_CONFIG}
