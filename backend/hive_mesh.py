@@ -227,6 +227,7 @@ class MeshNode:
         self.on_msg = None      # Callable[[str, dict], None]
         self.on_stream = None   # Callable[[str, dict], None]
         self.on_cancel = None   # Callable[[str, dict], None]
+        self.on_file = None     # Callable[[str, dict], None]  附件分片
         self.on_peer = None     # Callable[[], None]
 
     # ------------------------------------------------------------ 生命周期
