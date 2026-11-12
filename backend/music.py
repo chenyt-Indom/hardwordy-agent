@@ -1067,15 +1067,25 @@ def render_score(score: dict, sr: int = SR, progress=None) -> np.ndarray:
             delayed = np.concatenate([np.zeros(dly, dtype=np.float32), buf[:-dly]])
         else:
             delayed = buf
-        if pan < -0.02:                       # 偏左：右声道用延迟
-            l_sig = buf
-            r_sig = buf * 0.35 + delayed * 0.65
-        elif pan > 0.02:                      # 偏右：左声道用延迟
-            l_sig = buf * 0.35 + delayed * 0.65
-            r_sig = buf
-        else:                                 # 中轴：两侧都给一点延迟差
-            l_sig = buf * 0.6 + delayed * 0.4
-            r_sig = buf * 0.85 + delayed * 0.15
+        # ⚠️ 左右必须**能量对称**。原写法中轴分支用 0.6/0.85、偏侧分支一侧直接
+        #    用纯 buf（另一侧是 0.35/0.65 混合），导致右声道天生比左响——实测
+        #    gufeng 峰值 L=13153 / R=23251（差 5dB），听感明显偏右。
+        #    改成两侧同系数（0.72/0.28），只让**延迟量**不同：声像仍由 Haas
+        #    效应 + 等功率 gl/gr 决定，但左右能量严格相等。
+        dly2 = int((0.014 + 0.008 * abs(pan)) * sr)
+        if 0 < dly2 < n:
+            delayed2 = np.concatenate([np.zeros(dly2, dtype=np.float32), buf[:-dly2]])
+        else:
+            delayed2 = buf
+        if pan > 0.02:                        # 偏右：左声道延迟更长
+            l_sig = buf * 0.72 + delayed2 * 0.28
+            r_sig = buf * 0.72 + delayed * 0.28
+        elif pan < -0.02:                     # 偏左：右声道延迟更长
+            l_sig = buf * 0.72 + delayed * 0.28
+            r_sig = buf * 0.72 + delayed2 * 0.28
+        else:                                 # 中轴：两侧延迟量错开
+            l_sig = buf * 0.72 + delayed * 0.28
+            r_sig = buf * 0.72 + delayed2 * 0.28
         left += l_sig * gl
         right += r_sig * gr
         if progress:
