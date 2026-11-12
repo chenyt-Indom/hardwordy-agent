@@ -624,7 +624,7 @@ def _recv_worker(tid: str, gid: str, fid: str, host: str, port: int,
                 idx = struct.unpack(">I", body[:4])[0]
                 if idx >= count or _bm_has(bm, idx):
                     continue
-                data = aead.decrypt(body[4:], None)
+                data = aead.decrypt(_nonce(idx), body[4:], None)
                 f.seek(idx * chunk)
                 f.write(data)
                 f.flush()
