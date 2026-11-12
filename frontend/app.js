@@ -8809,6 +8809,10 @@
     window.addEventListener("resize", () => {
       if (avBox && !avBox.hidden) avPlace(avBox.offsetLeft, avBox.offsetTop);
     });
+    // 首屏再夹一次：恢复的旧坐标是按 132px 宽存的，现在窗口 180px，可能顶出右边界
+    setTimeout(() => {
+      if (avBox && !avBox.hidden) avPlace(avBox.offsetLeft, avBox.offsetTop);
+    }, 400);
     try {
       if (localStorage.getItem(AV_HIDE_KEY) === "1" && avTab) {
         avBox.hidden = true;
