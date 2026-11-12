@@ -860,4 +860,11 @@ def beacons(gid: str = "", max_age: float = 12.0) -> List[Dict[str, Any]]:
             _BEACONS.pop(k, None)
     if gid:
         out = [b for b in out if b.get("gid") == gid]
+    # 直接把连接码拼好给前端 —— 局域网里点一下就能收，不用手抄
+    for b in out:
+        try:
+            b["code"] = make_code(b["gid"], b["fid"], b.get("from") or "",
+                                  int(b.get("port") or 0), str(b.get("t") or ""))
+        except Exception:
+            b["code"] = ""
     return sorted(out, key=lambda b: b.get("seen") or 0, reverse=True)
