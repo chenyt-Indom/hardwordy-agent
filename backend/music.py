@@ -844,8 +844,8 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
                 if not _bass_inst:
                     # 低音要**长**且**响**，否则会被中音区几十个音符淹没
                     # （实测：2 拍 × 0.85 音量时，整曲低频占比只有 0.3%）
-                    add(hi, base, beat * 3.6, ch[0] - 12, lvl * 1.15)
-                    add(hi, base, beat * 3.6, ch[0], lvl * 0.55)
+                    add(hi, base, beat * 3.6, ch[0] - 12, lvl * 2.3)
+                    add(hi, base, beat * 3.6, ch[0], lvl * 0.75)
                 # 柱式和弦：钢琴 1/2.5 拍两下，电钢琴走二四拍（comping）
                 spots = (0.0, 2.0) if hi == "epiano" else (0.0, 2.5)
                 for sp in spots:
