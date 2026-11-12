@@ -258,6 +258,19 @@ async def handler(ws: WebSocketServerProtocol) -> None:
                     "v": int(m.get("v") or 1),
                 }, skip=None)
 
+            elif t == "cancel" and room is not None:
+                # 取消 @hd 任务：转发给房间里所有人，由**真正在跑任务的机器**
+                # 自己判断要不要停（它才知道 task_id 是不是自己的）。
+                # 中继不做权限判断 —— 它看不到谁有权限，密文也不该解。
+                await room.broadcast({
+                    "t": "cancel",
+                    "gid": room.gid,
+                    "mid": (m.get("mid") or "")[:40],
+                    "blob": m.get("blob") or "",
+                    "ts": float(m.get("ts") or time.time()),
+                    "v": int(m.get("v") or 1),
+                }, skip=None)
+
             elif t == "ping":
                 # 客户端用心跳测延迟。回 ts 让对面算 RTT。
                 await ws.send(json.dumps({
