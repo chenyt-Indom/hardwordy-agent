@@ -96,14 +96,17 @@ def parse_ws_url(u: str) -> Tuple[str, str, int, str]:
 
 
 def _health_url(scheme: str, host: str, port: int, path: str) -> str:
-    """拼 /health 的 HTTP 地址。wss 走 443 + 路径前缀，ws 走原端口。"""
+    """拼 /health 的 HTTP 地址。
+
+    ⚠️ 路径前缀必须保留：内置中继挂在 `/hive` 上，健康检查就在
+    `/hive/health`。早先这里对 ws 直接拼成 `/health`，于是
+    「地址是对的、也连上了」却仍报「健康检查 404」，看着像中继坏了。
+    """
     base = "https" if scheme == "wss" else "http"
-    if scheme == "wss":
-        p = path.rstrip("/") + "/health" if path else "/health"
-        if port in (443,):
-            return f"{base}://{host}{p}"
-        return f"{base}://{host}:{port}{p}"
-    return f"{base}://{host}:{port}/health"
+    p = (path.rstrip("/") + "/health") if path else "/health"
+    if (scheme == "wss" and port == 443) or (scheme == "ws" and port == 80):
+        return f"{base}://{host}{p}"
+    return f"{base}://{host}:{port}{p}"
 
 
 # ---------------------------------------------------------------- 错误诊断
