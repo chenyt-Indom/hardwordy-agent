@@ -9929,19 +9929,35 @@
     el("hiveJoinBtn").addEventListener("click", () => {
       openModal({
         title: "密码入群",
-        hint: "输入群主给你的 12 位密码（字母和数字，不含 0、1、I、L、O）。\n"
-          + "同一个 WiFi 下会自动找到群；跨网络请先要群主的连接码。",
+        hint: "输入群主给你的 12 位密码（字母数字，不含 0、1、I、L、O）。\n"
+          + "· 同一个 WiFi：只填密码就够了，会自动找到群\n"
+          + "· 不在同一个网络：再把群主的地址填到下面（点「🔗 连接码」能看到）",
         input: "",
         placeholder: "XXXX-XXXX-XXXX",
+        extra: "",
+        extraPlaceholder: "对方地址（跨网络才填），如 192.168.1.5:8899",
         okText: "进群",
-        onOk: async (v) => {
+        onOk: async (v, ex) => {
           const pw = (v || "").trim();
           if (!pw) { alert("密码不能为空"); return false; }
+          // 地址兼容三种写法：hive3://IP:端口 / IP:端口 / 只写 IP（用默认端口）
+          const raw = (ex || "").trim().replace(/^hive3?:\/\//i, "");
+          let host = "", port = 0;
+          if (raw) {
+            const m = raw.match(/^\[?([^\]]+?)\]?:(\d+)$/);
+            if (m) { host = m[1]; port = parseInt(m[2], 10); }
+            else { host = raw; }
+          }
           let d;
           try {
-            d = await api("/api/hive/join_password", { password: pw });
+            d = await api("/api/hive/join",
+              { password: pw, host: host, port: port });
           } catch (e) { alert("入群失败：" + e.message); return false; }
-          if (!d.ok) { alert(d.error || "入群失败"); return false; }
+          if (!d.ok) {
+            const stage = d.stage ? "（" + d.stage + "）" : "";
+            alert((d.error || "入群失败") + stage);
+            return false;
+          }
           await loadGroups();
           openGroup(d.group.gid);
           return true;
