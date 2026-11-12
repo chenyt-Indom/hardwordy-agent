@@ -224,6 +224,38 @@ def _http_health(url: str, timeout: float) -> Tuple[Optional[dict], str]:
         return None, f"{type(e).__name__}: {e}"
 
 
+def _ssl_ctx(url: str):
+    """wss + 纯 IP 时跳过证书校验；ws 返回 None。
+
+    和 hive_client._ssl_for 同一套判断。放两份是因为探测要能在
+    「客户端还没连」的时候独立跑 —— 探测本身也得过证书这关，
+    否则界面上会报一个其实和"通不通"无关的证书错误。
+    """
+    if not (url or "").startswith("wss://"):
+        return None
+    try:
+        host = url.split("://", 1)[1].split("/", 1)[0]
+        if host.startswith("["):
+            host = host.split("]", 1)[0].strip("[")
+        elif host.count(":") == 1:
+            host = host.split(":", 1)[0]
+        is_ip = False
+        if host.count(".") == 3:
+            try:
+                is_ip = all(0 <= int(x) <= 255 for x in host.split("."))
+            except Exception:
+                is_ip = False
+        elif ":" in host:
+            is_ip = True
+        ctx = ssl.create_default_context()
+        if is_ip:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    except Exception:
+        return None
+
+
 def _ws_check(url: str, timeout: float) -> Tuple[bool, str]:
     """真握手一次，连上就关。不 join、不发消息，不污染房间状态。"""
     try:
@@ -235,7 +267,8 @@ def _ws_check(url: str, timeout: float) -> Tuple[bool, str]:
         try:
             async with websockets.connect(url, open_timeout=timeout,
                                           ping_interval=None,
-                                          max_size=4 * 1024 * 1024):
+                                          max_size=4 * 1024 * 1024,
+                                          ssl=_ssl_ctx(url)):
                 return True, ""
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
