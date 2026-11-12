@@ -58,7 +58,8 @@ PROTO_MIN = 1            # 低于这个版本不再兼容（目前没有，留�
 KNOWN_TYPES = {"text", "system", "ai", "unknown"}
 
 # 本机支持的能力。别人按这个表决定"要不要发给你"（比如以后加了文件传输）。
-CAPS = ["text", "system", "ai", "ref", "edit"]
+# v3：加入 file（附件全员可见）—— 老客户端看到 caps 里多一项不会崩，只是不发附件给你。
+CAPS = ["text", "system", "ai", "ref", "edit", "file"]
 
 
 def _as_int(v: Any, default: int = 0) -> int:
