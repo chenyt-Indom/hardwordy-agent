@@ -555,7 +555,10 @@ def receive(gid: str, code: str) -> Dict[str, Any]:
 
     with _LOCK:
         for tid, r in _TRANSFERS.items():
-            if (r.get("gid") == gid and r.get("fid") == fid
+            # 「同一个文件」的判定：有 fid 比 fid，没 fid（共享本机文件）比 token。
+            # 只比 fid 的话，两个不同的本机文件都是空 fid，第二个会错误复用第一个的任务。
+            same = (r.get("fid") == fid) if fid else (r.get("token") == token)
+            if (r.get("gid") == gid and same
                     and r.get("dir") == "recv"
                     and r.get("state") in ("connecting", "transferring", "paused")):
                 return {"ok": True, "tid": tid, "reused": True}
