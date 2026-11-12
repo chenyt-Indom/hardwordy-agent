@@ -11272,10 +11272,17 @@ def hive_connect(body: dict):
     gid = b.get("gid") or ""
     if not gid:
         return {"ok": False, "error": "缺群号"}
+    # 老群（二维码时代建的）没有验证标签，别人拿到密码也算不出密钥 ——
+    # 进群时顺手迁移一下：单人群直接生成密码，多人群只提示不擅自动。
+    mig = {}
+    try:
+        mig = hive.ensure_password(gid)
+    except Exception as e:
+        mig = {"ok": False, "error": str(e)}
     code = (b.get("url") or b.get("code") or "").strip()
     r = hive_client.client().start(code, gid)
     return {"ok": bool(r.get("ok")), "client": hive_client.client().status(),
-            "error": r.get("error") or ""}
+            "error": r.get("error") or "", "migrate": mig}
 
 
 @app.post("/api/hive/disconnect")
