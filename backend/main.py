@@ -9746,6 +9746,151 @@ def library_delete(iid: str):
 
 # ---------- 语音输入（唤醒词「小千小千」+ 离线流式识别）----------
 # ---------- 数字人（形象 + 口型 + 看屏幕） ----------
+# ---------- 音乐生成与改编（纯本地算法合成） ----------
+# ⚠️ 和 TTS / 数字人一样：这些**必须是模块顶层路由**。用 insert_after 插进
+#    函数体里会被自动缩进 → 装饰器在函数内执行 → 路由一个都不注册（导入不报错，全 404）。
+@app.get("/api/music/styles")
+def music_styles():
+    """可选风格 + 乐器清单。"""
+    return {"ok": True, "styles": music.styles(), "instruments": music.instruments()}
+
+
+@app.post("/api/music/generate")
+def music_generate(body: dict):
+    """生成一首。
+
+    body: {style, bars, bpm, key, seed, vocals, title, notes, lyrics}
+      · bars  每小节 4 拍；118bpm 下 16 小节 ≈ 33 秒
+      · key   移调半音数（0=C）
+      · notes 可选旋律音符串（"C4 D4 E4" 或简谱 "1 2 3 5"）
+    """
+    body = body or {}
+
+    def _i(k, d):
+        try:
+            return int(body.get(k) if body.get(k) is not None else d)
+        except Exception:                              # noqa: BLE001
+            return d
+
+    def _f(k, d):
+        try:
+            return float(body.get(k) if body.get(k) is not None else d)
+        except Exception:                              # noqa: BLE001
+            return d
+
+    seed = body.get("seed")
+    try:
+        seed = int(seed) if seed not in (None, "") else None
+    except Exception:                                  # noqa: BLE001
+        seed = None
+    return music.generate(
+        style=str(body.get("style") or "pop"), bars=_i("bars", 16),
+        bpm=_f("bpm", 0), key=_i("key", 0), seed=seed,
+        vocals=bool(body.get("vocals", True)),
+        title=str(body.get("title") or ""), notes=str(body.get("notes") or ""),
+        lyrics=str(body.get("lyrics") or ""))
+
+
+@app.post("/api/music/remix")
+def music_remix(body: dict):
+    """改编：换风格 / 移调 / 变速 / 换配器 / 变奏 / 续写。
+
+    body: {id, style, key_shift, tempo, instruments[], extend_bars, variation, vocals, title}
+    """
+    body = body or {}
+    mid = str(body.get("id") or "")
+    if not mid:
+        return {"ok": False, "error": "需要 id（要改编哪一首）"}
+
+    def _i(k, d):
+        try:
+            return int(body.get(k) if body.get(k) is not None else d)
+        except Exception:                              # noqa: BLE001
+            return d
+
+    def _f(k, d):
+        try:
+            return float(body.get(k) if body.get(k) is not None else d)
+        except Exception:                              # noqa: BLE001
+            return d
+
+    ins = body.get("instruments")
+    if not isinstance(ins, list):
+        ins = None
+    voc = body.get("vocals")
+    return music.remix(
+        mid, style=str(body.get("style") or ""), key_shift=_i("key_shift", 0),
+        tempo=_f("tempo", 1.0), instruments=ins, extend_bars=_i("extend_bars", 0),
+        variation=_f("variation", 0.0),
+        vocals=(None if voc is None else bool(voc)),
+        title=str(body.get("title") or ""))
+
+
+@app.post("/api/music/from_notes")
+def music_from_notes(body: dict):
+    """把一段音符（音名或简谱）编成完整曲子。body: {notes, style, bars, bpm, key, vocals, title}"""
+    body = body or {}
+    try:
+        bars = int(body.get("bars") or 8)
+    except Exception:                                  # noqa: BLE001
+        bars = 8
+    try:
+        bpm = float(body.get("bpm") or 0)
+    except Exception:                                  # noqa: BLE001
+        bpm = 0.0
+    try:
+        key = int(body.get("key") or 0)
+    except Exception:                                  # noqa: BLE001
+        key = 0
+    return music.from_notes(str(body.get("notes") or ""),
+                            style=str(body.get("style") or "piano"),
+                            bars=bars, bpm=bpm, key=key,
+                            vocals=bool(body.get("vocals", False)),
+                            title=str(body.get("title") or ""))
+
+
+@app.get("/api/music/list")
+def music_list():
+    """已生成的曲子（新的在前）。"""
+    return {"ok": True, "files": music.list_music(), "dir": music._base()}
+
+
+@app.get("/api/music/audio/{name}")
+def music_audio(name: str):
+    """播放 / 下载曲子（16bit WAV，inline）。"""
+    p = music.audio_path(name)
+    if not p:
+        raise HTTPException(status_code=404, detail="音频不存在")
+    return FileResponse(p, media_type="audio/wav",
+                        headers={"Content-Disposition": "inline"})
+
+
+@app.get("/api/music/score/{mid}")
+def music_score(mid: str):
+    """看某首的乐谱（和弦 / 各轨音符 / 风格 / 调）。"""
+    sc = music.load_score(mid)
+    if not sc:
+        raise HTTPException(status_code=404, detail="乐谱不存在")
+    return {"ok": True, "score": sc}
+
+
+@app.post("/api/music/delete")
+def music_delete(body: dict):
+    body = body or {}
+    return music.delete(str(body.get("id") or ""))
+
+
+@app.post("/api/music/open_folder")
+def music_open_folder():
+    """打开音乐存放目录。"""
+    d = music._base()
+    try:
+        os.startfile(d)                                # noqa: S606  (Windows)
+    except Exception as e:                             # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e), "dir": d}
+    return {"ok": True, "dir": d}
+
+
 # ⚠️ 和 TTS 一样，这些**必须是模块顶层路由**。用 insert_after 插在函数体里
 #    会被自动缩进，装饰器在函数内执行 → 路由一个都不注册（导入不报错，全 404）。
 @app.get("/api/avatar/info")
