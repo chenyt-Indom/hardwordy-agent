@@ -745,8 +745,8 @@ class MeshNode:
                     pkt = json.dumps({
                         "svc": "hive-mesh", "ver": PROTO_VER,
                         "rk": _rk(g).hex(), "gid": g,
-                        "port": self.port, "uid": me.get("user_id", ""),
-                        "name": me.get("name", ""), "ts": time.time(),
+                        "port": self.port, "uid": self.uid,
+                        "name": self.uname, "ts": time.time(),
                     }).encode("utf-8")
                     try:
                         self._udp.sendto(pkt, ("255.255.255.255", 45231))
