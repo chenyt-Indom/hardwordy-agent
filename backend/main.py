@@ -10588,6 +10588,9 @@ def _hive_run_model(gid: str, instruction: str, body: dict) -> None:
     _hd_emit(gid, mid, "queued",
              task={"asker": asker, "ahead": ahead,
                    "instruction": (instruction or "")[:120]})
+    # ⚠️ 入队时就建取消事件：否则「排队中」的任务没法取消，
+    #    前面那个跑 40 秒，后面的人只能干等。
+    _hd_cancel[mid] = threading.Event()
     _hd_q.put((gid, instruction, body or {}, mid, asker, me["user_id"]))
 
 
