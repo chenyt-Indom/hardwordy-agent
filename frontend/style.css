@@ -3939,6 +3939,32 @@ html[data-theme="light"] select.pill-select option {
 }
 .hive-msgs .msg.user .hive-ref b { color: #fff; }
 
+/* ---------- 其他成员的消息：白底黑字气泡（2026-11-13 用户要求）----------
+   三档一眼可分：自己 = 绿色靠右 · AI = 深色面板靠左 · 其他成员 = 白色靠左。
+   白色气泡里的代码块/引用/链接必须换成深色系，否则浅底上根本看不见。 */
+.hive-msgs .msg.member > .bubble {
+  background: #ffffff;
+  border-color: #dfe3ea;
+  color: #14161b;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .20);
+}
+.hive-msgs .msg.member .bubble a { color: #1a4fd0; text-decoration: underline; }
+.hive-msgs .msg.member .bubble .md-code {
+  background: #eef1f6; border-color: #d7dde8; color: #1f2b45;
+}
+.hive-msgs .msg.member .bubble .md-quote {
+  background: #f2f5fa; border-left-color: #4f8bf9; color: #3a4252;
+}
+.hive-msgs .msg.member .bubble .md-h { color: #0d0f13; }
+.hive-msgs .msg.member .bubble .md-h::before { background: #4f8bf9; }
+.hive-msgs .msg.member .bubble .md-ul li::marker,
+.hive-msgs .msg.member .bubble .md-ol li::marker { color: #4f8bf9; }
+/* 白气泡上的「引用回复」块 */
+.hive-msgs .msg.member .hive-ref {
+  background: #eaeef5; border-left-color: #4f8bf9; color: #4a5265;
+}
+.hive-msgs .msg.member .hive-ref b { color: #14161b; }
+
 /* 实时进度卡片：正在跑的时候显示，跑完由正式消息替换 */
 .hd-live { max-width: 88%; }
 .hd-live-head {
