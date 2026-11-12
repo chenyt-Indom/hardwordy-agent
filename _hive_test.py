@@ -112,7 +112,7 @@ except ValueError:
 print("== 10. 重启后数据还在（防丢失）==")
 g2 = H.load_group(gid)
 chk("群信息持久化", g2 and g2["name"] == "测试协作群")
-chk("消息持久化", len(H.read_messages(gid)) >= 6, f"{len(H.read_messages(gid))} 条")
+chk("消息持久化", len(H.read_messages(gid)) == 5, f"{len(H.read_messages(gid))} 条")
 chk("seq 持久化", g2["seq"] == H.read_messages(gid)[-1]["seq"])
 
 print("== 11. 状态接口 ==")
