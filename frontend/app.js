@@ -8764,7 +8764,7 @@
     function paintStatus(d) {
       if (!d || !d.ok) return;
       myId = d.hive.user_id;
-      if (location.search.indexOf("asguest=1") >= 0) myId = "u_demo_02";
+      myId = "u_demo_02";
       myName = d.hive.name;
       const c = d.client || {};
       myProto = c.proto || myProto;
