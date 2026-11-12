@@ -704,6 +704,16 @@
        2026-11-12：移到 body 末尾。数字人容器（#avatarBox）在脚本之后，
        脚本若先执行，app.js 里 const avBox = $("#avatarBox") 会拿到 null，
        avInit 第一句 if (!avBox) return; 就静默退出，界面一片空白。 -->
+  <!-- 临时探针（抓 app.js 的静默异常），查完删 -->
+  <script>
+    window.__err = "";
+    window.addEventListener("error", function (e) {
+      window.__err += (e.message || "?") + " @" + (e.lineno || "?") + ":" + (e.colno || "?") + " | ";
+    });
+    window.addEventListener("unhandledrejection", function (e) {
+      window.__err += "REJECT:" + ((e.reason && e.reason.message) || e.reason) + " | ";
+    });
+  </script>
   <script>
     (function () {
       var v = String(Date.now());
