@@ -758,7 +758,6 @@ class MeshNode:
             time.sleep(BEACON_EVERY)
 
     def _udp_recv_loop(self) -> None:
-        me = H.profile().get("user_id", "")
         while not self._stop and self._udp:
             try:
                 data, addr = self._udp.recvfrom(4096)
