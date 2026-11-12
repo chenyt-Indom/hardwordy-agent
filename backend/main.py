@@ -10414,12 +10414,33 @@ def hive_groups():
 
 @app.post("/api/hive/join")
 def hive_join(body: dict):
-    """扫码入群（把二维码里的 hive:// 载荷原样发过来即可）。"""
+    """密码入群。
+
+    body: {password, name?, host?, port?}
+      密码 12 位（大小写/连字符都会自动规范化）
+      host 只有跨网络才要填 —— 同一 WiFi 靠 UDP 广播自动找到
+    老口令 `hive://join?...` 仍然兼容（别人手里可能还存着）。
+    """
     b = body or {}
+    pw = str(b.get("password") or "").strip()
+    legacy = str(b.get("payload") or "").strip()
+    if not pw and not legacy:
+        return {"ok": False, "stage": "format", "error": "请先输入 12 位入群密码"}
     try:
-        g = hive.join_group(b.get("payload") or "", b.get("name") or "")
+        if pw:
+            r = hive_client.client().join_by_password(
+                pw, b.get("name") or "",
+                str(b.get("host") or "").strip(), int(b.get("port") or 0))
+            if not r.get("ok"):
+                return r                      # 带 stage，前端能分清错在哪一类
+            g = r["group"]
+            if r.get("via") == "local":
+                # 本机本来就有这个群：补一次网络启动
+                hive_client.client().start("", g["gid"])
+        else:
+            g = hive.join_group(legacy, b.get("name") or "")
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "stage": "join", "error": str(e)}
     # 加入后启动 P2P 网络，并把「XX 加入了群」告诉大家 ——
     # 否则只有自己看得到提示，别人只知道名单多了一个人。
     relay = {"configured": False, "connected": False, "error": "", "mode": "mesh"}
