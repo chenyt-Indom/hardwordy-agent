@@ -10005,6 +10005,51 @@
       });
     });
 
+    // 🧠 群记忆：按当前群聊内容重建，并把生成结果给用户看一眼
+    el("hiveMemBtn").addEventListener("click", async () => {
+      if (!curGid) { alert("先在左边选一个群"); return; }
+      const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/memory/rebuild",
+        { method: "POST", body: {} });
+      if (!d.ok) { alert("重建失败：" + (d.error || "未知错误")); return; }
+      let content = "";
+      try {
+        const g = await api("/api/hive/" + encodeURIComponent(curGid) + "/memory");
+        content = g.content || "";
+      } catch (e) { /* 忽略 */ }
+      openModal({
+        title: "🧠 群记忆已重建",
+        hint: "依据最近 " + (d.msgs || 0) + " 条消息，共 " + (d.chars || 0)
+          + " 字。@hd 干活时会自动带上这份记忆当背景。下面是生成的内容（只读，"
+          + "再点一次「群记忆」会按最新聊天重新生成）：",
+        input: content,
+        readonly: true,
+        okText: "知道了",
+      });
+      // 打开只读弹窗：输入框要能滚动看全文
+      setTimeout(() => {
+        const box = el("hiveModalInput");
+        if (box) { box.style.height = "260px"; box.style.overflow = "auto"; }
+      }, 30);
+    });
+
+    // 🗑 删除群（仅群主）：二次确认，删的是本地这份，其他人会收到通知一起下线
+    el("hiveDelBtn").addEventListener("click", async () => {
+      if (!curGid) return;
+      const g = groups.find((x) => x.gid === curGid) || {};
+      const nm = g.name || curGid;
+      if (!confirm("删除群「" + nm + "」？\n\n"
+        + "· 群里的聊天记录、附件都会一起下线（移到 data/hive/_deleted，能捞回来）\n"
+        + "· 其他成员会收到通知，本地这个群也一起消失\n"
+        + "· 这个操作只有群主能做")) return;
+      if (!confirm("再确认一次：真的删除「" + nm + "」？")) return;
+      const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/delete",
+        { method: "POST", body: {} });
+      if (!d.ok) { alert("删除失败：" + (d.error || "未知错误")); return; }
+      curGid = "";
+      toast("已删除群「" + nm + "」");
+      loadGroups();
+    });
+
     // 换一个新身份（只在身份冲突时出现）
     el("hiveIdRenew").addEventListener("click", async () => {
       const ok = confirm(
