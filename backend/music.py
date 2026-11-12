@@ -772,6 +772,33 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
             for p in chords[b]:
                 add("pad", b * bar_s, bar_s * 0.98, p + 12, 0.45)
 
+    # --- 键盘 / 拨弦的和弦伴奏 ---
+    _mel_inst = _pick_melody_inst(cfg)
+    for hi in ("piano", "epiano", "organ", "pluck"):
+        if hi not in cfg["inst"]:
+            continue
+        # 它同时是主奏时，伴奏压低一点，别盖住旋律
+        lvl = 0.30 if hi == _mel_inst else 0.46
+        for b in range(bars):
+            base = b * bar_s
+            ch = chords[b]
+            if not ch:
+                continue
+            if hi == "pluck":
+                # 古筝/吉他：八分音符分解和弦，高低交替更有拨弦味
+                seq = ch + [ch[0] + 12]
+                for i in range(8):
+                    add("pluck", base + i * beat * 0.5, beat * 0.45,
+                        seq[i % len(seq)] + 12, lvl * (1.12 if i % 2 else 0.92))
+            elif hi == "organ":
+                add("organ", base, bar_s * 0.96, ch[0] + 12, lvl * 0.8)
+            else:
+                # 柱式和弦：钢琴 1/2.5 拍两下，电钢琴走二四拍（comping）
+                spots = (0.0, 2.0) if hi == "epiano" else (0.0, 2.5)
+                for sp in spots:
+                    for p in ch:
+                        add(hi, base + sp * beat, beat * 1.5, p + 12, lvl)
+
     # --- 琶音 ---
     if "arp" in cfg["inst"]:
         for b in range(bars):
