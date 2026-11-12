@@ -8887,11 +8887,17 @@
       let cls = "hive-msg";
       if (type === "system") cls += " sys";
       else if (type === "ai") cls += " ai";
+      else if (type === "unknown") cls += " unknown";
       else if (m.from === myId) cls += " mine";
       wrap.className = cls;
+      // 跨版本：对方用更新版本发来的类型，本机不认识 —— **照样显示原文**，
+      // 只标一句「你的版本看不懂」，而不是让消息凭空消失。
       const who = type === "system" ? ""
         : '<span class="hmsg-who">' + hEsc(m.name || m.from || "?")
           + (type === "ai" && m.by ? "（由 " + hEsc(m.by) + " 唤醒）" : "")
+          + (type === "unknown"
+            ? "（" + hEsc(m.orig_type || "新类型") + " · 你的版本看不懂，已按原文显示）"
+            : "")
           + (m.pending ? " · 待发送" : "") + "</span>";
       const ts = m.ts ? new Date(m.ts * 1000).toLocaleTimeString("zh-CN",
         { hour: "2-digit", minute: "2-digit" }) : "";
