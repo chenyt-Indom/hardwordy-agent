@@ -388,8 +388,11 @@ def _search_transcripts(query: str, top_k: int = TRANS_TOP) -> list:
             if not (vec >= 0.45 or (vec >= 0.38 and cov >= 0.85)):
                 continue
         score = (W_VEC * vec + W_COV * rank_cov) if vecs is not None else rank_cov
+        body = it["text"]
+        if len(body) > 300:
+            body = body[:300] + " …（后续已截断）"
         out.append({"level": "历史会话", "section": it["section"],
-                    "content": it["text"], "source": "transcript",
+                    "content": body, "source": "transcript",
                     "score": round(float(score), 4),
                     "vec": round(vec, 4), "cov": round(cov, 3)})
     out.sort(key=lambda x: x["score"], reverse=True)
