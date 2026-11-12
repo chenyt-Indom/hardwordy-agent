@@ -10886,8 +10886,17 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                     "在设置里填一个 Key，或把默认模型换成本地模型" % model)
             # thinking=True：这次任务的意义就在于「思考过程全员可见」，
             # 所以哪怕模型默认不思考，这里也显式打开。
+            # 有图时走 OpenAI 的多模态 content 数组（DeepSeek-VL 接口格式）
+            if images:
+                content = [{"type": "text", "text": prompt}]
+                for _b64 in images:
+                    content.append({"type": "image_url", "image_url": {
+                        "url": "data:image/jpeg;base64," + _b64}})
+                ds_msgs = [{"role": "user", "content": content}]
+            else:
+                ds_msgs = [{"role": "user", "content": prompt}]
             for kind, val in deepseek_client.chat_stream(
-                    [{"role": "user", "content": prompt}], model=model,
+                    ds_msgs, model=model,
                     api_key=dkey, temperature=0.3, max_tokens=2400,
                     thinking=True):
                 if ev.is_set():
