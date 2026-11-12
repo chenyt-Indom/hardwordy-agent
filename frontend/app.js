@@ -8931,21 +8931,25 @@
         if (!f || !f.fid) return;
         const url = base + encodeURIComponent(f.fid);
         const nm = hEsc(f.name || "文件");
+        // 📡 点对点直传：大文件走这条，**不经服务器**
+        const p2p = '<button type="button" class="hf-p2p" data-p2p="' + hEsc(f.fid)
+          + '" data-name="' + nm + '" title="点对点直传（G 级大文件，不经服务器）">📡</button>';
         if (f.kind === "image") {
-          out.push('<a href="' + url + '" target="_blank" rel="noopener">'
-            + '<img class="hive-file-img" src="' + url + '" alt="' + nm + '" loading="lazy"></a>');
+          out.push('<span class="hf-wrap"><a href="' + url + '" target="_blank" rel="noopener">'
+            + '<img class="hive-file-img" src="' + url + '" alt="' + nm + '" loading="lazy"></a>'
+            + p2p + "</span>");
         } else if (f.kind === "video") {
-          out.push('<video class="hive-file-video" src="' + url
-            + '" controls preload="metadata"></video>');
+          out.push('<span class="hf-wrap"><video class="hive-file-video" src="' + url
+            + '" controls preload="metadata"></video>' + p2p + "</span>");
         } else if (f.kind === "audio") {
-          out.push('<audio src="' + url
-            + '" controls preload="metadata" style="max-width:320px"></audio>');
+          out.push('<span class="hf-wrap"><audio src="' + url
+            + '" controls preload="metadata" style="max-width:320px"></audio>' + p2p + "</span>");
         } else {
           out.push('<a class="hive-file-doc" href="' + url + '" download>'
             + '<span class="hf-ico">' + fileIco(f) + "</span>"
             + '<span class="hf-meta"><span class="hf-name">' + nm + "</span>"
             + '<span class="hf-size">' + fmtSize(f.size) + "</span></span>"
-            + '<span class="hf-dl">⬇</span></a>');
+            + '<span class="hf-dl">⬇</span></a>' + p2p);
         }
       });
       return out.length ? '<div class="hive-files">' + out.join("") + "</div>" : "";
