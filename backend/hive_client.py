@@ -231,24 +231,53 @@ class HiveClient:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
 
+    async def _heartbeat(self, ws) -> None:
+        """每 15 秒 ping 一次。
+
+        两个作用：算 RTT（界面显示「12ms」）、尽早发现"连接假死"
+        （网络断了但 socket 还没报错时，ping 失败会触发重连）。
+        """
+        while self._running and self._ws is ws:
+            try:
+                self._last_ping = time.time()
+                await ws.send(json.dumps({"t": "ping", "ts": self._last_ping}))
+            except Exception:
+                return
+            await asyncio.sleep(15)
+
     async def _handle(self, ws, m: Dict[str, Any]) -> None:
         t = m.get("t")
+        self._last_recv = time.time()
         if t == "joined":
-            self._members = m.get("members") or []
+            self._members = _norm_members(m.get("members"))
             self._connected = True
+            # 中继报告的协议版本 —— 用来判断"对面比我老还是新"
+            self._relay_proto = int(m.get("proto") or 0)
+            self._relay_ver = str(m.get("relay_ver") or "")
             for rec in (m.get("msgs") or []):
                 self._store(rec)
             self._emit_status()
         elif t == "presence":
-            self._members = m.get("members") or []
+            self._members = _norm_members(m.get("members"))
             self._emit_status()
         elif t == "msg":
             self._store(m)
         elif t == "pong":
-            pass
+            if self._last_ping:
+                self._latency = (time.time() - self._last_ping) * 1000.0
+            if m.get("proto"):
+                self._relay_proto = int(m.get("proto") or self._relay_proto)
+            self._emit_status()
+        elif t == "welcome":
+            self._relay_proto = int(m.get("proto") or 0)
+            self._relay_ver = str(m.get("relay_ver") or "")
+            self._emit_status()
         elif t == "error":
             self._last_error = str(m.get("msg") or "")
+            self._last_error_at = time.time()
             self._emit_status()
+        # 其它类型：不认识就忽略 —— 跨版本时对方可能发来新帧，
+        # 不能因为不认识就断开连接。
 
     # ------------------------------------------------------------ 落盘 / 回调
 
