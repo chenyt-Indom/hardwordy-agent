@@ -921,6 +921,39 @@ def verify_import() -> dict:
             "err": "\n".join(lines[-6:])[-1200:]}
 
 
+def _pid_alive(pid: int) -> bool:
+    """这个 PID 现在是否真的还活着（拿不到 psutil 时保守返回 False）。"""
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except Exception:
+        return False
+
+
+def _window_owner_alive() -> bool:
+    """启动器还活着吗？只有它还活着，新进程才可以「不开窗口」。
+
+    ⚠️⚠️ 2026-11-12：用户反复报「自迭代之后重启，桌面总打不开」，根因在这里。
+
+      · 启动器（launcher/启动窗口.pyw）用 `MM_NO_WINDOW=1` 拉起后端，
+        语义是「窗口我来开，你别开」；
+      · 而重启是 `env = dict(os.environ)` **原样继承** —— 于是重启出来的
+        新进程也成了无窗口后端；
+      · 它偏偏还占着 8000。用户再双击快捷方式，撞上 run.py 的
+        「已有实例 → 打开浏览器 → 退出」分支，**永远不会有桌面窗口**；
+      · 一旦进了这个状态就自锁：没有任何路径会清掉 MM_NO_WINDOW，
+        所以「上次也是这样」—— 只要走过一次启动器，之后每次重启都没界面。
+
+    判据：启动器把自己的 PID 写进 `MM_LAUNCHER_PID`（见 启动窗口.pyw）。
+      · PID 还活着 → 让它继续管窗口，新进程保持无窗口（避免两个窗口）
+      · PID 没了 / 老版本启动器没写 → 新进程必须自己开窗，否则用户没界面
+    """
+    pid = (os.environ.get("MM_LAUNCHER_PID") or "").strip()
+    if not pid.isdigit():
+        return False          # 确认不了就当它没了，宁可自己开窗
+    return _pid_alive(int(pid))
+
+
 def restart(delay: float = 1.2) -> dict:
     """重启自己：先试导入，过了才拉新进程并退出本进程。"""
     chk = verify_import()
@@ -945,6 +978,15 @@ def restart(delay: float = 1.2) -> dict:
     env = dict(os.environ)
     env["MM_SKIP_ALREADY_CHECK"] = "1"   # 端口还没释放，别把自己挡回去
     env["MM_WAIT_PORT"] = "1"            # 新进程先等端口空出来，别急着 bind
+
+    # ★★ 2026-11-12：没有启动器接管窗口时，必须让新进程自己开窗口。
+    #   否则重启后只剩一个「无窗口后端」占着 8000，用户双击快捷方式会被
+    #   run.py 的「已有实例」分支挡回去 —— 表现就是「自迭代完桌面打不开」。
+    #   详细机制见 _window_owner_alive() 的注释。
+    if env.get("MM_NO_WINDOW") == "1" and not _window_owner_alive():
+        env.pop("MM_NO_WINDOW", None)
+        journal("restart_reown_window", "-",
+                launcher=(os.environ.get("MM_LAUNCHER_PID") or "未记录"))
 
     # ⚠️ Windows 上要三件套（2026-11-08 实测：只给 DETACHED_PROCESS 时，
     #   父进程一退出、或外层工具把进程放进 Job，子进程会跟着被杀）：

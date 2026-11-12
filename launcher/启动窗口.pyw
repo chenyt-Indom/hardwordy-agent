@@ -383,6 +383,12 @@ def start_service() -> subprocess.Popen:
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     env = dict(os.environ)
     env["MM_NO_WINDOW"] = "1"
+    # ★ 2026-11-12：声明「窗口归我管」。
+    #   后端自迭代重启时会把 env 原样继承下去，如果它不知道启动器还在不在，
+    #   就会一直保持无窗口状态 —— 用户看到的就是「自迭代完桌面打不开」。
+    #   把本进程 PID 传下去，backend/selfdev.py 重启前会检查它是否还活着：
+    #   活着 → 继续无窗口（窗口由本启动器显示）；死了 → 新进程自己开窗。
+    env["MM_LAUNCHER_PID"] = str(os.getpid())
     env["PYTHONUNBUFFERED"] = "1"     # 否则日志要等进程退出才落盘，等于没有
     # 后端子进程默认按系统 locale（简中是 GBK）输出，而这个日志文件是 UTF-8 ——
     # 混着写就会变成"表头正常、后面全乱码"。统一成 UTF-8。
