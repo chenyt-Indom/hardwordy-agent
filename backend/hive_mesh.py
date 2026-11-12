@@ -1135,6 +1135,9 @@ class MeshNode:
                 gid = str(k.get("gid") or "")
                 if not host or not port or not gid or gid not in self.groups:
                     continue
+                # 同 _learn：只由 uid 较小的一方重连，避免双向双连接。
+                if not _prefer_out(self.uid, uid):
+                    continue
                 if now - float(self._retry.get(uid) or 0) < 20.0:
                     continue
                 self._retry[uid] = now
