@@ -10601,7 +10601,8 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
     t0 = time.time()
     ev = threading.Event()
     _hd_cancel[mid] = ev
-    _hd_running[gid] = {"task_id": mid, "asker": asker, "since": t0}
+    _hd_running[gid] = {"task_id": mid, "asker": asker,
+                        "asker_id": asker_id, "since": t0}
     thinking = ""
     text = ""
     model = ""
