@@ -10354,6 +10354,24 @@ def hive_profile(body: dict):
     return {"ok": True, "profile": hive.set_name((body or {}).get("name") or "")}
 
 
+@app.post("/api/hive/profile/renew")
+def hive_profile_renew():
+    """换一个本机身份（新的 user_id，昵称保留）。
+
+    场景：把整个程序目录拷给另一台机器，两台机器的 user_id 一模一样，
+    群里分不清谁是谁、消息还会显示成自己发的。换一个就能正常区分。
+    """
+    try:
+        p = hive.renew_identity()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    try:
+        hive_client.client().refresh_identity()
+    except Exception:
+        pass
+    return {"ok": True, "profile": {"user_id": p.get("user_id"), "name": p.get("name")}}
+
+
 @app.post("/api/hive/create")
 def hive_create(body: dict):
     """建群 —— 建群的人就是群主。
