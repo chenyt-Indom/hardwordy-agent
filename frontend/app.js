@@ -9446,6 +9446,24 @@
       });
     }
 
+    // ==== 临时截图代码 TMPDEMO（截完删）====
+    setTimeout(function () {
+      try {
+        setMode("hive");
+        myId = "u_me"; myDev = "d_me";
+        renderMsgs([
+          { id: "m1", from: "u_other", dev: "d_other", name: "李四", type: "text",
+            text: "这条是**其他成员**发的，应该是白底黑字、靠左。", ts: Date.now() / 1000 },
+          { id: "m2", from: "u_me", dev: "d_me", name: "我", type: "text",
+            text: "这条是我自己发的，靠右绿色。", ts: Date.now() / 1000 },
+          { id: "m3", from: "u_me", dev: "d_me", name: "我", type: "ai", by: "我",
+            text: "这条是 @hd 的 **AI 回答**，应该靠左、深色气泡，不能靠右。",
+            thinking: "先分析需求，再给结论。", dur_ms: 1200, ts: Date.now() / 1000 }
+        ]);
+      } catch (e) { console.warn("tmpdemo", e); }
+    }, 1600);
+    // ==== TMPDEMO 结束 ====
+
     function renderMsgs(list) {
       const box = el("hiveMsgs");
       box.innerHTML = "";
