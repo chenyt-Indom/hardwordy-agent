@@ -595,6 +595,7 @@ class MeshNode:
         if self._stop:
             return
         self.flush()                      # 断线期间攒下的消息，先补发
+        self.broadcast_members(gid)       # 成员表也同步一份（新连上的人需要）
         known = self._known_list()
         self._fanout(gid, T_PEERS, {"known": known})
         # 互报水位：把对方没有的历史消息补过去（对方不缺的靠 mid 去重）
