@@ -3752,7 +3752,7 @@
   (function bindMemFold() {
     const head = $("#memToggle"), body = $("#memFoldBody"), caret = $("#memCaret");
     if (!head || !body) return;
-    const KEY = "ui.memFolded.TEMPOPEN";
+    const KEY = "ui.memFolded";
     const isFolded = () => head.classList.contains("folded");
     const apply = (folded, animate) => {
       head.classList.toggle("folded", folded);
