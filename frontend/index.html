@@ -704,16 +704,6 @@
        2026-11-12：移到 body 末尾。数字人容器（#avatarBox）在脚本之后，
        脚本若先执行，app.js 里 const avBox = $("#avatarBox") 会拿到 null，
        avInit 第一句 if (!avBox) return; 就静默退出，界面一片空白。 -->
-  <!-- 临时探针（抓 app.js 的静默异常），查完删 -->
-  <script>
-    window.__err = "";
-    window.addEventListener("error", function (e) {
-      window.__err += (e.message || "?") + " @" + (e.lineno || "?") + ":" + (e.colno || "?") + " | ";
-    });
-    window.addEventListener("unhandledrejection", function (e) {
-      window.__err += "REJECT:" + ((e.reason && e.reason.message) || e.reason) + " | ";
-    });
-  </script>
   <script>
     (function () {
       var v = String(Date.now());
@@ -723,32 +713,5 @@
     })();
   </script>
 
-  <!-- 临时探针（定位「数字人形象不显示」），查完删 -->
-  <script>
-    setTimeout(function () {
-      var ph = document.getElementById("avPh");
-      if (!ph) return;
-      var cv = document.getElementById("avCanvas");
-      var im = document.getElementById("avImg");
-      var bb = document.getElementById("avBubble");
-      var info = "init" + (window.__avInitRan ? 1 : 0)
-        + " cv" + (cv ? cv.width + "x" + cv.height : "-")
-        + " img" + (im && im.getAttribute("src") ? (im.complete ? (im.naturalWidth || "0") : "加载中") : "无");
-      try {
-        var d = cv.getContext("2d").getImageData(cv.width >> 1, cv.height >> 1, 1, 1).data;
-        info += " px" + d[0] + "," + d[1] + "," + d[2] + "," + d[3];
-      } catch (e2) { info += " pxERR"; }
-      info += " E:" + (window.__err || "无");
-      ph.hidden = false;
-      ph.textContent = info;
-      try {
-        fetch("/api/code/save", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code: info, language: "txt", filename: "avprobe" })
-        });
-      } catch (e3) {}
-    }, 3000);
-  </script>
 </body>
 </html>

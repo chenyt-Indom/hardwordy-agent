@@ -8301,8 +8301,6 @@
   window.addEventListener("avatar-changed", () => avLoad());
 
   (function avInit() {
-    window.__avInitRan = true;
-    window.__avBoxNull = !avBox;
     if (!avBox) return;
     avApplyMouth();
     avLoad();
