@@ -831,24 +831,84 @@ body.dragging .drop-overlay,
 .mem-meta { font-size: 11px; color: var(--muted); margin: 5px 0 2px; }
 .hint.sm { font-size: 11px; margin: 0 0 6px; line-height: 1.5; }
 
-/* ---------- 知识库面板 ---------- */
+/* ---------- 知识库面板（2026-11-13 重做）----------
+   用户反馈「前端不是很美观」，截图里的硬伤：
+     ① 「知识库」三个字被按钮挤成**竖排**（一字一行）；
+     ② 「刷新」贴到面板边缘；
+     ③ 提示文案里的 Markdown 星号 `**不需要导入**` 原样露出来。
+   做法：极简 —— 标题行只留 📂 和 ⋯，路径/说明/索引状态/重建刷新全收进
+   .kb-menu（默认隐藏）。信息一条没少，只是不再挡文档列表。 */
+.kbpanel .sec-head { margin-bottom: 8px; }
+.kbpanel .sec-head h2 { color: var(--kb-accent); }
+
+/* 标题绝不能被按钮压到换行。
+   原来 .sec-head 是 space-between + 可收缩，三个按钮加起来比面板还宽，
+   h2 被压到只剩一个字宽 —— 于是「知识库」竖着排。nowrap + 不收缩即解决。 */
+.kbpanel .sec-head h2,
+.doclib .sec-head h2,
+.audiolib .sec-head h2,
+.mempanel .sec-head h2 {
+  white-space: nowrap; flex: 0 0 auto;
+  overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+
+/* 纯图标按钮：固定正方形，不撑宽标题行 */
+.btn.sm.ico {
+  width: 26px; height: 26px; min-width: 26px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; line-height: 1;
+}
+.btn.sm.ico:hover { border-color: var(--kb-accent); color: var(--kb-accent); }
+#kbMore[aria-expanded="true"] {
+  background: var(--kb-accent-soft); border-color: var(--kb-accent);
+  color: var(--kb-accent);
+}
+
+/* ⋯ 菜单：展开后是一块卡片，装原来的全部信息 */
+.kb-menu {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 9px; padding: 8px 9px; margin-bottom: 8px;
+  animation: kbMenuIn .14s ease-out;
+}
+.kb-menu[hidden] { display: none; }
+@keyframes kbMenuIn {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+.kb-menu-acts { display: flex; gap: 6px; }
+.kb-menu-acts .btn { flex: 1 1 0; justify-content: center; }
+.kb-menu .hint { margin: 0; font-size: 11px; line-height: 1.5; }
+
 .kbpanel .kb-path {
   font-size: 10.5px; color: var(--muted); word-break: break-all;
   background: var(--panel2); border: 1px solid var(--border);
-  border-radius: 6px; padding: 5px 7px; margin: 6px 0;
+  border-radius: 6px; padding: 4px 7px; cursor: pointer;
   font-family: ui-monospace, Consolas, monospace;
 }
+.kbpanel .kb-path:hover { border-color: var(--kb-accent); color: var(--text); }
+.kb-idx { font-size: 10.5px; color: var(--muted); line-height: 1.5; }
+.kb-idx b { color: var(--kb-accent); font-weight: 600; }
+
+/* 文档列表 */
+.kb-list { display: flex; flex-direction: column; gap: 5px; }
 .kb-item {
   display: flex; align-items: center; gap: 7px;
   background: var(--panel2); border: 1px solid var(--border);
-  border-radius: 7px; padding: 6px 8px; margin-bottom: 5px; font-size: 12px;
+  border-radius: 8px; padding: 6px 8px; font-size: 12px;
+  transition: border-color .15s ease, background .15s ease;
 }
+.kb-item:hover { border-color: var(--kb-accent); }
 .kb-item .kb-name {
   /* 名称现在位于 .kb-body（纵向 flex）内，这里不能再写 flex:1，否则会被纵向拉高 */
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .kb-item .kb-size { color: var(--muted); font-size: 10.5px; flex: none; }
-.kb-item .kb-del { padding: 1px 7px; line-height: 1.4; }
+.kb-item .kb-del {
+  width: 20px; height: 20px; padding: 0; flex: none;
+  line-height: 1; opacity: .4; transition: opacity .15s ease;
+}
+.kb-item:hover .kb-del { opacity: 1; }
 
 /* ---------- 文档附件卡片（拖进聊天框的文档） ---------- */
 .attachment.doc {
