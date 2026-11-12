@@ -117,7 +117,8 @@ inv = hive.invite_payload(gid, "127.0.0.1:8000")
 chk("返回 payload", bool(inv.get("payload")), (inv.get("payload") or "")[:40])
 chk("返回二维码 png(data-url)", str(inv.get("qr_png", "")).startswith("data:image/png"),
     str(inv.get("qr_png", ""))[:30])
-chk("payload 含群密钥", bool(inv.get("key")), bool(inv.get("key")))
+chk("payload 内含群密钥（k= 参数）", "k=" in inv["payload"], inv["payload"][:46])
+chk("payload 不含群名以外的多余字段", "o_id=" in inv["payload"])
 
 # ---------------------------------------------------------------- 10 入群
 print("\n[10] 扫码入群 join_group（模拟另一台机器）")
