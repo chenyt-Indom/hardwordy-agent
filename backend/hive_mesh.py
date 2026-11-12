@@ -223,6 +223,7 @@ class MeshNode:
         self.seen: Dict[str, Set[str]] = {}       # gid -> 见过的 mid
         self.known: Dict[str, Dict[str, Any]] = {}  # uid -> {host, port, name, gid}
         self.outbox: List[Dict[str, Any]] = []    # 断线时排队的消息
+        self._retry: Dict[str, float] = {}        # uid -> 上次尝试重连的时间
         self._srv: Optional[socket.socket] = None
         self._udp: Optional[socket.socket] = None
         self._stop = False
