@@ -349,6 +349,64 @@ def _save_members(gid: str, m: Dict[str, Any]) -> None:
     _write_json(_members_path(gid), m)
 
 
+def merged_members(gid: str, peers: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """把「本地成员表」和「中继报的在线状态」合成一份给界面用。
+
+    为什么要合并：本地成员表有**角色**（谁是群主/管理员），
+    中继那边才有**在线状态、最后在线时间、对方协议版本**。
+    界面要同时显示「群主 · 在线 · 12ms」这些，缺哪一份都不完整。
+
+    状态取值（前端直接按这个上色）：
+      online   在线
+      offline  离线（主动退出或断线，带 last_seen）
+      error    异常（连过但报错，或版本对不上）
+    """
+    local = load_members(gid)
+    peer_map: Dict[str, Dict[str, Any]] = {}
+    for p in (peers or []):
+        if isinstance(p, dict):
+            uid = str(p.get("uid") or p.get("user_id") or "")
+            if uid:
+                peer_map[uid] = p
+
+    now = time.time()
+    out: List[Dict[str, Any]] = []
+    for uid, m in local.items():
+        p = peer_map.get(uid) or {}
+        online = bool(p.get("online"))
+        last_seen = _as_float(p.get("last_seen") or m.get("last_seen"), 0.0)
+        out.append({
+            "uid": uid,
+            "user_id": uid,                       # 兼容前端旧字段
+            "name": m.get("name") or p.get("name") or "成员",
+            "role": m.get("role") or "member",
+            "online": online,
+            "state": peer_state(last_seen, now, online),
+            "last_seen": last_seen,
+            "v": _as_int(p.get("v"), 0),          # 对方客户端协议版本，0=不知道
+            "caps": p.get("caps") or [],
+            "joined": _as_float(m.get("joined") or p.get("joined"), 0.0),
+        })
+    # 中继上有人、本地成员表里没有（刚加入还没同步 / 被踢但还没收到广播）
+    for uid, p in peer_map.items():
+        if uid in local:
+            continue
+        online = bool(p.get("online"))
+        out.append({
+            "uid": uid, "user_id": uid,
+            "name": p.get("name") or "成员",
+            "role": "member",
+            "online": online,
+            "state": peer_state(_as_float(p.get("last_seen"), 0.0), now, online),
+            "last_seen": _as_float(p.get("last_seen"), 0.0),
+            "v": _as_int(p.get("v"), 0),
+            "caps": p.get("caps") or [],
+            "joined": _as_float(p.get("joined"), 0.0),
+        })
+    out.sort(key=lambda x: (not x["online"], x["role"] != "owner", x["name"]))
+    return out
+
+
 def join_group(payload: str, name: str = "") -> Dict[str, Any]:
     """用二维码载荷加入群。载荷形如：
         hive://join?g=<gid>&k=<key>&h=<host>&n=<群名>&o=<群主名>
