@@ -2540,6 +2540,7 @@
   // 数据来自 /api/audio/list（data/tts 目录）；播放走 /api/tts/audio/{name}。
   let __auAudio = null;      // 当前正在播的 Audio 对象
   let __auPlaying = "";      // 正在播的文件名（用来切 ▶ / ⏸）
+  let __auDir = "";          // data/tts 的绝对路径（后端 /api/audio/list 返回的 dir）
 
   async function loadAudioLib() {
     const box = $("#audioList");
