@@ -63,6 +63,7 @@ T_PEERS = 6     # peer exchange
 T_SYNC = 7      # 断线补发请求/应答
 T_CANCEL = 8    # @hd 取消广播
 T_BYE = 9       # 主动断开
+T_FILE = 10     # 附件分片（512KB 一片，走泛洪）
 
 _LOCK = threading.RLock()
 
