@@ -531,29 +531,20 @@ def merged_members(gid: str, peers: Optional[List[Dict[str, Any]]] = None) -> Li
     return out
 
 
-def join_group(payload: str, name: str = "") -> Dict[str, Any]:
-    """用二维码载荷加入群。载荷形如：
-        hive://join?g=<gid>&k=<key>&h=<host>&n=<群名>&o=<群主名>
-    这里只做**本地登记**，真正连上群主由 hive_client 负责。
+def join_with_key(gid: str, key: bytes, name: str = "",
+                  meta: Optional[Dict[str, Any]] = None,
+                  allow_rekey: bool = False) -> Dict[str, Any]:
+    """用「群号 + 群密钥」入群 —— 密码入群、旧邀请码入群最终都走这里。
+
+    meta: 群元信息（n=群名 / o=群主名 / o_id=群主 id / h=host），
+          只在本机还没有这个群时用得上。
+    allow_rekey: 本机已有这个群但密钥不同（群主换过密码）时是否覆盖密钥。
+          调用方必须**先通过网络验证过**才能置 True，否则等于让任何人
+          输个错密码就把自己的群密钥冲掉。
     """
-    from urllib.parse import parse_qs, urlparse
-
-    raw = (payload or "").strip()
-    if raw.startswith("hive://"):
-        q = parse_qs(urlparse(raw).query)
-    else:
-        q = parse_qs(raw)
-    gid = (q.get("g") or [""])[0]
-    kb = (q.get("k") or [""])[0]
-    if not gid or not kb:
-        raise ValueError("二维码内容不完整（缺群号或密钥）")
-    try:
-        key = _key_from_b64(kb)
-    except Exception:
-        raise ValueError("二维码里的密钥无法解析")
-    if len(key) != 32:
-        raise ValueError("密钥长度不对，可能二维码被截断")
-
+    meta = meta or {}
+    if not gid or len(key) != 32:
+        raise ValueError("群号或密钥不合法")
     me = profile()
     if name:
         me = set_name(name)
