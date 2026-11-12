@@ -10684,7 +10684,11 @@ def hive_send(gid: str, body: dict):
     # 附件：本体分片广播给每个成员，各自存一份。
     # 放后台线程 —— 20MB 文件要发几十片，不能卡住"发送"这个请求。
     files = (extra or {}).get("files") or []
-    if files and cli.status().get("connected"):
+    # ⚠️ 这里**不能**再判断 connected：
+    #    没人连上时直接跳过，`_hive_send_files` 就不会被调用，
+    #    也就不会进 `_pending_files` 补发队列 —— 对方之后上线永远拿不到文件。
+    #    是否真的发得出去交给 _hive_send_files 内部判断（失败即入队）。
+    if files:
         threading.Thread(target=_hive_send_files, args=(gid, files),
                          daemon=True).start()
 
