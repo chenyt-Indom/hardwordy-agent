@@ -8413,4 +8413,292 @@
     setInterval(() => refresh(false), 1500);      // 只比长度，变了才真的请求
     setTimeout(() => refresh(true), 800);
   })();
+
+  // ===== 数字人（2026-11-12）=====
+  // 口型方案：音频 → AnalyserNode 取 RMS → 驱动嘴部矩形缩放。
+  // ⚠️ 这**不是** Wav2Lip 那种生成式口型（本机 Python 3.14 下 torch 导入就报
+  //    shm.dll 错，跑不了），而是"嘴张开合上"的形变。二次元立绘够用，写实脸会偏假。
+  //    要真口型得另开 3.11 环境 + 下 Wav2Lip 权重，别指望这里能做到音素级。
+  const AV_POS_KEY = "avatar_pos";
+  const AV_HIDE_KEY = "avatar_hide";
+  const avBox = $("#avatarBox");
+  const avStage = $("#avStage");
+  const avImg = $("#avImg");
+  const avPh = $("#avPh");
+  const avMouth = $("#avMouth");
+  const avBubble = $("#avBubble");
+  const avSleepTag = $("#avSleep");
+  const avTab = $("#avTab");
+  let avMouthCfg = { x: 0.5, y: 0.72, w: 0.16, h: 0.065 };
+  let avCalib = false;
+  let avSleepTimer = 0;
+  let avBubbleTimer = 0;
+  let avAC = null;
+  let avStop = null;
+
+  function avApplyMouth() {
+    if (!avMouth) return;
+    avMouth.style.left = (avMouthCfg.x * 100) + "%";
+    avMouth.style.top = (avMouthCfg.y * 100) + "%";
+    avMouth.style.width = (avMouthCfg.w * 100) + "%";
+    avMouth.style.height = (avMouthCfg.h * 100) + "%";
+  }
+
+  // v: 0~1 张口幅度
+  function avOpenMouth(v) {
+    if (!avMouth) return;
+    const k = Math.max(0, Math.min(1, v));
+    avMouth.style.transform =
+      "translate(-50%, -50%) scale(" + (1 - k * 0.12).toFixed(3) + ", " +
+      (0.45 + k * 2.1).toFixed(3) + ")";
+  }
+
+  function avSay(text, ms) {
+    if (!avBubble || !text) return;
+    avBubble.textContent = text;
+    avBubble.hidden = false;
+    clearTimeout(avBubbleTimer);
+    avBubbleTimer = setTimeout(() => { avBubble.hidden = true; }, ms || 4200);
+  }
+
+  function avSleeping(on) {
+    if (!avBox) return;
+    avBox.classList.toggle("sleep", !!on);
+    if (avSleepTag) avSleepTag.hidden = !on;
+  }
+
+  function avPoke() {
+    avSleeping(false);
+    clearTimeout(avSleepTimer);
+    avSleepTimer = setTimeout(() => avSleeping(true), 90000);
+  }
+
+  // 唤醒：醒过来 + 冒一句话 + 顺手看看屏幕在干嘛（慢，失败就算了）
+  function avWake() {
+    avPoke();
+    avSay("嗯？我在。", 2600);
+    avLookAtScreen();
+  }
+
+  async function avLookAtScreen() {
+    try {
+      const r = await api("/api/avatar/look", { method: "POST", body: JSON.stringify({}) });
+      const t = (r && r.ok && r.text) ? String(r.text).trim() : "";
+      if (t) avSay(t.slice(0, 60), 6000);
+    } catch (e) { /* 视觉模型不在线就不打扰用户 */ }
+  }
+
+  // 把一段音频接到嘴型上，返回停止函数
+  function avAttach(audio) {
+    if (!audio || !avBox) return null;
+    avPoke();
+    if (avStop) { try { avStop(); } catch (e) { /* ignore */ } avStop = null; }
+    avBox.classList.add("speaking");
+    let raf = 0, smooth = 0, cleaned = false;
+    const done = () => {
+      if (cleaned) return;
+      cleaned = true;
+      cancelAnimationFrame(raf);
+      avBox.classList.remove("speaking");
+      avOpenMouth(0);
+    };
+    try {
+      if (!avAC) avAC = new (window.AudioContext || window.webkitAudioContext)();
+      if (avAC.state === "suspended") avAC.resume();
+      const src = avAC.createMediaElementSource(audio);
+      const an = avAC.createAnalyser();
+      an.fftSize = 512;
+      src.connect(an);
+      an.connect(avAC.destination);      // 必须接出去，否则直接没声音
+      const buf = new Uint8Array(an.fftSize);
+      const tick = () => {
+        an.getByteTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) {
+          const v = (buf[i] - 128) / 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / buf.length);
+        smooth = smooth * 0.55 + Math.min(1, rms * 3.4) * 0.45;
+        avOpenMouth(smooth);
+        raf = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (e) {
+      // Web Audio 不可用 → 退回正弦假动作，总比一动不动强
+      const t0 = performance.now();
+      const fake = () => {
+        const t = (performance.now() - t0) / 1000;
+        avOpenMouth(0.35 + 0.35 * Math.abs(Math.sin(t * 9)));
+        raf = requestAnimationFrame(fake);
+      };
+      fake();
+    }
+    avStop = done;
+    audio.addEventListener("ended", done);
+    audio.addEventListener("pause", done);
+    return done;
+  }
+
+  function avPlace(left, top) {
+    if (!avBox) return null;
+    const w = avBox.offsetWidth || 132;
+    const h = avBox.offsetHeight || 210;
+    const l = Math.min(Math.max(0, left), Math.max(0, window.innerWidth - w - 4));
+    const t = Math.min(Math.max(0, top), Math.max(0, window.innerHeight - h - 4));
+    avBox.style.left = l + "px";
+    avBox.style.top = t + "px";
+    avBox.style.right = "auto";
+    avBox.style.bottom = "auto";
+    return { l, t };
+  }
+
+  async function avLoad() {
+    try {
+      const r = await api("/api/avatar/info");
+      if (r && r.mouth) { avMouthCfg = r.mouth; avApplyMouth(); }
+      if (r && r.has_image && r.url) {
+        avImg.src = r.url;
+        avImg.hidden = false;
+        if (avPh) avPh.hidden = true;
+      } else {
+        avImg.hidden = true;
+        if (avPh) avPh.hidden = false;
+      }
+    } catch (e) { /* 后端没起来就保持占位 */ }
+  }
+  // 外部（模型工具 / 其它脚本）换了形象后，喊一声就能刷新
+  window.addEventListener("avatar-changed", () => avLoad());
+
+  (function avInit() {
+    if (!avBox) return;
+    avApplyMouth();
+    avLoad();
+    avPoke();
+
+    // ① 拖动整个小人（校准模式下点嘴部除外）
+    let drag = null;
+    avBox.addEventListener("pointerdown", (ev) => {
+      if (avCalib && ev.target === avMouth) return;
+      if (ev.target.closest && ev.target.closest(".av-bar")) return;
+      const r = avBox.getBoundingClientRect();
+      drag = { dx: ev.clientX - r.left, dy: ev.clientY - r.top };
+      try { avBox.setPointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
+    });
+    avBox.addEventListener("pointermove", (ev) => {
+      if (!drag) return;
+      avPlace(ev.clientX - drag.dx, ev.clientY - drag.dy);
+    });
+    const endDrag = () => {
+      if (!drag) return;
+      drag = null;
+      try {
+        localStorage.setItem(AV_POS_KEY,
+          JSON.stringify({ l: avBox.offsetLeft, t: avBox.offsetTop }));
+      } catch (e) { /* ignore */ }
+      avPoke();
+    };
+    avBox.addEventListener("pointerup", endDrag);
+    avBox.addEventListener("pointercancel", endDrag);
+
+    // ② 恢复上次的位置 / 隐藏状态
+    try {
+      const p = JSON.parse(localStorage.getItem(AV_POS_KEY) || "null");
+      if (p && typeof p.l === "number") avPlace(p.l, p.t);
+    } catch (e) { /* ignore */ }
+    try {
+      if (localStorage.getItem(AV_HIDE_KEY) === "1" && avTab) {
+        avBox.hidden = true;
+        avTab.hidden = false;
+      }
+    } catch (e) { /* ignore */ }
+
+    // ③ 三个按钮
+    const hideBtn = $("#avHideBtn"), calBtn = $("#avCalBtn"), sayBtn = $("#avSayBtn");
+    if (hideBtn) hideBtn.onclick = () => {
+      avBox.hidden = true;
+      if (avTab) avTab.hidden = false;
+      try { localStorage.setItem(AV_HIDE_KEY, "1"); } catch (e) { /* ignore */ }
+    };
+    if (avTab) avTab.onclick = () => {
+      avBox.hidden = false;
+      avTab.hidden = true;
+      try { localStorage.setItem(AV_HIDE_KEY, "0"); } catch (e) { /* ignore */ }
+      avPoke();
+    };
+    if (calBtn) calBtn.onclick = async () => {
+      avCalib = !avCalib;
+      avBox.classList.toggle("calib", avCalib);
+      calBtn.classList.toggle("on", avCalib);
+      if (!avCalib) {
+        try {
+          await api("/api/avatar/mouth", {
+            method: "POST", body: JSON.stringify(avMouthCfg),
+          });
+          showToast("嘴部位置已保存", "");
+        } catch (e) { showToast("嘴部位置保存失败", "warn"); }
+      } else {
+        showToast("拖动黄框对准嘴巴，滚轮调大小，再点 ⚙ 保存", "");
+      }
+    };
+    // 播报：读最近一条回答
+    if (sayBtn) sayBtn.onclick = async () => {
+      const nodes = document.querySelectorAll(".msg.bot .bubble");
+      let txt = "";
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const s = (nodes[i].textContent || "").trim();
+        if (s.length > 4) { txt = s; break; }
+      }
+      if (!txt) { showToast("还没有可以朗读的回答", "warn"); return; }
+      sayBtn.textContent = "⏳";
+      sayBtn.disabled = true;
+      try {
+        const r = await api("/api/tts/synth", {
+          method: "POST",
+          body: JSON.stringify({ text: txt, voice: ttsVoice(), rate: ttsRate(),
+                                 pitch: ttsPitch(), style: ttsStyle() }),
+        });
+        if (!r || !r.ok) throw new Error((r && r.error) || "合成失败");
+        const a = new Audio(r.url);
+        avAttach(a);
+        await a.play();
+        avSay(txt.slice(0, 42) + (txt.length > 42 ? "…" : ""), 5000);
+      } catch (e) {
+        showToast("播报失败：" + String((e && e.message) || e), "warn");
+      } finally {
+        sayBtn.textContent = "💬";
+        sayBtn.disabled = false;
+      }
+    };
+
+    // ④ 校准：拖嘴、滚轮缩放
+    if (avMouth) {
+      let md = false;
+      avMouth.addEventListener("pointerdown", (ev) => {
+        if (!avCalib) return;
+        ev.stopPropagation();
+        md = true;
+        try { avMouth.setPointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
+      });
+      avMouth.addEventListener("pointermove", (ev) => {
+        if (!avCalib || !md) return;
+        const r = avStage.getBoundingClientRect();
+        avMouthCfg.x = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
+        avMouthCfg.y = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
+        avApplyMouth();
+      });
+      avMouth.addEventListener("pointerup", () => { md = false; });
+      avMouth.addEventListener("wheel", (ev) => {
+        if (!avCalib) return;
+        ev.preventDefault();
+        const k = ev.deltaY < 0 ? 1.12 : 0.89;
+        avMouthCfg.w = Math.min(0.9, Math.max(0.02, avMouthCfg.w * k));
+        avMouthCfg.h = Math.min(0.5, Math.max(0.01, avMouthCfg.h * k));
+        avApplyMouth();
+      }, { passive: false });
+    }
+
+    // ⑤ 点一下小人 = 打个招呼（也顺便唤醒）
+    if (avStage) avStage.addEventListener("dblclick", () => avWake());
+  })();
 })();
