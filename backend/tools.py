@@ -2737,6 +2737,8 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
         return _do_video_edit(arguments, ui_events, context)
     if name == "tts_speak":
         return _do_tts_speak(arguments, ui_events, context)
+        if name == "music_make":
+            return _do_music_make(arguments, ui_events, context)
     if name == "list_directory":
         return _do_list_directory(arguments)
     if name == "read_file":
