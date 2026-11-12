@@ -438,6 +438,12 @@
       <div class="hive-head">
         <div class="hive-title">
           <b id="hiveGroupName">未选择群</b>
+          <!-- 联网状态（2026-11-13）：灯 + 文字。四种状态：
+               在线（绿）/ 连接中（黄闪）/ 离线（灰）/ 异常（红） -->
+          <span class="hive-net idle" id="hiveNet"
+                title="这台机器和群服务器之间的连接状态">
+            <i class="net-dot"></i><span id="hiveNetText">本机模式</span>
+          </span>
           <span class="hive-meta" id="hiveGroupMeta"></span>
         </div>
         <span class="head-acts">
