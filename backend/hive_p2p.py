@@ -526,7 +526,8 @@ def share(gid: str, fid: str, port: int = 0, want_upnp: bool = True,
          code=code, upnp=up, token=token, stop=stop_evt)
 
     threading.Thread(target=_sender_worker,
-                     args=(tid, gid, fid, path, token, srv, stop_evt),
+                     args=(tid, gid, fid, path, token, srv, stop_evt,
+                           meta.get("name") or os.path.basename(path)),
                      daemon=True).start()
     # 局域网自动发现：同网段成员会收到「谁在共享哪个文件」
     threading.Thread(target=_beacon_sender,
