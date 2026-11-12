@@ -10718,62 +10718,91 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                  task={"asker": asker, "model": model, "hist": len(hist),
                        "prompt_chars": len(prompt),
                        "instruction": (instruction or "")[:120]})
-        resp = client.chat([{"role": "user", "content": prompt}],
-                           model=model, stream=True,
-                           params={"temperature": 0.3, "max_tokens": 2400})
+        # 两条通道：本地 Ollama / 云端 DeepSeek。
+        # ⚠️ 这个分支以前**不存在** —— 默认模型是 deepseek-flash 时，
+        #    @hd 会拿云端模型名去问 Ollama，直接报「模型不存在」，
+        #    整个功能在默认配置下根本跑不起来。
+        is_cloud = str(model).strip().lower().startswith("deepseek")
         last_push = 0.0
         seq_in = 0
         pend_t = ""
         pend_c = ""
-        for raw in resp.iter_lines(chunk_size=64, decode_unicode=False):
-            if ev.is_set():
-                cancelled = True
-                break
-            line = (raw.decode("utf-8", "ignore") if isinstance(raw, bytes)
-                    else str(raw)).strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            msg = obj.get("message") or {}
-            th = msg.get("thinking") or ""
-            ct = msg.get("content") or ""
-            if th:
-                thinking += th
-                pend_t += th
-            if ct:
-                text += ct
-                pend_c += ct
+
+        def _flush(force: bool = False) -> None:
+            """把攒着的增量推出去。节流是为了不把中继和界面刷爆。"""
+            nonlocal last_push, seq_in, pend_t, pend_c
             now = time.time()
-            if (now - last_push >= _HD_PUSH_GAP
-                    or len(pend_t) + len(pend_c) >= _HD_PUSH_CHARS):
-                base = {"asker": asker, "model": model}
-                if pend_t:
-                    seq_in += 1
-                    _hd_emit(gid, mid, "thinking", pend_t,
-                             {**base, "chars": len(thinking)}, seq_in)
-                    pend_t = ""
-                if pend_c:
-                    seq_in += 1
-                    _hd_emit(gid, mid, "content", pend_c,
-                             {**base, "chars": len(text)}, seq_in)
-                    pend_c = ""
-                last_push = now
-            if obj.get("done"):
-                break
-        # 收尾：把最后没推完的一小段推掉，别让界面卡在倒数第二句
-        if not cancelled:
+            if not force and (now - last_push < _HD_PUSH_GAP
+                              and len(pend_t) + len(pend_c) < _HD_PUSH_CHARS):
+                return
             base = {"asker": asker, "model": model}
             if pend_t:
                 seq_in += 1
                 _hd_emit(gid, mid, "thinking", pend_t,
                          {**base, "chars": len(thinking)}, seq_in)
+                pend_t = ""
             if pend_c:
                 seq_in += 1
                 _hd_emit(gid, mid, "content", pend_c,
                          {**base, "chars": len(text)}, seq_in)
+                pend_c = ""
+            last_push = now
+
+        if is_cloud:
+            dkey = _ds_key("")
+            if not dkey:
+                raise RuntimeError(
+                    "默认模型是云端「%s」，但没配置 DeepSeek Key —— "
+                    "在设置里填一个 Key，或把默认模型换成本地模型" % model)
+            # thinking=True：这次任务的意义就在于「思考过程全员可见」，
+            # 所以哪怕模型默认不思考，这里也显式打开。
+            for kind, val in deepseek_client.chat_stream(
+                    [{"role": "user", "content": prompt}], model=model,
+                    api_key=dkey, temperature=0.3, max_tokens=2400,
+                    thinking=True):
+                if ev.is_set():
+                    cancelled = True
+                    break
+                if not val:
+                    continue
+                if kind == "thinking":
+                    thinking += val
+                    pend_t += val
+                else:
+                    text += val
+                    pend_c += val
+                _flush()
+        else:
+            resp = client.chat([{"role": "user", "content": prompt}],
+                               model=model, stream=True,
+                               params={"temperature": 0.3, "max_tokens": 2400})
+            for raw in resp.iter_lines(chunk_size=64, decode_unicode=False):
+                if ev.is_set():
+                    cancelled = True
+                    break
+                line = (raw.decode("utf-8", "ignore") if isinstance(raw, bytes)
+                        else str(raw)).strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                msg = obj.get("message") or {}
+                th = msg.get("thinking") or ""
+                ct = msg.get("content") or ""
+                if th:
+                    thinking += th
+                    pend_t += th
+                if ct:
+                    text += ct
+                    pend_c += ct
+                _flush()
+                if obj.get("done"):
+                    break
+        # 收尾：把最后没推完的一小段推掉，别让界面卡在倒数第二句
+        if not cancelled:
+            _flush(force=True)
     except Exception as e:
         err = f"{type(e).__name__}: {e}" if not str(e) else str(e)
     finally:
