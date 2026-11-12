@@ -10563,7 +10563,13 @@ def hive_password_set(gid: str, body: dict = None):
 
 @app.post("/api/hive/join_password")
 def hive_join_password(body: dict):
-    """用 12 位密码入群 —— 取代原来的扫码。
+    """【已废弃 · 无调用方】请改用 /api/hive/join。
+
+    两者的差别：`/api/hive/join` 支持「密码 + 对方地址」跨网络入群，
+    并且把「从哪找到的群（via）」透传给前端；这个旧接口只能靠本机记录
+    和局域网广播，跨网络时会误报「找不到群」。保留仅为兼容，别再调用。
+
+    用 12 位密码入群 —— 取代原来的扫码。
 
     两步找群：
       1) 本机已有的群里，哪个的密钥正好等于这个密码派生的密钥；
