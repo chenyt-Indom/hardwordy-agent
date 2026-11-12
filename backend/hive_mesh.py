@@ -407,10 +407,9 @@ class MeshNode:
             peer.port = int(info.get("port") or 0)
             peer.last_seen = time.time()
 
-            me = H.profile()
             peer.send(T_HELLO, {
-                "uid": me.get("user_id", ""),
-                "name": me.get("name", ""),
+                "uid": self.uid,
+                "name": self.uname,
                 "ver": PROTO_VER,
                 "port": self.port,
                 "gid": gid,
