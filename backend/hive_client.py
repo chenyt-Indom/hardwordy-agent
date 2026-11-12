@@ -345,7 +345,10 @@ class HiveClient:
         m = MESH.node()
         if not m.started:
             return {"ok": False, "error": "网络未启动"}
-        fid = str(meta.get("id") or "")
+        # ⚠️ 2026-11-13 修：附件 meta 的字段名是 `fid`，这里原来读的是 `id`，
+        #    于是每次调用都返回「缺少文件 id」—— 附件从来没成功广播过，
+        #    群里只有发送者本机能打开文件。实测确认（在线状态也发不出去）。
+        fid = str(meta.get("fid") or meta.get("id") or "")
         if not fid:
             return {"ok": False, "error": "缺少文件 id"}
         CH = 512 * 1024
