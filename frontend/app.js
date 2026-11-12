@@ -1719,10 +1719,51 @@
       rateRow.appendChild(b);
     });
     menu.appendChild(rateRow);
+
+    // 情感（用 rate/pitch/volume 组合近似，不是真情感合成）
+    const stRow = document.createElement("div");
+    stRow.className = "tts-menu-rate";
+    const stTag = document.createElement("span");
+    stTag.textContent = "情感";
+    stRow.appendChild(stTag);
+    TTS_STYLES.forEach((pair) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "tts-menu-item" + (pair[0] === ttsStyle() ? " on" : "");
+      b.textContent = pair[1];
+      b.onclick = () => {
+        try { localStorage.setItem("tts_style", pair[0]); } catch (e) { /* ignore */ }
+        stRow.querySelectorAll(".tts-menu-item").forEach((n) => n.classList.remove("on"));
+        b.classList.add("on");
+      };
+      stRow.appendChild(b);
+    });
+    menu.appendChild(stRow);
+
+    // 音高
+    const piRow = document.createElement("div");
+    piRow.className = "tts-menu-rate";
+    const piTag = document.createElement("span");
+    piTag.textContent = "音高";
+    piRow.appendChild(piTag);
+    [-12, 0, 12].forEach((v) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "tts-menu-item" + (v === ttsPitch() ? " on" : "");
+      b.textContent = v > 0 ? "+" + v + "Hz" : (v === 0 ? "原调" : v + "Hz");
+      b.onclick = () => {
+        try { localStorage.setItem("tts_pitch", String(v)); } catch (e) { /* ignore */ }
+        piRow.querySelectorAll(".tts-menu-item").forEach((n) => n.classList.remove("on"));
+        b.classList.add("on");
+      };
+      piRow.appendChild(b);
+    });
+    menu.appendChild(piRow);
+
     document.body.appendChild(menu);
     const r = anchor.getBoundingClientRect();
-    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 200)) + "px";
-    menu.style.top = Math.min(r.bottom + 6, window.innerHeight - 220) + "px";
+    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 220)) + "px";
+    menu.style.top = Math.min(r.bottom + 6, window.innerHeight - 330) + "px";
     setTimeout(() => {
       const off = (ev) => {
         if (!menu.contains(ev.target)) {
