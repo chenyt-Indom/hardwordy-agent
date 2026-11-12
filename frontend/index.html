@@ -122,6 +122,13 @@
           <button class="btn sm ghost" id="hiveRelayBtn"
               title="跨网络时用：把你的连接码发给对方">🔗 连接码</button>
           <button class="btn sm ghost" id="hiveNameBtn">✏️ 我的昵称</button>
+          <!-- 群记忆（2026-11-13）：@hd 的长期背景就是这份东西，按群聊内容生成，
+               点一下立刻按当前聊天重建，能直接看到「这个群被理解成什么样」。 -->
+          <button class="btn sm ghost" id="hiveMemBtn"
+                  title="按当前群聊内容重建群记忆（@hd 干活时会拿它当长期背景）">🧠 群记忆</button>
+          <!-- 删除群（2026-11-13）：只有群主能用，非群主自动隐藏 -->
+          <button class="btn sm ghost" id="hiveDelBtn" hidden
+                  title="删除这个群（仅群主）。会移到 data/hive/_deleted，误删能捞回来">🗑 删除群</button>
         </div>
         <div class="kb-idx" id="hiveStatusLine">未连接</div>
       </div>
