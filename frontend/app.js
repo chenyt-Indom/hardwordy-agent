@@ -2360,6 +2360,11 @@
       window.Studio.onDropFiles(files);
       return;
     }
+    // 群聊模式：拖进来的文件属于这个群，别塞进单人模式的附件区
+    if (window.__hiveMode && typeof window.__hiveOnDrop === "function") {
+      window.__hiveOnDrop(files);
+      return;
+    }
     onDropFiles(files);
   }, true);
 
