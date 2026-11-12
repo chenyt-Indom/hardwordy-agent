@@ -1579,7 +1579,7 @@ def _rebuild_pad(score: dict, bars: int) -> list:
 
 def _rebuild_arp(score: dict, bars: int, inst: str) -> list:
     beat = 60.0 / float(score.get("bpm") or 120)
-    bar_s = beat * 4
+    bar_s = beat * float(score.get("beats_per_bar") or 4)
     out = []
     for b, ch in enumerate(score.get("chords") or []):
         if not ch:
