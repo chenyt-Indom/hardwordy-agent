@@ -169,7 +169,7 @@ async def handler(ws: WebSocketServerProtocol) -> None:
                     await ws.send(json.dumps({"t": "error", "msg": "join 缺 gid/uid"},
                                              ensure_ascii=False))
                     continue
-                ws._hive_uid = uid  # type: ignore[attr-defined]
+                CONN_UID[ws] = uid
                 room = _room(gid)
                 room.join(ws, uid, name)
                 since = int(m.get("since") or 0)
