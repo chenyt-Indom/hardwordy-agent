@@ -350,6 +350,8 @@ class MeshNode:
                 "proto": PROTO_VER,
                 "error": self._last_err,
                 "uptime": int(time.time() - self._started_at) if self._started_at else 0,
+                "dev": self.dev,
+                "uid_conflict": self.uid_conflict,
             }
 
     def peers_of(self, gid: str) -> List[Peer]:
