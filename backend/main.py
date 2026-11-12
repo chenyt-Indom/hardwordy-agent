@@ -11134,7 +11134,15 @@ def _hive_collect_attachments(gid: str, body: dict, hist: list):
             if not fid or fid in seen:
                 continue
             seen.add(fid)
-            info = file_tools.read_file(hive.file_path(gid, fid))
+            # ⚠️ 必须**逐个**附件容错：hive.file_path() 在索引里查不到 fid 时
+            #    会抛 ValueError("文件不存在")，原来这个异常被最外层 try 吞掉，
+            #    直接跳出整个 for —— 一个坏附件就把后面所有**存在的**附件一起丢掉，
+            #    模型只能看到残缺的一部分。实测确认（坏 fid 放中间，后面的文档全丢）。
+            try:
+                info = file_tools.read_file(hive.file_path(gid, fid))
+            except Exception:
+                note += "\n[附件·取不到] " + str(f.get("name") or fid)
+                continue
             if not info.get("ok"):
                 note += "\n[附件·取不到] " + str(f.get("name") or fid)
                 continue
