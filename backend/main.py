@@ -10330,13 +10330,25 @@ def hive_create(body: dict):
     relay_info: dict = {"configured": False}
     if url:
         try:
-            norm = hive_deploy.normalize_url(url)
+            # 2026-11-13：先自动试出真正能用的地址再存。
+            # 原来直接 normalize 就存 —— 用户填「139.199.69.88」会被当成
+            # ws://139.199.69.88（= 80 端口），而服务器上是 https + /hive，
+            # 于是地址存下来了、却永远连不上，还查不出原因。
+            pr = hive_deploy.probe_auto(url)
+            norm = (pr.get("url") if pr.get("ok") else "") or \
+                hive_deploy.normalize_url(url)
             hive_deploy.remember_relay(norm, b.get("relay_note") or "")
             hive.set_relay(norm, "", True)
             st = hive_client.client().start(norm, g["gid"])
-            relay_info = {"configured": True, "url": norm,
-                          "connected": bool(st.get("connected")),
-                          "error": st.get("last_error") or ""}
+            perr = pr.get("error") or {}
+            relay_info = {
+                "configured": True, "url": norm,
+                "connected": bool(st.get("connected")),
+                "error": st.get("last_error") or "",
+                "probe_ok": bool(pr.get("ok")),
+                "probe_error": perr.get("title") or "",
+                "tried": pr.get("tried") or [],
+            }
         except Exception as e:
             relay_info = {"configured": False, "url": url,
                           "error": f"{type(e).__name__}: {e}"}
