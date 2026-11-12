@@ -10673,7 +10673,8 @@ def hive_p2p_receive(gid: str, body: dict = None):
 def hive_p2p_list(gid: str):
     try:
         return {"ok": True, "transfers": hive_p2p.list_all(gid),
-                "local_ip": hive_p2p.local_ip()}
+                "local_ip": hive_p2p.local_ip(),
+                "beacons": hive_p2p.beacons(gid)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
