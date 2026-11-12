@@ -272,7 +272,14 @@ class MeshNode:
         for p in range(want, want + 12):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # ⚠️ Windows 上 SO_REUSEADDR 的语义和 Linux 不同：它允许**两个进程**
+                # 绑同一个端口，后绑的那个会抢走流量。实测两个节点同时绑 8899 都成功，
+                # 于是 A 连过去连到了自己 —— 消息发不出去，而且完全不报错。
+                # 用 SO_EXCLUSIVEADDRUSE 才是「端口真的被占了就失败」，递增重试才有意义。
+                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                else:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 s.bind(("0.0.0.0", p))
                 s.listen(32)
                 s.settimeout(1.0)
