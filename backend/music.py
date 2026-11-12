@@ -1302,11 +1302,13 @@ def generate(style: str = "pop", bars: int = 16, bpm: float = 0,
                          % (style, "、".join("%s=%s" % (k, v["name"])
                                              for k, v in STYLES.items()))}
     bars = max(2, min(MAX_BARS, int(bars or 16)))
+    bb = max(1.0, min(12.0, float(bar_beats or 4.0)))
     notes_in = parse_notes(notes, key=key,
-                           scale_name=(STYLES[style] or {}).get("scale", "major")) if notes else None
+                           scale_name=(STYLES[style] or {}).get("scale", "major"),
+                           bar_beats=bb) if notes else None
     score = make_score(style=style, bars=bars, bpm=bpm, key=key, seed=seed,
                        vocals=vocals, title=title, notes_in=notes_in,
-                       lyrics=lyrics)
+                       lyrics=lyrics, bar_beats=bb)
     if score["duration"] > MAX_SECONDS:
         return {"ok": False, "error": "太长了：%.0f 秒，上限 %d 秒"
                                       % (score["duration"], MAX_SECONDS)}
