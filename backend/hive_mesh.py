@@ -771,7 +771,7 @@ class MeshNode:
                 continue
             if o.get("svc") != "hive-mesh":
                 continue
-            if o.get("uid") == me:
+            if o.get("uid") == self.uid:
                 continue                      # 自己发的广播，忽略
             gid = str(o.get("gid") or "")
             with _LOCK:
