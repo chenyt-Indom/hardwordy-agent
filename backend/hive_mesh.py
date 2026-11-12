@@ -759,8 +759,9 @@ class MeshNode:
                         "name": self.uname, "ts": time.time(),
                     }).encode("utf-8")
                     try:
-                        self._udp.sendto(pkt, ("255.255.255.255", 45231))
-                        self._udp.sendto(pkt, (lan_ip().rsplit(".", 1)[0] + ".255", 45231))
+                        self._udp.sendto(pkt, ("255.255.255.255", self._beacon_port))
+                        self._udp.sendto(pkt, (lan_ip().rsplit(".", 1)[0] + ".255",
+                                                self._beacon_port))
                     except Exception:
                         pass
             except Exception:
