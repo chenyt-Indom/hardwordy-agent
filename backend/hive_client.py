@@ -340,6 +340,8 @@ class HiveClient:
             self._emit_status()
         elif t == "msg":
             self._store(m)
+        elif t == "stream":
+            self._stream(m)
         elif t == "pong":
             if self._last_ping:
                 self._latency = (time.time() - self._last_ping) * 1000.0
