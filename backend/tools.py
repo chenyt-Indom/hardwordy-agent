@@ -3956,9 +3956,12 @@ def _do_tts_speak(arguments, ui_events, context):
 
     url = r.get("url") or ""
     kind = "在线神经语音" if r.get("engine") == "edge" else "离线系统语音"
+    style_note = ""
+    if r.get("style") and r.get("style") != "neutral":
+        style_note = " · " + str(r.get("style_name") or "")
     lines = [
-        "语音已生成：**%s**（%s · %s）"
-        % (r.get("name"), r.get("voice_name") or r.get("voice") or "", kind),
+        "语音已生成：**%s**（%s · %s%s）"
+        % (r.get("name"), r.get("voice_name") or r.get("voice") or "", kind, style_note),
         "约 %.0f 秒，文件 %.1f KB。" % (float(r.get("est_seconds") or 0),
                                        float(r.get("bytes") or 0) / 1024.0),
         "[在线播放](%s)" % url,
