@@ -3943,8 +3943,14 @@ def _do_tts_speak(arguments, ui_events, context):
     _ui(ui_events, {"type": "status",
                     "text": "正在合成语音（%d 字）…长文要等几十秒" % chars})
 
+    try:
+        pitch = int(arguments.get("pitch") or 0)
+    except Exception:
+        pitch = 0
+
     r = tts.synth(text, voice=voice, rate=rate, engine=engine,
-                  filename=str(arguments.get("filename") or ""))
+                  filename=str(arguments.get("filename") or ""),
+                  pitch=pitch, style=str(arguments.get("style") or ""))
     if not r.get("ok"):
         return "语音合成失败：%s" % (r.get("error") or "未知原因")
 
