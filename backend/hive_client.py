@@ -348,6 +348,8 @@ class HiveClient:
             self._store(m)
         elif t == "stream":
             self._stream(m)
+        elif t == "file":
+            self._file(m)
         elif t == "cancel":
             # 别人请求取消：解密后交给上层判断（只有真正在跑的机器知道该不该停）
             key = H.group_key(self._gid)
