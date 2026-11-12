@@ -1601,7 +1601,7 @@ def _rebuild_arp(score: dict, bars: int, inst: str) -> list:
 
 def _rebuild_drums(score: dict, style: str) -> list:
     beat = 60.0 / float(score.get("bpm") or 120)
-    bar_s = beat * 4
+    bar_s = beat * float(score.get("beats_per_bar") or 4)
     bars = int(score.get("bars") or 16)
     rng = random.Random(5)
     pat = _drum_pattern(style, 4, rng)
