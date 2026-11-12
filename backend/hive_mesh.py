@@ -255,6 +255,7 @@ class MeshNode:
         self.on_file = None     # Callable[[str, dict], None]  附件分片
         self.on_peer = None     # Callable[[], None]
         self.on_members = None  # Callable[[str], None]  成员表有变化（收到别人的）
+        self.on_gone = None     # Callable[[str, str], None]  某个群被群主删了（gid, 群名）
 
     # ------------------------------------------------------------ 生命周期
 
