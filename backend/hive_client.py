@@ -160,6 +160,8 @@ class HiveClient:
                 pass
         self._connected = False
         self._ws = None
+        self._state = "idle"
+        self._latency = 0.0
         self._emit_status()
         return {"ok": True}
 
