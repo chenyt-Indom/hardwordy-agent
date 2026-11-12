@@ -9186,13 +9186,6 @@
     let saved = "single";
     try { saved = localStorage.getItem("ui_mode") || "single"; } catch (e) { /* 忽略 */ }
     setMode(saved === "hive" ? "hive" : "single");
-    el("hiveSetup").hidden = false; hsLog("ok", "DNS 解析成功：hive.example.com → 1.2.3.4（12ms）", 12);
-    hsLog("ok", "TCP 端口通：1.2.3.4:8765（28ms）", 28);
-    hsLog("ok", "健康检查通过：hive-relay v1.1，在线房间 2，已运行 3600s", 41);
-    hsLog("err", "WebSocket 握手失败：连接超时（被挡住了）", 6021);
-    hsLog("info", "建议1：云控制台的安全组里放行这个端口（入方向 TCP）");
-    el("hsLast").hidden = false; el("hsLastUrl").textContent = "ws://1.2.3.4:8765";
-    el("hsRelay").value = "ws://1.2.3.4:8765"; el("hsName").value = "官网改版"; /* TEMP-SHOT */
   })();
 
 })();
