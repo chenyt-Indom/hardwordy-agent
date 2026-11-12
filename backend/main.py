@@ -10197,5 +10197,238 @@ def version_undo():
     return r
 
 
+# ---------- 多人协作群（Hive）----------
+# ⚠️ 和语音一样，这些**必须是模块顶层路由**。插进函数体里会被自动缩进，
+#    装饰器在函数内执行 → 路由一个都不注册（导入不报错，全 404）。
+
+_hive_clients: set = set()
+_hive_loop = None
+
+
+def _broadcast_hive(event: dict) -> None:
+    """把群聊事件推给所有已连接的前端（从后台线程安全投递）。"""
+    loop = _hive_loop
+    if loop is None or loop.is_closed():
+        return
+    data = json.dumps(event, ensure_ascii=False)
+    for ws in list(_hive_clients):
+        try:
+            asyncio.run_coroutine_threadsafe(ws.send_text(data), loop)
+        except Exception:
+            pass
+
+
+def _hive_on_message(gid: str, msg: dict) -> None:
+    _broadcast_hive({"type": "msg", "gid": gid, "msg": msg})
+
+
+# 中继推来的消息 → 转给前端（回调在客户端线程里触发，投递是线程安全的）
+hive_client.client().on_message = _hive_on_message
+
+
+@app.websocket("/ws/hive")
+async def ws_hive(ws: WebSocket):
+    """群聊实时通道：只做下行推送（新消息 / 在线成员 / 连接状态）。
+
+    上行统一走 REST（/api/hive/{gid}/send），因为发消息要落盘 + 可能唤醒模型，
+    放在 HTTP 里能做超时和错误提示，比 WebSocket 里静默失败好排查。
+    """
+    global _hive_loop
+    await ws.accept()
+    _hive_loop = asyncio.get_running_loop()
+    _hive_clients.add(ws)
+    try:
+        await ws.send_text(json.dumps({
+            "type": "hello",
+            "status": hive.status(),
+            "client": hive_client.client().status(),
+        }, ensure_ascii=False))
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        _hive_clients.discard(ws)
+
+
+@app.get("/api/hive/status")
+def hive_status():
+    return {"ok": True, "hive": hive.status(),
+            "client": hive_client.client().status()}
+
+
+@app.post("/api/hive/profile")
+def hive_profile(body: dict):
+    """改本机在群里的昵称。"""
+    return {"ok": True, "profile": hive.set_name((body or {}).get("name") or "")}
+
+
+@app.post("/api/hive/create")
+def hive_create(body: dict):
+    """建群 —— 建群的人就是群主。"""
+    b = body or {}
+    try:
+        g = hive.create_group(b.get("name") or "协作群", b.get("owner_name") or "")
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "group": g}
+
+
+@app.get("/api/hive/groups")
+def hive_groups():
+    return {"ok": True, "groups": hive.list_groups()}
+
+
+@app.post("/api/hive/join")
+def hive_join(body: dict):
+    """扫码入群（把二维码里的 hive:// 载荷原样发过来即可）。"""
+    b = body or {}
+    try:
+        g = hive.join_group(b.get("payload") or "", b.get("name") or "")
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "group": g}
+
+
+@app.get("/api/hive/{gid}/messages")
+def hive_messages(gid: str, since: int = 0, limit: int = 200):
+    """增量拉消息。since = 上次见到的最大 seq，100 人群也不会卡。"""
+    return {"ok": True,
+            "messages": hive.read_messages(gid, since, limit),
+            "members": list(hive.load_members(gid).values()),
+            "group": hive.load_group(gid) or {}}
+
+
+@app.get("/api/hive/{gid}/invite")
+def hive_invite(gid: str, host: str = ""):
+    """生成二维码（返回可直接显示的 PNG data URL）。"""
+    try:
+        return {"ok": True, **hive.invite_payload(gid, host)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/kick")
+def hive_kick(gid: str, body: dict):
+    """踢人（只有群主能踢）。"""
+    try:
+        return {"ok": True, **hive.kick_member(gid, (body or {}).get("user_id") or "")}
+    except PermissionError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/send")
+def hive_send(gid: str, body: dict):
+    """发消息。文本里带 @hd 时，异步唤醒模型干活。"""
+    b = body or {}
+    text = b.get("text") or ""
+    mtype = b.get("type") or "text"
+    extra = b.get("extra")
+    cli = hive_client.client()
+    try:
+        if cli.status().get("connected"):
+            r = cli.send(gid, text, mtype, extra)
+        else:
+            m = hive.send_message(gid, text, mtype, extra=extra)
+            _broadcast_hive({"type": "msg", "gid": gid, "msg": m})
+            r = {"ok": True, "local": True, "msg": m}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    # @hd：只有出现这个标记才花算力，普通聊天完全不动模型
+    instr = hive.parse_hd(text)
+    if instr is not None:
+        threading.Thread(target=_hive_run_model, args=(gid, instr, b),
+                         daemon=True).start()
+    return {"ok": True, "sent": r, "woke_model": instr is not None}
+
+
+def _hive_post(gid: str, text: str, mtype: str, extra: dict | None = None) -> None:
+    """把一条消息发出去（连着中继就发中继，否则本地落盘 + 推前端）。"""
+    cli = hive_client.client()
+    try:
+        if cli.status().get("connected"):
+            cli.send(gid, text, mtype, extra)
+            return
+    except Exception:
+        pass
+    try:
+        m = hive.send_message(gid, text, mtype, extra=extra)
+        _broadcast_hive({"type": "msg", "gid": gid, "msg": m})
+    except Exception:
+        logger.warning("群消息落盘失败", exc_info=True)
+
+
+def _hive_run_model(gid: str, instruction: str, body: dict) -> None:
+    """@hd 唤起的模型任务。
+
+    指令来源就是 @ 模型的那个人（**不一定是群主**），
+    所以这里不检查身份 —— 群里任何人都能唤醒，谁唤醒就以谁的指令为准。
+    但「指令优先、上下文只作参考」这条由 build_hd_prompt 在提示词里钉死。
+    """
+    me = hive.profile()
+    asker = me["name"]
+    try:
+        _hive_post(gid, f"{asker} 唤醒了模型，正在处理…", "system")
+        hist = hive.read_messages(gid, 0, 60)
+        prompt = hive.build_hd_prompt(instruction, hist, asker)
+        cfg = config.load_config() or {}
+        model = cfg.get("default_model") or ""
+        if not model:
+            raise RuntimeError("没有配置默认模型（先在设置里选一个）")
+        resp = client.chat([{"role": "user", "content": prompt}],
+                           model=model, stream=False,
+                           params={"temperature": 0.3, "max_tokens": 1600})
+        data = resp.json()
+        text = ((data.get("message") or {}).get("content") or "").strip()
+        if not text:
+            think = ((data.get("message") or {}).get("thinking") or "").strip()
+            raise RuntimeError("模型没有返回正文" + ("（只有思考内容）" if think else ""))
+    except Exception as e:
+        text = f"⚠️ 模型执行失败：{e}"
+    _hive_post(gid, text, "ai", {"by": asker, "model": cfg.get("default_model") or ""})
+
+
+@app.get("/api/hive/relay")
+def hive_relay_get():
+    return {"ok": True, "relay": hive.relay_config()}
+
+
+@app.post("/api/hive/relay")
+def hive_relay_set(body: dict):
+    """配置云端中继地址（比如 ws://你的腾讯云IP:8765）。"""
+    b = body or {}
+    try:
+        cfg = hive.set_relay(b.get("url") or "", b.get("token") or "",
+                             bool(b.get("enabled", True)))
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "relay": cfg}
+
+
+@app.post("/api/hive/connect")
+def hive_connect(body: dict):
+    """连上中继（进入群聊模式时调用）。"""
+    b = body or {}
+    gid = b.get("gid") or ""
+    if not gid:
+        return {"ok": False, "error": "缺群号"}
+    url = (b.get("url") or hive.relay_config().get("url") or "").strip()
+    if not url:
+        return {"ok": False, "error": "还没有配置中继地址"}
+    r = hive_client.client().start(url, gid)
+    return {"ok": bool(r.get("ok")), "client": hive_client.client().status(),
+            "error": r.get("error") or ""}
+
+
+@app.post("/api/hive/disconnect")
+def hive_disconnect():
+    hive_client.client().stop()
+    return {"ok": True, "client": hive_client.client().status()}
+
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
