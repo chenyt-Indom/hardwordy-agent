@@ -690,12 +690,14 @@ class MeshNode:
         except Exception:
             return []
 
-    def _merge_members(self, gid: str, arr: Any) -> None:
+    def _merge_members(self, gid: str, arr: Any, kicked: Any = None) -> None:
         """收到别人的成员表就合并。变了就通知上层刷新界面。"""
-        if not isinstance(arr, list) or not arr:
-            return
+        n = 0
         try:
-            n = H.merge_members(gid, arr)
+            if isinstance(arr, list) and arr:
+                n = H.merge_members(gid, arr)
+            if isinstance(kicked, list) and kicked:
+                n += H.merge_kicked(gid, kicked)
         except Exception:
             return
         if n and self.on_members:
