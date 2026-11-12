@@ -8830,11 +8830,21 @@
         return;
       }
       box.innerHTML = groups.map((g) => {
-        const on = g.gid === curGid ? " on" : "";
+        const isCur = g.gid === curGid;
+        const on = isCur ? " on" : "";
         const owner = g.owner === myId ? "群主" : (g.owner_name || "");
-        return '<div class="hive-item' + on + '" data-gid="' + hEsc(g.gid) + '">'
-          + '<span class="hi-dot' + (g.gid === curGid ? " live" : "") + '"></span>'
-          + '<span class="hi-name" title="' + hEsc(g.name) + '">' + hEsc(g.name) + "</span>"
+        // 只有当前群在连中继，其它群不知道状态 → 保持中性灰
+        let dot = "";
+        if (isCur) dot = netCls === "idle" ? " offline" : " " + netCls;
+        const stTxt = isCur
+          ? (netCls === "online" ? "在线" : netCls === "connecting" ? "连接中"
+            : netCls === "error" ? "连不上" : "离线")
+          : "";
+        return '<div class="hive-item' + on + '" data-gid="' + hEsc(g.gid) + '"'
+          + (isCur ? ' title="' + hEsc(g.name + " · " + stTxt) + '"' : "")
+          + ">"
+          + '<span class="hi-dot' + dot + '"></span>'
+          + '<span class="hi-name">' + hEsc(g.name) + "</span>"
           + '<span class="hi-meta">' + hEsc(owner) + " · " + (g.members || 0) + "人</span>"
           + "</div>";
       }).join("");
