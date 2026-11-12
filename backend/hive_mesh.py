@@ -481,6 +481,7 @@ class MeshNode:
                 "gid": gid,
                 "known": self._known_list(),
                 "members": self._members_of(gid),
+                "kicked": self._kicked_of(gid),
             })
             with _LOCK:
                 # 同一 uid 已经有连接了就不重复加（避免双向连成两条）
