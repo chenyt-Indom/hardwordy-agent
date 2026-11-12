@@ -592,14 +592,17 @@ def _recv_worker(tid: str, gid: str, fid: str, host: str, port: int,
         # ⚠️ 不判这一步会出错：part 文件已不存在，后面算 SHA 时会报
         #    「文件校验失败」，让用户以为文件坏了。
         if st.get("finished"):
+            # 用状态里记的 fid_out —— 共享「本机文件」时 fid 是空串，
+            # 拿它去查 meta 必然查不到，会把已完成的文件误判成失败。
+            out_fid = str(st.get("fid_out") or fid or "")
             try:
-                m = H.get_file_meta(gid, fid)
+                m = H.get_file_meta(gid, out_fid) if out_fid else None
             except Exception:
                 m = None
             if m and int(m.get("size") or 0) == int(st.get("size") or -1):
                 _upd(tid, state="done", done=int(st.get("size") or 0),
                      total=int(st.get("size") or 0), name=st.get("name") or "",
-                     speed=0.0, eta=0, fid_out=fid)
+                     speed=0.0, eta=0, fid_out=out_fid)
                 return
         # 群密钥换了或 token 变了，旧位图作废
         if st.get("token") != token:
