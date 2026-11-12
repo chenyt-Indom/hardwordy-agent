@@ -2620,6 +2620,8 @@
         rx.disabled = false;
         rx.textContent = old;
         loadKbIndexStatus();
+        // 重建后每篇的块数会变，列表必须一起刷，否则卡片上还是旧块数
+        loadKb();
       }
     };
     loadKbIndexStatus();
