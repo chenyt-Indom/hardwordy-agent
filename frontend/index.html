@@ -498,6 +498,39 @@
       <p class="tip">普通聊天不会调用模型，只有 @hd 才会唤醒。模型跑在群主的机器上。</p>
     </div>
 
+    <!-- ============ 点对点直传（G 级文件，不经服务器） ============
+         连接信息靠「连接码」人工传递（二维码/复制粘贴），文件内容 TCP 直连。 -->
+    <div class="p2p-mask" id="p2pMask" hidden>
+      <div class="p2p-panel">
+        <div class="p2p-head">
+          <b>📡 点对点直传</b>
+          <span class="p2p-sub" id="p2pSub">G 级文件 · 不经过任何服务器</span>
+          <button type="button" class="p2p-x" id="p2pClose" title="关闭">✕</button>
+        </div>
+        <div class="p2p-body">
+          <div class="p2p-share" id="p2pShare" hidden>
+            <img class="p2p-qr" id="p2pQr" alt="连接码" />
+            <div class="p2p-share-info">
+              <div class="p2p-fname" id="p2pFname">—</div>
+              <div class="p2p-hint">让对方扫左边的二维码，或把下面的连接码复制给他</div>
+              <textarea id="p2pCode" rows="3" readonly spellcheck="false"></textarea>
+              <div class="p2p-row">
+                <button type="button" class="btn sm" id="p2pCopy">复制连接码</button>
+                <span class="p2p-addr" id="p2pAddr"></span>
+              </div>
+            </div>
+          </div>
+          <div class="p2p-recv">
+            <input id="p2pInput" placeholder="粘贴对方给的连接码（HIVE1-…）" spellcheck="false" />
+            <button type="button" class="btn sm primary" id="p2pGo">开始接收</button>
+          </div>
+          <div class="p2p-list" id="p2pList">
+            <p class="p2p-empty">还没有传输任务。点附件上的 📡 开始共享，或粘贴连接码接收。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="messages" id="messages">
       <div class="msg bot">
         <div class="bubble">
