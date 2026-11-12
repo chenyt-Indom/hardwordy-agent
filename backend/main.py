@@ -10267,13 +10267,32 @@ def hive_profile(body: dict):
 
 @app.post("/api/hive/create")
 def hive_create(body: dict):
-    """建群 —— 建群的人就是群主。"""
+    """建群 —— 建群的人就是群主。
+
+    `relay_url` 可选：填了就记下来并立即尝试连上（连不上也不影响建群，
+    群仍然建在本机，之后随时可以补填/换服务器）。
+    """
     b = body or {}
     try:
         g = hive.create_group(b.get("name") or "协作群", b.get("owner_name") or "")
     except Exception as e:
         return {"ok": False, "error": str(e)}
-    return {"ok": True, "group": g}
+
+    url = (b.get("relay_url") or "").strip()
+    relay_info: dict = {"configured": False}
+    if url:
+        try:
+            norm = hive_deploy.normalize_url(url)
+            hive_deploy.remember_relay(norm, b.get("relay_note") or "")
+            hive.set_relay(norm, "", True)
+            st = hive_client.client().start(norm, g["gid"])
+            relay_info = {"configured": True, "url": norm,
+                          "connected": bool(st.get("connected")),
+                          "error": st.get("last_error") or ""}
+        except Exception as e:
+            relay_info = {"configured": False, "url": url,
+                          "error": f"{type(e).__name__}: {e}"}
+    return {"ok": True, "group": g, "relay": relay_info}
 
 
 @app.get("/api/hive/groups")
