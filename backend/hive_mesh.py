@@ -570,14 +570,15 @@ class MeshNode:
             for k in (obj.get("known") or []):
                 if isinstance(k, dict) and k.get("uid"):
                     self._learn(k, gid)
-            self._merge_members(gid, obj.get("members"))
+            self._merge_members(gid, obj.get("members"), obj.get("kicked"))
             return
         if typ == T_MEMBERS:
-            self._merge_members(gid, obj.get("members"))
+            self._merge_members(gid, obj.get("members"), obj.get("kicked"))
             ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
             if ttl > 0:
                 self._fanout(gid, T_MEMBERS,
-                             {"members": obj.get("members") or [], "ttl": ttl},
+                             {"members": obj.get("members") or [],
+                              "kicked": obj.get("kicked") or [], "ttl": ttl},
                              skip=peer)
             return
         if typ == T_PEERS:
