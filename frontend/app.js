@@ -8616,6 +8616,42 @@
     avBubbleTimer = setTimeout(() => { avBubble.hidden = true; }, ms || 4200);
   }
 
+  // 合成一段语音并接到嘴型上（自动朗读、气泡播报都走这里）
+  async function avSpeak(text) {
+    const t = String(text || "").trim();
+    if (t.length < 2) return;
+    try {
+      const r = await api("/api/tts/synth", {
+        method: "POST",
+        body: JSON.stringify({ text: t, voice: ttsVoice(), rate: ttsRate(),
+                               pitch: ttsPitch(), style: ttsStyle() }),
+      });
+      if (!r || !r.ok) throw new Error((r && r.error) || "合成失败");
+      const a = new Audio(r.url);
+      avAttach(a);
+      await a.play();
+      avSay(t.slice(0, 42) + (t.length > 42 ? "…" : ""), 5000);
+    } catch (e) {
+      console.warn("[avatar] 自动朗读失败：", e);
+    }
+  }
+
+  // 每条回答结束时调一次：先按内容切表情，再（如果开着）自动朗读
+  function avOnAnswer(text) {
+    const t = String(text || "");
+    if (!t.trim()) return;
+    try {
+      if (/(抱歉|失败|错误|无法|不能|出错|异常)/.test(t)) avSetEmotion("serious");
+      else if (/(让我看|分析|思考|查一下|先确认|排查)/.test(t)) avSetEmotion("thinking");
+      else if (/(完成|成功|已经|搞定|好了)/.test(t)) avSetEmotion("happy");
+      else avSetEmotion("neutral");
+    } catch (e) { /* ignore */ }
+    avPoke();
+    try {
+      if ((localStorage.getItem("avatar_autoread") || "0") === "1") avSpeak(t);
+    } catch (e) { /* ignore */ }
+  }
+
   function avSleeping(on) {
     if (!avBox) return;
     avBox.classList.toggle("sleep", !!on);
