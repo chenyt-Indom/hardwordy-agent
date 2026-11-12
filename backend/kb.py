@@ -793,18 +793,23 @@ def search(query: str, top_k: int = 6, min_score: float = None):
         final = cov.copy()
 
     # ④ 阈值过滤：分数太低的不返回（用户要求）
-    lo_final = MIN_FINAL if min_score is None else float(min_score)
+    # ⚠️ 判据是「语义分达标 **或** 覆盖率达标」，**不能拿融合分当硬门槛**：
+    # 实测查「怎么让背景虚化」，正确文档语义分 0.411（已过线），
+    # 但查询词一个都没在原文出现（覆盖率 0），融合分只有 0.267，
+    # 于是被 0.30 的融合门槛误杀 —— 这类"换个说法问"正是向量检索的价值所在。
+    # 融合分只用来排序，不负责拦截。
     picked = []
     for i in range(n):
         base = float(final[i])
-        if base < lo_final:
-            continue
         v = float(vec[i]) if vec is not None else 0.0
         c = float(cov[i])
-        # 语义和覆盖率**至少有一个**像样才收 —— 两个都低说明真的不相关
-        if vec is not None and v < MIN_VEC and c < MIN_COV:
+        if min_score is not None and base < float(min_score):
             continue
-        if vec is None and c < MIN_COV:
+        if vec is not None:
+            ok = (v >= MIN_VEC) or (c >= MIN_COV)
+        else:
+            ok = c >= MIN_COV
+        if not ok:
             continue
         picked.append((base, i, v, c, float(kw_norm[i])))
     # 同分时用 BM25 打破平局（排序更稳定，结果可复现）
