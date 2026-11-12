@@ -167,13 +167,15 @@ def _run_async(coro):
 # --------------------------------------------------------------------------
 #  edge 引擎
 # --------------------------------------------------------------------------
-async def _edge_one(text: str, voice: str, rate: str, volume: str, path: str) -> None:
+async def _edge_one(text: str, voice: str, rate: str, volume: str, path: str,
+                    pitch: str = "+0Hz") -> None:
     import edge_tts
-    c = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
+    c = edge_tts.Communicate(text, voice, rate=rate, volume=volume, pitch=pitch)
     await c.save(path)
 
 
-def _edge_synth(text: str, voice: str, rate: str, volume: str, path: str) -> None:
+def _edge_synth(text: str, voice: str, rate: str, volume: str, path: str,
+                pitch: str = "+0Hz") -> None:
     """分段合成后按字节拼接成单个 mp3。"""
     import edge_tts  # noqa: F401  只做可用性检查，缺包在这里抛
     parts = split_text(text)
