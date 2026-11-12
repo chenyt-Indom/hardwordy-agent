@@ -815,7 +815,7 @@ def search(query: str, top_k: int = 6, min_score: float = None):
     per_doc = max(2, int(top_k) // 2)
     used = {}
     results = []
-    for f, i, v, k in picked:
+    for f, i, v, k, bm in picked:
         c = chunks[i]
         did = c.get("doc_id") or ""
         if used.get(did, 0) >= per_doc:
@@ -826,7 +826,8 @@ def search(query: str, top_k: int = 6, min_score: float = None):
             "doc_id": did,
             "score": round(f, 4),
             "vec_score": round(v, 4),
-            "kw_score": round(k, 4),
+            "kw_score": round(k, 4),      # 查询词覆盖率（0~1，绝对意义）
+            "kw_bm25": round(bm, 4),      # BM25 归一化分（仅参考）
             "chunk": c.get("idx"),
             "content": c.get("text", ""),
             "filename": os.path.basename(rel),
