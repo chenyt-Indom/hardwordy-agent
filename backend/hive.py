@@ -207,13 +207,40 @@ def renew_identity() -> Dict[str, Any]:
 
     用于身份冲突：从别人那儿拷了整个目录过来，user_id 和对方一模一样，
     群里分不清谁是谁。换一个新的就能正常区分。
+
+    ⚠️ 必须把自己在本机所有群里的痕迹一起迁过去。否则换完身份会出现：
+      · 自己建的群 owner 还写着旧 id → 自己立刻变成「普通成员」，
+        踢不了人、看不了密码、改不了设置，界面上却毫无提示；
+      · 成员表里留下一个永远不会再上线的旧 id。
     """
     with _LOCK:
         p = profile()
         old = p.get("user_id")
-        p["user_id"] = "u_" + secrets.token_hex(8)
+        new = "u_" + secrets.token_hex(8)
+        moved: List[str] = []
+        # 先把群里的痕迹迁好，再改 profile —— 中途出错也不会留下
+        # 「profile 已换、群还没迁」这种半截状态。
+        for gid in all_group_ids():
+            changed = False
+            g = load_group(gid) or {}
+            if g.get("owner") == old:
+                g["owner"] = new
+                _write_json(_group_path(gid), g)
+                changed = True
+            m = load_members(gid)
+            if old in m:
+                rec = dict(m.pop(old))
+                rec["user_id"] = new
+                rec["prev_id"] = old
+                m[new] = rec
+                _save_members(gid, m)
+                changed = True
+            if changed:
+                moved.append(gid)
+        p["user_id"] = new
         p["created"] = time.time()
         p["prev_id"] = old
+        p["migrated_groups"] = moved
         _write_json(_PROFILE, p)
         return p
 
