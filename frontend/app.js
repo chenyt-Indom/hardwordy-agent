@@ -8699,8 +8699,9 @@
     el("hiveModalOk").addEventListener("click", async () => {
       const fn = modalOnOk;
       const v = el("hiveModalInput").hidden ? "" : el("hiveModalInput").value;
+      const ex = el("hiveModalExtra").hidden ? "" : el("hiveModalExtra").value;
       if (fn) {
-        const keep = await fn(v);
+        const keep = await fn(v, ex);
         if (keep === false) return;
       }
       closeModal();
