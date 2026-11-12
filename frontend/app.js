@@ -9463,7 +9463,7 @@
             thinking: "先分析需求，再给结论。", dur_ms: 1200, ts: Date.now() / 1000 }
         ]);
       } catch (e) { console.warn("tmpdemo", e); }
-    }, 1600);
+    }, 400);
     // ==== TMPDEMO 结束 ====
 
     function renderMsgs(list) {
