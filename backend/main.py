@@ -10289,6 +10289,14 @@ def _hive_on_file(gid: str, meta: dict) -> None:
 
 hive_client.client().on_file = _hive_on_file
 
+
+def _hive_on_gone(gid: str, name: str) -> None:
+    """群主删了群：推一帧，前端立刻把这个群从列表里去掉。"""
+    _broadcast_hive({"type": "group_gone", "gid": gid, "name": name or ""})
+
+
+hive_client.client().on_gone = _hive_on_gone
+
 # 局域网 P2P 自动发现：监听 UDP 广播，知道同网段谁在共享什么。
 # 端口被占（比如开了两个实例）时内部会静默放弃，不影响手动传。
 try:
