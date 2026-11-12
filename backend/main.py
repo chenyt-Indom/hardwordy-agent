@@ -10398,6 +10398,7 @@ def _hive_after_join(g: dict, target: str) -> dict:
     return {"ok": True, "group": g, "relay": relay}
 
 
+@app.post("/api/hive/create")
 def hive_create(body: dict):
     """建群 —— 建群的人就是群主。
 
