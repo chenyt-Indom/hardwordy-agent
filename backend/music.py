@@ -1545,7 +1545,7 @@ def load_score_meta_title(mid: str) -> str:
 
 def _rebuild_bass(score: dict, cfg: dict) -> list:
     beat = 60.0 / float(score.get("bpm") or 120)
-    bar_s = beat * 4
+    bar_s = beat * float(score.get("beats_per_bar") or 4)
     out = []
     for b, ch in enumerate(score.get("chords") or []):
         if not ch:
