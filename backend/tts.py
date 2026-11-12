@@ -55,6 +55,32 @@ VOICES = [
 
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 
+# 情感预设。
+# ⚠️ edge 的免费接口**不支持 SSML 的 <mstts:express-as style="...">**（那是 Azure 付费
+#    接口才有的），所以这里用「语速 + 音高 + 音量」三者的组合去**近似**情绪色彩。
+#    实测 pitch 参数有效（+15Hz 能正常出声），但它是整体升降调，不等于真情感合成。
+STYLES = [
+    {"id": "neutral",  "name": "自然", "rate": 0,   "pitch": 0,   "volume": 0,   "tag": "不额外调整"},
+    {"id": "cheerful", "name": "愉悦", "rate": 12,  "pitch": 14,  "volume": 6,   "tag": "偏亮、偏快"},
+    {"id": "gentle",   "name": "温柔", "rate": -8,  "pitch": -3,  "volume": -8,  "tag": "放慢、压低音量"},
+    {"id": "serious",  "name": "严肃", "rate": -6,  "pitch": -10, "volume": 0,   "tag": "沉稳、降调"},
+    {"id": "sad",      "name": "低沉", "rate": -18, "pitch": -14, "volume": -10, "tag": "慢而低"},
+    {"id": "news",     "name": "播报", "rate": 5,   "pitch": -2,  "volume": 3,   "tag": "新闻播报感"},
+    {"id": "excited",  "name": "激动", "rate": 20,  "pitch": 18,  "volume": 8,   "tag": "快、高、响"},
+]
+
+
+def style_list() -> list:
+    """情感预设清单（给前端/工具用）。"""
+    return [dict(s) for s in STYLES]
+
+
+def _style_meta(sid: str) -> dict:
+    for s in STYLES:
+        if s["id"] == sid:
+            return s
+    return STYLES[0]
+
 # 中文语速基准：edge 神经语音约 4.5 字/秒（只用于给用户一个「大概多长」的估计）
 _CHARS_PER_SEC = 4.5
 
