@@ -120,6 +120,34 @@ def _hp(x: np.ndarray, fc: float, sr: int = SR) -> np.ndarray:
     return _sig.lfilter([1.0 - alpha, alpha - 1.0], [1.0, alpha - 1.0], x)
 
 
+def _lp_var(x: np.ndarray, fc_arr, sr: int = SR, segs: int = 16) -> np.ndarray:
+    """**时变**截止频率的一阶低通（滤波器系数不能逐样本变，所以分段做）。
+
+    用上一段的末状态当下一段初值（lfilter 的 zi），段与段之间不会有台阶。
+    """
+    n = len(x)
+    if n == 0:
+        return x
+    fc_arr = np.asarray(fc_arr, dtype=np.float64)
+    if fc_arr.ndim == 0:
+        return _lp(x, float(fc_arr), sr)
+    if len(fc_arr) != n:
+        fc_arr = np.interp(np.linspace(0, 1, n), np.linspace(0, 1, len(fc_arr)), fc_arr)
+    out = np.zeros(n, dtype=np.float64)
+    zi = np.zeros(1)
+    edges = np.linspace(0, n, min(segs, n) + 1).astype(int)
+    for i in range(len(edges) - 1):
+        a, b = int(edges[i]), int(edges[i + 1])
+        if b <= a:
+            continue
+        fc = float(np.mean(fc_arr[a:b]))
+        fc = max(30.0, min(fc, sr * 0.45))
+        alpha = 1.0 - math.exp(-2.0 * math.pi * fc / sr)
+        y, zi = _sig.lfilter([alpha], [1.0, alpha - 1.0], x[a:b], zi=zi)
+        out[a:b] = y
+    return out
+
+
 def _reson(x: np.ndarray, f: float, bw: float, sr: int = SR) -> np.ndarray:
     """二阶谐振器（共振峰用）。"""
     f = max(80.0, min(float(f), sr * 0.45))
