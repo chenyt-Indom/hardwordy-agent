@@ -265,7 +265,7 @@ def inst_bass(f: float, dur: float, vel: float = 0.85, sr: int = SR,
     n = _n(dur, sr)
     t = np.arange(n) / sr
     sig = _osc(f, n, kind, sr) * 0.7 + _osc(f, n, "sine", sr) * 0.5
-    sig = _lp(sig, 320 + 900 * math.exp(-t * 9.0))
+    sig = _lp_var(sig, 320 + 900 * np.exp(-t * 9.0), sr)
     env = _adsr(n, 0.006, 0.09, 0.72, min(0.18, dur * 0.3), sr)
     return _soft(sig * env) * vel * 0.75
 
