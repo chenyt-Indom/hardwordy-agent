@@ -8733,20 +8733,71 @@
       } catch (e) { /* 后端没起来就保持原样 */ }
     }
 
+    // 连接状态 → 灯的颜色 + 一句人话。
+    // 四态：online（绿）/ connecting（黄闪）/ offline（灰）/ error（红）。
+    // 「离线」和「异常」必须分开：前者是正常断线会自愈，后者是连不上、要人管。
+    function netInfo(c) {
+      const st = c.state || (c.connected ? "online"
+        : (c.running ? "connecting" : "idle"));
+      const lat = c.latency_ms ? " · " + Math.round(c.latency_ms) + "ms" : "";
+      const ppl = (c.online_count != null)
+        ? " · " + c.online_count + "/" + (c.total_count || c.online_count) + " 人在线" : "";
+      if (st === "online") {
+        let s = "已联网" + lat + ppl;
+        if (c.compat === "relay_older") s += " · 服务器较老";
+        else if (c.compat === "relay_newer") s += " · 服务器较新";
+        return { cls: "online", text: s };
+      }
+      if (st === "connecting") return { cls: "connecting", text: "正在连接…" };
+      if (st === "error") {
+        return { cls: "error", text: "连不上" + (c.last_error ? "：" + c.last_error : "") };
+      }
+      if (st === "offline") {
+        return { cls: "offline",
+          text: "已断开 · 重试中" + (c.queued ? " · " + c.queued + " 条待发" : "") };
+      }
+      return { cls: "idle", text: "本机模式（没连服务器，别人收不到）" };
+    }
+
     function paintStatus(d) {
       if (!d || !d.ok) return;
       myId = d.hive.user_id;
       myName = d.hive.name;
       const c = d.client || {};
+      myProto = c.proto || myProto;
+
+      // 头部状态灯
+      const ni = netInfo(c);
+      const net = el("hiveNet");
+      if (net) {
+        net.className = "hive-net " + ni.cls;
+        const nt = el("hiveNetText");
+        if (nt) nt.textContent = ni.text;
+        net.title = [
+          "服务器：" + (c.url || "未配置"),
+          "本机协议 v" + (c.proto || "?") + " · 服务器协议 v" + (c.relay_proto || "?")
+            + (c.relay_ver ? "（软件 " + c.relay_ver + "）" : ""),
+          c.last_error ? "最近错误：" + c.last_error : "",
+        ].filter(Boolean).join("\n");
+      }
+
+      // 侧栏菜单里那行文字也同步（详细版）
       const line = el("hiveStatusLine");
       if (line) {
-        const bits = [];
-        bits.push(c.connected ? "🟢 已连接中继" : "⚪ 未连接中继");
+        const bits = [ni.text];
         if (c.url) bits.push(c.url);
         if (c.queued) bits.push(c.queued + " 条待发");
-        if (c.last_error && !c.connected) bits.push("上次错误：" + c.last_error);
+        if (c.last_error && ni.cls !== "online") bits.push("上次错误：" + c.last_error);
         line.textContent = bits.join(" · ");
       }
+
+      // 成员在线状态：status 带回来的 peers 只对「当前连着的那个群」有效
+      if (Array.isArray(d.peers) && d.peers.length && curGid && c.gid === curGid) {
+        members = d.peers;
+        const side = el("hiveSide");
+        if (side && !side.hidden) renderMembers();
+      }
+
       if (curGid) {
         const meta = el("hiveGroupMeta");
         const g = (d.hive.group_list || []).find((x) => x.gid === curGid);
