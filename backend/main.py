@@ -9901,6 +9901,17 @@ def audio_rename(body: dict):
                             str(body.get("new_name") or ""))
 
 
+@app.post("/api/audio/open_folder")
+def audio_open_folder():
+    """打开「音频库」所在的文件夹（data/tts，音频实际保存的位置）。
+
+    和图片库的 /api/library/open_folder 同一套实现，保证
+    「界面上看到的」和「磁盘上存的」是同一个目录。
+    """
+    os.makedirs(tts.OUT_DIR, exist_ok=True)
+    return _open_folder_impl(tts.OUT_DIR)
+
+
 # ---------- 前端 ----------
 _NO_CACHE = "no-store, no-cache, must-revalidate, max-age=0"
 
