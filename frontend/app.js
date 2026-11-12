@@ -8768,8 +8768,52 @@
       }
     } catch (e) { /* ignore */ }
 
-    // ③ 三个按钮
+    // ③ 按钮组
     const hideBtn = $("#avHideBtn"), calBtn = $("#avCalBtn"), sayBtn = $("#avSayBtn");
+    const emoBtn = $("#avEmoBtn"), autoBtn = $("#avAutoBtn"), sayIn = $("#avSayIn");
+
+    // 表情：点一下轮换 自然 → 开心 → 思考 → 严肃
+    avSetEmotion(localStorage.getItem("avatar_emotion") || "neutral");
+    if (emoBtn) emoBtn.onclick = () => {
+      const keys = Object.keys(AV_EMO);
+      avSetEmotion(keys[(keys.indexOf(avEmoName) + 1) % keys.length]);
+      avPoke();
+      showToast("数字人表情：" + AV_EMO_NAME[avEmoName], "");
+    };
+
+    // 自动朗读开关：开了以后每条回答自动念（走同一个 TTS 接口）
+    function avPaintAuto() {
+      if (!autoBtn) return;
+      const on = (localStorage.getItem("avatar_autoread") || "0") === "1";
+      autoBtn.classList.toggle("on", on);
+      autoBtn.title = on ? "回答后自动朗读：开（点击关闭）" : "回答后自动朗读：关（点击开启）";
+    }
+    avPaintAuto();
+    if (autoBtn) autoBtn.onclick = () => {
+      const on = (localStorage.getItem("avatar_autoread") || "0") === "1";
+      try { localStorage.setItem("avatar_autoread", on ? "0" : "1"); } catch (e) { /* ignore */ }
+      avPaintAuto();
+      showToast(on ? "已关闭自动朗读" : "已开启自动朗读（每条回答都会念）", "");
+    };
+
+    // 对话输入：回车把内容送进主输入框并发送，复用现有的整套流程
+    if (sayIn) {
+      sayIn.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const t = (sayIn.value || "").trim();
+        if (!t) return;
+        sayIn.value = "";
+        const main = $("#input");
+        if (!main) { showToast("找不到主输入框", "warn"); return; }
+        main.value = t;
+        main.dispatchEvent(new Event("input", { bubbles: true }));
+        const form = main.closest("form");
+        if (form && typeof form.requestSubmit === "function") form.requestSubmit();
+        else main.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        avPoke();
+      });
+    }
     if (hideBtn) hideBtn.onclick = () => {
       avBox.hidden = true;
       if (avTab) avTab.hidden = false;
