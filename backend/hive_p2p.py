@@ -799,10 +799,15 @@ def resume(tid: str) -> bool:
 
 
 def cancel(tid: str) -> bool:
-    r = get(tid)
+    # ⚠️ 不能通过 get(tid) 取记录：它返回的是 _public() 过滤后的副本，
+    #    里面的 stop（threading.Event）已经被剥掉，ev 永远为 None，
+    #    取消信号发不出去 —— 传输会一直跑到结束，状态最后还变成 done。
+    #    必须直接读 _TRANSFERS 里的原始记录。
+    with _LOCK:
+        r = _TRANSFERS.get(tid)
+        ev = r.get("stop") if r else None
     if not r:
         return False
-    ev = r.get("stop")
     if isinstance(ev, threading.Event):
         ev.set()
     _upd(tid, state="canceled", paused=False, speed=0.0)
