@@ -10297,39 +10297,10 @@ except Exception as _e:
     print("[hive-p2p] 自动发现启动失败（不影响手动传输）:", _e)
 
 
-@app.websocket("/hive")
-async def hive_relay_ws(ws: WebSocket):
-    """**内置中继** —— 让本应用自己就能当群里那台中转站。
-
-    为什么要有这个（2026-11-13）：原设计是「中继单独跑一个进程、监听 8765、
-    nginx 反代 /hive」。但实际部署最常见的情况是：服务器上只跑了应用，
-    中继根本没启动，于是 `ws://IP:8765` 永远超时、`wss://IP/hive` 返回 404。
-    挂进应用之后就只占一个端口（还是原来那个 443），不用开安全组、
-    不用改 nginx、不用起第二个进程 —— 地址填 `wss://你的IP/hive` 直接能用。
-
-    转发逻辑完全复用 hive_relay.handler()（见 FastAPIWSAdapter），
-    不是另写一套，所以两边的定序、加密、离线成员规则一模一样。
-    """
-    await ws.accept()
-    try:
-        await hive_relay.handle_fastapi(
-            ws, os.path.join(hive._DATA, "relay"))
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        print(f"[hive-relay] {type(e).__name__}: {e}")
-
-
-@app.get("/hive/health")
-def hive_relay_health():
-    """内置中继的健康检查（探测用；和独立中继的 /health 字段对齐）。"""
-    return {
-        "ok": True, "svc": "hive-relay", "mode": "embedded",
-        "ver": getattr(hive_relay, "_RELAY_VER", "?"),
-        "proto": getattr(hive_relay, "PROTO_VER", 0),
-        "rooms": len(getattr(hive_relay, "ROOMS", {})),
-        "ts": time.time(),
-    }
+# 2026-11-13：内置中继（/hive、/hive/health）已按需求删除。
+# 群聊现在走 backend/hive_mesh.py 的纯 P2P 网络 —— 消息只在对等机器之间
+# 直连传输，不经过任何服务器。这个位置保留一行注释说明「为什么没有了」，
+# 免得以后有人以为是漏删。
 
 
 @app.websocket("/ws/hive")
