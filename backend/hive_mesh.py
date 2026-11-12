@@ -281,7 +281,7 @@ class MeshNode:
         with _LOCK:
             for p in list(self.peers):
                 try:
-                    p.send(T_BYE, {"uid": H.profile().get("user_id", "")})
+                    p.send(T_BYE, {"uid": self.uid})
                 except Exception:
                     pass
                 p.close()
