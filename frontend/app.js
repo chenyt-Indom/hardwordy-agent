@@ -8770,6 +8770,10 @@
 
       // 头部状态灯
       const ni = netInfo(c);
+      if (ni.cls !== netCls) {
+        netCls = ni.cls;
+        renderGroups();          // 侧栏群列表的点也跟着变色
+      }
       const net = el("hiveNet");
       if (net) {
         net.className = "hive-net " + ni.cls;
