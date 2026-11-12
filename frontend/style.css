@@ -3619,8 +3619,8 @@ html[data-theme="light"] select.pill-select option {
 }
 
 /* ---------- 侧栏：群列表 ---------- */
-.hive-acts { display: flex; gap: 6px; margin-bottom: 8px; }
-.hive-acts .btn { flex: 1; min-width: 0; }
+.hive-side-acts { display: flex; gap: 6px; margin-bottom: 8px; }
+.hive-side-acts .btn { flex: 1; min-width: 0; }
 .hive-list { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
 .hive-item {
   display: flex; align-items: center; gap: 8px; padding: 7px 9px;
