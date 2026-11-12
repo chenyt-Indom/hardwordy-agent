@@ -10398,6 +10398,81 @@ def hive_relay_get():
     return {"ok": True, "relay": hive.relay_config()}
 
 
+@app.post("/api/hive/relay/probe")
+def hive_relay_probe(body: dict):
+    """探测中继地址 —— 五层逐级验证（DNS/TCP/health/WS），带步骤日志。
+
+    不写任何配置，纯探测。建群时点「检测」走这里。
+    """
+    b = body or {}
+    try:
+        timeout = float(b.get("timeout") or 6)
+    except Exception:
+        timeout = 6.0
+    try:
+        return hive_deploy.probe(b.get("url") or "", timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": {"code": "unknown", "title": "探测出错",
+                                       "reason": f"{type(e).__name__}: {e}",
+                                       "advice": []},
+                "steps": [], "url": b.get("url") or "", "health": None,
+                "latency_ms": 0}
+
+
+@app.post("/api/hive/relay/bundle")
+def hive_relay_bundle(body: dict):
+    """生成中继部署包（zip：中继服务 + systemd/docker/nginx + 跨 WiFi 方案）。"""
+    b = body or {}
+    try:
+        r = hive_deploy.make_bundle({
+            "os": b.get("os") or "", "domain": b.get("domain") or "",
+            "note": b.get("note") or ""})
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": True, **r,
+            "download": "/api/hive/relay/bundle/download"}
+
+
+@app.get("/api/hive/relay/bundle/download")
+def hive_relay_bundle_download():
+    p = hive_deploy.status().get("bundle") or ""
+    if not p or not os.path.exists(p):
+        raise HTTPException(404, "还没生成部署包，先在界面上点「生成部署包」")
+    return FileResponse(p, filename="hive-relay-deploy.zip",
+                        media_type="application/zip")
+
+
+@app.get("/api/hive/relay/last")
+def hive_relay_last():
+    """上次用过的中继地址（建群时提示「沿用上次」）。"""
+    return {"ok": True, "last": hive_deploy.last_relay()}
+
+
+@app.post("/api/hive/relay/guide")
+def hive_relay_guide(body: dict):
+    """让模型按群主的实际环境写部署步骤（系统/域名/失败原因都带进去）。"""
+    b = body or {}
+
+    def _ask(system_p: str, user_p: str) -> str:
+        cfg = config.load_config() or {}
+        model = cfg.get("default_model") or ""
+        if not model:
+            raise RuntimeError("没有配置默认模型（先在设置里选一个）")
+        resp = client.chat(
+            [{"role": "system", "content": system_p},
+             {"role": "user", "content": user_p}],
+            model=model, stream=False,
+            params={"temperature": 0.2, "max_tokens": 1800})
+        d = resp.json()
+        msg = d.get("message") or {}
+        text = (msg.get("content") or "").strip()
+        if not text:
+            raise RuntimeError("模型没有返回正文")
+        return text
+
+    return hive_deploy.llm_guide(b, _ask)
+
+
 @app.post("/api/hive/relay")
 def hive_relay_set(body: dict):
     """配置云端中继地址（比如 ws://你的腾讯云IP:8765）。"""
