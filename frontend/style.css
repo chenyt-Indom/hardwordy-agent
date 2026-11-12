@@ -4011,8 +4011,9 @@ html[data-theme="light"] select.pill-select option {
 .hd-live-head .hd-cancel:hover {
   color: var(--danger, #e5534b); border-color: var(--danger, #e5534b);
 }
-/* 实时进度卡片已改用单人模式结构：正文是 .hmsg-body，思考是 .think-hdr/.think-body */
-.hd-live .hmsg-body { max-height: 320px; overflow: auto; }
+/* 实时进度卡片已改用单人模式结构：正文是 .hmsg-body，思考是 .think-hdr/.think-body。
+   ★ 2026-11-13：原来正文限高 320px 内部滚动，而正式消息不限高 ——
+   同一段文字在「跑的过程中」和「跑完之后」高度不一样。现在保持一致。 */
 .hd-live .hmsg-body:empty { display: none; }
 /* 还没有思考内容时，把空壳藏起来（折叠态本来就是 0 高，这里只是不给边框留缝） */
 .hd-live .think-body:not(.open):empty { display: none; }
