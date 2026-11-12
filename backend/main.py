@@ -10502,12 +10502,13 @@ def hive_send(gid: str, body: dict):
     ref = (b.get("ref") or "").strip()
     cli = hive_client.client()
     try:
-        if cli.status().get("connected"):
-            r = cli.send(gid, text, mtype, extra, ref)
-        else:
-            m = hive.send_message(gid, text, mtype, ref=ref, extra=extra)
-            _broadcast_hive({"type": "msg", "gid": gid, "msg": m})
-            r = {"ok": True, "local": True, "msg": m}
+        # 统一走 client.send —— 它会「本地落盘 + 泛洪给在线的人」。
+        # 没人在线时消息进 outbox，等对方上线自动补发。
+        # （原来这里是 if connected: send else: 只落盘，导致
+        #   「对方不在线时发的消息」永远补发不出去。）
+        r = cli.send(gid, text, mtype, extra, ref)
+        if r.get("ok") and r.get("msg"):
+            _broadcast_hive({"type": "msg", "gid": gid, "msg": r["msg"]})
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
