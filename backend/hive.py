@@ -613,6 +613,101 @@ def join_with_key(gid: str, key: bytes, name: str = "",
     return out
 
 
+def join_group(payload: str, name: str = "") -> Dict[str, Any]:
+    """兼容入口：老版本留下的 `hive://join?...` 载荷仍然能入群。
+
+    二维码界面已经删掉了，这条只为了别人手里还存着旧口令时别直接失败。
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    raw = (payload or "").strip()
+    if raw.startswith("hive://"):
+        q = parse_qs(urlparse(raw).query)
+    else:
+        q = parse_qs(raw)
+    gid = (q.get("g") or [""])[0]
+    kb = (q.get("k") or [""])[0]
+    if not gid or not kb:
+        raise ValueError("口令内容不完整（缺群号或密钥）")
+    try:
+        key = _key_from_b64(kb)
+    except Exception:
+        raise ValueError("口令里的密钥无法解析")
+    if len(key) != 32:
+        raise ValueError("密钥长度不对，可能口令被截断")
+    return join_with_key(gid, key, name, meta={
+        "n": (q.get("n") or ["协作群"])[0],
+        "o_id": (q.get("o_id") or [""])[0],
+        "o": (q.get("o") or ["群主"])[0],
+        "h": (q.get("h") or [""])[0],
+    })
+
+
+def set_password(gid: str, pw: str = "") -> Dict[str, Any]:
+    """群主设置/重置入群密码 —— 会**更换群密钥**，老成员必须用新密码重进。
+
+    这是「密码派生密钥」的必然结果：密码变了，算出来的密钥就变了。
+    """
+    me = profile()
+    with _LOCK:
+        g = load_group(gid)
+        if not g:
+            raise ValueError("群不存在")
+        if g.get("owner") != me["user_id"]:
+            raise PermissionError("只有群主能设置入群密码")
+        new_pw = norm_password(pw) if (pw or "").strip() else gen_password()
+        key = derive_key(new_pw, gid)
+        changed = g.get("kfp") != key_fingerprint(key)
+        g["key"] = _key_b64(key)
+        g["kfp"] = key_fingerprint(key)
+        g["vt"] = verify_tag(key, gid)
+        g["pw"] = new_pw
+        g["pw_set"] = time.time()
+        _write_json(_group_path(gid), g)
+    return {"ok": True, "gid": gid, "password": format_password(new_pw),
+            "raw": new_pw, "kfp": g["kfp"], "key_changed": changed}
+
+
+def group_password(gid: str) -> Dict[str, Any]:
+    """查看入群密码。只有群主本机存着明文，成员那边没有。"""
+    me = profile()
+    g = load_group(gid)
+    if not g:
+        raise ValueError("群不存在")
+    if g.get("owner") != me["user_id"]:
+        return {"ok": True, "gid": gid, "password": "", "owner_only": True}
+    pw = g.get("pw") or ""
+    if not pw:
+        # 老群没设过密码：提示用重置来生成一个
+        return {"ok": True, "gid": gid, "password": "", "need_set": True,
+                "kfp": g.get("kfp")}
+    return {"ok": True, "gid": gid, "password": format_password(pw),
+            "raw": pw, "kfp": g.get("kfp"), "pw_set": g.get("pw_set")}
+
+
+def password_candidates(pw: str) -> Dict[str, Any]:
+    """把密码规范化，并算出「用这个密码能匹配哪些群」需要的基础信息。
+
+    单机可判定的部分在这里做完：本机已有的群里，哪些的密钥正好等于
+    这个密码派生的密钥（说明密码是对的、而且就是那个群）。
+    局域网/公网的匹配交给 hive_client（要靠广播或探测拿到 gid + vt）。
+    """
+    pw = norm_password(pw)
+    hits = []
+    for item in list_groups():
+        gid = item.get("gid") or ""
+        g = load_group(gid) or {}
+        try:
+            key = derive_key(pw, gid)
+        except Exception:
+            continue
+        if g.get("kfp") == key_fingerprint(key):
+            hits.append({"gid": gid, "name": g.get("name"),
+                         "vt": verify_tag(key, gid), "local": True})
+    return {"ok": True, "password": pw, "fmt": format_password(pw),
+            "local_hits": hits}
+
+
 def leave_group(gid: str) -> Dict[str, Any]:
     """成员主动退出群。
 
