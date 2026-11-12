@@ -517,6 +517,8 @@ class HiveClient:
                 "seq": -1, "id": mid, "from": me["user_id"], "name": me["name"],
                 "type": mtype, "text": text, "ts": time.time(), "pending": True,
             }
+            if ref:
+                msg["ref"] = ref
             if extra:
                 msg.update(extra)
             try:
