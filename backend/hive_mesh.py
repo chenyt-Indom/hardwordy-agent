@@ -515,7 +515,7 @@ class MeshNode:
                     if mid in s:
                         return          # 泛洪时同一条会从多条路径到达
                     s.add(mid)
-            saved = H.ingest_message(gid, m)
+            saved = self.ingest(gid, m)
             if saved is None:
                 return
             if self.on_msg:
