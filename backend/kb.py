@@ -242,6 +242,11 @@ def read_doc(path: str) -> tuple:
     if hit and hit[0] == mtime:
         return hit[1], hit[2]
     text, note = doc_extract.extract_text(path)
+    # 在这里统一规范化，而不是在检索里临时转：
+    # read_doc 是**所有**取正文路径的收口（list_documents / tree_text /
+    # 建索引 / RAG 上下文），一处修全部受益，也不会出现
+    # "检索用规范化的、显示用原始的"这种两套文本打架的情况。
+    text = _norm_text(text)
     _text_cache[key] = (mtime, text, note)
     return text, note
 
