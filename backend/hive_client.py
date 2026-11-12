@@ -27,6 +27,51 @@ except Exception:  # pragma: no cover
     websockets = None
 
 
+def _is_ip_host(host: str) -> bool:
+    """纯 IPv4/IPv6 字面量？"""
+    h = (host or "").strip("[]")
+    if not h:
+        return False
+    if h.count(".") == 3:
+        try:
+            parts = [int(x) for x in h.split(".")]
+            return len(parts) == 4 and all(0 <= p <= 255 for p in parts)
+        except Exception:
+            return False
+    return ":" in h          # IPv6
+
+
+def _ssl_for(url: str):
+    """给 wss 连接准备 SSL 上下文；ws 返回 None。
+
+    **为什么对纯 IP 关掉证书校验**（2026-11-13 实测踩到）：
+    公网 IP 几乎不可能有有效证书（CA 不给裸 IP 签），自己配的 nginx
+    十有八九是自签、或者签给了域名。浏览器会弹「继续访问」，但 Python 的
+    websockets 不会 —— 直接 `CERTIFICATE_VERIFY_FAILED: IP address mismatch`，
+    表现就是「地址明明能打开网页，应用却说连不上」。
+
+    安全性上可以接受：中继只转发 AES-GCM 密文，群密钥走二维码在成员之间
+    传递、从不上服务器。就算证书不校验、被中间人接了，他拿到的也是密文。
+    域名走正常校验，不降级。
+    """
+    if not (url or "").startswith("wss://"):
+        return None
+    try:
+        import ssl
+        host = url.split("://", 1)[1].split("/", 1)[0].rsplit("@", 1)[-1]
+        if host.startswith("["):                    # [::1]:443
+            host = host.split("]", 1)[0].strip("[")
+        elif host.count(":") == 1:                  # host:port
+            host = host.split(":", 1)[0]
+        ctx = ssl.create_default_context()
+        if _is_ip_host(host):
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    except Exception:
+        return None
+
+
 def _norm_members(ms: Any) -> List[Dict[str, Any]]:
     """把中继发来的成员列表规整成统一结构。
 
