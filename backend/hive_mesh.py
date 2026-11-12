@@ -503,16 +503,12 @@ class MeshNode:
                     self._learn(k, gid)
             return
         if typ == T_SYNC:
-            mode = obj.get("mode")
-            if mode == "req":
-                # 对方报了他最大的 ts，我把更新的补发过去
-                since = float(obj.get("since") or 0)
-                for m in H.read_messages(gid, 0, 500):
-                    if float(m.get("ts") or 0) > since:
-                        peer.send(T_MSG, {"msg": m, "ttl": 0})
-            elif mode == "hello":
-                since = float(obj.get("since") or 0)
-                peer.send(T_SYNC, {"mode": "req", "since": since})
+            # 对方报了他本地最大的时间戳，我把比它新的都补发过去。
+            # 双方都会发一次，所以两边各自补齐 —— 谁缺谁收，不缺的靠 mid 去重。
+            since = float(obj.get("since") or 0)
+            for m in H.read_messages(gid, 0, 1000):
+                if float(m.get("ts") or 0) > since:
+                    peer.send(T_MSG, {"msg": m, "ttl": 0})
             return
         if typ == T_MSG:
             m = obj.get("msg")
