@@ -127,6 +127,17 @@ def _read_frame(sock: socket.socket) -> Optional[Tuple[int, bytes, bytes]]:
     return typ, rk, body
 
 
+def _send_plain(sock: socket.socket, typ: int, obj: Any) -> bool:
+    """发一帧**不加密**的内容。只用于入群探测 —— 里面不含密钥、不含消息。"""
+    try:
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        pkt = bytes([typ]) + b"\x00\x00\x00\x00" + struct.pack(">I", len(body)) + body
+        sock.sendall(pkt)
+        return True
+    except Exception:
+        return False
+
+
 def _open_frame(body: bytes, key: bytes) -> Optional[Any]:
     if AESGCM is None or len(body) < 13:
         return None
