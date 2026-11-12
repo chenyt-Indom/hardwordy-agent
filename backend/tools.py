@@ -1267,6 +1267,48 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
         {
             "type": "function",
             "function": {
+                "name": "tts_speak",
+                "description": (
+                    "【文字转语音】把文本合成为音频（mp3 / wav），返回可直接播放和下载的链接。\n"
+                    "用户说「读一下这段」「把讲稿转成配音」「生成语音」「配个旁白」时用它。\n"
+                    "引擎默认自动：联网用微软神经语音（接近真人，14 个中文音色），"
+                    "断网或接口失败自动回退系统离线语音（机械但能用），返回里会说明。\n"
+                    "常用音色 id：zh-CN-XiaoxiaoNeural 晓晓（女，通用首选）、"
+                    "zh-CN-YunxiNeural 云希（男，年轻）、zh-CN-YunjianNeural 云健（男，浑厚解说）、"
+                    "zh-CN-YunyangNeural 云扬（男，播音腔）；离线用 sapi:Microsoft Huihui Desktop。\n"
+                    "rate 是语速百分比：0 原速，20 = 快 20%，-15 = 慢 15%。\n"
+                    "长文（几千字）会自动分段拼接，耗时几十秒，调用前先跟用户说一声。\n"
+                    "⚠️ 返回里的播放/下载链接要**原样**给用户，别自己改写或省略。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string",
+                                 "description": "要读的文字。Markdown 符号、代码块、链接会自动"
+                                                "清洗掉不念；几千字也可以，会自动分段"},
+                        "voice": {"type": "string",
+                                  "description": "音色 id，默认 zh-CN-XiaoxiaoNeural（晓晓）。"
+                                                 "用户说「男声」用 zh-CN-YunxiNeural，"
+                                                 "「播音腔」用 zh-CN-YunyangNeural，"
+                                                 "「浑厚/解说」用 zh-CN-YunjianNeural，"
+                                                 "「离线」用 sapi:Microsoft Huihui Desktop"},
+                        "rate": {"type": "integer",
+                                 "description": "语速百分比，0 原速；讲解稿建议 0~10，"
+                                                "有声书建议 -5"},
+                        "engine": {"type": "string",
+                                   "enum": ["auto", "edge", "sapi"],
+                                   "description": "auto（默认，在线优先失败回退）/ edge 强制在线 / "
+                                                  "sapi 强制离线"},
+                        "filename": {"type": "string",
+                                     "description": "（可选）音频文件名，不给就自动命名"},
+                    },
+                    "required": ["text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "list_directory",
                 "description": "列出指定目录下的一级内容（文件/子目录）。用于浏览用户本机文件系统。",
                 "parameters": {
