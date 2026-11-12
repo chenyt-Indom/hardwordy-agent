@@ -584,6 +584,88 @@ def _append_raw(gid: str, msg: Dict[str, Any]) -> None:
         os.fsync(f.fileno())
 
 
+_MID_CACHE: Dict[str, set] = {}
+
+
+def _has_mid(gid: str, mid: str) -> bool:
+    """这个 mid 是否已经落过盘？（内存索引，首次访问时从日志重建）
+
+    P2P 模式下没有中继发号，seq 只能本地自增，所以「同一条消息」必须靠
+    mid 认。索引放内存，避免每收一条就扫一遍日志。
+    """
+    s = _MID_CACHE.get(gid)
+    if s is None:
+        s = set()
+        path = _msg_path(gid)
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            v = json.loads(line).get("id")
+                            if v:
+                                s.add(v)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+        _MID_CACHE[gid] = s
+    if mid in s:
+        return True
+    s.add(mid)
+    return False
+
+
+def ingest_message(gid: str, msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """把**别人发来的**消息落盘。按 mid 去重，分配本地 seq。
+
+    返回落盘后的消息；重复消息返回 None（泛洪时同一条会从多条路径到达）。
+    """
+    mid = str(msg.get("id") or "")
+    with _LOCK:
+        g = load_group(gid)
+        if not g:
+            return None
+        if mid and _has_mid(gid, mid):
+            return None
+        seq = (g.get("seq") or 0) + 1
+        m = normalize_msg(dict(msg)) or {}
+        m["seq"] = seq
+        m["id"] = mid or ("m_" + secrets.token_hex(6))
+        if not m.get("ts"):
+            m["ts"] = time.time()
+        _append_raw(gid, m)
+        g["seq"] = seq
+        _write_json(_group_path(gid), g)
+    return m
+
+
+def max_ts(gid: str) -> float:
+    """本地已收到的最大时间戳 —— 断线重连后按它向对方要补发。"""
+    path = _msg_path(gid)
+    if not os.path.exists(path):
+        return 0.0
+    mx = 0.0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    t = float(json.loads(line).get("ts") or 0)
+                    if t > mx:
+                        mx = t
+                except Exception:
+                    continue
+    except Exception:
+        return mx
+    return mx
+
+
 def read_messages(gid: str, since: int = 0, limit: int = 200) -> List[Dict[str, Any]]:
     """读消息。`since` 是上次见到的最大 seq（增量拉取，100 人群也不卡）。"""
     path = _msg_path(gid)
