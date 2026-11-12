@@ -515,6 +515,11 @@ def share(gid: str, fid: str, port: int = 0, want_upnp: bool = True) -> Dict[str
     threading.Thread(target=_sender_worker,
                      args=(tid, gid, fid, path, token, srv, stop_evt),
                      daemon=True).start()
+    # 局域网自动发现：同网段成员会收到「谁在共享哪个文件」
+    threading.Thread(target=_beacon_sender,
+                     args=(tid, gid, fid, meta.get("name") or name_str(meta),
+                           size, bound, token),
+                     daemon=True).start()
 
     return {"ok": True, "tid": tid, "code": code, "host": host,
             "port": bound, "lan_ip": _lan_ip(), "size": size,
