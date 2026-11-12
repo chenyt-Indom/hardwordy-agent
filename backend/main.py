@@ -7265,21 +7265,52 @@ async def chat_deepseek(req: ChatRequest,
     # ⚠️ 但 **图片是认的** —— 2026-11-08 之前这里把 images 一起丢了，
     #    所以用户拖图问云端模型，模型回答"我看不到图片"。
     #    实测 DeepSeek 接受 image_url（content 用数组形式），见 vision_chat()。
+    _imgs = [x for x in (req.images_b64 or []) if isinstance(x, str) and len(x) > 100]
+    _img_ok = model in ("deepseek-flash", "deepseek-flash-think")   # v4-pro 只支持文本
+
+    # ★ 2026-11-13：**图片跨轮可见**（用户报「图片只能当轮使用，下一轮就查不到」）。
+    #   云端通道原来两处都没存：前端 history 只有文字、后端只挂本轮。
+    #   这里补上：本轮图落盘 + 记台账，再把之前轮次的图按哈希挂回对应消息。
+    _attach_paths: list = []
+    _hist_imgs: list = []
+    try:
+        if _imgs:
+            from . import img_fetch as _imgf
+            _attach_paths = _imgf.save_chat_images(_imgs)
+        _last_u = next((str(m.get("content") or "") for m in reversed(messages)
+                        if str(m.get("role") or "") == "user"), "")
+        if _attach_paths:
+            chatimg.record(session, _last_u, _attach_paths)
+        _hist_imgs = chatimg.attach(messages, session)
+    except Exception:
+        logger.warning("云端通道图片台账失败（本轮按无图继续）", exc_info=True)
+
+    # 只保留 role/content（Ollama 的额外字段 DeepSeek 不认）；
+    # 但 **图片是认的** —— 历史消息带 images 时转成 OpenAI 多模态数组。
     clean: list[dict] = []
     for m in messages:
         content = m.get("content")
         if content is None:
             continue
-        clean.append({"role": str(m.get("role") or "user"),
-                      "content": str(content)})
+        _role = str(m.get("role") or "user")
+        _mi = [x for x in (m.get("images") or []) if isinstance(x, str) and len(x) > 100]
+        if _mi and _img_ok:
+            _hp = [{"type": "text", "text": str(content)}]
+            for b64 in _mi[:4]:                       # 单条最多 4 张
+                _hp.append({"type": "image_url",
+                            "image_url": {"url": "data:image/png;base64," + b64}})
+            clean.append({"role": _role, "content": _hp})
+        else:
+            clean.append({"role": _role, "content": str(content)})
 
     # 把本轮图片挂到最后一条 user 消息上（数组 content，OpenAI 多模态格式）
-    _imgs = [x for x in (req.images_b64 or []) if isinstance(x, str) and len(x) > 100]
-    _img_ok = model in ("deepseek-flash", "deepseek-flash-think")   # v4-pro 只支持文本
     if _imgs and _img_ok and clean:
         for i in range(len(clean) - 1, -1, -1):
             if clean[i].get("role") == "user":
-                _parts = [{"type": "text", "text": str(clean[i].get("content") or "")}]
+                _c = clean[i].get("content")
+                if isinstance(_c, list):
+                    break                             # 已经是数组（理论上不会，attach 跳过本轮）
+                _parts = [{"type": "text", "text": str(_c or "")}]
                 for b64 in _imgs[:4]:                 # 一次最多 4 张，别把额度烧光
                     _parts.append({"type": "image_url",
                                    "image_url": {"url": "data:image/png;base64," + b64}})
