@@ -10535,9 +10535,9 @@ def hive_password_set(gid: str, body: dict = None):
     return r
 
 
-@app.post("/api/hive/join_password")
-def hive_join_password(body: dict):
-    """【已废弃 · 无调用方】请改用 /api/hive/join。
+@app.post("/api/hive/_removed_join_password")
+def hive_join_password_removed(body: dict):
+    """【已删除】这个接口和 /api/hive/join 重复，已合并到后者。调用会返回错误。
 
     两者的差别：`/api/hive/join` 支持「密码 + 对方地址」跨网络入群，
     并且把「从哪找到的群（via）」透传给前端；这个旧接口只能靠本机记录
