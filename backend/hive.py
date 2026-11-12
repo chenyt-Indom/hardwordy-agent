@@ -176,6 +176,48 @@ def set_name(name: str) -> Dict[str, Any]:
     return p
 
 
+_DEV = ""
+
+
+def dev_id() -> str:
+    """本机设备标识。**不落盘**，由机器本身算出来。
+
+    为什么要单独有一个：`user_id` 存在 `profile.json` 里，一旦把整个程序目录
+    拷给另一台机器，两台机器就是同一个 user_id —— 对端会把你的消息当成
+    「他自己发的」（实测过）。dev 由主机名 + 网卡地址算出，拷贝目录带不走它，
+    所以能识别出「同一个身份的另一个设备」。
+    """
+    global _DEV
+    if _DEV:
+        return _DEV
+    try:
+        host = os.environ.get("COMPUTERNAME") or os.uname().nodename  # type: ignore[attr-defined]
+    except Exception:
+        host = ""
+    try:
+        mac = "%012x" % uuid.getnode()
+    except Exception:
+        mac = ""
+    _DEV = "d_" + hashlib.sha256(("%s|%s" % (host, mac)).encode()).hexdigest()[:8]
+    return _DEV
+
+
+def renew_identity() -> Dict[str, Any]:
+    """换一个本机身份（新的 user_id，昵称保留）。
+
+    用于身份冲突：从别人那儿拷了整个目录过来，user_id 和对方一模一样，
+    群里分不清谁是谁。换一个新的就能正常区分。
+    """
+    with _LOCK:
+        p = profile()
+        old = p.get("user_id")
+        p["user_id"] = "u_" + secrets.token_hex(8)
+        p["created"] = time.time()
+        p["prev_id"] = old
+        _write_json(_PROFILE, p)
+        return p
+
+
 # ---------------------------------------------------------------- 群密钥
 
 def _new_key() -> bytes:
