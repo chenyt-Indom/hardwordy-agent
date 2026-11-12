@@ -65,6 +65,7 @@ T_SYNC = 7      # 断线补发请求/应答
 T_CANCEL = 8    # @hd 取消广播
 T_BYE = 9       # 主动断开
 T_FILE = 10     # 附件分片（512KB 一片，走泛洪）
+T_MEMBERS = 11  # 成员表同步（谁在群里、什么角色）
 
 _LOCK = threading.RLock()
 
