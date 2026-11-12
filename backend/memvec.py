@@ -84,43 +84,29 @@ def _char_cov(query: str, text: str) -> float:
     return sum(1 for c in qc if c in tc) / float(len(qc))
 
 
-def _cov_parts(query: str, text: str):
+def _text_sets(text: str):
+    """把文本变成 (实字集合, 2-gram 集合)。转录条目在构建时预算好，查询时不再分词。"""
+    t = text or ""
+    chars = {c for c in t
+             if c not in _STOP_CHARS and c not in _PUNCT and not c.isspace()}
+    return chars, set(memory._tokenize(t))
+
+
+def _q_sets(query: str):
+    return _text_sets(query)
+
+
+def _cov_pair(qchars, qtoks, tchars, ttoks):
     """返回 (字级覆盖, 2-gram 覆盖)。
 
-    门槛用两者**较大值**（只要一种说得通就收），
-    排序用加权（2-gram 更能区分「后端」和「前端」这类近义边界）。
+    门槛用两者**较大值**（只要一种说得通就收）——
+    实测：查「我在哪个学校读书」，2-gram 只命中 {学校}（0.14），
+    但字级是 2/4=0.5，靠字级才召回得到「学校：广州民航职业技术学院…」。
+    排序用加权（2-gram 更能分出「后端」与「前端」这类近义边界）。
     """
-    q = (query or "").strip()
-    if not q:
-        return 0.0, 0.0
-    c = _char_cov(q, text)
-    qt = set(memory._tokenize(q))
-    b = 0.0
-    if qt:
-        it = set(memory._tokenize(text))
-        b = len(qt & it) / float(len(qt))
+    c = (len(qchars & tchars) / float(len(qchars))) if qchars else 0.0
+    b = (len(qtoks & ttoks) / float(len(qtoks))) if qtoks else 0.0
     return c, b
-
-
-def _coverage(query: str, text: str) -> float:
-    """综合覆盖率（用于门槛）：取字级与 2-gram 的较大值。"""
-    c, b = _cov_parts(query, text)
-    return max(c, b)
-
-
-def _cov_rank(query: str, text: str, pre=None) -> float:
-    """排序用的覆盖率：字级 0.6 + 2-gram 0.4。
-
-    实测动机：查「我的项目用什么后端框架」时，纯字级覆盖对
-    「前端框架：原生JS」和「后端框架：FastAPI」都算 0.67（打平），
-    2-gram 才能分出 0.2 vs 0.3 —— 加权后后端那条排前面。
-    """
-    if pre is not None:
-        c = sum(1 for ch in pre[0] if ch in pre[2]) / float(max(1, len(pre[0])))
-        b = (len(pre[1] & pre[3]) / float(len(pre[1]))) if pre[1] else 0.0
-        return 0.6 * c + 0.4 * b
-    c, b = _cov_parts(query, text)
-    return 0.6 * c + 0.4 * b
 
 
 # =====================================================================
