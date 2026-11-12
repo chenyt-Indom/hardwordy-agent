@@ -2,6 +2,11 @@
 """验证 @hd 全员可见进度：流式解析、进度帧、落盘思考、取消、队列串行。"""
 import os, sys, json, time, threading
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
