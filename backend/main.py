@@ -10451,11 +10451,19 @@ def hive_invite(gid: str, host: str = ""):
 def hive_kick(gid: str, body: dict):
     """踢人（只有群主能踢）。"""
     try:
-        return {"ok": True, **hive.kick_member(gid, (body or {}).get("user_id") or "")}
+        r = hive.kick_member(gid, (body or {}).get("user_id") or "")
     except PermissionError as e:
         return {"ok": False, "error": str(e)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+    # 名单变了要广播：不然对方那边还以为自己在群里
+    try:
+        hive_client.client().broadcast_members(gid)
+        hive_client.client().send(gid, f"{r.get('name') or '有人'} 被移出了群",
+                                  mtype="system")
+    except Exception:
+        pass
+    return {"ok": True, **r}
 
 
 @app.post("/api/hive/{gid}/leave")
