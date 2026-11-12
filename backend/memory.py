@@ -19,7 +19,10 @@ import os
 import re
 import json
 import time
+import logging
 from . import config
+
+_LOG = logging.getLogger("uvicorn.error")
 
 DATA_DIR = config.data("data")
 MEM_DIR = os.path.join(DATA_DIR, "memory")
