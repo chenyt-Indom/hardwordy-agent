@@ -9026,6 +9026,32 @@ def memory_clear(session_id: str = "", scope: str = "short"):
     return {"ok": True, "cleared": "all_short", **r}
 
 
+@app.get("/api/memory/search")
+def memory_search(q: str = "", session_id: str = "", top_k: int = 8):
+    """记忆检索（条目级）。给前端「检索测试」和排查召回问题用。"""
+    n = max(1, min(int(top_k or 8), 20))
+    hits = memory.search_all(q, sid=(session_id or "").strip(), top_k=n)
+    return {"ok": True, "query": q, "count": len(hits), "hits": hits}
+
+
+@app.get("/api/memory/index")
+def memory_index_status():
+    """记忆向量索引状态：条目数、分层统计、向量后端 / 模型 / 维度。"""
+    try:
+        from . import memvec
+        st = memvec.status()
+        return {"ok": True, **st}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "items": 0, "indexed": False}
+
+
+@app.post("/api/memory/reindex")
+def memory_reindex():
+    """强制全量重建记忆索引（换模型或怀疑索引异常时用）。"""
+    from . import memvec
+    return {"ok": True, **memvec.rebuild()}
+
+
 @app.get("/api/memory/usage")
 def memory_usage():
     """各部分占用情况：每个会话的历史、记忆、归档、进程内存。
