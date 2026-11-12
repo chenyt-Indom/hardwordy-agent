@@ -3591,6 +3591,32 @@
       showToast("已清空本对话短期记忆");
       loadMemory();
     };
+
+    // ---- 向量检索：试一句看召回 + 重建索引 ----
+    const vgo = $("#memVecGo");
+    if (vgo) vgo.onclick = () => runMemVecSearch();
+    const vq = $("#memVecQ");
+    if (vq) vq.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); runMemVecSearch(); }
+    };
+    const vrb = $("#memVecRebuild");
+    if (vrb) vrb.onclick = async () => {
+      const old = vrb.textContent;
+      vrb.disabled = true;
+      vrb.textContent = "重建中…";
+      try {
+        const r = await api("/api/memory/reindex", { method: "POST" });
+        showToast(r.indexed
+          ? `索引已重建：${r.items} 条 · ${r.ms}ms`
+          : `已重建，但没有可用向量模型（${r.backend || "无"}），检索走关键词兜底`,
+          r.indexed ? "ok" : "warn");
+      } catch (e) {
+        showToast("重建失败：" + (e.message || e), "warn");
+      }
+      vrb.textContent = old;
+      vrb.disabled = false;
+      loadMemVecStat();
+    };
   }
   bindMemoryPanel();
 

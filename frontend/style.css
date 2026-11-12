@@ -3558,3 +3558,32 @@ html[data-theme="light"] select.pill-select option {
 .tts-menu-rate > span { flex: none; }
 .tts-menu-rate .tts-menu-item { width: auto; padding: 3px 7px; font-size: 12px; }
 
+
+/* ---------- 记忆库 · 向量检索（检索测试 + 索引状态 + 重建）----------
+   只占两行，结果区默认隐藏、展开后限高滚动，不改变面板原有高度。 */
+.mem-vec { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 4px; }
+.mem-vec-row { display: flex; align-items: center; gap: 6px; }
+.mem-vec-row input {
+  flex: 1 1 auto; min-width: 0; height: 28px; padding: 0 8px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--field-bg); color: var(--text); font-size: 12px;
+}
+.mem-vec-row input:focus { outline: none; border-color: var(--kb-accent); }
+.mem-vec-stat {
+  flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mem-vec-hits {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 200px; overflow: auto;
+}
+.mem-vec-hit {
+  border: 1px solid var(--border); border-left: 3px solid var(--kb-accent);
+  border-radius: 6px; padding: 6px 8px; background: var(--panel);
+}
+.mem-vec-hit-h { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+.mem-vec-hit-b {
+  font-size: 12px; line-height: 1.5; color: var(--text);
+  white-space: pre-wrap; word-break: break-word;
+}
+.mem-vec-empty { font-size: 12px; color: var(--muted); padding: 2px 0; }
