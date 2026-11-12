@@ -3761,6 +3761,12 @@ html[data-theme="light"] select.pill-select option {
   background: none; border: none; color: var(--muted);
   font-size: 12px; padding: 2px 0; text-align: center;
 }
+/* 跨版本：本机不认识的消息类型。内容照显，虚线边框 + 略淡，
+   让人一眼看出「这条来自更新版本」，但不会误以为是正常消息 */
+.hive-msg.unknown .hmsg-bubble {
+  border-style: dashed; opacity: .82;
+}
+.hive-msg.unknown .hmsg-who { color: var(--meta-fg); }
 .hive-msg .hmsg-ts { font-size: 10.5px; color: var(--meta-fg); }
 
 /* ---------- 输入区 ---------- */
