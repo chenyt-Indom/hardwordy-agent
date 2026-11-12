@@ -1572,7 +1572,7 @@
     } catch (e) { return false; }
   }
 
-  function renderFinal(bubble, text, userText) {
+  function renderFinal(bubble, text, userText, silent) {
     const raw = String(text == null ? "" : text);
     if (isPlainMode()) {
       bubble.textContent = raw;
