@@ -604,8 +604,7 @@ class MeshNode:
         uid = str(k.get("uid") or "")
         host = str(k.get("host") or "")
         port = int(k.get("port") or 0)
-        me = H.profile().get("user_id", "")
-        if not uid or uid == me or not host or not port:
+        if not uid or uid == self.uid or not host or not port:
             return
         with _LOCK:
             self.known[uid] = {"host": host, "port": port,
