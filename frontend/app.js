@@ -9028,6 +9028,8 @@
       // 只标一句「你的版本看不懂」，而不是让消息凭空消失。
       const who = type === "system" ? ""
         : '<span class="hmsg-who">' + hEsc(m.name || m.from || "?")
+          + (m.from === myId && m.dev && myDev && m.dev !== myDev
+            ? '<span class="hmsg-dup">（同身份的另一台设备）</span>' : "")
           + (type === "ai" && m.by ? "（由 " + hEsc(m.by) + " 唤醒）" : "")
           + (type === "unknown"
             ? "（" + hEsc(m.orig_type || "新类型") + " · 你的版本看不懂，已按原文显示）"
