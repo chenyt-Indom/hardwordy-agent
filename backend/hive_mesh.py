@@ -463,6 +463,11 @@ class MeshNode:
 
     # ------------------------------------------------------------ 消息处理
 
+    def ingest(self, gid: str, msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """把收到的消息落盘。抽成方法而不是直接调 H，是为了让每个节点能有
+        自己的落盘目标（同一进程跑多个账号时必需）。"""
+        return H.ingest_message(gid, msg)
+
     def _dispatch(self, peer: Peer, typ: int, obj: Dict[str, Any]) -> None:
         gid = peer.gid
         if typ == T_PING:
