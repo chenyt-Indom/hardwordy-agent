@@ -770,6 +770,27 @@
        之前改完前端，窗口常常还在跑旧 JS（no-store 也拦不住 WebView 缓存），
        导致"改了没效果"。加 ?v=时间戳 后每次加载都是唯一 URL。
         放在 body 末尾，确保 DOM 已解析完再执行。 -->
+  <!-- 群聊通用浮层（2026-11-13）：二维码展示 / 文本输入二合一。
+       电脑端大多没有摄像头，所以二维码旁边**一定**同时给可复制的文本口令，
+       否则"扫码入群"在纯 PC 团队里第一步就走不通。 -->
+  <div class="hive-modal" id="hiveModal" hidden>
+    <div class="hive-modal-in">
+      <div class="hm-head">
+        <b id="hiveModalTitle">标题</b>
+        <button type="button" class="hm-x" id="hiveModalClose" title="关闭">✕</button>
+      </div>
+      <img id="hiveQrImg" class="hive-qr" alt="群二维码" hidden />
+      <p class="hint" id="hiveModalHint"></p>
+      <textarea id="hiveModalInput" class="hive-modal-input" rows="3" hidden
+                spellcheck="false"></textarea>
+      <input id="hiveModalCode" class="hive-code" readonly hidden />
+      <div class="hm-acts">
+        <button type="button" class="btn sm ghost" id="hiveModalCopy" hidden>📋 复制口令</button>
+        <button type="button" class="btn sm primary" id="hiveModalOk">确定</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     (function () {
       var v = String(Date.now());
