@@ -739,7 +739,7 @@ def build_hd_prompt(instruction: str, history: List[Dict[str, Any]],
         "如果讨论记录与最后那条指令冲突，一律以最后那条指令为准。\n\n"
         "【讨论记录】\n"
         f"{ctx}\n\n"
-        "【当前指令】（由 {asker} 发出，优先级最高）\n"
+        f"【当前指令】（由 {asker} 发出，优先级最高）\n"
         f"{instruction.strip() or '（没有写明具体任务，请根据上面的讨论判断需要做什么）'}\n\n"
         "【输出要求】\n"
         "直接给出结果，不要复述讨论过程，不要解释你在做什么。"
