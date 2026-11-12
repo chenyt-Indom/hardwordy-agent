@@ -9449,25 +9449,6 @@
       });
     }
 
-    // ==== TMPDEMO2（截完删）====
-    setInterval(function () {
-      try {
-        if (typeof setMode !== "function" || !el("hiveMsgs")) return;
-        setMode("hive");
-        myId = "u_me"; myDev = "d_me";
-        renderMsgs([
-          { id: "m1", from: "u_other", dev: "d_other", name: "李四", type: "text",
-            text: "成员消息：白底黑字、靠左。", ts: Date.now() / 1000 },
-          { id: "m2", from: "u_me", dev: "d_me", name: "我", type: "text",
-            text: "我的消息：绿底白字、靠右。", ts: Date.now() / 1000 },
-          { id: "m3", from: "u_me", dev: "d_me", name: "我", type: "ai", by: "我",
-            text: "AI 回答：靠左、深色气泡。", thinking: "想一下。", dur_ms: 1200,
-            ts: Date.now() / 1000 }
-        ]);
-      } catch (e) { /* 忽略 */ }
-    }, 400);
-    // ==== TMPDEMO2 结束 ====
-
     function renderMsgs(list) {
       const box = el("hiveMsgs");
       box.innerHTML = "";
