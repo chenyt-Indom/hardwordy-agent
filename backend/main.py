@@ -10813,6 +10813,31 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
     try:
         hist = hive.read_messages(gid, 0, 60)
         prompt = hive.build_hd_prompt(instruction, hist, asker)
+
+        # 附件：图片交给视觉模型看，文档抽出正文拼进提示词。
+        # 用户要求「@hd 能带图片/文档一起处理」—— 附件本身就在本机群目录里
+        # （发送时已广播过来），这里直接按 fid 取，不需要前端再传一遍。
+        images: list = []
+        attach_note = ""
+        try:
+            for f in ((body or {}).get("extra") or {}).get("files") or []:
+                fid = (f or {}).get("fid")
+                if not fid:
+                    continue
+                info = file_tools.read_file(hive.file_path(gid, fid))
+                if not info.get("ok"):
+                    continue
+                if info.get("type") == "image":
+                    images.append(info["b64"])
+                    attach_note += "\n[附件·图片] " + str(f.get("name") or "")
+                else:
+                    attach_note += ("\n\n【附件：" + str(f.get("name") or "")
+                                    + "】\n" + (info.get("content") or "")[:8000])
+        except Exception:
+            pass
+        if attach_note:
+            prompt += "\n\n【成员随指令提供的附件】" + attach_note
+
         cfg = config.load_config() or {}
         model = cfg.get("default_model") or ""
         if not model:
