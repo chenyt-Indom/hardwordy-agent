@@ -9089,11 +9089,14 @@
       wrap.setAttribute("data-mid", m.id || m.mid || "");
       // 跨版本：对方用更新版本发来的类型，本机不认识 —— **照样显示原文**，
       // 只标一句「你的版本看不懂」，而不是让消息凭空消失。
+      // AI 消息的 m.name 记的是**唤醒者**的名字，直接显示就成了「我（由我唤醒）」，
+      // 看着像自己发的。这里统一显示「@hd（由 我 唤醒）」。
+      const whoName = isAI ? "🤖 @hd" : (m.name || m.from || "?");
       const who = type === "system" ? ""
-        : '<span class="hmsg-who">' + hEsc(m.name || m.from || "?")
-          + (m.from === myId && m.dev && myDev && m.dev !== myDev
+        : '<span class="hmsg-who">' + hEsc(whoName)
+          + (!isAI && m.from === myId && m.dev && myDev && m.dev !== myDev
             ? '<span class="hmsg-dup">（同身份的另一台设备）</span>' : "")
-          + (type === "ai" && m.by ? "（由 " + hEsc(m.by) + " 唤醒）" : "")
+          + (isAI && m.by ? "（由 " + hEsc(m.by) + " 唤醒）" : "")
           + (type === "unknown"
             ? "（" + hEsc(m.orig_type || "新类型") + " · 你的版本看不懂，已按原文显示）"
             : "")
