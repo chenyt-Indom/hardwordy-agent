@@ -111,27 +111,10 @@ def _ollama_models():
         return []
 
 
-def _pick_ollama_model(names):
-    """从已装模型里挑一个 embedding 模型。
-
-    ⚠️ 必须精确比对模型名，不能看名字里有没有 "embed" ——
-    对话模型（如 qwen2.5:7b）也能被 /api/embed 调用，但**输出维度不对**，
-    更糟的是它不会报错，会安静地给出一堆语义无关的向量。
-    """
-    if not names:
-        return ""
-    norm = {}
-    for n in names:
-        base = n.split(":")[0]
-        norm.setdefault(base, n)          # 保留带 tag 的完整名
-        norm.setdefault(n, n)
-    for cand in OLLAMA_CANDIDATES:
-        if cand in norm:
-            return norm[cand]
-        base = cand.split(":")[0]
-        if base in norm:
-            return norm[base]
-    return ""
+# 选模型已并入 `_match_model` + `BACKENDS` 列表。
+# ⚠️ 选 embedding 模型必须**精确比对模型名**，不能看名字里有没有 "embed" ——
+# 对话模型（如 qwen2.5:7b）也能被 /api/embed 调用，但输出维度不对，
+# 而且它不会报错，会安静地给出一堆语义无关的向量，最难查。
 
 
 def _ollama_embed(texts, model):
