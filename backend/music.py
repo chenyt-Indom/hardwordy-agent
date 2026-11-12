@@ -770,7 +770,7 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
     scale_name = cfg["scale"]
     root = 60 + int(key)
     beat = 60.0 / bpm
-    bar_beats = 4.0
+    bar_beats = max(1.0, min(12.0, float(bar_beats or 4.0)))
     bar_s = beat * bar_beats
 
     # --- 和弦进行 ---
