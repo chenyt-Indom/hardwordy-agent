@@ -10588,6 +10588,16 @@ def hive_relay_bundle_download():
                         media_type="application/zip")
 
 
+@app.get("/api/hive/upgrade/download")
+def hive_upgrade_download():
+    """下载「把服务器上的应用升级到带内置中继」的包（4 个 py + 说明）。"""
+    p = os.path.join(hive._DATA, "hive_upgrade.zip")
+    if not os.path.exists(p):
+        raise HTTPException(404, "升级包还没生成")
+    return FileResponse(p, filename="hive_upgrade.zip",
+                        media_type="application/zip")
+
+
 @app.get("/api/hive/relay/last")
 def hive_relay_last():
     """上次用过的中继地址（建群时提示「沿用上次」）。"""
