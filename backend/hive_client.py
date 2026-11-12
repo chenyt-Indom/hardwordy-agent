@@ -119,6 +119,9 @@ class HiveClient:
         self._retry = 0
         self.on_message: Optional[Callable[[str, Dict[str, Any]], None]] = None
         self.on_status: Optional[Callable[[Dict[str, Any]], None]] = None
+        # @hd 执行进度帧的回调。和 on_message 分开：
+        # 进度帧是**过程数据**，不落盘、不进 seq，只用于界面实时刷新。
+        self.on_stream: Optional[Callable[[str, Dict[str, Any]], None]] = None
         self._lock = threading.RLock()
 
         # ---- 跨版本 / 状态显示相关（2026-11-13）----
