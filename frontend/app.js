@@ -8802,7 +8802,7 @@
         const bits = [ni.text];
         if (c.url) bits.push(c.url);
         if (c.queued) bits.push(c.queued + " 条待发");
-        if (c.last_error && ni.cls !== "online") bits.push("上次错误：" + c.last_error);
+        if (c.error && ni.cls !== "online") bits.push("上次错误：" + c.error);
         line.textContent = bits.join(" · ");
       }
 
