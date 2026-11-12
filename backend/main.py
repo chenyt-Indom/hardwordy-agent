@@ -10367,32 +10367,25 @@ def hive_create(body: dict):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-    url = (b.get("relay_url") or "").strip()
-    relay_info: dict = {"configured": False}
-    if url:
-        try:
-            # 2026-11-13：先自动试出真正能用的地址再存。
-            # 原来直接 normalize 就存 —— 用户填「139.199.69.88」会被当成
-            # ws://139.199.69.88（= 80 端口），而服务器上是 https + /hive，
-            # 于是地址存下来了、却永远连不上，还查不出原因。
-            pr = hive_deploy.probe_auto(url)
-            norm = (pr.get("url") if pr.get("ok") else "") or \
-                hive_deploy.normalize_url(url)
-            hive_deploy.remember_relay(norm, b.get("relay_note") or "")
-            hive.set_relay(norm, "", True)
-            st = hive_client.client().start(norm, g["gid"])
-            perr = pr.get("error") or {}
-            relay_info = {
-                "configured": True, "url": norm,
-                "connected": bool(st.get("connected")),
-                "error": st.get("last_error") or "",
-                "probe_ok": bool(pr.get("ok")),
-                "probe_error": perr.get("title") or "",
-                "tried": pr.get("tried") or [],
-            }
-        except Exception as e:
-            relay_info = {"configured": False, "url": url,
-                          "error": f"{type(e).__name__}: {e}"}
+    # 2026-11-13：建群不再需要任何服务器。
+    # `relay_url` 字段保留只为兼容旧前端，含义变成了「连接码」：
+    #   留空          → 局域网模式，靠 UDP 广播自动发现同群的人（零配置）
+    #   hive3://IP:端口 → 直接连某个人（跨网络，人工传一次码）
+    code = (b.get("relay_url") or b.get("code") or "").strip()
+    relay_info: dict = {"configured": False, "mode": "mesh"}
+    try:
+        st = hive_client.client().start(code, g["gid"])
+        relay_info = {
+            "configured": bool(code),
+            "url": code or "局域网",
+            "connected": bool(st.get("connected")),
+            "mode": "mesh",
+            "port": st.get("port") or 0,
+            "lan_ip": st.get("lan_ip") or "",
+            "error": st.get("error") or "",
+        }
+    except Exception as e:
+        relay_info["error"] = f"{type(e).__name__}: {e}"
     return {"ok": True, "group": g, "relay": relay_info}
 
 
