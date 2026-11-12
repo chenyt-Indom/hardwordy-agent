@@ -9142,10 +9142,14 @@
         c.think.innerHTML += hEsc(f.delta || "").replace(/\n/g, "<br>");
       } else if (ph === "content") {
         c.phase.textContent = "正在输出… " + (t.chars || 0) + " 字";
-        c.out.innerHTML += fmtBody(f.delta || "");
+        // 流式阶段用**轻量渲染**（转义 + 换行），不走 renderFinal：
+        // 每次增量都全量重渲染会让代码块反复重建、滚动位置乱跳。
+        // 跑完后正式消息会由 msg 事件补上，那条走完整的 renderFinal。
+        c.out.innerHTML += hEsc(f.delta || "").replace(/\n/g, "<br>");
       } else if (ph === "done") {
         c.phase.textContent = t.cancelled ? "已取消"
           : (t.error ? "执行失败" : "完成");
+        setStopBtn(false);
         // 正式消息马上会由 msg 事件补上（它带完整思考和耗时），
         // 这里延时移除卡片，别抢在正式消息前面闪一下。
         setTimeout(() => {
@@ -9154,7 +9158,31 @@
         }, 1200);
         return;
       }
+      setStopBtn(true, f.mid);
       box.scrollTop = box.scrollHeight;
+    }
+
+    // 输入区的「■ 终止」：有任务在跑才显示，点了取消当前那个。
+    // 为什么还要这个按钮 —— 实时卡片上已经有「取消」了，但卡片可能被滚出视野，
+    // 而用户盯着输入框的时候最想按的就是这里（和单人模式的位置一致）。
+    let stopMid = "";
+    function setStopBtn(on, mid) {
+      const b = el("hiveStopBtn");
+      if (!b) return;
+      if (on && mid) stopMid = mid;
+      b.hidden = !on;
+      if (!on) stopMid = "";
+    }
+
+    const stopEl = el("hiveStopBtn");
+    if (stopEl) {
+      stopEl.addEventListener("click", () => {
+        if (stopMid) hdCancel(stopMid);
+        else {
+          // 没拿到 mid（比如刚进群时任务已经在跑）：让后端按群取消
+          hdCancel("");
+        }
+      });
     }
 
     function renderMsgs(list) {
