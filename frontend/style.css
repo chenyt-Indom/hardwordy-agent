@@ -3723,6 +3723,7 @@ html[data-theme="light"] select.pill-select option {
 }
 .hive-composer textarea:focus { outline: none; border-color: var(--accent); }
 .hive-composer .btn { flex: none; }
+.hive-main > .tip { flex: none; padding: 0 18px 8px; margin: 0; }
 
 /* ---------- 二维码 / 输入浮层 ---------- */
 .hive-modal {
