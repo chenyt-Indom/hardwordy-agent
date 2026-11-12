@@ -8873,6 +8873,7 @@
       if (!text) return;
       if (!curGid) { alert("先在左边选一个群"); return; }
       ta.value = "";
+      try { atBtnSync(); } catch (e) { /* 函数在后面定义，首次调用可能未就绪 */ }
       try {
         const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/send",
           { text: text });
