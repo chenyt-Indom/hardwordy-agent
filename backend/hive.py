@@ -240,6 +240,77 @@ def key_fingerprint(key: bytes) -> str:
     return hashlib.sha256(key).hexdigest()[:12]
 
 
+# ---------------------------------------------------------------- 入群密码
+#
+# 为什么是「密码派生密钥」，不是「密码里装着密钥」：
+#   群密钥 32 字节 = 256 位，12 位密码最多 60 位，**装不下**。
+#   所以密码只做种子：key = HKDF-SHA256(密码, salt=群号)。
+# 好处：密码本身就是完整凭证，不用再分发密钥，也就不需要二维码。
+# 代价：改密码 = 换密钥 = 老成员要用新密码重新进群（界面上会明说）。
+#
+# 字符集 32 个，去掉 0 1 I L O —— 避免「零和欧」「一和艾」看错。
+
+PW_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+PW_LEN = 12
+
+
+def gen_password() -> str:
+    """生成 12 位入群密码（32 字符集 → 60 位熵）。"""
+    return "".join(secrets.choice(PW_ALPHABET) for _ in range(PW_LEN))
+
+
+def norm_password(s: str) -> str:
+    """规范化输入：去掉空格/连字符、转大写，并校验字符集。
+
+    出错抛 ValueError，消息里直接写清「错在哪」，界面可以原样展示给用户。
+    """
+    raw = "".join(ch for ch in (s or "") if ch.isalnum()).upper()
+    if not raw:
+        raise ValueError("密码不能为空")
+    if len(raw) != PW_LEN:
+        raise ValueError("密码是 %d 位，你输入了 %d 位" % (PW_LEN, len(raw)))
+    bad = sorted({ch for ch in raw if ch not in PW_ALPHABET})
+    if bad:
+        raise ValueError("密码里不会出现 %s（不含 0、1、I、L、O）" % "、".join(bad))
+    return raw
+
+
+def format_password(pw: str) -> str:
+    """给人看的写法：ABCD-EFGH-JKMN。"""
+    pw = norm_password(pw)
+    return "%s-%s-%s" % (pw[0:4], pw[4:8], pw[8:12])
+
+
+def derive_key(pw: str, gid: str) -> bytes:
+    """密码 + 群号 → 32 字节群密钥（HKDF-SHA256）。"""
+    pw = norm_password(pw)
+    salt = (gid or "").encode("utf-8")
+    try:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        return HKDF(algorithm=hashes.SHA256(), length=32, salt=salt,
+                    info=b"hive-group-key-v1").derive(pw.encode("utf-8"))
+    except Exception:
+        import hmac as _hmac
+
+        prk = _hmac.new(salt, pw.encode("utf-8"), hashlib.sha256).digest()
+        return _hmac.new(prk, b"hive-group-key-v1\x01", hashlib.sha256).digest()
+
+
+def verify_tag(key: bytes, gid: str) -> str:
+    """验证标签：让「只知道密码的人」能确认自己算出来的密钥对不对。
+
+    ⚠️ 这个标签会随 UDP 广播明文发出去，等于给了别人离线试密码的材料。
+       密码是 60 位随机串，爆破不现实，这个取舍是划算的 ——
+       换来的是「输错密码」和「没找到群」能分得清清楚楚。
+    """
+    import hmac as _hmac
+
+    return _hmac.new(key, b"hive-verify:" + (gid or "").encode("utf-8"),
+                     hashlib.sha256).hexdigest()[:16]
+
+
 def _seal(key: bytes, obj: Any) -> str:
     """加密一条消息体。中继只看得到这段密文。"""
     try:
