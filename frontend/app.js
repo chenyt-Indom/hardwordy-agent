@@ -8883,17 +8883,117 @@
     }
 
     // ---------------------------------------------------------- 消息
-    function fmtBody(t) {
-      const parts = String(t || "").split("```");
-      let out = "";
-      parts.forEach((p, i) => {
-        if (i % 2 === 1) {
-          out += "<pre>" + hEsc(p.replace(/^[a-zA-Z0-9+#-]*\n/, "")) + "</pre>";
+    //
+    // ★ 正文**复用单人模式的 renderFinal**（代码高亮 + 每块复制按钮 + 可点链接
+    //   + 图片 + 表格 + Markdown 排版），不再自己写一套简易版 —— 用户要求
+    //   两个模式「完全统一甚至更好」。群聊额外多的只有：谁说的、附件、引用、
+    //   以及消息操作条（复制 / 引用 / 朗读）。
+    //
+    // ⚠️ 系统消息和「看不懂的新类型」**必须走纯文本**：它们是保真优先，
+    //    走 Markdown 渲染反而可能把对方原样写的内容改形。
+
+    // 当前这批消息的索引：引用块要按 mid 找回原文
+    let msgIndex = {};
+    let quoteMsg = null;
+
+    function fmtSize(n) {
+      n = Number(n) || 0;
+      if (n < 1024) return n + " B";
+      if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+      return (n / 1048576).toFixed(1) + " MB";
+    }
+    function fileIco(f) {
+      const n = String((f && f.name) || "").toLowerCase();
+      if (/\.pdf$/.test(n)) return "📕";
+      if (/\.(docx?|rtf)$/.test(n)) return "📘";
+      if (/\.(xlsx?|csv)$/.test(n)) return "📗";
+      if (/\.(pptx?)$/.test(n)) return "📙";
+      if (/\.(zip|rar|7z|tar|gz)$/.test(n)) return "🗜";
+      if (/\.(py|js|ts|java|c|cpp|go|rs|json|html|css|md|txt|log|yml|yaml)$/.test(n)) return "📄";
+      if ((f && f.kind) === "audio") return "🎵";
+      return "📎";
+    }
+
+    function fileCards(m) {
+      const fs = (m && m.files) || [];
+      if (!fs.length) return "";
+      const base = "/api/hive/" + encodeURIComponent(curGid) + "/files/";
+      const out = [];
+      fs.forEach((f) => {
+        if (!f || !f.fid) return;
+        const url = base + encodeURIComponent(f.fid);
+        const nm = hEsc(f.name || "文件");
+        if (f.kind === "image") {
+          out.push('<a href="' + url + '" target="_blank" rel="noopener">'
+            + '<img class="hive-file-img" src="' + url + '" alt="' + nm + '" loading="lazy"></a>');
+        } else if (f.kind === "video") {
+          out.push('<video class="hive-file-video" src="' + url
+            + '" controls preload="metadata"></video>');
+        } else if (f.kind === "audio") {
+          out.push('<audio src="' + url
+            + '" controls preload="metadata" style="max-width:320px"></audio>');
         } else {
-          out += hEsc(p).replace(/\n/g, "<br>");
+          out.push('<a class="hive-file-doc" href="' + url + '" download>'
+            + '<span class="hf-ico">' + fileIco(f) + "</span>"
+            + '<span class="hf-meta"><span class="hf-name">' + nm + "</span>"
+            + '<span class="hf-size">' + fmtSize(f.size) + "</span></span>"
+            + '<span class="hf-dl">⬇</span></a>');
         }
       });
-      return out;
+      return out.length ? '<div class="hive-files">' + out.join("") + "</div>" : "";
+    }
+
+    function refBlock(m) {
+      if (!m || !m.ref) return "";
+      const r = msgIndex[m.ref] || {};
+      const who = hEsc(r.name || "成员");
+      const t = String(r.text || "").replace(/\s+/g, " ").slice(0, 90) || "（原消息）";
+      return '<div class="hive-ref"><b>' + who + "</b>：" + hEsc(t) + "</div>";
+    }
+
+    function mkAct(label, fn) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.onclick = (e) => { e.stopPropagation(); fn(); };
+      return b;
+    }
+
+    async function copyText(t, box) {
+      try { await navigator.clipboard.writeText(t); }
+      catch (e) {
+        const ta = document.createElement("textarea");
+        ta.value = t;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } catch (_) { /* 忽略 */ }
+        ta.remove();
+      }
+      // 反馈只改第一个按钮的文字，**不重建 innerHTML** ——
+      // 重建会把按钮的 onclick 一起冲掉，之后就点不动了。
+      const b = box && box.querySelector("button");
+      if (b) {
+        const o = b.textContent;
+        b.textContent = "已复制 ✓";
+        setTimeout(() => { try { b.textContent = o; } catch (_) { /* 忽略 */ } }, 1200);
+      }
+    }
+
+    function setQuote(m) {
+      quoteMsg = m;
+      const bar = el("hiveQuoteBar");
+      const tx = el("hiveQuoteTxt");
+      if (!bar || !tx) return;
+      const t = String(m.text || "").replace(/\s+/g, " ").slice(0, 60);
+      tx.textContent = (m.name || "成员") + "：" + (t || "（附件消息）");
+      bar.hidden = false;
+      try { el("hiveText").focus(); } catch (e) { /* 忽略 */ }
+    }
+
+    function clearQuote() {
+      quoteMsg = null;
+      const bar = el("hiveQuoteBar");
+      if (bar) bar.hidden = true;
     }
 
     function msgNode(m) {
@@ -8905,6 +9005,7 @@
       else if (type === "unknown") cls += " unknown";
       else if (m.from === myId) cls += " mine";
       wrap.className = cls;
+      wrap.setAttribute("data-mid", m.id || m.mid || "");
       // 跨版本：对方用更新版本发来的类型，本机不认识 —— **照样显示原文**，
       // 只标一句「你的版本看不懂」，而不是让消息凭空消失。
       const who = type === "system" ? ""
@@ -8914,8 +9015,6 @@
             ? "（" + hEsc(m.orig_type || "新类型") + " · 你的版本看不懂，已按原文显示）"
             : "")
           + (m.pending ? " · 待发送" : "") + "</span>";
-      const ts = m.ts ? new Date(m.ts * 1000).toLocaleTimeString("zh-CN",
-        { hour: "2-digit", minute: "2-digit" }) : "";
       // 思考过程：**默认收起**。它可能几千字，展开会把整个聊天记录冲走；
       // 但必须存下来且能点开 —— 后来进群的人也要能回看当时模型在想什么。
       let think = "";
@@ -8923,14 +9022,51 @@
         const tc = String(m.thinking).length;
         const dur = m.dur_ms ? " · 耗时 " + (m.dur_ms / 1000).toFixed(1) + "s" : "";
         think = '<details class="hmsg-think"><summary>💭 思考过程（'
-          + tc + " 字" + dur + "）</summary><div class=\"hthink-body\">"
+          + tc + " 字" + dur + '）</summary><div class="hthink-body">'
           + hEsc(m.thinking).replace(/\n/g, "<br>") + "</div></details>";
       }
       if (type === "ai" && m.cancelled) {
         think = '<div class="hmsg-cancel">⏹ 这次任务被取消了</div>' + think;
       }
-      wrap.innerHTML = who + think + '<div class="hmsg-bubble">' + fmtBody(m.text)
-        + "</div>" + (ts ? '<span class="hmsg-ts">' + ts + "</span>" : "");
+      const ts = m.ts ? new Date(m.ts * 1000).toLocaleTimeString("zh-CN",
+        { hour: "2-digit", minute: "2-digit" }) : "";
+
+      wrap.innerHTML = who + think + refBlock(m)
+        + '<div class="hmsg-bubble"></div>'
+        + '<div class="hive-acts"></div>'
+        + (ts ? '<span class="hmsg-ts">' + ts + "</span>" : "");
+
+      const bubble = wrap.querySelector(".hmsg-bubble");
+      const raw = String(m.text == null ? "" : m.text);
+      if (type === "system" || type === "unknown" || m.pending) {
+        bubble.textContent = raw;
+        bubble.style.whiteSpace = "pre-wrap";
+      } else {
+        try { renderFinal(bubble, raw, "", true); }
+        catch (e) {
+          bubble.textContent = raw;
+          bubble.style.whiteSpace = "pre-wrap";
+        }
+      }
+      const fh = fileCards(m);
+      if (fh) bubble.insertAdjacentHTML("beforeend", fh);
+
+      const acts = wrap.querySelector(".hive-acts");
+      if (type !== "system" && (raw || (m.files || []).length)) {
+        if (raw) {
+          acts.appendChild(mkAct("复制", () => copyText(raw, acts)));
+          acts.appendChild(mkAct("引用", () => setQuote(m)));
+        }
+        if (type === "ai" && raw) {
+          const b = mkAct("🔊", () => {});
+          b.title = "朗读这段";
+          b.onclick = (e) => { e.stopPropagation(); ttsPlay(raw, b); };
+          acts.appendChild(b);
+        }
+        if (!acts.children.length) acts.remove();
+      } else {
+        acts.remove();
+      }
       return wrap;
     }
 
