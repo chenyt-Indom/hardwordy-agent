@@ -517,7 +517,7 @@ def rebuild() -> dict:
     """强制全量重建（换模型、或怀疑索引坏了时用）。"""
     with _lock:
         _idx.update({"sig": "", "dsig": "", "items": [], "mat": None})
-        _trans.update({"sig": "", "items": []})
+        _trans.update({"files": {}, "items": []})
         for p in (VEC_FILE, META_FILE):
             try:
                 if os.path.isfile(p):
