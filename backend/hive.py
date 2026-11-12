@@ -1374,6 +1374,160 @@ def build_hd_prompt(instruction: str, history: List[Dict[str, Any]],
 
 # ---------------------------------------------------------------- 自检
 
+# ---------------------------------------------------------------- 群记忆
+# 为什么需要：@hd 原来只带最近 60 条消息当上下文，聊长了就「失忆」，
+# 而且这些内容不落成记忆，换个成员再问同样的事它又要重新看一遍。
+# 现在按群聊内容生成一份**可反复重建**的群记忆（memory.md）：
+#   · 纯本地确定性算法，不调模型 —— 重建是毫秒级，不会烧算力；
+#   · 每次重建覆盖写，所以永远和当前聊天内容一致（用户要求「根据群聊内容重新构建」）；
+#   · @hd 跑任务时把这份记忆一起塞进提示词，模型就知道这个群之前干过什么。
+
+def _mem_path(gid: str) -> str:
+    return os.path.join(_gdir(gid), "memory.md")
+
+
+def _short(s: str, n: int = 90) -> str:
+    s = " ".join((s or "").split())
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def rebuild_memory(gid: str, limit: int = 600) -> Dict[str, Any]:
+    """按群聊内容重建群记忆。返回重建结果（字数 / 依据条数 / 时间）。"""
+    with _LOCK:
+        g = load_group(gid)
+        if not g:
+            raise ValueError("群不存在")
+        msgs = read_messages(gid, 0, limit)
+        mem = load_members(gid) or {}
+
+        speakers: Dict[str, Dict[str, Any]] = {}
+        hd_lines: List[str] = []
+        file_lines: List[str] = []
+        tail: List[str] = []
+
+        for m in msgs:
+            who = str(m.get("name") or m.get("from") or "?")
+            body = (m.get("text") or "").strip()
+            mtype = m.get("type") or "text"
+            ts = float(m.get("ts") or 0)
+
+            if mtype == "system":
+                continue
+            # 附件
+            for f in (m.get("files") or []):
+                nm = str((f or {}).get("name") or "")
+                if nm:
+                    file_lines.append("- %s（%s）" % (_short(nm, 40), who))
+            if not body:
+                continue
+            # @hd 的任务指令：这是「这个群干过什么」最硬的线索
+            if "@hd" in body:
+                hd_lines.append("- %s：%s" % (who, _short(body, 100)))
+            sp = speakers.setdefault(who, {"n": 0, "samples": []})
+            sp["n"] += 1
+            if len(sp["samples"]) < 3 and len(body) >= 6:
+                sp["samples"].append(_short(body, 80))
+            tail.append("%s %s：%s" % (_hhmm(ts), who, _short(body, 70)))
+
+        head = [
+            "# 群记忆 · %s" % (g.get("name") or gid),
+            "",
+            "> 由群聊内容自动重建于 %s · 依据最近 %d 条消息 · 重建会覆盖，不用手改"
+            % (_hhmm(time.time()), len(msgs)),
+            "> 成员 %d 人 · 群号 %s" % (len(mem), gid),
+            "",
+            "## 一、这个群在做什么",
+        ]
+        if hd_lines:
+            head += hd_lines[-10:]
+        else:
+            head.append("（还没有人 @hd 派过任务）")
+
+        head += ["", "## 二、谁说过什么"]
+        for who, sp in sorted(speakers.items(), key=lambda kv: -kv[1]["n"])[:12]:
+            head.append("- **%s**（%d 条）" % (who, sp["n"]))
+            for s in sp["samples"]:
+                head.append("  - " + s)
+        if not speakers:
+            head.append("（暂无发言）")
+
+        if file_lines:
+            head += ["", "## 三、共享过的文件"] + file_lines[-15:]
+
+        if tail:
+            head += ["", "## 四、最近进展（最后 12 条）"] + ["- " + t for t in tail[-12:]]
+
+        text = "\n".join(head).strip() + "\n"
+        # 兜底：太长就砍（记忆是给提示词用的，不是存档）
+        if len(text) > 6000:
+            text = text[:6000] + "\n…（已截断）\n"
+        with open(_mem_path(gid), "w", encoding="utf-8") as f:
+            f.write(text)
+        return {"ok": True, "gid": gid, "chars": len(text), "msgs": len(msgs),
+                "updated_at": time.time(), "path": _mem_path(gid)}
+
+
+def read_memory(gid: str) -> Dict[str, Any]:
+    """读群记忆（没有就现建一份）。"""
+    p = _mem_path(gid)
+    if not os.path.exists(p):
+        try:
+            return rebuild_memory(gid)
+        except Exception:
+            return {"ok": False, "gid": gid, "chars": 0, "msgs": 0,
+                    "updated_at": 0, "content": ""}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        content = ""
+    return {"ok": True, "gid": gid, "chars": len(content), "msgs": 0,
+            "updated_at": os.path.getmtime(p), "content": content}
+
+
+def memory_context(gid: str, max_chars: int = 2500) -> str:
+    """给提示词用的群记忆片段（裁到 max_chars，避免把上下文吃满）。"""
+    d = read_memory(gid)
+    c = (d.get("content") or "").strip()
+    if not c:
+        return ""
+    if len(c) > max_chars:
+        c = c[:max_chars] + "\n…（群记忆已截断）"
+    return c
+
+
+# ---------------------------------------------------------------- 删除群
+def _deleted_dir() -> str:
+    d = os.path.join(_DATA, "_deleted")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def delete_group(gid: str, force: bool = False) -> Dict[str, Any]:
+    """删除一个群（仅群主）。不真删 —— 整个群目录移到 data/hive/_deleted/ 下，
+    万一误删还能捞回来（和 workspace 删除的规矩一致）。
+    """
+    with _LOCK:
+        g = load_group(gid)
+        if not g:
+            raise ValueError("群不存在")
+        me = profile()["user_id"]
+        if not force and str(g.get("owner") or "") != me:
+            raise PermissionError("只有群主能删除这个群")
+        src = _gdir(gid)
+        dst = os.path.join(_deleted_dir(), "%s_%s" % (gid, time.strftime("%Y%m%d_%H%M%S")))
+        moved = False
+        try:
+            if os.path.isdir(src):
+                import shutil
+                shutil.move(src, dst)
+                moved = True
+        except Exception:
+            moved = False
+        return {"ok": True, "gid": gid, "name": g.get("name") or gid,
+                "moved_to": dst if moved else "", "moved": moved}
+
+
 def status() -> Dict[str, Any]:
     _ensure()
     me = profile()
