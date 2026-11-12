@@ -8758,7 +8758,14 @@
         avImg.hidden = true;
         if (avPh) avPh.hidden = false;
       }
-    } catch (e) { /* 后端没起来就保持占位 */ }
+    } catch (e) {
+      // 2026-11-12：原来是静默吞掉，结果「形象不显示」时查不出原因。
+      // 现在把真实错误写到占位上，一眼能看见。
+      if (avPh) {
+        avPh.hidden = false;
+        avPh.textContent = "形象加载失败：" + ((e && e.message) || e);
+      }
+    }
   }
   // 外部（模型工具 / 其它脚本）换了形象后，喊一声就能刷新
   window.addEventListener("avatar-changed", () => avLoad());
