@@ -730,9 +730,16 @@
       if (!ph || ph.hidden) return;
       var cv = document.getElementById("avCanvas");
       var im = document.getElementById("avImg");
-      ph.textContent = "init:" + (window.__avInitRan ? "1" : "0")
-        + " cvW:" + (cv ? (cv.width || 0) : "-")
-        + " err:" + (window.__err || "无");
+      var bb = document.getElementById("avBubble");
+      var info = "init" + (window.__avInitRan ? 1 : 0)
+        + " cv" + (cv ? cv.width + "x" + cv.height : "-")
+        + " img" + (im && im.getAttribute("src") ? (im.complete ? (im.naturalWidth || "0") : "加载中") : "无");
+      try {
+        var d = cv.getContext("2d").getImageData(cv.width >> 1, cv.height >> 1, 1, 1).data;
+        info += " px" + d[0] + "," + d[1] + "," + d[2] + "," + d[3];
+      } catch (e2) { info += " pxERR"; }
+      info += " E:" + (window.__err || "无");
+      if (bb) { bb.hidden = false; bb.textContent = info; }
     }, 3000);
   </script>
 </body>

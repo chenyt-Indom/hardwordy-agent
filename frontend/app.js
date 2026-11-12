@@ -7941,480 +7941,6 @@
   // 和 __showSampling / __restartAppNow 同一套做法（箭头函数读的是最新值）。
   window.__ctxState = () => ({ messages: history, session: sessionId });
   window.__ctxToast = showToast;
-})();
-
-/* =====================================================================
-   技能（skill）面板 —— 2026-11-10 用户要求：
-     · 顶栏「⚡ 技能」点开弹层，列出全部技能，点条目看详情；
-     · 支持新建 / 编辑 / 删除 / 启用开关；
-     · 三种生效方式：手动（点「用它」注入下一轮）/ 常驻 / 自动（模型自己判断）。
-   数据全在后端 data/skills.json，这里只做展示与增删改。
-   ===================================================================== */
-(function () {
-  const btn = document.getElementById("skillBtn");
-  if (!btn) return;
-
-  const MODE_LABEL = { manual: "手动", always: "常驻", auto: "自动" };
-  const MODE_HINT = {
-    manual: "点「用它」注入到下一轮对话，只生效一次",
-    always: "始终注入系统提示，每一轮都起作用",
-    auto: "只把名称和触发词给模型，它自己判断该不该用"
-  };
-  let items = [];
-  let openId = null;     // 展开详情的技能 id
-  let editing = null;    // 正在编辑的数据（新建时是空对象）
-
-  const sid = () => localStorage.getItem("ai_session_id") || "";
-  const esc = (s) => String(s == null ? "" : s)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-
-  async function call(url, body) {
-    const opt = body === undefined ? {} :
-      { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body) };
-    const r = await fetch(url, opt);
-    return await r.json();
-  }
-
-  let el = null;
-  function layer() {
-    if (el) return el;
-    el = document.createElement("div");
-    el.className = "confirm-layer sk-layer";
-    el.innerHTML =
-      '<div class="confirm-box sk-box">' +
-        '<div class="sk-head">' +
-          '<span class="sk-title">⚡ 技能</span>' +
-          '<span class="sk-count"></span>' +
-          '<span class="sk-head-acts">' +
-            '<button type="button" class="btn sm sk-new">＋ 新建</button>' +
-            '<button type="button" class="btn sm ghost sk-import">导入</button>' +
-            '<button type="button" class="btn sm ghost sk-close">关闭</button>' +
-          '</span>' +
-        '</div>' +
-        '<div class="sk-msg"></div>' +
-        '<div class="sk-list"></div>' +
-      '</div>';
-    document.body.appendChild(el);
-    el.addEventListener("click", (e) => { if (e.target === el) hide(); });
-    el.querySelector(".sk-close").onclick = hide;
-    el.querySelector(".sk-import").onclick = () => { openImport(); };
-    el.querySelector(".sk-new").onclick = () => {
-      openId = null; editing = { mode: "manual", enabled: true }; render();
-    };
-    el.querySelector(".sk-list").addEventListener("click", onList);
-    return el;
-  }
-
-  function say(t, kind) {
-    const m = layer().querySelector(".sk-msg");
-    m.textContent = t || "";
-    m.className = "sk-msg " + (kind || "");
-    if (t) setTimeout(() => { if (m.textContent === t) m.textContent = ""; }, 3500);
-  }
-
-  function hide() {
-    if (el) { el.remove(); el = null; }
-    openId = null; editing = null;
-  }
-
-  function render() {
-    const box = layer();
-    box.querySelector(".sk-count").textContent =
-      "共 " + items.length + " 个 · 已启用 " + items.filter(i => i.enabled).length + " 个";
-    const list = box.querySelector(".sk-list");
-    let html = "";
-
-    if (editing) {
-      const e = editing;
-      html += '<div class="sk-edit">' +
-        '<div class="sk-field"><label>名称</label>' +
-          '<input class="sk-in-name" maxlength="60" value="' + esc(e.name) + '" placeholder="如：写周报"></div>' +
-        '<div class="sk-field"><label>一句话描述</label>' +
-          '<input class="sk-in-desc" maxlength="200" value="' + esc(e.desc) + '" placeholder="它解决什么问题（模型判断用不用时会看这句）"></div>' +
-        '<div class="sk-field"><label>触发词</label>' +
-          '<input class="sk-in-trig" value="' + esc((e.triggers || []).join("，")) + '" placeholder="用逗号分隔，如：周报，工作总结"></div>' +
-        '<div class="sk-field"><label>生效方式</label>' +
-          '<select class="sk-in-mode">' +
-            ["manual", "always", "auto"].map(k =>
-              '<option value="' + k + '"' + ((e.mode || "manual") === k ? " selected" : "") + '>' +
-              MODE_LABEL[k] + " — " + MODE_HINT[k] + '</option>').join("") +
-          '</select></div>' +
-        '<div class="sk-field"><label>内容（做法 / 步骤 / 规范）</label>' +
-          '<textarea class="sk-in-content" rows="10" placeholder="写清要模型怎么做：分几步、每步产出什么、有哪些禁忌">' +
-          esc(e.content) + '</textarea></div>' +
-        '<div class="sk-acts">' +
-          '<button type="button" class="btn sm" data-act="save">保存</button>' +
-          '<button type="button" class="btn sm ghost" data-act="cancel">取消</button>' +
-        '</div></div>';
-      list.innerHTML = html;
-      return;
-    }
-
-    if (!items.length) {
-      list.innerHTML = '<div class="sk-empty">还没有技能。点右上角「＋ 新建」加一个，' +
-        '或者直接跟我说「加一个XX技能」。</div>';
-      return;
-    }
-
-    html = items.map(function (it) {
-      const open = openId === it.id;
-      let row = '<div class="sk-item' + (it.enabled ? "" : " off") + '" data-id="' + esc(it.id) + '">' +
-        '<div class="sk-row" data-act="open">' +
-          '<span class="sk-name">' + esc(it.name) + '</span>' +
-          '<span class="sk-mode m-' + esc(it.mode) + '">' + MODE_LABEL[it.mode] + '</span>' +
-          '<span class="sk-desc">' + esc(it.desc || "（没有描述）") + '</span>' +
-          '<span class="sk-sw" data-act="toggle" title="启用 / 关闭">' +
-            '<i class="' + (it.enabled ? "on" : "") + '"></i></span>' +
-          '<span class="sk-caret">' + (open ? "▾" : "▸") + '</span>' +
-        '</div>';
-      if (open) {
-        row += '<div class="sk-detail">' +
-          (it.triggers && it.triggers.length
-            ? '<div class="sk-trig">触发词：' + it.triggers.map(esc).join("、") + '</div>' : "") +
-          '<pre class="sk-content">' + esc(it.content || "（空）") + '</pre>' +
-          '<div class="sk-acts">' +
-            (it.mode === "manual"
-              ? '<button type="button" class="btn sm" data-act="use">用它</button>' : "") +
-            '<button type="button" class="btn sm ghost" data-act="share">分享</button>' +
-            '<button type="button" class="btn sm ghost" data-act="edit">编辑</button>' +
-            '<button type="button" class="btn sm ghost danger" data-act="del">删除</button>' +
-          '</div></div>';
-      }
-      return row + '</div>';
-    }).join("");
-    list.innerHTML = html;
-  }
-
-  async function onList(e) {
-    const t = e.target.closest("[data-act]");
-    if (!t) return;
-    const act = t.getAttribute("data-act");
-    const item = t.closest(".sk-item");
-    const id = item ? item.getAttribute("data-id") : "";
-
-    if (act === "save") { await save(); return; }
-    if (act === "cancel") { editing = null; render(); return; }
-    if (!id) return;
-
-    if (act === "open") {
-      openId = openId === id ? null : id;
-      render();
-      return;
-    }
-    if (act === "toggle") {
-      e.stopPropagation();
-      const cur = items.find(i => i.id === id);
-      if (!cur) return;
-      const r = await call("/api/skills/toggle", { id: id, enabled: !cur.enabled });
-      if (!r.ok) { say(r.error || "操作失败", "bad"); return; }
-      await reload();
-      say((r.item.enabled ? "已启用：" : "已关闭：") + r.item.name, "ok");
-      return;
-    }
-    if (act === "use") {
-      const r = await call("/api/skills/use", { id: id, session: sid() });
-      if (!r.ok) { say(r.error || "用不了这个技能", "bad"); return; }
-      say("已选「" + r.name + "」—— 下一条消息会按它来做（只生效一次）", "ok");
-      return;
-    }
-    if (act === "share") {
-      const cur = items.find(i => i.id === id);
-      if (cur) await openShare(cur);
-      return;
-    }
-    if (act === "edit") {
-      const cur = items.find(i => i.id === id);
-      if (cur) { editing = JSON.parse(JSON.stringify(cur)); openId = null; render(); }
-      return;
-    }
-    if (act === "del") {
-      const cur = items.find(i => i.id === id);
-      if (!cur) return;
-      if (!confirm("删除技能「" + cur.name + "」？删了就找不回来了。")) return;
-      const r = await call("/api/skills/delete", { id: id });
-      if (!r.ok) { say("删除失败（可能已经不存在）", "bad"); return; }
-      await reload();
-      say("已删除：" + cur.name, "ok");
-      return;
-    }
-  }
-
-  async function save() {
-    const box = layer();
-    const v = (sel) => { const n = box.querySelector(sel); return n ? n.value : ""; };
-    const data = {
-      name: v(".sk-in-name").trim(),
-      desc: v(".sk-in-desc").trim(),
-      content: v(".sk-in-content"),
-      triggers: v(".sk-in-trig"),
-      mode: v(".sk-in-mode") || "manual"
-    };
-    if (!data.name) { say("名称不能为空", "bad"); return; }
-    const isNew = !editing || !editing.id;
-    const r = isNew
-      ? await call("/api/skills/create", data)
-      : await call("/api/skills/update", Object.assign({ id: editing.id }, data));
-    if (!r.ok) { say(r.error || "保存失败", "bad"); return; }
-    editing = null;
-    await reload();
-    openId = r.item.id;
-    render();
-    say("已保存：" + r.item.name, "ok");
-  }
-
-  // ---------------- 分享 / 导入（2026-11-10 用户要求） ----------------
-  //  分享：一段可直接粘给任何 AI 的话 + 机器可读分享码，可复制 / 下载 / 二维码 / 系统分享
-  //  导入：把别人发来的整段内容粘回来，一键建成本地技能（重名自动加后缀）
-  function modal(html) {
-    const d = document.createElement("div");
-    d.className = "confirm-layer sk-layer";
-    d.innerHTML = '<div class="confirm-box sk-box sk-share">' + html + '</div>';
-    document.body.appendChild(d);
-    d.addEventListener("click", (e) => { if (e.target === d) d.remove(); });
-    return d;
-  }
-
-  function fallbackCopy(t) {
-    const ta = document.createElement("textarea");
-    ta.value = t;
-    ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand("copy"); } catch (e) {}
-    ta.remove();
-  }
-
-  function copyText(t) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(t).catch(() => fallbackCopy(t));
-    }
-    fallbackCopy(t);
-    return Promise.resolve();
-  }
-
-  async function openShare(it) {
-    const r = await call("/api/skills/share", { id: it.id });
-    if (!r.ok) { say(r.error || "导出失败", "bad"); return; }
-    const d = modal(
-      '<div class="sk-head"><span class="sk-title">分享：' + esc(it.name) + '</span>' +
-        '<span class="sk-head-acts"><button type="button" class="btn sm ghost sk-x">关闭</button></span></div>' +
-      '<div class="sk-share-tip">下面这段可以直接发给别人，内容可改，改完再复制。' +
-        '生效方式已固定建议为「自动」，对方可自行调整。</div>' +
-      '<textarea class="sk-share-ta" rows="12" spellcheck="false"></textarea>' +
-      '<div class="sk-acts sk-share-acts">' +
-        '<button type="button" class="btn sm" data-s="copy">复制文本</button>' +
-        '<button type="button" class="btn sm ghost" data-s="md">保存 .md</button>' +
-        '<button type="button" class="btn sm ghost" data-s="qr">二维码</button>' +
-        '<button type="button" class="btn sm ghost" data-s="sys">系统分享</button>' +
-      '</div>' +
-      '<div class="sk-share-msg"></div>' +
-      '<div class="sk-qr"></div>'
-    );
-    const ta = d.querySelector(".sk-share-ta");
-    ta.value = r.text;
-    d.querySelector(".sk-x").onclick = () => d.remove();
-    d.querySelector(".sk-share-acts").addEventListener("click", async (e) => {
-      const b = e.target.closest("[data-s]");
-      if (!b) return;
-      const act = b.getAttribute("data-s");
-      const txt = ta.value;
-      if (act === "copy") {
-        await copyText(txt);
-        const old = b.textContent;
-        b.textContent = "已复制 ✓";
-        setTimeout(() => { b.textContent = old; }, 1600);
-      } else if (act === "md") {
-        // 2026-11-10 用户反馈：点「下载 .md」没反应、也不知道存哪了。
-        // 根因：原来直接 a.click() 触发浏览器下载，内嵌 WebView 会静默拦掉；
-        //       而且 a 没挂到 DOM 上，某些浏览器同样不触发。改成后端真实写盘，
-        //       把绝对路径显示出来（点一下就能打开所在文件夹）。
-        const mb = d.querySelector(".sk-share-msg");
-        const oldTxt = b.textContent;
-        b.disabled = true;
-        b.textContent = "保存中…";
-        let sr = { ok: false, error: "请求失败" };
-        try { sr = await call("/api/skills/save_md", { text: txt, name: it.name }); }
-        catch (err) { sr = { ok: false, error: String((err && err.message) || err) }; }
-        b.disabled = false;
-        b.textContent = oldTxt;
-        if (sr.ok) {
-          mb.className = "sk-share-msg ok";
-          mb.innerHTML = "已保存到：" +
-            '<a class="path-link" href="javascript:void(0)" data-path="' + esc(sr.path) +
-            '" title="点击打开所在文件夹">' + esc(sr.path) + "</a>" +
-            "（" + sr.bytes + " 字节，点路径可直接打开）";
-        } else {
-          // 后端写不了盘时退回浏览器下载，这次挂到 DOM 上并明确告知去哪儿找
-          const blob = new Blob([txt], { type: "text/markdown;charset=utf-8" });
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = "技能-" + it.name + ".md";
-          a.style.display = "none";
-          document.body.appendChild(a);
-          a.click();
-          setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
-          mb.className = "sk-share-msg bad";
-          mb.textContent = "后端保存失败（" + (sr.error || "未知原因") +
-            "），已改为浏览器下载：请到浏览器的「下载」目录里找「技能-" + it.name + ".md」";
-        }
-      } else if (act === "qr") {
-        const box = d.querySelector(".sk-qr");
-        const m = txt.match(/SKILL1:[A-Za-z0-9_\-=]+/);
-        box.innerHTML = '<div class="sk-qr-tip">生成中…</div>';
-        const q = await call("/api/skills/qr", m ? { text: m[0] } : { id: it.id });
-        if (!q.ok) {
-          box.innerHTML = '<div class="sk-qr-tip bad">' + esc(q.error || "生成失败") + '</div>';
-          return;
-        }
-        box.innerHTML = '<img class="sk-qr-img" onclick="window.open(this.src)" alt="分享二维码" title="点击看原图" src="' + q.data_url + '">' +
-          '<div class="sk-qr-tip">手机扫码 → 复制 → 粘到「导入」里即可原样重建</div>';
-      } else if (act === "sys") {
-        if (navigator.share) {
-          try { await navigator.share({ title: "技能分享：" + it.name, text: txt }); }
-          catch (err) {}
-        } else {
-          await copyText(txt);
-          const old = b.textContent;
-          b.textContent = "已复制（本机无系统分享）";
-          setTimeout(() => { b.textContent = old; }, 2200);
-        }
-      }
-    });
-  }
-
-  function openImport() {
-    const d = modal(
-      '<div class="sk-head"><span class="sk-title">导入技能</span>' +
-        '<span class="sk-head-acts"><button type="button" class="btn sm ghost sk-x">关闭</button></span></div>' +
-      '<div class="sk-share-tip">把别人发来的整段分享内容粘进来（带 SKILL1: 的分享码也认）。' +
-        '重名会自动加「（导入1）」，不会覆盖你已有的技能。</div>' +
-      '<textarea class="sk-share-ta sk-import-ta" rows="10" placeholder="粘贴分享内容…"></textarea>' +
-      '<div class="sk-acts"><button type="button" class="btn sm sk-do">导入</button></div>' +
-      '<div class="sk-msg sk-import-msg"></div>'
-    );
-    const ta = d.querySelector(".sk-import-ta");
-    const msg = d.querySelector(".sk-import-msg");
-    d.querySelector(".sk-x").onclick = () => d.remove();
-    d.querySelector(".sk-do").onclick = async () => {
-      if (!ta.value.trim()) {
-        msg.textContent = "先粘贴内容"; msg.className = "sk-msg bad"; return;
-      }
-      const r = await call("/api/skills/import", { text: ta.value });
-      if (!r.ok) {
-        msg.textContent = r.error || "导入失败"; msg.className = "sk-msg bad"; return;
-      }
-      await reload();
-      d.remove();
-      openId = r.item.id;
-      render();
-      say("已导入：" + r.item.name, "ok");
-    };
-  }
-
-  async function reload() {
-    try {
-      const d = await call("/api/skills");
-      items = (d && d.items) || [];
-    } catch (err) { items = []; }
-    if (openId && !items.some(i => i.id === openId)) openId = null;
-  }
-
-  btn.addEventListener("click", async function () {
-    layer();
-    await reload();
-    render();
-  });
-
-  // ================== 上下文占用环（2026-11-11）==================
-  // 底栏那个小圆环：绿 → 橙 → 红，越接近上限越红。
-  // · 容量（limit）由用户自己定（顶栏「⚙ 上下文」/ 性能档位），
-  //   所以每次都重新问后端要 —— 换模型、改长度后比例会跟着变；
-  // · 到 90% 就**自动压缩**：较早的对话压成要点摘要、最近的原文保留，
-  //   这样既不顶爆窗口，又不会失忆（摘要里带着「必须记住」的关键信息）。
-  (() => {
-    const btn = document.querySelector("#ctxRing");
-    const fg = document.querySelector("#ctxRingFg");
-    const txt = document.querySelector("#ctxRingTxt");
-    if (!btn || !fg || !txt) return;
-    const C = 2 * Math.PI * 15.5;        // 圆周长（r=15.5），与 HTML 的 dasharray 一致
-    let lastLen = -1, busy = false, compactAt = 0;
-
-    // 0 → 绿；0.7 → 橙；1 → 红，中间线性过渡
-    const colorOf = (r) => {
-      const g = [34, 197, 94], o = [245, 158, 11], rd = [239, 68, 68];
-      const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
-      const c = r <= 0.7 ? mix(g, o, Math.max(0, r) / 0.7)
-                         : mix(o, rd, Math.min(1, (r - 0.7) / 0.3));
-      return "rgb(" + c.join(",") + ")";
-    };
-    const kk = (n) => (Number(n) >= 10000 ? (Number(n) / 10000).toFixed(1) + "万" : String(Number(n) || 0));
-
-    const paint = (d) => {
-      const r = Math.max(0, Math.min(1, Number(d.ratio) || 0));
-      fg.style.strokeDashoffset = String(C * (1 - r));
-      fg.style.stroke = colorOf(r);
-      txt.textContent = r >= 0.995 ? "满" : Math.round(r * 100) + "%";
-      txt.style.color = r >= 0.85 ? colorOf(r) : "#9a9aa2";
-      btn.title = "上下文占用 " + (r * 100).toFixed(1) + "%\n"
-        + "已用 " + kk(d.used) + " / " + kk(d.limit) + " token\n"
-        + "· 系统提示 " + kk(d.prompt) + "\n"
-        + "· 工具定义 " + kk(d.tools) + "\n"
-        + "· 对话历史 " + kk(d.history)
-        + (r >= 0.9 ? "\n\n已接近上限，会自动压缩较早的对话（保留要点）" : "");
-    };
-    const post = async (url, body) => {
-      const res = await fetch(url, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body || {}),
-      });
-      return res.json();
-    };
-
-    // 会话消息与 sessionId 在**主模块**作用域里，本模块拿不到 —— 走主模块暴露的钩子。
-    const st = () => (window.__ctxState ? window.__ctxState() : { messages: [], session: "" });
-
-    async function refresh(force) {
-      const s = st();
-      const msgs = s.messages || [];
-      if (busy) return;
-      if (!force && msgs.length === lastLen) return;   // 没变化就不打扰后端
-      busy = true;
-      try {
-        const d = await post("/api/context/usage", { messages: msgs, session: s.session || "" });
-        if (!d || !d.ok) return;
-        lastLen = msgs.length;
-        paint(d);
-        // 到 90% 就压：留余量，别等真顶爆（那时这一轮已经塞不下了）
-        if (d.ratio >= 0.9 && msgs.length > 4 && (Date.now() - compactAt) > 20000) {
-          compactAt = Date.now();
-          const r = await post("/api/context/compact",
-            { messages: msgs, session: s.session || "", target: 0.6 });
-          if (r && r.ok && r.changed && (r.messages || []).length) {
-            msgs.length = 0;                      // msgs 就是主模块那个 history 数组本身
-            r.messages.forEach((m) => msgs.push(m));
-            lastLen = msgs.length;
-            if (window.__ctxToast) {
-              window.__ctxToast("上下文已自动压缩：保留最近 " + (r.kept || 0)
-                + " 条原文 + 较早对话的要点摘要（不会失忆）", "ok");
-            }
-            const d2 = await post("/api/context/usage", { messages: msgs, session: s.session || "" });
-            if (d2 && d2.ok) paint(d2);
-          }
-        }
-      } catch (e) { /* 读不到就保持原样，不打扰用户 */ }
-      finally { busy = false; }
-    }
-
-    btn.addEventListener("click", () => refresh(true));
-    window.addEventListener("model-changed", () => setTimeout(() => refresh(true), 300));
-    window.addEventListener("perf-changed", () => setTimeout(() => refresh(true), 300));
-    window.addEventListener("focus", () => refresh(false));
-    setInterval(() => refresh(false), 1500);      // 只比长度，变了才真的请求
-    setTimeout(() => refresh(true), 800);
-  })();
-
   // ===== 数字人（2026-11-12）=====
   // 口型方案：音频 → AnalyserNode 取 RMS → 驱动嘴部矩形缩放。
   // ⚠️ 这**不是** Wav2Lip 那种生成式口型（本机 Python 3.14 下 torch 导入就报
@@ -8962,4 +8488,478 @@
     // ⑤ 点一下小人 = 打个招呼（也顺便唤醒）
     if (avStage) avStage.addEventListener("dblclick", () => avWake());
   })();
+})();
+
+/* =====================================================================
+   技能（skill）面板 —— 2026-11-10 用户要求：
+     · 顶栏「⚡ 技能」点开弹层，列出全部技能，点条目看详情；
+     · 支持新建 / 编辑 / 删除 / 启用开关；
+     · 三种生效方式：手动（点「用它」注入下一轮）/ 常驻 / 自动（模型自己判断）。
+   数据全在后端 data/skills.json，这里只做展示与增删改。
+   ===================================================================== */
+(function () {
+  const btn = document.getElementById("skillBtn");
+  if (!btn) return;
+
+  const MODE_LABEL = { manual: "手动", always: "常驻", auto: "自动" };
+  const MODE_HINT = {
+    manual: "点「用它」注入到下一轮对话，只生效一次",
+    always: "始终注入系统提示，每一轮都起作用",
+    auto: "只把名称和触发词给模型，它自己判断该不该用"
+  };
+  let items = [];
+  let openId = null;     // 展开详情的技能 id
+  let editing = null;    // 正在编辑的数据（新建时是空对象）
+
+  const sid = () => localStorage.getItem("ai_session_id") || "";
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+  async function call(url, body) {
+    const opt = body === undefined ? {} :
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body) };
+    const r = await fetch(url, opt);
+    return await r.json();
+  }
+
+  let el = null;
+  function layer() {
+    if (el) return el;
+    el = document.createElement("div");
+    el.className = "confirm-layer sk-layer";
+    el.innerHTML =
+      '<div class="confirm-box sk-box">' +
+        '<div class="sk-head">' +
+          '<span class="sk-title">⚡ 技能</span>' +
+          '<span class="sk-count"></span>' +
+          '<span class="sk-head-acts">' +
+            '<button type="button" class="btn sm sk-new">＋ 新建</button>' +
+            '<button type="button" class="btn sm ghost sk-import">导入</button>' +
+            '<button type="button" class="btn sm ghost sk-close">关闭</button>' +
+          '</span>' +
+        '</div>' +
+        '<div class="sk-msg"></div>' +
+        '<div class="sk-list"></div>' +
+      '</div>';
+    document.body.appendChild(el);
+    el.addEventListener("click", (e) => { if (e.target === el) hide(); });
+    el.querySelector(".sk-close").onclick = hide;
+    el.querySelector(".sk-import").onclick = () => { openImport(); };
+    el.querySelector(".sk-new").onclick = () => {
+      openId = null; editing = { mode: "manual", enabled: true }; render();
+    };
+    el.querySelector(".sk-list").addEventListener("click", onList);
+    return el;
+  }
+
+  function say(t, kind) {
+    const m = layer().querySelector(".sk-msg");
+    m.textContent = t || "";
+    m.className = "sk-msg " + (kind || "");
+    if (t) setTimeout(() => { if (m.textContent === t) m.textContent = ""; }, 3500);
+  }
+
+  function hide() {
+    if (el) { el.remove(); el = null; }
+    openId = null; editing = null;
+  }
+
+  function render() {
+    const box = layer();
+    box.querySelector(".sk-count").textContent =
+      "共 " + items.length + " 个 · 已启用 " + items.filter(i => i.enabled).length + " 个";
+    const list = box.querySelector(".sk-list");
+    let html = "";
+
+    if (editing) {
+      const e = editing;
+      html += '<div class="sk-edit">' +
+        '<div class="sk-field"><label>名称</label>' +
+          '<input class="sk-in-name" maxlength="60" value="' + esc(e.name) + '" placeholder="如：写周报"></div>' +
+        '<div class="sk-field"><label>一句话描述</label>' +
+          '<input class="sk-in-desc" maxlength="200" value="' + esc(e.desc) + '" placeholder="它解决什么问题（模型判断用不用时会看这句）"></div>' +
+        '<div class="sk-field"><label>触发词</label>' +
+          '<input class="sk-in-trig" value="' + esc((e.triggers || []).join("，")) + '" placeholder="用逗号分隔，如：周报，工作总结"></div>' +
+        '<div class="sk-field"><label>生效方式</label>' +
+          '<select class="sk-in-mode">' +
+            ["manual", "always", "auto"].map(k =>
+              '<option value="' + k + '"' + ((e.mode || "manual") === k ? " selected" : "") + '>' +
+              MODE_LABEL[k] + " — " + MODE_HINT[k] + '</option>').join("") +
+          '</select></div>' +
+        '<div class="sk-field"><label>内容（做法 / 步骤 / 规范）</label>' +
+          '<textarea class="sk-in-content" rows="10" placeholder="写清要模型怎么做：分几步、每步产出什么、有哪些禁忌">' +
+          esc(e.content) + '</textarea></div>' +
+        '<div class="sk-acts">' +
+          '<button type="button" class="btn sm" data-act="save">保存</button>' +
+          '<button type="button" class="btn sm ghost" data-act="cancel">取消</button>' +
+        '</div></div>';
+      list.innerHTML = html;
+      return;
+    }
+
+    if (!items.length) {
+      list.innerHTML = '<div class="sk-empty">还没有技能。点右上角「＋ 新建」加一个，' +
+        '或者直接跟我说「加一个XX技能」。</div>';
+      return;
+    }
+
+    html = items.map(function (it) {
+      const open = openId === it.id;
+      let row = '<div class="sk-item' + (it.enabled ? "" : " off") + '" data-id="' + esc(it.id) + '">' +
+        '<div class="sk-row" data-act="open">' +
+          '<span class="sk-name">' + esc(it.name) + '</span>' +
+          '<span class="sk-mode m-' + esc(it.mode) + '">' + MODE_LABEL[it.mode] + '</span>' +
+          '<span class="sk-desc">' + esc(it.desc || "（没有描述）") + '</span>' +
+          '<span class="sk-sw" data-act="toggle" title="启用 / 关闭">' +
+            '<i class="' + (it.enabled ? "on" : "") + '"></i></span>' +
+          '<span class="sk-caret">' + (open ? "▾" : "▸") + '</span>' +
+        '</div>';
+      if (open) {
+        row += '<div class="sk-detail">' +
+          (it.triggers && it.triggers.length
+            ? '<div class="sk-trig">触发词：' + it.triggers.map(esc).join("、") + '</div>' : "") +
+          '<pre class="sk-content">' + esc(it.content || "（空）") + '</pre>' +
+          '<div class="sk-acts">' +
+            (it.mode === "manual"
+              ? '<button type="button" class="btn sm" data-act="use">用它</button>' : "") +
+            '<button type="button" class="btn sm ghost" data-act="share">分享</button>' +
+            '<button type="button" class="btn sm ghost" data-act="edit">编辑</button>' +
+            '<button type="button" class="btn sm ghost danger" data-act="del">删除</button>' +
+          '</div></div>';
+      }
+      return row + '</div>';
+    }).join("");
+    list.innerHTML = html;
+  }
+
+  async function onList(e) {
+    const t = e.target.closest("[data-act]");
+    if (!t) return;
+    const act = t.getAttribute("data-act");
+    const item = t.closest(".sk-item");
+    const id = item ? item.getAttribute("data-id") : "";
+
+    if (act === "save") { await save(); return; }
+    if (act === "cancel") { editing = null; render(); return; }
+    if (!id) return;
+
+    if (act === "open") {
+      openId = openId === id ? null : id;
+      render();
+      return;
+    }
+    if (act === "toggle") {
+      e.stopPropagation();
+      const cur = items.find(i => i.id === id);
+      if (!cur) return;
+      const r = await call("/api/skills/toggle", { id: id, enabled: !cur.enabled });
+      if (!r.ok) { say(r.error || "操作失败", "bad"); return; }
+      await reload();
+      say((r.item.enabled ? "已启用：" : "已关闭：") + r.item.name, "ok");
+      return;
+    }
+    if (act === "use") {
+      const r = await call("/api/skills/use", { id: id, session: sid() });
+      if (!r.ok) { say(r.error || "用不了这个技能", "bad"); return; }
+      say("已选「" + r.name + "」—— 下一条消息会按它来做（只生效一次）", "ok");
+      return;
+    }
+    if (act === "share") {
+      const cur = items.find(i => i.id === id);
+      if (cur) await openShare(cur);
+      return;
+    }
+    if (act === "edit") {
+      const cur = items.find(i => i.id === id);
+      if (cur) { editing = JSON.parse(JSON.stringify(cur)); openId = null; render(); }
+      return;
+    }
+    if (act === "del") {
+      const cur = items.find(i => i.id === id);
+      if (!cur) return;
+      if (!confirm("删除技能「" + cur.name + "」？删了就找不回来了。")) return;
+      const r = await call("/api/skills/delete", { id: id });
+      if (!r.ok) { say("删除失败（可能已经不存在）", "bad"); return; }
+      await reload();
+      say("已删除：" + cur.name, "ok");
+      return;
+    }
+  }
+
+  async function save() {
+    const box = layer();
+    const v = (sel) => { const n = box.querySelector(sel); return n ? n.value : ""; };
+    const data = {
+      name: v(".sk-in-name").trim(),
+      desc: v(".sk-in-desc").trim(),
+      content: v(".sk-in-content"),
+      triggers: v(".sk-in-trig"),
+      mode: v(".sk-in-mode") || "manual"
+    };
+    if (!data.name) { say("名称不能为空", "bad"); return; }
+    const isNew = !editing || !editing.id;
+    const r = isNew
+      ? await call("/api/skills/create", data)
+      : await call("/api/skills/update", Object.assign({ id: editing.id }, data));
+    if (!r.ok) { say(r.error || "保存失败", "bad"); return; }
+    editing = null;
+    await reload();
+    openId = r.item.id;
+    render();
+    say("已保存：" + r.item.name, "ok");
+  }
+
+  // ---------------- 分享 / 导入（2026-11-10 用户要求） ----------------
+  //  分享：一段可直接粘给任何 AI 的话 + 机器可读分享码，可复制 / 下载 / 二维码 / 系统分享
+  //  导入：把别人发来的整段内容粘回来，一键建成本地技能（重名自动加后缀）
+  function modal(html) {
+    const d = document.createElement("div");
+    d.className = "confirm-layer sk-layer";
+    d.innerHTML = '<div class="confirm-box sk-box sk-share">' + html + '</div>';
+    document.body.appendChild(d);
+    d.addEventListener("click", (e) => { if (e.target === d) d.remove(); });
+    return d;
+  }
+
+  function fallbackCopy(t) {
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    ta.remove();
+  }
+
+  function copyText(t) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(t).catch(() => fallbackCopy(t));
+    }
+    fallbackCopy(t);
+    return Promise.resolve();
+  }
+
+  async function openShare(it) {
+    const r = await call("/api/skills/share", { id: it.id });
+    if (!r.ok) { say(r.error || "导出失败", "bad"); return; }
+    const d = modal(
+      '<div class="sk-head"><span class="sk-title">分享：' + esc(it.name) + '</span>' +
+        '<span class="sk-head-acts"><button type="button" class="btn sm ghost sk-x">关闭</button></span></div>' +
+      '<div class="sk-share-tip">下面这段可以直接发给别人，内容可改，改完再复制。' +
+        '生效方式已固定建议为「自动」，对方可自行调整。</div>' +
+      '<textarea class="sk-share-ta" rows="12" spellcheck="false"></textarea>' +
+      '<div class="sk-acts sk-share-acts">' +
+        '<button type="button" class="btn sm" data-s="copy">复制文本</button>' +
+        '<button type="button" class="btn sm ghost" data-s="md">保存 .md</button>' +
+        '<button type="button" class="btn sm ghost" data-s="qr">二维码</button>' +
+        '<button type="button" class="btn sm ghost" data-s="sys">系统分享</button>' +
+      '</div>' +
+      '<div class="sk-share-msg"></div>' +
+      '<div class="sk-qr"></div>'
+    );
+    const ta = d.querySelector(".sk-share-ta");
+    ta.value = r.text;
+    d.querySelector(".sk-x").onclick = () => d.remove();
+    d.querySelector(".sk-share-acts").addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-s]");
+      if (!b) return;
+      const act = b.getAttribute("data-s");
+      const txt = ta.value;
+      if (act === "copy") {
+        await copyText(txt);
+        const old = b.textContent;
+        b.textContent = "已复制 ✓";
+        setTimeout(() => { b.textContent = old; }, 1600);
+      } else if (act === "md") {
+        // 2026-11-10 用户反馈：点「下载 .md」没反应、也不知道存哪了。
+        // 根因：原来直接 a.click() 触发浏览器下载，内嵌 WebView 会静默拦掉；
+        //       而且 a 没挂到 DOM 上，某些浏览器同样不触发。改成后端真实写盘，
+        //       把绝对路径显示出来（点一下就能打开所在文件夹）。
+        const mb = d.querySelector(".sk-share-msg");
+        const oldTxt = b.textContent;
+        b.disabled = true;
+        b.textContent = "保存中…";
+        let sr = { ok: false, error: "请求失败" };
+        try { sr = await call("/api/skills/save_md", { text: txt, name: it.name }); }
+        catch (err) { sr = { ok: false, error: String((err && err.message) || err) }; }
+        b.disabled = false;
+        b.textContent = oldTxt;
+        if (sr.ok) {
+          mb.className = "sk-share-msg ok";
+          mb.innerHTML = "已保存到：" +
+            '<a class="path-link" href="javascript:void(0)" data-path="' + esc(sr.path) +
+            '" title="点击打开所在文件夹">' + esc(sr.path) + "</a>" +
+            "（" + sr.bytes + " 字节，点路径可直接打开）";
+        } else {
+          // 后端写不了盘时退回浏览器下载，这次挂到 DOM 上并明确告知去哪儿找
+          const blob = new Blob([txt], { type: "text/markdown;charset=utf-8" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = "技能-" + it.name + ".md";
+          a.style.display = "none";
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+          mb.className = "sk-share-msg bad";
+          mb.textContent = "后端保存失败（" + (sr.error || "未知原因") +
+            "），已改为浏览器下载：请到浏览器的「下载」目录里找「技能-" + it.name + ".md」";
+        }
+      } else if (act === "qr") {
+        const box = d.querySelector(".sk-qr");
+        const m = txt.match(/SKILL1:[A-Za-z0-9_\-=]+/);
+        box.innerHTML = '<div class="sk-qr-tip">生成中…</div>';
+        const q = await call("/api/skills/qr", m ? { text: m[0] } : { id: it.id });
+        if (!q.ok) {
+          box.innerHTML = '<div class="sk-qr-tip bad">' + esc(q.error || "生成失败") + '</div>';
+          return;
+        }
+        box.innerHTML = '<img class="sk-qr-img" onclick="window.open(this.src)" alt="分享二维码" title="点击看原图" src="' + q.data_url + '">' +
+          '<div class="sk-qr-tip">手机扫码 → 复制 → 粘到「导入」里即可原样重建</div>';
+      } else if (act === "sys") {
+        if (navigator.share) {
+          try { await navigator.share({ title: "技能分享：" + it.name, text: txt }); }
+          catch (err) {}
+        } else {
+          await copyText(txt);
+          const old = b.textContent;
+          b.textContent = "已复制（本机无系统分享）";
+          setTimeout(() => { b.textContent = old; }, 2200);
+        }
+      }
+    });
+  }
+
+  function openImport() {
+    const d = modal(
+      '<div class="sk-head"><span class="sk-title">导入技能</span>' +
+        '<span class="sk-head-acts"><button type="button" class="btn sm ghost sk-x">关闭</button></span></div>' +
+      '<div class="sk-share-tip">把别人发来的整段分享内容粘进来（带 SKILL1: 的分享码也认）。' +
+        '重名会自动加「（导入1）」，不会覆盖你已有的技能。</div>' +
+      '<textarea class="sk-share-ta sk-import-ta" rows="10" placeholder="粘贴分享内容…"></textarea>' +
+      '<div class="sk-acts"><button type="button" class="btn sm sk-do">导入</button></div>' +
+      '<div class="sk-msg sk-import-msg"></div>'
+    );
+    const ta = d.querySelector(".sk-import-ta");
+    const msg = d.querySelector(".sk-import-msg");
+    d.querySelector(".sk-x").onclick = () => d.remove();
+    d.querySelector(".sk-do").onclick = async () => {
+      if (!ta.value.trim()) {
+        msg.textContent = "先粘贴内容"; msg.className = "sk-msg bad"; return;
+      }
+      const r = await call("/api/skills/import", { text: ta.value });
+      if (!r.ok) {
+        msg.textContent = r.error || "导入失败"; msg.className = "sk-msg bad"; return;
+      }
+      await reload();
+      d.remove();
+      openId = r.item.id;
+      render();
+      say("已导入：" + r.item.name, "ok");
+    };
+  }
+
+  async function reload() {
+    try {
+      const d = await call("/api/skills");
+      items = (d && d.items) || [];
+    } catch (err) { items = []; }
+    if (openId && !items.some(i => i.id === openId)) openId = null;
+  }
+
+  btn.addEventListener("click", async function () {
+    layer();
+    await reload();
+    render();
+  });
+
+  // ================== 上下文占用环（2026-11-11）==================
+  // 底栏那个小圆环：绿 → 橙 → 红，越接近上限越红。
+  // · 容量（limit）由用户自己定（顶栏「⚙ 上下文」/ 性能档位），
+  //   所以每次都重新问后端要 —— 换模型、改长度后比例会跟着变；
+  // · 到 90% 就**自动压缩**：较早的对话压成要点摘要、最近的原文保留，
+  //   这样既不顶爆窗口，又不会失忆（摘要里带着「必须记住」的关键信息）。
+  (() => {
+    const btn = document.querySelector("#ctxRing");
+    const fg = document.querySelector("#ctxRingFg");
+    const txt = document.querySelector("#ctxRingTxt");
+    if (!btn || !fg || !txt) return;
+    const C = 2 * Math.PI * 15.5;        // 圆周长（r=15.5），与 HTML 的 dasharray 一致
+    let lastLen = -1, busy = false, compactAt = 0;
+
+    // 0 → 绿；0.7 → 橙；1 → 红，中间线性过渡
+    const colorOf = (r) => {
+      const g = [34, 197, 94], o = [245, 158, 11], rd = [239, 68, 68];
+      const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+      const c = r <= 0.7 ? mix(g, o, Math.max(0, r) / 0.7)
+                         : mix(o, rd, Math.min(1, (r - 0.7) / 0.3));
+      return "rgb(" + c.join(",") + ")";
+    };
+    const kk = (n) => (Number(n) >= 10000 ? (Number(n) / 10000).toFixed(1) + "万" : String(Number(n) || 0));
+
+    const paint = (d) => {
+      const r = Math.max(0, Math.min(1, Number(d.ratio) || 0));
+      fg.style.strokeDashoffset = String(C * (1 - r));
+      fg.style.stroke = colorOf(r);
+      txt.textContent = r >= 0.995 ? "满" : Math.round(r * 100) + "%";
+      txt.style.color = r >= 0.85 ? colorOf(r) : "#9a9aa2";
+      btn.title = "上下文占用 " + (r * 100).toFixed(1) + "%\n"
+        + "已用 " + kk(d.used) + " / " + kk(d.limit) + " token\n"
+        + "· 系统提示 " + kk(d.prompt) + "\n"
+        + "· 工具定义 " + kk(d.tools) + "\n"
+        + "· 对话历史 " + kk(d.history)
+        + (r >= 0.9 ? "\n\n已接近上限，会自动压缩较早的对话（保留要点）" : "");
+    };
+    const post = async (url, body) => {
+      const res = await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+      return res.json();
+    };
+
+    // 会话消息与 sessionId 在**主模块**作用域里，本模块拿不到 —— 走主模块暴露的钩子。
+    const st = () => (window.__ctxState ? window.__ctxState() : { messages: [], session: "" });
+
+    async function refresh(force) {
+      const s = st();
+      const msgs = s.messages || [];
+      if (busy) return;
+      if (!force && msgs.length === lastLen) return;   // 没变化就不打扰后端
+      busy = true;
+      try {
+        const d = await post("/api/context/usage", { messages: msgs, session: s.session || "" });
+        if (!d || !d.ok) return;
+        lastLen = msgs.length;
+        paint(d);
+        // 到 90% 就压：留余量，别等真顶爆（那时这一轮已经塞不下了）
+        if (d.ratio >= 0.9 && msgs.length > 4 && (Date.now() - compactAt) > 20000) {
+          compactAt = Date.now();
+          const r = await post("/api/context/compact",
+            { messages: msgs, session: s.session || "", target: 0.6 });
+          if (r && r.ok && r.changed && (r.messages || []).length) {
+            msgs.length = 0;                      // msgs 就是主模块那个 history 数组本身
+            r.messages.forEach((m) => msgs.push(m));
+            lastLen = msgs.length;
+            if (window.__ctxToast) {
+              window.__ctxToast("上下文已自动压缩：保留最近 " + (r.kept || 0)
+                + " 条原文 + 较早对话的要点摘要（不会失忆）", "ok");
+            }
+            const d2 = await post("/api/context/usage", { messages: msgs, session: s.session || "" });
+            if (d2 && d2.ok) paint(d2);
+          }
+        }
+      } catch (e) { /* 读不到就保持原样，不打扰用户 */ }
+      finally { busy = false; }
+    }
+
+    btn.addEventListener("click", () => refresh(true));
+    window.addEventListener("model-changed", () => setTimeout(() => refresh(true), 300));
+    window.addEventListener("perf-changed", () => setTimeout(() => refresh(true), 300));
+    window.addEventListener("focus", () => refresh(false));
+    setInterval(() => refresh(false), 1500);      // 只比长度，变了才真的请求
+    setTimeout(() => refresh(true), 800);
+  })();
+
 })();
