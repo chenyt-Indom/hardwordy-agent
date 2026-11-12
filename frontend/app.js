@@ -9822,21 +9822,9 @@
 
     async function openSetup() {
       el("hsName").value = "";
-      el("hsRelay").value = "";
       hsClearLog();
       el("hiveSetup").hidden = false;
       setTimeout(() => el("hsName").focus(), 50);
-      try {
-        const d = await api("/api/hive/relay/last");
-        const last = (d && d.last) || {};
-        if (last.url) {
-          el("hsLastUrl").textContent = last.url;
-          el("hsLast").hidden = false;
-          el("hsRelay").value = last.url;
-        } else {
-          el("hsLast").hidden = true;
-        }
-      } catch (e) { /* 没有上次记录也正常 */ }
     }
 
     el("hiveCreateBtn").addEventListener("click", openSetup);
@@ -9844,83 +9832,28 @@
     el("hiveSetup").addEventListener("click", (e) => {
       if (e.target === el("hiveSetup")) el("hiveSetup").hidden = true;
     });
-    el("hsUseLast").addEventListener("click", () => {
-      el("hsRelay").value = el("hsLastUrl").textContent || "";
-    });
-
-    el("hsProbe").addEventListener("click", async () => {
-      const url = (el("hsRelay").value || "").trim();
-      hsClearLog();
-      el("hsProbe").disabled = true;
-      hsLog("info", url ? "开始检测 " + url : "没填地址，将使用本机模式");
-      try {
-        const d = await api("/api/hive/relay/probe", { url: url });
-        (d.steps || []).forEach((s) => hsLog(s.level || "info", s.text, s.t));
-        if (d.ok && d.url) {
-          hsLog("ok", "✅ 贯通 —— 这个地址可以用");
-        } else if (!d.skipped) {
-          const e = d.error || {};
-          hsLog("err", "❌ " + (e.title || "不通"));
-          if (e.reason) hsLog("info", "原因：" + e.reason);
-          (e.advice || []).forEach((a, i) => hsLog("info", "建议" + (i + 1) + "：" + a));
-        }
-      } catch (e) {
-        hsLog("err", "检测失败：" + e.message);
-      } finally {
-        el("hsProbe").disabled = false;
-      }
-    });
-
-    el("hsBundle").addEventListener("click", async () => {
-      hsClearLog();
-      hsLog("info", "正在生成部署包…");
-      try {
-        const d = await api("/api/hive/relay/bundle", {});
-        if (!d.ok) { hsLog("err", "生成失败：" + (d.error || "")); return; }
-        hsLog("ok", "✅ 已生成（" + Math.round((d.size || 0) / 1024) + " KB，"
-          + (d.files || []).length + " 个文件）");
-        hsLog("info", "含：中继服务 + systemd + Docker + nginx + 跨 WiFi 两方案");
-        hsLog("info", "下载后传服务器，跑 bash deploy.sh 8765 即可");
-        window.open("/api/hive/relay/bundle/download", "_blank");
-      } catch (e) { hsLog("err", "生成失败：" + e.message); }
-    });
-
-    el("hsGuide").addEventListener("click", async () => {
-      hsClearLog();
-      hsLog("info", "正在让模型按你的环境写部署步骤…");
-      try {
-        const d = await api("/api/hive/relay/guide", {
-          os: "", domain: "", port: 8765, scene: "",
-          note: "", probe: { url: (el("hsRelay").value || "").trim() },
-        });
-        if (!d.ok) { hsLog("err", "失败：" + (d.error || "")); return; }
-        (d.guide || "").split("\n").forEach((ln) => {
-          if (ln.trim()) hsLog("info", ln);
-        });
-      } catch (e) { hsLog("err", "失败：" + e.message); }
-    });
 
     el("hsCreate").addEventListener("click", async () => {
       const name = (el("hsName").value || "").trim();
       if (!name) { alert("群名不能为空"); el("hsName").focus(); return; }
-      const url = (el("hsRelay").value || "").trim();
       el("hsCreate").disabled = true;
       try {
-        const d = await api("/api/hive/create", { name: name, relay_url: url });
+        // 不再传任何服务器地址 —— 建群只做两件事：生成群密钥、启动 P2P 监听
+        const d = await api("/api/hive/create", { name: name });
         if (!d.ok) { alert(d.error || "建群失败"); return; }
         el("hiveSetup").hidden = true;
         await loadGroups();
         openGroup(d.group.gid);
         const r = d.relay || {};
-        if (r.configured && r.connected) {
-          /* 连上了，不打扰 */
-        } else if (r.configured) {
-          alert("群建好了，但中继没连上：" + (r.error || "未知原因")
-            + "\n其他人暂时收不到消息，可以点「⋯ → 中继地址」重试。");
-        } else if (!url) {
-          alert("群建好了（本机模式）。\n别人暂时收不到消息 —— "
-            + "想多人协作的话，点「⋯ → 中继地址」填一个再连。");
-        }
+        // 建完给一句人话：接下来怎么让别人进来
+        setTimeout(() => {
+          alert("群建好了 ✅\n\n"
+            + "· 同一个 WiFi：把邀请码发给对方，他会自动找到你\n"
+            + "· 不同网络：点右上角「🔗 连接码」，把码发给他粘一下\n\n"
+            + "本机监听端口 " + (r.port || "?")
+            + "，局域网地址 " + (r.lan_ip || "?")
+            + "\n（消息只在成员机器之间直连，不经过任何服务器）");
+        }, 300);
       } catch (e) { alert("建群失败：" + e.message); }
       finally { el("hsCreate").disabled = false; }
     });
