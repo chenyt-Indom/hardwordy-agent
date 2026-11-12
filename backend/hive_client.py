@@ -35,6 +35,11 @@ class HiveClient:
         self.on_cancel = None
         self.on_file = None
         self.on_status = None
+        # 下面三个原来只在 _on_xxx 里用 getattr 兜着取，从没在 __init__ 声明。
+        # 上层（main.py）直接赋值也能用，但声明出来更清楚，也避免拼错名字静默失效。
+        self.on_peer = None         # Callable[[], None]        有人连上/断开
+        self.on_members = None      # Callable[[str], None]     成员表变了
+        self.on_gone = None         # Callable[[str, str], None] 群被群主删了
 
         self._state = "offline"
         self._gid = ""
