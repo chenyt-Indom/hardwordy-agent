@@ -8715,6 +8715,24 @@
     });
 
     // ---------------------------------------------------------- 模式切换
+    /* TEMP-CMP-START */
+    setTimeout(() => {
+      try {
+        const t = document.querySelector('.mode-tab[data-mode="single"]');
+        if (t) t.click();
+        const msgs = document.querySelector(".messages");
+        if (msgs) {
+          const w = document.createElement("div");
+          w.className = "msg bot";
+          w.innerHTML = '<div class="bubble think-hdr"><span>🧠 思考过程（114 字 · 耗时 1.2s）</span><span class="arrow">▸</span></div>'
+            + '<div class="think-body open">这是一段思考内容，用来对比两种模式的样式差异。</div>'
+            + '<div class="bubble">单人模式的 AI 正文气泡。</div>';
+          msgs.appendChild(w);
+          msgs.scrollTop = msgs.scrollHeight;
+        }
+      } catch (e) { console.error(e); }
+    }, 1500);
+    /* TEMP-CMP-END */
     function setMode(m) {
       mode = m;
       const isHive = m === "hive";
