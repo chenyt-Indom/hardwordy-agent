@@ -907,6 +907,9 @@ def make_score(style: str = "pop", bars: int = 16, bpm: float = 0,
                 melody.append({"t": round(tt, 4), "d": round(max(0.08, nt["d"] * beat * 0.95), 4),
                                "p": int(nt["p"]), "v": 0.8})
                 t_beats += max(0.05, nt["d"])
+            # 下一遍回到小节线，否则每遍错开一点、越走越乱
+            if bar_beats and bar_beats > 0:
+                t_beats = (math.floor(t_beats / bar_beats + 1e-9) + 1) * bar_beats
             if loop_len <= 0:
                 break
     else:
