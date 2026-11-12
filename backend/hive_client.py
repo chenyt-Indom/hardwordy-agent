@@ -27,6 +27,35 @@ except Exception:  # pragma: no cover
     websockets = None
 
 
+def _norm_members(ms: Any) -> List[Dict[str, Any]]:
+    """把中继发来的成员列表规整成统一结构。
+
+    不同版本字段名可能不同（`uid` / `user_id`），缺字段补默认 ——
+    这样界面永远只处理一种格式，不用管对面是老版本还是新版本。
+    """
+    out: List[Dict[str, Any]] = []
+    if not isinstance(ms, list):
+        return out
+    for m in ms:
+        if not isinstance(m, dict):
+            continue
+        uid = str(m.get("uid") or m.get("user_id") or "")
+        if not uid:
+            continue
+        out.append({
+            "uid": uid,
+            "user_id": uid,                       # 兼容前端旧字段名
+            "name": str(m.get("name") or "成员")[:32],
+            "online": bool(m.get("online")),
+            "last_seen": float(m.get("last_seen") or 0),
+            "joined": float(m.get("joined") or 0),
+            "v": int(m.get("v") or 1),
+            "caps": m.get("caps") or [],
+        })
+    out.sort(key=lambda x: (not x["online"], x["name"]))
+    return out
+
+
 class HiveClient:
     def __init__(self) -> None:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
