@@ -529,6 +529,7 @@ def send_message(gid: str, text: str, mtype: str = "text",
             "type": mtype,
             "text": text,
             "ts": time.time(),
+            "ver": PROTO_VER,
         }
         if ref:
             msg["ref"] = ref
