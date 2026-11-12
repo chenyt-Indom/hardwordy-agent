@@ -9152,6 +9152,10 @@
     function renderMsgs(list) {
       const box = el("hiveMsgs");
       box.innerHTML = "";
+      // ⚠️ 索引必须**先**建好再渲染：引用块要靠它找回被引用的原文，
+      //    边渲染边建的话，前面那条引用后面才渲染的消息就查不到了。
+      msgIndex = {};
+      list.forEach((m) => { if (m && m.id) msgIndex[m.id] = m; });
       if (!list.length) {
         box.innerHTML = '<p class="hint hive-empty">还没有消息，说点什么吧。</p>';
         return;
@@ -9164,6 +9168,7 @@
       const box = el("hiveMsgs");
       const empty = box.querySelector(".hive-empty");
       if (empty) empty.remove();
+      if (m && m.id) msgIndex[m.id] = m;
       box.appendChild(msgNode(m));
       box.scrollTop = box.scrollHeight;
     }
@@ -9171,14 +9176,23 @@
     async function sendMsg() {
       const ta = el("hiveText");
       const text = (ta.value || "").trim();
-      if (!text) return;
+      const files = pendingFiles.map((f) => f.meta).filter(Boolean);
+      if (!text && !files.length) return;
       if (!curGid) { alert("先在左边选一个群"); return; }
+      if (uploading) { alert("附件还在上传，等一下再发"); return; }
       ta.value = "";
+      const refId = quoteMsg ? (quoteMsg.id || "") : "";
       try { atBtnSync(); } catch (e) { /* 函数在后面定义，首次调用可能未就绪 */ }
       try {
-        const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/send",
-          { text: text });
+        const body = { text: text };
+        if (files.length) body.extra = { files: files };
+        if (refId) body.ref = refId;
+        const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/send", body);
         if (!d.ok) { alert(d.error || "发送失败"); return; }
+        // 发成功才清空附件与引用 —— 失败还留着，用户可以重发
+        pendingFiles = [];
+        renderAttachBar();
+        clearQuote();
         // 没连中继时后端会本地落盘并推送；连了中继则等 WS 回执，避免重复显示
         if (d.sent && d.sent.msg && d.sent.local) { /* 已由广播推送 */ }
       } catch (e) {
