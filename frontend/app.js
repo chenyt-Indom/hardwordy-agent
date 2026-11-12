@@ -2592,6 +2592,8 @@
   (() => {
     const box = $("#audioList"), rf = $("#audioRefresh");
     if (rf) rf.onclick = () => loadAudioLib();
+    const ofb = $("#audioOpenFolder");
+    if (ofb) ofb.onclick = () => openFolderRequest("/api/audio/open_folder", { method: "POST" });
     if (!box) return;
     box.addEventListener("click", async (ev) => {
       const item = ev.target.closest(".au-item");
