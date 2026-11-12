@@ -643,10 +643,20 @@ class MeshNode:
         if typ == T_SYNC:
             # 对方报了他本地最大的时间戳，我把比它新的都补发过去。
             # 双方都会发一次，所以两边各自补齐 —— 谁缺谁收，不缺的靠 mid 去重。
+            #
+            # full=True 表示「我是新来的，本地没有历史」，直接推全量（限 800 条）。
             since = float(obj.get("since") or 0)
-            for m in H.read_messages(gid, 0, 1000):
-                if float(m.get("ts") or 0) > since:
-                    peer.send(T_MSG, {"msg": m, "ttl": 0})
+            full = bool(obj.get("full"))
+            limit = 800 if full else 1000
+            sent = 0
+            for m in H.read_messages(gid, 0, limit):
+                if full or float(m.get("ts") or 0) > since:
+                    if peer.send(T_MSG, {"msg": m, "ttl": 0}):
+                        sent += 1
+            if sent:
+                with _LOCK:
+                    self._last_sync = {"gid": gid, "sent": sent,
+                                       "full": full, "ts": time.time()}
             return
         if typ == T_MSG:
             m = obj.get("msg")
