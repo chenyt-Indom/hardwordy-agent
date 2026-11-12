@@ -772,11 +772,12 @@ def search(query: str, top_k: int = 6, min_score: float = None):
         return []
     n = len(chunks)
 
-    # ① 关键词分（BM25，只扫命中的倒排链）
+    # ① 关键词：BM25 管排序细节，**覆盖率**管阈值
     post, lens = _build_postings(tokens_list)
     kw = _bm25(q_tokens, tokens_list, post, lens)
     kw_max = float(kw.max()) if kw.size else 0.0
     kw_norm = (kw / kw_max) if kw_max > 0 else kw
+    cov = _coverage(q_tokens, n, post)
 
     # ② 语义分（向量已 L2 归一化，余弦 = 点积）
     vec = None
@@ -785,28 +786,29 @@ def search(query: str, top_k: int = 6, min_score: float = None):
         if qv is not None and getattr(qv, "shape", (0,))[0] == 1:
             vec = vectors @ qv[0]
 
-    # ③ 融合
+    # ③ 融合：语义为主、覆盖率兜底（专有名词/编号/数字靠它）
     if vec is not None:
-        final = VEC_WEIGHT * vec + KW_WEIGHT * kw_norm
+        final = VEC_WEIGHT * vec + KW_WEIGHT * cov
     else:
-        final = kw_norm.copy()
+        final = cov.copy()
 
     # ④ 阈值过滤：分数太低的不返回（用户要求）
     lo_final = MIN_FINAL if min_score is None else float(min_score)
     picked = []
     for i in range(n):
-        f = float(final[i])
-        if f < lo_final:
+        base = float(final[i])
+        if base < lo_final:
             continue
         v = float(vec[i]) if vec is not None else 0.0
-        k = float(kw_norm[i])
-        # 语义和关键词**至少有一个**像样，才收 —— 两个都低说明是真的不相关
-        if vec is not None and v < MIN_VEC and k < MIN_KW:
+        c = float(cov[i])
+        # 语义和覆盖率**至少有一个**像样才收 —— 两个都低说明真的不相关
+        if vec is not None and v < MIN_VEC and c < MIN_COV:
             continue
-        if vec is None and k < MIN_KW:
+        if vec is None and c < MIN_COV:
             continue
-        picked.append((f, i, v, k))
-    picked.sort(key=lambda x: x[0], reverse=True)
+        picked.append((base, i, v, c, float(kw_norm[i])))
+    # 同分时用 BM25 打破平局（排序更稳定，结果可复现）
+    picked.sort(key=lambda x: (x[0], x[4]), reverse=True)
 
     # 同一篇文档最多占 top_k 的一半名额：否则一个长文档的相邻块会把
     # 其他同样相关的文档全挤掉，用户看到"怎么全是同一篇"
