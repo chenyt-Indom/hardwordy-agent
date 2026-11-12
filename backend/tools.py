@@ -1318,6 +1318,58 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
         {
             "type": "function",
             "function": {
+                "name": "music_make",
+                "description": (
+                    "【音乐生成与改编】**纯本地算法合成**（numpy/scipy），不联网、秒级出结果，"
+                    "最长 300 秒。\n"
+                    "用户说「来一段 / 生成一首 / 做个曲子」「要古风 / 电子 / Lo-fi / 钢琴」"
+                    "「给视频配个背景音乐」时用它。\n"
+                    "action=generate 按风格生成；action=remix 改编已有曲子"
+                    "（换风格会自动做音阶映射，旋律骨架保留）；"
+                    "action=from_notes 把用户给的音符（音名 C4 D4 E4 或简谱 1 2 3 5）编成完整曲子；"
+                    "action=list 列出已生成的曲子。\n"
+                    "风格 id：pop 流行/轻快、gufeng 古风五声、lofi 学习背景、electronic 电子、"
+                    "chiptune 8bit、jazz 爵士、piano 纯钢琴、epic 史诗电影感。\n"
+                    "⚠️ 人声是**共振峰合成的吟唱**（啊/哦/咿），不是真人演唱、唱不出清晰歌词 —— "
+                    "用户要真人唱要如实说明做不到。\n"
+                    "⚠️ 返回的播放/下载链接要**原样**给用户。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string",
+                                   "enum": ["generate", "remix", "from_notes", "list"],
+                                   "description": "生成 / 改编 / 按音符编曲 / 列出现有的"},
+                        "style": {"type": "string",
+                                  "description": "风格 id：pop / gufeng / lofi / electronic / "
+                                                 "chiptune / jazz / piano / epic"},
+                        "bars": {"type": "integer",
+                                 "description": "小节数（每小节 4 拍）。118bpm 下 16 小节≈33 秒、"
+                                                "32 小节≈65 秒；最长 160"},
+                        "bpm": {"type": "number", "description": "速度，留空跟随风格"},
+                        "key": {"type": "integer", "description": "移调半音数，0=C"},
+                        "vocals": {"type": "boolean",
+                                   "description": "要不要人声吟唱（默认 true）"},
+                        "notes": {"type": "string",
+                                  "description": "旋律音符：音名「C4 D4 E4 G4」或简谱「1 2 3 5 6」"},
+                        "id": {"type": "string",
+                               "description": "remix 用：要改编哪一首的 id"},
+                        "key_shift": {"type": "integer",
+                                      "description": "remix 用：移调半音数，可为负"},
+                        "tempo": {"type": "number",
+                                  "description": "remix 用：速度倍率，1.2 = 快 20%"},
+                        "extend_bars": {"type": "integer",
+                                        "description": "remix 用：续写几小节"},
+                        "variation": {"type": "number",
+                                      "description": "remix 用：变奏幅度 0~1"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "list_directory",
                 "description": "列出指定目录下的一级内容（文件/子目录）。用于浏览用户本机文件系统。",
                 "parameters": {
