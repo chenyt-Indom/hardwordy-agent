@@ -548,11 +548,17 @@ def parse_notes(text: str, key: int = 0, scale_name: str = "major") -> list:
       · 带时值："C4:1 D4:0.5 E4:0.5"（冒号后是拍数）
     默认每个音符 1 拍。
     """
-    s = (text or "").replace("，", " ").replace(",", " ").replace("|", " ")
+    s = (text or "").replace("，", " ").replace(",", " ")
+    s = s.replace("|", " | ").replace("｜", " | ")
     toks = s.split()
     out = []
     t = 0.0
     for tok in toks:
+        if tok == "|":
+            # 小节线：把时间推到下一个小节开头，保证乐句落在拍子上
+            if bar_beats and bar_beats > 0:
+                t = round((math.floor(t / bar_beats + 1e-9) + 1) * bar_beats, 4)
+            continue
         dur = 1.0
         if ":" in tok:
             tok, ds = tok.split(":", 1)
