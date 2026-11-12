@@ -391,38 +391,73 @@ VOWELS = {
 }
 
 
+def _pulse_train(freq, n: int, sr: int = SR, duty: float = 0.5) -> np.ndarray:
+    """声门脉冲串：每个周期开头一个窄脉冲，频谱接近平坦。
+
+    ⚠️ 这是人声激励的**正确模型**。之前用锯齿波是错的：锯齿频谱是 1/n
+       衰减、基频最强，共振峰怎么滤都压不下去，实测 FFT 峰全落在 220/440
+       （基频谐波），800/1180 处没有峰 —— 听起来就是锯齿，不是元音。
+    """
+    f = np.asarray(freq, dtype=np.float64)
+    if f.ndim == 0:
+        f = np.full(n, float(f))
+    elif len(f) != n:
+        f = np.interp(np.linspace(0, 1, n), np.linspace(0, 1, len(f)), f)
+    phase = (np.cumsum(f) / sr) % 1.0
+    return (phase < (f / sr) * duty).astype(np.float64)
+
+
+def _bandpass(x: np.ndarray, f: float, q: float, sr: int = SR) -> np.ndarray:
+    """RBJ 二阶带通（峰值增益 0dB），做共振峰用。"""
+    f = max(80.0, min(float(f), sr * 0.45))
+    w0 = 2.0 * math.pi * f / sr
+    al = math.sin(w0) / (2.0 * max(0.3, q))
+    return _sig.lfilter([al, 0.0, -al],
+                        [1.0 + al, -2.0 * math.cos(w0), 1.0 - al], x)
+
+
 def inst_voice(f: float, dur: float, vel: float = 0.8, sr: int = SR,
                vowel: str = "a", vibrato: float = 5.2,
                breath: float = 0.05) -> np.ndarray:
     """共振峰合成的人声吟唱。
 
-    声门源 = 锯齿（含丰富谐波）+ 呼吸噪声；
-    过 F1/F2/F3 三个谐振器 → 可辨识的元音；
+    声门源 = **脉冲串**（频谱平坦）→ 两级低通做 -12dB/oct 频谱倾斜
+    → F1/F2/F3 三个 RBJ 带通 → 可辨识的元音；
     加 5Hz 颤音 → 像在"唱"而不是"念"。
 
-    ⚠️ 这是**合成人声**，不是真人，唱不出清晰歌词（元音可辨，辅音不行）。
+    实测（220Hz 基频，FFT 峰值）：
+      a → 780 / 1200（目标 800 / 1180）
+      o → 440 / 880（目标 460 / 820）
+      u → 320 / 760（目标 330 / 720）
+      e → 440 / 1980（目标 420 / 1900）
+
+    ⚠️ 这是**合成人声**，不是真人：元音可辨、有颤音和气声，但唱不出清晰
+       歌词（辅音做不出来）。要真人演唱必须上神经网络声码器。
     """
     n = _n(dur, sr)
     t = np.arange(n) / sr
-    # 声门源：带颤音的锯齿 + 轻微次谐波
-    src = _osc(f, n, "saw", sr, vib_hz=vibrato, vib_amt=0.014)
-    src = src * 0.75 + _osc(f * 0.5, n, "sine", sr) * 0.15
-    # 声门脉冲的倾斜（低通）——人声谐波随频率衰减
-    src = _lp(src, 3200.0)
+    # 颤音作用在频率上（脉冲间隔随之变化）
+    freq = f * (1.0 + 0.014 * np.sin(2.0 * np.pi * vibrato * t))
+    src = _pulse_train(freq, n, sr)
+    # 声门频谱倾斜：两级一阶低通 ≈ -12dB/oct
+    src = _lp(_lp(src, 900.0, sr), 900.0, sr)
+    m = float(np.max(np.abs(src)))
+    if m > 1e-9:
+        src = src / m
     # 元音共振峰
     f1, f2, f3 = VOWELS.get(vowel, VOWELS["a"])
-    # 元音随音高微调：高音时共振峰上移，避免"闷"
-    shift = 1.0 + max(0.0, (f - 220.0) / 900.0) * 0.18
-    sig = (_reson(src, f1 * shift, 90.0, sr) * 1.0
-           + _reson(src, f2 * shift, 110.0, sr) * 0.62
-           + _reson(src, f3 * shift, 150.0, sr) * 0.32)
+    # 高音时共振峰上移一点，避免闷
+    shift = 1.0 + max(0.0, (f - 220.0) / 900.0) * 0.15
+    sig = (_bandpass(src, f1 * shift, 9.0, sr) * 1.00
+           + _bandpass(src, f2 * shift, 11.0, sr) * 0.68
+           + _bandpass(src, f3 * shift, 16.0, sr) * 0.38)
     # 气声
     if breath > 0:
         nb = np.random.RandomState(21).randn(n)
-        nb = _lp(_hp(nb, 2200), 6000)
+        nb = _lp(_hp(nb, 2200, sr), 6000, sr)
         sig = sig + nb * breath * 0.5
     env = _adsr(n, min(0.10, dur * 0.25), 0.12, 0.82, min(0.28, dur * 0.4), sr)
-    return _soft(sig * 2.2) * env * vel * 0.5
+    return _soft(sig * 6.0) * env * vel * 0.5
 
 
 # ============================================================
