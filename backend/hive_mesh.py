@@ -508,11 +508,30 @@ class MeshNode:
                 "kicked": self._kicked_of(gid),
             })
             with _LOCK:
-                # 同一 uid 已经有连接了就不重复加（避免双向连成两条）
+                # 同一 uid 已经有连接了：只保留「uid 较小方发起」的那一条。
+                # 双方用同一个规则算，落到的必然是**同一条 TCP 连接** ——
+                # 否则会出现「各自留下不同方向」的两条死连接，消息全丢。
                 for p in self.peers:
                     if p.alive and p.gid == gid and p.uid and p.uid == peer.uid:
-                        peer.close()
-                        return
+                        keep_new = _prefer_out(self.uid, peer.uid) == (not inbound)
+                        if not keep_new:
+                            peer.close()
+                            return
+                        # 新连接才是该留的那条：把旧的关掉
+                        p.alive = False
+                        try:
+                            p.sock.shutdown(socket.SHUT_RDWR)
+                        except Exception:
+                            pass
+                        try:
+                            p.sock.close()
+                        except Exception:
+                            pass
+                        try:
+                            self.peers.remove(p)
+                        except ValueError:
+                            pass
+                        break
                 self.peers.append(peer)
                 if peer.uid:
                     self.known[peer.uid] = {
