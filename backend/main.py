@@ -10553,7 +10553,29 @@ def hive_send(gid: str, body: dict):
     if instr is not None:
         threading.Thread(target=_hive_run_model, args=(gid, instr, b),
                          daemon=True).start()
+
+    # 附件：本体分片广播给每个成员，各自存一份。
+    # 放后台线程 —— 20MB 文件要发几十片，不能卡住"发送"这个请求。
+    files = (extra or {}).get("files") or []
+    if files and cli.status().get("connected"):
+        threading.Thread(target=_hive_send_files, args=(gid, files),
+                         daemon=True).start()
+
     return {"ok": True, "sent": r, "woke_model": instr is not None}
+
+
+def _hive_send_files(gid: str, files: list) -> None:
+    """把本机刚发的附件逐个广播给群里其他人。失败不重试（下条消息会重发）。"""
+    cli = hive_client.client()
+    for f in files:
+        try:
+            fid = (f or {}).get("fid")
+            if not fid:
+                continue
+            data = hive.read_file_bytes(gid, fid)
+            cli.send_file(gid, f, data)
+        except Exception:
+            continue
 
 
 # ---------------------------------------------------------------- 群附件
