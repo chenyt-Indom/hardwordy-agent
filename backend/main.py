@@ -10555,9 +10555,10 @@ def hive_hd_cancel(gid: str, body: dict = None):
     try:
         b = body or {}
         me = hive.profile()
-        info = _hd_running.get(gid) or {}
+        # 先看正在跑的，再看排队中的 —— 排队中也是「用户能看到的、还没结束的任务」
+        info = _hd_running.get(gid) or _hd_waiting.get(b.get("task_id") or "") or {}
         if not info:
-            return {"ok": False, "error": "当前没有正在执行的任务"}
+            return {"ok": False, "error": "当前没有正在执行或排队中的任务"}
         mid = b.get("task_id") or info.get("task_id")
         if mid != info.get("task_id"):
             return {"ok": False, "error": "任务号对不上（可能已经跑完了）"}
@@ -10568,6 +10569,7 @@ def hive_hd_cancel(gid: str, body: dict = None):
         if not ev:
             return {"ok": False, "error": "任务状态已失效（可能刚好跑完）"}
         ev.set()
+        _hd_waiting.pop(mid, None)
         # 告诉其他成员「这次任务被取消了」，否则他们那边进度卡片会一直转
         try:
             hive_client.client().send_cancel(gid, mid, me["user_id"])
