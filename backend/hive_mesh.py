@@ -276,6 +276,7 @@ class MeshNode:
         _me = H.profile()
         self.uid = str(_me.get("user_id") or "")
         self.uname = str(_me.get("name") or "")
+        self.dev = H.dev_id()
         for g in (groups or []):
             self.groups.add(g)
         threading.Thread(target=self._accept_loop, daemon=True).start()
