@@ -9555,10 +9555,24 @@
         const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/p2p/transfers");
         if (!d.ok) return;
         const list = d.transfers || [];
+        const bs = (d.beacons || []).filter((b) => b && b.code);
+        // 局域网发现：同网段有人共享时会自动冒出来，点一下就收（公网仍需人工传码）
+        const beaconHtml = bs.length
+          ? '<div class="p2p-beacon"><div class="p2p-bt">📶 局域网里有人在共享（点一下就能收）</div>'
+            + bs.map((b) => '<div class="p2p-brow">'
+              + '<span class="p2p-name" title="' + hEsc(b.name || "") + '">'
+              + hEsc(b.name || "文件") + "</span>"
+              + '<span class="p2p-st">' + fmtSize(b.size || 0) + "</span>"
+              + '<button class="p2p-mini" data-p2pcode="' + hEsc(b.code) + '">接收</button>'
+              + "</div>").join("")
+            + "</div>"
+          : "";
         if (!list.length) {
-          box.innerHTML = '<p class="p2p-empty">还没有传输任务。点附件上的 📡 开始共享，或粘贴连接码接收。</p>';
+          box.innerHTML = beaconHtml
+            || '<p class="p2p-empty">还没有传输任务。点附件上的 📡 开始共享，或粘贴连接码接收。</p>';
           return;
         }
+        if (beaconHtml) box.dataset.head = "1";
         box.innerHTML = list.map((t) => {
           const total = t.total || 0;
           const done = t.done || 0;
