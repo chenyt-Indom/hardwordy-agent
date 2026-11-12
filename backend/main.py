@@ -10769,6 +10769,17 @@ def _hive_send_files(gid: str, files: list) -> None:
             continue
 
 
+# 把回调挂到 **mesh 节点**上（不是 HiveClient —— 这两个回调是 MeshNode 的属性）。
+# 挂上之后：
+#   · 有人连上来 → 补发积压附件 + 前端立刻刷新在线人数；
+#   · 成员表变化 → 前端立刻刷新成员列表（原来只能靠 4 秒轮询）。
+try:
+    hive_client.MESH.node().on_peer = _hive_on_peer
+    hive_client.MESH.node().on_members = _hive_on_members
+except Exception:
+    logger.warning("群聊回调注册失败", exc_info=True)
+
+
 # ---------------------------------------------------------------- 群附件
 #
 # 前端把文件读成 base64 传上来（单文件 ≤ 20MB），后端落盘到群目录。
