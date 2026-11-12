@@ -487,6 +487,8 @@
           placeholder="说点什么…  输入 @hd + 指令 唤醒模型干活（例：@hd 帮我写一个登录接口）"></textarea>
         <!-- @hd 快捷开关（2026-11-13）：点一下在开头插入 @hd、再点一下撤掉。
              不点也能手输，这只是省事。 -->
+          <button type="button" class="btn ghost danger stop" id="hiveStopBtn" hidden
+                  title="终止正在跑的 @hd 任务（生成会立刻停下）">■ 终止</button>
         <button type="button" class="btn hive-at" id="hiveAtBtn"
                 title="快捷唤醒模型：点一下自动加上 @hd（再点取消）。加完在后面写你的指令就行">@hd</button>
         <button class="btn primary" id="hiveSendBtn">发送</button>
