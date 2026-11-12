@@ -10034,11 +10034,7 @@
         readonly: true,
         okText: "知道了",
       });
-      // 打开只读弹窗：输入框要能滚动看全文
-      setTimeout(() => {
-        const box = el("hiveModalInput");
-        if (box) { box.style.height = "260px"; box.style.overflow = "auto"; }
-      }, 30);
+
     });
 
     // 🗑 删除群（仅群主）：二次确认，删的是本地这份，其他人会收到通知一起下线
