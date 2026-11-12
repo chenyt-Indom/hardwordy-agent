@@ -2565,8 +2565,41 @@
     const open = $("#kbOpenFolder");
     if (open) open.onclick = () =>
       openFolderRequest("/api/kb/open_folder", { method: "POST" });
+
+    // ⋯ 菜单：路径、说明、索引状态、重建/刷新全收在里面，默认不占高度。
+    // 点面板外面或按 Esc 收起 —— 否则开着菜单去点别处，菜单一直挡着列表。
+    const more = $("#kbMore"), menu = $("#kbMenu");
+    const setMenu = (show) => {
+      if (!menu || !more) return;
+      menu.hidden = !show;
+      more.setAttribute("aria-expanded", show ? "true" : "false");
+    };
+    if (more && menu) {
+      more.onclick = (e) => { e.stopPropagation(); setMenu(menu.hidden); };
+      document.addEventListener("click", (e) => {
+        if (menu.hidden) return;
+        if (menu.contains(e.target) || more.contains(e.target)) return;
+        setMenu(false);
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !menu.hidden) setMenu(false);
+      });
+    }
+    // 点路径直接复制，省得手抄一长串 D:\...\data\kb
+    const pathEl = $("#kbPath");
+    if (pathEl) pathEl.onclick = async () => {
+      const t = (pathEl.textContent || "").trim();
+      if (!t) return;
+      try {
+        await navigator.clipboard.writeText(t);
+        showToast("路径已复制", "ok");
+      } catch (e) {
+        showToast("复制失败，请手动选中路径", "warn");
+      }
+    };
+
     const rf = $("#kbRefresh");
-    if (rf) rf.onclick = loadKb;
+    if (rf) rf.onclick = () => { loadKb(); loadKbIndexStatus(); };
     const rx = $("#kbReindex");
     if (rx) rx.onclick = async () => {
       const old = rx.textContent;
