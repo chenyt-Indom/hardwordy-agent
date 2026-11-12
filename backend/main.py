@@ -10255,8 +10255,20 @@ async def ws_hive(ws: WebSocket):
 
 @app.get("/api/hive/status")
 def hive_status():
-    return {"ok": True, "hive": hive.status(),
-            "client": hive_client.client().status()}
+    """连接状态 + 成员在线情况。
+
+    `peers` 是本地角色表和中继在线状态合并后的结果 ——
+    前端只认这一份，不用自己拼接两个来源。
+    """
+    cs = hive_client.client().status()
+    gid = cs.get("gid") or ""
+    peers: list = []
+    if gid:
+        try:
+            peers = hive.merged_members(gid, cs.get("members"))
+        except Exception:
+            peers = []
+    return {"ok": True, "hive": hive.status(), "client": cs, "peers": peers}
 
 
 @app.post("/api/hive/profile")
