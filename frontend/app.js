@@ -8950,22 +8950,52 @@
     });
 
     // ---------------------------------------------------------- 建群 / 入群
-    el("hiveCreateBtn").addEventListener("click", () => {
-      openModal({
-        title: "新建协作群",
-        hint: "建群的人自动成为群主，可以踢人、分配工作。",
-        input: "",
-        placeholder: "群名，比如「官网改版」",
-        onOk: async (v) => {
-          const name = (v || "").trim();
-          if (!name) { alert("群名不能为空"); return false; }
-          const d = await api("/api/hive/create", { name: name });
-          if (!d.ok) { alert(d.error || "建群失败"); return false; }
-          await loadGroups();
-          openGroup(d.group.gid);
-          return true;
-        },
-      });
+    // ---------------------------------------------------------- 建群向导
+    function hsLog(level, text, ms) {
+      const box = el("hsLog");
+      if (!box) return;
+      box.hidden = false;
+      const d = document.createElement("div");
+      d.className = "l " + (level || "info");
+      d.innerHTML = '<span class="t">' + (ms != null ? ms + "ms" : "") + "</span>"
+        + '<span class="m">' + hEsc(text) + "</span>";
+      box.appendChild(d);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function hsClearLog() {
+      const box = el("hsLog");
+      if (!box) return;
+      box.innerHTML = "";
+      box.hidden = true;
+    }
+
+    async function openSetup() {
+      el("hsName").value = "";
+      el("hsRelay").value = "";
+      hsClearLog();
+      el("hiveSetup").hidden = false;
+      setTimeout(() => el("hsName").focus(), 50);
+      try {
+        const d = await api("/api/hive/relay/last");
+        const last = (d && d.last) || {};
+        if (last.url) {
+          el("hsLastUrl").textContent = last.url;
+          el("hsLast").hidden = false;
+          el("hsRelay").value = last.url;
+        } else {
+          el("hsLast").hidden = true;
+        }
+      } catch (e) { /* 没有上次记录也正常 */ }
+    }
+
+    el("hiveCreateBtn").addEventListener("click", openSetup);
+    el("hsClose").addEventListener("click", () => { el("hiveSetup").hidden = true; });
+    el("hiveSetup").addEventListener("click", (e) => {
+      if (e.target === el("hiveSetup")) el("hiveSetup").hidden = true;
+    });
+    el("hsUseLast").addEventListener("click", () => {
+      el("hsRelay").value = el("hsLastUrl").textContent || "";
     });
 
     el("hiveJoinBtn").addEventListener("click", () => {
