@@ -879,6 +879,35 @@ def members_snapshot(gid: str) -> List[Dict[str, Any]]:
     return out
 
 
+def merge_kicked(gid: str, incoming: Any) -> int:
+    """把别人报来的「被踢名单」并进本地。返回新增条数。
+
+    ⚠️ 必须同步这张表，否则「踢人」只在自己机器上有效：被踢的人仍握着
+    群密钥，他的消息照样能被别人解开、照样落盘显示，等于没踢。
+    """
+    if not isinstance(incoming, list) or not incoming:
+        return 0
+    with _LOCK:
+        g = load_group(gid)
+        if not g:
+            return 0
+        kicked = list(g.get("kicked") or [])
+        owner = str(g.get("owner") or "")
+        me = profile().get("user_id")
+        added = 0
+        for u in incoming:
+            u = str(u or "")
+            # 群主和自己不能被「别人报的名单」踢掉（防篡改）
+            if not u or u == owner or u == me or u in kicked:
+                continue
+            kicked.append(u)
+            added += 1
+        if added:
+            g["kicked"] = kicked[-200:]
+            _write_json(_group_path(gid), g)
+        return added
+
+
 def merge_members(gid: str, incoming: List[Dict[str, Any]]) -> int:
     """把别人报来的成员表合并进本地。返回发生变化的条数。
 
