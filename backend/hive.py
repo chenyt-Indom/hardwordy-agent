@@ -1382,6 +1382,14 @@ def build_hd_prompt(instruction: str, history: List[Dict[str, Any]],
 #   · 每次重建覆盖写，所以永远和当前聊天内容一致（用户要求「根据群聊内容重新构建」）；
 #   · @hd 跑任务时把这份记忆一起塞进提示词，模型就知道这个群之前干过什么。
 
+def _hhmm(ts: float) -> str:
+    """时间戳 → 本地「月-日 时:分」，群记忆里用来标时间。"""
+    try:
+        return time.strftime("%m-%d %H:%M", time.localtime(float(ts or 0)))
+    except Exception:
+        return ""
+
+
 def _mem_path(gid: str) -> str:
     return os.path.join(_gdir(gid), "memory.md")
 
