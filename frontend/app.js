@@ -2536,6 +2536,197 @@
     if (rf) rf.onclick = loadKb;
   })();
 
+  // ---------- 🎼 音乐工坊（生成 / 改编）----------
+  // 后端 /api/music/*：**纯本地算法合成**（numpy + scipy），秒级出结果、不联网。
+  // 每首曲子同时存乐谱（data/music/scores），所以能反复改编：
+  // 换风格重编（音阶映射，旋律骨架保留）/ 移调 / 变速 / 换配器 / 变奏 / 续写。
+  (() => {
+    const btn = $("#muBtn"), box = $("#muFloat");
+    if (!btn || !box) return;
+    const listEl = $("#muList"), stEl = $("#muStatus");
+    const styleSel = $("#muStyle"), keySel = $("#muKey");
+    const KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let audio = null, playing = "", styles = [], loaded = false;
+
+    function setStatus(t) { if (stEl) stEl.textContent = t; }
+
+    function fillKeys() {
+      if (!keySel) return;
+      let h = "";
+      for (let k = -5; k <= 6; k++) {
+        const nm = KEY_NAMES[((k % 12) + 12) % 12];
+        const label = k === 0 ? "C" : (nm + (k > 0 ? "+" : "") + k);
+        h += '<option value="' + k + '"' + (k === 0 ? " selected" : "") + ">" +
+             escapeHtml(label) + "</option>";
+      }
+      keySel.innerHTML = h;
+    }
+
+    async function loadStyles() {
+      if (styles.length) return;
+      try {
+        const d = await api("/api/music/styles");
+        styles = (d && d.styles) || [];
+      } catch (e) { styles = []; }
+      if (styleSel) {
+        styleSel.innerHTML = styles.length
+          ? styles.map((s) => '<option value="' + escapeHtml(s.id) + '">' +
+              escapeHtml(s.name) + "（" + s.bpm + "bpm）</option>").join("")
+          : '<option value="pop">流行/轻快</option>';
+      }
+    }
+
+    async function loadMusic() {
+      await loadStyles();
+      if (!listEl) return;
+      let d;
+      try { d = await api("/api/music/list"); }
+      catch (e) {
+        listEl.innerHTML = '<div class="mu-empty">读取失败：' +
+          escapeHtml(String(e.message || e)) + "</div>";
+        return;
+      }
+      const files = (d && d.files) || [];
+      const badge = $("#muBadge");
+      if (badge) badge.textContent = String(files.length);
+      if (!files.length) {
+        listEl.innerHTML = '<div class="mu-empty">还没有曲子。选个风格点「生成」，几秒就好；' +
+          '也可以直接在对话里说「来一段古风音乐」。</div>';
+        return;
+      }
+      const opts = [["", "改编…"]];
+      styles.forEach((s) => opts.push(["style:" + s.id, "→" + s.name]));
+      opts.push(["key:2", "升 2 半音"], ["key:-2", "降 2 半音"],
+                ["tempo:1.25", "加快 25%"], ["tempo:0.8", "放慢 20%"],
+                ["extend:8", "续写 8 小节"], ["var:0.6", "变奏 60%"],
+                ["vocals:1", "加人声"], ["vocals:0", "去人声"]);
+      const selHtml = opts.map((o) =>
+        '<option value="' + escapeHtml(o[0]) + '">' + escapeHtml(o[1]) + "</option>").join("");
+      listEl.innerHTML = files.map((f) =>
+        '<div class="mu-item" data-id="' + escapeHtml(f.id) + '" data-url="' +
+          escapeHtml(f.url) + '">' +
+          '<button type="button" class="mu-btn mu-play" title="试听">' +
+            (playing === f.id ? "⏸" : "▶") + "</button>" +
+          '<span class="mu-title" title="' + escapeHtml(f.title) + '">' +
+            escapeHtml(f.title) + "</span>" +
+          '<span class="mu-meta">' + escapeHtml(f.style_name || f.style || "") +
+            (f.duration ? " · " + Math.round(f.duration) + "s" : "") + "</span>" +
+          '<select class="mu-remix" title="改编这首">' + selHtml + "</select>" +
+          '<a class="mu-btn" href="' + escapeHtml(f.url) +
+            '" download title="下载 WAV">⬇</a>' +
+          '<button type="button" class="mu-btn mu-del" title="删除">🗑</button>' +
+        "</div>").join("");
+    }
+
+    function play(id, url) {
+      if (audio) { audio.pause(); audio = null; }
+      if (playing === id) { playing = ""; loadMusic(); return; }
+      playing = id;
+      audio = new Audio(url);
+      audio.onended = () => { playing = ""; audio = null; loadMusic(); };
+      audio.play().catch(() => {
+        playing = ""; audio = null; loadMusic(); showToast("播放失败", "warn");
+      });
+      loadMusic();
+    }
+
+    async function gen() {
+      setStatus("生成中…");
+      const barsEl = $("#muBars"), bpmEl = $("#muBpm"),
+            vocEl = $("#muVocals"), notesEl = $("#muNotes");
+      const body = {
+        style: styleSel ? styleSel.value : "pop",
+        bars: parseInt(barsEl && barsEl.value, 10) || 16,
+        bpm: parseFloat(bpmEl && bpmEl.value) || 0,
+        key: parseInt(keySel && keySel.value, 10) || 0,
+        vocals: !!(vocEl && vocEl.checked),
+        notes: (notesEl && notesEl.value) || "",
+      };
+      try {
+        const d = await api("/api/music/generate",
+          { method: "POST", body: JSON.stringify(body) });
+        if (!d || !d.ok) {
+          setStatus("失败：" + ((d && d.error) || "未知原因"));
+          showToast("生成失败", "warn");
+          return;
+        }
+        setStatus("好了：" + d.music.title + " · " + Math.round(d.music.duration) + " 秒");
+        await loadMusic();
+      } catch (e) {
+        setStatus("失败：" + String(e.message || e));
+      }
+    }
+
+    async function remix(id, val) {
+      if (!val || !id) return;
+      const parts = val.split(":");
+      const k = parts[0], v = parts[1];
+      const body = { id: id };
+      if (k === "style") body.style = v;
+      else if (k === "key") body.key_shift = parseInt(v, 10);
+      else if (k === "tempo") body.tempo = parseFloat(v);
+      else if (k === "extend") body.extend_bars = parseInt(v, 10);
+      else if (k === "var") body.variation = parseFloat(v);
+      else if (k === "vocals") body.vocals = (v === "1");
+      setStatus("改编中…");
+      try {
+        const d = await api("/api/music/remix",
+          { method: "POST", body: JSON.stringify(body) });
+        if (!d || !d.ok) { setStatus("失败：" + ((d && d.error) || "未知原因")); return; }
+        setStatus("改编完成：" + (d.music.ops || ""));
+        await loadMusic();
+      } catch (e) {
+        setStatus("失败：" + String(e.message || e));
+      }
+    }
+
+    function open() {
+      box.hidden = false;
+      if (!loaded) { loaded = true; fillKeys(); loadMusic(); }
+    }
+    function close() { box.hidden = true; }
+    btn.onclick = () => (box.hidden ? open() : close());
+    const closeBtn = $("#muClose");
+    if (closeBtn) closeBtn.onclick = close;
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !box.hidden) close();
+    });
+    const genBtn = $("#muGen");
+    if (genBtn) genBtn.onclick = gen;
+    const folderBtn = $("#muFolder");
+    if (folderBtn) {
+      folderBtn.onclick = () => openFolderRequest("/api/music/open_folder", { method: "POST" });
+    }
+
+    if (listEl) {
+      listEl.addEventListener("click", async (ev) => {
+        const item = ev.target.closest(".mu-item");
+        if (!item) return;
+        const id = item.getAttribute("data-id") || "";
+        const url = item.getAttribute("data-url") || "";
+        if (ev.target.closest(".mu-play")) { play(id, url); return; }
+        if (ev.target.closest(".mu-del")) {
+          if (!confirm("删掉这首曲子？（音频和乐谱都会删）")) return;
+          try {
+            await api("/api/music/delete",
+              { method: "POST", body: JSON.stringify({ id: id }) });
+            await loadMusic();
+          } catch (e) { showToast("删除失败", "warn"); }
+        }
+      });
+      listEl.addEventListener("change", (ev) => {
+        const sel = ev.target.closest(".mu-remix");
+        if (!sel) return;
+        const item = sel.closest(".mu-item");
+        if (!item) return;
+        remix(item.getAttribute("data-id") || "", sel.value);
+        sel.value = "";
+      });
+    }
+    // 对话里的音频卡片也能打开这个面板
+    window.__openMusicPanel = open;
+  })();
+
   // ---------- 音频库（TTS 产物）----------
   // 数据来自 /api/audio/list（data/tts 目录）；播放走 /api/tts/audio/{name}。
   let __auAudio = null;      // 当前正在播的 Audio 对象
