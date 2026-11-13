@@ -103,6 +103,87 @@ def ffmpeg() -> str:
     return p or ""
 
 
+# ---------------------------------------------------------------- 人脸检测（自动定位嘴）
+_YUNET: dict = {"path": "", "tried": False}
+
+
+def _find_yunet() -> str:
+    """找 yunet 人脸检测模型。项目里没有就返回空（自动检测降级为手动校准）。"""
+    if _YUNET["path"]:
+        return _YUNET["path"]
+    if _YUNET["tried"]:
+        return ""
+    _YUNET["tried"] = True
+    root = _root()
+    cands = [
+        os.path.join(root, "data", "models", "face", "face_detection_yunet.onnx"),
+        os.path.join(root, "models", "face", "face_detection_yunet.onnx"),
+        os.path.join(root, "data", "models", "face", "yunet.onnx"),
+    ]
+    cands += glob.glob(os.path.join(root, "**", "yunet*.onnx"), recursive=True)
+    for p in cands:
+        if p and os.path.isfile(p) and os.path.getsize(p) > 50000:
+            _YUNET["path"] = p
+            return p
+    return ""
+
+
+def detect_mouth(img_path: str) -> dict:
+    """用 yunet 找脸 → 由左右嘴角推出嘴部矩形。
+
+    返回 {ok, mouth, score} 或 {ok: False, error}。
+    没模型/没检测到脸都不算错误，调用方自己决定是否降级到手动校准。
+    """
+    mpath = _find_yunet()
+    if not mpath:
+        return {"ok": False, "error": "没有人脸检测模型"}
+    if not os.path.isfile(img_path):
+        return {"ok": False, "error": "没有形象图"}
+    try:
+        import cv2
+        img = cv2.imread(img_path)
+        if img is None:
+            # cv2.imread 不认中文路径，退回 PIL 读再转
+            from PIL import Image
+            with Image.open(img_path) as im:
+                arr = np.array(im.convert("RGB"))
+            img = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        h, w = img.shape[:2]
+        det = cv2.FaceDetectorYN.create(mpath, "", (w, h),
+                                        score_threshold=0.6, nms_threshold=0.3,
+                                        top_k=5000)
+        _n, faces = det.detect(img)
+        if faces is None or len(faces) == 0:
+            return {"ok": False, "error": "没检测到人脸"}
+        # 多张脸时取最大那张（通常就是主体）
+        faces = sorted(faces, key=lambda f: float(f[2]) * float(f[3]), reverse=True)
+        f = faces[0]
+        fx, fy, fw, fh = [float(v) for v in f[:4]]
+        score = float(f[14])
+        lm = f[4:14].reshape(5, 2)
+        rc, lc = lm[3], lm[4]          # 右嘴角、左嘴角
+        mcx = (float(rc[0]) + float(lc[0])) / 2.0
+        mcy = (float(rc[1]) + float(lc[1])) / 2.0
+        mw = math.hypot(float(rc[0]) - float(lc[0]), float(rc[1]) - float(lc[1]))
+        if mw < 4:
+            return {"ok": False, "error": "嘴角定位异常"}
+        # 嘴部矩形：中心比嘴角中点略低一点点（唇在下），宽取嘴角距 1.18 倍，
+        # 高取嘴宽的 0.42（自然唇高约是唇宽的 0.3~0.45）
+        out = {
+            "x": mcx / w,
+            "y": min(1.0, (mcy + fh * 0.006) / h),
+            "w": min(0.9, (mw * 1.18) / w),
+            "h": min(0.5, (mw * 0.42) / w),
+        }
+        out["x"] = min(max(out["x"], 0.0), 1.0)
+        out["y"] = min(max(out["y"], 0.0), 1.0)
+        return {"ok": True, "mouth": out, "score": round(score, 3),
+                "face": [round(fx / w, 4), round(fy / h, 4),
+                         round(fw / w, 4), round(fh / h, 4)]}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 # ---------------------------------------------------------------- 形象管理
 def mouth() -> dict:
     m = dict(DEFAULT_MOUTH)
