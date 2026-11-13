@@ -380,7 +380,6 @@ class HiveClient:
             "lan_ip": st.get("lan_ip") or "",
             "queued": st.get("queued") or 0,
             "error": self._error,
-            "mode": "mesh",
             "uptime": st.get("uptime") or 0,
             "dev": st.get("dev") or "",
             "uid_conflict": st.get("uid_conflict"),
