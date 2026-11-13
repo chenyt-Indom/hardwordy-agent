@@ -66,7 +66,7 @@ MOODS = {
     "surprise": {
         "label": "惊讶", "emoji": "😮", "style": "cheerful",
         "rate": 6, "pitch": 12,
-        "sway": 1.2, "nod": 1.4, "rot": 0.40, "brow": 2.0, "freq": 0.48,
+        "sway": 2.3, "nod": 2.6, "rot": 0.58, "brow": 2.6, "freq": 0.48,
         "desc": "音调抬高、顿挫感强，眉眼带拉伸最大",
     },
     "worried": {
