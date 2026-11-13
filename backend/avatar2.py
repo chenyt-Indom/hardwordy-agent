@@ -686,12 +686,13 @@ def _frame(prep: dict, openness: float, width: float):
 
 def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
            fps: int = FPS, on_progress=None, engine: str = "param",
-           boost: float = 1.0) -> dict:
+           boost: float = 1.0, expr: dict = None) -> dict:
     """逐帧渲染 + ffmpeg 合成。返回 {ok, frames, duration, path}
 
     engine="wav2lip" → 神经网络真口型（Wav2Lip ONNX）
     engine="param"   → 本项目的声学特征形变（不崩但幅度小）
     boost            → 口型幅度倍率，只对 wav2lip 生效（1.0 原样）
+    expr             → 表情层配置（avatar2_expr.resolve 的返回值），None 则不做
     """
     exe = ffmpeg()
     if not exe:
