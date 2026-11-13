@@ -1348,6 +1348,10 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                         "style": {"type": "string",
                                   "description": "情感预设：neutral / cheerful / gentle / "
                                                  "serious / sad / news / excited"},
+                        "amp": {"type": "number",
+                                "description": "口型幅度增益 0.6~2.0，默认 1.0。"
+                                               "觉得嘴张得太小时用 1.3~1.5；"
+                                               "0.8 以下会显得嘴几乎不动"},
                     },
                     "required": ["text"],
                 },
