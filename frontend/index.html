@@ -1224,39 +1224,5 @@
       });
     })();
   </script>
-  <script>
-    /* TEMP_PROBE_AV2 —— 临时测量数字人滑块尺寸，验证完删除 */
-    setTimeout(function () {
-      try {
-        var p = document.getElementById("av2Panel");
-        if (p) {
-          p.classList.remove("collapsed");
-          p.removeAttribute("hidden");
-          var b = p.querySelector(".sec-head");
-          if (b) b.click();
-        }
-        setTimeout(function () {
-          var out = [];
-          var s = document.getElementById("av2Boost");
-          var v = document.getElementById("av2BoostVal");
-          var lab = document.querySelector(".av2-boost-lab");
-          function r(el) {
-            if (!el) return "MISSING";
-            var b = el.getBoundingClientRect();
-            return "x=" + Math.round(b.left) + " y=" + Math.round(b.top) +
-                   " w=" + Math.round(b.width) + " h=" + Math.round(b.height);
-          }
-          out.push("slider " + r(s));
-          out.push("value  " + r(v) + " text=" + (v ? v.textContent : "?"));
-          out.push("label  " + r(lab));
-          out.push("slider.value=" + (s ? s.value : "?") + " min=" + (s ? s.min : "?") + " max=" + (s ? s.max : "?"));
-          var d = document.createElement("div");
-          d.style.cssText = "position:fixed;left:8px;top:8px;z-index:99999;background:#000;color:#0f0;font:13px monospace;padding:10px;white-space:pre;border:1px solid #0f0";
-          d.textContent = out.join("\n");
-          document.body.appendChild(d);
-        }, 900);
-      } catch (e) {}
-    }, 1800);
-  </script>
 </body>
 </html>
