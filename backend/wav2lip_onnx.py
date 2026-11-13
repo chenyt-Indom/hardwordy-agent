@@ -339,19 +339,7 @@ def _gap96(pred96: np.ndarray, my_rel: float) -> int:
 
 def _lip_openness(pred96: np.ndarray, my_rel: float, base_gap: int) -> float:
     """估这一帧的张口量（0~1），用于幅度增强。"""
-    import cv2
-    g = cv2.cvtColor(pred96, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    c = int(my_rel * 96)
-    a, b = max(0, c - 12), min(96, c + 12)
-    if b - a < 4:
-        return 0.0
-    prof = g[a:b].mean(axis=1)
-    mn = float(prof.min())
-    dark = prof < (mn + 12)
-    best = cur = 0
-    for v in dark:
-        cur = cur + 1 if v else 0
-        best = max(best, cur)
+    best = _gap96(pred96, my_rel)
     # 相对首帧的增量，映射到 0~1
     extra = max(0.0, float(best - base_gap))
     return float(min(1.0, extra / 4.0))
