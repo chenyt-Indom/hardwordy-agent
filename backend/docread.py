@@ -40,7 +40,9 @@ def _normalize_cjk(text: str) -> str:
     out = []
     for ch in text:
         cp = ord(ch)
-        if 0x2E80 <= cp <= 0x2FDF or 0xF900 <= cp <= 0xFAFF:
+        if cp in _RADICAL_MAP:
+            out.append(_RADICAL_MAP[cp])
+        elif 0x2F00 <= cp <= 0x2FDF or 0xF900 <= cp <= 0xFAFF:
             out.append(unicodedata.normalize("NFKC", ch))
         else:
             out.append(ch)
