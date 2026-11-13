@@ -769,7 +769,8 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
 
 
 def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
-           fps: int = FPS, on_progress=None, expr: dict = None) -> dict:
+           fps: int = FPS, on_progress=None, expr: dict = None,
+           amp: float = 1.0) -> dict:
     """逐帧渲染 + ffmpeg 合成。返回 {ok, frames, duration, path}
 
     口型由本项目的声学特征形变驱动（不崩、位置准、幅度偏小）。
