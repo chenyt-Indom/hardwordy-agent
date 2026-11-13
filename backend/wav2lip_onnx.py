@@ -345,30 +345,9 @@ def _lip_openness(pred96: np.ndarray, my_rel: float, base_gap: int) -> float:
     return float(min(1.0, extra / 4.0))
 
 
-def _boost_patch(patch: np.ndarray, open_amt: float, my_rel: float,
-                 k: float) -> np.ndarray:
-    """按张口量对嘴部做纵向位移放大（连续采样，不填色，避免断层/坑洞）。
-
-    实测：k<=0.5 时肉眼几乎看不出伪影；k=0.9 会出现明显涂抹。
-    """
-    import cv2
-    if k <= 0.001 or open_amt <= 0.02:
-        return patch
-    h, w = patch.shape[:2]
-    g = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    ym = int(my_rel * h)
-    a, b = max(0, ym - 18), min(h, ym + 18)
-    if b - a >= 4:
-        band = g[a:b].mean(axis=1)
-        ym = a + int(np.argmin(band))
-    r = 1.0 + k * open_amt
-    yy = np.arange(h, dtype=np.float32)
-    src = np.clip(ym + (yy - ym) / r, 0, h - 1)
-    y0 = np.floor(src).astype(np.int32)
-    y1_ = np.minimum(y0 + 1, h - 1)
-    fr = (src - y0)[:, None, None]
-    out = patch[y0].astype(np.float32) * (1 - fr) + patch[y1_].astype(np.float32) * fr
-    return np.clip(out, 0, 255).astype(np.uint8)
+# 2026-11-14：`_boost_patch`（按张口量纵向拉伸嘴部）已删除 ——
+# 口型幅度改由遮罩范围驱动（模型真实生成），叠加拉伸只会出涂抹和断层，
+# 实测增益也只有 2px。保留注释说明为什么不再需要它。
 
 
 def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
