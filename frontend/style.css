@@ -4724,3 +4724,100 @@ html[data-theme="light"] select.pill-select option {
 /* 品牌区（logo + 名字）单独留一点上边距，别贴着窗口顶端 */
 .sidebar .brand { margin-bottom: 4px; }
 
+/* ================= ⏰ 自动化分组（2026-11-13）=================
+   用户要求：「定时任务移动到左侧工具栏，同样需要可折叠有动画」
+   「以卡片的形式展示，卡片不要太小也不要太大」「内容以及控制目标要全面且周到美观」。
+   折叠动画复用的是 initFoldablePanels 那套（autoPanel 已加进那个数组），
+   这里只负责面板内部：检索框、状态条、任务卡片、底部按钮。 */
+.auto-search {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 2px 8px;
+}
+.auto-search input {
+  flex: 1 1 auto; min-width: 0;
+  box-sizing: border-box;
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, .04);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color .18s ease, background .18s ease;
+}
+.auto-search input::placeholder { color: var(--muted); opacity: .8; }
+.auto-search input:focus {
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, .07);
+}
+/* 检索状态条：如实写明这次走的是「语义向量 + 关键词」还是「仅关键词」 */
+.auto-backend {
+  margin: 0 2px 7px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  background: rgba(79, 139, 249, .10);
+  border: 1px solid rgba(79, 139, 249, .22);
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.auto-backend[hidden] { display: none; }
+
+/* 任务卡片：侧栏用紧凑版、弹窗用完整版，同一套底子，尺寸只差一点 */
+.auto-list { display: flex; flex-direction: column; gap: 7px; }
+.sched-item {
+  border-top: none;                 /* 卡片化之后不要分隔线 */
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 11px 10px;
+  background: rgba(255, 255, 255, .035);
+  transition: border-color .18s ease, background .18s ease;
+}
+.sched-item:hover {
+  border-color: rgba(79, 139, 249, .45);
+  background: rgba(255, 255, 255, .055);
+}
+.sched-item.compact { padding: 8px 10px 9px; }
+.sched-item.compact .sched-hd { font-size: 12px; }
+.sched-item.compact .sched-meta { font-size: 10.5px; line-height: 1.6; }
+/* 检索相关度：只在检索结果里出现 */
+.sched-score {
+  float: right;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(79, 139, 249, .16);
+  color: var(--accent);
+  line-height: 16px;
+}
+
+/* 新建任务的时间：24 档 + 60 档（用户要求不用手打） */
+.sched-time { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
+.sched-time select {
+  width: auto; flex: 0 0 auto;
+  padding: 5px 4px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel); color: var(--text);
+  font-size: 12px; font-family: inherit;
+}
+.sched-colon { color: var(--muted); font-size: 12px; }
+
+/* 侧栏底部「＋ 新建任务」 */
+.auto-acts { display: flex; gap: 6px; margin-top: 8px; }
+.auto-acts .btn { flex: 1 1 auto; justify-content: center; }
+
+/* 结果窗里的 markdown：套一层 .bubble 才能用上 .md-* 那套排版，
+   但要把气泡本身的视觉盖掉 —— 它不是一个聊天气泡，是这扇窗的正文 */
+.sched-win-body .sched-md {
+  max-width: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  white-space: normal;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
