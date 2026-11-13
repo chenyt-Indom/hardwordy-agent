@@ -63,12 +63,14 @@ for _p in _meta_pkgs:
         pass
 
 # —— 前端与自带 SD 模型（只读打包资源）——
-def _dir_datas(src_root, dst_root, skip_suffixes=()):
-    """把目录展开为 (文件, 目标目录) 列表；可跳过指定后缀的残余文件。"""
+def _dir_datas(src_root, dst_root, skip_suffixes=(), skip_contains=()):
+    """把目录展开为 (文件, 目标目录) 列表；可跳过指定后缀/关键词的残余文件。"""
     out = []
     for dirpath, _dirnames, filenames in os.walk(src_root):
         for fn in filenames:
             if any(fn.endswith(s) for s in skip_suffixes):
+                continue
+            if any(s in fn for s in skip_contains):
                 continue
             src = os.path.join(dirpath, fn)
             rel = os.path.relpath(dirpath, src_root)
@@ -84,12 +86,14 @@ def _dir_datas(src_root, dst_root, skip_suffixes=()):
 #   跳过 *.incomplete（没下完的残片，否则会把半个文件塞进包里）。
 _SD_ROOT = r"E:\local-multimodal-models\sdxl-base"           # 文生图 / 整图微改
 _INPAINT_ROOT = r"E:\local-multimodal-models\sdxl-inpaint"    # 局部重绘（精确微改）
-# ⚠️ 2026-11-13（11.13e）：frontend 目录下留着撤语音功能时的
-#   app.js.bak_voice / style.css.bak_voice，_dir_datas 是整目录收，
-#   于是这两个备份被一起打进包里（首次构建文件数 7018，正常应 7016）。
-#   这里过滤掉 .bak / .bak_voice，别让备份文件混进交付包。
+# ⚠️ 2026-11-13（11.13e / 11.13f）：frontend 目录堆了 22 个历史备份
+#   （app.js.bak / app.js.bak-cats-20261111 / style.css.bak_voice …），
+#   _dir_datas 是整目录收，于是这些垃圾全被打进包里（11.13e 的包带了 22 个）。
+#   11.13e 先用 endswith(".bak") 过滤，只挡住 2 个 —— `.bak_avatar_removal`
+#   `.bak-cats-20261111` 这种**不以 .bak 结尾**的全漏了。
+#   改成按包含判断：文件名里出现 ".bak" 一律不要。
 all_datas += _dir_datas(os.path.join(root, "frontend"), "frontend",
-                        skip_suffixes=(".bak", ".bak_voice"))
+                        skip_contains=(".bak",))
 if os.path.isdir(_SD_ROOT):
     all_datas += _dir_datas(_SD_ROOT, "sd_model", skip_suffixes=(".incomplete",))
 # 局部重绘模型（约 6.5GB）：缺了它"只在指定区域重绘"就用不了，
@@ -116,6 +120,16 @@ all_hidden += [
     #   · backend.memvec  —— 记忆库向量索引
     #   · backend.chatimg —— 对话图片台账
     "backend.embed", "backend.memvec", "backend.chatimg",
+    # ⚠️ 2026-11-13（11.13f）：main.py 顶层有 `from . import selfdev, scheduler,
+    #   perf, model_manager, selftest`，理论上静态分析能连带收进来；但这几个
+    #   都是"只在函数内被调用"的模块，最容易被漏（11.13a 的 edge_tts 就是这么
+    #   翻车的：源码跑正常、打包版功能全废）。显式列出，成本为零。
+    "backend.scheduler", "backend.selfdev", "backend.perf",
+    "backend.model_manager", "backend.selftest",
+    # ⚠️ 2026-11-13（11.13f）：web_tools.py 解 brotli 压缩的网页时用
+    #   `import brotli`（函数内 + try）。缺了不会崩，但会返回空 → 大量
+    #   返回 br 压缩的站点直接"抓不到"。几十 KB，加上更稳。
+    "brotli",
     "sounddevice", "sherpa_onnx", "tokenizers", "onnxruntime",
     # ⚠️ 2026-11-13：语音合成（backend/tts.py）用的是**函数内延迟导入** ——
     #   `import edge_tts` 和 `import win32com.client` 都写在函数体里，
