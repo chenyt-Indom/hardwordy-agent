@@ -928,6 +928,141 @@
     </div>
   </div>
 
+  <!-- ===== 顶栏简化：右侧设置抽屉（2026-11-13）=====
+       用户要求：「上面的按钮太过凌乱，需要分类，配 API key 的弄成一个可折叠列表，
+       大幅简化布局」。这里把第二行（.tools-bar）里的控件重新归置：
+         · 顶栏只留 4 个高频开关 + 模型 + 询问方式 + ⚙ 设置（一行 8 个）；
+         · 其余收进从右侧滑出的抽屉，按「密钥 / 对话能力 / 模型 / 开发工具」分组；
+         · 需要配 Key 的三项默认折叠，每项附官网链接。
+       为什么用脚本搬而不是直接改 HTML：这些控件都是 app.js 按 id 取的，
+       只移动父节点、id 与事件绑定一律不受影响；而「性能档位 / 上下文 / 定时 /
+       完全访问」是 app.js 动态插进 .tools-bar 的，整个容器搬走它们才跟着走。 -->
+  <script>
+  (function () {
+    var $ = function (s, r) { return (r || document).querySelector(s); };
+
+    // ① 顶栏只剩一行，清掉可能残留的「已收起」状态（否则顶栏会整行消失）
+    try { localStorage.setItem('topbar_collapsed', '0'); } catch (e) {}
+    document.body.classList.remove('topbar-collapsed');
+
+    // ② 抽屉骨架
+    var mask = document.createElement('div');
+    mask.className = 'sd-mask';
+    mask.id = 'settingsMask';
+    mask.hidden = true;
+
+    var dw = document.createElement('aside');
+    dw.className = 'sd-drawer';
+    dw.id = 'settingsDrawer';
+    dw.hidden = true;
+    dw.innerHTML = [
+      '<div class="sd-head"><b>⚙ 设置</b>',
+      '<button type="button" class="sd-x" id="settingsClose" title="关闭">✕</button></div>',
+      '<div class="sd-body">',
+      '  <section class="sd-sec">',
+      '    <button type="button" class="sd-fold" id="sdKeysToggle" aria-expanded="false">',
+      '      <span>🔑 需要配 API Key</span><i class="sd-badge">3 项</i><i class="sd-caret">▸</i></button>',
+      '    <div class="sd-keylist" id="sdKeyList" hidden>',
+      '      <div class="sd-key"><div class="sd-key-t"><b>高德地图</b><small>地图 · 天气 · 周边</small></div>',
+      '        <button type="button" class="pill pill-btn" id="amapKeyBtn" title="填高德开放平台的 key —— 填了地图能搜到全国的小店、有真实评分和实时路况">高德 key</button>',
+      '        <a class="sd-link" href="https://console.amap.com/dev/key/app" target="_blank" rel="noopener">去申请 ↗</a></div>',
+      '      <div class="sd-key"><div class="sd-key-t"><b>DeepSeek</b><small>聊天 · 思考 · V4 Pro</small></div>',
+      '        <span class="sd-slot" id="sdSlotDs"></span>',
+      '        <a class="sd-link" href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">去申请 ↗</a></div>',
+      '      <div class="sd-key"><div class="sd-key-t"><b>图片模型</b><small>文生图 · 图片微改</small></div>',
+      '        <span class="sd-slot" id="sdSlotImg"></span>',
+      '        <a class="sd-link" href="https://xingpan.site" target="_blank" rel="noopener">去申请 ↗</a></div>',
+      '    </div>',
+      '  </section>',
+      '  <section class="sd-sec"><h4 class="sd-h">💬 对话能力</h4>',
+      '    <div class="sd-grid" id="sdSlotCfg"></div></section>',
+      '  <section class="sd-sec"><h4 class="sd-h">⚙ 模型与性能</h4>',
+      '    <div class="sd-grid" id="sdSlotModel"></div></section>',
+      '  <section class="sd-sec"><h4 class="sd-h">🛠 开发与工具</h4>',
+      '    <div class="sd-grid" id="sdSlotDev"></div></section>',
+      '</div>'
+    ].join('');
+    document.body.appendChild(mask);
+    document.body.appendChild(dw);
+
+    // ③ 搬运：id 和事件都跟着节点走，功能不变
+    var move = function (sel, box) {
+      var el = $(sel), b = $(box);
+      if (el && b && el.parentElement !== b) b.appendChild(el);
+    };
+
+    var amap = $('#amapKeyBtn');
+    if (amap) amap.onclick = function () { window.__showAmapKey && window.__showAmapKey(); };
+
+    // 对话能力（app.js 按 .pill[data-cfg] 统一接管，搬走照常工作）
+    move('label[data-cfg="auto_memorize"]', '#sdSlotCfg');
+    move('label[data-cfg="code_auto_route"]', '#sdSlotCfg');
+    // 模型与性能
+    move('#imgModelSelect', '#sdSlotModel');
+    move('#codeModelSelect', '#sdSlotModel');
+    // 密钥
+    move('#dsKeyBtn', '#sdSlotDs');
+    move('#imgKeyBtn', '#sdSlotImg');
+
+    // ④ 第二行整个容器搬进抽屉。
+    //    ⚠️ 必须搬**容器**而不是里面的控件：app.js 会往 .tools-bar 里
+    //       insertBefore(性能档位 / 上下文 / 定时 / 完全访问, #selfDevBtn)，
+    //       锚点必须和容器在一起，否则直接抛 NotFoundError。
+    var bar = $('.tools-bar');
+    if (bar) {
+      // 顶栏已有一份同 id 的模型下拉和询问按钮，第二行这份是重复的，删掉
+      var dup = bar.querySelectorAll('#askModeBtn, #modelSelect');
+      Array.prototype.forEach.call(dup, function (el) { el.remove(); });
+      var devBox = $('#sdSlotDev');
+      if (devBox) devBox.appendChild(bar);
+    }
+    // ⑤ 旧的两个按钮不再需要
+    ['#moreBtn', '#topbarToggle'].forEach(function (s) {
+      var el = $(s);
+      if (el) el.remove();
+    });
+
+    // ⑥ 抽屉开关
+    var open = function (on) {
+      mask.hidden = !on;
+      dw.hidden = !on;
+      if (on) {
+        dw.classList.remove('in');
+        void dw.offsetWidth;   // 强制回流，让滑入动画每次都重播
+        dw.classList.add('in');
+      }
+    };
+    var sbtn = $('#settingsBtn');
+    if (sbtn) sbtn.onclick = function () { open(dw.hidden); };
+    var scl = $('#settingsClose');
+    if (scl) scl.onclick = function () { open(false); };
+    mask.onclick = function () { open(false); };
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !dw.hidden) open(false);
+    });
+
+    // ⑦ 密钥列表：默认收起，点一下展开（用户要求）
+    var kt = $('#sdKeysToggle'), kl = $('#sdKeyList');
+    if (kt && kl) {
+      kt.onclick = function () {
+        kl.hidden = !kl.hidden;
+        kt.setAttribute('aria-expanded', kl.hidden ? 'false' : 'true');
+        kt.classList.toggle('open', !kl.hidden);
+      };
+    }
+
+    // ⑧ app.js 异步加载，它动态插进 .tools-bar 的「性能档位 / 上下文 / 定时 /
+    //    完全访问」要等它跑完才出现。轮询最多 3 秒，出现就收进抽屉。
+    var waited = 0;
+    var t = setInterval(function () {
+      waited += 200;
+      var dev = $('#sdSlotDev'), b2 = $('.tools-bar');
+      if (b2 && dev && b2.parentElement !== dev) dev.appendChild(b2);
+      if (($('#perfSelect') && $('#schedOpenBtn')) || waited >= 3000) clearInterval(t);
+    }, 200);
+  })();
+  </script>
+
   <script>
     (function () {
       var v = String(Date.now());
