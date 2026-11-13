@@ -4462,6 +4462,13 @@ html[data-theme="light"] select.pill-select option {
               border-color .16s ease,
               color .16s ease;
 }
+/* ⚠️ 必须用 .top-bar > 前缀 + !important：
+   上面 L2220 那条 `.top-bar > * { width: auto !important }` 会把按钮压成
+   「svg 15px + 边框 2px = 17px」，变成一个竖长条（实测 btn = 17.0 x 28.0）。 */
+.top-bar > .tb-fold-btn {
+  width: 28px !important;
+  flex: 0 0 auto !important;
+}
 .tb-fold-btn svg { display: block; }
 .tb-fold-btn:hover {
   background: var(--hover-bg);
