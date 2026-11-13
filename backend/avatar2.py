@@ -1077,7 +1077,9 @@ def concat_videos(names, out_name: str = "") -> dict:
             os.remove(lst)
         except Exception:                              # noqa: BLE001
             pass
-    dur = round(sum(_probe_duration(p) for p in paths), 2)
+    # 时长直接读合并后的成品：累加各段时若某一段探测失败会返回 0，
+    # 实测就出现过 101 秒的片子报成 54.6 秒（用户会以为丢了一半）。
+    dur = round(_probe_duration(out), 2)
     return {"ok": True, "name": os.path.basename(out), "parts": len(paths),
             "duration": dur, "bytes": os.path.getsize(out),
             "url": "/api/avatar2/video/" + _q(os.path.basename(out))}
