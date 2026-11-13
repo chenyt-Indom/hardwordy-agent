@@ -1139,6 +1139,22 @@
           setTimeout(function () {
             var b = document.getElementById('hiveRelayBtn');
             if (b) b.click();
+            setTimeout(function () {
+              // 拦截剪贴板，把真正复制走的内容显示到 hint 上核对
+              try {
+                navigator.clipboard.writeText = function (t) {
+                  window.__copied = t;
+                  return Promise.resolve();
+                };
+              } catch (e) { window.__copied = "(无法拦截: " + e.message + ")"; }
+              var cp = document.getElementById('hiveModalCopy');
+              if (cp) cp.click();
+              setTimeout(function () {
+                var h = document.getElementById('hiveModalHint');
+                var btn = document.getElementById('hiveModalCopy');
+                if (h) h.textContent = "COPYED=[" + String(window.__copied) + "] BTN=" + (btn ? btn.textContent : "?");
+              }, 300);
+            }, 900);
           }, 1200);
         }, 700);
       }, 1000);
