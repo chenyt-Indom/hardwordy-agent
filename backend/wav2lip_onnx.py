@@ -462,8 +462,12 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     both = both.transpose(2, 0, 1)[None]  # (1,6,96,96)
 
     # 融合蒙版（只贴嘴部带状区域，下巴保留原图）
+    # 2026-11-14：0.60~0.88 会连下巴一起换成 96x96 的模糊输出，实测下巴出现
+    # 紫色伪影与整块虚化（用户反馈"嘴太吓人"就是这个）。收窄到 0.56~0.76
+    # 只覆盖唇部，下巴完全保留原图；羽化同步收窄到 0.03，避免过渡带太宽
+    # 把上唇也稀释掉。
     cw, ch = x2 - x1, y2 - y1
-    msk = _feather_mask(ch, cw, top=0.60, bot=0.88)
+    msk = _feather_mask(ch, cw, top=0.56, bot=0.76, feather=0.03)
 
     cmd = [exe, "-y", "-loglevel", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (W, H),
