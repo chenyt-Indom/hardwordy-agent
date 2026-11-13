@@ -1231,8 +1231,10 @@
       if (s) {
         var d = document.createElement("div");
         d.style.cssText = "position:fixed;left:8px;top:8px;z-index:99999;background:#000;color:#0f0;font:14px monospace;padding:6px";
-        d.textContent = "LIP options=" + s.options.length + " val=" + s.value +
-                        " | w=" + (s.offsetWidth||0);
+        var txts = [];
+        for (var i=0;i<s.options.length;i++) txts.push(s.options[i].text);
+        d.textContent = "LIP w=" + (s.offsetWidth||0) + " val=" + s.value +
+                        " opts=[" + txts.join(" | ") + "]";
         document.body.appendChild(d);
       }
     }catch(e){}
