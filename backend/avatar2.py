@@ -703,7 +703,11 @@ def _frame(prep: dict, openness: float, width: float):
     yy, xx = np.mgrid[0:ph, 0:pw].astype(np.float32)
     d = yy - cyi
     wv = np.exp(-(d / (0.62 * mh)) ** 2)                    # 纵向：唇缝最强
-    wh = np.exp(-((xx - (cx - x0)) / (0.80 * mw * 0.5)) ** 2)  # 横向：嘴角固定
+    # 横向：嘴角固定。唇形宽窄（wd）用横向 sigma 表达 ——
+    # 原先是用整帧横向 resize 实现的，但 resize 目标宽度每帧都差 ±1px，
+    # 等于每帧都重新采样一次，本身就是抖动源。改成调制 sigma 就完全不用重采样。
+    sig_h = 0.80 * mw * 0.5 * (1.0 + 0.18 * (wd - 1.0))
+    wh = np.exp(-((xx - (cx - x0)) / max(sig_h, 1.0)) ** 2)
     k = 1.0 - 0.72 * op * wv * wh
     k = np.maximum(k, 0.40)      # 限制最大拉伸倍数（约 2.5x），再大就拉丝
     src = np.clip(cyi + d * k, 0, ph - 1)
