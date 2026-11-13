@@ -1133,43 +1133,6 @@
   </script>
 
   <script>
-  /* TEMP_PROBE_LOGO */
-  setTimeout(function () {
-    try {
-      var sb = document.getElementById('sidebar');
-      var lg = document.getElementById('logoBtn');
-      if (!sb || !lg) return;
-      sb.style.transition = 'none';
-      sb.classList.add('hidden');
-      sb.style.width = '78px'; sb.style.minWidth = '78px';
-      sb.style.paddingLeft = '10px'; sb.style.paddingRight = '10px';
-      setTimeout(function () {
-        var cs = getComputedStyle(lg);
-        var br = document.querySelector('.brand');
-        var tx = document.querySelector('.brand > div');
-        var r = lg.getBoundingClientRect(), sr = sb.getBoundingClientRect();
-        var L = [
-          'OUTLINE ' + cs.outlineStyle + ' ' + cs.outlineWidth + ' ' + cs.outlineColor,
-          'SHADOW ' + (cs.boxShadow || 'none').slice(0, 44),
-          'LOGO x=' + Math.round(r.left - sr.left) + ' y=' + Math.round(r.top) + ' w=' + Math.round(r.width),
-          'SB w=' + Math.round(sr.width),
-          'BRAND ' + getComputedStyle(br).flexDirection + ' gap=' + getComputedStyle(br).gap,
-          'TEXT ' + getComputedStyle(tx).display
-        ];
-        lg.focus();
-        var c2 = getComputedStyle(lg);
-        L.push('FOCUS outline ' + c2.outlineStyle + ' ' + c2.outlineWidth);
-        L.push('FOCUSVIS ' + lg.matches(':focus-visible'));
-        var d = document.createElement('div');
-        d.style.cssText = 'position:fixed;z-index:99999;left:0;top:0;right:0;background:#000;color:#0f0;font:700 16px/1.5 monospace;padding:8px;white-space:pre';
-        d.textContent = L.join('\n');
-        document.body.appendChild(d);
-      }, 500);
-    } catch (e) {}
-  }, 1500);
-  </script>
-
-  <script>
     (function () {
       var v = String(Date.now());
       ["/static/app.js", "/static/artifacts.js"].forEach(function (src) {
