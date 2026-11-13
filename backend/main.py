@@ -11228,6 +11228,41 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
         #    @hd 会拿云端模型名去问 Ollama，直接报「模型不存在」，
         #    整个功能在默认配置下根本跑不起来。
         is_cloud = str(model).strip().lower().startswith("deepseek")
+        # ★ 2026-11-13 用户要求：「群聊模式也要能自开发」。
+        #   @hd 原来只是一次纯文本生成，模型手上**没有任何工具** ——
+        #   它在群里说「我已经改好了」，实际一行代码都没动。
+        #   自开发开关打开时，这里把自开发工具交给它，并在下面补一个执行循环。
+        #   ⚠️ 只给 selfdev_* / workspace_*：群聊要的是改代码，不是画图做 PPT；
+        #      工具表越长，模型越容易挑错工具，也越吃上下文。
+        tool_names, tool_schemas = set(), []
+        try:
+            if bool(cfg.get("self_dev_enabled")):
+                _all_tools = tools.make_schemas(
+                    web_enabled=False, kb_enabled=False, code_exec=True,
+                    writing=False, ask_mode=str(cfg.get("ask_mode") or "quick"))
+                tool_schemas = [
+                    s for s in _all_tools
+                    if str((s.get("function") or {}).get("name") or "").startswith(
+                        ("selfdev_", "workspace_"))]
+                tool_names = {s["function"]["name"] for s in tool_schemas}
+        except Exception:
+            logger.warning("@hd 取自开发工具表失败（这一轮按普通回答处理）",
+                           exc_info=True)
+            tool_names, tool_schemas = set(), []
+        if tool_names:
+            prompt += (
+                "\n\n【自开发已打开：你可以改这个应用自己的源码】\n"
+                "可用工具：" + "、".join(sorted(tool_names)) + "\n"
+                "群聊通道走**文本协议** —— 需要调用工具时，正文里单独写一个块：\n"
+                '```tool\n{"name": "selfdev_grep", "arguments": '
+                '{"rel": "backend/main.py", "pattern": "关键字"}}\n```\n'
+                "一次可以写多个块，工具会**真的执行**，结果会回给你。\n"
+                "⚠️ 拿到工具结果之前，**不许**声称已经改完；每一步都要基于真实输出。\n"
+                "标准流程：selfdev_grep 定位 → selfdev_read 读那一段 → "
+                "selfdev_patch 最小改动 → selfdev_run 验证。\n"
+                "⚠️ 不许碰 data/、models/、sessions/、image_library/（那是用户数据）。\n"
+                "⚠️ 改前端不用重启后端，但要提醒用户 Ctrl+F5；"
+                "改后端要让用户点「立即重启」。\n")
         last_push = 0.0
         seq_in = 0
         pend_t = ""
