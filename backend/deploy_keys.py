@@ -375,8 +375,8 @@ def start_deploy(restart_only: bool = False) -> dict:
         args.append("--restart")
 
     def _run() -> None:
-        _JOB.log("$ " + " ".join([os.path.basename(args[0]), "deploy/hive_relay_deploy.py"]
-                                 + args[2:]))
+        _JOB.log("$ python deploy/hive_relay_deploy.py"
+                 + (" --restart" if restart_only else ""))
         try:
             env = dict(os.environ)
             env["PYTHONIOENCODING"] = "utf-8"
