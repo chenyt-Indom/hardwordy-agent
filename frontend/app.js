@@ -6650,14 +6650,30 @@
       }
     }
 
+    // 2026-11-13 用户要求：「时间精确到分钟，不要输入用选择分档的形式，
+    // 也就是 24 档加 60 档那样」。原来是一个手打 HH:MM 的输入框，
+    // 打错格式（9:0 / 09：00 / 9点）后端会直接拒。改成两个下拉，永远不会输错。
     const typeSel = document.querySelector("#schedType");
-    const timeIn = document.querySelector("#schedTime");
+    const hourSel = document.querySelector("#schedHour");
+    const minSel = document.querySelector("#schedMin");
+    const timeIn = document.querySelector(".sched-time");   // 容器，整体显隐
     const everyIn = document.querySelector("#schedEvery");
+    const pad2 = (i) => String(i).padStart(2, "0");
+    if (hourSel && !hourSel.options.length) {
+      hourSel.innerHTML = Array.from({ length: 24 }, (_, i) =>
+        '<option value="' + pad2(i) + '"' + (i === 9 ? " selected" : "") + '>' +
+        pad2(i) + " 时</option>").join("");
+    }
+    if (minSel && !minSel.options.length) {
+      minSel.innerHTML = Array.from({ length: 60 }, (_, i) =>
+        '<option value="' + pad2(i) + '"' + (i === 0 ? " selected" : "") + '>' +
+        pad2(i) + " 分</option>").join("");
+    }
     if (typeSel) {
       typeSel.onchange = () => {
         const daily = typeSel.value === "daily";
-        timeIn.hidden = !daily;
-        everyIn.hidden = daily;
+        if (timeIn) timeIn.hidden = !daily;
+        if (everyIn) everyIn.hidden = daily;
       };
     }
 
