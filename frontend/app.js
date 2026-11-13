@@ -2536,6 +2536,85 @@
       };
     }
 
+    // —— 心情 & 语速 ——
+    const moodSel = $("#av2Mood"), rateSel = $("#av2Rate");
+    const MOOD_KEY = "avatar2_mood", RATE_KEY = "avatar2_rate";
+    let moodsCache = [], moodsLoaded = false;
+    async function loadMoods() {
+      if (moodsLoaded || !moodSel) return;
+      try {
+        const r = await api("/api/avatar2/moods");
+        moodsCache = r.items || [];
+        const opts = ['<option value="auto">🤖 心情：自动判断</option>'];
+        moodsCache.forEach((m) => {
+          opts.push('<option value="' + esc(m.key) + '">' + esc(m.emoji + " " + m.label) + "</option>");
+        });
+        moodSel.innerHTML = opts.join("");
+        moodsLoaded = true;
+        const saved = localStorage.getItem(MOOD_KEY);
+        if (saved && moodSel.querySelector('option[value="' + saved + '"]')) moodSel.value = saved;
+        moodSel.onchange = () => {
+          try { localStorage.setItem(MOOD_KEY, moodSel.value); } catch (e) {}
+          const m = moodsCache.find((x) => x.key === moodSel.value);
+          if (m) say("心情：" + m.emoji + " " + m.label + " · " + m.desc);
+        };
+      } catch (e) {}
+    }
+    if (rateSel) {
+      const saved = localStorage.getItem(RATE_KEY);
+      if (saved) rateSel.value = saved;
+      rateSel.onchange = () => {
+        try { localStorage.setItem(RATE_KEY, rateSel.value); } catch (e) {}
+      };
+    }
+
+    // —— 导入文档朗读：先预览，用户自己删减后再填进朗读框 ——
+    const docBtn = $("#av2DocBtn"), docIn = $("#av2Doc");
+    const docBox = $("#av2DocBox"), docName = $("#av2DocName");
+    const docMeta = $("#av2DocMeta"), docText = $("#av2DocText");
+    if (docBtn && docIn) {
+      docBtn.onclick = () => docIn.click();
+      docIn.onchange = async () => {
+        const f = docIn.files && docIn.files[0];
+        if (!f) return;
+        docIn.value = "";
+        say("正在读取「" + f.name + "」…");
+        const fd = new FormData();
+        fd.append("file", f);
+        try {
+          // multipart 必须走原生 fetch，api() 会强制 JSON
+          const r = await fetch("/api/avatar2/import_doc", { method: "POST", body: fd });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.detail || "导入失败");
+          if (!d.ok) throw new Error(d.error || "读不出文字");
+          docBox.hidden = false;
+          docName.textContent = f.name;
+          const bits = [d.chars + " 字", String(d.kind || "").toUpperCase()];
+          if (d.encoding) bits.push(d.encoding);
+          if (d.truncated) bits.push("已截断");
+          docMeta.textContent = bits.filter(Boolean).join(" · ") +
+            (d.warning ? " ⚠ " + d.warning : "");
+          docText.value = d.text;
+          say("已导入，可在下面预览、删减后再点「用这段」");
+        } catch (e) { say("导入失败：" + e.message, "err"); }
+      };
+      const useBtn = $("#av2DocUse");
+      if (useBtn) useBtn.onclick = () => {
+        const t = (docText.value || "").trim();
+        if (!t) { say("预览里没有文字", "err"); return; }
+        if (t.length > 1200) {
+          textIn.value = t.slice(0, 1200);
+          say("超过 1200 字上限，只填了前 1200 字（可自行删减）", "err");
+        } else {
+          textIn.value = t;
+          say("已填入朗读框（" + t.length + " 字）");
+        }
+        docBox.hidden = true;
+      };
+      const closeBtn = $("#av2DocClose");
+      if (closeBtn) closeBtn.onclick = () => { docBox.hidden = true; };
+    }
+
     // —— 生成 ——
     $("#av2Go").onclick = async () => {
       if (busy) return;
