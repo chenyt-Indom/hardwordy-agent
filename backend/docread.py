@@ -287,6 +287,30 @@ def _read_doc(raw: bytes) -> tuple:
             pass
 
 
+def _looks_binary(raw: bytes) -> bool:
+    """粗略判断字节流是不是二进制。
+
+    判定依据（对中文文本必须放行，所以不能只看 ASCII 比例）：
+      · 前 4KB 里有 NUL 字节 —— 除非它能按 UTF-16 正常解码成文字
+      · 控制字符（除 \\t \\n \\r）占比 > 15%
+    """
+    sample = raw[:4096]
+    if not sample:
+        return False
+    if b"\x00" in sample:
+        for enc in ("utf-16-le", "utf-16-be"):
+            try:
+                t = sample.decode(enc, "ignore")
+            except Exception:                           # noqa: BLE001
+                continue
+            ctrl = sum(1 for c in t if ord(c) < 32 and c not in "\t\n\r")
+            if ctrl / max(1, len(t)) < 0.05:
+                return False
+        return True
+    ctrl = sum(1 for b in sample if b < 32 and b not in (9, 10, 13))
+    return (ctrl / len(sample)) > 0.15
+
+
 # ---------------------------------------------------------------- 统一入口
 _EXT_KIND = {
     ".txt": "text", ".md": "text", ".markdown": "text", ".csv": "text",
