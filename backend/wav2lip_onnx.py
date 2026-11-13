@@ -406,6 +406,17 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
             if cw > 160 or ch > 160:
                 _b = cv2.GaussianBlur(patch, (0, 0), 1.0)
                 patch = cv2.addWeighted(patch, 1.28, _b, -0.28, 0)
+            # 色调偏移校正：上半脸是模型"看到"的已知区域，本应与原图一致。
+            # 用它两者的均值差当作色偏，整体平移 patch，能明显减轻贴回后的色块感。
+            # 只做平移（不缩放对比度），避免改坏唇部本身的结构。
+            _half = max(4, ch // 2)
+            try:
+                _ref_top = img[y1:y1 + _half, x1:x2].astype(np.float32)
+                _p_top = patch[:_half].astype(np.float32)
+                _off = _ref_top.mean(axis=(0, 1)) - _p_top.mean(axis=(0, 1))
+                patch = np.clip(patch.astype(np.float32) + _off, 0, 255).astype(np.uint8)
+            except Exception:  # noqa: BLE001
+                pass
 
             frame = img.copy()
             roi = frame[y1:y2, x1:x2].astype(np.float32)
