@@ -2481,13 +2481,24 @@
       btn.textContent = "生成中…";
       say("正在配音 → 口型对齐 → 合成，约 10 秒…");
       try {
+        const lipSel = $("#av2Lip");
         const r = await api("/api/avatar2/speak", {
           method: "POST",
-          body: JSON.stringify({ text: text, voice: voiceSel.value }),
+          body: JSON.stringify({
+            text: text,
+            voice: voiceSel.value,
+            lipsync: lipSel ? lipSel.value : "auto",
+          }),
         });
         if (!r.ok) throw new Error(r.error || "生成失败");
+        let tail = "";
+        if (r.fallback_from) {
+          tail = "（真口型失败已回退：" + (r.fallback_reason || "") + "）";
+        } else if (r.lipsync_label) {
+          tail = " · " + r.lipsync_label;
+        }
         say("已生成 " + r.duration + " 秒 · " + (r.size || []).join("×") +
-            " · " + (r.align || ""));
+            " · " + (r.align || "") + tail, r.fallback_from ? "err" : "");
         playVideo(r.name);
         loadVideos();
       } catch (e) {
