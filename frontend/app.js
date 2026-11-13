@@ -6604,18 +6604,11 @@
       float.hidden = !on;
       if (on) load();
     };
-    const bar = document.querySelector(".tools-bar");
-    const anchor = document.querySelector("#selfDevBtn");
-    if (bar && anchor && !document.querySelector("#schedOpenBtn")) {
-      const ob = document.createElement("button");
-      ob.type = "button";
-      ob.id = "schedOpenBtn";
-      ob.className = "pill pill-btn";
-      ob.title = "定时任务（独立面板 · 只读，不能在这里聊天）";
-      ob.textContent = "⏰ 定时";
-      ob.onclick = () => openFloat(float ? float.hidden : true);
-      bar.insertBefore(ob, anchor);
-    }
+    // 2026-11-13 用户要求：「定时任务移动到左侧工具栏」——
+    // 原来这里往顶栏插一颗 ⏰ pill（后来被抽屉脚本收进「开发与工具」组，
+    // 要翻两层才点得到）。现在入口是侧栏的 #autoPanel 分组：
+    // 侧栏看概览和检索、点 ⤢ 开这个弹窗看全文，两个入口都能用。
+    // 所以这里**不再创建任何顶栏按钮**。
     const closeBtn = document.querySelector("#schedClose");
     if (closeBtn) closeBtn.onclick = () => openFloat(false);
     document.addEventListener("keydown", (e) => {
