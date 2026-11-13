@@ -774,8 +774,12 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
 
 # ---------------------------------------------------------------- 一站式
 def speak(text: str, voice: str = "", rate: int = 0, style: str = "",
-          engine: str = "auto") -> dict:
-    """文本 → TTS → 口型对齐 → mp4。这是给工具/前端调的主入口。"""
+          engine: str = "auto", lipsync: str = "auto") -> dict:
+    """文本 → TTS → 口型对齐 → mp4。这是给工具/前端调的主入口。
+
+    engine  = TTS 引擎（auto/edge/sapi）
+    lipsync = 口型引擎：auto（有 Wav2Lip 就用）/ wav2lip / param
+    """
     t = (text or "").strip()
     if not t:
         return {"ok": False, "error": "文本是空的"}
