@@ -4529,6 +4529,24 @@ def _do_read_file(arguments, ui_events):
     path = arguments.get("path") or ""
     if not path:
         return "错误：未提供文件路径。"
+    # ★ 2026-11-14：用户可能只给文件名或半个路径（「我的简历.docx」）。
+    #   原来直接 open，路径不完整就报「文件不存在」，明明盘上有这个文件。
+    #   现在先解析：原样 → 相对项目根 → 在常用目录里模糊找。
+    try:
+        _rp = file_tools.resolve_path(path)
+    except Exception:
+        _rp = {"ok": True, "path": path, "how": "exact", "candidates": []}
+    if not _rp.get("ok"):
+        return "错误：%s" % _rp.get("error", "找不到这个文件")
+    if _rp.get("how") == "search" and not _rp.get("decisive"):
+        _cands = _rp.get("candidates") or []
+        _lines = ["按「%s」找到 %d 个相似文件，**不确定是哪一个**：" % (path, len(_cands))]
+        for _i, _c in enumerate(_cands[:10], 1):
+            _lines.append("  %d. %s" % (_i, _c["path"]))
+        _lines.append("\n请从上面挑一个完整路径再调用一次 read_file；"
+                      "如果都不是，问用户要准确位置。")
+        return "\n".join(_lines)
+    path = _rp.get("path") or path
     # 视频：抽帧展示（让模型能“看”视频）
     if os.path.splitext(path)[1].lower() in _VIDEO_EXTS:
         from . import video as video_mod
