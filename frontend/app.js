@@ -2218,15 +2218,40 @@
       head.setAttribute("role", "button");
       head.setAttribute("tabindex", "0");
 
-      const apply = (collapsed) => {
+      // 高度动画由 JS 直接写 height：从当前高度 → 0，或从 0 → 内容高度。
+      // 展开结束后把 height 设回 auto，内容变多（比如新传了文档）也不会被卡住。
+      const foldIn = inner;
+      const setHeight = (collapsed, animate) => {
+        if (!animate) {
+          foldIn.style.transition = "none";
+          foldIn.style.height = collapsed ? "0px" : "auto";
+          void foldIn.offsetHeight; // 强制重排，让 transition 从新值开始
+          foldIn.style.transition = "";
+          return;
+        }
+        if (collapsed) {
+          const cur = foldIn.getBoundingClientRect().height;
+          foldIn.style.height = cur + "px";
+          requestAnimationFrame(() => { foldIn.style.height = "0px"; });
+        } else {
+          const h = foldIn.scrollHeight;
+          foldIn.style.height = "0px";
+          requestAnimationFrame(() => { foldIn.style.height = h + "px"; });
+          setTimeout(() => {
+            if (!pnl.classList.contains("collapsed")) foldIn.style.height = "auto";
+          }, 330);
+        }
+      };
+      const apply = (collapsed, animate) => {
         pnl.classList.toggle("collapsed", collapsed);
         head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+        setHeight(collapsed, animate !== false);
       };
-      apply(!!folded[id]);
+      apply(!!folded[id], false);
 
       const toggle = () => {
         const next = !pnl.classList.contains("collapsed");
-        apply(next);
+        apply(next, true);
         folded[id] = next;
         saveFolded();
       };
