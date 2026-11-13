@@ -57,6 +57,7 @@ sys.path.insert(0, ROOT)
 SERVER_CFG = os.path.join(ROOT, "data", "deploy", "server.json")
 RELAY_CFG = os.path.join(ROOT, "data", "hive", "relay.json")
 RELAY_SRC = os.path.join(ROOT, "backend", "hive_relay_server.py")
+WS_SRC = os.path.join(ROOT, "backend", "ws_min.py")
 REMOTE_DIR = "/opt/hive"
 SERVICE = "hive-relay"
 
