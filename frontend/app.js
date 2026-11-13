@@ -2293,6 +2293,11 @@
     }
 
     function setPin(on) {
+      // 没形象就别开常驻：右下角会挂一张破图
+      if (on && img.hidden) {
+        say("先上传一张形象图（或点「用最新生成图」），再常驻右下角", "err");
+        return;
+      }
       pin.classList.toggle("on", !!on);
       pinBtn.classList.toggle("active", !!on);
       pinBtn.title = on ? "取消常驻" : "常驻右下角";
