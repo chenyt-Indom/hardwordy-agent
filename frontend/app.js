@@ -9443,6 +9443,13 @@
         b.onclick = () => {
           hvThinkFollow = !hvThinkFollow;
           try { localStorage.setItem("think_follow", hvThinkFollow ? "1" : "0"); } catch (e) { /* 隐私模式 */ }
+          // 主动打开跟随 → 之前点过「归位」的卡片重新纳入跟随
+          if (hvThinkFollow) {
+            Object.keys(hdCards).forEach((k) => {
+              const n = hdCards[k] && hdCards[k].node;
+              if (n) n._noFollow = false;
+            });
+          }
           hvSyncThink();
           // 已存在的实时卡片立刻跟着动
           Object.keys(hdCards).forEach((k) => hvDock(hdCards[k] && hdCards[k].node));
