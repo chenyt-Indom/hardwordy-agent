@@ -798,12 +798,24 @@ def speak(text: str, voice: str = "", rate: int = 0, style: str = "",
         return {"ok": False, "error": "音频转码失败：%s: %s" % (type(e).__name__, e)}
 
     words = _asr_words(wav)
+    # 口型引擎选择：auto 时，有 Wav2Lip 权重就用真口型
+    want = (lipsync or "auto").lower()
+    if want not in ("wav2lip", "param"):
+        want = "auto"
+    use = want
+    if want == "auto":
+        try:
+            from . import wav2lip_onnx as _w2l
+            use = "wav2lip" if _w2l.available() else "param"
+        except Exception:                               # noqa: BLE001
+            use = "param"
     name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
     out = os.path.join(_vdir(), name)
-    r = render(_img_path(), wav, out, words=words)
+    r = render(_img_path(), wav, out, words=words, engine=use)
     if not r.get("ok"):
         return r
     from urllib.parse import quote
+    used = r.get("engine") or ("wav2lip" if use == "wav2lip" else "param")
     return {
         "ok": True,
         "name": name,
@@ -813,6 +825,11 @@ def speak(text: str, voice: str = "", rate: int = 0, style: str = "",
         "size": r["size"],
         "frames": r["frames"],
         "bytes": r["bytes"],
+        "lipsync": used,
+        "lipsync_label": ("Wav2Lip 真口型" if used == "wav2lip"
+                          else "声学形变口型"),
+        "fallback_from": r.get("fallback_from", ""),
+        "fallback_reason": r.get("fallback_reason", ""),
         "audio_url": a.get("url") or "",
         "audio_engine": a.get("engine") or "",
         "align": ("字级对齐 %d 字" % len(words)) if words else "声学驱动（未找到 ASR 模型）",
