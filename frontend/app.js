@@ -11011,12 +11011,26 @@
         now = live.online
           ? "🟢 已连接 " + (live.rtt_ms || 0) + "ms"
           : "⚪ 未连接" + (live.error ? "：" + live.error : "（进群时会自动连）");
+        if (live.online) {
+          const ok = live.direct_ok || 0, bad = live.direct_fail || 0;
+          now += "\n   · P2P 直连：" + ok + " 人";
+          if (bad) now += "；" + bad + " 人打洞失败，暂时走服务器兜底";
+          if (live.all_direct) now += "　✅ 全员直连，消息不经服务器";
+          if (live.bypassed) now += "\n   · 已绕过服务器 " + live.bypassed + " 帧";
+          if (live.signal_error) now += "\n   · ⚠️ " + live.signal_error;
+          (live.p2p || []).forEach((p) => {
+            now += "\n   · " + (p.name || p.uid || "?") + "："
+              + (p.state === "ok" ? "直连"
+                 : p.state === "connecting" ? "打洞中…"
+                 : "失败（" + (p.err || "未知") + "）");
+          });
+        }
       }
       openModal({
         title: "🌐 中继服务器",
-        hint: "跨网络的群聊需要一台公网服务器转发消息。转发的是密文，"
-          + "服务器看不到任何聊天内容。\n当前：" + now + "\n\n"
-          + "地址形如 hive4://你的IP:8765。密钥第一次保存会自动生成，"
+        hint: "服务器只做两件事：帮你和对方**交换地址**、在你打洞失败时兜底转发密文。"
+          + "\n连上之后聊天走 P2P 直连，服务器收不到消息内容。\n当前：" + now + "\n\n"
+          + "地址形如 hive4://你的IP:18765。密钥第一次保存会自动生成，"
           + "再把它填到服务器上（用 deploy 脚本则不用管）。",
         input: cfg.url || "",
         placeholder: "hive4://1.2.3.4:8765",
