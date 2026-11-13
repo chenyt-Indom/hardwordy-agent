@@ -207,14 +207,24 @@ def _public_ip() -> str:
     if _PUB_CACHE["ts"] and (now - _PUB_CACHE["ts"]) < ttl:
         return _PUB_CACHE["ip"]
     ip = ""
-    try:
-        import urllib.request
-        with urllib.request.urlopen("https://api.ipify.org", timeout=2.5) as r:
-            s = r.read(64).decode("utf-8", "ignore").strip()
-            if s.count(".") == 3:
+    # 多源依次试（2026-11-13 实测）：api.ipify.org 在国内会被「远程主机强迫关闭连接」，
+    # 只写它一个的话，国内用户永远看不到「跨网络」地址。
+    for url in ("https://ipv4.icanhazip.com",
+                "http://ip.3322.net",
+                "https://api.ipify.org"):
+        try:
+            import urllib.request
+            with urllib.request.urlopen(url, timeout=2.5) as r:
+                s = r.read(64).decode("utf-8", "ignore").strip()
+            # 有些源会带换行或多余文字，只认「纯 IPv4」那种形态
+            s = s.split()[0] if s else ""
+            parts = s.split(".")
+            if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255
+                                       for p in parts):
                 ip = s
-    except Exception:
-        pass
+                break
+        except Exception:
+            continue
     _PUB_CACHE["ip"] = ip
     _PUB_CACHE["ts"] = now
     return ip
