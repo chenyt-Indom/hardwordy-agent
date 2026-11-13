@@ -439,7 +439,6 @@ class RelayLink:
                     pass
                 return False
             sock = ws_min.WSSock(sock, rest=rest, mask_out=True)
-            self.ws_path_ok = True
 
         # 握手：先收 challenge，再回 HMAC
         got = _recv_pkt(sock)
