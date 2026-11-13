@@ -499,47 +499,7 @@ body.dragging .drop-overlay,
 .drop-overlay-title { margin-top: 12px; font-size: 18px; font-weight: 600; color: var(--text); }
 .drop-overlay-sub { margin-top: 6px; font-size: 12px; color: var(--muted); }
 
-/* ---------- 语音输入状态条 ---------- */
-.voice-hint {
-  display: none; align-items: center; gap: 8px;
-  margin-bottom: 8px; padding: 6px 12px;
-  font-size: 13px; color: var(--muted);
-  background: var(--panel2); border: 1px solid var(--border);
-  border-radius: 10px;
-}
-.voice-hint.on, .voice-hint.awake { display: flex; }
-.voice-hint.on { color: #7fdcac; border-color: #2f6f4f; }
-.voice-hint.awake { color: #f0b95c; border-color: #8a6120; background: rgba(240, 185, 92, .08); }
-.v-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: #5b6478; flex: 0 0 auto;
-}
-.voice-hint.on .v-dot { background: var(--green); animation: vpulse 1.4s ease-in-out infinite; }
-.voice-hint.awake .v-dot { background: #f0a83c; animation: vpulse .9s ease-in-out infinite; }
-@keyframes vpulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: .4; transform: scale(.78); }
-}
 .icon-btn.active { border-color: var(--green); color: var(--green); }
-
-/* 电平条：说话时它要跟着跳。**一直不动就说明没采到声音** ——
-   以前"喊不动"只能靠猜（麦克风选错了？系统静音了？），现在一眼能看出来。 */
-.voice-hint .v-level {
-  flex: 0 0 auto; width: 48px; height: 6px; border-radius: 4px;
-  background: rgba(255, 255, 255, .12); overflow: hidden;
-}
-.voice-hint .v-level i {
-  display: block; height: 100%; width: 0;
-  background: var(--muted); transition: width .12s linear, background .2s;
-}
-.voice-hint .v-level.hot i { background: var(--green); }
-.voice-hint .v-dev {
-  flex: 0 0 auto; max-width: 200px; padding: 1px 4px;
-  font-size: 11px; color: inherit; background: transparent;
-  border: 1px solid var(--border); border-radius: 6px;
-}
-.voice-hint .v-dev option { background: var(--panel); color: var(--text); }
-
 /* ---------- 轻提示（toast）---------- */
 .toast-wrap {
   position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
