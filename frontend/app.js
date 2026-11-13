@@ -2255,7 +2255,8 @@
           foldIn.style.transition = "none";
           foldIn.style.height = collapsed ? "0px" : "auto";
           void foldIn.offsetHeight; // 强制重排，让 transition 从新值开始
-          foldIn.style.transition = "";
+          // ⚠️ 不能清成 ""：那会回落到 style.css 的规则，而那条在这里不生效
+          foldIn.style.transition = "height .3s cubic-bezier(.4, 0, .2, 1)";
           return;
         }
         // ⚠️ 这里不用 requestAnimationFrame：页面在后台标签页时 rAF 会被挂起，
