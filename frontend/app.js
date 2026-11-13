@@ -8463,6 +8463,9 @@
       const cp = el("hiveModalCopy");
       cp.hidden = !(opt.code || opt.copyInput);
       cp.dataset.from = opt.copyInput ? "input" : "code";
+      // 精确指定「复制出去的那串字」：不填就复制整个框（旧行为）。
+      // 「我的地址」用它，否则会把整段说明文字一起复制走。
+      cp.dataset.value = opt.copyValue || "";
       cp.textContent = opt.copyLabel || (opt.copyInput ? "📋 复制" : "📋 复制密码");
       const ok = el("hiveModalOk");
       ok.hidden = !!opt.noOk;
