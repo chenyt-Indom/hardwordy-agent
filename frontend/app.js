@@ -274,6 +274,7 @@
       document.body.appendChild(w);
     }
     placeThinkDock(w);
+    ensureThinkHome(w, sendThinkHome);
   }
   // ★ 2026-11-12 用户三次反馈「点了跟随，过一会儿又自己回原位」：
   //   根因是**好几处**都会调 undockOne（正文开始输出、思考结束、新一轮开始…），
