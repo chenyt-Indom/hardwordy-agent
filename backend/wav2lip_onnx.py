@@ -372,10 +372,12 @@ def _boost_patch(patch: np.ndarray, open_amt: float, my_rel: float,
 
 
 def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
-           on_progress=None, boost: float = 1.0) -> dict:
+           on_progress=None, boost: float = 1.0, expr: dict = None) -> dict:
     """图片 + 音频 → 真口型视频。
 
     boost: 口型幅度倍率（1.0=原始输出；1.2~1.6 明显放大；>1.8 会出涂抹感）
+    expr : 表情层配置（avatar2_expr.resolve() 的返回值）。为 None 则不做表情。
+           表情叠加在**嘴部合成之后**的整帧上，所以不会破坏 Wav2Lip 的口型。
     """
     sess = session()
     if sess is None:
