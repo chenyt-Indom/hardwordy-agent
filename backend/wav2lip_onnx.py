@@ -488,11 +488,10 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     # 改成**非对称**：上边只留 0.05（人中不能动），下边放到 0.15（覆盖整个开口
     # 到下巴上沿）。实测 96 空间覆盖 57.9~77.1，正好包住开口。
     # 下边再放大（0.18 / 旧 0.60~0.88）会把下巴也换掉，出现重影和脏块，更吓人。
-    _up = 0.05
-    _dn = 0.15
-    _mtop = max(0.0, my_rel - _up)
-    _mbot = min(1.0, my_rel + _dn)
-    msk = _feather_mask(ch, cw, top=_mtop, bot=_mbot, feather=0.03)
+    # 蒙版形状：矩形整行宽 → 椭圆（rx=0.36）。矩形带左右铺满裁剪框，两颊
+    # 皮肤也被换成 96x96 模糊输出，实测视觉上像"整块嘴被切下来往下拽"；
+    # 椭圆只覆盖嘴周，两颊与下巴保留原图，接缝感明显更轻。
+    msk = _mouth_mask(ch, cw, my_rel, rx=0.36, up=0.06, dn=0.16, soft=0.35)
 
     cmd = [exe, "-y", "-loglevel", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (W, H),
