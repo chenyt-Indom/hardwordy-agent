@@ -11117,6 +11117,281 @@
     });
 
     // 2026-11-13：这个按钮原来填「云端中继地址」，后来叫「连接码」，
+    // ---------------------------------------------------------- 密钥与部署（2026-11-14）
+    // 两种密钥（SSH 私钥 / 中继密钥）都支持「拖文件」和「直接粘贴」，默认打码，
+    // 点眼睛才向服务端要明文。配齐后能一键部署，日志在弹窗里实时滚。
+    let dpTimer = null;
+
+    function _dpEsc(s) {
+      return String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    }
+
+    function _dpTag(id, ok, text) {
+      const n = el(id);
+      if (!n) return;
+      n.textContent = text;
+      n.className = "dp-tag " + (ok ? "ok" : "bad");
+    }
+
+    function buildDeployPanel() {
+      const mask = document.createElement("div");
+      mask.className = "dp-mask";
+      mask.id = "dpMask";
+      mask.hidden = true;
+      mask.innerHTML = `
+        <div class="dp-box">
+          <div class="dp-head"><b>🔐 密钥与部署</b><button id="dpClose" title="关闭">✕</button></div>
+          <div class="dp-body">
+            <div class="dp-status" id="dpStatus">读取中…</div>
+
+            <div class="dp-sec">
+              <div class="dp-sec-h">服务器 <span class="dp-tag" id="dpSrvTag">未配置</span></div>
+              <div class="dp-row"><input id="dpHost" placeholder="139.199.69.88（也可以直接粘 user@host:22）"></div>
+              <div class="dp-row">
+                <label>用户</label><input id="dpUser" class="dp-num" placeholder="root">
+                <label>端口</label><input id="dpPort" class="dp-num" placeholder="22">
+                <label>中继端口</label><input id="dpRelayPort" class="dp-num" placeholder="18765">
+              </div>
+              <div class="dp-row">
+                <button class="btn sm" id="dpSrvSave">保存服务器</button>
+                <button class="btn sm ghost" id="dpSrvClear">清除</button>
+              </div>
+            </div>
+
+            <div class="dp-sec">
+              <div class="dp-sec-h">SSH 私钥 <span class="dp-tag" id="dpSshTag">未配置</span></div>
+              <div class="dp-drop" id="dpSshDrop">把私钥文件拖到这里，或点这里选文件</div>
+              <input type="file" id="dpSshFile" hidden>
+              <textarea id="dpSshText" placeholder="也可以直接粘贴私钥全文（-----BEGIN OPENSSH PRIVATE KEY----- …）"></textarea>
+              <div class="dp-row">
+                <button class="btn sm ghost" id="dpSshEye">👁 显示明文</button>
+                <button class="btn sm" id="dpSshSave">保存私钥</button>
+                <button class="btn sm ghost" id="dpSshClear">清除</button>
+              </div>
+              <div class="dp-hint" id="dpSshHint"></div>
+            </div>
+
+            <div class="dp-sec">
+              <div class="dp-sec-h">中继密钥 <span class="dp-tag" id="dpTokTag">未配置</span></div>
+              <div class="dp-drop" id="dpTokDrop">把密钥文件拖到这里，或点这里选文件</div>
+              <input type="file" id="dpTokFile" hidden>
+              <textarea id="dpTokText" placeholder="也可以直接粘贴中继密钥"></textarea>
+              <div class="dp-row">
+                <button class="btn sm ghost" id="dpTokEye">👁 显示明文</button>
+                <button class="btn sm" id="dpTokSave">保存密钥</button>
+                <button class="btn sm ghost" id="dpTokClear">清除</button>
+              </div>
+            </div>
+
+            <div class="dp-sec">
+              <div class="dp-sec-h">部署到服务器</div>
+              <div class="dp-row">
+                <button class="btn" id="dpRun">🚀 一键部署</button>
+                <button class="btn sm ghost" id="dpRestart">只重启服务</button>
+                <button class="btn sm ghost" id="dpStop" hidden>停止</button>
+              </div>
+              <pre class="dp-log" id="dpLog"></pre>
+            </div>
+          </div>
+        </div>`;
+      document.body.appendChild(mask);
+
+      el("dpClose").addEventListener("click", closeDeployPanel);
+      mask.addEventListener("click", (e) => { if (e.target === mask) closeDeployPanel(); });
+
+      _dpBindDrop("dpSshDrop", "dpSshFile", "dpSshText");
+      _dpBindDrop("dpTokDrop", "dpTokFile", "dpTokText");
+
+      el("dpSshEye").addEventListener("click", () => _dpEye("ssh", "dpSshText", "dpSshEye"));
+      el("dpTokEye").addEventListener("click", () => _dpEye("relay", "dpTokText", "dpTokEye"));
+
+      el("dpSrvSave").addEventListener("click", async () => {
+        const d = await api("/api/deploy/server", {
+          host: el("dpHost").value.trim(),
+          user: el("dpUser").value.trim() || "root",
+          port: parseInt(el("dpPort").value, 10) || 22,
+          relay_port: parseInt(el("dpRelayPort").value, 10) || 18765,
+        }).catch((e) => ({ ok: false, error: e.message }));
+        if (!d.ok) { alert("保存失败：" + (d.error || "未知原因")); return; }
+        toast("服务器信息已保存");
+        refreshDeploy();
+      });
+      el("dpSrvClear").addEventListener("click", async () => {
+        if (!confirm("清除服务器信息？（已部署的服务不受影响）")) return;
+        await api("/api/deploy/server/clear", {}).catch(() => null);
+        toast("已清除");
+        refreshDeploy();
+      });
+
+      el("dpSshSave").addEventListener("click", () => _dpSaveKey("ssh", "dpSshText", "dpSshEye"));
+      el("dpTokSave").addEventListener("click", () => _dpSaveKey("relay", "dpTokText", "dpTokEye"));
+      el("dpSshClear").addEventListener("click", () => _dpClearKey("ssh"));
+      el("dpTokClear").addEventListener("click", () => _dpClearKey("relay"));
+
+      el("dpRun").addEventListener("click", () => _dpStart(false));
+      el("dpRestart").addEventListener("click", () => _dpStart(true));
+      el("dpStop").addEventListener("click", async () => {
+        await api("/api/deploy/stop", {}).catch(() => null);
+      });
+    }
+
+    // 拖文件：拖进来读成文本填进 textarea（看得见、能核对），也支持点一下选文件。
+    function _dpBindDrop(dropId, fileId, textId) {
+      const drop = el(dropId), fi = el(fileId), ta = el(textId);
+      const read = async (file) => {
+        if (!file) return;
+        if (file.size > 64 * 1024) {
+          alert("这个文件 " + Math.round(file.size / 1024) + "KB，太大了。私钥/密钥一般只有几 KB，确认拖对了没。");
+          return;
+        }
+        let txt = "";
+        try { txt = await file.text(); } catch (e) { alert("读文件失败：" + e.message); return; }
+        ta.value = txt;
+        drop.textContent = "✅ 已读取 " + file.name + "（" + file.size + " 字节），内容在下方，核对后点保存";
+      };
+      drop.addEventListener("click", () => fi.click());
+      fi.addEventListener("change", () => read(fi.files && fi.files[0]));
+      ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => {
+        e.preventDefault(); e.stopPropagation(); drop.classList.add("over");
+      }));
+      ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => {
+        e.preventDefault(); e.stopPropagation(); drop.classList.remove("over");
+      }));
+      drop.addEventListener("drop", (e) => {
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        read(f);
+      });
+    }
+
+    // 眼睛：默认不显示。点一下才向服务端要明文，再点收起。
+    async function _dpEye(which, taId, btnId) {
+      const ta = el(taId), btn = el(btnId);
+      if (btn.dataset.on === "1") {
+        ta.value = "";
+        btn.dataset.on = "0";
+        btn.textContent = "👁 显示明文";
+        return;
+      }
+      const d = await api("/api/deploy/key?which=" + which + "&reveal=1")
+        .catch((e) => ({ ok: false, error: e.message }));
+      if (!d.ok || !d.text) { alert("还没有保存过，先把文件拖进来或粘贴内容再保存"); return; }
+      ta.value = d.text;
+      btn.dataset.on = "1";
+      btn.textContent = "🙈 隐藏";
+    }
+
+    async function _dpSaveKey(which, taId, btnId) {
+      const ta = el(taId);
+      const txt = (ta.value || "").trim();
+      if (!txt) { alert("先把文件拖进来，或者把内容粘进下面的框"); return; }
+      const d = await api("/api/deploy/key", { which: which, text: txt })
+        .catch((e) => ({ ok: false, error: e.message }));
+      if (!d.ok) { alert("保存失败：" + (d.error || "未知原因")); return; }
+      toast(which === "ssh" ? "SSH 私钥已保存" : "中继密钥已保存");
+      ta.value = "";
+      el(btnId).dataset.on = "0";
+      el(btnId).textContent = "👁 显示明文";
+      refreshDeploy();
+    }
+
+    async function _dpClearKey(which) {
+      const nm = which === "ssh" ? "SSH 私钥" : "中继密钥";
+      if (!confirm("清除" + nm + "？")) return;
+      await api("/api/deploy/key/clear", { which: which }).catch(() => null);
+      toast(nm + "已清除");
+      refreshDeploy();
+    }
+
+    async function refreshDeploy() {
+      const d = await api("/api/deploy/overview").catch(() => null);
+      if (!d || !d.ok) { el("dpStatus").textContent = "读取失败（后端可能还没重启）。"; return; }
+      const s = d.server || {}, k = d.ssh_key || {}, t = d.relay_token || {};
+      const L = [];
+      L.push("服务器：" + (s.configured ? s.host + ":" + s.port + "（" + s.user + "）" : "未配置"));
+      L.push("SSH 私钥：" + (k.set
+        ? (k.valid === false ? "已配置但格式有问题" : "已配置" + (k.fingerprint ? "　" + k.fingerprint : ""))
+        : "未配置"));
+      L.push("中继密钥：" + (t.set ? "已配置　" + (t.hint || "") : "未配置"));
+      L.push(d.ready ? "✅ 三项齐全，可以部署了" : "⚠️ 还缺：" + ((d.missing || []).join("、")));
+      el("dpStatus").textContent = L.join("\n");
+
+      _dpTag("dpSrvTag", !!s.configured, s.configured ? "已配置" : "未配置");
+      _dpTag("dpSshTag", !!k.set && k.valid !== false,
+        k.set ? (k.valid === false ? "格式有问题" : "已配置") : "未配置");
+      _dpTag("dpTokTag", !!t.set, t.set ? "已配置" : "未配置");
+      el("dpSshHint").textContent = k.set
+        ? (k.hint || "") + (k.size ? "　" + (Math.round(k.size / 102.4) / 10) + " KB" : "")
+        : "";
+
+      // 只在空的时候回填 —— 别把用户正在改的内容冲掉
+      if (!el("dpHost").value) el("dpHost").value = s.host || "";
+      if (!el("dpUser").value) el("dpUser").value = s.user || "root";
+      if (!el("dpPort").value) el("dpPort").value = String(s.port || 22);
+      if (!el("dpRelayPort").value) el("dpRelayPort").value = String(s.relay_port || 18765);
+
+      if ((d.deploy || {}).state === "running") _dpPollLog();
+    }
+
+    async function _dpPollLog() {
+      clearTimeout(dpTimer);
+      const log = el("dpLog");
+      if (!log) return;
+      const since = parseInt(log.dataset.seq || "0", 10);
+      const d = await api("/api/deploy/log?since=" + since).catch(() => null);
+      if (!d || !d.ok) return;
+      log.dataset.seq = String(d.seq);
+      if (d.lines && d.lines.length) {
+        const html = d.lines.map((x) => {
+          const t = String(x.t || "");
+          let cls = "";
+          if (/✅|完成/.test(t)) cls = "dp-ok";
+          else if (/❌|失败|⚠️|Traceback|Error/.test(t)) cls = "dp-err";
+          return '<span class="' + cls + '">' + _dpEsc(t) + "</span>";
+        }).join("\n");
+        log.innerHTML += (log.innerHTML ? "\n" : "") + html;
+        log.scrollTop = log.scrollHeight;
+      }
+      if (d.state === "running") {
+        el("dpStop").hidden = false;
+        el("dpRun").disabled = true;
+        el("dpRestart").disabled = true;
+        dpTimer = setTimeout(_dpPollLog, 800);
+      } else {
+        el("dpStop").hidden = true;
+        el("dpRun").disabled = false;
+        el("dpRestart").disabled = false;
+        if (d.state === "done" || d.state === "failed") {
+          toast(d.state === "done" ? "部署完成 ✅" : "部署失败，看日志");
+          refreshDeploy();
+        }
+      }
+    }
+
+    async function _dpStart(restartOnly) {
+      const log = el("dpLog");
+      log.innerHTML = "";
+      log.dataset.seq = "0";
+      const d = await api("/api/deploy/run", { restart_only: !!restartOnly })
+        .catch((e) => ({ ok: false, error: e.message }));
+      if (!d.ok) { alert("启动失败：" + (d.error || "未知原因")); return; }
+      _dpPollLog();
+    }
+
+    function openDeployPanel() {
+      if (!el("dpMask")) buildDeployPanel();
+      el("dpMask").hidden = false;
+      el("dpLog").innerHTML = "";
+      el("dpLog").dataset.seq = "0";
+      refreshDeploy();
+    }
+
+    function closeDeployPanel() {
+      clearTimeout(dpTimer);
+      const m = el("dpMask");
+      if (m) m.hidden = true;
+    }
+
+    el("deployBtn").addEventListener("click", openDeployPanel);
     // 现在改成「我的地址」—— 群主最常做的事就是把自己的地址发给别人。
     // 同一个 WiFi 下压根用不上地址（UDP 广播自动发现），只有跨网络才需要。
     el("hiveRelayBtn").addEventListener("click", async () => {
