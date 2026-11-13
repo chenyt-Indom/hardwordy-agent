@@ -340,6 +340,8 @@
   function applyThinkDock() {
     _thinkBoxes.forEach((w) => {
       if (!w.isConnected) { _thinkBoxes.delete(w); return; }
+      // 点过「归位」的卡片保持原位，不再被全局「跟随视角」拽起来
+      if (w._noFollow) { undockOne(w, true); return; }
       if (thinkFollow) dockOne(w); else undockOne(w);
     });
     if (thinkFollow) placeAllThinkDocks();
