@@ -2334,8 +2334,30 @@
         const st = await api("/api/avatar2/status");
         const bits = [st.ffmpeg ? "ffmpeg ✓" : "ffmpeg ✗",
                       st.asr ? "字级对齐 ✓" : "仅声学驱动"];
-        if (!st.torch) bits.push("无 torch → 不能 Wav2Lip");
-        say(bits.join(" · ") + "。口型为参数化形变，不是神经网络重绘。");
+        if (st.wav2lip) bits.push("Wav2Lip ✓ " + (st.wav2lip_size_mb || 0) + "MB");
+        // 口型引擎下拉：按后端真实能力填充，不写死
+        const lip = $("#av2Lip");
+        if (lip) {
+          const opts = [];
+          if (st.wav2lip) {
+            opts.push('<option value="auto">口型：自动（真口型）</option>');
+            opts.push('<option value="wav2lip">口型：Wav2Lip 真口型</option>');
+          } else {
+            opts.push('<option value="auto">口型：自动（形变）</option>');
+          }
+          opts.push('<option value="param">口型：声学形变（不崩）</option>');
+          lip.innerHTML = opts.join("");
+          const saved = localStorage.getItem("av2_lipsync") || "auto";
+          lip.value = saved;
+          lip.onchange = () => {
+            try { localStorage.setItem("av2_lipsync", lip.value); } catch (e) {}
+          };
+        }
+        if (st.wav2lip) {
+          say(bits.join(" · ") + "。口型为神经网络重绘（真口型）。");
+        } else {
+          say(bits.join(" · ") + "。未找到 Wav2Lip 权重，口型为声学形变。", "err");
+        }
       } catch (e) { /* 状态读不到不影响用 */ }
     }
 
