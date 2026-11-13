@@ -4515,13 +4515,14 @@ html[data-theme="light"] select.pill-select option {
    做法：JS 把 .sec-head 之后的兄弟节点包进 .pnl-fold > .pnl-fold-in，
    用 grid-template-rows 1fr ↔ 0fr 做高度动画 —— 不需要预先知道内容高度，
    也没有 max-height 那种"高度猜大了就卡一下"的毛病。 */
-.pnl-fold {
-  display: grid;
-  grid-template-rows: 1fr;
-  transition: grid-template-rows .3s cubic-bezier(.4, 0, .2, 1);
+/* ⚠️ 高度动画由 JS 直接写 height（见 app.js 的 initFoldablePanels）。
+   原本想用 grid-template-rows: 1fr → 0fr 纯 CSS 做，但实测某些内核对 0fr
+   不生效（折叠后 computed 仍是内容高度 55.5px），所以改成 JS 量高度再过渡，
+   兼容性最稳。这里只留容器与裁剪。 */
+.pnl-fold > .pnl-fold-in {
+  overflow: hidden;
+  transition: height .3s cubic-bezier(.4, 0, .2, 1);
 }
-.pnl-fold > .pnl-fold-in { overflow: hidden; min-height: 0; }
-.panel.collapsed .pnl-fold { grid-template-rows: 0fr; }
 .panel.collapsed .sec-head { margin-bottom: 0; }
 
 /* 可折叠面板的标题行：整行都能点，hover 有反馈 */
