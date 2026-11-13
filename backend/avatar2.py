@@ -577,8 +577,11 @@ def _mouth_shadow(w: int, h: int, op: float) -> "object":
     a = np.clip(1.0 - r, 0.0, 1.0)
     a = a * a * (3.0 - 2.0 * a)
     a = a * (255.0 * 0.88 * float(np.clip(op, 0.0, 1.0)))
-    rgb = np.zeros((h, w, 3), dtype=np.uint8)
-    rgb[:, :] = (38, 16, 18)
+    # 垂直渐变：上暗（口腔深处）→ 下略亮（下唇内侧反光），比纯色有深度
+    t = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None, None]
+    top = np.array([26, 10, 12], dtype=np.float32)
+    bot = np.array([64, 27, 29], dtype=np.float32)
+    rgb = np.broadcast_to(top + (bot - top) * t, (h, w, 3)).astype(np.uint8)
     rgba = np.dstack([rgb, a.astype(np.uint8)])
     return Image.fromarray(rgba, mode="RGBA")
 
