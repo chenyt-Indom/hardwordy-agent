@@ -24,6 +24,69 @@ MAX_CHARS = 200000          # 单次导入的硬上限，防止把整个大文�
 _ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "gbk", "big5", "utf-16", "latin-1")
 
 
+def _normalize_cjk(text: str) -> str:
+    """把 CJK 部首/兼容字符还原成正常汉字。
+
+    实测（2026-11-14，data/kb/入团申请书.pdf）：pypdf 抽出来的是
+    「⼊团申请书」「⻘年团」「⼴⼤」「⾝边」「⽼师」—— 这些是康熙部首
+    (U+2F00-2FDF) 和 CJK 部首补充 (U+2E80-2EFF)，字形像但码位不同，
+    TTS 会把它们读错或直接跳过。
+
+    只对部首区做 NFKC 单字转换，**不动全角标点**（整体 NFKC 会把
+    「，。；」变成半角，中文排版会变丑）。
+    """
+    import unicodedata
+
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        if 0x2E80 <= cp <= 0x2FDF or 0xF900 <= cp <= 0xFAFF:
+            out.append(unicodedata.normalize("NFKC", ch))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+_SENT_END = "。！？；：!?;:…\"'）)》」』】"
+
+
+def _reflow(text: str) -> str:
+    """PDF 段落重排：把排版造成的**硬换行**合并回自然句子。
+
+    实测同一份 PDF 抽出「在实践中学习中\\n国特⾊社会主义」——
+    词被换行劈成两半，直接喂给 TTS 会断句错误、发音也怪。
+
+    规则：上一行结尾不是句末标点、且下一行不像新段落开头（标题/序号/
+    项目符号）时，就拼起来。行尾的连字符也一并处理。
+    """
+    lines = [l.strip() for l in text.split("\n")]
+    out = []
+    for ln in lines:
+        if not ln:
+            out.append("")
+            continue
+        if not out or not out[-1]:
+            out.append(ln)
+            continue
+        prev = out[-1]
+        # 下一行像新段落/标题/列表 -> 不合并
+        if re.match(r"^(第[一二三四五六七八九十百]+[章节条]|[0-9]+[.、）)]|"
+                    r"[（(][0-9一二三四五六七八九十]+[）)]|[-*•·]|#)", ln):
+            out.append(ln)
+            continue
+        if prev and prev[-1] in _SENT_END:
+            out.append(ln)
+            continue
+        # 合并：中文直接拼，英文单词之间补一个空格
+        if re.search(r"[A-Za-z0-9]$", prev) and re.match(r"^[A-Za-z0-9]", ln):
+            out[-1] = prev + " " + ln
+        elif prev.endswith("-") and re.match(r"^[A-Za-z]", ln):
+            out[-1] = prev[:-1] + ln
+        else:
+            out[-1] = prev + ln
+    return "\n".join(out)
+
+
 def _decode_text(raw: bytes) -> tuple:
     """按常见编码依次尝试，返回 (text, encoding)。"""
     for enc in _ENCODINGS:
