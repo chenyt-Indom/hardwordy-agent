@@ -287,6 +287,28 @@ def _read_doc(raw: bytes) -> tuple:
             pass
 
 
+def _text_quality(text: str) -> float:
+    """可疑字符占比，用来识破"解码成功但其实是乱码"。
+
+    正常中文/英文文本里几乎没有：控制符、格式符、私用区、未分配码位、
+    单独出现的组合符。乱码则这些占比很高。
+    """
+    import unicodedata
+
+    if not text:
+        return 1.0
+    bad = 0
+    n = 0
+    for c in text[:8000]:
+        n += 1
+        cat = unicodedata.category(c)
+        if cat in ("Cc", "Cf", "Co", "Cn", "Cs", "Mn", "Me", "Zl", "Zp"):
+            if c in "\n\r\t":
+                continue
+            bad += 1
+    return bad / max(1, n)
+
+
 def _looks_binary(raw: bytes) -> bool:
     """粗略判断字节流是不是二进制。
 
