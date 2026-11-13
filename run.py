@@ -247,7 +247,9 @@ def _wait_port_free(timeout: float = 40.0) -> bool:
             #   于是探测永远返回 True → 新进程立刻去 bind → 必然失败 → 启动即退出。
             #   去掉它，bind 才会在端口被占用时如实抛 WSAEADDRINUSE。
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
-                sk.bind((HOST, PORT))
+                # 固定用回环地址探测：HOST 现在是 0.0.0.0（监听所有网卡），
+                # 但"端口是否被占"这件事只跟端口有关，用 127.0.0.1 判断最准。
+                sk.bind(("127.0.0.1", PORT))
             return True
         except OSError:
             time.sleep(0.4)
