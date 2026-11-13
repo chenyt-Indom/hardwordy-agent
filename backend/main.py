@@ -7008,21 +7008,45 @@ def schedule_list():
 
 
 @app.get("/api/schedule/result")
-def schedule_result(id: str = "", limit: int = 20000):
+def schedule_result(id: str = "", limit: int = 0):
     """某个定时任务**最近一次运行**的完整结果正文（只读）。
 
     2026-11-11：用户反馈「定时任务看不到结果在哪」—— 面板和 list_schedules
     只给 last_preview（前 200 字），正文在日志里。这里把它整段取出来，
     供前端那个「结果查看窗」显示。
+
+    2026-11-13 用户要求「不要少字」：默认 limit=0 = **整篇返回，不截断**。
+    原来默认 20000 字符、上限 60000，一篇长报告（尤其带表格的）会被切在半句上。
     """
     jid = str(id or "").strip()
     if not jid:
         return {"ok": False, "error": "缺少任务 id"}
     try:
-        n = max(500, min(int(limit or 20000), 60000))
+        n = int(limit or 0)
     except Exception:
-        n = 20000
+        n = 0
+    # 0 / 负数 = 全文；显式要截断时才封顶，避免误传一个天文数字
+    n = 0 if n <= 0 else max(500, min(n, 2000000))
     return {"ok": True, "id": jid, "text": scheduler.latest_result(jid, limit=n)}
+
+
+@app.get("/api/schedule/search")
+def schedule_search(q: str = "", top_k: int = 50):
+    """在定时任务里检索（名称 / 任务内容 / 上次结果）。
+
+    2026-11-13 用户要求：「定时任务内容也要支持检索，最好向量化提高召回率」。
+    检索本身在 scheduler.search_jobs 里（语义向量 + 字符 bigram 覆盖率），
+    这里只做参数校验和转发。backend 字段如实告诉前端用的是哪种方式。
+    """
+    try:
+        k = max(1, min(int(top_k or 50), 200))
+    except Exception:
+        k = 50
+    try:
+        return scheduler.search_jobs(str(q or ""), top_k=k)
+    except Exception as e:                            # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                "items": [], "backend": "error"}
 
 
 @app.post("/api/schedule")
