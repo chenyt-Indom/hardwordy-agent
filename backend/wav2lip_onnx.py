@@ -421,7 +421,28 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     face0 = img[y1:y2, x1:x2]
     face96 = cv2.resize(face0, (96, 96), interpolation=cv2.INTER_LINEAR)
     masked = face96.copy()
-    masked[96 // 2:, :] = 0          # 下半脸遮住，让模型生成
+    # 遮罩范围决定张口幅度（实测同一张图同一段音频）：
+    #   整下半脸 → 唇缝 2~4px，最自然，但嘴几乎不动
+    #   只遮嘴部上下 18~20px → 唇缝 2~7px，张开明显，伪影可接受
+    #   只遮上下 20~24px → 唇缝 1~12px，张最大，牙齿/口腔会有涂抹
+    # boost 1.0 保持官方做法；越大遮得越窄，嘴张得越大。
+    try:
+        _b = float(boost or 1.0)
+    except Exception:  # noqa: BLE001
+        _b = 1.0
+    if _b <= 1.05:
+        masked[96 // 2:, :] = 0
+    else:
+        try:
+            _mr = int(float(avatar2.mouth()["y"]) * 96)
+        except Exception:  # noqa: BLE001
+            _mr = 64
+        _k = min(1.0, (_b - 1.0) / 0.8)          # 1.0→0, 1.8→1
+        _up = int(round(14 + 10 * _k))           # 14 → 24
+        _dn = int(round(16 + 12 * _k))           # 16 → 28
+        _t = max(0, _mr - _up)
+        _bt = min(96, _mr + _dn)
+        masked[_t:_bt, :] = 0
     both = np.concatenate([masked, face96], axis=2).astype(np.float32) / 255.0
     both = both.transpose(2, 0, 1)[None]  # (1,6,96,96)
 
