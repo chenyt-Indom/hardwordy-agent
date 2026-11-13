@@ -295,15 +295,27 @@ def mel_chunks(mel: np.ndarray, fps: int, n_frames: int | None = None):
     return out
 
 
-def _feather_mask(h: int, w: int, top: int = 0):
-    """下半脸的融合蒙版：上部渐入，避免贴回时出现硬边。"""
-    m = np.ones((h, w), dtype=np.float32)
-    band = max(2, int(h * 0.18))
-    for i in range(band):
-        v = (i + 1) / float(band + 1)
-        yy = top + i
+def _feather_mask(h: int, w: int, top: float = 0.60, bot: float = 0.88,
+                  feather: float = 0.05):
+    """嘴部带状融合蒙版。
+
+    实测（同一帧三档对比）：整块下半脸贴回会把下巴也换成 96x96 的模糊输出，
+    下巴出现明显色块；收窄到 0.60~0.88 的嘴部带状后，下巴保留原图，
+    嘴部仍有正常张合，伪影最少。
+    """
+    m = np.zeros((h, w), dtype=np.float32)
+    t0, t1 = int(h * top), int(h * bot)
+    t1 = max(t0 + 1, min(h, t1))
+    m[t0:t1, :] = 1.0
+    fb = max(2, int(h * feather))
+    for i in range(fb):
+        v = (i + 1) / float(fb + 1)
+        yy = t0 + i
         if 0 <= yy < h:
-            m[yy, :] = v
+            m[yy, :] = np.minimum(m[yy, :], v)
+        yy2 = t1 - 1 - i
+        if 0 <= yy2 < h:
+            m[yy2, :] = np.minimum(m[yy2, :], v)
     return m[:, :, None]
 
 
