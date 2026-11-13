@@ -815,7 +815,12 @@ def speak(text: str, voice: str = "", rate: int = 0, style: str = "",
             use = "param"
     name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
     out = os.path.join(_vdir(), name)
-    r = render(_img_path(), wav, out, words=words, engine=use)
+    try:
+        _boost = float(boost or 1.0)
+    except Exception:  # noqa: BLE001
+        _boost = 1.0
+    _boost = float(min(2.5, max(1.0, _boost)))
+    r = render(_img_path(), wav, out, words=words, engine=use, boost=_boost)
     if not r.get("ok"):
         return r
     from urllib.parse import quote
