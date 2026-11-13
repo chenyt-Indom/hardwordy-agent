@@ -597,6 +597,9 @@ class HiveClient:
         p = m.parse_code(code)
         if not p.get("ok"):
             return p
+        # punch:// 是 UDP 打洞地址（端口和 TCP 不是同一个），必须走打洞通道
+        if p.get("mode") == "punch":
+            return m.connect_punch(p["host"], p["port"], gid, timeout=10.0)
         return m.connect(p["host"], p["port"], gid)
 
     def seen_beacons(self) -> List[Dict[str, Any]]:
