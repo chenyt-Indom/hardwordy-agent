@@ -390,7 +390,40 @@ class MeshNode:
         threading.Thread(target=self._accept_loop, daemon=True).start()
         threading.Thread(target=self._beacon_loop, daemon=True).start()
         threading.Thread(target=self._housekeep_loop, daemon=True).start()
+        self._start_punch()
         return self.status()
+
+    def _start_punch(self) -> None:
+        """启动 UDP 打洞通道（跨网络用）。失败不影响局域网/公网直连。"""
+        if self.punch:
+            return
+        try:
+            node = HP.PunchNode()
+            node.on_tunnel = self._on_punch_tunnel
+            r = node.start(0)
+            if not r.get("ok"):
+                self._last_err = "打洞通道启动失败：%s" % r.get("error")
+                return
+            self.punch = node
+            # 后台查一次公网映射地址，让「我的地址」立刻有东西可显示。
+            # 不阻塞 start()：STUN 偶尔要等 1~2 秒，卡在这里会让进群变慢。
+            threading.Thread(target=node.mapped, kwargs={"timeout": 2.5},
+                             daemon=True).start()
+        except Exception as e:  # noqa: BLE001
+            self._last_err = "打洞通道启动异常：%s" % e
+
+    def _on_punch_tunnel(self, sock, addr) -> None:
+        """别人打洞打进来了：当成一条入站连接交给正常的握手流程。
+
+        ReliableUDPSock 提供了 sendall/recv/settimeout/close/shutdown，
+        和 socket 的接口一致，所以 _serve 一行都不用改。
+        """
+        try:
+            sock.settimeout(60.0)
+        except Exception:
+            pass
+        threading.Thread(target=self._serve, args=(sock, addr, True),
+                         daemon=True).start()
 
     def stop(self) -> Dict[str, Any]:
         self._stop = True
