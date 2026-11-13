@@ -10077,9 +10077,13 @@ def avatar2_speak(body: dict):
     text = str(body.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text 不能为空")
-    if len(text) > 1200:
+    # 2026-11-14：原来这里硬拦 1200 字，导致长文档读不了。
+    # 现在单次上限放到 6000（约 7 分钟语音），再长的由前端按句子切成
+    # 多段分别生成、最后 /api/avatar2/concat 合并 —— 这样每段请求都在
+    # 前端超时窗口内，不会出现"字数一多就超时"。
+    if len(text) > 6000:
         raise HTTPException(status_code=400,
-                            detail="文本太长（上限 1200 字，约 90 秒语音）")
+                            detail="单次最多 6000 字；更长的文本前端会自动分段生成再拼接")
     # rate 允许不传（None）—— 表示"用心情的建议语速"，不能强转成 0，
     # 否则用户选了「自动语速」也会被钉死在原速。
     _r = body.get("rate")
