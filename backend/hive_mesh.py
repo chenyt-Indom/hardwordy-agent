@@ -961,17 +961,22 @@ class MeshNode:
         return {"ok": True, "host": host, "port": port, "gid": gid}
 
     def connect_code(self, gid: str) -> Dict[str, Any]:
-        """生成跨网络用的连接码。"""
+        """生成跨网络用的连接码，并给出可直接念给别人的纯地址。"""
         if not self.started:
-            return {"ok": False, "error": "本机 P2P 网络还没启动"}
+            return {"ok": False,
+                    "error": "本机 P2P 网络还没启动（先点一下左边的群名进入群聊）"}
         pub = _public_ip()
         lip = lan_ip()
+        # lan_addr / wan_addr 是**不带 hive3:// 前缀**的纯 IP:端口 ——
+        # 「密码入群」的地址框要的就是这个格式，直接复制粘贴不会带出协议头。
         return {
             "ok": True,
             "gid": gid,
             "port": self.port,
             "lan_ip": lip,
             "public_ip": pub,
+            "lan_addr": "%s:%s" % (lip, self.port),
+            "wan_addr": ("%s:%s" % (pub, self.port)) if pub else "",
             "lan_code": "hive3://%s:%s" % (lip, self.port),
             "wan_code": ("hive3://%s:%s" % (pub, self.port)) if pub else "",
             "note": ("公网地址没探到，跨网络需要路由器端口映射，"
