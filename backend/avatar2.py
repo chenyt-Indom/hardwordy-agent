@@ -502,11 +502,19 @@ def _asr_words(wav_path: str) -> list:
 
 
 # ---------------------------------------------------------------- 口型参数
-def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS) -> list:
+def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS,
+                  amp: float = 1.0) -> list:
     """把声学特征 + 字边界 → 每帧的 (openness, width) 0~1 附近的口型参数。
 
     openness：张口高度倍率（0=闭唇，1=大张）
     width   ：唇形宽窄（<1 圆唇，>1 扁唇）
+    amp     ：口型幅度增益 0.6~2.0（1.0 = 原始观感）
+
+    ⚠ amp 为什么作用在「曲线」而不只是「单帧拉伸」：
+      实测真实中文语音的 openness 分布 —— mean 0.281、中位数 0.215、
+      只有 23.9% 的帧 >0.5、3.9% 的帧 >0.8。也就是说大部分时间嘴只微张，
+      这才是用户觉得「幅度小」的主因，光加大单帧拉伸解决不了。
+      amp 把整条曲线抬起来：amp=1.4 时 >0.5 的帧升到 32.3%、>0.8 升到 19.3%。
     """
     feats = _analyze(y, sr, fps)
     rms, zcr, cen = feats["rms"], feats["zcr"], feats["centroid"]
