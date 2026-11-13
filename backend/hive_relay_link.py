@@ -377,6 +377,11 @@ class RelayLink:
         self._stop = True
         self._teardown()
         self.state = "offline"
+        with self._p2p_lock:
+            self.p2p.clear()
+            self._punching.clear()
+        self.direct_ok = 0
+        self.direct_fail = 0
         return self.status()
 
     def _teardown(self) -> None:
