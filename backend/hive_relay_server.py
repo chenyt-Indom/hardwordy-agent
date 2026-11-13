@@ -377,8 +377,19 @@ class RelayServer:
             return
         r = self.rooms.get(conn.gid)
         if r:
+            # ⚠️ 锁不能嵌套：signal_del() 内部要拿 r.lock，
+            #    所以这里只在 with 里取数据，出去再广播。
             with r.lock:
+                info = dict(r.members.get(conn) or {})
                 r.conns.discard(conn)
+            others = r.signal_del(conn)
+            if info.get("uid") or info.get("paddr"):
+                for o in others:
+                    try:
+                        o.ctrl({"op": "signal_gone",
+                                "uid": info.get("uid", "")})
+                    except Exception:
+                        pass
         log.info("断开 %s 群=%s", conn.addr, (conn.gid or "")[:8])
 
     # -------------------------------------------------- 主循环
