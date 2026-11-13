@@ -192,17 +192,32 @@ def lan_ip() -> str:
             return "127.0.0.1"
 
 
+_PUB_CACHE = {"ip": "", "ts": 0.0}
+
+
 def _public_ip() -> str:
-    """尽力探公网 IP（失败就返回空，不阻塞主流程）。"""
+    """尽力探公网 IP（失败就返回空，不阻塞主流程）。
+
+    结果带缓存（2026-11-13）：「📡 我的地址」弹窗每次打开都会走到这里，
+    不缓存的话每点一次都要干等最多 2.5 秒。成功缓存 10 分钟，
+    失败只缓存 60 秒 —— 万一只是当时断了一下网，不至于十分钟都显示「没探到」。
+    """
+    now = time.time()
+    ttl = 600 if _PUB_CACHE["ip"] else 60
+    if _PUB_CACHE["ts"] and (now - _PUB_CACHE["ts"]) < ttl:
+        return _PUB_CACHE["ip"]
+    ip = ""
     try:
         import urllib.request
         with urllib.request.urlopen("https://api.ipify.org", timeout=2.5) as r:
-            ip = r.read(64).decode("utf-8", "ignore").strip()
-            if ip.count(".") == 3:
-                return ip
+            s = r.read(64).decode("utf-8", "ignore").strip()
+            if s.count(".") == 3:
+                ip = s
     except Exception:
         pass
-    return ""
+    _PUB_CACHE["ip"] = ip
+    _PUB_CACHE["ts"] = now
+    return ip
 
 
 # ---------------------------------------------------------------- Peer
