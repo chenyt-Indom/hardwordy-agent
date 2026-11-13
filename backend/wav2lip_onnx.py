@@ -388,7 +388,6 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     # 预处理：原图裁剪一次，后面每帧复用（静态图，人脸不动）
     face0 = img[y1:y2, x1:x2]
     face96 = cv2.resize(face0, (96, 96), interpolation=cv2.INTER_LINEAR)
-    masked = face96.copy()
     # 嘴在**裁剪框内**的相对位置。boost 遮罩、融合带、张口测量必须共用这一套
     # 坐标。2026-11-14 修：这里原来写 int(avatar2.mouth()["y"] * 96)，用的是
     # 整图归一化 y，和融合带的裁剪框坐标差 6px/96（0.583 vs 0.648）。结果模型
