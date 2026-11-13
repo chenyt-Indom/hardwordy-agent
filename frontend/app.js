@@ -6841,6 +6841,26 @@
       load();
     };
 
+    // 侧栏和弹窗是两个独立容器，但按钮语义完全一样 —— 绑同一个处理器
+    if (list) list.onclick = onAct;
+    if (sideList) sideList.onclick = onAct;
+
+    // ---------- 侧栏入口：⤢ 打开大窗口 / ＋ 新建任务 ----------
+    const autoWinBtn = document.querySelector("#autoWinBtn");
+    if (autoWinBtn) autoWinBtn.onclick = () => openFloat(true);
+    const autoNewBtn = document.querySelector("#autoNewBtn");
+    if (autoNewBtn) {
+      autoNewBtn.onclick = () => {
+        openFloat(true);
+        const det = document.querySelector(".sched-new");
+        if (det) det.open = true;
+        setTimeout(() => {
+          const p = document.querySelector("#schedPrompt");
+          if (p) p.focus();
+        }, 140);
+      };
+    }
+
     const addBtn = document.querySelector("#schedAdd");
     if (addBtn) {
       addBtn.onclick = async () => {
