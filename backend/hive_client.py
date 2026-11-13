@@ -292,7 +292,11 @@ class HiveClient:
             r = m.connect(p["host"], p["port"], gid)
             if not r.get("ok"):
                 self._state = "error"
-                self._error = r.get("error", "连不上")
+                # 家用宽带在 NAT 后面时 TCP 必然连不进来 —— 直接引导到打洞地址，
+                # 免得用户反复重试同一个连不通的地址。
+                self._error = (str(r.get("error", "连不上")) +
+                               "。如果对方用的是家庭宽带，让对方打开「📡 我的地址」，"
+                               "把 punch:// 开头的那一行发给你 —— 那个能穿透 NAT。")
                 return self.status()
             self._latency = round((time.time() - t0) * 1000, 1)
             self._state = "online"
