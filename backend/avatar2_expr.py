@@ -265,10 +265,16 @@ def _affine(frame, t: float, cfg: dict):
     a2 = math.sin(2 * math.pi * f * 0.61 * t + 1.7)
     dx = sway * (0.7 * a1 + 0.3 * a2)
     dy = nod * (0.6 * a1 + 0.4 * a2)
-    th = rot * (0.5 * a1 + 0.5 * a2)
+    # 旋转系数 0.72：实测旋转超过 0.6 度就有"歪头"感（用户要求不夸张），
+    # 而它带来的边缘位移代价很高（要放大更多才不露边）。
+    th = rot * (0.5 * a1 + 0.5 * a2) * 0.72
 
-    # 预放大：覆盖最大位移 1.6px + 旋转带来的边角偏移
-    zoom = 1.0 + max(0.004, (abs(dx) + abs(dy) + 2.0) / max(1.0, min(w, h)) * 2.2)
+    # 预放大：必须同时覆盖平移和旋转。旋转 θ 度时，最远角点位移约
+    # (对角线/2)*sin(θ)。只按平移算会露黑边（warpAffine 的 REFLECT 会镜像出脏边）。
+    rot_px = (math.hypot(w, h) * 0.5) * math.sin(math.radians(abs(th)))
+    need_x = abs(dx) + rot_px + 2.0
+    need_y = abs(dy) + rot_px + 2.0
+    zoom = 1.0 + max(0.004, max(need_x / max(1.0, w), need_y / max(1.0, h)) * 1.08)
     cx, cy = w * 0.5, h * 0.42          # 转轴放在脸上方，像脖子带动的头
     M = cv2.getRotationMatrix2D((cx, cy), th, zoom)
     M[0, 2] += dx
