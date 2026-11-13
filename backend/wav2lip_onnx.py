@@ -295,6 +295,29 @@ def mel_chunks(mel: np.ndarray, fps: int, n_frames: int | None = None):
     return out
 
 
+def _mouth_mask(h: int, w: int, my_rel: float, rx: float = 0.36,
+                up: float = 0.06, dn: float = 0.16, soft: float = 0.35):
+    """嘴部**椭圆**融合蒙版（相对裁剪框尺寸）。
+
+    2026-11-14 第三次修：原来用整行宽的矩形带，左右一直铺到裁剪框边缘，
+    两颊和下巴的皮肤也被换成 96x96 的模糊输出，用户看到的是「整块嘴被切下来
+    往下拽」的贴图感。实测四种蒙版对比，椭圆 rx=0.36 的两颊过渡最自然、
+    无明显接缝。
+
+    形状是上下不对称的椭圆：上边 up（人中不能动），下边 dn（要覆盖张开的
+    口腔）。soft 是边缘渐变比例（相对椭圆半径）。
+    """
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    cyv = my_rel * h
+    cxv = w * 0.5
+    dy = yy - cyv
+    hh = np.where(dy < 0, up * h, dn * h)
+    d = np.sqrt(((xx - cxv) / max(1e-6, rx * w)) ** 2
+                + (dy / np.maximum(hh, 1e-3)) ** 2)
+    m = np.clip((1.0 - d) / max(1e-6, soft), 0.0, 1.0)
+    return m[:, :, None].astype(np.float32)
+
+
 def _feather_mask(h: int, w: int, top: float = 0.60, bot: float = 0.88,
                   feather: float = 0.05):
     """嘴部带状融合蒙版。
