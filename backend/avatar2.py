@@ -547,24 +547,40 @@ def _mouth_geom(size, m: dict) -> tuple:
     return cx, cy, mw, mh
 
 
-def _half_mask(w: int, h: int, lower: bool) -> "object":
-    """半椭圆羽化蒙版：上唇用上半、下唇用下半，贴合处在中线上 alpha=1。
-
-    为什么不用整块椭圆再整体缩放：实测整体 resize 在写实人脸上会变成
-    "橡皮泥"（嘴被拉长、下巴断层），所以改成上下唇**分开位移**。
-    """
+def _soft_mask(w: int, h: int) -> "object":
+    """椭圆径向羽化蒙版：中心 255，边缘 0，中间 smoothstep 过渡。"""
     from PIL import Image
     if w < 2 or h < 2:
         return Image.new("L", (max(1, w), max(1, h)), 255)
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    # 椭圆中心落在贴边的那一侧：上半区中心在底边，下半区中心在顶边
-    ccy = float(h) if not lower else 0.0
     nx = (xx - (w - 1) / 2.0) / max(w / 2.0, 1e-6)
-    ny = (yy - ccy) / max(float(h), 1e-6)
+    ny = (yy - (h - 1) / 2.0) / max(h / 2.0, 1e-6)
     r = np.sqrt(nx * nx + ny * ny)
-    a = np.clip((1.0 - r) / 0.55, 0.0, 1.0)
+    a = np.clip((1.0 - r) / 0.62, 0.0, 1.0)
     a = a * a * (3.0 - 2.0 * a)            # smoothstep，过渡更柔和
     return Image.fromarray((a * 255).astype(np.uint8), mode="L")
+
+
+def _mouth_shadow(w: int, h: int, op: float) -> "object":
+    """唇缝阴影：中间暗、四周透明。用来表现"嘴唇分开了一条缝"。
+
+    ⚠️ 不画牙齿和口腔 —— 单张图凭空造"张开的嘴"必然是贴纸感，
+       实测画出来像贴了个长方形，所以只做一层柔和的暗部。
+    """
+    from PIL import Image
+    if w < 2 or h < 2:
+        return Image.new("RGBA", (max(1, w), max(1, h)), (0, 0, 0, 0))
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    nx = (xx - (w - 1) / 2.0) / max(w / 2.0, 1e-6)
+    ny = (yy - (h - 1) / 2.0) / max(h / 2.0, 1e-6)
+    r = np.sqrt(nx * nx + ny * ny)
+    a = np.clip(1.0 - r, 0.0, 1.0)
+    a = a * a * (3.0 - 2.0 * a)
+    a = a * (255.0 * 0.72 * float(np.clip(op, 0.0, 1.0)))
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    rgb[:, :] = (46, 22, 24)
+    rgba = np.dstack([rgb, a.astype(np.uint8)])
+    return Image.fromarray(rgba, mode="RGBA")
 
 
 def _prep(img_path: str):
