@@ -2645,6 +2645,7 @@
         voice: voiceSel.value,
         mood: moodSel ? moodSel.value : "auto",
         rate: rateVal,
+        amp: syncAmp(),
       };
       try {
         // 长文本切成多段分别生成，每段都在请求超时窗口内，最后合并成一个视频。
