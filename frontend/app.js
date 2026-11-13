@@ -6649,16 +6649,22 @@
         // 直接复用对话里那套 renderFinal —— 它自带"渲染丢了结尾就退回纯文本"的兜底，
         // 比在这里另写一套 markdown 解析稳。万一它不在当前作用域，就退纯文本，不会白屏。
         winBody.textContent = "";
+        // renderFinal 产出的 markdown 样式全挂在 .bubble 下（.bubble .md-h / .md-ul …），
+        // 所以套一层 .bubble 才能真的复用那套排版；气泡本身的底色/边框/内边距
+        // 由 CSS 里的 .sched-md 盖掉，看起来还是这个结果窗，不会多出一个气泡。
+        const host = document.createElement("div");
+        host.className = "bubble sched-md";
+        winBody.appendChild(host);
         try {
           if (typeof renderFinal === "function") {
-            renderFinal(winBody, txt, "");
+            renderFinal(host, txt, "");
           } else {
-            winBody.textContent = txt;
-            winBody.style.whiteSpace = "pre-wrap";
+            host.textContent = txt;
+            host.style.whiteSpace = "pre-wrap";
           }
         } catch (e) {
-          winBody.textContent = txt;
-          winBody.style.whiteSpace = "pre-wrap";
+          host.textContent = txt;
+          host.style.whiteSpace = "pre-wrap";
         }
       } catch (e) {
         winBody.textContent = "读取失败：" + e.message;
