@@ -1177,14 +1177,18 @@
 
 
 <script>
-/* TEMP_PROBE_AUTO 临时探针：自动展开自动化面板，截图核对后立即删除 */
+/* TEMP_PROBE_AUTO 临时探针：展开自动化面板 → 点「＋ 新建任务」，截图核对后立即删除 */
 (function () {
   setTimeout(function () {
     var p = document.getElementById('autoPanel');
     if (!p) return;
     var head = p.querySelector('.fold-head');
     if (head && p.classList.contains('collapsed')) head.click();
-  }, 1500);
+  }, 1200);
+  setTimeout(function () {
+    var b = document.getElementById('autoNewBtn');
+    if (b) b.click();
+  }, 2200);
 })();
 </script>
 </body>
