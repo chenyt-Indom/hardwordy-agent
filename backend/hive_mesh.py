@@ -326,6 +326,9 @@ class MeshNode:
         self._last_sync: Dict[str, Any] = {}      # 最近一次历史补发的记录（排查用）
         self._srv: Optional[socket.socket] = None
         self._udp: Optional[socket.socket] = None
+        # UDP 打洞通道：跨网络时靠它把 TCP 直连不到的双方连起来。
+        # 独立于上面的 _udp（那个只做局域网广播，绑在固定端口上）。
+        self.punch: Optional[HP.PunchNode] = None
         self._stop = False
         self._last_err = ""
         self._started_at = 0.0
