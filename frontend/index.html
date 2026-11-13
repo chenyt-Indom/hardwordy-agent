@@ -375,6 +375,19 @@
       <label class="pill" data-cfg="rag_enabled"><i class="sw"></i>知识库</label>
       <label class="pill" data-cfg="web_enabled" title="开着：搜索/网页/地图都联网查；关掉：全部走本地，地图只能用内置的常用地名表（没有底图、不显示地图缓存）"><i class="sw"></i>联网</label>
       <label class="pill" data-cfg="code_exec_enabled" title="让模型在本机真跑 Python 把结果算出来（默认关闭；开启后模型写的代码会在你电脑上执行）"><i class="sw"></i>跑代码</label>
+      <span class="bar-sep" aria-hidden="true"></span>
+      <select id="modelSelect" class="pill pill-select" title="选择本轮对话用哪个模型">
+        <option value="auto">🖥 本地·自动</option>
+        <option value="qwen3-vl:30b">🖥 本地 30B</option>
+        <option value="qwen3-vl:8b">🖥 本地 8B</option>
+        <option value="deepseek-flash">⚡ DS V4.1</option>
+        <option value="deepseek-flash-think">🧠 DS V4.1 思考</option>
+        <option value="deepseek-v4-pro">🔮 DS V4 Pro</option>
+      </select>
+      <button type="button" class="pill pill-btn askmode-btn" id="askModeBtn"
+              title="模型在动手前会问你多少问题：快速了解 = 只问最关键的几条；深度询问 = 分多轮把关键信息问透。点这里切换（下一次提问生效）。">快速问</button>
+      <button type="button" class="pill pill-btn settings-btn" id="settingsBtn"
+              title="设置：需要配 API Key 的 / 对话能力 / 模型与性能 / 开发与工具">⚙ 设置</button>
       <!-- 询问方式：**一个按钮**，按钮上直接显示当前选的是哪种，点开可切换。
            ⚠️ 故意**不加 data-cfg** —— 那条规则会把 .pill[data-cfg] 当成布尔开关处理
            （`p.onclick` 被覆盖成 toggle + saveToggles），二选一的控件套进去会互相打架。
