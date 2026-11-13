@@ -42,7 +42,7 @@ MOODS = {
     "serious": {
         "label": "认真", "emoji": "🧐", "style": "serious",
         "rate": -4, "pitch": -4,
-        "sway": 0.6, "nod": 0.9, "rot": 0.22, "brow": 1.3, "freq": 0.26,
+        "sway": 1.2, "nod": 1.7, "rot": 0.32, "brow": 1.6, "freq": 0.26,
         "desc": "语速略缓、音调压低，头部动作克制",
     },
     "gentle": {
