@@ -8480,10 +8480,12 @@
     el("hiveModalClose").addEventListener("click", closeModal);
     modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
     el("hiveModalCopy").addEventListener("click", async () => {
-      const v = el("hiveModalCode").value;
+      const b0 = el("hiveModalCopy");
+      const src = b0.dataset.from === "input" ? el("hiveModalInput") : el("hiveModalCode");
+      const v = src.value;
       try { await navigator.clipboard.writeText(v); }
       catch (e) {
-        const t = el("hiveModalCode"); t.select(); document.execCommand("copy");
+        src.select(); document.execCommand("copy");
       }
       const b = el("hiveModalCopy");
       const old = b.textContent;
