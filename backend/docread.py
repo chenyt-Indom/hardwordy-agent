@@ -419,10 +419,12 @@ def read_bytes(raw: bytes, filename: str = "") -> dict:
             # 两道关：字节层面 + 解码后的字符质量。
             # 只靠字节层面会漏（实测 b"\x00\x01\x02\x03"*100 能"成功"按
             # utf-16 解出 Ā̂Ȅ… 一串组合符，看着不像二进制其实全是噪声）。
-            if _looks_binary(raw) or _text_quality(text) > 0.10:
+            mg = _magic_name(raw)
+            if mg or _looks_binary(raw) or _text_quality(text) > 0.10:
                 return {"ok": False,
-                        "error": "这不是文本文档（像是二进制文件），读不出文字。"
-                                 "支持 .docx / .pdf / .doc / .txt / .md"}
+                        "error": "这不是文本文档（识别为%s），读不出文字。"
+                                 "支持 .docx / .pdf / .doc / .txt / .md"
+                                 % (mg or "二进制文件")}
 
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
