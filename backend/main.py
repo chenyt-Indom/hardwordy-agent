@@ -10088,7 +10088,8 @@ def avatar2_speak(body: dict):
                          voice=str(body.get("voice") or ""),
                          rate=rate,
                          style=str(body.get("style") or ""),
-                         engine=str(body.get("engine") or "auto"))
+                         engine=str(body.get("engine") or "auto"),
+                         lipsync=str(body.get("lipsync") or "auto"))
 
 
 @app.get("/api/avatar2/videos")
