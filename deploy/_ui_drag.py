@@ -110,14 +110,18 @@ with connect(ws_url, max_size=60 * 1024 * 1024) as ws:
     })()""")
     print("  ", r)
 
-    print("\n=== 4. 保存中继密钥（假内容，长度够）===")
+    print("\n=== 4. 中继密钥：只读检查（不写入，避免覆盖真实密钥）===")
     r = ev(ws, """(async () => {
+      document.getElementById('dpTokEye').click();
+      await new Promise(r => setTimeout(r, 1200));
       const ta = document.getElementById('dpTokText');
-      const before = (document.getElementById('dpTokTag')||{}).textContent;
-      ta.value = 'a'.repeat(40);
-      document.getElementById('dpTokSave').click();
-      await new Promise(r => setTimeout(r, 1500));
-      return {taCleared: ta.value === '', tag: document.getElementById('dpTokTag').textContent};
+      const out = {revealed: ta.value.length, head: ta.value.slice(0, 6),
+                   btn: document.getElementById('dpTokEye').textContent,
+                   tag: document.getElementById('dpTokTag').textContent};
+      document.getElementById('dpTokEye').click();   // 收起
+      await new Promise(r => setTimeout(r, 400));
+      out.collapsed = ta.value.length === 0;
+      return out;
     })()""")
     print("  ", r)
 
