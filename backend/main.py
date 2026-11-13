@@ -10103,7 +10103,7 @@ def avatar2_speak(body: dict):
                          rate=rate,
                          style=str(body.get("style") or ""),
                          engine=str(body.get("engine") or "auto"),
-                         lipsync=str(body.get("lipsync") or "auto"),
+                         lipsync=str(body.get("lipsync") or "param"),
                          boost=boost,
                          mood=str(body.get("mood") or ""),
                          expr=bool(body.get("expr", True)))
