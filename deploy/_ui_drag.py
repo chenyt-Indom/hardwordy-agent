@@ -69,7 +69,7 @@ with connect(ws_url, max_size=60 * 1024 * 1024) as ws:
     time.sleep(1.8)
 
     print("=== 1. 拖拽私钥文件 ===")
-    r = ev(ws, """(() => {
+    r = ev(ws, """(async () => {
       const pem = '-----BEGIN OPENSSH PRIVATE KEY-----\\nAAAAB3NzaC1yc2E\\n-----END OPENSSH PRIVATE KEY-----';
       const f = new File([pem], 'id_rsa', {type: 'application/octet-stream'});
       const dt = new DataTransfer(); dt.items.add(f);
@@ -77,11 +77,15 @@ with connect(ws_url, max_size=60 * 1024 * 1024) as ws:
       drop.dispatchEvent(new DragEvent('dragover', {dataTransfer: dt, bubbles: true, cancelable: true}));
       const clsOver = drop.classList.contains('over');
       drop.dispatchEvent(new DragEvent('drop', {dataTransfer: dt, bubbles: true, cancelable: true}));
+      // file.text() 是 Promise —— 必须等它读完，否则读到的是空（上一版就踩了这个坑）
+      await new Promise(r => setTimeout(r, 900));
       return {overClassApplied: clsOver, clsAfter: drop.className,
-              dropText: drop.textContent, taLen: document.getElementById('dpSshText').value.length};
+              dropText: drop.textContent,
+              taLen: document.getElementById('dpSshText').value.length,
+              taHead: document.getElementById('dpSshText').value.slice(0, 32)};
     })()""")
     print("  ", r)
-    time.sleep(0.6)
+    time.sleep(0.4)
 
     print("\n=== 2. 拖拽 100KB 文件（应被拦）===")
     r = ev(ws, """(() => {
