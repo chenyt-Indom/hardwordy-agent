@@ -59,6 +59,13 @@ K_SEQ = 2                        # 服务器下发的「带 seq 的 mesh 帧」
 
 log = logging.getLogger("hive_relay")
 
+# WebSocket 支持：把中继挂到 nginx 反代后面时需要（nginx 转不了裸 TCP）。
+# 服务器上这个文件跟 ws_min.py 一起放在 /opt/hive/，本机则在 backend 包里。
+try:
+    import ws_min                                    # noqa: F401  /opt/hive/
+except ImportError:                                  # pragma: no cover
+    from backend import ws_min                       # noqa: F401  项目内
+
 
 # ---------------------------------------------------------------- 底层收发
 
