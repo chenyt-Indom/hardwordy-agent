@@ -2247,6 +2247,9 @@
       // 高度动画由 JS 直接写 height：从当前高度 → 0，或从 0 → 内容高度。
       // 展开结束后把 height 设回 auto，内容变多（比如新传了文档）也不会被卡住。
       const foldIn = inner;
+      // 同样兜底：overflow/transition 直接写内联，不指望 style.css 那条规则生效
+      foldIn.style.overflow = "hidden";
+      foldIn.style.transition = "height .3s cubic-bezier(.4, 0, .2, 1)";
       const setHeight = (collapsed, animate) => {
         if (!animate) {
           foldIn.style.transition = "none";
