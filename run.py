@@ -376,6 +376,18 @@ def main() -> None:
     # 原来用 "warning"，后端一个字都不记请求 —— 排查"界面第一次打开某项是空的/
     # 灰的"这类问题时，完全看不到前端到底发没发请求、请求是成功还是失败，
     # 只能靠猜。日志落在 %TEMP%\mm_backend.log，排查完可以调回 "warning"。
+    # ★★ 2026-11-13：bind 之前再确认一次端口真的空了。
+    # 为什么（日志实证，不是推测）：data/app.log 里有 3 次
+    #     [Errno 10048] error while attempting to bind on address ('0.0.0.0', 8000)
+    # 新进程在旧进程还没退干净时就 bind → 失败 → 自己这条 uvicorn 线程直接死掉；
+    # 但紧接着 _wait_until_up() 却能连上（旧进程还在服务）→ 误判「服务已就绪」
+    # → 去开窗口 → 几秒后旧进程退出、端口没了 → 页面所有请求全断。
+    # 用户看到的就是「重启后新窗口一打开就被拦 / 连不上」。
+    if not _wait_port_free(15.0):
+        _wlog("端口 %d 等 15 秒仍被占用，仍然尝试启动（大概率会失败）" % PORT)
+    else:
+        _wlog("端口 %d 已空闲，开始启动服务" % PORT)
+
     server = uvicorn.Server(uvicorn.Config(app, host=HOST, port=PORT,
                                            log_level="info"))
     t = threading.Thread(target=_serve, args=(server,), daemon=True)
