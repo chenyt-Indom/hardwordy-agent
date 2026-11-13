@@ -36,7 +36,13 @@ _pkgs = ['webview', 'sherpa_onnx', 'sounddevice', 'edge_tts',
          #   tokenizers 原来躺在下面的 _EXCLUDE_BIG 里（当初排除它是因为
          #   以为它跟 transformers 绑定），实测它**不依赖 torch**，是独立的
          #   Rust 扩展，所以从排除表里挪出来。
-         'tokenizers', 'onnxruntime']
+         'tokenizers', 'onnxruntime',
+         # ⚠️ 2026-11-14（11.14）：数字人与文档读取上线后新增的两个依赖。
+         #   · cv2     —— avatar2 / avatar2_expr / wav2lip_onnx 全靠它处理帧
+         #   · olefile —— docread 读老式 .doc 的 OLE 复合文档
+         #   两个本机都装了，但 11.13f 的包里**都没有**（那时还没模块用它们），
+         #   不显式收就会在打包版上「数字人不出画面 / .doc 打不开」。
+         'cv2', 'olefile']
 
 _EXCLUDE_BIG = ['torch', 'torchvision', 'diffusers', 'transformers',
                 'accelerate', 'safetensors', 'huggingface_hub',
@@ -109,6 +115,24 @@ _ASR_ROOT = r"D:\local-multimodal-models\sherpa-asr"
 if os.path.isdir(_ASR_ROOT):
     all_datas += _dir_datas(_ASR_ROOT, "asr_model")
 
+# —— 数字人 2.0 的人脸检测模型（2026-11-14 / 11.14）——
+#   backend/avatar2.py 会去 <程序根>/data/models/face/ 找 yunet onnx（232KB）。
+#   不收集的后果：打包版「数字人」直接报"没人脸检测模型"，源码版却正常。
+_FACE_ROOT = os.path.join(root, "data", "models", "face")
+if os.path.isdir(_FACE_ROOT):
+    all_datas += _dir_datas(_FACE_ROOT, "data/models/face")
+else:
+    print("[spec] 提示：没找到人脸检测模型 %s —— 数字人功能将不可用" % _FACE_ROOT)
+
+# Wav2Lip 权重（>100MB 的 onnx）本机没有，avatar2/wav2lip_onnx 会走降级分支，
+# 不收集；将来放进 data/models/wav2lip/ 再在这里补 _dir_datas。
+_W2L_ROOT = os.path.join(root, "data", "models", "wav2lip")
+if os.path.isdir(_W2L_ROOT) and any(f.endswith(".onnx") for f in os.listdir(_W2L_ROOT)):
+    all_datas += _dir_datas(_W2L_ROOT, "data/models/wav2lip")
+    print("[spec] 已收集 Wav2Lip 权重")
+else:
+    print("[spec] 提示：本机无 Wav2Lip 权重（正常）—— 唇形同步走 avatar2 形变方案")
+
 # —— 后端模块的显式收集 ——
 all_hidden += [
     "backend.main", "backend.config", "backend.ollama_client", "backend.tools",
@@ -144,6 +168,18 @@ all_hidden += [
     "fastapi", "pydantic", "websockets", "multipart", "python_multipart",
     "clr", "pythonnet",
 ]
+
+# ⚠️⚠️ 2026-11-14（11.14）：**全量收录 backend 下所有模块**，别再手工维护名单。
+#   背景：backend 已经 61 个 .py，而且每版都在加（11.14 一口气加了 avatar2 /
+#   avatar2_expr / wav2lip_onnx / docread / hive_punch / hive_relay_link /
+#   hive_relay_server / ws_min / deploy_keys 九个）。这些模块大多是"只在
+#   函数内被调用"，静态分析抓不全 —— 漏一个的后果是**打包版某个功能直接废掉，
+#   源码跑却完全正常**，且日志里可能连报错都没有。
+#   直接扫目录生成，宁可在 PYZ 里多几十个模块，也不能少一个。
+all_hidden += ["backend." + _p.stem
+               for _p in sorted(__import__("pathlib").Path(root, "backend").glob("*.py"))
+               if _p.stem != "__init__"]
+
 all_hidden += collect_submodules("uvicorn", filter=lambda n: True)
 # pywin32 的 COM 客户端（win32com.client / win32com.shell 下的子模块）
 # 不显式收集的话只会带进空壳，SAPI 兜底朗读会 ImportError。

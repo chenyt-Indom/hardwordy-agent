@@ -438,6 +438,10 @@ def _find_asr() -> str:
         os.path.join(root, "data", "models", "asr", "*"),
         os.path.join(root, "dist", "**", "asr_model", "*"),
         os.path.join(root, "models", "asr", "*"),
+        # ⚠️ 2026-11-14（11.14 打包发现）：PyInstaller 打包后 root 是 _internal，
+        #   而 spec 把 ASR 模型收在 _internal/asr_model/ 下 —— 上面三条都匹配不到，
+        #   结果「打包版数字人没有字级时间戳、源码版却有」。补这一条即可。
+        os.path.join(root, "asr_model", "*"),
     ]
     cands: list[str] = []
     for pat in pats:
