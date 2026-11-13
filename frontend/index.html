@@ -149,6 +149,31 @@
       <div class="list hive-list" id="hiveGroupList"></div>
     </section>
 
+    <!-- ⏰ 自动化（2026-11-13）
+         用户要求：「定时任务移动到左侧工具栏，同样需要可折叠有动画」。
+         原来它是顶栏的一颗 pill（被脚本插进设置抽屉），要翻进去才知道有什么。
+         现在单独一个分组放在侧栏，复用 .pnl-fold 那套折叠动画（默认收起）；
+         弹窗 #schedFloat 保留 —— 侧栏看概览和检索，弹窗看全文、建任务。 -->
+    <section class="panel autopanel" id="autoPanel">
+      <div class="sec-head">
+        <h2>⏰ 自动化</h2>
+        <span class="head-acts">
+          <button class="btn sm ghost ico" id="autoWinBtn"
+                  title="打开定时任务大窗口：看全文结果、新建任务">⤢</button>
+        </span>
+      </div>
+      <div class="auto-search">
+        <input id="autoSearch" type="search" placeholder="检索任务 / 结果…"
+               autocomplete="off" />
+        <button class="btn sm ghost ico" id="autoSearchClear" title="清空检索" hidden>✕</button>
+      </div>
+      <div class="auto-backend" id="autoBackend" hidden></div>
+      <div class="list auto-list" id="autoList"></div>
+      <div class="auto-acts">
+        <button class="btn sm" id="autoNewBtn">＋ 新建任务</button>
+      </div>
+    </section>
+
     <section class="panel kbpanel" id="kbPanel">
       <div class="sec-head">
         <h2>📚 知识库</h2>
