@@ -319,7 +319,7 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     if not os.path.isfile(wav_path):
         return {"ok": False, "error": "没有音频文件"}
 
-    from . import avatar2
+    avatar2 = _avatar2()
     exe = avatar2.ffmpeg()
     if not exe:
         return {"ok": False, "error": "找不到 ffmpeg"}
