@@ -10886,17 +10886,23 @@
       finally { el("hsCreate").disabled = false; }
     });
 
-    el("hiveJoinBtn").addEventListener("click", () => {
+    // 2026-11-14：原来弹窗里有两个框（密码 + 对方地址），新手根本不知道第二个要不要填 ——
+    // 而现在跨网络也靠中继目录按密码自动找群，地址只是兜底。所以默认只给密码一个框，
+    // 只有「密码本身没错、但就是没找到群」时，才把地址框展开并告诉他去哪拿。
+    function joinFlow(opt) {
+      const o = opt || {};
       openModal({
         title: "密码入群",
-        hint: "输入群主给你的 12 位密码（字母数字，不含 0、1、I、L、O）。\n"
-          + "· 同一个 WiFi：只填密码就够了，会自动找到群\n"
-          + "· 不在同一个网络：再填群主的地址 —— 让他点群名旁边的「📡 我的地址」，"
-          + "复制那段发给你",
-        input: "",
+        hint: o.showAddr
+          ? "还是没找到群。让群主点群名旁边的「📡 我的地址」，"
+            + "把那串复制给你，填在下面的地址框里。\n（在同一个 WiFi 下就不用填，留空即可）"
+          : "输入群主给你的 12 位密码，大小写都行。\n"
+            + "不用管地址 —— 同一个 WiFi、不同网络都能直接进。",
+        input: o.pw || "",
+        inputMode: "password",
         placeholder: "XXXX-XXXX-XXXX",
-        extra: "",
-        extraPlaceholder: "对方地址（跨网络才填），如 192.168.1.5:8899",
+        extra: o.showAddr ? (o.addr || "") : null,
+        extraPlaceholder: "对方地址，如 192.168.1.5:8899",
         okText: "进群",
         onOk: async (v, ex) => {
           const pw = (v || "").trim();
@@ -10915,6 +10921,11 @@
               { password: pw, host: host, port: port });
           } catch (e) { alert("入群失败：" + e.message); return false; }
           if (!d.ok) {
+            // 没填地址、又没找到群 → 直接把地址框展开重来，别让他卡在这一步
+            if (!raw && (d.stage === "notfound" || d.stage === "network")) {
+              joinFlow({ showAddr: true, pw: pw });
+              return false;
+            }
             const stage = d.stage ? "（" + d.stage + "）" : "";
             alert((d.error || "入群失败") + stage);
             return false;
@@ -10924,7 +10935,8 @@
           return true;
         },
       });
-    });
+    }
+    el("hiveJoinBtn").addEventListener("click", () => joinFlow());
 
     // ---------------------------------------------------------- 更多菜单
     const moreBtn = el("hiveMore");
