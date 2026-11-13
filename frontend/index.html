@@ -1186,21 +1186,26 @@ setTimeout(function () {
   logo.click();
   setTimeout(function () {
     var cs3 = getComputedStyle(sb);
-    out.push('afterClick w=' + cs3.width + ' minw=' + cs3.minWidth + ' pad=' + cs3.paddingLeft);
-    out.push('inline=' + (sb.getAttribute('style') || 'none'));
-    out.push('rect=' + Math.round(sb.getBoundingClientRect().width));
+    out.push('after3s w=' + cs3.width + ' minw=' + cs3.minWidth + ' pad=' + cs3.paddingLeft);
+    out.push('rect3s=' + Math.round(sb.getBoundingClientRect().width));
     var kb = document.querySelector('#kbPanel');
     var fold = document.querySelector('#kbPanel > .pnl-fold');
-    out.push('--collapsed--');
+    var inner2 = fold.firstElementChild;
+    out.push('--fold test--');
     out.push('kb_h=' + Math.round(kb.getBoundingClientRect().height));
+    out.push('inner_before=' + Math.round(inner2.getBoundingClientRect().height));
     kb.querySelector('.sec-head').click();
     setTimeout(function () {
-      var inner2 = fold.firstElementChild;
       out.push('kb_h2=' + Math.round(kb.getBoundingClientRect().height));
-      out.push('fold_h=' + Math.round(fold.getBoundingClientRect().height));
-      out.push('fold_rows=' + getComputedStyle(fold).gridTemplateRows);
-      out.push('inner_h=' + Math.round(inner2.getBoundingClientRect().height));
+      out.push('inner_after=' + Math.round(inner2.getBoundingClientRect().height));
+      out.push('inner_style_h=' + (inner2.style.height || '-'));
       out.push('kb_cls=' + kb.className);
+      // 再展开回去，确认能恢复
+      kb.querySelector('.sec-head').click();
+      setTimeout(function () {
+        out.push('--reopen--');
+        out.push('inner_reopen=' + Math.round(inner2.getBoundingClientRect().height));
+        out.push('inner_style_h2=' + (inner2.style.height || '-'));
       var d = document.createElement('div');
       d.style.cssText = 'position:fixed;left:20px;top:20px;z-index:99999;background:#000;color:#0f0;font:14px monospace;padding:12px;white-space:pre;border:3px solid #0f0;line-height:1.35;max-width:1000px';
       d.textContent = out.join('\n');
