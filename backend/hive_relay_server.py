@@ -394,7 +394,7 @@ class RelayServer:
         except Exception:
             _old_to = None
         try:
-            sock.settimeout(1.0)
+            sock.settimeout(0.25)
             first = sock.recv(1, socket.MSG_PEEK)
         except Exception:
             first = b""
