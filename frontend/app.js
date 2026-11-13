@@ -2343,7 +2343,11 @@
         head.setAttribute("aria-expanded", collapsed ? "false" : "true");
         setHeight(collapsed, animate !== false);
       };
-      apply(!!folded[id], false);
+      // 2026-11-13 用户要求：「默认收起，和其他面板一致」——
+      // 但其他面板历史上是"没记过就展开"。这里只给 autoPanel 定默认收起，
+      // 用户手动展开过之后按记忆走（folded[id] 一旦有值就以它为准）。
+      const defCollapsed = (id === "autoPanel");
+      apply(folded[id] === undefined ? defCollapsed : !!folded[id], false);
 
       const toggle = () => {
         const next = !pnl.classList.contains("collapsed");
