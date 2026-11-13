@@ -1,2 +1,4 @@
 总字数 480
 分段数 2 [258, 222]
+[ WARN:0@9.510] global net_impl_backend.cpp:345 cv::dnn::dnn5_v20260605::Net::Impl::setPreferableTarget Targets are not supported by the new graph engine for now
+第1段 ok=True dur=54.74 耗时=54.9s 
