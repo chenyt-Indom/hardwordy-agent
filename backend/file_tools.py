@@ -96,25 +96,35 @@ SKIP_DIRS = {
     "AppData", "Windows", "Program Files", "Program Files (x86)",
     "$Recycle.Bin", "System Volume Information", ".cache", "site-packages",
     "dist", "build", ".next", "target", ".idea", ".vscode",
+    # 2026-11-14 实测：home 下递归会把 conda 的包目录全扫一遍
+    #（`tools` 会误命中 aioitertools.conda，还慢到 3 秒），必须剪掉
+    "anaconda3", "miniconda3", "pkgs", ".conda", ".condarc",
+    "node_modules", ".npm", ".gradle", ".m2", "Library", "OneDrive",
 }
 SEARCH_MAX_DEPTH = 5        # 最多往下钻 5 层
 SEARCH_MAX_SECONDS = 4.0    # 总耗时上限，防止在大盘上卡死
 SEARCH_MAX_HITS = 20
+SEARCH_COLLECT_CAP = 200    # 收集阶段的上限（够排序，又不会把内存撑爆）
 
 
 def _default_roots() -> list:
-    """模糊查找的默认起点：常用目录 + 当前项目根。"""
+    """模糊查找的默认起点。
+
+    ⚠️ 顺序有讲究（2026-11-14 实测）：项目根和常用目录放前面，
+    整个 home 放**最后**。原来 home 在 proj 之前，扫 home 时就把
+    收集上限占满了，`tools` 反而找不到项目里的 backend/tools.py。
+    """
     home = os.path.expanduser("~")
+    proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     roots = []
+    if os.path.isdir(proj):
+        roots.append(proj)
     for sub in ("Desktop", "Documents", "Downloads", "桌面", "文档", "下载"):
         p = os.path.join(home, sub)
         if os.path.isdir(p) and p not in roots:
             roots.append(p)
-    if os.path.isdir(home):
+    if os.path.isdir(home) and home not in roots:
         roots.append(home)
-    proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if os.path.isdir(proj) and proj not in roots:
-        roots.append(proj)
     return roots
 
 
