@@ -4281,3 +4281,110 @@ html[data-theme="light"] select.pill-select option {
 .p2p-brow { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 .p2p-brow .p2p-name { flex: 1; min-width: 0; font-size: 12.5px; }
 .p2p-brow .p2p-st { font-size: 11.5px; }
+
+/* ================= 顶栏简化 · 右侧设置抽屉（2026-11-13）=================
+   用户反馈：「上面的按钮太过凌乱，需要分类，配 API key 的弄成一个可折叠列表，
+   大幅简化布局」。顶栏压成一行 8 个控件，其余全部收进这个从右侧滑出的抽屉。
+   抽屉盖在内容之上，**不占顶栏高度**，也不影响消息区滚动。 */
+
+/* 顶栏里的竖分隔线：把「开关」和「模型 / 询问 / 设置」分开 */
+.bar-sep {
+  width: 1px; height: 18px; flex: 0 0 auto;
+  background: var(--border); margin: 0 2px;
+}
+
+/* ⚙ 设置按钮：这一行唯一的入口，稍微显眼一点 */
+.settings-btn { border-color: var(--accent); color: var(--text); }
+.settings-btn:hover { background: rgba(43, 108, 240, .12); }
+
+/* 遮罩：点一下关闭 */
+.sd-mask {
+  position: fixed; inset: 0; z-index: 900;
+  background: rgba(0, 0, 0, .38);
+  animation: sd-fade .18s ease;
+}
+@keyframes sd-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* 抽屉本体：从右侧滑入 */
+.sd-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 901;
+  width: min(380px, 92vw);
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, .28);
+  transform: translateX(100%);
+  transition: transform .22s cubic-bezier(.2, .8, .2, 1);
+}
+.sd-drawer.in { transform: translateX(0); }
+@media (prefers-reduced-motion: reduce) {
+  .sd-drawer { transition: none; }
+  .sd-mask { animation: none; }
+}
+
+.sd-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+  font-size: 14px; flex: 0 0 auto;
+}
+.sd-x {
+  border: 0; background: transparent; color: var(--muted);
+  font-size: 15px; cursor: pointer; padding: 4px 8px; border-radius: 7px;
+}
+.sd-x:hover { background: var(--panel2); color: var(--text); }
+
+.sd-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 14px 22px; }
+
+.sd-sec { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.sd-sec:last-child { border-bottom: 0; }
+
+.sd-h {
+  margin: 0 0 9px; font-size: 12px; font-weight: 600;
+  color: var(--muted); letter-spacing: .3px;
+}
+
+/* 一组控件排成整齐的网格，不再挤成一长条 */
+.sd-grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* ① 密钥折叠头 */
+.sd-fold {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 9px 11px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--panel2);
+  color: var(--text); font-size: 12.5px; font-family: inherit; cursor: pointer;
+}
+.sd-fold:hover { border-color: var(--accent); }
+.sd-badge {
+  margin-left: auto; font-style: normal; font-size: 11px;
+  padding: 1px 7px; border-radius: 999px;
+  background: rgba(43, 108, 240, .16); color: #5aa9ff;
+}
+.sd-caret { font-style: normal; font-size: 10px; color: var(--muted); transition: transform .18s; }
+.sd-fold.open .sd-caret { transform: rotate(90deg); }
+
+/* 每一项密钥：名字 + 按钮 + 官网链接 */
+.sd-keylist { margin-top: 8px; display: flex; flex-direction: column; gap: 7px; }
+.sd-key {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--panel2);
+}
+.sd-key-t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.sd-key-t b { font-size: 12.5px; font-weight: 600; }
+.sd-key-t small { font-size: 10.5px; color: var(--muted); }
+.sd-key .pill { height: 26px; padding: 0 11px; font-size: 12px; }
+.sd-link {
+  font-size: 11.5px; color: #5aa9ff; text-decoration: none; white-space: nowrap;
+}
+.sd-link:hover { text-decoration: underline; }
+.sd-slot { display: inline-flex; }
+
+/* 第二行搬进来之后：去掉它原来的顶栏边框/底色/内边距，只当普通容器用 */
+.sd-drawer .tools-bar {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  justify-content: flex-start;
+  padding: 0; border: 0; background: none;
+}
+/* 抽屉里控件一律直接可见（原来那套 [data-more] 显隐跟着「⋯ 更多」一起废了） */
+.sd-drawer [data-more] { display: inline-flex !important; }
+
