@@ -1144,6 +1144,48 @@
 
 </body>
 <script>
+/* 临时探针：分步刷新，任何时刻截图都能读到最新数值。验证完删除 */
+(function () {
+  var d = document.createElement('div');
+  d.style.cssText = 'position:fixed;left:0;top:0;right:0;z-index:999999;background:#000;color:#0f0;font:26px/1.5 monospace;padding:20px 24px;white-space:pre;border-bottom:4px solid #0f0';
+  d.textContent = 'PROBE 启动…';
+  document.body.appendChild(d);
+  var out = [];
+  function show() { d.textContent = out.join('\n'); }
+  setTimeout(function () {
+    var sb = document.querySelector('#sidebar');
+    var logo = document.querySelector('#logoBtn');
+    out.push('A 初始宽=' + Math.round(sb.getBoundingClientRect().width) + 'px');
+    show();
+    logo.click();
+    setTimeout(function () {
+      var cs = getComputedStyle(sb);
+      out.push('B 收起后宽=' + Math.round(sb.getBoundingClientRect().width) + 'px');
+      out.push('C minW=' + cs.minWidth + ' pad=' + cs.paddingLeft);
+      show();
+      var kb = document.querySelector('#kbPanel');
+      var inner = document.querySelector('#kbPanel > .pnl-fold > .pnl-fold-in');
+      out.push('D 知识库折叠前=' + Math.round(inner.getBoundingClientRect().height) + 'px');
+      show();
+      kb.querySelector('.sec-head').click();
+      setTimeout(function () {
+        out.push('E 折叠后=' + Math.round(inner.getBoundingClientRect().height) + 'px');
+        out.push('F style.h=' + (inner.style.height || '-'));
+        show();
+        var sc = document.querySelector('#scFold > .sc-fold-in');
+        out.push('G 状态卡前=' + Math.round(sc.getBoundingClientRect().height) + 'px');
+        show();
+        document.querySelector('#scToggle').click();
+        setTimeout(function () {
+          out.push('H 状态卡后=' + Math.round(sc.getBoundingClientRect().height) + 'px');
+          show();
+        }, 450);
+      }, 450);
+    }, 500);
+  }, 200);
+})();
+</script>
+<script>
 /* 临时诊断 v2：CSSOM 命中规则 + 折叠后真实 grid 值，稍后删除 */
 if (false) setTimeout(function () {
   var out = [];
