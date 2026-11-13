@@ -1041,6 +1041,68 @@ class MeshNode:
                          daemon=True).start()
         return {"ok": True, "host": host, "port": port, "gid": gid}
 
+    def punch_addr(self, refresh: bool = False) -> Dict[str, Any]:
+        """本机的「跨网打洞地址」—— 对方拿它就能在 NAT 后面连到你。
+
+        注意这里返回的是 **UDP 端口**，和 TCP 的 self.port 不是同一个；
+        地址带 punch:// 前缀，好让对端知道该走打洞而不是 TCP 直连。
+        """
+        if not self.punch:
+            return {"ok": False, "error": "打洞通道没启动"}
+        m = self.punch.mapped(timeout=2.5, force=refresh)
+        if not m:
+            return {"ok": False,
+                    "error": "查不到公网映射地址（可能断网，或公共 STUN 都被挡了）"}
+        addr = "%s:%s" % (m["ip"], m["port"])
+        return {"ok": True, "ip": m["ip"], "port": m["port"],
+                "addr": addr, "code": "punch://%s" % addr}
+
+    def connect_punch(self, host: str, port: int, gid: str,
+                      timeout: float = 10.0) -> Dict[str, Any]:
+        """跨网络连接：TCP 到不了时改用 UDP 打洞。
+
+        打通后这条通道被当成一条普通的出站连接交给 _serve ——
+        之后的消息、附件、AI 回答全部复用原有逻辑，不需要任何特殊处理。
+        """
+        if not self.started:
+            return {"ok": False, "error": "本机 P2P 网络还没启动"}
+        if not self.punch:
+            return {"ok": False, "error": "打洞通道没启动（UDP 端口可能被占用）"}
+        key = H.group_key(gid) or b""
+        if not key:
+            return {"ok": False, "error": "群不存在或没有密钥"}
+        r = self.punch.connect(host, port, timeout=timeout)
+        if not r.get("ok"):
+            return r
+        sock = r["sock"]
+        peer = Peer(sock, (host, int(port)), gid, out=True)
+        peer.key = key
+        try:
+            ok = _send_frame(sock, T_HELLO, _rk(gid), key, {
+                "uid": self.uid,
+                "name": self.uname,
+                "dev": self.dev,
+                "ver": PROTO_VER,
+                "port": self.port,
+                "gid": gid,
+                "known": self._known_list(),
+                "members": self._members_of(gid),
+                "kicked": self._kicked_of(gid),
+            })
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            r = {"ok": False, "error": "打洞后握手失败：%s" % e}
+        if not ok:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return r if not r.get("ok") else {"ok": False, "error": "打洞后握手帧发送失败"}
+        threading.Thread(target=self._serve, args=(sock, (host, int(port)), False),
+                         daemon=True).start()
+        return {"ok": True, "host": host, "port": int(port), "gid": gid,
+                "via": "punch"}
+
     def connect_code(self, gid: str) -> Dict[str, Any]:
         """生成跨网络用的连接码，并给出可直接念给别人的纯地址。"""
         if not self.started:
