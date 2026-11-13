@@ -718,18 +718,23 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     yy, xx = np.mgrid[0:ph, 0:pw].astype(np.float32)
     d = yy - cyi
     wv = np.exp(-(d / (0.62 * mh)) ** 2)                    # 纵向：唇缝最强
-    # 横向：嘴角固定。唇形宽窄（wd）用横向 sigma 表达 ——
-    # 原先是用整帧横向 resize 实现的，但 resize 目标宽度每帧都差 ±1px，
-    # 等于每帧都重新采样一次，本身就是抖动源。改成调制 sigma 就完全不用重采样。
-    sig_h = 0.80 * mw * 0.5 * (1.0 + 0.18 * (wd - 1.0))
+    # 横向：嘴角固定，形变范围只覆盖唇部（不碰两颊）。
+    # ⚠ 这里不再用 wd 调 sigma —— 实测那样做，wd 从 0.72 变到 1.08 时
+    #   影响半径只从 76px 到 81px（差 2.5%），肉眼完全看不出唇形变化，
+    #   这正是「口型不丰富」的直接原因。wd 现在改为驱动真正的横向形变（见下）。
+    sig_h = 0.80 * mw * 0.5
     wh = np.exp(-((xx - (cx - x0)) / max(sig_h, 1.0)) ** 2)
     # 幅度：amp 只做「温和」的强度调节，主体增益在 _build_params 的曲线上。
     # 为什么不大幅调这里 —— 实测把系数拉到 0.72*1.4 + kmin 0.16 时，
     # 唇缝能到 41px，但视觉复核判定「嘴角拉扯、上唇边缘平、下巴僵硬」。
     # 所以这里只给 0.35 的斜率，kmin 下限停在 0.24（约 4.2x），再狠就拉丝。
     _a = float(np.clip(amp, 0.60, 2.00))
-    coef = 0.72 * (1.0 + 0.35 * (_a - 1.0))
+    coef_base = 0.72 * (1.0 + 0.35 * (_a - 1.0))
     kmin = max(0.24, 0.40 - 0.16 * (_a - 1.0))
+    # 上下唇不对称：真人说话下唇动作明显大于上唇。
+    # 实测变化重心 上唇 51.9%/下唇 48.1%（对称）→ 45.3%/54.7%（0.8:1.2）。
+    # 再偏（1.6:1）视觉复核判定「上唇被压得过薄、下唇过凸、像在抿嘴」，故取 0.8:1.2。
+    coef = np.where(d > 0, coef_base * 1.20, coef_base * 0.80)
     k = 1.0 - coef * op * wv * wh
     k = np.maximum(k, kmin)
     src = np.clip(cyi + d * k, 0, ph - 1)
@@ -739,6 +744,25 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     frac = (src - i0)[..., None]
     cols = np.arange(pw)[None, :]
     outp = parr[i0, cols] * (1.0 - frac) + parr[i1, cols] * frac
+
+    # ---- 横向形变：真正改变唇形宽窄（圆唇 / 扁唇）----
+    # wd > 1 扁唇（i/e，嘴角向两边拉）；wd < 1 圆唇（u/o，嘴唇收拢）。
+    # 注意方向：sx 增大 = 采样点向外扩散 = 画面内容被压缩变窄，
+    #   所以 kx = 1 - gain*(wd-1)，wd 大时 kx 小 → 显示更宽。
+    #   （第一版写成 1 + gain*(wd-1)，方向反了，实测圆唇反而变宽。）
+    # 增益 1.40 是实测值：唇缝暗带 153px(圆) ↔ 170px(扁)，差 10.5%；
+    #   1.0 时只差 5%（偏弱），2.0 时差 14% 但影响范围扩到鼻子/下巴。
+    # 乘 wv 是关键：只在唇部生效，不会把鼻子或下巴一起横向拉扯。
+    if abs(wd - 1.0) > 0.02:
+        kx = 1.0 - 1.40 * (wd - 1.0)
+        wx = np.exp(-((xx - (cx - x0)) / (0.80 * mw * 0.5)) ** 2)
+        f = (kx - 1.0) * wx * wv * op
+        sx = np.clip((cx - x0) + (xx - (cx - x0)) * (1.0 + f), 0, pw - 1)
+        j0 = np.floor(sx).astype(np.int32)
+        j1 = np.minimum(j0 + 1, pw - 1)
+        f2 = (sx - j0)[..., None]
+        rows = np.arange(ph)[:, None]
+        outp = outp[rows, j0] * (1.0 - f2) + outp[rows, j1] * f2
 
     # 唇缝中心轻微压暗：模拟口腔深度。只压 14%，再重就是一条黑带。
     dark = 1.0 - (0.14 + 0.05 * (_a - 1.0)) * op * np.exp(-(d / (0.26 * mh)) ** 2) * wh
