@@ -2272,14 +2272,38 @@
     const head = document.getElementById("scToggle");
     if (!card || !head) return;
     const KEY = "statuscard_collapsed";
-    const apply = (collapsed) => {
+    const foldIn = document.querySelector("#scFold > .sc-fold-in");
+    const setHeight = (collapsed, animate) => {
+      if (!foldIn) return;
+      if (!animate) {
+        foldIn.style.transition = "none";
+        foldIn.style.height = collapsed ? "0px" : "auto";
+        void foldIn.offsetHeight;
+        foldIn.style.transition = "";
+        return;
+      }
+      if (collapsed) {
+        const cur = foldIn.getBoundingClientRect().height;
+        foldIn.style.height = cur + "px";
+        requestAnimationFrame(() => { foldIn.style.height = "0px"; });
+      } else {
+        const h = foldIn.scrollHeight;
+        foldIn.style.height = "0px";
+        requestAnimationFrame(() => { foldIn.style.height = h + "px"; });
+        setTimeout(() => {
+          if (!card.classList.contains("collapsed")) foldIn.style.height = "auto";
+        }, 330);
+      }
+    };
+    const apply = (collapsed, animate) => {
       card.classList.toggle("collapsed", collapsed);
       head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      setHeight(collapsed, animate !== false);
     };
-    try { apply(localStorage.getItem(KEY) === "1"); } catch (e) {}
+    try { apply(localStorage.getItem(KEY) === "1", false); } catch (e) {}
     const toggle = () => {
       const next = !card.classList.contains("collapsed");
-      apply(next);
+      apply(next, true);
       try { localStorage.setItem(KEY, next ? "1" : "0"); } catch (e) {}
     };
     head.addEventListener("click", (ev) => {
