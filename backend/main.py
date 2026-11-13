@@ -11697,4 +11697,56 @@ def hive_disconnect():
     return {"ok": True, "client": hive_client.client().status()}
 
 
+# ---------------------------------------------------------------- 中继（服务器模式）
+# 2026-11-14：恢复「公网服务器中转」。中继只转发密文，看不到聊天内容；
+# 密钥存 data/hive/relay.json（权限 600），接口只回显掩码。
+
+
+@app.get("/api/hive/relay")
+def hive_relay_get():
+    """中继配置 + 实时链路状态（不含密钥）。"""
+    cfg = hive_client.relay_config()
+    lk = getattr(hive_client.client(), "_relay", None)
+    return {"ok": True, "config": hive_client.mask_relay(cfg),
+            "live": (lk.status() if lk is not None else {}),
+            "client": hive_client.client().status()}
+
+
+@app.post("/api/hive/relay")
+def hive_relay_set(body: dict):
+    """保存中继地址/密钥。保存后如果群正在线，立刻用新配置重连。"""
+    b = body or {}
+    cfg = hive_client.relay_config()
+    url = b.get("url")
+    if url is None:
+        url = cfg.get("url") or ""
+    token = b.get("token")
+    if b.get("gen_token"):
+        token = os.urandom(24).hex()
+    keep = token is None or str(token).strip() == ""
+    out = hive_client.set_relay_config(str(url or ""), "" if keep else str(token),
+                                       bool(b.get("enabled", True)), keep_token=True)
+    if b.get("gen_token"):
+        out["token"] = token        # 只在生成这一刻回一次，方便填到服务器
+    reconnected = None
+    gid = getattr(hive_client.client(), "_gid", "") or ""
+    if gid and out.get("enabled") and out.get("url"):
+        try:
+            reconnected = hive_client.client().start("", gid)
+        except Exception as e:
+            reconnected = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    return {"ok": True, "config": out, "reconnected": reconnected}
+
+
+@app.post("/api/hive/relay/test")
+def hive_relay_test(body: dict):
+    """测一下服务器通不通（填地址前先点这个，比建群失败再排查快）。"""
+    b = body or {}
+    cfg = hive_client.relay_config()
+    url = str(b.get("url") or cfg.get("url") or "").strip()
+    if not url:
+        return {"ok": False, "error": "先填服务器地址"}
+    return hive_relay_link.probe(url, cfg.get("token") or "")
+
+
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
