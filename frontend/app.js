@@ -9407,8 +9407,19 @@
         : "当前：回到原位 —— 思考框待在消息流原来的位置。点一下改为「跟随视角」";
     }
     // 把某张实时卡片按当前偏好摆好（.think-dock 的 fixed 样式与单人模式共用）
+    // 群聊的「归位」：只把这张实时卡片放回群消息流，全局「跟随视角」不变
+    function hvSendHome(node) {
+      if (!node || !node.isConnected) return;
+      node._noFollow = true;
+      node.classList.remove("think-dock");
+      node.style.left = node.style.top = node.style.width = node.style.bottom = "";
+      const box = el("hiveMsgs");
+      if (box) box.appendChild(node);
+      if (typeof showToast === "function") showToast("思考卡片已归位", "");
+    }
     function hvDock(node) {
       if (!node || !node.isConnected) return;
+      if (node._noFollow) return;   // 点过「归位」的卡片不再被跟随拽起来
       if (!hvThinkFollow) {
         if (node.classList.contains("think-dock")) {
           node.classList.remove("think-dock");
