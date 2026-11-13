@@ -580,6 +580,24 @@ class HiveClient:
             else:
                 net_err = pr.get("error") or "连不上"
 
+        # (d) 中继目录（跨网络）—— 这是跨网入群的关键：
+        #     原来只靠「本机记录 / 局域网广播 / 手填地址」，跨网三条都不通，
+        #     所以别人拿着密码也进不来。现在配了中继就直接按密码指纹查目录。
+        relay_err = ""
+        cfg = relay_config()
+        if cfg.get("enabled") and cfg.get("url"):
+            try:
+                dr = RELAY.dir_lookup(cfg["url"], cfg.get("token") or "", pw_n)
+                if dr.get("ok"):
+                    hit = (dr.get("raw") or {}).get("group") or {}
+                    if hit.get("gid"):
+                        _add(hit.get("gid") or "", hit.get("vt") or "",
+                             hit.get("name") or "", "relay")
+                else:
+                    relay_err = str(dr.get("error") or "")
+            except Exception as e:
+                relay_err = "%s: %s" % (type(e).__name__, e)
+
         if not cands:
             if net_err:
                 return {"ok": False, "stage": "network",
