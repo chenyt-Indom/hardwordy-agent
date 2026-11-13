@@ -2470,6 +2470,24 @@
     my.oninput = pushMouth;
     mw.oninput = pushMouth;
 
+    // —— 口型幅度滑块 ——
+    const boostIn = $("#av2Boost");
+    const boostVal = $("#av2BoostVal");
+    const BOOST_KEY = "avatar2_boost";
+    function paintBoost() {
+      if (!boostIn || !boostVal) return;
+      boostVal.textContent = parseFloat(boostIn.value).toFixed(1) + "×";
+    }
+    if (boostIn) {
+      const saved = parseFloat(localStorage.getItem(BOOST_KEY) || "");
+      if (!isNaN(saved) && saved >= 1 && saved <= 2) boostIn.value = String(saved);
+      paintBoost();
+      boostIn.oninput = () => {
+        paintBoost();
+        localStorage.setItem(BOOST_KEY, boostIn.value);
+      };
+    }
+
     // —— 生成 ——
     $("#av2Go").onclick = async () => {
       if (busy) return;
