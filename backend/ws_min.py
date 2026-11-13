@@ -164,7 +164,11 @@ class WSSock:
     def __init__(self, sock: socket.socket, rest: bytes = b"",
                  mask_out: bool = False):
         self._s = sock
-        self._buf = bytearray(rest or b"")
+        # ⚠️ rest 是握手响应之后**残留的原始 TCP 字节**（里面是 WS 帧，带帧头），
+        # 不是已解帧的 payload。早先直接塞进 _buf 会在「101 响应和第一帧挤在
+        # 同一个 TCP 段」时错位 —— 表现为有时能连、有时中继「没响应」（实测踩过）。
+        self._raw = bytearray(rest or b"")   # 未解帧的原始字节
+        self._buf = bytearray()              # 已解帧的 payload
         self._mask_out = bool(mask_out)
         self._wlock = threading.Lock()
         self._closed = False
