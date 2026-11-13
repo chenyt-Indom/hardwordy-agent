@@ -4642,3 +4642,41 @@ html[data-theme="light"] select.pill-select option {
   }
 }
 
+/* ==========================================================================
+   2026-11-13（第二次）：侧栏彻底一体化，去掉「那条柱子」
+
+   用户原话：「我看着左边那条灰色框好别扭，页面一体化一些」→ 上一轮我只把
+   .sidebar 自身的 background / border-right 去掉了，结果用户反馈「更难看了，
+   我要一体化一些，不要那条柱子」。
+
+   原因（像素实测，不是猜）：侧栏里的 .panel / .status-card 仍是
+   var(--panel2) = rgb(31,36,48) 实色 + 1px 描边，而它们几乎无缝堆叠 ——
+   扫描 x=150 整列，y=154 到 y=900 全是 rgb(31,36,48)，卡片之间只剩
+   10px 的缝（rgb(13,15,19)）。于是侧栏在视觉上就是**一根 262px 宽、
+   贯穿全高的深色柱子**，边框 1px 是它的轮廓线。侧栏自己变透明后，
+   页面背景 rgb(15,17,21) 更暗，这根柱子反而更突出 —— 所以「更难看了」。
+
+   现在把卡片也一起融进背景：透明底 + 透明描边 + 去投影，只留文字和图标；
+   层次靠 hover 的极淡高亮体现。侧栏与主区共用同一片 --bg，不再有边界。
+   ⚠️ 只作用于 .sidebar 内部，不影响主区的 .panel（主区卡片仍要有实体感）。
+   ========================================================================== */
+.sidebar .panel,
+.sidebar .status-card {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+/* 收起状态（78px 窄条）不需要 hover 高亮 —— 那时内容都淡出了 */
+.sidebar .panel:hover,
+.sidebar .status-card:hover {
+  background: rgba(255, 255, 255, .035);
+}
+.sidebar.hidden .panel:hover,
+.sidebar.hidden .status-card:hover {
+  background: transparent;
+}
+/* 面板之间的间隙从 16px 收到 8px：卡片没有底了，太大的空隙会让分组散开 */
+.sidebar { gap: 8px; }
+/* 品牌区（logo + 名字）单独留一点上边距，别贴着窗口顶端 */
+.sidebar .brand { margin-bottom: 4px; }
+
