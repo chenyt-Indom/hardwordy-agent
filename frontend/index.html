@@ -1027,6 +1027,42 @@
       if (el) el.remove();
     });
 
+    // ⑤.5 顶栏折叠：平时只留一个蓝色箭头，点一下从左到右依次展开
+    //      ⚠️ 用「搬节点」而不是改 HTML 结构：这些控件的 id 和 onclick 都写在
+    //         app.js 里，只换父级，事件绑定一律不受影响。
+    var bar0 = document.getElementById('topBar');
+    if (bar0 && !document.getElementById('tbFoldBtn')) {
+      var fb = document.createElement('button');
+      fb.type = 'button';
+      fb.id = 'tbFoldBtn';
+      fb.className = 'tb-fold-btn';
+      fb.title = '展开 / 收起顶部工具';
+      fb.setAttribute('aria-expanded', 'false');
+      fb.innerHTML = '<span>▶</span>';
+
+      var fbox = document.createElement('div');
+      fbox.className = 'tb-fold';
+      fbox.id = 'tbFoldBox';
+
+      // 记忆 / 知识库 / 联网 / 跑代码 / 模型 / 询问方式 / ⚙ 设置 —— 整体搬进去
+      while (bar0.firstElementChild) fbox.appendChild(bar0.firstElementChild);
+      bar0.appendChild(fb);
+      bar0.appendChild(fbox);
+
+      var setFold = function (on) {
+        fbox.classList.toggle('open', on);
+        fb.classList.toggle('open', on);
+        fb.setAttribute('aria-expanded', on ? 'true' : 'false');
+        try { localStorage.setItem('tb_fold_open', on ? '1' : '0'); } catch (e) {}
+      };
+      fb.onclick = function () { setFold(!fbox.classList.contains('open')); };
+
+      // 记住上次状态；第一次进来默认收起（用户要的就是「只剩一个箭头」）
+      var wantFold = '0';
+      try { wantFold = localStorage.getItem('tb_fold_open') || '0'; } catch (e) {}
+      setFold(wantFold === '1');
+    }
+
     // ⑥ 抽屉开关
     // ⚠️ 关闭时必须 remove('in')：否则 transform 还停在 translateX(0)，
     //    而 .sd-drawer{display:flex} 又会压掉 [hidden] 的 display:none，
