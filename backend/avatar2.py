@@ -576,9 +576,9 @@ def _mouth_shadow(w: int, h: int, op: float) -> "object":
     r = np.sqrt(nx * nx + ny * ny)
     a = np.clip(1.0 - r, 0.0, 1.0)
     a = a * a * (3.0 - 2.0 * a)
-    a = a * (255.0 * 0.72 * float(np.clip(op, 0.0, 1.0)))
+    a = a * (255.0 * 0.88 * float(np.clip(op, 0.0, 1.0)))
     rgb = np.zeros((h, w, 3), dtype=np.uint8)
-    rgb[:, :] = (46, 22, 24)
+    rgb[:, :] = (38, 16, 18)
     rgba = np.dstack([rgb, a.astype(np.uint8)])
     return Image.fromarray(rgba, mode="RGBA")
 
