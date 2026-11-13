@@ -701,7 +701,7 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
         try:
             from . import wav2lip_onnx as _w2l
             r = _w2l.render(img_path, wav_path, out_mp4, fps=fps,
-                            on_progress=on_progress)
+                            on_progress=on_progress, boost=boost)
             if r.get("ok"):
                 return r
             fb = r.get("error") or "未知原因"
