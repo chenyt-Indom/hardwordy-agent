@@ -702,13 +702,13 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
         try:
             from . import wav2lip_onnx as _w2l
             r = _w2l.render(img_path, wav_path, out_mp4, fps=fps,
-                            on_progress=on_progress, boost=boost)
+                            on_progress=on_progress, boost=boost, expr=expr)
             if r.get("ok"):
                 return r
             fb = r.get("error") or "未知原因"
             # 真口型失败不直接报死，退回形变并说明
             r2 = render(img_path, wav_path, out_mp4, words=words, fps=fps,
-                        on_progress=on_progress, engine="param")
+                        on_progress=on_progress, engine="param", expr=expr)
             if r2.get("ok"):
                 r2["fallback_from"] = "wav2lip"
                 r2["fallback_reason"] = fb
