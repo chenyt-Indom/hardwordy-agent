@@ -794,11 +794,26 @@ def status() -> dict:
     exe = ffmpeg()
     asr = _find_asr()
     torch_ok = False
+    torch_ver = ""
     try:
         import torch  # noqa: F401
         torch_ok = True
+        torch_ver = getattr(torch, "__version__", "")
     except Exception:                                   # noqa: BLE001
         torch_ok = False
+    # Wav2Lip 走 onnxruntime，不依赖 torch，所以单独探测
+    w2l = False
+    w2l_err = ""
+    w2l_info = {}
+    try:
+        from . import wav2lip_onnx as w2l_mod
+        w2l = bool(w2l_mod.available())
+        if w2l:
+            w2l_info = w2l_mod.model_info()
+        else:
+            w2l_err = "没有权重文件"
+    except Exception as e:                              # noqa: BLE001
+        w2l_err = "%s: %s" % (type(e).__name__, e)
     return {
         "ok": True,
         "ffmpeg": bool(exe),
@@ -806,13 +821,17 @@ def status() -> dict:
         "asr": bool(asr),
         "asr_dir": asr,
         "torch": torch_ok,
-        "wav2lip": False,          # 本机 torch 不可用，永远是 False
+        "torch_version": torch_ver,
+        "wav2lip": w2l,
+        "wav2lip_error": w2l_err,
+        "wav2lip_size_mb": w2l_info.get("size_mb", 0),
         "fps": FPS,
         "max_seconds": MAX_SECONDS,
         "max_side": MAX_SIDE,
         "has_image": os.path.isfile(_img_path()),
-        "note": ("参数化口型（声学特征驱动）"
-                 + ("，已启用字级对齐" if asr else "，未找到 ASR 模型，仅声学驱动")),
+        "engines": (["wav2lip"] if w2l else []) + ["param"],
+        "note": ("真·口型（Wav2Lip 神经网络）" if w2l else "参数化口型（声学特征驱动）")
+                + ("，已启用字级对齐" if asr else "，未找到 ASR 模型，仅声学驱动"),
     }
 
 
