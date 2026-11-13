@@ -500,6 +500,30 @@ class HiveClient:
 
     # ---------------------------------------------------------- 密码进群
 
+    def _publish_dir(self, url: str, gid: str, token: str) -> bool:
+        """把群登记到中继目录，让跨网的人凭密码就能找到。
+
+        只有**群主**能登记 —— 明文密码只存在群主本机（`group_password`
+        对成员返回空）。所以群主连过一次中继之后，别人就能查到。
+        """
+        try:
+            g = H.load_group(gid) or {}
+            if g.get("owner") != H.profile()["user_id"]:
+                return False
+            info = H.group_password(gid) or {}
+            pw = str(info.get("raw") or "")
+            vt = str(g.get("vt") or "")
+            if not pw or not vt:
+                return False
+            r = RELAY.dir_publish(url, token, pw, gid, vt, g.get("name") or "")
+            self._dir_ok = bool(r.get("ok"))
+            self._dir_err = "" if self._dir_ok else str(r.get("error") or "")
+            return self._dir_ok
+        except Exception as e:
+            self._dir_ok = False
+            self._dir_err = "%s: %s" % (type(e).__name__, e)
+            return False
+
     def join_by_password(self, pw: str, name: str = "", host: str = "",
                          port: int = 0) -> Dict[str, Any]:
         """用 12 位密码进群（二维码已经删掉了）。
