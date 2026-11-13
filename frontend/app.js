@@ -2308,13 +2308,17 @@
     if (!card || !head) return;
     const KEY = "statuscard_collapsed";
     const foldIn = document.querySelector("#scFold > .sc-fold-in");
+    if (foldIn) {
+      foldIn.style.overflow = "hidden";
+      foldIn.style.transition = "height .3s cubic-bezier(.4, 0, .2, 1)";
+    }
     const setHeight = (collapsed, animate) => {
       if (!foldIn) return;
       if (!animate) {
         foldIn.style.transition = "none";
         foldIn.style.height = collapsed ? "0px" : "auto";
         void foldIn.offsetHeight;
-        foldIn.style.transition = "";
+        foldIn.style.transition = "height .3s cubic-bezier(.4, 0, .2, 1)";
         return;
       }
       if (collapsed) {
