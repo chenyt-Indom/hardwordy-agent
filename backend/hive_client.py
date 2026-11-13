@@ -101,6 +101,7 @@ class HiveClient:
         self._files: Dict[str, Dict[str, Any]] = {}   # fid -> 攒片状态
         self._flock = threading.Lock()
         self._hooked = False
+        self._relay = None          # RelayLink（走公网中继时才有）
 
     # ------------------------------------------------------------ 回调挂接
 
