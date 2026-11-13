@@ -2664,9 +2664,7 @@
           });
         }
         let tail = "";
-        if (r.fallback_from) {
-          tail = "（真口型失败已回退：" + (r.fallback_reason || "") + "）";
-        } else if (r.lipsync_label) {
+        if (r.lipsync_label) {
           tail = " · " + r.lipsync_label;
         }
         if (r.mood_label) {
