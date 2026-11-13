@@ -412,6 +412,35 @@ class RelayLink:
         except Exception:
             pass
 
+        # ws:// / wss:// 先升级成 WebSocket，再把 sock 包成 WSSock ——
+        # 之后的 _recv_pkt / _send_pkt 完全不用改（接口和普通 socket 一致）。
+        if self.ws:
+            try:
+                if self.tls:
+                    import ssl
+                    sock = ssl.create_default_context().wrap_socket(
+                        sock, server_hostname=self.host)
+                    sock.settimeout(None)
+                rest = ws_min.handshake_client(
+                    sock, "%s:%s" % (self.host, self.port), self.ws_path)
+            except Exception as e:
+                self.error = "WebSocket 握手异常（%s）" % type(e).__name__
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                return False
+            if rest is None:
+                self.error = ("WebSocket 握手失败 —— 检查 nginx 里 %s 这条 "
+                              "location 有没有配好" % self.ws_path)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                return False
+            sock = ws_min.WSSock(sock, rest=rest, mask_out=True)
+            self.ws_path_ok = True
+
         # 握手：先收 challenge，再回 HMAC
         got = _recv_pkt(sock)
         if not got:
