@@ -1113,14 +1113,18 @@ class MeshNode:
         ts = tailscale_ip()
         # lan_addr / wan_addr 是**不带 hive3:// 前缀**的纯 IP:端口 ——
         # 「密码入群」的地址框要的就是这个格式，直接复制粘贴不会带出协议头。
-        if ts:
-            note = ("检测到 Tailscale：把「Tailscale 地址」发给对方，"
-                    "他粘进来就能连（跨网络也不用公网 IP）")
-        elif pub:
-            note = "把这个码发给对方，他粘进来就能连上（数据不经任何服务器）"
+        # 跨网主路径：本项目自带的 UDP 打洞，不需要装任何外部软件。
+        # 查不到（断网/STUN 全被挡）时再退回 Tailscale 提示。
+        punch = self.punch_addr() if self.punch else {"ok": False}
+        paddr = punch.get("addr", "") if punch.get("ok") else ""
+        if paddr:
+            note = ("把「跨网地址」（punch:// 开头）发给对方，他粘进连接框就能连。"
+                    "数据全程加密，不经过任何服务器。")
+        elif ts:
+            note = ("打洞地址暂时查不到，但检测到 Tailscale："
+                    "把「Tailscale 地址」发给对方也能连。")
         else:
-            note = ("家用宽带没有公网 IP，跨网络连不上。装一个 Tailscale（免费），"
-                    "两台机器登录同一账号后，这里会自动出现 100.x 的地址")
+            note = ("打洞地址暂时查不到（可能断网）。同一个 WiFi 下用局域网地址即可。")
         return {
             "ok": True,
             "gid": gid,
@@ -1134,6 +1138,12 @@ class MeshNode:
             "lan_code": "hive3://%s:%s" % (lip, self.port),
             "wan_code": ("hive3://%s:%s" % (pub, self.port)) if pub else "",
             "ts_code": ("hive3://%s:%s" % (ts, self.port)) if ts else "",
+            # 跨网打洞（推荐）：UDP 端口，带 punch:// 前缀
+            "punch_ok": bool(paddr),
+            "punch_ip": punch.get("ip", "") if punch.get("ok") else "",
+            "punch_port": punch.get("port", 0) if punch.get("ok") else 0,
+            "punch_addr": paddr,
+            "punch_code": ("punch://%s" % paddr) if paddr else "",
             "note": note,
         }
 
