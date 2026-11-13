@@ -1019,3 +1019,80 @@ def delete_video(name: str, scope: str = "avatar") -> dict:
         return {"ok": True}
     except OSError as e:
         return {"ok": False, "error": str(e)}
+
+
+def concat_videos(names, out_name: str = "") -> dict:
+    """把多段数字人视频按顺序拼成一个 mp4（长文本分段生成后合并用）。
+
+    分段产物编码参数一致（h264 + aac、同分辨率同帧率），所以先用
+    concat demuxer + `-c copy` 直接流拷贝，几秒完成；万一参数不一致
+    导致 copy 失败，再退回重编码一次（慢但一定能成）。
+    """
+    import re as _re
+    from urllib.parse import quote as _q
+    exe = ffmpeg()
+    if not exe:
+        return {"ok": False, "error": "找不到 ffmpeg"}
+    if not names:
+        return {"ok": False, "error": "没有可拼接的视频"}
+    paths = []
+    for n in names:
+        p = os.path.join(_vdir(), os.path.basename(str(n)))
+        if not os.path.isfile(p):
+            return {"ok": False, "error": "分段视频不存在：%s" % n}
+        paths.append(p)
+    if len(paths) == 1:
+        nm = os.path.basename(paths[0])
+        return {"ok": True, "name": nm, "parts": 1, "duration": _probe_duration(paths[0]),
+                "url": "/api/avatar2/video/" + _q(nm)}
+
+    name = out_name or ("avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_"
+                        + uuid.uuid4().hex[:4] + ".mp4")
+    out = os.path.join(_vdir(), os.path.basename(name))
+    lst = os.path.join(_vdir(), "_concat_%s.txt" % uuid.uuid4().hex[:8])
+    try:
+        with open(lst, "w", encoding="utf-8") as f:
+            for p in paths:
+                # concat demuxer 的路径要转义单引号；反斜杠统一成 / 更稳
+                f.write("file '%s'\n" % p.replace("\\", "/").replace("'", "'\\''"))
+        r = subprocess.run([exe, "-y", "-loglevel", "error", "-f", "concat",
+                            "-safe", "0", "-i", lst, "-c", "copy",
+                            "-movflags", "+faststart", out],
+                           capture_output=True)
+        ok = r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 1000
+        if not ok:
+            # 兜底：参数不一致时重编码
+            r2 = subprocess.run([exe, "-y", "-loglevel", "error", "-f", "concat",
+                                 "-safe", "0", "-i", lst,
+                                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+                                 "-movflags", "+faststart", out],
+                                capture_output=True)
+            if r2.returncode != 0 or not os.path.isfile(out) or os.path.getsize(out) < 1000:
+                return {"ok": False,
+                        "error": "拼接失败：%s" % ((r2.stderr or r.stderr or b"")[:300]
+                                                  .decode("utf-8", "ignore"))}
+    finally:
+        try:
+            os.remove(lst)
+        except Exception:                              # noqa: BLE001
+            pass
+    dur = round(sum(_probe_duration(p) for p in paths), 2)
+    return {"ok": True, "name": os.path.basename(out), "parts": len(paths),
+            "duration": dur, "bytes": os.path.getsize(out),
+            "url": "/api/avatar2/video/" + _q(os.path.basename(out))}
+
+
+def _probe_duration(path: str) -> float:
+    """读 mp4 时长（秒）；失败返回 0，不影响拼接结果。"""
+    try:
+        import re as _re
+        exe = ffmpeg()
+        r = subprocess.run([exe, "-i", path], capture_output=True)
+        s = (r.stderr or b"").decode("utf-8", "ignore")
+        m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", s)
+        if not m:
+            return 0.0
+        return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:                                  # noqa: BLE001
+        return 0.0
