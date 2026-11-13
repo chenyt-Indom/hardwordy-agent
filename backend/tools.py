@@ -4023,8 +4023,8 @@ def _do_avatar_speak(arguments, ui_events, context):
     text = str(arguments.get("text") or "").strip()
     if not text:
         return "错误：text 是空的。把要让数字人念的文字给我。"
-    if len(text) > 1200:
-        text = text[:1200]
+    if len(text) > 6000:      # 与 /api/avatar2/speak 一致；再长请分段
+        text = text[:6000]
 
     img = str(arguments.get("image") or "").strip()
     if img:
