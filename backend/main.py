@@ -10080,10 +10080,16 @@ def avatar2_speak(body: dict):
     if len(text) > 1200:
         raise HTTPException(status_code=400,
                             detail="文本太长（上限 1200 字，约 90 秒语音）")
-    try:
-        rate = int(body.get("rate") or 0)
-    except Exception:
-        rate = 0
+    # rate 允许不传（None）—— 表示"用心情的建议语速"，不能强转成 0，
+    # 否则用户选了「自动语速」也会被钉死在原速。
+    _r = body.get("rate")
+    if _r is None or _r == "":
+        rate = None
+    else:
+        try:
+            rate = int(_r)
+        except Exception:
+            rate = None
     try:
         boost = float(body.get("boost") or 1.0)
     except Exception:
@@ -10094,13 +10100,47 @@ def avatar2_speak(body: dict):
                          style=str(body.get("style") or ""),
                          engine=str(body.get("engine") or "auto"),
                          lipsync=str(body.get("lipsync") or "auto"),
-                         boost=boost)
+                         boost=boost,
+                         mood=str(body.get("mood") or ""),
+                         expr=bool(body.get("expr", True)))
 
 
 @app.get("/api/avatar2/videos")
-def avatar2_videos():
-    """已生成的数字人视频列表，新的在前。"""
-    return {"ok": True, "items": avatar2.list_videos()}
+def avatar2_videos(scope: str = "avatar"):
+    """可浏览的 mp4 列表，新的在前。scope=avatar/library/all"""
+    return {"ok": True, "scope": scope, "items": avatar2.list_videos(scope=scope)}
+
+
+@app.get("/api/avatar2/moods")
+def avatar2_moods():
+    """心情清单 + 每个心情的建议参数，给前端下拉用。"""
+    from . import avatar2_expr
+    return {"ok": True, "items": avatar2_expr.list_moods()}
+
+
+@app.post("/api/avatar2/detect_mood")
+def avatar2_detect_mood(body: dict):
+    """按语境自动判断心情与语速（纯规则，秒出）。body: {text}"""
+    from . import avatar2_expr
+    body = body or {}
+    return avatar2_expr.detect_mood(str(body.get("text") or ""))
+
+
+@app.post("/api/avatar2/import_doc")
+async def avatar2_import_doc(file: UploadFile = File(...)):
+    """导入文档取文本，给前端预览用。
+
+    只返回文本，**不自动开始朗读** —— 用户要先看一眼、自己删减。
+    """
+    from . import docread
+    raw = await file.read()
+    if len(raw) > 40 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件太大（上限 40MB）")
+    r = docread.read_bytes(raw, file.filename or "")
+    if r.get("ok"):
+        r["paragraphs"] = docread.split_paragraphs(r["text"])
+        r["name"] = file.filename or ""
+    return r
 
 
 @app.get("/api/avatar2/video/{name}")
