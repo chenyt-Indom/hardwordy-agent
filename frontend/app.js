@@ -9431,6 +9431,19 @@
       node.style.left = node.style.top = node.style.width = node.style.bottom = "";
       const box = el("hiveMsgs");
       if (box) box.appendChild(node);
+      // ★ 2026-11-13 同上：没有别的实时卡片在跟随时，把群聊的「跟随视角」开关一并关掉，
+      //   否则开关仍显示「跟随视角」，用户点一次只是关掉它，得连点两次才恢复。
+      if (hvThinkFollow) {
+        const anyFloat = Object.keys(hdCards).some((k) => {
+          const n = hdCards[k] && hdCards[k].node;
+          return n && n.isConnected && n.classList.contains("think-dock") && !n._noFollow;
+        });
+        if (!anyFloat) {
+          hvThinkFollow = false;
+          try { localStorage.setItem("think_follow", "0"); } catch (e) { /* 隐私模式 */ }
+          hvSyncThink();
+        }
+      }
       if (typeof showToast === "function") showToast("思考卡片已归位", "");
     }
     function hvDock(node) {
