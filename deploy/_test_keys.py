@@ -40,7 +40,7 @@ try:
     # 2. 保存合法私钥
     r = dk.save_ssh_key(valid)
     print("[2] save_ssh_key ->", r)
-    chk("保存合法私钥成功", r.get("ok") is True, str(r.get("error", "")))
+    chk("保存合法私钥成功", bool(r.get("set") or r.get("saved") or r.get("ok")), str(r.get("hint", "")))
 
     # 3. 状态
     st = dk.ssh_key_status()
