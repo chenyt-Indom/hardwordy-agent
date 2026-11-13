@@ -2552,7 +2552,8 @@
     }
     if (boostIn) {
       const saved = parseFloat(localStorage.getItem(BOOST_KEY) || "");
-      if (!isNaN(saved) && saved >= 1 && saved <= 2) boostIn.value = String(saved);
+      // 上限已收到 1.4（1.6 以上会出黑腔/下巴虚化），旧存档超出就夹回来
+      if (!isNaN(saved) && saved >= 1) boostIn.value = String(Math.min(1.4, saved));
       paintBoost();
       boostIn.oninput = () => {
         paintBoost();
