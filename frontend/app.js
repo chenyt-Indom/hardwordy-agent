@@ -327,7 +327,6 @@
     undockOne(w, true);
     if (typeof showToast === "function") showToast("思考卡片已归位", "");
   }
-  window.__thTest = { ensureThinkHome, sendThinkHome, dockOne, undockOne, boxes: _thinkBoxes }; // TEMP-VERIFY
   function clearThinkDock() {
     _thinkLive = null;
     _thinkBoxes.clear();
