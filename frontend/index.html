@@ -1038,7 +1038,11 @@
       fb.className = 'tb-fold-btn';
       fb.title = '展开 / 收起顶部工具';
       fb.setAttribute('aria-expanded', 'false');
-      fb.innerHTML = '<span>▶</span>';
+      // 图标用内联 SVG 折线，不用字符 ▶（2026-11-13 用户反馈「箭头不雅观」：
+      // 字符 ▶ 在不同字体下粗细/位置都不一样，而且看起来像个「播放键」）
+      fb.innerHTML = '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">' +
+        '<path d="M6.2 3.4 10.8 8l-4.6 4.6" fill="none" stroke="currentColor" ' +
+        'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
       var fbox = document.createElement('div');
       fbox.className = 'tb-fold';
