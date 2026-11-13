@@ -2150,10 +2150,121 @@
   window.__openSidebar = openSidebar;
   window.__closeSidebar = closeSidebar;
 
-  $("#toggleSidebar").onclick = () => {
+  // 2026-11-13 用户要求：去掉「智能体对话」旁的 ☰ 单钮，改由侧栏 logo 本身
+  // 折叠整条侧栏。桌面端收起是「78px 窄条」（logo 还在，随时点回来），
+  // 手机端是「滑出屏幕」——两种行为都还是靠 .hidden 表示，差异全在 CSS 里。
+  const SB_KEY = "sidebar_collapsed";
+  const setSbCollapsed = (collapsed, persist) => {
     const el = _sbEl(); if (!el) return;
-    if (el.classList.contains("hidden")) openSidebar(); else closeSidebar();
+    if (collapsed) closeSidebar(); else openSidebar();
+    const b = document.querySelector("#logoBtn");
+    if (b) b.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    if (persist) { try { localStorage.setItem(SB_KEY, collapsed ? "1" : "0"); } catch (e) {} }
   };
+  const _logoBtn = document.querySelector("#logoBtn");
+  if (_logoBtn) {
+    _logoBtn.onclick = () => {
+      const el = _sbEl(); if (!el) return;
+      setSbCollapsed(!el.classList.contains("hidden"), true);
+    };
+  }
+  // 手机端侧栏滑走后 logo 也跟着走了，用主区那个同款 logo 小按钮叫回来
+  const _sbFloat = document.querySelector("#sbFloat");
+  if (_sbFloat) _sbFloat.onclick = () => setSbCollapsed(false, true);
+  // 恢复上次的折叠状态（只在桌面端恢复：手机上默认就该是收起的）
+  try {
+    if (localStorage.getItem(SB_KEY) === "1" && window.innerWidth > 768) setSbCollapsed(true, false);
+  } catch (e) {}
+
+  // ---------- 侧栏面板折叠（2026-11-13）----------
+  // 用户要求：知识库 / 音频 / 图片库 / 协作群 这些面板也要能各自收起展开、带动画。
+  // 做法：把 .sec-head 之后的兄弟节点整体包进 .pnl-fold > .pnl-fold-in，
+  // 高度动画交给 CSS 的 grid-template-rows 1fr ↔ 0fr（不用预先量高度）。
+  // ⚠️ 生成文库 / 对话 / 记忆库本来就有自己的折叠逻辑，这里**跳过**，否则两套打架。
+  (function initFoldablePanels() {
+    const FOLD_KEY = "folded_panels";
+    let folded = {};
+    try { folded = JSON.parse(localStorage.getItem(FOLD_KEY) || "{}") || {}; } catch (e) { folded = {}; }
+    const saveFolded = () => { try { localStorage.setItem(FOLD_KEY, JSON.stringify(folded)); } catch (e) {} };
+
+    ["kbPanel", "audioPanel", "libraryPanel", "hivePanel"].forEach((id) => {
+      const pnl = document.getElementById(id);
+      if (!pnl) return;
+      const head = pnl.querySelector(".sec-head");
+      if (!head) return;
+      // 已经包过就不再包（热重载 / 重复初始化时防重）
+      if (pnl.querySelector(":scope > .pnl-fold")) return;
+
+      const fold = document.createElement("div");
+      fold.className = "pnl-fold";
+      const inner = document.createElement("div");
+      inner.className = "pnl-fold-in";
+      fold.appendChild(inner);
+
+      // 先把所有待移动的兄弟节点收集起来再移动 —— 边遍历边 append 会漏掉节点
+      const moving = [];
+      let n = head.nextSibling;
+      while (n) { moving.push(n); n = n.nextSibling; }
+      if (!moving.length) return;
+      pnl.appendChild(fold);
+      moving.forEach((node) => inner.appendChild(node));
+
+      const chev = document.createElement("span");
+      chev.className = "fold-chev";
+      chev.textContent = "▾";
+      chev.setAttribute("aria-hidden", "true");
+      head.appendChild(chev);
+      head.classList.add("fold-head");
+      head.setAttribute("role", "button");
+      head.setAttribute("tabindex", "0");
+
+      const apply = (collapsed) => {
+        pnl.classList.toggle("collapsed", collapsed);
+        head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      };
+      apply(!!folded[id]);
+
+      const toggle = () => {
+        const next = !pnl.classList.contains("collapsed");
+        apply(next);
+        folded[id] = next;
+        saveFolded();
+      };
+      head.addEventListener("click", (ev) => {
+        // 标题行里的按钮（📂 / ⋯ / ＋建群 / 🔑密码入群）是干活的，不算折叠
+        if (ev.target.closest("button")) return;
+        toggle();
+      });
+      head.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); }
+      });
+    });
+  })();
+
+  // ---------- 模型状态卡折叠（2026-11-13）----------
+  (function initStatusFold() {
+    const card = document.getElementById("statusCard");
+    const head = document.getElementById("scToggle");
+    if (!card || !head) return;
+    const KEY = "statuscard_collapsed";
+    const apply = (collapsed) => {
+      card.classList.toggle("collapsed", collapsed);
+      head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    };
+    try { apply(localStorage.getItem(KEY) === "1"); } catch (e) {}
+    const toggle = () => {
+      const next = !card.classList.contains("collapsed");
+      apply(next);
+      try { localStorage.setItem(KEY, next ? "1" : "0"); } catch (e) {}
+    };
+    head.addEventListener("click", (ev) => {
+      if (ev.target.closest("button")) return;
+      toggle();
+    });
+    head.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); }
+    });
+  })();
   const _sbCloseBtn = document.querySelector("#sbClose");
   if (_sbCloseBtn) _sbCloseBtn.onclick = closeSidebar;
   const _sbMaskEl = _maskEl();
