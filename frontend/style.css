@@ -4364,6 +4364,8 @@ html[data-theme="light"] select.pill-select option {
 
 /* 每一项密钥：名字 + 按钮 + 官网链接 */
 .sd-keylist { margin-top: 8px; display: flex; flex-direction: column; gap: 7px; }
+/* ⚠️ display:flex 的优先级高于 [hidden] 的 UA 样式，不加这条「默认收起」会失效 */
+.sd-keylist[hidden] { display: none; }
 .sd-key {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 10px; border-radius: 10px;
