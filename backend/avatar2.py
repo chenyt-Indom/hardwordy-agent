@@ -790,8 +790,9 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
     if dur < 0.2:
         return {"ok": False, "error": "音频太短（%.2f 秒）" % dur}
 
+    _amp = float(np.clip(amp, 0.60, 2.00))
     prep = _prep(img_path)
-    params = _build_params(y, sr, words or [], fps)
+    params = _build_params(y, sr, words or [], fps, amp=_amp)
     W, H = prep["wh"]
     n = len(params)
 
