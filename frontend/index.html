@@ -1144,39 +1144,37 @@
 
 </body>
 <script>
-/* 临时验证：测折叠前后的真实尺寸，稍后删除 */
+/* 临时诊断：折叠到底卡在哪一环，稍后删除 */
 setTimeout(function () {
   var out = [];
   var sb = document.querySelector('#sidebar');
   var logo = document.querySelector('#logoBtn');
-  out.push('sb_before=' + Math.round(sb.getBoundingClientRect().width));
+  var cs = getComputedStyle(sb);
+  out.push('vw=' + window.innerWidth);
+  out.push('mq769=' + matchMedia('(min-width: 769px)').matches);
+  out.push('sb_cls=' + sb.className);
+  out.push('sb_w=' + cs.width + ' minw=' + cs.minWidth);
+  out.push('sb_pad=' + cs.paddingLeft);
   logo.click();
   setTimeout(function () {
-    out.push('sb_after=' + Math.round(sb.getBoundingClientRect().width));
-    out.push('sb_hidden=' + sb.classList.contains('hidden'));
-    var logoBox = logo.getBoundingClientRect();
-    out.push('logo_visible=' + (logoBox.width > 10 && logoBox.height > 10));
-    var kb = document.querySelector('#kbPanel');
-    var h0 = Math.round(kb.getBoundingClientRect().height);
-    kb.querySelector('.sec-head').click();
-    setTimeout(function () {
-      out.push('kb_before=' + h0);
-      out.push('kb_after=' + Math.round(kb.getBoundingClientRect().height));
-      out.push('kb_collapsed=' + kb.classList.contains('collapsed'));
-      var sc = document.querySelector('#statusCard');
-      var s0 = Math.round(sc.getBoundingClientRect().height);
-      document.querySelector('#scToggle').click();
-      setTimeout(function () {
-        out.push('sc_before=' + s0);
-        out.push('sc_after=' + Math.round(sc.getBoundingClientRect().height));
-        out.push('sc_collapsed=' + sc.classList.contains('collapsed'));
-        var d = document.createElement('div');
-        d.style.cssText = 'position:fixed;left:40px;top:40px;z-index:99999;background:#000;color:#0f0;font:19px monospace;padding:18px;white-space:pre;border:3px solid #0f0;line-height:1.5';
-        d.textContent = out.join('\n');
-        document.body.appendChild(d);
-      }, 600);
-    }, 600);
-  }, 700);
+    var cs2 = getComputedStyle(sb);
+    out.push('--after click--');
+    out.push('sb_cls2=' + sb.className);
+    out.push('sb_w2=' + cs2.width + ' minw2=' + cs2.minWidth);
+    out.push('sb_pad2=' + cs2.paddingLeft);
+    out.push('rect2=' + Math.round(sb.getBoundingClientRect().width));
+    var fold = document.querySelector('#kbPanel > .pnl-fold');
+    out.push('kb_fold=' + (fold ? 'yes' : 'NO'));
+    if (fold) {
+      out.push('kb_fold_rows=' + getComputedStyle(fold).gridTemplateRows);
+      out.push('kb_fold_disp=' + getComputedStyle(fold).display);
+      out.push('kb_inner_kids=' + fold.firstElementChild.children.length);
+    }
+    var d = document.createElement('div');
+    d.style.cssText = 'position:fixed;left:30px;top:30px;z-index:99999;background:#000;color:#0f0;font:17px monospace;padding:16px;white-space:pre;border:3px solid #0f0;line-height:1.45';
+    d.textContent = out.join('\n');
+    document.body.appendChild(d);
+  }, 800);
 }, 1500);
 </script>
 </html>
