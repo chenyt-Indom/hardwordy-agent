@@ -382,7 +382,7 @@ class RelayServer:
         except Exception as e:
             log.debug("连接异常 %s: %s", addr, e)
         finally:
-            conn.close()
+            conn.graceful_close(0.8)
 
     def _serve_conn(self, conn: Conn) -> None:
         nonce = os.urandom(16).hex()
