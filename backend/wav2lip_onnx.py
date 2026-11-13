@@ -463,7 +463,7 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     _half = 0.045
     _mtop = max(0.0, my_rel - _half)
     _mbot = min(1.0, my_rel + _half)
-    msk = _feather_mask(ch, cw, top=_mtop, bot=_mbot, feather=0.03)
+    msk = _feather_mask(ch, cw, top=_mtop, bot=_mbot, feather=0.04)
 
     cmd = [exe, "-y", "-loglevel", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (W, H),
