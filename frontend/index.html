@@ -1192,9 +1192,7 @@ setTimeout(function () {
     var kb = document.querySelector('#kbPanel');
     var fold = document.querySelector('#kbPanel > .pnl-fold');
     var inner2 = fold.firstElementChild;
-    out.push('--fold test--');
-    out.push('kb_h=' + Math.round(kb.getBoundingClientRect().height));
-    out.push('inner_before=' + Math.round(inner2.getBoundingClientRect().height));
+    out.push('C 知识库折叠前=' + Math.round(inner2.getBoundingClientRect().height) + 'px');
     kb.querySelector('.sec-head').click();
     setTimeout(function () {
       out.push('D 知识库折叠后=' + Math.round(inner2.getBoundingClientRect().height) + 'px');
