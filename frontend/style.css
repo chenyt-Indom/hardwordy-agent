@@ -4393,3 +4393,65 @@ html[data-theme="light"] select.pill-select option {
 /* 抽屉里控件一律直接可见（原来那套 [data-more] 显隐跟着「⋯ 更多」一起废了） */
 .sd-drawer [data-more] { display: inline-flex !important; }
 
+/* ================= 顶栏折叠（2026-11-13）=================
+   用户要求：顶栏那一排按钮收成一个蓝色箭头，点一下从左到右依次展开。
+   实现要点：
+     · 容器 max-width 0 → 1400px 做「拉开」的动作；子项 flex:0 0 auto 不收缩，
+       配合容器 overflow:hidden，控件就是被逐个「露出来」的 —— 天然从左到右；
+     · 子项再加 opacity + translateX(-12px)→0，并按 nth-child 递增 transition-delay，
+       观感是依次弹出，而不是整块浮现；
+     · 收起时 delay 全部归零（一次性收回去），避免收起也慢吞吞。 */
+.top-bar > .tb-fold {
+  display: flex; align-items: center; gap: 12px;
+  flex: 0 0 auto;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: max-width .36s cubic-bezier(.4, 0, .2, 1), opacity .18s ease;
+}
+.top-bar > .tb-fold.open {
+  max-width: 1400px;
+  opacity: 1;
+  pointer-events: auto;
+}
+/* 容器里的控件要重新写一遍宽度兜底：它们不再是 .top-bar 的直接子元素，
+   原来那条 `.top-bar > *` 管不到它们了。 */
+.top-bar > .tb-fold > * {
+  width: auto !important;
+  max-width: 186px;
+  flex: 0 0 auto;
+  min-width: 0;
+  opacity: 0;
+  transform: translateX(-12px);
+  transition: opacity .2s ease, transform .26s cubic-bezier(.2, .8, .2, 1);
+}
+.top-bar > .tb-fold.open > * { opacity: 1; transform: translateX(0); }
+.top-bar > .tb-fold.open > *:nth-child(1) { transition-delay: .04s; }
+.top-bar > .tb-fold.open > *:nth-child(2) { transition-delay: .07s; }
+.top-bar > .tb-fold.open > *:nth-child(3) { transition-delay: .10s; }
+.top-bar > .tb-fold.open > *:nth-child(4) { transition-delay: .13s; }
+.top-bar > .tb-fold.open > *:nth-child(5) { transition-delay: .16s; }
+.top-bar > .tb-fold.open > *:nth-child(6) { transition-delay: .19s; }
+.top-bar > .tb-fold.open > *:nth-child(7) { transition-delay: .22s; }
+.top-bar > .tb-fold.open > *:nth-child(8) { transition-delay: .25s; }
+.top-bar > .tb-fold.open > *:nth-child(n+9) { transition-delay: .28s; }
+.top-bar > .tb-fold:not(.open) > * { transition-delay: 0s; }
+
+/* 蓝色箭头：▶ 展开时转 90° 变 ▼，表示「可以收回去」 */
+.tb-fold-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  background: #1c2947;
+  color: var(--accent);
+  font-size: 11px; line-height: 1;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: transform .32s cubic-bezier(.2, .8, .2, 1),
+              background-color .15s, box-shadow .15s;
+}
+.tb-fold-btn:hover { background: #24345c; box-shadow: 0 0 10px rgba(79, 139, 249, .45); }
+.tb-fold-btn.open { transform: rotate(90deg); }
+
