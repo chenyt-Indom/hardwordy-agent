@@ -2262,6 +2262,221 @@
   // 做法：把 .sec-head 之后的兄弟节点整体包进 .pnl-fold > .pnl-fold-in，
   // 高度动画交给 CSS 的 grid-template-rows 1fr ↔ 0fr（不用预先量高度）。
   // ⚠️ 生成文库 / 对话 / 记忆库本来就有自己的折叠逻辑，这里**跳过**，否则两套打架。
+  // ---------- 🎭 数字人（2026-11-13） ----------
+  // 一张图 + 一段话 → 会说话的视频。口型是**参数化**的（声学特征驱动），
+  // 不是 Wav2Lip 那种神经网络重绘，界面上必须如实写清这一点。
+  (function initAvatar2() {
+    const pnl = document.getElementById("av2Panel");
+    if (!pnl) return;
+    const $ = (s) => pnl.querySelector(s);
+    const img = $("#av2Img"), empty = $("#av2Empty");
+    const fileIn = $("#av2File"), textIn = $("#av2Text");
+    const voiceSel = $("#av2Voice"), hint = $("#av2Hint");
+    const video = $("#av2Video"), list = $("#av2List");
+    const cal = $("#av2Cal"), my = $("#av2MY"), mw = $("#av2MW");
+    const pinBtn = $("#av2Pin");
+    const PIN_KEY = "avatar2_pin";
+    let busy = false, voicesLoaded = false;
+
+    // 右下角常驻：动态建节点，不动已有布局骨架
+    const pin = document.createElement("div");
+    pin.className = "av2-pin";
+    pin.innerHTML = '<div class="av2-pin-head"><span>🎭 数字人</span>' +
+      '<button type="button" title="关闭常驻">✕</button></div>' +
+      '<img alt="数字人形象" /><video playsinline></video>';
+    document.body.appendChild(pin);
+    const pinImg = pin.querySelector("img"), pinVid = pin.querySelector("video");
+
+    function say(msg, kind) {
+      hint.textContent = msg || "";
+      hint.style.color = kind === "err" ? "#e06c75" : "";
+    }
+
+    function setPin(on) {
+      pin.classList.toggle("on", !!on);
+      pinBtn.classList.toggle("active", !!on);
+      pinBtn.title = on ? "取消常驻" : "常驻右下角";
+      try { localStorage.setItem(PIN_KEY, on ? "1" : ""); } catch (e) {}
+      if (!on) { pin.classList.remove("speaking"); }
+    }
+    pin.querySelector("button").onclick = () => setPin(false);
+    pinBtn.onclick = () => setPin(!pin.classList.contains("on"));
+
+    function paintInfo(info) {
+      const has = !!(info && info.has_image);
+      img.hidden = !has;
+      empty.hidden = has;
+      if (has && info.url) {
+        // 加时间戳：换了形象要立刻看到新的，别吃缓存
+        const u = info.url + (info.url.indexOf("?") >= 0 ? "&" : "?") + "t=" + Date.now();
+        img.src = u;
+        pinImg.src = u;
+      }
+      cal.hidden = !has;
+      if (info && info.mouth) {
+        my.value = info.mouth.y;
+        mw.value = info.mouth.w;
+      }
+    }
+
+    async function loadInfo() {
+      try { paintInfo(await api("/api/avatar2/info")); }
+      catch (e) { say("读取形象失败：" + e.message, "err"); }
+    }
+
+    async function loadStatus() {
+      try {
+        const st = await api("/api/avatar2/status");
+        const bits = [st.ffmpeg ? "ffmpeg ✓" : "ffmpeg ✗",
+                      st.asr ? "字级对齐 ✓" : "仅声学驱动"];
+        if (!st.torch) bits.push("无 torch → 不能 Wav2Lip");
+        say(bits.join(" · ") + "。口型为参数化形变，不是神经网络重绘。");
+      } catch (e) { /* 状态读不到不影响用 */ }
+    }
+
+    async function loadVoices() {
+      if (voicesLoaded) return;
+      try {
+        const r = await api("/api/tts/voices");
+        const vs = (r.voices || []).filter((v) => v.available !== false);
+        voiceSel.innerHTML = vs.map((v) =>
+          '<option value="' + v.id + '">' + (v.name || v.id) + "</option>").join("");
+        if (r.default) voiceSel.value = r.default;
+        voicesLoaded = true;
+      } catch (e) {}
+    }
+
+    function playVideo(name) {
+      const src = "/api/avatar2/video/" + encodeURIComponent(name);
+      video.hidden = false;
+      video.src = src;
+      video.play().catch(() => {});
+      // 常驻小窗同步播：说话时把小图换成视频
+      pinVid.src = src;
+      pin.classList.add("speaking");
+      pinVid.onended = () => pin.classList.remove("speaking");
+      pinVid.onerror = () => pin.classList.remove("speaking");
+    }
+
+    async function loadVideos() {
+      try {
+        const r = await api("/api/avatar2/videos");
+        const items = r.items || [];
+        list.innerHTML = items.length
+          ? items.map((it) =>
+              '<div class="av2-item" data-name="' + it.name + '" title="' + it.name + '">' +
+              '<span class="av2-name">' + String(it.name).replace(/^avatar_/, "") + "</span>" +
+              '<span class="av2-meta">' + String(it.mtime).slice(5, 16) + "</span></div>").join("")
+          : "";
+        list.querySelectorAll(".av2-item").forEach((el) => {
+          el.onclick = () => playVideo(el.dataset.name);
+        });
+      } catch (e) {}
+    }
+
+    // —— 上传 ——
+    $("#av2UploadBtn").onclick = () => fileIn.click();
+    fileIn.onchange = async () => {
+      const f = fileIn.files && fileIn.files[0];
+      if (!f) return;
+      fileIn.value = "";
+      const fd = new FormData();
+      fd.append("file", f);
+      say("上传中…");
+      try {
+        // 上传不能用 api()：它默认塞 application/json，multipart 的 boundary 会丢
+        const r = await fetch("/api/avatar2/upload", { method: "POST", body: fd });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || "上传失败");
+        paintInfo(d);
+        const am = d.auto_mouth || {};
+        say(am.ok
+          ? "已上传 · 自动定位嘴部（置信度 " + am.score + "）"
+          : "已上传，但没检测到人脸：" + (am.error || "未知") + "。请拖滑块校准嘴位。",
+          am.ok ? "" : "err");
+      } catch (e) { say("上传失败：" + e.message, "err"); }
+    };
+
+    // —— 用最近生成的那张图 ——
+    $("#av2LatestBtn").onclick = async () => {
+      say("正在取最近生成的图…");
+      try {
+        const r = await api("/api/library/images");
+        const gen = (r.images || []).filter((x) => x.origin === "gen");
+        gen.sort((a, b) => String(b.created).localeCompare(String(a.created)));
+        if (!gen.length) { say("图库里还没有 AI 生成的图。先在对话里让我画一张。", "err"); return; }
+        const d = await api("/api/avatar2/from_library", {
+          method: "POST", body: JSON.stringify({ id: gen[0].id }) });
+        paintInfo(d);
+        const am = d.auto_mouth || {};
+        say("已设为形象" + (am.ok ? " · 嘴部已自动定位" : " · 请手动校准嘴位"),
+            am.ok ? "" : "err");
+      } catch (e) { say("设置失败：" + e.message, "err"); }
+    };
+
+    // —— 自动定位嘴部 ——
+    $("#av2Detect").onclick = async () => {
+      say("正在检测人脸…");
+      try {
+        const r = await api("/api/avatar2/detect_mouth", { method: "POST", body: "{}" });
+        if (!r.ok) { say("没检测到人脸：" + (r.error || "未知"), "err"); return; }
+        my.value = r.mouth.y;
+        mw.value = r.mouth.w;
+        say("已重新定位嘴部（置信度 " + r.score + "）");
+      } catch (e) { say("检测失败：" + e.message, "err"); }
+    };
+
+    // —— 手动校准（拖动时防抖，220ms 才落盘） ——
+    let calTimer = null;
+    function pushMouth() {
+      clearTimeout(calTimer);
+      calTimer = setTimeout(async () => {
+        try {
+          await api("/api/avatar2/mouth", {
+            method: "POST",
+            body: JSON.stringify({ y: parseFloat(my.value), w: parseFloat(mw.value) }),
+          });
+        } catch (e) {}
+      }, 220);
+    }
+    my.oninput = pushMouth;
+    mw.oninput = pushMouth;
+
+    // —— 生成 ——
+    $("#av2Go").onclick = async () => {
+      if (busy) return;
+      const text = (textIn.value || "").trim();
+      if (!text) { say("先写点要让数字人说的话", "err"); return; }
+      const btn = $("#av2Go");
+      const old = btn.textContent;
+      busy = true;
+      btn.disabled = true;
+      btn.textContent = "生成中…";
+      say("正在配音 → 口型对齐 → 合成，约 10 秒…");
+      try {
+        const r = await api("/api/avatar2/speak", {
+          method: "POST",
+          body: JSON.stringify({ text: text, voice: voiceSel.value }),
+        });
+        if (!r.ok) throw new Error(r.error || "生成失败");
+        say("已生成 " + r.duration + " 秒 · " + (r.size || []).join("×") +
+            " · " + (r.align || ""));
+        playVideo(r.name);
+        loadVideos();
+      } catch (e) {
+        say("生成失败：" + e.message, "err");
+      } finally {
+        busy = false;
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    };
+
+    // —— 启动 ——
+    loadInfo().then(() => { loadStatus(); loadVoices(); loadVideos(); });
+    setPin(localStorage.getItem(PIN_KEY) === "1");
+  })();
+
   (function initFoldablePanels() {
     const FOLD_KEY = "folded_panels";
     let folded = {};
