@@ -463,12 +463,22 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   border-radius: 50%; cursor: pointer;
 }
 
-/* 2026-11-13 用户要求「最底下的栏弄成一体式」：
-   原来是 border-top 一条实色横线 + background: var(--panel) 实色底，
-   在深色下和消息区（--bg）之间形成一条明显的"断开"。
-   现在两样都去掉，输入区跟页面共用同一层背景，
-   层次交给里面的输入框本身（--panel2 底 + 描边 + 圆角）表现。 */
-.composer { border-top: 1px solid transparent; padding: 12px 20px 14px; background: transparent; }
+/* 2026-11-13（二轮）用户反馈：「我还是想要有边框，但要注意美观」。
+   一轮把实色底 + 横线全去掉后，输入区跟消息区完全同色，边界感也一起丢了。
+   这一版改成「浮起的圆角卡片」：
+     · 四周留白 + 圆角 + 一圈淡描边 → 边界清楚，
+       但不会像横贯全宽的硬线那样把页面切成两半（"断开"的观感就来自那条硬线）；
+     · 底色用 --panel（只比页面亮一点点）+ 柔和外阴影，像从页面上轻轻浮起一层；
+     · 颜色全走变量，切到浅色模式自动跟着变。 */
+.composer {
+  position: relative;
+  margin: 0 16px 14px;
+  padding: 12px 14px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .22);
+}
 .input-row { display: flex; gap: 10px; align-items: flex-end; }
 .input-row textarea {
   flex: 1; background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
