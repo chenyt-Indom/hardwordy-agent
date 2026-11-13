@@ -78,7 +78,7 @@ MOODS = {
     "confident": {
         "label": "自信", "emoji": "😎", "style": "news",
         "rate": 4, "pitch": -2,
-        "sway": 0.9, "nod": 1.0, "rot": 0.30, "brow": 1.2, "freq": 0.34,
+        "sway": 1.7, "nod": 1.9, "rot": 0.42, "brow": 1.6, "freq": 0.34,
         "desc": "吐字清楚、节奏稳，头部小幅点头",
     },
 }
