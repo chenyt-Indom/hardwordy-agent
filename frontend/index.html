@@ -1143,4 +1143,40 @@
 
 
 </body>
+<script>
+/* 临时验证：测折叠前后的真实尺寸，稍后删除 */
+setTimeout(function () {
+  var out = [];
+  var sb = document.querySelector('#sidebar');
+  var logo = document.querySelector('#logoBtn');
+  out.push('sb_before=' + Math.round(sb.getBoundingClientRect().width));
+  logo.click();
+  setTimeout(function () {
+    out.push('sb_after=' + Math.round(sb.getBoundingClientRect().width));
+    out.push('sb_hidden=' + sb.classList.contains('hidden'));
+    var logoBox = logo.getBoundingClientRect();
+    out.push('logo_visible=' + (logoBox.width > 10 && logoBox.height > 10));
+    var kb = document.querySelector('#kbPanel');
+    var h0 = Math.round(kb.getBoundingClientRect().height);
+    kb.querySelector('.sec-head').click();
+    setTimeout(function () {
+      out.push('kb_before=' + h0);
+      out.push('kb_after=' + Math.round(kb.getBoundingClientRect().height));
+      out.push('kb_collapsed=' + kb.classList.contains('collapsed'));
+      var sc = document.querySelector('#statusCard');
+      var s0 = Math.round(sc.getBoundingClientRect().height);
+      document.querySelector('#scToggle').click();
+      setTimeout(function () {
+        out.push('sc_before=' + s0);
+        out.push('sc_after=' + Math.round(sc.getBoundingClientRect().height));
+        out.push('sc_collapsed=' + sc.classList.contains('collapsed'));
+        var d = document.createElement('div');
+        d.style.cssText = 'position:fixed;left:40px;top:40px;z-index:99999;background:#000;color:#0f0;font:19px monospace;padding:18px;white-space:pre;border:3px solid #0f0;line-height:1.5';
+        d.textContent = out.join('\n');
+        document.body.appendChild(d);
+      }, 600);
+    }, 600);
+  }, 700);
+}, 1500);
+</script>
 </html>
