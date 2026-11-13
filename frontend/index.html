@@ -1155,12 +1155,13 @@
   setTimeout(function () {
     var sb = document.querySelector('#sidebar');
     var logo = document.querySelector('#logoBtn');
-    out.push('A 初始宽=' + Math.round(sb.getBoundingClientRect().width) + 'px');
+    out.push('URL=' + location.href.slice(0, 60));
+    out.push('A 初始宽=' + Math.round(sb.getBoundingClientRect().width) + 'px cls=' + sb.className);
     show();
     logo.click();
     setTimeout(function () {
       var cs = getComputedStyle(sb);
-      out.push('B 收起后宽=' + Math.round(sb.getBoundingClientRect().width) + 'px');
+      out.push('B 收起后宽=' + Math.round(sb.getBoundingClientRect().width) + 'px cls=' + sb.className);
       out.push('C minW=' + cs.minWidth + ' pad=' + cs.paddingLeft);
       show();
       var kb = document.querySelector('#kbPanel');
