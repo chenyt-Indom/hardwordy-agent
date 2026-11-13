@@ -813,7 +813,6 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
     if not r.get("ok"):
         return r
     from urllib.parse import quote
-    used = r.get("engine") or ("wav2lip" if use == "wav2lip" else "param")
     return {
         "ok": True,
         "name": name,
