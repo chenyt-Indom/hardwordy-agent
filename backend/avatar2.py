@@ -570,8 +570,11 @@ def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS,
     openness = np.clip(openness / max(_pct(openness, 99, 1e-3), 1e-3), 0.0, 1.0)
 
     # 唇形：亮音偏扁（宽），闷音偏圆（窄）。同样用低通去掉帧级毛刺。
+    # ⚠ tau 从 60ms 降到 40ms：实测 60ms 把唇宽变化压得太平（std 0.080，
+    #   而开合是 0.313），唇形看起来几乎不动。40ms 时 std 0.103、帧间|Δ| 0.106，
+    #   比开合略活跃但不抽搐；25ms 虽更活跃（0.130）却接近原始 bright 的噪声水平。
     width = 0.70 + bright * 0.55
-    width = _one_pole(width, 60, fps)
+    width = _one_pole(width, 40, fps)
 
     # 字外低能量段轻压：ASR 字尾到下一个字起点之间是换气，嘴应该闭上。
     # 旧版这里是 *=0.05 的硬跳变，本身也贡献抖动；改成按能量平滑衰减。
