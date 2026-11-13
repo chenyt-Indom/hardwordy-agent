@@ -226,9 +226,22 @@ def _imread(path: str):
     return img
 
 
+def _avatar2():
+    """拿 avatar2 模块；兼容「包内导入」和「独立文件加载」两种情况。"""
+    try:
+        from . import avatar2 as m
+        return m
+    except Exception:  # noqa: BLE001
+        import importlib.util
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "avatar2.py")
+        spec = importlib.util.spec_from_file_location("_av2_standalone", p)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+
 def _yunet_path() -> str:
-    from . import avatar2
-    return avatar2._find_yunet()
+    return _avatar2()._find_yunet()
 
 
 def detect_face_box(img) -> list | None:
