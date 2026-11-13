@@ -293,6 +293,39 @@
     else if (w._home && w._home.parentNode === messagesEl) messagesEl.insertBefore(w, w._home);
     else messagesEl.appendChild(w);
   }
+  // ---------- 思考卡片右上角「归位」（2026-11-13 用户要求）----------
+  // 跟随视角下卡片浮在视口里；用户想让它回原位时，不必跑去工具条切全局开关 ——
+  // 卡片右上角直接给一颗【归位】，只让**这一张**回原位，其它卡片和全局偏好都不动。
+  // ⚠️ 为什么要 _noFollow 标记：下面的 watchThinkEscape 会盯着「跟随模式下被挪回消息流」
+  //    的框并立刻重新浮起；不打标记的话点完归位会马上又被弹回浮动状态（按钮等于没反应）。
+  function ensureThinkHome(w, onHome) {
+    if (!w) return null;
+    let b = w._homeBtn;
+    if (!b) {
+      b = document.createElement("button");
+      b.type = "button";
+      b.className = "think-home";
+      b.textContent = "归位";
+      b.title = "让这张思考卡片回到消息流里的原位置（其它卡片和「跟随视角」设置不受影响）";
+      b.setAttribute("aria-label", "思考卡片归位");
+      b.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof b._onHome === "function") b._onHome(w);
+      });
+      w._homeBtn = b;
+    }
+    b._onHome = onHome;
+    if (b.parentNode !== w) w.appendChild(b);
+    return b;
+  }
+  // 单人模式的「归位」：只把这一张放回原位，全局仍是跟随（下一轮新卡片照旧浮起）
+  function sendThinkHome(w) {
+    if (!w || !w.isConnected) return;
+    w._noFollow = true;
+    undockOne(w, true);
+    if (typeof showToast === "function") showToast("思考卡片已归位", "");
+  }
   function clearThinkDock() {
     _thinkLive = null;
     _thinkBoxes.clear();
