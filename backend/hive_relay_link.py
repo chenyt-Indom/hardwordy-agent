@@ -731,6 +731,12 @@ class RelayLink:
         sock = self.sock
         if sock is None or self.state != "online":
             return False
+        # ★ 全员直连后，消息只走 P2P 通道，服务器**一个字节都收不到**。
+        #   返回 True 是让 mesh 认为「已发出」——实际由直连 Peer 在送。
+        #   只要还有一个人没连上，就继续走服务器兜底，否则他会漏消息。
+        if self._all_direct():
+            self.bypassed += 1
+            return True
         key = H.group_key(self.gid) or b""
         frame = _frame_bytes(typ, MESH._rk(self.gid), key, obj)
         if not frame:
