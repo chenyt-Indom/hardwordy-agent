@@ -36,7 +36,7 @@ MOODS = {
     "calm": {
         "label": "平静", "emoji": "😌", "style": "neutral",
         "rate": 0, "pitch": 0,
-        "sway": 0.8, "nod": 0.7, "rot": 0.28, "brow": 0.9, "freq": 0.30,
+        "sway": 1.6, "nod": 1.5, "rot": 0.40, "brow": 1.2, "freq": 0.30,
         "desc": "自然中性，最接近真人静态说话",
     },
     "serious": {
