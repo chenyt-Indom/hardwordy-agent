@@ -894,7 +894,8 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
     words = _asr_words(wav)
     name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
     out = os.path.join(_vdir(), name)
-    r = render(_img_path(), wav, out, words=words, expr=expr_cfg)
+    _amp = float(np.clip(amp, 0.60, 2.00))
+    r = render(_img_path(), wav, out, words=words, expr=expr_cfg, amp=_amp)
     if not r.get("ok"):
         return r
     from urllib.parse import quote
