@@ -619,13 +619,32 @@ def _prep(img_path: str):
             "geom": (cx, cy, mw, mh), "wh": (W, H)}
 
 
-def _frame(prep: dict, openness: float, width: float):
-    """按口型参数生成一帧。
+def _h_mask(w: int, h: int) -> "object":
+    """左右羽化、上下硬接的蒙版。
 
-    做法：先在唇缝位置画一个随张口度变大的"口腔"（暗色 + 上下牙），
-    再把上唇片往上、下唇片往下各推开一段 —— 这才像张嘴。
-    早期版本是把整块嘴部区域纵向 resize，实测在写实人脸上会变成
-    "橡皮泥"（嘴被拉长、下巴断层、没有牙齿），所以换掉了。
+    上下必须硬接：上下唇是「整片位移」，皮肤本身是连续的；
+    上下若做羽化，额头和下巴会出现一条渐变带，像贴了块补丁。
+    """
+    from PIL import Image
+    w = max(w, 2)
+    h = max(h, 2)
+    x = np.linspace(0.0, 1.0, w, dtype=np.float32)
+    a = np.clip(np.minimum(x, 1.0 - x) / 0.22, 0.0, 1.0)
+    a = a * a * (3.0 - 2.0 * a)
+    col = (a * 255.0).astype(np.uint8)[None, :]
+    return Image.fromarray(np.tile(col, (h, 1)), mode="L")
+
+
+def _frame(prep: dict, openness: float, width: float):
+    """按口型参数生成一帧：上下唇分离位移 + 缝隙用原图唇缝像素拉伸填充。
+
+    演进过程（每一版都拿真实写实人像逐帧验证过，不靠想象）：
+      v1 整块嘴部纵向 resize          → 橡皮泥：嘴被拉长、下巴断层
+      v2 硬画口腔椭圆 + 牙齿          → 贴纸感：刀切边缘、几何色块
+      v3 极克制的整体伸缩 + 唇缝阴影  → 不崩，但几乎看不出在说话（像呼吸）
+      v4（当前）上下唇整片错开，缝隙取原图唇缝像素纵向拉伸并按距离压暗
+         · 缝隙颜色来自原图唇缝，不是凭空画的色块 → 不像贴纸
+         · 上下唇真的错开了 → 能明显看出张嘴
     """
     from PIL import Image
     base = prep["base"]
@@ -637,28 +656,62 @@ def _frame(prep: dict, openness: float, width: float):
 
     op = float(np.clip(openness, 0.0, 1.0))
     wd = float(np.clip(width, 0.70, 1.35))
+    # 闭嘴且唇形不变 → 直接用底图，省一次重绘
+    if op < 0.03 and abs(wd - 1.0) < 0.03:
+        return out
 
-    # ---- 唇部纵向伸缩（克制）----
-    # 闭嘴 0.94（略微收紧）→ 大张 1.40（微张）。幅度不敢再大：
-    # 实测拉到 1.8 以上时写实人脸会变成"橡皮泥"。
-    sy = 0.95 + 0.63 * op
-    sx = 1.0 + 0.05 * (wd - 1.0)
-    nw = max(2, int(round(patch.width * sx)))
-    nh = max(2, int(round(patch.height * sy)))
-    p2 = patch.resize((nw, nh), Image.BICUBIC)
-    m2 = mask.resize((nw, nh), Image.BICUBIC)
+    pw, ph = patch.size
+    parr = np.asarray(patch, dtype=np.float32)
+    cyi = int(round(cy - ytop))
+    cyi = max(3, min(ph - 4, cyi))
 
-    # 以唇缝中心为锚点，让伸缩是"上下对称展开"而不是整体位移
-    nbx = int(round(cx - (cx - x0) * sx))
-    nby = int(round(cy - (cy - ytop) * sy))
-    out.paste(p2, (nbx, nby), m2)
+    # 张口缝隙像素数：最大约 0.42 个唇高
+    gap = int(round(0.42 * mh * op))
+    gap = max(0, min(gap, int(ph * 0.44)))
+    half = gap // 2
 
-    # ---- 唇缝阴影：越张越明显 ----
-    if op > 0.06:
+    # 逐行「目标 → 源」映射：上唇片整体上移 half，下唇片整体下移 half
+    src = np.empty(ph, dtype=np.int32)
+    for r in range(ph):
+        if r + half < cyi:
+            src[r] = r + half
+        elif r - half >= cyi:
+            src[r] = r - half
+        else:
+            src[r] = -1                    # 中间缝隙，待填
+    valid = src >= 0
+    outp = np.empty_like(parr)
+    outp[valid] = parr[src[valid]]
+
+    if not valid.all():
+        # 缝隙：取唇缝上下各 2 行的平均色纵向拉伸，再按到唇缝的距离压暗
+        seam = parr[max(0, cyi - 2):cyi + 3].mean(axis=0)
+        idx = np.where(~valid)[0]
+        outp[~valid] = seam
+        d = np.abs(idx - cyi).astype(np.float32) / float(max(half, 1))
+        k = 0.30 + 0.46 * np.clip(d, 0.0, 1.0)
+        outp[~valid] = outp[~valid] * k[:, None, None]
+
+    img = Image.fromarray(np.clip(outp, 0, 255).astype(np.uint8), mode="RGB")
+
+    # 唇形宽窄：横向轻微缩放，以唇心为锚点
+    sx = 1.0 + 0.07 * (wd - 1.0)
+    if abs(sx - 1.0) > 0.005:
+        nw = max(2, int(round(pw * sx)))
+        img = img.resize((nw, ph), Image.BICUBIC)
+        nbx = int(round(cx - (cx - x0) * sx))
+        m2 = mask.resize((nw, ph), Image.BICUBIC)
+    else:
+        nbx = x0
+        m2 = mask
+    out.paste(img, (nbx, ytop), m2)
+
+    # 缝隙上再叠一层柔和暗部，增强「口腔深度」的观感
+    if op > 0.10 and gap >= 2:
         sw, sh = prep["shadow_size"]
         sw2 = max(3, int(round(sw * wd)))
-        sh2 = max(2, int(round(sh * (0.55 + 0.85 * op))))
-        shadow = _mouth_shadow(sw2, sh2, op)
+        sh2 = max(2, int(round(gap * 1.15)))
+        shadow = _mouth_shadow(sw2, sh2, op * 0.85)
         out.paste(shadow, (int(round(cx - sw2 / 2.0)),
                            int(round(cy - sh2 / 2.0))), shadow)
     return out
