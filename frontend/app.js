@@ -2264,7 +2264,7 @@
   // ⚠️ 生成文库 / 对话 / 记忆库本来就有自己的折叠逻辑，这里**跳过**，否则两套打架。
   // ---------- 🎭 数字人（2026-11-13） ----------
   // 一张图 + 一段话 → 会说话的视频。口型是**参数化**的（声学特征驱动），
-  // 不是神经网络重绘，界面上必须如实写清这一点。
+  // 不是 Wav2Lip 那种神经网络重绘，界面上必须如实写清这一点。
   (function initAvatar2() {
     const pnl = document.getElementById("av2Panel");
     if (!pnl) return;
@@ -2327,6 +2327,16 @@
     async function loadInfo() {
       try { paintInfo(await api("/api/avatar2/info")); }
       catch (e) { say("读取形象失败：" + e.message, "err"); }
+    }
+
+    // 口型幅度滑块只影响 Wav2Lip 的遮罩范围，声学形变下没有意义 → 置灰
+    function syncBoostRow() {
+      const lip = $("#av2Lip"), row = document.querySelector(".av2-row-boost");
+      if (!lip || !row) return;
+      const on = lip.value === "wav2lip";
+      row.classList.toggle("av2-boost-off", !on);
+      const r = $("#av2Boost");
+      if (r) r.disabled = !on;
     }
 
     async function loadStatus() {
@@ -2518,6 +2528,25 @@
     my.oninput = pushMouth;
     mw.oninput = pushMouth;
 
+    // —— 口型幅度滑块 ——
+    const boostIn = $("#av2Boost");
+    const boostVal = $("#av2BoostVal");
+    const BOOST_KEY = "avatar2_boost";
+    function paintBoost() {
+      if (!boostIn || !boostVal) return;
+      boostVal.textContent = parseFloat(boostIn.value).toFixed(1) + "×";
+    }
+    if (boostIn) {
+      const saved = parseFloat(localStorage.getItem(BOOST_KEY) || "");
+      // 上限已收到 1.4（1.6 以上会出黑腔/下巴虚化），旧存档超出就夹回来
+      if (!isNaN(saved) && saved >= 1) boostIn.value = String(Math.min(1.4, saved));
+      paintBoost();
+      boostIn.oninput = () => {
+        paintBoost();
+        localStorage.setItem(BOOST_KEY, boostIn.value);
+      };
+    }
+
     // —— 心情 & 语速 ——
     const moodSel = $("#av2Mood"), rateSel = $("#av2Rate");
     const MOOD_KEY = "avatar2_mood", RATE_KEY = "avatar2_rate";
@@ -2605,11 +2634,14 @@
       busy = true;
       btn.disabled = true;
       btn.textContent = "生成中…";
+      const lipSel = $("#av2Lip");
       // rate 传 null 表示「用心情的建议语速」，不能传 0（那会把语速钉死）
       const rateVal = rateSel && rateSel.value !== "auto"
         ? parseInt(rateSel.value, 10) : null;
       const base = {
         voice: voiceSel.value,
+        lipsync: lipSel ? lipSel.value : "auto",
+        boost: boostIn ? parseFloat(boostIn.value) || 1.0 : 1.0,
         mood: moodSel ? moodSel.value : "auto",
         rate: rateVal,
       };
@@ -2664,7 +2696,9 @@
           });
         }
         let tail = "";
-        if (r.lipsync_label) {
+        if (r.fallback_from) {
+          tail = "（真口型失败已回退：" + (r.fallback_reason || "") + "）";
+        } else if (r.lipsync_label) {
           tail = " · " + r.lipsync_label;
         }
         if (r.mood_label) {

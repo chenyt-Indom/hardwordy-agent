@@ -10094,11 +10094,17 @@ def avatar2_speak(body: dict):
             rate = int(_r)
         except Exception:
             rate = None
+    try:
+        boost = float(body.get("boost") or 1.0)
+    except Exception:
+        boost = 1.0
     return avatar2.speak(text,
                          voice=str(body.get("voice") or ""),
                          rate=rate,
                          style=str(body.get("style") or ""),
                          engine=str(body.get("engine") or "auto"),
+                         lipsync=str(body.get("lipsync") or "param"),
+                         boost=boost,
                          mood=str(body.get("mood") or ""),
                          expr=bool(body.get("expr", True)))
 
