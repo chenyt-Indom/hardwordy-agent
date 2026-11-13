@@ -2649,24 +2649,65 @@
       busy = true;
       btn.disabled = true;
       btn.textContent = "生成中…";
-      say("正在配音 → 口型对齐 → 合成，约 10 秒…");
+      const lipSel = $("#av2Lip");
+      // rate 传 null 表示「用心情的建议语速」，不能传 0（那会把语速钉死）
+      const rateVal = rateSel && rateSel.value !== "auto"
+        ? parseInt(rateSel.value, 10) : null;
+      const base = {
+        voice: voiceSel.value,
+        lipsync: lipSel ? lipSel.value : "auto",
+        boost: boostIn ? parseFloat(boostIn.value) || 1.0 : 1.0,
+        mood: moodSel ? moodSel.value : "auto",
+        rate: rateVal,
+      };
       try {
-        const lipSel = $("#av2Lip");
-        // rate 传 null 表示「用心情的建议语速」，不能传 0（那会把语速钉死）
-        const rateVal = rateSel && rateSel.value !== "auto"
-          ? parseInt(rateSel.value, 10) : null;
-        const r = await api("/api/avatar2/speak", {
-          method: "POST",
-          body: JSON.stringify({
-            text: text,
-            voice: voiceSel.value,
-            lipsync: lipSel ? lipSel.value : "auto",
-            boost: boostIn ? parseFloat(boostIn.value) || 1.0 : 1.0,
-            mood: moodSel ? moodSel.value : "auto",
-            rate: rateVal,
-          }),
-        });
-        if (!r.ok) throw new Error(r.error || "生成失败");
+        // 长文本切成多段分别生成，每段都在请求超时窗口内，最后合并成一个视频。
+        // 之前一次性发整篇，字数一多就渲染超时（用户反馈的那个问题）。
+        const parts = splitSpeech(text, 260);
+        let r;
+        if (parts.length <= 1) {
+          say("正在配音 → 口型对齐 → 合成，约 10 秒…");
+          r = await api("/api/avatar2/speak", {
+            method: "POST",
+            body: JSON.stringify(Object.assign({}, base, { text: parts[0] || text })),
+          });
+          if (!r.ok) throw new Error(r.error || "生成失败");
+        } else {
+          const names = [];
+          let lastOk = null;
+          for (let i = 0; i < parts.length; i++) {
+            btn.textContent = "生成中 " + (i + 1) + "/" + parts.length;
+            say("长文本已切成 " + parts.length + " 段，正在生成第 " + (i + 1) +
+                "/" + parts.length + " 段（" + parts[i].length + " 字）…");
+            const seg = await api("/api/avatar2/speak", {
+              method: "POST",
+              body: JSON.stringify(Object.assign({}, base, { text: parts[i] })),
+            });
+            if (!seg.ok) throw new Error("第 " + (i + 1) + " 段失败：" + (seg.error || "未知错误"));
+            names.push(seg.name);
+            lastOk = seg;
+          }
+          btn.textContent = "合并中…";
+          say("已生成 " + names.length + " 段，正在合并…");
+          const c = await api("/api/avatar2/concat", {
+            method: "POST",
+            body: JSON.stringify({ names: names }),
+          });
+          if (!c.ok) throw new Error(c.error || "合并失败");
+          // 合并后碎片没用了，清掉免得视频列表里堆一堆小段
+          for (const n of names) {
+            try {
+              await api("/api/avatar2/video/delete", {
+                method: "POST",
+                body: JSON.stringify({ name: n, scope: "avatar" }),
+              });
+            } catch (e) {}
+          }
+          r = Object.assign({}, lastOk, {
+            name: c.name, duration: c.duration, parts: c.parts,
+            align: "已合并 " + c.parts + " 段",
+          });
+        }
         let tail = "";
         if (r.fallback_from) {
           tail = "（真口型失败已回退：" + (r.fallback_reason || "") + "）";
