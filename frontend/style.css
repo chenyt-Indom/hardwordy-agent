@@ -2610,7 +2610,12 @@ html[data-theme="light"] body {
    计算一次模糊，滚动和流式输出时非常吃 GPU；而它们背后只是一层很淡的径向渐变，
    blur 18px 和 0px 肉眼几乎看不出差别。换成实色后观感不变，帧率明显稳。
    （用户要求「功能不能受影响，剩下随意」—— 这里只动绘制，不动任何交互。） */
-.sidebar, .chat-header, .composer {
+/* 2026-11-13：.sidebar 从这条里摘出去了。
+   原来这里给侧栏也刷一层 var(--panel) 实色，是当年「玻璃模糊改实色」的副作用，
+   它写在第 136 行之后、优先级又相同，会把侧栏那条 transparent 覆盖回去 ——
+   等于灰框的「底色」那一半还在。现在侧栏跟着页面底色走，和主区共用同一层，
+   层次只由里面的 .panel 卡片（--panel2 + 描边）表现。 */
+.chat-header, .composer {
   background: var(--panel);
 }
 .panel, .status-card {
