@@ -242,6 +242,25 @@ class HiveClient:
             u = cfg["url"]
             self._url = u
 
+        # 跨网打洞：punch://IP:端口 —— 本项目自带，不需要装任何外部软件。
+        # 走 UDP，和 TCP 直连的端口不是同一个，所以必须靠前缀区分。
+        if u.startswith(("punch://", "udp://")):
+            p = m.parse_code(u)
+            if not p.get("ok"):
+                self._state = "error"
+                self._error = p.get("error", "打洞地址格式不对")
+                return self.status()
+            t0 = time.time()
+            r = m.connect_punch(p["host"], p["port"], gid, timeout=10.0)
+            if not r.get("ok"):
+                self._state = "error"
+                self._error = r.get("error", "打洞没成功")
+                return self.status()
+            self._latency = round((time.time() - t0) * 1000, 1)
+            self._state = "online"
+            self._last_ok = time.time()
+            return self.status()
+
         # 中继：hive4:// / ws:// / wss:// / tcp:// / 裸 host:port
         # （本项目用的是自定义二进制协议，写 ws:// 只是习惯，不是真的 WebSocket）
         if u and not u.startswith(("hive3://", "hive2://", "hive://")):
@@ -332,7 +351,7 @@ class HiveClient:
             "gid": self._gid,
             "latency_ms": self._latency,
             "proto": PROTO_VER,
-            "relay_ver": "",           # 中继已移除，字段保留避免前端报错
+            "relay_ver": (str((relay or {}).get("state") or "") if relay else ""),
             "compat": compat,
             "peers": peers,
             "members": st.get("members") or [],
