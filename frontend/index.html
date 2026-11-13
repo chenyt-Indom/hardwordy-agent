@@ -1158,7 +1158,9 @@
       waited += 200;
       var dev = $('#sdSlotDev'), b2 = $('.tools-bar');
       if (b2 && dev && b2.parentElement !== dev) dev.appendChild(b2);
-      if (($('#perfSelect') && $('#schedOpenBtn')) || waited >= 3000) clearInterval(t);
+      // 2026-11-13：#schedOpenBtn 已经不再创建（定时任务入口挪到侧栏），
+      // 原来的判断永远为 false，会白等满 3 秒。改用同时创建的 perfCtxBtn。
+      if (($('#perfSelect') && $('#perfCtxBtn')) || waited >= 3000) clearInterval(t);
     }, 200);
   })();
   </script>
