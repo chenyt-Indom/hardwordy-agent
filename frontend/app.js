@@ -2664,11 +2664,6 @@
           });
         }
         let tail = "";
-        if (r.fallback_from) {
-          tail = "（真口型失败已回退：" + (r.fallback_reason || "") + "）";
-        } else if (r.lipsync_label) {
-          tail = " · " + r.lipsync_label;
-        }
         if (r.mood_label) {
           tail += " · 心情" + r.mood_label + (r.mood_auto ? "(自动)" : "") +
                   " 语速" + (r.rate >= 0 ? "+" : "") + r.rate;
