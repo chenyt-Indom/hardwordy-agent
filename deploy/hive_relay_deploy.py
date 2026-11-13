@@ -198,6 +198,9 @@ def main(argv=None) -> int:
         sftp = cli.open_sftp()
         try:
             sftp.put(RELAY_SRC, REMOTE_DIR + "/hive_relay_server.py")
+            # ws_min.py 必须一起传：中继靠它支持 WebSocket（挂 nginx 反代用）。
+            # 两个文件放同一目录，服务端 `import ws_min` 就能找到。
+            sftp.put(WS_SRC, REMOTE_DIR + "/ws_min.py")
             # 密钥直接写文件，不走命令行（避免 ps 里看到）
             with sftp.open(REMOTE_DIR + "/token", "w") as f:
                 f.write(token + "\n")
