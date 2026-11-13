@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """数字人 2.0：一张图 + 一段话 → 会说话的视频（2026-11-13）
 
-口型方案
---------
-走**声学特征驱动的参数化口型**：
+为什么不是 Wav2Lip
+------------------
+本机 Python 3.14 下 torch 导入就报 `shm.dll` 错误，Wav2Lip / SadTalker 这类
+**神经网络重绘口型**根本跑不起来（要另开 3.11 环境 + 下几百 MB 权重）。
+所以走**声学特征驱动的参数化口型**：
 
   · 每 40ms 一帧，算 RMS（音量）/ 过零率（声音亮暗）/ 频谱质心；
   · RMS → 张口高度；过零率 + 质心 → 唇形宽窄（扁唇 i/e ↔ 圆唇 u/o）；
@@ -13,8 +15,7 @@
 
 代价（必须说清，不吹）：这是**形变**不是**重绘**。嘴的形状由声学特征推断，
 不做音素级重绘，所以不会精确做出 "b/p/m" 的闭唇口型。二次元立绘上观感自然，
-写实人脸会偏"橡皮嘴"。曾经试过神经网络重绘（Wav2Lip），在正脸证件照上嘴位
-整体偏移、口腔糊成色块，效果反而不如形变，已整条移除（代码 + 138MB 权重）。
+写实人脸会偏"橡皮嘴"。要真口型得装 torch + Wav2Lip，本机做不到。
 
 存的东西都在 data/avatar2/：
   · avatar.png   当前形象
@@ -690,6 +691,7 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
            fps: int = FPS, on_progress=None, expr: dict = None) -> dict:
     """逐帧渲染 + ffmpeg 合成。返回 {ok, frames, duration, path}
 
+    口型由本项目的声学特征形变驱动（不崩、位置准、幅度偏小）。
     expr → 表情层配置（avatar2_expr.resolve 的返回值），None 则不做
     """
     exe = ffmpeg()
@@ -772,10 +774,14 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
 
 # ---------------------------------------------------------------- 一站式
 def speak(text: str, voice: str = "", rate=None, style: str = "",
-          engine: str = "auto", mood: str = "", expr: bool = True) -> dict:
+          engine: str = "auto", lipsync: str = "param",
+          boost: float = 1.0, mood: str = "", expr: bool = True) -> dict:
     """文本 → TTS → 口型对齐 → mp4。这是给工具/前端调的主入口。
 
     engine  = TTS 引擎（auto/edge/sapi）
+    lipsync = 口型引擎：param（声学形变，默认）/ wav2lip（实验性，嘴位易偏）
+              auto 等同 param
+    boost   = 口型幅度倍率（1.0 原样，1.2~1.6 更明显，>1.8 会糊）
     mood    = 心情：auto/""（按语境自动判断）/ happy/calm/serious/gentle/
               sad/excited/surprise/worried/confident
     rate    = 语速 -50~50；None 表示用心情的建议值
@@ -806,12 +812,28 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
         return {"ok": False, "error": "音频转码失败：%s: %s" % (type(e).__name__, e)}
 
     words = _asr_words(wav)
+    # 口型引擎：默认声学形变。
+    # 实测 Wav2Lip(96x96) 在正脸证件照上嘴位整体偏移、口腔糊成色块，
+    # 观感反而不如形变，所以不再默认启用；auto 也归到 param。
+    # 想试神经网络口型仍可显式传 lipsync="wav2lip"。
+    want = (lipsync or "param").lower()
+    use = "wav2lip" if want == "wav2lip" else "param"
     name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
     out = os.path.join(_vdir(), name)
-    r = render(_img_path(), wav, out, words=words, expr=expr_cfg)
+    try:
+        _boost = float(boost or 1.0)
+    except Exception:  # noqa: BLE001
+        _boost = 1.0
+    # 上限收到 1.4：实测 1.6 以上遮罩放得过宽，模型会"发明"整个下半脸，
+    # 出现黑腔、牙齿横条、下巴虚化（用户截图里那种吓人效果）。
+    # 1.0 = 官方整下半脸遮罩，是实测最自然的一档。
+    _boost = float(min(1.4, max(1.0, _boost)))
+    r = render(_img_path(), wav, out, words=words, engine=use, boost=_boost,
+               expr=expr_cfg)
     if not r.get("ok"):
         return r
     from urllib.parse import quote
+    used = r.get("engine") or ("wav2lip" if use == "wav2lip" else "param")
     return {
         "ok": True,
         "name": name,
@@ -821,6 +843,8 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
         "size": r["size"],
         "frames": r["frames"],
         "bytes": r["bytes"],
+        "lipsync": used,
+        "boost": _boost,
         "mood": cfg.get("key", "calm"),
         "mood_label": cfg.get("label", "平静"),
         "mood_auto": bool(cfg.get("auto")),
@@ -829,6 +853,10 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
         "rate": final_rate,
         "style": final_style,
         "expr": bool(expr),
+        "lipsync_label": ("Wav2Lip 真口型" if used == "wav2lip"
+                          else "声学形变口型"),
+        "fallback_from": r.get("fallback_from", ""),
+        "fallback_reason": r.get("fallback_reason", ""),
         "audio_url": a.get("url") or "",
         "audio_engine": a.get("engine") or "",
         "align": ("字级对齐 %d 字" % len(words)) if words else "声学驱动（未找到 ASR 模型）",
@@ -848,6 +876,19 @@ def status() -> dict:
         torch_ver = getattr(torch, "__version__", "")
     except Exception:                                   # noqa: BLE001
         torch_ok = False
+    # Wav2Lip 走 onnxruntime，不依赖 torch，所以单独探测
+    w2l = False
+    w2l_err = ""
+    w2l_info = {}
+    try:
+        from . import wav2lip_onnx as w2l_mod
+        w2l = bool(w2l_mod.available())
+        if w2l:
+            w2l_info = w2l_mod.model_info()
+        else:
+            w2l_err = "没有权重文件"
+    except Exception as e:                              # noqa: BLE001
+        w2l_err = "%s: %s" % (type(e).__name__, e)
     return {
         "ok": True,
         "ffmpeg": bool(exe),
@@ -856,12 +897,15 @@ def status() -> dict:
         "asr_dir": asr,
         "torch": torch_ok,
         "torch_version": torch_ver,
+        "wav2lip": w2l,
+        "wav2lip_error": w2l_err,
+        "wav2lip_size_mb": w2l_info.get("size_mb", 0),
         "fps": FPS,
         "max_seconds": MAX_SECONDS,
         "max_side": MAX_SIDE,
         "has_image": os.path.isfile(_img_path()),
-        "engines": ["param"],
-        "note": "参数化口型（声学特征驱动）"
+        "engines": (["wav2lip"] if w2l else []) + ["param"],
+        "note": ("真·口型（Wav2Lip 神经网络）" if w2l else "参数化口型（声学特征驱动）")
                 + ("，已启用字级对齐" if asr else "，未找到 ASR 模型，仅声学驱动"),
     }
 
