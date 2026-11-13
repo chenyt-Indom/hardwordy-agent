@@ -547,15 +547,22 @@ def _mouth_geom(size, m: dict) -> tuple:
     return cx, cy, mw, mh
 
 
-def _ellipse_mask(w: int, h: int) -> "object":
-    """椭圆径向羽化蒙版：中心 255，边缘 0。让形变区域和原图自然过渡。"""
+def _half_mask(w: int, h: int, lower: bool) -> "object":
+    """半椭圆羽化蒙版：上唇用上半、下唇用下半，贴合处在中线上 alpha=1。
+
+    为什么不用整块椭圆再整体缩放：实测整体 resize 在写实人脸上会变成
+    "橡皮泥"（嘴被拉长、下巴断层），所以改成上下唇**分开位移**。
+    """
     from PIL import Image
+    if w < 2 or h < 2:
+        return Image.new("L", (max(1, w), max(1, h)), 255)
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    # 椭圆中心落在贴边的那一侧：上半区中心在底边，下半区中心在顶边
+    ccy = float(h) if not lower else 0.0
     nx = (xx - (w - 1) / 2.0) / max(w / 2.0, 1e-6)
-    ny = (yy - (h - 1) / 2.0) / max(h / 2.0, 1e-6)
+    ny = (yy - ccy) / max(float(h), 1e-6)
     r = np.sqrt(nx * nx + ny * ny)
-    # r<=0.55 全实，1.0 处完全透明，中间平滑
-    a = np.clip((1.0 - r) / 0.45, 0.0, 1.0)
+    a = np.clip((1.0 - r) / 0.55, 0.0, 1.0)
     a = a * a * (3.0 - 2.0 * a)            # smoothstep，过渡更柔和
     return Image.fromarray((a * 255).astype(np.uint8), mode="L")
 
