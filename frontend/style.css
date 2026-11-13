@@ -182,7 +182,7 @@ body {
   .sidebar.hidden {
     width: 78px !important; min-width: 78px !important;
     padding-left: 10px !important; padding-right: 10px !important;
-    border-right-width: 1px; border-right-color: var(--border);
+    border-right-width: 1px; border-right-color: transparent;
     overflow: hidden;
   }
   .sidebar.hidden > * { opacity: 0; pointer-events: none; }
