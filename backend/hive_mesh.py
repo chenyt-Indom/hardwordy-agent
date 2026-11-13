@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import socket
 import struct
@@ -40,6 +41,14 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import backend.hive as H
+
+logger = logging.getLogger("hive_mesh")
+
+# 已经告警过的「不认识的帧类型」—— 同类只记一次，避免每帧刷屏。
+# ★ 2026-11-13：两台机器的代码可能不一样（用户改完自开发、只在一台重启过），
+#   新版会发出旧版不认识的帧。那种帧必须**安全忽略**，不能断连 ——
+#   否则现象就是「代码一不同步，连上就掉」，看起来像联机失败。
+_UNKNOWN_TYP: Set[int] = set()
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
