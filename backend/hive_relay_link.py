@@ -631,7 +631,21 @@ class RelayLink:
         with self._p2p_lock:
             if not self.p2p:
                 return False
-            return all(v.get("state") == "ok" for v in self.p2p.values())
+            if not all(v.get("state") == "ok" for v in self.p2p.values()):
+                return False
+            need = len(self.p2p)
+        # 光看状态还不够：直连 Peer 可能已经断了但状态没来得及改。
+        # 核对 mesh 里真的有这么多条活着的、同群的、非中继连接。
+        try:
+            live = 0
+            for p in list(MESH.node().peers):
+                if isinstance(p, RelayPeer) or not p.alive:
+                    continue
+                if p.gid == self.gid:
+                    live += 1
+            return live >= need
+        except Exception:
+            return False
 
     def _pub_signal(self) -> None:
         """把自己的打洞地址报给服务器。服务器只负责转告，不碰消息内容。"""
