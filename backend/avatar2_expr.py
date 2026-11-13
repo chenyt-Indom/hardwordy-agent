@@ -54,7 +54,7 @@ MOODS = {
     "sad": {
         "label": "悲伤", "emoji": "😔", "style": "sad",
         "rate": -14, "pitch": -8,
-        "sway": 0.5, "nod": 1.0, "rot": 0.18, "brow": 1.8, "freq": 0.20,
+        "sway": 1.0, "nod": 1.9, "rot": 0.26, "brow": 2.2, "freq": 0.20,
         "desc": "语速慢、音调低，头部轻微下垂感",
     },
     "excited": {
