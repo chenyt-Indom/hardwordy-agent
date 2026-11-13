@@ -277,6 +277,18 @@ class RelayLink:
         self._thread: Optional[threading.Thread] = None
         self._state_path = state_path
         self._seqs: Dict[str, int] = {}
+        # ---------------- 信令 + P2P 直连 ----------------
+        # p2p: uid -> {"name","paddr","state","err","ts"}
+        #   state: connecting / ok / fail / gone
+        # 一旦某个成员 state == ok，他就在 mesh 里有一条独立的直连 Peer，
+        # 发给他消息**不再经过服务器**。
+        self.p2p: Dict[str, Dict[str, Any]] = {}
+        self._p2p_lock = threading.Lock()
+        self._punching: set = set()      # 正在打洞的 uid，防重复
+        self._punch_sem = threading.Semaphore(PUNCH_CONCURRENCY)
+        self.direct_ok = 0               # 已直连人数（给前端看）
+        self.direct_fail = 0
+        self.signal_pub_at = 0.0
         self._load_state()
 
     # -------------------------------------------------- 水位持久化
