@@ -502,6 +502,8 @@ class MeshNode:
                 "uptime": int(time.time() - self._started_at) if self._started_at else 0,
                 "dev": self.dev,
                 "uid_conflict": self.uid_conflict,
+                # 打洞通道状态（跨网络用；局域网直连不需要它）
+                "punch": (self.punch.status() if self.punch else {"ok": False}),
             }
 
     def refresh_identity(self) -> Dict[str, Any]:
