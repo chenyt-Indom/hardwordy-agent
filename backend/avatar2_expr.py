@@ -48,7 +48,7 @@ MOODS = {
     "gentle": {
         "label": "温柔", "emoji": "🤍", "style": "gentle",
         "rate": -10, "pitch": 4,
-        "sway": 1.0, "nod": 0.8, "rot": 0.32, "brow": 1.1, "freq": 0.28,
+        "sway": 1.9, "nod": 1.5, "rot": 0.46, "brow": 1.4, "freq": 0.28,
         "desc": "语速放慢、声音放软，头部轻晃",
     },
     "sad": {
