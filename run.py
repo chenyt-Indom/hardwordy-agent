@@ -138,6 +138,60 @@ def _focus_window_win32() -> bool:
         return False
 
 
+def _old_window_exists() -> bool:
+    """按标题检测是否已有应用窗口（不依赖 pywebview 对象）。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        found = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def _cb(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if WINDOW_TITLE in (buf.value or ""):
+                found.append(hwnd)
+                return False
+            return True
+
+        user32.EnumWindows(_cb, 0)
+        return bool(found)
+    except Exception:
+        return False
+
+
+def _wait_old_window_gone(timeout: float = 6.0) -> None:
+    """重启时：等上一个实例的窗口先关掉，再开自己的窗口。
+
+    为什么需要（2026-11-13 用户反馈「先弹出新页面、老页面再关」）：
+    旧进程退出时，uvicorn 先释放 8000 端口，pywebview 的窗口要晚几百毫秒
+    才真正销毁。新进程 `_wait_port_free()` 一拿到端口就往下走、立刻
+    create_window，于是两个窗口短暂并存 —— 用户看到的就是
+    「新窗口先冒出来，老窗口才消失」。
+
+    这里在开窗前轮询窗口标题，旧窗口消失（或超时）再继续。
+    正常启动时根本没有旧窗口，`_old_window_exists()` 立刻返回 False，零开销。
+    """
+    if os.name != "nt":
+        return
+    t0 = time.time()
+    waited = False
+    while time.time() - t0 < timeout:
+        if not _old_window_exists():
+            if waited:
+                _wlog("旧窗口已消失（等了 %.1f 秒），开始建新窗口" % (time.time() - t0))
+            return
+        waited = True
+        time.sleep(0.15)
+    _wlog("旧窗口 %.0f 秒内没关掉，仍然继续建新窗口（避免卡死）" % timeout)
+
+
 def _make_wake_focus(window=None):
     """生成"被唤醒时"的回调：先试 pywebview 对象，再退回 Win32 按标题找。"""
     def _focus() -> None:
