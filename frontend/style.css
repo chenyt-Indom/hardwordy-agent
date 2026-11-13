@@ -4871,7 +4871,9 @@ html[data-theme="light"] select.pill-select option {
    侧栏内宽约 240px，标签 56px + 数值 34px，滑块 flex 吃掉剩余，
    实测滑块仍有 130px 以上可拖，不会挤成一根细线。 */
 .av2-row-amp { margin-top: 6px; }
-.av2-amp {
+/* ⚠ 必须带 .av2panel 前缀：全局有 `.panel label { display: block }`（权重 0,1,1），
+   单写 `.av2-amp`（0,1,0）会被它盖掉，实测三个子元素纵向堆成 67px 高。 */
+.av2panel .av2-amp {
   display: flex; align-items: center; gap: 6px; width: 100%;
   font-size: 12px; color: var(--muted);
 }
