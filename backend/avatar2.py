@@ -857,7 +857,8 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
 
 # ---------------------------------------------------------------- 一站式
 def speak(text: str, voice: str = "", rate=None, style: str = "",
-          engine: str = "auto", mood: str = "", expr: bool = True) -> dict:
+          engine: str = "auto", mood: str = "", expr: bool = True,
+          amp: float = 1.0) -> dict:
     """文本 → TTS → 口型对齐 → mp4。这是给工具/前端调的主入口。
 
     engine  = TTS 引擎（auto/edge/sapi）
