@@ -60,7 +60,7 @@ MOODS = {
     "excited": {
         "label": "兴奋", "emoji": "🤩", "style": "excited",
         "rate": 14, "pitch": 14,
-        "sway": 1.6, "nod": 1.5, "rot": 0.55, "brow": 2.0, "freq": 0.55,
+        "sway": 3.0, "nod": 2.8, "rot": 0.78, "brow": 2.6, "freq": 0.55,
         "desc": "语速快、音调高，头部动作明显（仍在上限内）",
     },
     "surprise": {
