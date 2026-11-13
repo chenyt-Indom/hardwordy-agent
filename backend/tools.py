@@ -4043,10 +4043,15 @@ def _do_avatar_speak(arguments, ui_events, context):
         rate = int(arguments.get("rate") or 0)
     except Exception:
         rate = 0
+    try:
+        amp = float(arguments.get("amp") or 1.0)
+    except Exception:
+        amp = 1.0
     r = avatar2.speak(text,
                       voice=str(arguments.get("voice") or ""),
                       rate=rate,
-                      style=str(arguments.get("style") or ""))
+                      style=str(arguments.get("style") or ""),
+                      amp=amp)
     if not r.get("ok"):
         return "数字人视频生成失败：%s" % (r.get("error") or "未知原因")
 
