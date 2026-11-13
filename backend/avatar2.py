@@ -620,20 +620,25 @@ def _prep(img_path: str):
             "geom": (cx, cy, mw, mh), "wh": (W, H)}
 
 
-def _h_mask(w: int, h: int) -> "object":
-    """左右羽化、上下硬接的蒙版。
+def _h_mask(w: int, h: int, feather: int = 3) -> "object":
+    """左右宽羽化 + 上下窄羽化的融合蒙版。
 
-    上下必须硬接：上下唇是「整片位移」，皮肤本身是连续的；
-    上下若做羽化，额头和下巴会出现一条渐变带，像贴了块补丁。
+    左右给 0.22w 的宽羽化：融合区横向边界不能留痕；
+    上下只给 feather（默认 3px）：上下唇是「整片位移」，皮肤本身连续，
+    上下羽化一旦给宽，额头和下巴就会出现一条渐变带，像贴了块补丁。
+    （实测：上下完全不羽化时 y=349 那行亮度会突跳 20，肉眼就是一条横线）
     """
     from PIL import Image
     w = max(w, 2)
     h = max(h, 2)
     x = np.linspace(0.0, 1.0, w, dtype=np.float32)
-    a = np.clip(np.minimum(x, 1.0 - x) / 0.22, 0.0, 1.0)
-    a = a * a * (3.0 - 2.0 * a)
-    col = (a * 255.0).astype(np.uint8)[None, :]
-    return Image.fromarray(np.tile(col, (h, 1)), mode="L")
+    ax = np.clip(np.minimum(x, 1.0 - x) / 0.22, 0.0, 1.0)
+    ax = ax * ax * (3.0 - 2.0 * ax)
+    y = np.arange(h, dtype=np.float32)
+    ay = np.clip(np.minimum(y, h - 1 - y) / float(max(feather, 1)), 0.0, 1.0)
+    ay = ay * ay * (3.0 - 2.0 * ay)
+    m = (ax[None, :] * ay[:, None] * 255.0).astype(np.uint8)
+    return Image.fromarray(m, mode="L")
 
 
 def _frame(prep: dict, openness: float, width: float):
