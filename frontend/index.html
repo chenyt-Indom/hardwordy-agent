@@ -210,17 +210,6 @@
           <select id="av2Voice" title="音色"></select>
           <button class="btn sm primary" id="av2Go">生成视频</button>
         </div>
-        <div class="av2-row av2-row-lip">
-          <select id="av2Lip" title="口型引擎">
-            <option value="auto">口型：自动</option>
-          </select>
-        </div>
-        <div class="av2-row av2-row-boost">
-          <label class="av2-boost-lab">口型幅度 <b id="av2BoostVal">1.0×</b>
-            <input type="range" id="av2Boost" min="1.0" max="1.4" step="0.1" value="1.0"
-                   title="1.0 = 推荐档（宽/窄两套遮罩各跑一次再混合，开口约脸高 8%，自然不糊）；往右嘴张得更大，1.4 约 16%，口腔内部会糊" />
-          </label>
-        </div>
         <!-- 心情：决定 TTS 的语气/音调，以及面部微表情幅度。
              「自动」按文本关键词+标点+句长做规则判断，秒出。 -->
         <div class="av2-row av2-row-mood">
