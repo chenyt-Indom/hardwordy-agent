@@ -4438,20 +4438,36 @@ html[data-theme="light"] select.pill-select option {
 .top-bar > .tb-fold.open > *:nth-child(n+9) { transition-delay: .28s; }
 .top-bar > .tb-fold:not(.open) > * { transition-delay: 0s; }
 
-/* 蓝色箭头：▶ 展开时转 90° 变 ▼，表示「可以收回去」 */
+/* 折叠把手（2026-11-13 用户反馈：「这个箭头有点不雅观，换一个」
+                        「而且箭头和记忆按钮挤在一起了」）
+   改法：
+     · 字符 ▶ → 内联 SVG 折线（见 index.html），各系统渲染一致，不再像「播放键」；
+     · 蓝色描边圆 + 蓝色发光 → 透明底 ghost 方块，hover 才浮现，平时不抢视线；
+     · 与右侧「记忆」的间距 8px → 14px（由 .tb-fold.open 的 margin-left 补 6px）。
+   展开时整体旋转 180°：箭头「向右」变「向左」，语义是「点它把工具收回去」。 */
 .tb-fold-btn {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 30px; height: 30px; padding: 0;
-  border-radius: 50%;
-  border: 1px solid var(--accent);
-  background: #1c2947;
-  color: var(--accent);
-  font-size: 11px; line-height: 1;
+  width: 28px; height: 28px; padding: 0;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
   cursor: pointer;
   flex: 0 0 auto;
-  transition: transform .32s cubic-bezier(.2, .8, .2, 1),
-              background-color .15s, box-shadow .15s;
+  transition: transform .3s cubic-bezier(.2, .8, .2, 1),
+              background-color .16s ease,
+              border-color .16s ease,
+              color .16s ease;
 }
-.tb-fold-btn:hover { background: #24345c; box-shadow: 0 0 10px rgba(79, 139, 249, .45); }
-.tb-fold-btn.open { transform: rotate(90deg); }
+.tb-fold-btn svg { display: block; }
+.tb-fold-btn:hover {
+  background: var(--hover-bg);
+  border-color: var(--border);
+  color: var(--text);
+}
+.tb-fold-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.tb-fold-btn.open { transform: rotate(180deg); }
 
