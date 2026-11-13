@@ -736,6 +736,18 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
     W, H = prep["wh"]
     n = len(params)
 
+    # 表情层：人脸框用于定位眉眼带；没有就只做整头微动（不传 face）
+    _expr = expr or None
+    _face_norm = None
+    _ex_mod = None
+    if _expr:
+        try:
+            from . import avatar2_expr as _ex_mod       # noqa: F811
+            _d = detect_mouth(img_path)
+            _face_norm = _d.get("face") if _d.get("ok") else None
+        except Exception:                               # noqa: BLE001
+            _ex_mod = None
+
     cmd = [exe, "-y", "-loglevel", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (W, H),
            "-r", str(fps), "-i", "-",
