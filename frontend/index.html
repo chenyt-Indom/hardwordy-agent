@@ -1064,30 +1064,7 @@
       // 记住上次状态；第一次进来默认收起（用户要的就是「只剩一个箭头」）
       var wantFold = '0';
       try { wantFold = localStorage.getItem('tb_fold_open') || '0'; } catch (e) {}
-      setFold(true); /* TEMP-VERIFY 强制展开 */
-      setTimeout(function () {
-        var b = document.getElementById('tbFoldBtn');
-        var box = document.getElementById('tbFoldBox');
-        var first = box && box.firstElementChild;
-        var cs = b && getComputedStyle(b);
-        var rb = b && b.getBoundingClientRect();
-        var rf = first && first.getBoundingClientRect();
-        var d = document.createElement('div');
-        d.id = 'tempVerify';
-        d.style.cssText = 'position:fixed;left:8px;top:8px;z-index:99999;background:#000;' +
-          'color:#0f0;font:13px monospace;padding:10px;white-space:pre;line-height:1.6';
-        d.textContent =
-          'btn = ' + (rb ? rb.width.toFixed(1) + ' x ' + rb.height.toFixed(1) : 'n/a') +
-          '\ncolor = ' + (cs && cs.color) +
-          '\nborder = ' + (cs && cs.borderTopWidth + ' / ' + cs.borderTopColor) +
-          '\nbg = ' + (cs && cs.backgroundColor) +
-          '\nradius = ' + (cs && cs.borderRadius) +
-          '\nsvg = ' + (b && b.querySelector('svg') ? 'YES' : 'NO') +
-          '\nrotate = ' + (cs && cs.transform) +
-          '\nfirstBtn = ' + (first ? (first.textContent || first.tagName).trim().slice(0, 10) : 'n/a') +
-          '\ngapToFirst = ' + (rf && rb ? (rf.left - rb.right).toFixed(1) + 'px' : 'n/a');
-        document.body.appendChild(d);
-      }, 900);
+      setFold(wantFold === '1');
     }
 
     // ⑥ 抽屉开关
