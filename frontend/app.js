@@ -10867,21 +10867,28 @@
         el("hiveSetup").hidden = true;
         await loadGroups();
         openGroup(d.group.gid);
-        const r = d.relay || {};
-        // 建完给一句人话：接下来怎么让别人进来
+        // 建完只讲一件事：密码。顺手复制到剪贴板，省得他去抄。
+        // （原来这里弹 6 行，含监听端口和局域网 IP，新手看完还是不知道该干什么）
         const pw = (d.group && d.group.password) || "";
-        setTimeout(() => {
-          alert("群建好了 ✅\n\n"
-            + (pw ? "· 入群密码：" + pw + "\n"
-                 + "  把这个 12 位密码发给对方，他点「🔑 密码入群」输进去就能进\n"
-                 : "")
-            + "· 同一个 WiFi：对方输密码即可自动找到你\n"
-            + "· 不同网络：点群名旁边的「📡 我的地址」，复制那段发给他\n\n"
-            + "本机监听端口 " + (r.port || "?")
-            + "，局域网地址 " + (r.lan_ip || "?")
-            + "\n（消息在成员机器之间 P2P 直连；只有打洞失败的成员才走服务器兜底，"
-            + "且转发的是密文）");
-        }, 300);
+        if (pw) {
+          const pretty = (pw.match(/.{1,4}/g) || []).join("-");
+          try { await navigator.clipboard.writeText(pretty); }
+          catch (e) {
+            // http:// 访问时没有 navigator.clipboard，退化成隐藏 textarea
+            const t = document.createElement("textarea");
+            t.value = pretty;
+            t.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+            document.body.appendChild(t);
+            t.select();
+            try { document.execCommand("copy"); } catch (_) { /* 忽略 */ }
+            t.remove();
+          }
+          setTimeout(() => {
+            alert("群建好了 ✅\n\n入群密码：" + pretty + "（已复制）\n\n"
+              + "把它发给对方，他点「🔑 密码入群」输进去就能进 —— "
+              + "同一个 WiFi、不同网络都一样，不用给地址。");
+          }, 300);
+        }
       } catch (e) { alert("建群失败：" + e.message); }
       finally { el("hsCreate").disabled = false; }
     });
