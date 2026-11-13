@@ -750,6 +750,15 @@ class MeshNode:
             if ttl > 0:
                 self._fanout(gid, T_FILE, dict(obj, ttl=ttl), skip=peer)
             return
+        # ★ 2026-11-13：走到这里 = **本机不认识这个帧类型**。
+        #   最典型的场景就是「对方代码比本机新」（自开发改过、只有一边重启了）。
+        #   必须**安全忽略**：不抛异常、不断连 —— 否则两台机器代码一不同步，
+        #   连上就断，用户看到的就是「联机失败」。
+        #   记一次日志（同类只记一次），否则排查时完全看不出发生过什么。
+        if typ not in _UNKNOWN_TYP:
+            _UNKNOWN_TYP.add(int(typ))
+            logger.warning("收到不认识的帧类型 %s（多半是对方版本更新），"
+                           "已安全忽略；连接保持", typ)
 
     def _announce_peers(self, gid: str) -> None:
         """把「我认识谁」广播出去。
