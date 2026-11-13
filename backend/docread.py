@@ -287,6 +287,37 @@ def _read_doc(raw: bytes) -> tuple:
             pass
 
 
+# 常见二进制格式的魔数。必须靠它兜底：gb18030 几乎能"成功解码"任何字节序列
+# （实测一张 PNG 被解成一串正常汉字，字符质量检查完全看不出来）。
+_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "PNG 图片"),
+    (b"\xff\xd8\xff", "JPEG 图片"),
+    (b"GIF87a", "GIF 图片"), (b"GIF89a", "GIF 图片"),
+    (b"BM", "BMP 图片"),
+    (b"RIFF", "RIFF 文件（音频/视频）"),
+    (b"%PDF", "PDF"),
+    (b"PK\x03\x04", "ZIP 压缩包"),
+    (b"Rar!", "RAR 压缩包"),
+    (b"7z\xbc\xaf\x27\x1c", "7z 压缩包"),
+    (b"\x1f\x8b", "GZIP 压缩包"),
+    (b"MZ", "Windows 可执行文件"),
+    (b"\x7fELF", "Linux 可执行文件"),
+    (b"OggS", "OGG 音频"),
+    (b"ID3", "MP3 音频"),
+    (b"fLaC", "FLAC 音频"),
+    (b"\x00\x00\x00\x18ftyp", "MP4 视频"),
+    (b"\x00\x00\x00\x20ftyp", "MP4 视频"),
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "OLE 文档（老 .doc/.xls）"),
+)
+
+
+def _magic_name(raw: bytes) -> str:
+    for sig, name in _MAGIC:
+        if raw.startswith(sig):
+            return name
+    return ""
+
+
 def _text_quality(text: str) -> float:
     """可疑字符占比，用来识破"解码成功但其实是乱码"。
 
