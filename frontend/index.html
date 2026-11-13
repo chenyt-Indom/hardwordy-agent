@@ -1028,13 +1028,20 @@
     });
 
     // ⑥ 抽屉开关
+    // ⚠️ 关闭时必须 remove('in')：否则 transform 还停在 translateX(0)，
+    //    而 .sd-drawer{display:flex} 又会压掉 [hidden] 的 display:none，
+    //    结果就是「点 ✕ / 点遮罩没反应，面板还杵在那儿」。
     var open = function (on) {
-      mask.hidden = !on;
-      dw.hidden = !on;
       if (on) {
         dw.classList.remove('in');
+        mask.hidden = false;
+        dw.hidden = false;
         void dw.offsetWidth;   // 强制回流，让滑入动画每次都重播
         dw.classList.add('in');
+      } else {
+        dw.classList.remove('in');
+        mask.hidden = true;
+        dw.hidden = true;
       }
     };
     var sbtn = $('#settingsBtn');
