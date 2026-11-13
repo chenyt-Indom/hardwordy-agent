@@ -9353,6 +9353,23 @@
       modalOnOk = null;
     }
 
+    // 12 位密码手输最容易错：大小写、带空格、漏横杠、把 O/0 看混。
+    // 边打边整形 —— 非法字符直接进不去，用户当场就能看出「这个字不是密码里的」。
+    // 合法字符集与后端 PW_ALPHABET 完全一致（不含 0、1、I、L、O）。
+    (function () {
+      const ta = el("hiveModalInput");
+      if (!ta) return;
+      ta.addEventListener("input", () => {
+        if (ta.dataset.mode !== "password") return;
+        const atEnd = ta.selectionStart === ta.value.length;
+        const raw = (ta.value || "").toUpperCase()
+          .replace(/[^23456789ABCDEFGHJKMNPQRSTUVWXYZ]/g, "");
+        const v = (raw.match(/.{1,4}/g) || []).join("-").slice(0, 14);
+        ta.value = v;
+        if (atEnd) { try { ta.setSelectionRange(v.length, v.length); } catch (e) {} }
+      });
+    })();
+
     el("hiveModalClose").addEventListener("click", closeModal);
     modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
     el("hiveModalCopy").addEventListener("click", async () => {
