@@ -1143,19 +1143,4 @@
 
 
 </body>
-<script>
-/* 临时：不可见页面里 transition 不推进，这里禁掉过渡直接看收起后的静态样子 */
-setTimeout(function () {
-  var sb = document.querySelector('#sidebar');
-  var inner = document.querySelector('#kbPanel > .pnl-fold > .pnl-fold-in');
-  sb.style.transition = 'none';
-  inner.style.transition = 'none';
-  document.querySelector('#logoBtn').click();
-  document.querySelector('#kbPanel .sec-head').click();
-  void sb.offsetHeight;
-  // 让侧栏内部的元素也立刻到位
-  var kids = sb.querySelectorAll('*');
-  for (var i = 0; i < kids.length; i++) kids[i].style.transition = 'none';
-}, 300);
-</script>
 </html>

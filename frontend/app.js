@@ -2239,7 +2239,11 @@
       chev.className = "fold-chev";
       chev.textContent = "▾";
       chev.setAttribute("aria-hidden", "true");
-      head.appendChild(chev);
+      // 插在标题文字**后面**，而不是 head 末尾 —— head-acts 有 margin-left:auto，
+      // 放在末尾会被推到面板最右边，紧贴边缘、几乎看不见（实测就是这个效果）。
+      const h2 = head.querySelector("h2");
+      if (h2 && h2.parentNode === head) h2.after(chev);
+      else head.insertBefore(chev, head.firstChild);
       head.classList.add("fold-head");
       head.setAttribute("role", "button");
       head.setAttribute("tabindex", "0");
