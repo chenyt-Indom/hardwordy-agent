@@ -4879,7 +4879,59 @@ html[data-theme="light"] select.pill-select option {
   border: 1px solid var(--border);
 }
 .av2-row .btn { flex: 0 0 auto; white-space: nowrap; }
-.av2-hint { font-size: 11px; line-height: 1.55; }
+/* 心情 / 语速 / 视频目录：各占一行。侧栏只有 300px，
+   两个下拉并排会把「心情：自动判断」截成「心情：」 */
+.av2-row-mood, .av2-row-rate, .av2-row-scope { margin-top: 4px; }
+.av2-acts-doc { margin-top: 2px; }
+.av2-acts-doc .btn { flex: 1 1 auto; }
+
+/* 文档导入预览：先看清楚再朗读，不直接覆盖用户写的内容 */
+.av2-doc {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 8px; border-radius: 8px;
+  background: var(--panel2); border: 1px solid var(--border);
+}
+.av2-doc-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--muted);
+}
+.av2-doc-name {
+  flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: var(--fg);
+}
+.av2-doc-meta { font-size: 10px; line-height: 1.5; }
+.av2panel textarea#av2DocText {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  min-height: 70px; line-height: 1.55; padding: 7px 9px;
+  border-radius: 7px; font-size: 11px; font-family: inherit;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border);
+}
+.av2panel textarea#av2DocText:focus { outline: none; border-color: var(--accent); }
+.av2panel textarea#av2DocText::placeholder { color: var(--muted); }
+
+/* 视频列表：删除按钮平时不显示，悬停才出来，免得列表显得拥挤 */
+.av2-item .av2-name, .av2-item .av2-meta { cursor: pointer; }
+.av2-item .av2-del {
+  flex: 0 0 auto; width: 20px; height: 20px; padding: 0;
+  border-radius: 6px; border: 1px solid transparent;
+  background: transparent; color: var(--muted);
+  font-size: 11px; line-height: 1; cursor: pointer;
+  opacity: 0; transition: opacity .15s;
+}
+.av2-item:hover .av2-del, .av2-item:focus-within .av2-del { opacity: 1; }
+.av2-item .av2-del:hover {
+  color: #e06c75; border-color: #e06c75; background: rgba(224, 108, 117, .12);
+}
+/* 触摸屏没有 hover，删除按钮要一直可见 */
+@media (hover: none) { .av2-item .av2-del { opacity: .7; } }
+.av2-tag {
+  font-style: normal; font-size: 9px; padding: 0 4px;
+  border-radius: 4px; background: var(--border); color: var(--muted);
+  vertical-align: middle;
+}
+.av2-empty-list { text-align: center; padding: 8px 0; }
+.av2-hint { font-size: 11px; line-height: 1.55; white-space: pre-line; }
 .av2-list { display: flex; flex-direction: column; gap: 6px; }
 .av2-item {
   display: flex; align-items: center; gap: 8px;
