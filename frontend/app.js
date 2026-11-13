@@ -10823,23 +10823,29 @@
       }
       const lan = d.lan_addr || (d.lan_ip ? d.lan_ip + ":" + d.port : "");
       const wan = d.wan_addr || (d.public_ip ? d.public_ip + ":" + d.port : "");
-      // 要发出去的那一行：有公网地址就发公网的，没有就发本机的
-      const copyAddr = wan || lan;
+      const ts = d.ts_addr || (d.tailscale_ip ? d.tailscale_ip + ":" + d.port : "");
+      // 要发出去的那一行：Tailscale 优先（跨网络也能用），其次公网，最后本机
+      const copyAddr = ts || wan || lan;
       const L = [];
       L.push("【同一 WiFi】对方只输密码就行，不用填地址");
       if (lan) L.push("    本机地址   " + lan);
       L.push("");
-      if (wan) {
-        L.push("【不同网络】把下面这行发给他，填进「对方地址」");
-        L.push("    " + wan);
-        L.push("    还需要在路由器上把 " + d.port + " 端口映射到本机");
+      if (ts) {
+        L.push("【不同网络 · 推荐】把下面这行发给他，填进「对方地址」");
+        L.push("    " + ts);
+        L.push("    这是 Tailscale 地址，异地直连，不用公网 IP、不用端口映射");
       } else {
-        L.push("【不同网络】没探到公网地址（可能被防火墙挡了）");
-        L.push("    需要在路由器上做端口映射，或改用 Tailscale 这类组网工具");
+        L.push("【不同网络】现在没有可用地址 —— 家用宽带没有公网 IP，跨网连不通");
+        L.push("    解决：两台机器都装 Tailscale（免费），登录同一账号");
+        L.push("    装完回到这里，会自动多出一行 100.x 的地址，发那行给对方即可");
+      }
+      if (wan && !ts) {
+        L.push("");
+        L.push("（备用）公网地址 " + wan + "，需要在路由器上做 " + d.port + " 端口映射");
       }
       if (copyAddr) {
         L.push("");
-        L.push("（点「复制" + (wan ? "公网" : "本机") + "地址」只会复制那一行地址本身，"
+        L.push("（点「复制" + (ts ? "Tailscale" : (wan ? "公网" : "本机")) + "地址」只会复制那一行地址本身，"
           + "不带上面这些说明）");
       }
       openModal({
