@@ -673,32 +673,31 @@ def _frame(prep: dict, openness: float, width: float):
     cyi = int(round(cy - ytop))
     cyi = max(3, min(ph - 4, cyi))
 
-    # 张口缝隙像素数：最大约 0.42 个唇高
-    gap = int(round(0.42 * mh * op))
-    gap = max(0, min(gap, int(ph * 0.44)))
-    half = gap // 2
+    # ---- 连续二维形变场 ----
+    # 源行 src = cyi + (y-cyi) * k，k<1 表示该处内容被纵向拉伸（唇缝变宽）。
+    # k 在唇心最小、向外高斯衰减到 1，所以形变是连续的、没有断层。
+    #
+    # 为什么不能「切一条缝再填色」（v4 的做法，已废弃）：
+    #   上下唇片硬错开 + 中间填一条平均色，实测是一条边缘生硬的暗带，
+    #   视觉模型判定为「贴纸」。而连续拉伸用的是原图自己的像素，
+    #   缝隙是原图唇缝被拉长，不会有外来色块。
+    yy, xx = np.mgrid[0:ph, 0:pw].astype(np.float32)
+    d = yy - cyi
+    wv = np.exp(-(d / (0.62 * mh)) ** 2)                    # 纵向：唇缝最强
+    wh = np.exp(-((xx - (cx - x0)) / (0.80 * mw * 0.5)) ** 2)  # 横向：嘴角固定
+    k = 1.0 - 0.72 * op * wv * wh
+    k = np.maximum(k, 0.40)      # 限制最大拉伸倍数（约 2.5x），再大就拉丝
+    src = np.clip(cyi + d * k, 0, ph - 1)
 
-    # 逐行「目标 → 源」映射：上唇片整体上移 half，下唇片整体下移 half
-    src = np.empty(ph, dtype=np.int32)
-    for r in range(ph):
-        if r + half < cyi:
-            src[r] = r + half
-        elif r - half >= cyi:
-            src[r] = r - half
-        else:
-            src[r] = -1                    # 中间缝隙，待填
-    valid = src >= 0
-    outp = np.empty_like(parr)
-    outp[valid] = parr[src[valid]]
+    i0 = np.floor(src).astype(np.int32)
+    i1 = np.minimum(i0 + 1, ph - 1)
+    frac = (src - i0)[..., None]
+    cols = np.arange(pw)[None, :]
+    outp = parr[i0, cols] * (1.0 - frac) + parr[i1, cols] * frac
 
-    if not valid.all():
-        # 缝隙：取唇缝上下各 2 行的平均色纵向拉伸，再按到唇缝的距离压暗
-        seam = parr[max(0, cyi - 2):cyi + 3].mean(axis=0)
-        idx = np.where(~valid)[0]
-        outp[~valid] = seam
-        d = np.abs(idx - cyi).astype(np.float32) / float(max(half, 1))
-        k = 0.30 + 0.46 * np.clip(d, 0.0, 1.0)
-        outp[~valid] = outp[~valid] * k[:, None, None]
+    # 唇缝中心轻微压暗：模拟口腔深度。只压 14%，再重就是一条黑带。
+    dark = 1.0 - 0.14 * op * np.exp(-(d / (0.26 * mh)) ** 2) * wh
+    outp = outp * dark[..., None]
 
     img = Image.fromarray(np.clip(outp, 0, 255).astype(np.uint8), mode="RGB")
 
@@ -713,15 +712,6 @@ def _frame(prep: dict, openness: float, width: float):
         nbx = x0
         m2 = mask
     out.paste(img, (nbx, ytop), m2)
-
-    # 缝隙上再叠一层柔和暗部，增强「口腔深度」的观感
-    if op > 0.10 and gap >= 2:
-        sw, sh = prep["shadow_size"]
-        sw2 = max(3, int(round(sw * wd)))
-        sh2 = max(2, int(round(gap * 1.15)))
-        shadow = _mouth_shadow(sw2, sh2, op * 0.85)
-        out.paste(shadow, (int(round(cx - sw2 / 2.0)),
-                           int(round(cy - sh2 / 2.0))), shadow)
     return out
 
 
