@@ -386,7 +386,8 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
             pred = sess.run([out_name], feeds)[0]            # (1,3,96,96)
             pred = pred[0].transpose(1, 2, 0)                # (96,96,3)
             pred = np.clip(pred * 255.0, 0, 255).astype(np.uint8)
-            pred = cv2.cvtColor(pred, cv2.COLOR_RGB2BGR)
+            # 模型输入输出都是 BGR（官方用 cv2 读图，未做通道转换），
+            # 这里绝不能再 cvtColor，否则嘴唇会发紫。
             patch = cv2.resize(pred, (cw, ch), interpolation=cv2.INTER_LINEAR)
 
             frame = img.copy()
