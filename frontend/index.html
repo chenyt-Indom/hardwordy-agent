@@ -1192,17 +1192,19 @@
       show();
       kb.querySelector('.sec-head').click();
       setTimeout(function () {
-        out.push('E 折叠后=' + Math.round(inner.getBoundingClientRect().height) + 'px');
-        out.push('F style.h=' + (inner.style.height || '-'));
+        // 不可见页面里 CSS transition 不推进，所以禁掉过渡量终值（真实浏览器里是动画到位）
+        inner.style.transition = 'none'; void inner.offsetHeight;
+        out.push('E 知识库终值=' + Math.round(inner.getBoundingClientRect().height) + 'px style.h=' + (inner.style.height || '-'));
+        inner.style.transition = '';
         show();
         var sc = document.querySelector('#scFold > .sc-fold-in');
+        sc.style.transition = 'none'; void sc.offsetHeight;
         out.push('G 状态卡前=' + Math.round(sc.getBoundingClientRect().height) + 'px');
-        show();
         document.querySelector('#scToggle').click();
-        setTimeout(function () {
-          out.push('H 状态卡后=' + Math.round(sc.getBoundingClientRect().height) + 'px');
-          show();
-        }, 450);
+        sc.style.transition = 'none'; void sc.offsetHeight;
+        out.push('H 状态卡终值=' + Math.round(sc.getBoundingClientRect().height) + 'px style.h=' + (sc.style.height || '-'));
+        sc.style.transition = '';
+        show();
       }, 450);
     }, 500);
   }, 200);
