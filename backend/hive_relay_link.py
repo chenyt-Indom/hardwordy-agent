@@ -296,6 +296,7 @@ class RelayLink:
         self.direct_ok = 0               # 已直连人数（给前端看）
         self.direct_fail = 0
         self.signal_pub_at = 0.0
+        self.signal_error = ""
         self._load_state()
 
     # -------------------------------------------------- 水位持久化
