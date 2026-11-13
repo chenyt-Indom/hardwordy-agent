@@ -4867,6 +4867,23 @@ html[data-theme="light"] select.pill-select option {
 /* 心情 / 语速 / 视频目录：各占一行。侧栏只有 300px，
    两个下拉并排会把「心情：自动判断」截成「心情：」 */
 .av2-row-mood, .av2-row-rate, .av2-row-scope { margin-top: 4px; }
+/* 口型幅度：标签 + 滑块 + 数值一行排开。
+   侧栏内宽约 240px，标签 56px + 数值 34px，滑块 flex 吃掉剩余，
+   实测滑块仍有 130px 以上可拖，不会挤成一根细线。 */
+.av2-row-amp { margin-top: 6px; }
+.av2-amp {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  font-size: 12px; color: var(--muted);
+}
+.av2-amp-lb { flex: 0 0 auto; white-space: nowrap; }
+.av2-amp input[type="range"] {
+  flex: 1 1 auto; min-width: 0; height: 16px; accent-color: var(--accent);
+  cursor: pointer;
+}
+.av2-amp-v {
+  flex: 0 0 auto; min-width: 34px; text-align: right;
+  font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600;
+}
 .av2-acts-doc { margin-top: 2px; }
 .av2-acts-doc .btn { flex: 1 1 auto; }
 
