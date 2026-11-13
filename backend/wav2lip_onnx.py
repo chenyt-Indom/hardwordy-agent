@@ -515,6 +515,18 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
             blend = patch.astype(np.float32) * msk + roi * (1 - msk)
             frame[y1:y2, x1:x2] = np.clip(blend, 0, 255).astype(np.uint8)
 
+            # 微表情放在**嘴部合成之后**：口型已由 Wav2Lip 生成好，
+            # 整帧再做轻量仿射不会破坏它（反过来先动再贴会错位）。
+            if _ex_mod is not None:
+                try:
+                    # 说话强度取本帧 mel 均值：静音段 mel≈-4，有声段更高，
+                    # 用它对表情幅度做门控，避免不说话时还在挤眉弄眼。
+                    _en = float(np.clip((float(ch_mel.mean()) + 4.0) / 8.0, 0.0, 1.0))
+                    _ex_mod.apply(frame, i / float(fps), _expr,
+                                  face=_face_norm, energy=_en)
+                except Exception:                          # noqa: BLE001
+                    pass
+
             proc.stdin.write(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).tobytes())
             if on_progress and (i % 10 == 0 or i == n - 1):
                 try:
