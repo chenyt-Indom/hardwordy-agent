@@ -418,6 +418,8 @@ def main() -> None:
         _alert("缺少桌面窗口组件 pywebview：\n" + str(exc))
         raise
 
+    # 重启时先等上一个实例的窗口关掉，再开自己的 —— 否则两个窗口会短暂并存
+    _wait_old_window_gone()
     _wlog("准备创建窗口 NO_WINDOW=%s 标题=%s" % (NO_WINDOW, WINDOW_TITLE))
 
     window = webview.create_window(
