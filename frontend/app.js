@@ -9434,6 +9434,8 @@
         document.body.appendChild(node);
       }
       try { placeThinkDock(node); } catch (e) { /* 顶层函数不可用时忽略 */ }
+      // 单人模式那个函数在本文件顶层，正常同作用域；用 typeof 兜底，避免万一取不到就抛错
+      if (typeof ensureThinkHome === "function") ensureThinkHome(node, hvSendHome);
     }
     (function bindHvThink() {
       const b = el("hvThinkFollowBtn");
