@@ -8459,7 +8459,11 @@
       const code = el("hiveModalCode");
       if (opt.code) { code.value = opt.code; code.hidden = false; }
       else { code.hidden = true; }
-      el("hiveModalCopy").hidden = !opt.code;
+      // 复制按钮的两种来源：单行 code 框（密码/连接码），或上面的多行文本框
+      const cp = el("hiveModalCopy");
+      cp.hidden = !(opt.code || opt.copyInput);
+      cp.dataset.from = opt.copyInput ? "input" : "code";
+      cp.textContent = opt.copyLabel || (opt.copyInput ? "📋 复制" : "📋 复制密码");
       const ok = el("hiveModalOk");
       ok.hidden = !!opt.noOk;
       ok.textContent = opt.okText || "确定";
