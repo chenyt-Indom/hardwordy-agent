@@ -10997,6 +10997,68 @@
       if (curGid) openGroup(curGid);
     });
 
+    // 2026-11-14：公网中继配置。跨网络的群聊要靠一台公网服务器转发，
+    // 但转发的是 mesh 层的密文 —— 服务器既看不到内容，也没有群密钥。
+    // 密钥只在本机文件里，接口只回显掩码；只有「刚生成」那一刻会显示全文。
+    el("hiveSrvBtn").addEventListener("click", async () => {
+      let d = {};
+      try { d = (await api("/api/hive/relay")) || {}; }
+      catch (e) { d = { ok: false, error: e.message }; }
+      const cfg = d.config || {};
+      const live = d.live || {};
+      let now = "还没配置（现在走局域网/直连）";
+      if (cfg.url) {
+        now = live.online
+          ? "🟢 已连接 " + (live.rtt_ms || 0) + "ms"
+          : "⚪ 未连接" + (live.error ? "：" + live.error : "（进群时会自动连）");
+      }
+      openModal({
+        title: "🌐 中继服务器",
+        hint: "跨网络的群聊需要一台公网服务器转发消息。转发的是密文，"
+          + "服务器看不到任何聊天内容。\n当前：" + now + "\n\n"
+          + "地址形如 hive4://你的IP:8765。密钥第一次保存会自动生成，"
+          + "再把它填到服务器上（用 deploy 脚本则不用管）。",
+        input: cfg.url || "",
+        placeholder: "hive4://1.2.3.4:8765",
+        extra: "",
+        extraPlaceholder: cfg.token_set
+          ? "密钥已设置（" + cfg.token_hint + "），留空不改"
+          : "中继密钥（留空 = 自动生成）",
+        okText: "保存",
+        onOk: async (url, tok) => {
+          const u = (url || "").trim();
+          if (!u) { alert("先填服务器地址"); return false; }
+          const body = { url: u, token: (tok || "").trim(), enabled: true };
+          if (!body.token && !cfg.token_set) body.gen_token = true;
+          let r = {};
+          try { r = await api("/api/hive/relay", body) || {}; }
+          catch (e) { alert("保存失败：" + e.message); return false; }
+          if (!r.ok) { alert("保存失败：" + (r.error || "未知原因")); return false; }
+          const newTok = (r.config || {}).token;
+          if (newTok) {
+            setTimeout(() => {
+              openModal({
+                title: "🔑 中继密钥已生成",
+                hint: "把这串填到服务器（用 deploy 脚本会自动读本机这个文件，"
+                  + "手动部署时作为 install 脚本的参数）。只显示这一次。",
+                input: newTok, readonly: true,
+                copyInput: true, copyValue: newTok, copyLabel: "📋 复制密钥",
+                noOk: true,
+              });
+            }, 60);
+            return true;
+          }
+          let t = {};
+          try { t = await api("/api/hive/relay/test", { url: u }) || {}; }
+          catch (e) { t = { ok: false, error: e.message }; }
+          alert(t.ok
+            ? "已保存，服务器可达（" + t.ms + "ms）"
+            : "已保存，但连不上：" + (t.error || "未知原因"));
+          return true;
+        },
+      });
+    });
+
     // 2026-11-13：这个按钮原来填「云端中继地址」，后来叫「连接码」，
     // 现在改成「我的地址」—— 群主最常做的事就是把自己的地址发给别人。
     // 同一个 WiFi 下压根用不上地址（UDP 广播自动发现），只有跨网络才需要。
