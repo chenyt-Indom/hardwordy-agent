@@ -11453,7 +11453,11 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
     elif err:
         final = f"⚠️ 模型执行失败：{err}"
     else:
-        final = text.strip() or "（模型没有返回正文）"
+        # ★ 2026-11-13：模型偶尔会在**没开自开发**时也硬吐一个 ```tool 块
+        #   （它见过这种格式）。那种块不会被执行，但会原样留在正文里 ——
+        #   群里所有人看到的是一坨 JSON。这里只**清显示**、不执行。
+        _shown = _TOOL_FENCE_RE.sub("", text or "").strip()
+        final = _shown or "（模型没有返回正文）"
     extra = {"by": asker, "model": model, "thinking": thinking,
              "dur_ms": dur, "task_id": mid, "cancelled": cancelled,
              "think_chars": len(thinking), "out_chars": len(text),
