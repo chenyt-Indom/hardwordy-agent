@@ -350,6 +350,8 @@
     const was = thinkFollow;
     thinkFollow = !!v;
     try { localStorage.setItem("think_follow", thinkFollow ? "1" : "0"); } catch (e) { /* 隐私模式 */ }
+    // 用户主动打开「跟随视角」→ 之前点过「归位」的卡片重新纳入跟随
+    if (thinkFollow) _thinkBoxes.forEach((w) => { w._noFollow = false; });
     syncThinkBtn();
     applyThinkDock();
     if (was !== thinkFollow && typeof showToast === "function") {
