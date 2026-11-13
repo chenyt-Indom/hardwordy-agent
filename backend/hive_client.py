@@ -18,14 +18,64 @@ url 的含义变了：
 from __future__ import annotations
 
 import base64
+import json
+import os
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
 import backend.hive as H
 import backend.hive_mesh as MESH
+import backend.hive_relay_link as RELAY
 
 PROTO_VER = MESH.PROTO_VER
+
+# 中继配置：一个服务器给所有群共用。存在 data/hive/relay.json（权限 600）。
+# ★ 密钥只在本机文件里，接口只回显掩码 —— 避免前端/日志把密钥漏出去。
+RELAY_CFG = os.path.join(H._DATA, "relay.json")
+RELAY_STATE = os.path.join(H._DATA, "relay_state.json")
+
+
+def relay_config() -> Dict[str, Any]:
+    try:
+        with open(RELAY_CFG, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return {"url": "", "token": "", "enabled": False}
+    return {
+        "url": str(d.get("url") or "").strip(),
+        "token": str(d.get("token") or "").strip(),
+        "enabled": bool(d.get("enabled", True)),
+    }
+
+
+def mask_relay(d: Dict[str, Any]) -> Dict[str, Any]:
+    """给前端看的版本：永远不含完整密钥。"""
+    tok = str(d.get("token") or "")
+    return {
+        "url": d.get("url") or "",
+        "enabled": bool(d.get("enabled", True)),
+        "token_set": bool(tok),
+        "token_hint": (tok[:3] + "***") if tok else "",
+    }
+
+
+def set_relay_config(url: str = "", token: str = "", enabled: bool = True,
+                     keep_token: bool = True) -> Dict[str, Any]:
+    """写中继配置。token 留空且 keep_token=True 时保留原密钥。"""
+    old = relay_config()
+    tok = (token or "").strip() or (old.get("token") or "" if keep_token else "")
+    d = {"url": (url or "").strip(), "token": tok, "enabled": bool(enabled)}
+    os.makedirs(H._DATA, exist_ok=True)
+    tmp = RELAY_CFG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, RELAY_CFG)
+    try:
+        os.chmod(RELAY_CFG, 0o600)      # 只有本机当前用户能读
+    except Exception:
+        pass
+    return mask_relay(d)
 
 
 class HiveClient:
