@@ -498,6 +498,52 @@ class RelayServer:
         if op == "health":
             conn.ctrl(self.health())
             return
+
+        # ── 群目录：让跨网络的人**只凭密码**就能找到群 ──────────────────
+        # 背景：密码入群原来是靠「本机记录 / 局域网广播 / 手填地址」找群，
+        # 跨网的人三条路都不通，所以进不来。这里加一个轻量目录。
+        #
+        # 存的是 `fp = HMAC(密码, "hive-dir-v1")` 和 `vt`（验证标签），
+        # **不含群密钥、不含密码本身**。服务器拿到 fp 也反推不出密码
+        # （12 位密码 ≈ 1.2e18 种，且 fp 是单向 HMAC）。
+        if op in ("dir_publish", "dir_lookup"):
+            if self.token:
+                want = hmac.new(self.token, (nonce + "|dir").encode("utf-8"),
+                                hashlib.sha256).hexdigest()
+                if not hmac.compare_digest(want, str(hello.get("mac") or "")):
+                    self.stats["auth_fail"] += 1
+                    conn.ctrl({"op": "err", "msg": "中继密钥不对"})
+                    return
+            fp = str(hello.get("fp") or "").strip()[:128]
+            if not fp:
+                conn.ctrl({"op": "err", "msg": "缺少 fp"})
+                return
+            if op == "dir_publish":
+                g = str(hello.get("gid") or "").strip()[:128]
+                vt = str(hello.get("vt") or "").strip()[:128]
+                nm = str(hello.get("name") or "").strip()[:64]
+                if not g or not vt:
+                    conn.ctrl({"op": "err", "msg": "缺少 gid 或 vt"})
+                    return
+                with self.dir_lock:
+                    self.directory[fp] = {"gid": g, "vt": vt, "name": nm,
+                                          "ts": time.time()}
+                    n = len(self.directory)
+                conn.ctrl({"op": "dir_ok", "count": n})
+                log.info("目录登记 fp=%s*** 群=%s", fp[:6], g[:8])
+            else:
+                with self.dir_lock:
+                    hit = dict(self.directory.get(fp) or {})
+                # 顺手清掉超过 90 天没更新的条目，免得无限增长
+                if len(self.directory) > 2000:
+                    cut = time.time() - 90 * 86400
+                    with self.dir_lock:
+                        for k in [k for k, v in self.directory.items()
+                                  if (v.get("ts") or 0) < cut]:
+                            self.directory.pop(k, None)
+                conn.ctrl({"op": "dir_result", "group": hit})
+            return
+
         if op != "hello":
             conn.ctrl({"op": "err", "msg": "先 hello"})
             return
