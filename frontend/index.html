@@ -1155,7 +1155,18 @@
   setTimeout(function () {
     var sb = document.querySelector('#sidebar');
     var logo = document.querySelector('#logoBtn');
-    out.push('URL=' + location.href.slice(0, 60));
+    out.push('URL=' + location.href.slice(0, 40) + ' sheets=' + document.styleSheets.length);
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', '/static/style.css', false);
+      xhr.send();
+      var txt = xhr.responseText || '';
+      out.push('CSS长度=' + txt.length + ' 含pnlFold=' + (txt.indexOf('.pnl-fold > .pnl-fold-in') >= 0) + ' 含imp=' + (txt.indexOf('78px !important') >= 0));
+      var links = document.querySelectorAll('link[rel=stylesheet]');
+      var hrefs = [];
+      for (var li = 0; li < links.length; li++) hrefs.push(links[li].href.slice(-24));
+      out.push('links=' + links.length + ' ' + hrefs.join(' | '));
+    } catch (e) { out.push('XHRERR ' + e.message); }
     out.push('A 初始宽=' + Math.round(sb.getBoundingClientRect().width) + 'px cls=' + sb.className);
     show();
     logo.click();
