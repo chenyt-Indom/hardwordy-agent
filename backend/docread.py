@@ -298,6 +298,7 @@ def read_bytes(raw: bytes, filename: str = "") -> dict:
                                      "可以在 Word/WPS 里另存为 .docx 再导入。" % e}
             if not text.strip():
                 return {"ok": False, "error": "没能从这份 .doc 里抽出文字"}
+            text = _normalize_cjk(text)
         else:
             text, enc = _decode_text(raw)
 
