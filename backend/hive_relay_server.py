@@ -646,6 +646,8 @@ class RelayServer:
             "frames": self.stats["frames"],
             "replayed": self.stats["replayed"],
             "auth_fail": self.stats["auth_fail"],
+            "dir": len(self.directory),
+            "ws": self.stats.get("ws", 0),
         }
 
 
