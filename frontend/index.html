@@ -403,14 +403,6 @@
            provider，否则不知道该往哪个后端发。默认仍是「自动（本地）」。 -->
 <button type="button" class="pill pill-btn askmode-btn" id="askModeBtn"
               title="模型在动手前会问你多少问题：快速了解 = 只问最关键的几条；深度询问 = 分多轮把关键信息问透。点这里切换（下一次提问生效）。">快速问</button>
-      <select id="modelSelect" class="pill pill-select" title="选择本轮对话用哪个模型">
-        <option value="auto">🖥 本地·自动</option>
-        <option value="qwen3-vl:30b">🖥 本地 30B</option>
-        <option value="qwen3-vl:8b">🖥 本地 8B</option>
-        <option value="deepseek-flash">⚡ DS V4.1</option>
-        <option value="deepseek-flash-think">🧠 DS V4.1 思考</option>
-        <option value="deepseek-v4-pro">🔮 DS V4 Pro</option>
-      </select>
       <!-- ⚡ 2026-11-12 顶栏整理：下面这几个都是「配一次就不动」的低频设置，
            平时收在「⋯ 更多」里（data-more="1"），点一下才展开，顶栏不再挤。
            只是 CSS 显隐，控件本身、id、事件全都没动，功能不受影响。 -->
