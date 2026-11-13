@@ -584,6 +584,17 @@ def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS,
         outside = _smoothstep((0.045 - e) / 0.045) * (~mask)
         openness = openness * (1.0 - 0.85 * outside)
 
+    # ---- 幅度增益 ----
+    # 纯乘系数会让曲线整体抬高，连「本来就闭嘴」的静音段也一起抬高，
+    # 看起来像嘴一直半张。所以先减掉基线再放大，保持「该闭的地方还是闭」。
+    #   实测：直接乘 1.4 时静音段 openness 从 0.00 抬到 0.00（不变），
+    #   但低能量段 0.10 → 0.14，观感上嘴会一直微微张着；减基线后回到 0.03。
+    g = float(np.clip(amp, 0.60, 2.00))
+    if abs(g - 1.0) > 1e-3:
+        base_lv = float(_pct(openness, 12, 0.0))     # 静音基线
+        openness = base_lv + (openness - base_lv) * g
+        openness = np.clip(openness, 0.0, 1.0)
+
     params = []
     for i in range(n):
         params.append((float(openness[i]), float(width[i])))
