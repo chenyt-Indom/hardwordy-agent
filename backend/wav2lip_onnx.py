@@ -318,59 +318,10 @@ def _mouth_mask(h: int, w: int, my_rel: float, rx: float = 0.36,
     return m[:, :, None].astype(np.float32)
 
 
-def _feather_mask(h: int, w: int, top: float = 0.60, bot: float = 0.88,
-                  feather: float = 0.05):
-    """嘴部带状融合蒙版。
-
-    实测（同一帧三档对比）：整块下半脸贴回会把下巴也换成 96x96 的模糊输出，
-    下巴出现明显色块；收窄到 0.60~0.88 的嘴部带状后，下巴保留原图，
-    嘴部仍有正常张合，伪影最少。
-    """
-    m = np.zeros((h, w), dtype=np.float32)
-    t0, t1 = int(h * top), int(h * bot)
-    t1 = max(t0 + 1, min(h, t1))
-    m[t0:t1, :] = 1.0
-    fb = max(2, int(h * feather))
-    for i in range(fb):
-        v = (i + 1) / float(fb + 1)
-        yy = t0 + i
-        if 0 <= yy < h:
-            m[yy, :] = np.minimum(m[yy, :], v)
-        yy2 = t1 - 1 - i
-        if 0 <= yy2 < h:
-            m[yy2, :] = np.minimum(m[yy2, :], v)
-    return m[:, :, None]
-
-
 # ---------------------------------------------------------------- 推理
-def _gap96(pred96: np.ndarray, my_rel: float) -> int:
-    """测 96x96 输出里唇缝暗带的高度（像素）。"""
-    import cv2
-    g = cv2.cvtColor(pred96, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    c = int(my_rel * 96)
-    a, b = max(0, c - 12), min(96, c + 12)
-    if b - a < 4:
-        return 0
-    prof = g[a:b].mean(axis=1)
-    mn = float(prof.min())
-    best = cur = 0
-    for v in (prof < (mn + 12)):
-        cur = cur + 1 if v else 0
-        best = max(best, cur)
-    return int(best)
-
-
-def _lip_openness(pred96: np.ndarray, my_rel: float, base_gap: int) -> float:
-    """估这一帧的张口量（0~1），用于幅度增强。"""
-    best = _gap96(pred96, my_rel)
-    # 相对首帧的增量，映射到 0~1
-    extra = max(0.0, float(best - base_gap))
-    return float(min(1.0, extra / 4.0))
-
-
-# 2026-11-14：`_boost_patch`（按张口量纵向拉伸嘴部）已删除 ——
-# 口型幅度改由遮罩范围驱动（模型真实生成），叠加拉伸只会出涂抹和断层，
-# 实测增益也只有 2px。保留注释说明为什么不再需要它。
+# 2026-11-14 清理：`_feather_mask`（矩形带状蒙版，已被 _mouth_mask 椭圆取代）、
+# `_gap96` / `_lip_openness`（给已删除的幅度增强用）、`_boost_patch`（纵向拉伸）
+# 全部删除 —— 都已无调用方，留着只会让下一个人以为还能用。
 
 
 def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
