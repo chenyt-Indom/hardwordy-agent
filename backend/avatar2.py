@@ -383,13 +383,6 @@ def _analyze(y: np.ndarray, sr: int, fps: int = FPS) -> dict:
             "hop": hop, "sr": sr}
 
 
-def _smooth(a: np.ndarray, k: int = 3) -> np.ndarray:
-    if a.size < 3 or k <= 1:
-        return a
-    ker = np.ones(k, dtype=np.float32) / float(k)
-    return np.convolve(a, ker, mode="same")
-
-
 def _one_pole(a: np.ndarray, tau_ms: float, fps: int = FPS) -> np.ndarray:
     """一阶低通（指数平滑）。tau_ms 越大越平滑，且不会像滑动平均那样在两端塌陷。"""
     if a.size == 0:
