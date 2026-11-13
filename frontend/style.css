@@ -4244,6 +4244,9 @@ html[data-theme="light"] select.pill-select option {
 /* ---- 建群向导（中继地址 + 连通检测日志） ---- */
 .hive-modal-in.wide { width: min(520px, 94vw); }
 .hs-label { font-size: 12px; color: var(--muted); margin-top: 2px; }
+/* 建群向导的密码提示（2026-11-14）：原来这里是两大块「同一个 WiFi / 不在同一个网络」
+   说明，跨网已不需要地址后整段删掉，压成这一行 */
+.hs-tip { margin: 4px 0 2px; line-height: 1.65; }
 .hs-dim { opacity: .75; font-weight: 400; }
 .hs-row { display: flex; gap: 6px; flex-wrap: wrap; }
 .hs-last {
