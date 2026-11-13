@@ -35,7 +35,11 @@
     <!-- 手机端才显示：抽屉盖住了顶栏的 ☰，没有这个按钮就"收不回去"（2026-11-09） -->
     <button type="button" class="sb-close" id="sbClose" title="收起侧栏">✕</button>
     <div class="brand">
-      <div class="logo">◉</div>
+      <!-- 2026-11-13 用户要求：去掉「智能体对话」旁的 ☰ 单钮，
+           改以 logo 本身作按钮，点一下整个侧栏展开 / 收起（带动画）。
+           桌面端收起后侧栏收成窄条、只留这个 logo，所以永远点得回来。 -->
+      <button type="button" class="logo" id="logoBtn" title="收起 / 展开左侧栏"
+              aria-label="收起或展开左侧栏" aria-expanded="true">◉</button>
       <div>
         <h1>hardwordy</h1>
         <!-- ⚠️ 这里原来写死「Qwen 智能体」。换模型（比如换成 DeepSeek / Llama）之后
