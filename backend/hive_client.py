@@ -606,9 +606,17 @@ class HiveClient:
             if probe_ok:
                 return {"ok": False, "stage": "password",
                         "error": "密码不对：对方在线，但他的群没有一个和这个密码匹配。"}
+            # 提示要能指路：跨网时最常见的是「群主还没连中继」或「中继不是同一台」
+            if relay_err:
+                tail = ("中继也查不到（%s）。请确认群主那边已经连上中继，"
+                        "并且你在「🌐 中继」里填的是同一台服务器。" % relay_err)
+            elif cfg.get("enabled") and cfg.get("url"):
+                tail = ("中继上没有这个密码对应的群 —— 让群主先打开一次群"
+                        "（连上中继后会自动登记），再重试。")
+            else:
+                tail = "如果对方不在同一 WiFi，请再填上他的地址。"
             return {"ok": False, "stage": "notfound",
-                    "error": "没找到匹配的群。先确认密码有没有输错；"
-                             "如果对方不在同一 WiFi，请再填上他的地址。"}
+                    "error": "没找到匹配的群。先确认密码有没有输错；" + tail}
 
         hit = cands[0]
         try:
