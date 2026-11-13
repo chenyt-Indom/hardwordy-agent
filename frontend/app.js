@@ -2367,9 +2367,9 @@
           syncBoostRow();
         }
         if (st.wav2lip) {
-          say(bits.join(" · ") + "。口型为神经网络重绘（真口型）。");
+          say(bits.join(" · ") + "。口型默认用声学形变（推荐），需要可切 Wav2Lip。");
         } else {
-          say(bits.join(" · ") + "。未找到 Wav2Lip 权重，口型为声学形变。", "err");
+          say(bits.join(" · ") + "。口型为声学形变。");
         }
       } catch (e) { /* 状态读不到不影响用 */ }
     }
