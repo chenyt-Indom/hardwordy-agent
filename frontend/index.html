@@ -1176,28 +1176,5 @@
 
 
 
-<script>
-/* TEMP_PROBE_AUTO 临时探针：测量 logo 点击前后坐标，验证抖动是否消除，测完立即删除 */
-(function () {
-  setTimeout(function () {
-    var logo = document.getElementById('logoBtn');
-    if (!logo) return;
-    var b = logo.getBoundingClientRect();
-    logo.click();
-    setTimeout(function () {
-      var a = logo.getBoundingClientRect();
-      var d = document.createElement('div');
-      d.style.cssText = 'position:fixed;left:0;top:0;right:0;z-index:99999;' +
-        'background:#000;color:#0f0;font:15px monospace;padding:10px;white-space:pre;line-height:1.6';
-      d.textContent =
-        'BEFORE x=' + b.x.toFixed(1) + ' y=' + b.y.toFixed(1) + ' w=' + b.width.toFixed(1) + '\n' +
-        'AFTER  x=' + a.x.toFixed(1) + ' y=' + a.y.toFixed(1) + ' w=' + a.width.toFixed(1) + '\n' +
-        'DX=' + (a.x - b.x).toFixed(1) + '  DY=' + (a.y - b.y).toFixed(1) +
-        '  DW=' + (a.width - b.width).toFixed(1);
-      document.body.appendChild(d);
-    }, 900);
-  }, 1600);
-})();
-</script>
 </body>
 </html>
