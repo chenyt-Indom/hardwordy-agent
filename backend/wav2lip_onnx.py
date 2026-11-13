@@ -320,6 +320,23 @@ def _feather_mask(h: int, w: int, top: float = 0.60, bot: float = 0.88,
 
 
 # ---------------------------------------------------------------- 推理
+def _gap96(pred96: np.ndarray, my_rel: float) -> int:
+    """测 96x96 输出里唇缝暗带的高度（像素）。"""
+    import cv2
+    g = cv2.cvtColor(pred96, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    c = int(my_rel * 96)
+    a, b = max(0, c - 12), min(96, c + 12)
+    if b - a < 4:
+        return 0
+    prof = g[a:b].mean(axis=1)
+    mn = float(prof.min())
+    best = cur = 0
+    for v in (prof < (mn + 12)):
+        cur = cur + 1 if v else 0
+        best = max(best, cur)
+    return int(best)
+
+
 def _lip_openness(pred96: np.ndarray, my_rel: float, base_gap: int) -> float:
     """估这一帧的张口量（0~1），用于幅度增强。"""
     import cv2
