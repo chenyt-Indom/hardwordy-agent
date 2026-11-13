@@ -211,8 +211,8 @@ def main(argv=None) -> int:
                 pass
         finally:
             sftp.close()
-        run(cli, "chmod 600 %s/token && chmod 644 %s/hive_relay_server.py"
-            % (REMOTE_DIR, REMOTE_DIR), quiet=True)
+        run(cli, "chmod 600 %s/token && chmod 644 %s/hive_relay_server.py %s/ws_min.py"
+            % (REMOTE_DIR, REMOTE_DIR, REMOTE_DIR), quiet=True)
 
         _log("[6/7] 安装 systemd 服务 ...")
         unit = """[Unit]
