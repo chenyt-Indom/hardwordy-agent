@@ -760,6 +760,14 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
     try:
         for i, (op, wd) in enumerate(params):
             fr = _frame(prep, op, wd)
+            if _ex_mod is not None:
+                try:
+                    # 张口度本身就是「此刻在不在说话」的代理指标
+                    _ex_mod.apply(fr, i / float(fps), _expr,
+                                  face=_face_norm,
+                                  energy=min(1.0, float(op) * 1.6))
+                except Exception:                       # noqa: BLE001
+                    pass
             proc.stdin.write(fr.tobytes())
             if on_progress and (i % 10 == 0 or i == n - 1):
                 try:
