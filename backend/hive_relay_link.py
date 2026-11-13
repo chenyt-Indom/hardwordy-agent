@@ -539,6 +539,9 @@ class RelayLink:
         self.error = ""
         self.connected_at = time.time()
         self.reconnects += 1 if self.reconnects else 0
+        # 连上就报自己的打洞地址 → 服务器转告其他成员 → 双方自动直连。
+        # 放在**独立线程**里：STUN 偶尔要等 1~2 秒，不能卡住握手返回。
+        threading.Thread(target=self._pub_signal, daemon=True).start()
         return True
 
     # -------------------------------------------------- 信令 → 打洞
