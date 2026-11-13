@@ -192,6 +192,34 @@ def lan_ip() -> str:
             return "127.0.0.1"
 
 
+def tailscale_ip() -> str:
+    """找 Tailscale 给本机分配的地址（100.64.0.0/10）。没装就返回空串。
+
+    装了 Tailscale 之后，两台异地机器等于处在同一个局域网里，
+    直接连这个 100.x 地址就能通，不需要公网 IP、不需要端口映射、不需要中继。
+    """
+    try:
+        import psutil
+        for _name, lst in psutil.net_if_addrs().items():
+            for a in lst:
+                if getattr(a.family, "name", "") != "AF_INET":
+                    continue
+                ip = a.address or ""
+                parts = ip.split(".")
+                if len(parts) != 4:
+                    continue
+                try:
+                    second = int(parts[1])
+                except Exception:  # noqa: BLE001
+                    continue
+                # 100.64.0.0/10 —— 运营商级 NAT 段，Tailscale 就用它
+                if parts[0] == "100" and 64 <= second <= 127:
+                    return ip
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 _PUB_CACHE = {"ip": "", "ts": 0.0}
 
 
