@@ -140,17 +140,20 @@ class ReliableUDPSock:
                 pass
 
     def recv(self, n: int) -> bytes:
+        """标准 socket 语义：有数据就返回（最多 n 字节），没数据才等。
+
+        ⚠️ 原来写的是「凑够 n 字节才返回」，和 socket.recv 的约定不符 ——
+        上层只要按标准写法 `sock.recv(4096)` 去读一小段数据，就会一直卡到
+        超时（实测踩过：5 字节的 hello 永远读不出来）。mesh 那边用的是
+        循环精确读，所以这个 bug 一直没暴露。
+        """
         deadline = time.time() + (self._timeout if self._timeout else 60.0)
         with self._cv:
-            while len(self._buf) < n:
-                if not self.alive and not self._buf:
+            while not self._buf:
+                if not self.alive:
                     return b""
                 left = deadline - time.time()
                 if left <= 0:
-                    if self._buf:
-                        out = bytes(self._buf)
-                        self._buf.clear()
-                        return out
                     raise socket.timeout("打洞通道读取超时")
                 self._cv.wait(min(left, 0.5))
             out = bytes(self._buf[:n])
