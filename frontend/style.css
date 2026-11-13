@@ -169,9 +169,12 @@ body {
    为什么不像原来那样收成 width:0 —— logo 现在是开关，收没了就再也点不回来。
    窄条里除 .brand 外全部淡出且不可点，避免留一块看不见却点得到的区域。 */
 @media (min-width: 769px) {
+  /* ⚠️ width / min-width 必须带 !important：
+     .sidebar 的 min-width: 300px 会把宽度死死撑在 300px，
+     实测收起后 computed 仍是 300×300（padding 却在动），就是这个原因。 */
   .sidebar.hidden {
-    width: 78px; min-width: 78px;
-    padding-left: 10px; padding-right: 10px;
+    width: 78px !important; min-width: 78px !important;
+    padding-left: 10px !important; padding-right: 10px !important;
     border-right-width: 1px; border-right-color: var(--border);
     overflow: hidden;
   }
