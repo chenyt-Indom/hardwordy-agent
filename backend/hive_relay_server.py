@@ -208,6 +208,45 @@ class Room:
             conn.push(K_SEQ, struct.pack(">Q", s) + fr)
         return len(todo)
 
+    # -------------------------------------------------- 信令（只交换地址）
+
+    def signal_set(self, conn, uid: str, name: str, paddr: str) -> list:
+        """登记/更新某人的打洞地址，返回「应该通知的其他连接」。
+
+        ⚠️ 这里**不记录 paddr 之外任何东西**，更不碰消息体。服务器在这个
+        模式下就是个「通讯录」：谁在线、他的 UDP 地址是多少。
+        """
+        with self.lock:
+            self.members[conn] = {"uid": uid, "name": name,
+                                  "paddr": paddr, "ts": time.time()}
+            others = [c for c in self.conns
+                      if c is not conn and c.alive and c in self.members]
+        return others
+
+    def signal_del(self, conn) -> list:
+        """某人断线：从名单摘掉，返回还活着的其他连接。"""
+        with self.lock:
+            self.members.pop(conn, None)
+            others = [c for c in self.conns if c is not conn and c.alive]
+        return others
+
+    def signal_peers(self, conn) -> list:
+        """给新进来的人一份「已经在线的成员地址表」。"""
+        with self.lock:
+            me = self.members.get(conn) or {}
+            out = []
+            for c, info in self.members.items():
+                if c is conn or not c.alive:
+                    continue
+                if not info.get("paddr"):
+                    continue
+                if me.get("uid") and info.get("uid") == me.get("uid"):
+                    continue   # 同一账号的另一台机器，不用直连
+                out.append({"uid": info.get("uid", ""),
+                            "name": info.get("name", ""),
+                            "paddr": info.get("paddr", "")})
+        return out
+
 
 # ---------------------------------------------------------------- 连接
 
