@@ -1174,6 +1174,12 @@
       var cs = getComputedStyle(sb);
       out.push('B 收起后宽=' + Math.round(sb.getBoundingClientRect().width) + 'px cls=' + sb.className);
       out.push('C minW=' + cs.minWidth + ' pad=' + cs.paddingLeft);
+      out.push('W=' + window.innerWidth + ' inline=' + (sb.getAttribute('style') || 'none').slice(0, 70));
+      // 一锤定音：手动写内联宽度，看浏览器认不认
+      sb.style.width = '78px';
+      sb.style.minWidth = '78px';
+      void sb.offsetHeight;
+      out.push('手动设78后=' + Math.round(sb.getBoundingClientRect().width) + 'px minW=' + getComputedStyle(sb).minWidth);
       show();
       var kb = document.querySelector('#kbPanel');
       var inner = document.querySelector('#kbPanel > .pnl-fold > .pnl-fold-in');
