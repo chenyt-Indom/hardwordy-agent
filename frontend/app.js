@@ -2344,33 +2344,7 @@
         const st = await api("/api/avatar2/status");
         const bits = [st.ffmpeg ? "ffmpeg ✓" : "ffmpeg ✗",
                       st.asr ? "字级对齐 ✓" : "仅声学驱动"];
-        if (st.wav2lip) bits.push("Wav2Lip ✓ " + (st.wav2lip_size_mb || 0) + "MB");
-        // 口型引擎下拉：按后端真实能力填充，不写死
-        const lip = $("#av2Lip");
-        if (lip) {
-          const opts = [];
-          // 文案要短：侧栏只有 300px，两个下拉 + 按钮并排，长文案会被截断
-          // 顺序按实测效果排：声学形变第一且默认（Wav2Lip 嘴位易偏、口腔糊）
-          opts.push('<option value="param">声学形变·推荐</option>');
-          if (st.wav2lip) {
-            opts.push('<option value="wav2lip">Wav2Lip·实验</option>');
-          }
-          lip.innerHTML = opts.join("");
-          // 老版本存的是 auto/wav2lip，换新选项后要回退到 param，否则会变成空选
-          const saved = localStorage.getItem("av2_lipsync") || "param";
-          lip.value = saved;
-          if (!lip.value) lip.value = "param";
-          lip.onchange = () => {
-            try { localStorage.setItem("av2_lipsync", lip.value); } catch (e) {}
-            syncBoostRow();
-          };
-          syncBoostRow();
-        }
-        if (st.wav2lip) {
-          say(bits.join(" · ") + "。口型默认用声学形变（推荐），需要可切 Wav2Lip。");
-        } else {
-          say(bits.join(" · ") + "。口型为声学形变。");
-        }
+        say(bits.join(" · ") + "。口型为声学形变。");
       } catch (e) { /* 状态读不到不影响用 */ }
     }
 
