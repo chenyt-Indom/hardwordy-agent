@@ -286,6 +286,12 @@ class HiveClient:
         return self.status()
 
     def stop(self) -> Dict[str, Any]:
+        if self._relay is not None:
+            try:
+                self._relay.stop()
+            except Exception:
+                pass
+            self._relay = None
         m = MESH.node()
         m.stop()
         self._state = "offline"
