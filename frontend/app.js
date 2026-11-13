@@ -10113,6 +10113,8 @@
       }
       const lan = d.lan_addr || (d.lan_ip ? d.lan_ip + ":" + d.port : "");
       const wan = d.wan_addr || (d.public_ip ? d.public_ip + ":" + d.port : "");
+      // 要发出去的那一行：有公网地址就发公网的，没有就发本机的
+      const copyAddr = wan || lan;
       const L = [];
       L.push("【同一 WiFi】对方只输密码就行，不用填地址");
       if (lan) L.push("    本机地址   " + lan);
@@ -10124,6 +10126,11 @@
       } else {
         L.push("【不同网络】没探到公网地址（可能被防火墙挡了）");
         L.push("    需要在路由器上做端口映射，或改用 Tailscale 这类组网工具");
+      }
+      if (copyAddr) {
+        L.push("");
+        L.push("（点「复制" + (wan ? "公网" : "本机") + "地址」只会复制那一行地址本身，"
+          + "不带上面这些说明）");
       }
       openModal({
         title: "📡 我的地址",
