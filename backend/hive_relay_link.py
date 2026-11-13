@@ -112,21 +112,38 @@ def _split_frame(frame: bytes):
 
 
 def parse_url(url: str) -> Dict[str, Any]:
-    """把用户填的地址解析成 host/port。
+    """把用户填的地址解析成 host/port/scheme。
 
-    支持：hive4://1.2.3.4:8765 / ws://1.2.3.4:8765 / tcp://... / 1.2.3.4:8765
-    本项目用的是自定义二进制协议（不是 WebSocket），写 ws:// 只是习惯 ——
-    会被当成普通 TCP 连接。这点在手册里也写了。
+    支持：
+      hive4://1.2.3.4:18765      裸 TCP（默认端口 8765，最快）
+      tcp://1.2.3.4:18765        同上
+      1.2.3.4:18765              同上
+      ws://1.2.3.4/hive-relay    WebSocket（默认端口 80，走 nginx 反代）
+      wss://example.com/hive     WebSocket over TLS（默认端口 443）
+
+    ⚠️ 早期版本把 ws:// 当普通 TCP（只是剥掉前缀），因为当时中继只监听裸端口。
+    现在真的做 WebSocket 握手了 —— 要挂到 nginx 后面绕开安全组，这是唯一的路。
     """
     u = (url or "").strip()
     if not u:
         return {"ok": False, "error": "地址是空的"}
+    scheme = "hive4"
     for p in ("hive4://", "hive3://", "hive://", "ws://", "wss://", "tcp://"):
         if u.lower().startswith(p):
+            scheme = p[:-3].lower()
             u = u[len(p):]
             break
-    u = u.split("/")[0]
-    host, port = u, 8765
+    path = ""
+    if "/" in u:
+        u, _, tail = u.partition("/")
+        path = "/" + tail
+    if scheme == "ws":
+        port = 80
+    elif scheme == "wss":
+        port = 443
+    else:
+        port = 8765
+    host = u
     if ":" in u:
         h, _, ps = u.rpartition(":")
         host = h
@@ -138,7 +155,9 @@ def parse_url(url: str) -> Dict[str, Any]:
         return {"ok": False, "error": "没有主机名"}
     if not (0 < port < 65536):
         return {"ok": False, "error": "端口超出范围"}
-    return {"ok": True, "host": host, "port": port}
+    return {"ok": True, "host": host, "port": port, "scheme": scheme,
+            "ws": scheme in ("ws", "wss"), "tls": scheme == "wss",
+            "path": path or "/hive-relay"}
 
 
 def probe(url: str, token: str = "", timeout: float = 4.0) -> Dict[str, Any]:
