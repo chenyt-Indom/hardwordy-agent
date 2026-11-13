@@ -9314,6 +9314,8 @@
         ta.readOnly = !!opt.readonly;
         ta.style.height = opt.readonly ? "260px" : "";
         ta.style.overflow = opt.readonly ? "auto" : "";
+        // inputMode="password"：边打边整形（大写 + 只留合法字符 + 每 4 位补横杠）
+        ta.dataset.mode = opt.inputMode || "";
       } else {
         ta.hidden = true;
         ta.readOnly = false;
