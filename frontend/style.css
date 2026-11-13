@@ -134,8 +134,15 @@ body {
 
 /* ---------- 侧边栏 ---------- */
 .sidebar {
-  width: 300px; min-width: 300px; background: var(--panel);
-  border-right: 1px solid var(--border); padding: 18px;
+  width: 300px; min-width: 300px; background: transparent;
+  /* 2026-11-13 用户要求「左侧那条灰色框好别扭，页面一体化一些」：
+     原来是 background: var(--panel) + border-right 1px 实色描边，
+     深色下 #171a21 比主区 #0f1115 略亮、再加一条 #2a3040 竖线，
+     看起来像嵌了一个灰框。现在底色透明（直接透出页面 --bg）+ 描边转透明，
+     侧栏和主区连成一片；层次改由里面的 .panel 卡片自己表现。
+     ⚠️ 描边保留 1px 宽度只是占位，别改成 0 —— 上面的 transition 在过渡
+     border-right-width，宽度突变会让收起动画跳一下。 */
+  border-right: 1px solid transparent; padding: 18px;
   display: flex; flex-direction: column; gap: 16px; overflow-y: auto;
   /* 2026-11-12 用户要求：点 ☰ 展开/收起侧栏要有动画。
      原来只有 transition: width .2s —— 太快，几乎看不出；而 padding / border
