@@ -541,6 +541,28 @@ class RelayServer:
                     conn.ctrl({"op": "pong", "t": time.time()})
                 elif c.get("op") == "health":
                     conn.ctrl(self.health())
+                elif c.get("op") == "signal_pub":
+                    # 客户端报告自己的打洞地址 → 记下来，并立刻转告其他成员。
+                    # 这一步之后双方就能自己 UDP 直连，消息不再经过这里。
+                    uid = str(c.get("uid") or "")[:64]
+                    name = str(c.get("name") or "")[:64]
+                    paddr = str(c.get("paddr") or "")[:64]
+                    if not paddr or ":" not in paddr:
+                        conn.ctrl({"op": "err", "msg": "打洞地址不合法"})
+                    else:
+                        others = room.signal_set(conn, uid, name, paddr)
+                        conn.ctrl({"op": "signal_list",
+                                   "peers": room.signal_peers(conn)})
+                        for o in others:
+                            try:
+                                o.ctrl({"op": "signal_peer", "uid": uid,
+                                        "name": name, "paddr": paddr})
+                            except Exception:
+                                pass
+                        self.stats["signals"] = self.stats.get("signals", 0) + 1
+                elif c.get("op") == "signal_get":
+                    conn.ctrl({"op": "signal_list",
+                               "peers": room.signal_peers(conn)})
                 continue
             if kind != K_FRAME:
                 continue
