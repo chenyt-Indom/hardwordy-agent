@@ -415,6 +415,19 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     face0 = img[y1:y2, x1:x2]
     face96 = cv2.resize(face0, (96, 96), interpolation=cv2.INTER_LINEAR)
     masked = face96.copy()
+    # 嘴在**裁剪框内**的相对位置。boost 遮罩、融合带、张口测量必须共用这一套
+    # 坐标。2026-11-14 修：这里原来写 int(avatar2.mouth()["y"] * 96)，用的是
+    # 整图归一化 y，和融合带的裁剪框坐标差 6px/96（0.583 vs 0.648）。结果模型
+    # 把嘴生成在偏上位置、融合带却贴在偏下，用户看到「嘴位严重往下偏、下巴有
+    # 模糊带」。
+    try:
+        _m0 = avatar2.mouth()
+        my_rel = (float(_m0["y"]) * H - y1) / float(max(1, y2 - y1))
+    except Exception:  # noqa: BLE001
+        my_rel = 0.66
+    my_rel = float(min(0.95, max(0.05, my_rel)))
+    _mr = int(round(my_rel * 96))
+
     # 遮罩范围决定张口幅度（实测同一张图同一段音频）：
     #   整下半脸 → 唇缝 2~4px，最自然，但嘴几乎不动
     #   只遮嘴部上下 18~20px → 唇缝 2~7px，张开明显，伪影可接受
@@ -427,10 +440,6 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     if _b <= 1.05:
         masked[96 // 2:, :] = 0
     else:
-        try:
-            _mr = int(float(avatar2.mouth()["y"]) * 96)
-        except Exception:  # noqa: BLE001
-            _mr = 64
         _k = min(1.0, (_b - 1.0) / 0.8)          # 1.0→0, 1.8→1
         _up = int(round(14 + 10 * _k))           # 14 → 24
         _dn = int(round(16 + 12 * _k))           # 16 → 28
