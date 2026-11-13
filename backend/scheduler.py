@@ -609,3 +609,158 @@ def status() -> dict:
             "count": len(jobs),
             "enabled": len([j for j in jobs if j.get("enabled")]),
             "thread_alive": bool(_THREAD and _THREAD.is_alive())}
+
+
+# ---------------------------------------------------------------- 检索
+# 2026-11-13 用户要求：「定时任务内容也要支持检索，最好向量化提高召回率」。
+# 直接复用知识库那套后端（backend/embed.py），不另建一套索引：
+#   · 任务数量本来就少（几个到几十个），一次 embed 全部文本足够快；
+#   · 按「文本 md5」缓存向量，内容没变就不重算；
+#   · 向量后端不可用（没装 embedding 模型）时自动退回纯关键词，
+#     不会因为"没配模型"就让检索直接不可用。
+_VEC_LOCK = threading.Lock()
+_VEC_CACHE = {"sig": "", "items": {}}
+
+
+def _vec_path() -> str:
+    return config.data("data", "schedule_vecs.json")
+
+
+def _load_vec_cache() -> dict:
+    global _VEC_CACHE
+    if _VEC_CACHE.get("items"):
+        return _VEC_CACHE
+    try:
+        with open(_vec_path(), "r", encoding="utf-8") as f:
+            d = json.load(f) or {}
+        if isinstance(d, dict):
+            _VEC_CACHE = {"sig": str(d.get("sig") or ""),
+                          "items": dict(d.get("items") or {})}
+    except Exception:
+        pass
+    return _VEC_CACHE
+
+
+def _save_vec_cache() -> None:
+    try:
+        p = _vec_path()
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_VEC_CACHE, f)
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
+def _job_search_text(job: dict) -> str:
+    """一条任务参与检索的文本：名称 + 任务内容 + 上次结果摘要。"""
+    parts = [str(job.get("name") or ""), str(job.get("prompt") or "")]
+    prev = str(job.get("last_preview") or "")
+    if prev:
+        parts.append(prev)
+    return "\n".join(p for p in parts if p)
+
+
+def _bigrams(s: str) -> set:
+    """字符二元组。中文没有空格分词，用 bigram 当关键词信号最稳。"""
+    s = "".join(ch for ch in str(s or "").lower() if not ch.isspace())
+    if len(s) < 2:
+        return {s} if s else set()
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def search_jobs(query: str, top_k: int = 50) -> dict:
+    """在定时任务里做混合检索，返回 {ok, items, backend}。
+
+    backend 会告诉前端这次到底是"向量+关键词"还是"仅关键词"，
+    这样界面上能如实标注，而不是假装一直在用向量。
+    """
+    query = (query or "").strip()
+    jobs = load_jobs()
+    if not jobs:
+        return {"ok": True, "items": [], "backend": "none"}
+    if not query:
+        items = []
+        for j in jobs:
+            d = dict(j)
+            d.update({"score": 1.0, "vec_score": 0.0, "kw_score": 0.0})
+            items.append(d)
+        return {"ok": True, "items": items, "backend": "all"}
+
+    texts = [_job_search_text(j) for j in jobs]
+    n = len(texts)
+
+    # ① 关键词：查询的字符 bigram 有多大比例出现在任务文本里
+    q_grams = _bigrams(query)
+    kw = [0.0] * n
+    if q_grams:
+        for i, t in enumerate(texts):
+            g = _bigrams(t)
+            if g:
+                kw[i] = len(q_grams & g) / float(len(q_grams))
+
+    # ② 语义向量（带缓存）
+    vec = None
+    backend = "keyword"
+    try:
+        import numpy as np
+        from . import embed as _embed
+        try:
+            sig = str(_embed.signature() or "")
+        except Exception:
+            sig = ""
+        with _VEC_LOCK:
+            cache = _load_vec_cache()
+            if cache.get("sig") != sig:
+                _VEC_CACHE.clear()
+                _VEC_CACHE.update({"sig": sig, "items": {}})
+            items = _VEC_CACHE.get("items") or {}
+            need, keys = [], []
+            for j, t in zip(jobs, texts):
+                k = str(j.get("id") or "")
+                h = hashlib.md5(t.encode("utf-8")).hexdigest()
+                old = items.get(k) or {}
+                if old.get("h") != h or not old.get("v"):
+                    need.append(t)
+                    keys.append((k, h))
+            if need:
+                got = _embed.embed_texts(need, is_query=False)
+                if got is not None and len(got) == len(need):
+                    for (k, h), v in zip(keys, got):
+                        items[k] = {"h": h, "v": [float(x) for x in v]}
+                    _save_vec_cache()
+            qv = _embed.embed_texts([query], is_query=True)
+            if qv is not None and len(qv) == 1:
+                qvec = np.asarray(qv[0], dtype=np.float32)
+                qn = float(np.linalg.norm(qvec)) or 1.0
+                qvec = qvec / qn
+                sims = []
+                for j in jobs:
+                    it = items.get(str(j.get("id") or "")) or {}
+                    v = it.get("v")
+                    if not v:
+                        sims.append(0.0)
+                        continue
+                    arr = np.asarray(v, dtype=np.float32)
+                    an = float(np.linalg.norm(arr)) or 1.0
+                    sims.append(float(arr @ qvec / an))
+                vec = sims
+                backend = "vector+keyword"
+    except Exception:
+        vec = None
+        backend = "keyword"
+
+    out = []
+    for i, j in enumerate(jobs):
+        v = float(vec[i]) if vec else 0.0
+        score = (0.65 * v + 0.35 * kw[i]) if vec else kw[i]
+        d = dict(j)
+        d["score"] = round(float(score), 4)
+        d["vec_score"] = round(v, 4)
+        d["kw_score"] = round(float(kw[i]), 4)
+        out.append(d)
+    out.sort(key=lambda x: -x["score"])
+    hit = [d for d in out if d["score"] > 0.02 or d["kw_score"] > 0]
+    return {"ok": True, "items": (hit or out)[:max(1, int(top_k))],
+            "backend": backend}
