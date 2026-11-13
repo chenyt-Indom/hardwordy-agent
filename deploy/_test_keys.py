@@ -91,7 +91,13 @@ try:
     print("[8] overview ->", json.dumps(ov, ensure_ascii=False)[:400])
     hint = (ov.get("relay_token") or {}).get("hint") or ""
     chk("中继密钥有打码提示", bool(hint) and ("*" in hint), hint)
-    chk("overview 不含私钥全文", valid[:30] not in json.dumps(ov, ensure_ascii=False))
+    # preview 只应含 PEM 头那一行；真正的密钥正文（第 2 行）绝不能出现在 overview 里
+    body_line = [ln for ln in valid.strip().splitlines() if ln.strip()][1][:24]
+    ovs = json.dumps(ov, ensure_ascii=False)
+    chk("overview 不含私钥正文", body_line not in ovs, "查:" + body_line[:12] + "...")
+    chk("overview 的 preview 只有 PEM 头",
+        (ov.get("ssh_key") or {}).get("preview", "").startswith("-----BEGIN"),
+        (ov.get("ssh_key") or {}).get("preview", ""))
     chk("三项齐全 ready", ov.get("ready") is True, "missing=" + str(ov.get("missing")))
 
     # 9. 服务器信息
