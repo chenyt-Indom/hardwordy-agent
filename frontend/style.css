@@ -2620,7 +2620,10 @@ html[data-theme="light"] body {
    它写在第 136 行之后、优先级又相同，会把侧栏那条 transparent 覆盖回去 ——
    等于灰框的「底色」那一半还在。现在侧栏跟着页面底色走，和主区共用同一层，
    层次只由里面的 .panel 卡片（--panel2 + 描边）表现。 */
-.chat-header, .composer {
+/* 2026-11-13：.composer 也从这条里摘出去了（跟侧栏同样的坑）。
+   它写在第 136 行之后、优先级相同，会把上面那条 transparent 覆盖回实色底，
+   等于"断开"的那块底色还在。 */
+.chat-header {
   background: var(--panel);
 }
 .panel, .status-card {
