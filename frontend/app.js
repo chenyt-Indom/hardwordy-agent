@@ -9245,6 +9245,12 @@
           c.details.querySelector(".arrow").textContent = "▾";
         }
         c.think.innerHTML += hEsc(f.delta || "").replace(/\n/g, "<br>");
+      } else if (ph === "tool") {
+        // ★ 2026-11-13：群聊 @hd 自开发时，模型在**真改代码** ——
+        //   必须把「正在动哪个工具」显示出来，否则界面上只有思考在滚，
+        //   看不出它到底有没有在干活（用户会以为又只是嘴上说说）。
+        c.phase.textContent = "正在执行工具（第 " + (t.round || 1) + " 轮）："
+          + ((t.tools || []).join("、") || "");
       } else if (ph === "content") {
         c.phase.textContent = "正在输出… " + (t.chars || 0) + " 字";
         // 流式阶段用**轻量渲染**（转义 + 换行），不走 renderFinal：
