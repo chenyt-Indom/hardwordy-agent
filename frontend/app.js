@@ -6661,34 +6661,116 @@
       };
     }
 
+    // ---------- 侧栏（⏰ 自动化）与弹窗共用同一套渲染 ----------
+    // 2026-11-13 用户要求：「定时任务移动到左侧工具栏」「以卡片的形式展示，
+    // 卡片不要太小也不要太大」。所以同一份数据渲染两处：
+    //   侧栏 = 紧凑卡片（看结果 / 运行），弹窗 = 完整卡片（含暂停 / 删除）。
+    const sideList = document.querySelector("#autoList");
+    const sideNote = document.querySelector("#autoBackend");
+    const searchIn = document.querySelector("#autoSearch");
+    const searchClear = document.querySelector("#autoSearchClear");
+    let lastJobs = [];
+    let searching = false;
+
+    function itemHtml(j, compact, runningId) {
+      const st = (runningId && j.id === runningId) ? "⏳" : (j.enabled ? "🟢" : "⏸️");
+      const last = j.last_run
+        ? ("上次 " + String(j.last_run).slice(5, 16) + " " + (j.last_status || ""))
+        : "还没跑过";
+      const prev = j.last_preview
+        ? '<div class="sched-prev">' +
+          String(j.last_preview).replace(/</g, "&lt;").slice(0, compact ? 56 : 80) + '…</div>'
+        : "";
+      // 相关度只在检索结果里显示；普通列表里显示会满屏百分比，反而干扰
+      const sc = (searching && j.score != null && j.score < 1)
+        ? '<span class="sched-score" title="检索相关度">' + Math.round(j.score * 100) + '%</span>'
+        : "";
+      const acts = compact
+        ? '<button data-act="result">看结果</button>' +
+          '<button data-act="run">运行</button>'
+        : '<button data-act="result">看结果</button>' +
+          '<button data-act="run">立即运行</button>' +
+          '<button data-act="toggle">' + (j.enabled ? "暂停" : "启用") + '</button>' +
+          '<button data-act="del">删除</button>';
+      return '<div class="sched-item' + (compact ? " compact" : "") +
+        '" data-id="' + j.id + '">' +
+        '<div class="sched-hd">' + st + ' <b>' + (j.name || "") + '</b>' + sc + '</div>' +
+        '<div class="sched-meta">' + (j.period || "") + ' · 下次 ' + (j.next_human || "-") +
+        ' · ' + last + '</div>' +
+        (j.channel_hint ? '<div class="sched-meta">上次用：' + j.channel_hint + '</div>' : '') +
+        prev +
+        '<div class="sched-acts">' + acts + '</div></div>';
+    }
+
+    const EMPTY_HTML = '<div class="hint" style="padding:6px 10px">还没有定时任务。' +
+      '点下面的「＋ 新建任务」，或者直接在对话里说「每天早上九点帮我总结XX」。</div>';
+
+    function paint(jobs, runningId) {
+      if (badge) badge.textContent = String(jobs.length);
+      const h = jobs.length ? null : EMPTY_HTML;
+      if (list) list.innerHTML = h || jobs.map((j) => itemHtml(j, false, runningId)).join("");
+      if (sideList) sideList.innerHTML = h || jobs.map((j) => itemHtml(j, true, runningId)).join("");
+    }
+
     async function load() {
       try {
         const d = await (await fetch("/api/schedule")).json();
         const jobs = d.jobs || [];
-        if (badge) badge.textContent = String(jobs.length);
-        if (!jobs.length) {
-          list.innerHTML = '<div class="hint" style="padding:6px 10px">还没有定时任务。展开下面的「＋ 新建」加一个，或者在对话里直接说「每天早上九点帮我总结XX」。</div>';
-          return;
-        }
-        list.innerHTML = jobs.map((j) => {
-          const st = j.running ? "⏳" : (j.enabled ? "🟢" : "⏸️");
-          const last = j.last_run
-            ? ("上次 " + j.last_run.slice(5, 16) + " " + (j.last_status || ""))
-            : "还没跑过";
-          return '<div class="sched-item" data-id="' + j.id + '">' +
-            '<div class="sched-hd">' + st + ' <b>' + (j.name || "") + '</b></div>' +
-            '<div class="sched-meta">' + (j.period || "") + ' · 下次 ' + (j.next_human || "-") +
-            ' · ' + last + '</div>' +
-            (j.channel_hint ? '<div class="sched-meta">上次用：' + j.channel_hint + '</div>' : '') +
-            (j.last_preview ? '<div class="sched-prev">' + String(j.last_preview).replace(/</g, "&lt;").slice(0, 80) + '…</div>' : "") +
-            '<div class="sched-acts">' +
-            '<button data-act="result">看结果</button>' +
-            '<button data-act="run">立即运行</button>' +
-            '<button data-act="toggle">' + (j.enabled ? "暂停" : "启用") + '</button>' +
-            '<button data-act="del">删除</button>' +
-            '</div></div>';
-        }).join("");
+        lastJobs = jobs;
+        const runningId = (d.status || {}).running || "";
+        // 检索状态下不要覆盖结果 —— 否则每 15 秒一次的轮询会把检索结果冲掉
+        if (!searching) paint(jobs, runningId);
+        else if (badge) badge.textContent = String(jobs.length);
       } catch (e) { /* ignore */ }
+    }
+
+    // ---------- 检索（用户要求：「定时任务内容也要支持检索，最好向量化提高召回率」）----------
+    // 后端 /api/schedule/search 用 embed.py 的语义向量 + 字符 bigram 覆盖率混合打分，
+    // 返回的 backend 字段如实说明这次走的是"向量+关键词"还是"仅关键词"，
+    // 界面照实标注，不假装一直在用向量。
+    let searchTimer = 0;
+    function setNote(t) {
+      if (!sideNote) return;
+      sideNote.hidden = !t;
+      sideNote.textContent = t || "";
+    }
+    async function doSearch() {
+      if (!searchIn) return;
+      const q = (searchIn.value || "").trim();
+      if (searchClear) searchClear.hidden = !q;
+      if (!q) {
+        searching = false;
+        setNote("");
+        paint(lastJobs);
+        return;
+      }
+      searching = true;
+      setNote("检索中…");
+      try {
+        const d = await (await fetch("/api/schedule/search?q=" +
+          encodeURIComponent(q))).json();
+        if (!d.ok) { setNote("检索失败：" + (d.error || "")); return; }
+        const items = d.items || [];
+        const bk = d.backend === "vector+keyword" ? "语义向量 + 关键词"
+                 : d.backend === "keyword" ? "仅关键词（向量后端不可用）"
+                 : "全部";
+        setNote("命中 " + items.length + " 条 · " + bk);
+        paint(items);
+      } catch (e) {
+        setNote("检索失败：" + e.message);
+      }
+    }
+    if (searchIn) {
+      searchIn.addEventListener("input", () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(doSearch, 320);   // 打字防抖，别每敲一个字打一次后端
+      });
+      searchIn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { clearTimeout(searchTimer); doSearch(); }
+      });
+    }
+    if (searchClear) {
+      searchClear.onclick = () => { searchIn.value = ""; doSearch(); };
     }
 
     list.onclick = async (ev) => {
