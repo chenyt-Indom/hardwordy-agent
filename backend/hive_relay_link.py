@@ -223,6 +223,95 @@ def probe(url: str, token: str = "", timeout: float = 4.0) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------- 虚拟 peer
+def password_fp(password: str) -> str:
+    """密码指纹：HMAC(规范化密码, "hive-dir-v1")。
+
+    用作群目录的键。为什么不用 gid 或 vt：入群的人**还不知道 gid**，
+    而 vt 是拿 gid 派生的，所以只能拿「密码本身」派生一个指纹来查。
+    单向 HMAC，服务器拿到 fp 也推不出密码（12 位密码 ≈ 1.2e18 种）。
+    """
+    pw = (password or "").strip().replace("-", "").replace(" ", "").upper()
+    return hmac.new(pw.encode("utf-8"), b"hive-dir-v1",
+                    hashlib.sha256).hexdigest()[:32]
+
+
+def _open_sock(p, timeout: float = 5.0):
+    """按 parse_url 的结果建连（含 WS 升级）。返回 socket 或抛异常。"""
+    s = socket.create_connection((p["host"], p["port"]), timeout=timeout)
+    s.settimeout(timeout)
+    if p.get("ws"):
+        if p.get("tls"):
+            import ssl
+            s = ssl.create_default_context().wrap_socket(
+                s, server_hostname=p["host"])
+            s.settimeout(timeout)
+        rest = ws_min.handshake_client(
+            s, "%s:%s" % (p["host"], p["port"]),
+            p.get("path") or "/hive-relay")
+        if rest is None:
+            try:
+                s.close()
+            except Exception:
+                pass
+            raise RuntimeError("WebSocket 握手失败")
+        s = ws_min.WSSock(s, rest=rest, mask_out=True)
+    return s
+
+
+def _dir_call(url: str, token: str, op: str, extra: Dict[str, Any],
+              timeout: float = 5.0) -> Dict[str, Any]:
+    """连一次中继、发一个目录请求、拿结果就走（不保持长连接）。"""
+    p = parse_url(url)
+    if not p.get("ok"):
+        return p
+    s = None
+    try:
+        s = _open_sock(p, timeout)
+        got = _recv_pkt(s)
+        if not got:
+            return {"ok": False, "error": "中继没有响应"}
+        nonce = ""
+        try:
+            nonce = str(json.loads(got[1].decode("utf-8")).get("nonce") or "")
+        except Exception:
+            pass
+        mac = hmac.new(token.encode("utf-8"),
+                       (nonce + "|dir").encode("utf-8"),
+                       hashlib.sha256).hexdigest()
+        body = dict(extra)
+        body.update({"op": op, "mac": mac})
+        if not _send_pkt(s, K_CTRL, json.dumps(body).encode("utf-8")):
+            return {"ok": False, "error": "发送失败"}
+        got = _recv_pkt(s)
+        if not got:
+            return {"ok": False, "error": "中继没回包"}
+        r = json.loads(got[1].decode("utf-8"))
+        if r.get("op") == "err":
+            return {"ok": False, "error": r.get("msg") or "中继拒绝了请求"}
+        return {"ok": True, "raw": r}
+    except Exception as e:
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+
+def dir_publish(url: str, token: str, password: str, gid: str,
+                vt: str, name: str = "") -> Dict[str, Any]:
+    """把群登记到中继目录（群主建群/连上中继时自动调用）。"""
+    return _dir_call(url, token, "dir_publish",
+                     {"fp": password_fp(password), "gid": gid,
+                      "vt": vt or "", "name": name or ""})
+
+
+def dir_lookup(url: str, token: str, password: str) -> Dict[str, Any]:
+    """按密码指纹在中继目录里找群。"""
+    return _dir_call(url, token, "dir_lookup", {"fp": password_fp(password)})
+
+
 
 class RelayPeer(MESH.Peer):
     """长得像 Peer，但 send() 走中继。
