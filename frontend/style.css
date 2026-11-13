@@ -208,12 +208,16 @@ body {
   transition: transform .18s cubic-bezier(.4,0,.2,1),
               box-shadow .22s ease, filter .18s ease;
 }
+/* 2026-11-13 修「按下 logo 时抖动」第二处根因：
+   hover 是 translateY(-1px)，active 又回到 translateY(0) —— 按下瞬间整块上移 1px 再落回，
+   加上侧栏同时折叠，观感就是"抖一下 + 瞬间偏移"。
+   现在只用 scale 表达按压，不再有任何位移，按下/松开都只在原地缩放。 */
 .logo:hover {
-  transform: translateY(-1px) scale(1.04);
+  transform: scale(1.05);
   box-shadow: 0 6px 18px rgba(79,139,249,.38);
   filter: brightness(1.08);
 }
-.logo:active { transform: translateY(0) scale(.97); }
+.logo:active { transform: scale(.96); }
 .logo:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .brand h1 { font-size: 18px; }
 .brand .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
