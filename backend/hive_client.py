@@ -236,14 +236,32 @@ class HiveClient:
         self._started_at = self._started_at or time.time()
 
         u = self._url
-        if u.startswith(("ws://", "wss://")):
-            # 老群信息里存着中继地址。中继已经删了，这里**自动忽略并走局域网**，
-            # 不报错 —— 否则用户升级后打开旧群会看到「连不上」，以为功能坏了。
-            # 用户什么都不用做，同一 WiFi 下会自动发现彼此。
-            self._url = ""
-            self._state = "online"
-            self._last_ok = time.time()
-            return self.status()
+        cfg = relay_config()
+        # 没填地址时，用全局中继配置（「以后建群连接直接用密钥」就是靠这里）
+        if not u and cfg.get("enabled") and cfg.get("url"):
+            u = cfg["url"]
+            self._url = u
+
+        # 中继：hive4:// / ws:// / wss:// / tcp:// / 裸 host:port
+        # （本项目用的是自定义二进制协议，写 ws:// 只是习惯，不是真的 WebSocket）
+        if u and not u.startswith(("hive3://", "hive2://", "hive://")):
+            try:
+                lk = RELAY.link(RELAY_STATE)
+                st = lk.start(u, gid, cfg.get("token") or "")
+                self._relay = lk
+                if st.get("online"):
+                    self._state = "online"
+                    self._error = ""
+                    self._last_ok = time.time()
+                    self._latency = float(st.get("rtt_ms") or 0)
+                else:
+                    self._state = "error"
+                    self._error = st.get("error") or "中继连不上"
+                return self.status()
+            except Exception as e:
+                self._state = "error"
+                self._error = "%s: %s" % (type(e).__name__, e)
+                return self.status()
 
         if u.startswith(("hive3://", "hive2://", "hive://")):
             p = m.parse_code(u)
