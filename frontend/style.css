@@ -4662,14 +4662,17 @@ html[data-theme="light"] select.pill-select option {
    ========================================================================== */
 .sidebar .panel,
 .sidebar .status-card {
-  background: transparent;
+  /* 完全不透明会被看成"柱子"，完全透明又散 —— 取中间：2.8% 白。
+     在 --bg(15,17,21) 上算出来约 (22,24,27)，只比背景亮 6~7；
+     原来 --panel2 是 (31,36,48)，亮了 16，那才是柱子的观感来源。 */
+  background: rgba(255, 255, 255, .028);
   border-color: transparent;
   box-shadow: none;
 }
 /* 收起状态（78px 窄条）不需要 hover 高亮 —— 那时内容都淡出了 */
 .sidebar .panel:hover,
 .sidebar .status-card:hover {
-  background: rgba(255, 255, 255, .035);
+  background: rgba(255, 255, 255, .06);
 }
 .sidebar.hidden .panel:hover,
 .sidebar.hidden .status-card:hover {
