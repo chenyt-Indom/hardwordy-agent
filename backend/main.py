@@ -11756,105 +11756,105 @@ def hive_relay_test(body: dict):
     return hive_relay_link.probe(url, cfg.get("token") or "")
 
 
-    # ---------------------------------------------------------------- 部署凭据（2026-11-14）
-    # 两样密钥都在本机：SSH 私钥（data/deploy/id_rsa）+ 中继密钥（data/hive/relay.json）。
-    # 私钥默认只回掩码/指纹，前端点「眼睛」才用 reveal=1 取全文。
+# ---------------------------------------------------------------- 部署凭据（2026-11-14）
+# 两样密钥都在本机：SSH 私钥（data/deploy/id_rsa）+ 中继密钥（data/hive/relay.json）。
+# 私钥默认只回掩码/指纹，前端点「眼睛」才用 reveal=1 取全文。
 
 
-    @app.get("/api/deploy/overview")
-    def deploy_overview():
-        """服务器信息 + 两种密钥状态 + 部署任务状态（不含密钥内容）。"""
-        return {"ok": True, **deploy_keys.overview()}
+@app.get("/api/deploy/overview")
+def deploy_overview():
+    """服务器信息 + 两种密钥状态 + 部署任务状态（不含密钥内容）。"""
+    return {"ok": True, **deploy_keys.overview()}
 
 
-    @app.post("/api/deploy/server")
-    def deploy_server_set(body: dict):
-        """保存服务器连接信息。地址里带 user@host:port 也能自动拆开。"""
-        b = body or {}
-        try:
-            cfg = deploy_keys.save_server_config(
-                str(b.get("host") or ""),
-                b.get("port") or 22,
-                str(b.get("user") or "root"),
-                b.get("relay_port") or deploy_keys.DEFAULT_RELAY_PORT,
-            )
-        except ValueError as e:
-            return {"ok": False, "error": str(e)}
-        return {"ok": True, "server": cfg}
+@app.post("/api/deploy/server")
+def deploy_server_set(body: dict):
+    """保存服务器连接信息。地址里带 user@host:port 也能自动拆开。"""
+    b = body or {}
+    try:
+        cfg = deploy_keys.save_server_config(
+            str(b.get("host") or ""),
+            b.get("port") or 22,
+            str(b.get("user") or "root"),
+            b.get("relay_port") or deploy_keys.DEFAULT_RELAY_PORT,
+        )
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "server": cfg}
 
 
-    @app.post("/api/deploy/server/clear")
-    def deploy_server_clear():
-        return {"ok": True, "server": deploy_keys.clear_server_config()}
+@app.post("/api/deploy/server/clear")
+def deploy_server_clear():
+    return {"ok": True, "server": deploy_keys.clear_server_config()}
 
 
-    @app.post("/api/deploy/key")
-    def deploy_key_set(body: dict):
-        """保存密钥。which=ssh（SSH 私钥）或 relay（中继密钥）。
+@app.post("/api/deploy/key")
+def deploy_key_set(body: dict):
+    """保存密钥。which=ssh（SSH 私钥）或 relay（中继密钥）。
 
-        两种都支持「拖文件」和「直接粘贴」—— 前端把文件读成文本再发过来，
-        所以这里只认文本，不用管来源。
-        """
-        b = body or {}
-        which = str(b.get("which") or "").strip().lower()
-        text = str(b.get("text") or "")
-        try:
-            if which == "ssh":
-                st = deploy_keys.save_ssh_key(text)
-                return {"ok": True, "which": "ssh", "status": st}
-            if which == "relay":
-                st = deploy_keys.save_relay_token(text)
-                return {"ok": True, "which": "relay", "status": st}
-        except ValueError as e:
-            return {"ok": False, "error": str(e)}
-        return {"ok": False, "error": "which 只能是 ssh 或 relay"}
-
-
-    @app.get("/api/deploy/key")
-    def deploy_key_get(which: str = "ssh", reveal: int = 0):
-        """取密钥。默认返回掩码；reveal=1 才返回全文（前端点眼睛才用）。"""
-        which = (which or "ssh").strip().lower()
+    两种都支持「拖文件」和「直接粘贴」—— 前端把文件读成文本再发过来，
+    所以这里只认文本，不用管来源。
+    """
+    b = body or {}
+    which = str(b.get("which") or "").strip().lower()
+    text = str(b.get("text") or "")
+    try:
         if which == "ssh":
-            st = deploy_keys.ssh_key_status()
-            out = {"ok": True, "which": "ssh", "status": st}
-            if reveal:
-                out["text"] = deploy_keys.reveal_ssh_key()
-            return out
+            st = deploy_keys.save_ssh_key(text)
+            return {"ok": True, "which": "ssh", "status": st}
         if which == "relay":
-            st = deploy_keys.relay_token_status()
-            out = {"ok": True, "which": "relay", "status": st}
-            if reveal:
-                out["text"] = deploy_keys.reveal_relay_token()
-            return out
-        return {"ok": False, "error": "which 只能是 ssh 或 relay"}
+            st = deploy_keys.save_relay_token(text)
+            return {"ok": True, "which": "relay", "status": st}
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": False, "error": "which 只能是 ssh 或 relay"}
 
 
-    @app.post("/api/deploy/key/clear")
-    def deploy_key_clear(body: dict):
-        b = body or {}
-        which = str(b.get("which") or "").strip().lower()
-        if which == "ssh":
-            return {"ok": True, "which": "ssh", "status": deploy_keys.clear_ssh_key()}
-        if which == "relay":
-            return {"ok": True, "which": "relay", "status": deploy_keys.clear_relay_token()}
-        return {"ok": False, "error": "which 只能是 ssh 或 relay"}
+@app.get("/api/deploy/key")
+def deploy_key_get(which: str = "ssh", reveal: int = 0):
+    """取密钥。默认返回掩码；reveal=1 才返回全文（前端点眼睛才用）。"""
+    which = (which or "ssh").strip().lower()
+    if which == "ssh":
+        st = deploy_keys.ssh_key_status()
+        out = {"ok": True, "which": "ssh", "status": st}
+        if reveal:
+            out["text"] = deploy_keys.reveal_ssh_key()
+        return out
+    if which == "relay":
+        st = deploy_keys.relay_token_status()
+        out = {"ok": True, "which": "relay", "status": st}
+        if reveal:
+            out["text"] = deploy_keys.reveal_relay_token()
+        return out
+    return {"ok": False, "error": "which 只能是 ssh 或 relay"}
 
 
-    @app.post("/api/deploy/run")
-    def deploy_run(body: dict):
-        """一键部署到服务器（后台线程跑，日志用 /api/deploy/log 增量拉）。"""
-        b = body or {}
-        return deploy_keys.start_deploy(restart_only=bool(b.get("restart_only")))
+@app.post("/api/deploy/key/clear")
+def deploy_key_clear(body: dict):
+    b = body or {}
+    which = str(b.get("which") or "").strip().lower()
+    if which == "ssh":
+        return {"ok": True, "which": "ssh", "status": deploy_keys.clear_ssh_key()}
+    if which == "relay":
+        return {"ok": True, "which": "relay", "status": deploy_keys.clear_relay_token()}
+    return {"ok": False, "error": "which 只能是 ssh 或 relay"}
 
 
-    @app.get("/api/deploy/log")
-    def deploy_log(since: int = 0):
-        return {"ok": True, **deploy_keys.deploy_log(since)}
+@app.post("/api/deploy/run")
+def deploy_run(body: dict):
+    """一键部署到服务器（后台线程跑，日志用 /api/deploy/log 增量拉）。"""
+    b = body or {}
+    return deploy_keys.start_deploy(restart_only=bool(b.get("restart_only")))
 
 
-    @app.post("/api/deploy/stop")
-    def deploy_stop():
-        return deploy_keys.stop_deploy()
+@app.get("/api/deploy/log")
+def deploy_log(since: int = 0):
+    return {"ok": True, **deploy_keys.deploy_log(since)}
+
+
+@app.post("/api/deploy/stop")
+def deploy_stop():
+    return deploy_keys.stop_deploy()
 
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")

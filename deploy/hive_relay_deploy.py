@@ -254,17 +254,28 @@ WantedBy=multi-user.target
 
         _log("[7/7] 从本机自检 ...")
         time.sleep(1.0)
-        ok = _local_probe(cfg["host"], port) == 0
+        # 优先用应用里已经配好的地址：如果走的是 nginx 80/443 反代（ws://host/hive-relay），
+        # 拿 hive4://host:18765 去测必然超时 —— 那不是部署失败，是测错了地方。
+        probe_url, via = _pick_probe_url(cfg["host"], port)
+        _log("      检测目标: %s%s" % (probe_url, "（%s）" % via if via else ""))
+        ok = _local_probe(probe_url) == 0
         if not ok:
             _log("")
-            _log("⚠️  服务器上服务起来了，但从公网连不上。最常见的原因是：")
-            _log("   腾讯云控制台 → 轻量应用服务器 → 防火墙 → 添加规则 → 放行 TCP %d" % port)
-            _log("   （轻量的防火墙在控制台里，服务器内的 ufw/firewalld 管不到它）")
+            if via:
+                _log("⚠️  通过 %s 连不上。检查 nginx 反代是否配好：" % via)
+                _log("   nginx -t && systemctl reload nginx")
+                _log("   配置里应有 location %s → proxy_pass http://127.0.0.1:%d" % (via, port))
+            else:
+                _log("⚠️  服务器上服务起来了，但从公网连不上。最常见的原因是：")
+                _log("   腾讯云控制台 → 轻量应用服务器 → 防火墙 → 添加规则 → 放行 TCP %d" % port)
+                _log("   （轻量的防火墙在控制台里，服务器内的 ufw/firewalld 管不到它）")
+                _log("   绕过办法：用 nginx 把 80 端口反代到 %d，然后把应用里的地址填成" % port)
+                _log("   ws://%s/hive-relay（这样不用改安全组）" % cfg["host"])
             return 1
 
         _log("")
         _log("✅ 部署完成。应用里「群聊 → 🌐 中继」填：")
-        _log("      hive4://%s:%d" % (cfg["host"], port))
+        _log("      %s" % probe_url)
         return 0
     finally:
         try:
