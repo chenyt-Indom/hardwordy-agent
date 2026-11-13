@@ -2518,25 +2518,6 @@
     my.oninput = pushMouth;
     mw.oninput = pushMouth;
 
-    // —— 口型幅度滑块 ——
-    const boostIn = $("#av2Boost");
-    const boostVal = $("#av2BoostVal");
-    const BOOST_KEY = "avatar2_boost";
-    function paintBoost() {
-      if (!boostIn || !boostVal) return;
-      boostVal.textContent = parseFloat(boostIn.value).toFixed(1) + "×";
-    }
-    if (boostIn) {
-      const saved = parseFloat(localStorage.getItem(BOOST_KEY) || "");
-      // 上限已收到 1.4（1.6 以上会出黑腔/下巴虚化），旧存档超出就夹回来
-      if (!isNaN(saved) && saved >= 1) boostIn.value = String(Math.min(1.4, saved));
-      paintBoost();
-      boostIn.oninput = () => {
-        paintBoost();
-        localStorage.setItem(BOOST_KEY, boostIn.value);
-      };
-    }
-
     // —— 心情 & 语速 ——
     const moodSel = $("#av2Mood"), rateSel = $("#av2Rate");
     const MOOD_KEY = "avatar2_mood", RATE_KEY = "avatar2_rate";
