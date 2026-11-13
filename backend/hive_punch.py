@@ -275,6 +275,14 @@ class PunchNode:
                     u.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
                 except Exception:
                     pass
+            # 缓冲区尽量开大：实测默认值下 3MB 传输会因接收缓冲溢出
+            # 丢约 190 片（数据仍能靠重传补齐，但白白多花时间）。
+            for opt, val in ((socket.SO_RCVBUF, 4 * 1024 * 1024),
+                             (socket.SO_SNDBUF, 4 * 1024 * 1024)):
+                try:
+                    u.setsockopt(socket.SOL_SOCKET, opt, val)
+                except Exception:
+                    pass
             u.bind(("0.0.0.0", int(port or 0)))
             u.settimeout(0.3)
         except Exception as e:
