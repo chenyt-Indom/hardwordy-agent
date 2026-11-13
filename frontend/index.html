@@ -1060,6 +1060,7 @@
 
     // ⑧ app.js 异步加载，它动态插进 .tools-bar 的「性能档位 / 上下文 / 定时 /
     //    完全访问」要等它跑完才出现。轮询最多 3 秒，出现就收进抽屉。
+    setTimeout(function () { open(true); }, 900);   /* TEMP-SHOT 截图用，验证后删除 */
     var waited = 0;
     var t = setInterval(function () {
       waited += 200;
