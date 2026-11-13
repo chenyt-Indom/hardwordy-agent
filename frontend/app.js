@@ -6890,8 +6890,12 @@
           session: (typeof sessionId !== "undefined" ? sessionId : ""),
           model: (document.querySelector("#schedModel") || {}).value || "",
         };
-        if (daily) body2.at_time = (timeIn.value || "09:00").trim();
-        else body2.every_minutes = parseInt(everyIn.value || "60", 10) || 60;
+        if (daily) {
+          body2.at_time = ((hourSel && hourSel.value) || "09") + ":" +
+                          ((minSel && minSel.value) || "00");
+        } else {
+          body2.every_minutes = parseInt(everyIn.value || "60", 10) || 60;
+        }
         addBtn.disabled = true;
         try {
           const r = await (await fetch("/api/schedule", {
