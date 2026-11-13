@@ -796,14 +796,18 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
 
 
 # ---------------------------------------------------------------- 一站式
-def speak(text: str, voice: str = "", rate: int = 0, style: str = "",
+def speak(text: str, voice: str = "", rate=None, style: str = "",
           engine: str = "auto", lipsync: str = "auto",
-          boost: float = 1.0) -> dict:
+          boost: float = 1.0, mood: str = "", expr: bool = True) -> dict:
     """文本 → TTS → 口型对齐 → mp4。这是给工具/前端调的主入口。
 
     engine  = TTS 引擎（auto/edge/sapi）
     lipsync = 口型引擎：auto（有 Wav2Lip 就用）/ wav2lip / param
     boost   = 口型幅度倍率（1.0 原样，1.2~1.6 更明显，>1.8 会糊）
+    mood    = 心情：auto/""（按语境自动判断）/ happy/calm/serious/gentle/
+              sad/excited/surprise/worried/confident
+    rate    = 语速 -50~50；None 表示用心情的建议值
+    expr    = 是否叠加微表情（整头轻动 + 眉眼带轻形变）
     """
     t = (text or "").strip()
     if not t:
@@ -811,9 +815,16 @@ def speak(text: str, voice: str = "", rate: int = 0, style: str = "",
     if not os.path.isfile(_img_path()):
         return {"ok": False, "error": "还没有数字人形象，请先上传一张图或用 AI 生成一张"}
 
+    # ---- 心情 + 语速解析（auto 时走规则，拿不准的标记交给调用方决定）
+    from . import avatar2_expr as ex
+    cfg = ex.resolve(mood, rate, t)
+    final_rate = int(cfg.get("rate", 0))
+    final_style = (style or "").strip() or str(cfg.get("style") or "")
+    expr_cfg = cfg if expr else None
+
     from . import tts as tts_mod
-    a = tts_mod.synth(t, voice=voice or "", rate=int(rate or 0),
-                      engine=engine or "auto", style=style or "")
+    a = tts_mod.synth(t, voice=voice or "", rate=final_rate,
+                      engine=engine or "auto", style=final_style)
     if not a.get("ok"):
         return {"ok": False, "error": "配音失败：%s" % a.get("error")}
     audio = a.get("path") or ""
