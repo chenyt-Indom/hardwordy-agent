@@ -741,7 +741,7 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     outp = parr[i0, cols] * (1.0 - frac) + parr[i1, cols] * frac
 
     # 唇缝中心轻微压暗：模拟口腔深度。只压 14%，再重就是一条黑带。
-    dark = 1.0 - 0.14 * op * np.exp(-(d / (0.26 * mh)) ** 2) * wh
+    dark = 1.0 - (0.14 + 0.05 * (_a - 1.0)) * op * np.exp(-(d / (0.26 * mh)) ** 2) * wh
     outp = outp * dark[..., None]
 
     img = Image.fromarray(np.clip(outp, 0, 255).astype(np.uint8), mode="RGB")
