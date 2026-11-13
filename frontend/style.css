@@ -4317,6 +4317,9 @@ html[data-theme="light"] select.pill-select option {
   transition: transform .22s cubic-bezier(.2, .8, .2, 1);
 }
 .sd-drawer.in { transform: translateX(0); }
+/* ⚠️ 必须显式压掉 [hidden]：上面的 display:flex 优先级高于浏览器默认的
+   [hidden]{display:none}，所以只把 hidden 设成 true 面板照样留在屏幕上。 */
+.sd-drawer[hidden], .sd-mask[hidden] { display: none !important; }
 @media (prefers-reduced-motion: reduce) {
   .sd-drawer { transition: none; }
   .sd-mask { animation: none; }
