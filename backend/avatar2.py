@@ -838,17 +838,12 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
         return {"ok": False, "error": "音频转码失败：%s: %s" % (type(e).__name__, e)}
 
     words = _asr_words(wav)
-    # 口型引擎选择：auto 时，有 Wav2Lip 权重就用真口型
-    want = (lipsync or "auto").lower()
-    if want not in ("wav2lip", "param"):
-        want = "auto"
-    use = want
-    if want == "auto":
-        try:
-            from . import wav2lip_onnx as _w2l
-            use = "wav2lip" if _w2l.available() else "param"
-        except Exception:                               # noqa: BLE001
-            use = "param"
+    # 口型引擎：默认声学形变。
+    # 实测 Wav2Lip(96x96) 在正脸证件照上嘴位整体偏移、口腔糊成色块，
+    # 观感反而不如形变，所以不再默认启用；auto 也归到 param。
+    # 想试神经网络口型仍可显式传 lipsync="wav2lip"。
+    want = (lipsync or "param").lower()
+    use = "wav2lip" if want == "wav2lip" else "param"
     name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
     out = os.path.join(_vdir(), name)
     try:
