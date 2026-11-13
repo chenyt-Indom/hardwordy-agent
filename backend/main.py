@@ -10606,9 +10606,13 @@ def hive_join(body: dict):
         code = (full.get("host") or "").strip()
         st = hive_client.client().start(code, g["gid"])
         relay = {
-            "configured": bool(code), "url": code or "局域网",
+            "configured": bool(code), "url": st.get("url") or code or "局域网",
             "connected": bool(st.get("connected")),
-            "mode": "mesh", "error": st.get("error") or "",
+            "mode": st.get("mode") or "mesh",
+            "via_relay": st.get("mode") == "relay",
+            "dir_ok": bool(st.get("dir_ok")),
+            "dir_err": st.get("dir_err") or "",
+            "error": st.get("error") or "",
             "port": st.get("port") or 0, "lan_ip": st.get("lan_ip") or "",
         }
         if g.get("joined_new"):
