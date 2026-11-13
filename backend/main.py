@@ -10155,8 +10155,10 @@ def avatar2_video(name: str):
 
 @app.post("/api/avatar2/video/delete")
 def avatar2_video_delete(body: dict):
+    """删除视频。body: {name, scope}。scope=library 时进回收站可恢复。"""
     body = body or {}
-    return avatar2.delete_video(str(body.get("name") or ""))
+    return avatar2.delete_video(str(body.get("name") or ""),
+                                scope=str(body.get("scope") or "avatar"))
 
 
 # ---------- 前端 ----------
