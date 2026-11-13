@@ -1218,29 +1218,5 @@
       });
     })();
   </script>
-  <!-- TEMP_PROBE_AV2_START -->
-  <script>
-  setTimeout(function(){
-    try{
-      var p = document.getElementById("av2Panel");
-      if (p) {
-        var f = p.querySelector(":scope > .pnl-fold");
-        if (f) { f.style.height = "auto"; f.style.overflow = "visible"; }
-      }
-      var s = document.getElementById("av2Lip");
-      if (s) {
-        var d = document.createElement("div");
-        d.style.cssText = "position:fixed;left:8px;top:8px;z-index:99999;background:#000;color:#0f0;font:14px monospace;padding:6px";
-        var txts = [];
-        for (var i=0;i<s.options.length;i++) txts.push(s.options[i].text);
-        d.textContent = "LIP w=" + (s.offsetWidth||0) + " val=" + s.value +
-                        " opts=[" + txts.join(" | ") + "]";
-        document.body.appendChild(d);
-      }
-    }catch(e){}
-  }, 900);
-  </script>
-  <!-- TEMP_PROBE_AV2_END -->
-
 </body>
 </html>
