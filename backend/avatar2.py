@@ -711,6 +711,14 @@ def _frame(prep: dict, openness: float, width: float):
     else:
         nbx = x0
         m2 = mask
+
+    # 纵向拉伸会把 1px 铺成 2.5px，分辨率损失表现为「涂抹感」。
+    # 轻度 USM 补偿回来：percent=70 是实测的平衡点 ——
+    # 拉普拉斯均值 5.59 → 6.84（边缘变清楚），再高（120）就会出现白边和振铃。
+    if op > 0.15:
+        from PIL import ImageFilter
+        img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=70,
+                                                 threshold=2))
     out.paste(img, (nbx, ytop), m2)
     return out
 
