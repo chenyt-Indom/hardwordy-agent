@@ -100,7 +100,17 @@ SKIP_DIRS = {
     #（`tools` 会误命中 aioitertools.conda，还慢到 3 秒），必须剪掉
     "anaconda3", "miniconda3", "pkgs", ".conda", ".condarc",
     "node_modules", ".npm", ".gradle", ".m2", "Library", "OneDrive",
+    # 2026-11-14 实测（本机真实数字）：项目根一共 264530 个文件，
+    # 其中 data/ 103951 个（2.6s）、dist/ 63111 个（1.1s），
+    # 全遍历要 7 秒 —— 模糊查找在 4 秒超时内根本走不到 backend/。
+    # 这些是运行期数据 / 构建产物，不该参与「找文件」。
+    "data", "sessions", "logs", "hive_data", "image_library",
+    "build", "build-lite", "vendor", "releases", "_backup_out",
+    "_bak_avatarrm_20261112_235603", ".webtest-data",
 }
+
+# 这些目录名前缀一律跳过（dist_v3 / dist_v24 … 本机有二十多个）
+SKIP_PREFIXES = ("dist", ".", "_bak_", "_backup_")
 SEARCH_MAX_DEPTH = 5        # 最多往下钻 5 层
 SEARCH_MAX_SECONDS = 4.0    # 总耗时上限，防止在大盘上卡死
 SEARCH_MAX_HITS = 20
