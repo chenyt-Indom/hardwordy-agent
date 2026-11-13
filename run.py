@@ -402,6 +402,22 @@ def main() -> None:
                "3) 是否已拉取模型 qwen3-vl:8b")
         raise SystemExit("本地服务启动失败")
 
+    # ★ 2026-11-13：再确认一次「8000 上应答的就是自己」。
+    # _wait_until_up() 只验证"有人应答"，一旦上面 bind 失败（端口被旧进程占着），
+    # 它连上的其实是旧实例 → 返回 True → 误判就绪 → 开窗口 → 旧进程一退页面全断。
+    # 这正是用户说的「重启后新窗口一打开就被拦」。比对 pid 才能识破。
+    _h_self = _running_health(2.0)
+    _hp = int((_h_self or {}).get("pid") or 0)
+    if _hp and _hp != os.getpid():
+        _wlog("8000 上应答的是别的进程 pid=%d（本进程 %d），不开窗口"
+              % (_hp, os.getpid()))
+        _alert("8000 端口被另一个实例占用（PID %d）。\n\n"
+               "本窗口不会正常工作，已停止启动。\n"
+               "请先关掉那个实例（或结束该进程）再启动。" % _hp)
+        server.should_exit = True
+        raise SystemExit("端口被其他实例占用")
+    _wlog("服务自检通过 pid=%d" % os.getpid())
+
     if NO_WINDOW:
         # 被外部启动器拉起：这里只保持后端服务存活，窗口由启动器负责，
         # 否则会和启动器各开一个窗口（用户看到两个）。
