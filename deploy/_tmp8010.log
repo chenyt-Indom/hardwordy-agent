@@ -1,0 +1,8 @@
+INFO:     [procwin] 黑窗防护状态：{'os': 'nt', 'executable': 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\pythonw.exe', 'nowin_value': '0x8000000', 'init_patched': True, 'exec_patched': True}
+INFO:     Started server process [18256]
+INFO:     Waiting for application startup.
+INFO:     已启动高德 key 状态看门狗
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8010 (Press CTRL+C to quit)
+WARNING:  预热模型 deepseek-flash 失败：HTTP Error 404: Not Found
+INFO:     127.0.0.1:59064 - "GET /api/deploy/overview HTTP/1.1" 200 OK

@@ -2,6 +2,11 @@
 """无头浏览器验证「🔐 密钥与部署」弹窗（临时脚本，验完删）。"""
 import base64, json, os, shutil, subprocess, sys, tempfile, time, urllib.request
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 URL = "http://127.0.0.1:8010"
 PORT = 9333
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
