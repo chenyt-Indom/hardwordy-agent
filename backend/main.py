@@ -10094,13 +10094,20 @@ def avatar2_speak(body: dict):
             rate = int(_r)
         except Exception:
             rate = None
+    # amp = 口型幅度增益 0.6~2.0（1.0 原始观感）。不传按 1.0，非法值交给
+    # avatar2.speak 内部 clip，不在这里报错 —— 老前端不带这个字段也要能跑。
+    try:
+        _amp = float(body.get("amp") or 1.0)
+    except Exception:
+        _amp = 1.0
     return avatar2.speak(text,
                          voice=str(body.get("voice") or ""),
                          rate=rate,
                          style=str(body.get("style") or ""),
                          engine=str(body.get("engine") or "auto"),
                          mood=str(body.get("mood") or ""),
-                         expr=bool(body.get("expr", True)))
+                         expr=bool(body.get("expr", True)),
+                         amp=_amp)
 
 
 @app.post("/api/avatar2/concat")
