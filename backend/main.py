@@ -10109,6 +10109,26 @@ def avatar2_speak(body: dict):
                          expr=bool(body.get("expr", True)))
 
 
+@app.post("/api/avatar2/concat")
+def avatar2_concat(body: dict):
+    """把多段数字人视频拼成一个。body: {names: [...], out_name?}
+
+    长文本朗读时前端按句子切成多段分别生成（每段都在超时窗口内），
+    最后调这里合并 —— 避免"字数一多就超时"。
+    """
+    body = body or {}
+    names = body.get("names") or []
+    if not isinstance(names, list) or not names:
+        raise HTTPException(status_code=400, detail="names 不能为空")
+    if len(names) > 200:
+        raise HTTPException(status_code=400, detail="分段太多（上限 200 段）")
+    r = avatar2.concat_videos([str(n) for n in names],
+                              out_name=str(body.get("out_name") or ""))
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "拼接失败")
+    return r
+
+
 @app.get("/api/avatar2/videos")
 def avatar2_videos(scope: str = "avatar"):
     """可浏览的 mp4 列表，新的在前。scope=avatar/library/all"""
