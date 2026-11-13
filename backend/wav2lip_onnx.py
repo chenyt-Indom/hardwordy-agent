@@ -467,13 +467,6 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     n = len(chunks)
-    # 嘴在裁剪框里的相对位置：boost 增强以唇缝为中心
-    try:
-        _m = avatar2.mouth()
-        my_rel = (float(_m["y"]) * H - y1) / float(max(1, y2 - y1))
-    except Exception:  # noqa: BLE001
-        my_rel = 0.66
-    my_rel = float(min(0.95, max(0.05, my_rel)))
     _base_gap = None
     _boost_on = bool(boost and boost > 1.001)
     try:
