@@ -633,31 +633,29 @@ def _frame(prep: dict, openness: float, width: float):
     op = float(np.clip(openness, 0.0, 1.0))
     wd = float(np.clip(width, 0.70, 1.35))
 
-    # ---- 口腔：暗色底 + 上下排牙 ----
-    if op > 0.05:
-        ow = max(3.0, mw * 1.05 * wd)
-        oh = max(2.0, mh * (0.10 + op * 1.05))
-        d = ImageDraw.Draw(out)
-        d.ellipse([cx - ow / 2, cy - oh / 2, cx + ow / 2, cy + oh / 2],
-                  fill=(44, 19, 21))
-        # 上排牙：一条白，随张口度变高
-        th = max(1.0, oh * 0.30)
-        d.rounded_rectangle(
-            [cx - ow * 0.40, cy - oh / 2 + oh * 0.05,
-             cx + ow * 0.40, cy - oh / 2 + oh * 0.05 + th],
-            radius=max(1.0, th * 0.35), fill=(236, 233, 227))
-        # 下排牙：小一点、暗一点，别抢视线
-        bh = max(0.8, oh * 0.16)
-        d.rounded_rectangle(
-            [cx - ow * 0.36, cy + oh / 2 - bh - oh * 0.04,
-             cx + ow * 0.36, cy + oh / 2 - oh * 0.04],
-            radius=max(1.0, bh * 0.35), fill=(212, 206, 198))
+    # ---- 唇部纵向伸缩（克制）----
+    # 闭嘴 0.94（略微收紧）→ 大张 1.40（微张）。幅度不敢再大：
+    # 实测拉到 1.8 以上时写实人脸会变成"橡皮泥"。
+    sy = 0.94 + 0.46 * op
+    sx = 1.0 + 0.04 * (wd - 1.0)
+    nw = max(2, int(round(patch.width * sx)))
+    nh = max(2, int(round(patch.height * sy)))
+    p2 = patch.resize((nw, nh), Image.BICUBIC)
+    m2 = mask.resize((nw, nh), Image.BICUBIC)
 
-    # ---- 上下唇推开 ----
-    dy = op * mh * 0.46
-    if dy >= 0.5:
-        out.paste(prep["up"], (x0, int(round(ytop - dy))), prep["mu"])
-        out.paste(prep["lo"], (x0, int(round(cyi + dy))), prep["ml"])
+    # 以唇缝中心为锚点，让伸缩是"上下对称展开"而不是整体位移
+    nbx = int(round(cx - (cx - x0) * sx))
+    nby = int(round(cy - (cy - ytop) * sy))
+    out.paste(p2, (nbx, nby), m2)
+
+    # ---- 唇缝阴影：越张越明显 ----
+    if op > 0.06:
+        sw, sh = prep["shadow_size"]
+        sw2 = max(3, int(round(sw * wd)))
+        sh2 = max(2, int(round(sh * (0.55 + 0.85 * op))))
+        shadow = _mouth_shadow(sw2, sh2, op)
+        out.paste(shadow, (int(round(cx - sw2 / 2.0)),
+                           int(round(cy - sh2 / 2.0))), shadow)
     return out
 
 
