@@ -102,6 +102,8 @@ class HiveClient:
         self._flock = threading.Lock()
         self._hooked = False
         self._relay = None          # RelayLink（走公网中继时才有）
+        self._dir_ok = False        # 群是否已登记到中继目录（跨网入群靠它）
+        self._dir_err = ""
 
     # ------------------------------------------------------------ 回调挂接
 
