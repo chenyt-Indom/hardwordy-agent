@@ -1183,11 +1183,12 @@ setTimeout(function () {
       }
     }
   }
+  out.length = 0; // 上面的 CSSOM 明细不再需要
   logo.click();
   setTimeout(function () {
     var cs3 = getComputedStyle(sb);
-    out.push('after3s w=' + cs3.width + ' minw=' + cs3.minWidth + ' pad=' + cs3.paddingLeft);
-    out.push('rect3s=' + Math.round(sb.getBoundingClientRect().width));
+    out.push('A 侧栏宽=' + Math.round(sb.getBoundingClientRect().width) + 'px');
+    out.push('B minW=' + cs3.minWidth);
     var kb = document.querySelector('#kbPanel');
     var fold = document.querySelector('#kbPanel > .pnl-fold');
     var inner2 = fold.firstElementChild;
