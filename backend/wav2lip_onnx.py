@@ -371,9 +371,9 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     both = np.concatenate([masked, face96], axis=2).astype(np.float32) / 255.0
     both = both.transpose(2, 0, 1)[None]  # (1,6,96,96)
 
-    # 融合蒙版（只贴下半部分，带羽化）
+    # 融合蒙版（只贴嘴部带状区域，下巴保留原图）
     cw, ch = x2 - x1, y2 - y1
-    msk = _feather_mask(ch, cw, top=ch // 2 - 2)
+    msk = _feather_mask(ch, cw, top=0.60, bot=0.88)
 
     cmd = [exe, "-y", "-loglevel", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (W, H),
