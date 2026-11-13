@@ -6643,8 +6643,23 @@
           winBody.textContent = "读取失败：" + ((d && d.error) || "未知原因");
           return;
         }
-        winBody.textContent = d.text ||
+        const txt = d.text ||
           "这个任务还没有跑过，或者上次没留下正文。点「立即运行」跑一次就有结果了。";
+        // 2026-11-13 用户要求：「结果窗口里把 markdown 渲染成排版（标题/表格/代码块）」。
+        // 直接复用对话里那套 renderFinal —— 它自带"渲染丢了结尾就退回纯文本"的兜底，
+        // 比在这里另写一套 markdown 解析稳。万一它不在当前作用域，就退纯文本，不会白屏。
+        winBody.textContent = "";
+        try {
+          if (typeof renderFinal === "function") {
+            renderFinal(winBody, txt, "");
+          } else {
+            winBody.textContent = txt;
+            winBody.style.whiteSpace = "pre-wrap";
+          }
+        } catch (e) {
+          winBody.textContent = txt;
+          winBody.style.whiteSpace = "pre-wrap";
+        }
       } catch (e) {
         winBody.textContent = "读取失败：" + e.message;
       }
