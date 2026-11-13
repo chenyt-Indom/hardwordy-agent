@@ -2329,6 +2329,16 @@
       catch (e) { say("读取形象失败：" + e.message, "err"); }
     }
 
+    // 口型幅度滑块只影响 Wav2Lip 的遮罩范围，声学形变下没有意义 → 置灰
+    function syncBoostRow() {
+      const lip = $("#av2Lip"), row = document.querySelector(".av2-row-boost");
+      if (!lip || !row) return;
+      const on = lip.value === "wav2lip";
+      row.classList.toggle("av2-boost-off", !on);
+      const r = $("#av2Boost");
+      if (r) r.disabled = !on;
+    }
+
     async function loadStatus() {
       try {
         const st = await api("/api/avatar2/status");
