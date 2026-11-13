@@ -202,7 +202,8 @@ def resolve_path(path: str, roots=None, max_depth: int = SEARCH_MAX_DEPTH,
                 timed_out = True
                 break
             dirnames[:] = [d for d in dirnames
-                           if d not in SKIP_DIRS and not d.startswith(".")]
+                           if d not in SKIP_DIRS
+                           and not any(d.startswith(p) for p in SKIP_PREFIXES)]
             if dirpath.count(os.sep) - root_depth >= max_depth:
                 dirnames[:] = []
             for fn in filenames:
