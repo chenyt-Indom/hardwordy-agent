@@ -412,6 +412,19 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     if x2 - x1 < 24 or y2 - y1 < 24:
         return {"ok": False, "error": "人脸太小，无法做口型"}
 
+    # 表情层：用**未扩展**的人脸框定位眉眼带（crop_rect 会把框上下各扩 1/4，
+    # 拿它定位会把眉眼带算到额头上）。
+    _expr = expr or None
+    _face_norm = None
+    _ex_mod = None
+    if _expr:
+        try:
+            from . import avatar2_expr as _ex_mod          # noqa: F811
+            bx1, by1, bx2, by2 = box
+            _face_norm = [bx1 / W, by1 / H, (bx2 - bx1) / W, (by2 - by1) / H]
+        except Exception:                                  # noqa: BLE001
+            _ex_mod = None
+
     mel = mel_spectrogram(y, sr)
     n_frames = int(round(dur * fps))
     chunks = mel_chunks(mel, fps, n_frames=n_frames)
