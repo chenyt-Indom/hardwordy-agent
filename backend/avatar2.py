@@ -835,6 +835,7 @@ def speak(text: str, voice: str = "", rate: int = 0, style: str = "",
         "frames": r["frames"],
         "bytes": r["bytes"],
         "lipsync": used,
+        "boost": _boost,
         "lipsync_label": ("Wav2Lip 真口型" if used == "wav2lip"
                           else "声学形变口型"),
         "fallback_from": r.get("fallback_from", ""),
