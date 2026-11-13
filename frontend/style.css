@@ -4821,3 +4821,96 @@ html[data-theme="light"] select.pill-select option {
   line-height: 1.8;
 }
 
+
+
+/* ===== 🎭 数字人面板（2026-11-13） =====
+   形象预览 + 校准 + 文本 + 音色 + 生成 + 历史视频。
+   颜色全走变量，浅色模式自动跟随。 */
+.av2-body { display: flex; flex-direction: column; gap: 8px; }
+.av2-stage {
+  position: relative; width: 100%; aspect-ratio: 1 / 1;
+  border-radius: 10px; overflow: hidden;
+  background: var(--panel2);
+  display: flex; align-items: center; justify-content: center;
+}
+.av2-stage img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.av2-empty {
+  color: var(--muted); font-size: 12px; text-align: center;
+  line-height: 1.7; padding: 12px;
+}
+.av2-acts { display: flex; gap: 6px; }
+.av2-acts .btn { flex: 1; min-width: 0; }
+.av2-cal { display: flex; flex-direction: column; gap: 5px; }
+.av2-cal label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--muted);
+}
+.av2-cal input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.av2panel textarea#av2Text {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  min-height: 62px; line-height: 1.55; padding: 8px 10px;
+  border-radius: 8px; font-size: 12px; font-family: inherit;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border);
+}
+.av2panel textarea#av2Text:focus {
+  outline: none; border-color: var(--accent);
+}
+.av2panel textarea#av2Text::placeholder { color: var(--muted); }
+.av2-row { display: flex; gap: 6px; align-items: center; }
+.av2-row select {
+  flex: 1; min-width: 0; padding: 6px 8px; border-radius: 8px;
+  font-size: 12px; background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border);
+}
+.av2-row .btn { flex: 0 0 auto; white-space: nowrap; }
+.av2-hint { font-size: 11px; line-height: 1.55; }
+.av2-list { display: flex; flex-direction: column; gap: 6px; }
+.av2-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 8px;
+  background: var(--panel2); font-size: 11px; cursor: pointer;
+  border: 1px solid transparent;
+}
+.av2-item:hover { border-color: var(--border); }
+.av2-item .av2-name {
+  flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.av2-item .av2-meta { color: var(--muted); flex: 0 0 auto; }
+.av2panel video#av2Video {
+  width: 100%; border-radius: 10px; background: #000; display: block;
+}
+
+/* 右下角常驻小数字人：📌 切换。默认隐藏，不占布局 */
+.av2-pin {
+  position: fixed; right: 22px; bottom: 104px; z-index: 55;
+  width: 138px; border-radius: 14px; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--border);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, .45);
+  display: none;
+}
+.av2-pin.on { display: block; }
+.av2-pin .av2-pin-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; font-size: 11px; color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.av2-pin .av2-pin-head span { flex: 1; }
+.av2-pin .av2-pin-head button {
+  border: 0; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 12px; padding: 0 2px;
+}
+.av2-pin .av2-pin-head button:hover { color: var(--text); }
+.av2-pin img, .av2-pin video {
+  width: 100%; display: block; background: #000;
+}
+.av2-pin video { display: none; }
+.av2-pin.speaking video { display: block; }
+.av2-pin.speaking img { display: none; }
+@media (max-width: 720px) {
+  .av2-pin { right: 10px; bottom: 84px; width: 104px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .av2-pin { transition: none; }
+}

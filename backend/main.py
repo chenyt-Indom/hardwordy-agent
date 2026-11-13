@@ -10024,11 +10024,21 @@ async def avatar2_upload(file: UploadFile = File(...)):
 
 @app.post("/api/avatar2/from_library")
 def avatar2_from_library(body: dict):
-    """把图片库/刚生成的那张图设为形象。body: {path}"""
+    """把图片库里的图设为形象。body: {id} 或 {path}
+
+    ⚠️ 前端只能拿到图库 id（列表里没有磁盘路径），所以必须支持 id；
+       直接用 path 是给"本地绝对路径"这种调用留的口子。
+    """
     body = body or {}
     p = str(body.get("path") or "")
+    iid = str(body.get("id") or "")
+    if not p and iid:
+        try:
+            p = image_library.get_path(iid) or ""
+        except Exception:
+            p = ""
     if not p:
-        raise HTTPException(status_code=400, detail="缺少 path")
+        raise HTTPException(status_code=400, detail="缺少 path 或 id（或图库里找不到这张图）")
     r = avatar2.save_from_path(p, source=os.path.basename(p))
     if not r.get("ok"):
         raise HTTPException(status_code=400, detail=r.get("error") or "保存失败")
