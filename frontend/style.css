@@ -2739,10 +2739,13 @@ html[data-theme="light"] body {
     transform: translateX(0);
     transition: transform .25s cubic-bezier(.4, 0, .2, 1);
     box-shadow: 8px 0 32px rgba(0, 0, 0, .5);
+    /* ⚠️ 桌面端侧栏已改成 transparent（一体化），但手机端是浮在主区上的抽屉，
+       透明会直接看见底下的对话内容。这里必须补回实心底，靠阴影和主区分开。 */
+    background: var(--panel);
   }
   .sidebar.hidden {
     width: 84vw; min-width: 0; padding: 18px;
-    border-right: 1px solid var(--border);
+    border-right: none;
     transform: translateX(-102%);
     box-shadow: none;
   }
