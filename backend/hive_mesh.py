@@ -443,6 +443,12 @@ class MeshNode:
                 pass
         self._srv = None
         self._udp = None
+        if self.punch:
+            try:
+                self.punch.stop()
+            except Exception:
+                pass
+            self.punch = None
         self.started = False
         self.groups.clear()
         return self.status()
