@@ -609,7 +609,8 @@ def _prep(img_path: str):
     if ybot - ytop < 4:
         ybot = min(H, ytop + 4)
     patch = base.crop((x0, ytop, x1, ybot))
-    mask = _soft_mask(patch.width, patch.height)
+    # 左右羽化、上下硬接 —— 上下唇是整片位移，皮肤连续，不能羽化
+    mask = _h_mask(patch.width, patch.height)
     # 唇缝阴影层（比 patch 窄一点、扁一点，只覆盖唇部）
     sw = max(4, int(round(mw * 0.92)))
     sh = max(3, int(round(mh * 0.62)))
