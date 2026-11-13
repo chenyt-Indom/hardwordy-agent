@@ -11018,28 +11018,34 @@
       const lan = d.lan_addr || (d.lan_ip ? d.lan_ip + ":" + d.port : "");
       const wan = d.wan_addr || (d.public_ip ? d.public_ip + ":" + d.port : "");
       const ts = d.ts_addr || (d.tailscale_ip ? d.tailscale_ip + ":" + d.port : "");
-      // 要发出去的那一行：Tailscale 优先（跨网络也能用），其次公网，最后本机
-      const copyAddr = ts || wan || lan;
+      // 跨网打洞地址（本项目自带，不需要装任何外部软件）
+      const punch = d.punch_code || (d.punch_addr ? "punch://" + d.punch_addr : "");
+      // 要发出去的那一行：打洞优先（能穿透家用宽带 NAT），其次 Tailscale，再公网，最后本机
+      const copyAddr = punch || ts || wan || lan;
+      const copyWhat = punch ? "跨网" : (ts ? "Tailscale" : (wan ? "公网" : "本机"));
       const L = [];
       L.push("【同一 WiFi】对方只输密码就行，不用填地址");
       if (lan) L.push("    本机地址   " + lan);
       L.push("");
-      if (ts) {
+      if (punch) {
         L.push("【不同网络 · 推荐】把下面这行发给他，填进「对方地址」");
-        L.push("    " + ts);
-        L.push("    这是 Tailscale 地址，异地直连，不用公网 IP、不用端口映射");
+        L.push("    " + punch);
+        L.push("    这是打洞地址，能穿透家用宽带的 NAT，不用公网 IP、不用装任何软件");
+        L.push("    双方都在家庭宽带后面时，让他也把他的这行发给你，两边各连一次最稳");
       } else {
-        L.push("【不同网络】现在没有可用地址 —— 家用宽带没有公网 IP，跨网连不通");
-        L.push("    解决：两台机器都装 Tailscale（免费），登录同一账号");
-        L.push("    装完回到这里，会自动多出一行 100.x 的地址，发那行给对方即可");
+        L.push("【不同网络】现在没拿到打洞地址（可能断网，或公共 STUN 被挡了）");
+        L.push("    稍等几秒再点开这个窗口重试；仍然没有的话，同一 WiFi 用上面的本机地址");
       }
-      if (wan && !ts) {
+      if (ts) {
         L.push("");
+        L.push("（备用）Tailscale 地址 " + ts);
+      }
+      if (wan) {
         L.push("（备用）公网地址 " + wan + "，需要在路由器上做 " + d.port + " 端口映射");
       }
       if (copyAddr) {
         L.push("");
-        L.push("（点「复制" + (ts ? "Tailscale" : (wan ? "公网" : "本机")) + "地址」只会复制那一行地址本身，"
+        L.push("（点「复制" + copyWhat + "地址」只会复制那一行地址本身，"
           + "不带上面这些说明）");
       }
       openModal({
@@ -11050,7 +11056,7 @@
         readonly: true,
         copyInput: !!copyAddr,
         copyValue: copyAddr || "",
-        copyLabel: "📋 复制" + (ts ? "Tailscale" : (wan ? "公网" : "本机")) + "地址",
+        copyLabel: "📋 复制" + copyWhat + "地址",
         extra: "",
         extraPlaceholder: "（可选）要主动连别人？把他的地址粘到这里，如 1.2.3.4:8899",
         okText: "连接",
