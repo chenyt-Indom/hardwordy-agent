@@ -595,21 +595,24 @@ def _prep(img_path: str):
     m = mouth()
     cx, cy, mw, mh = _mouth_geom((W, H), m)
 
-    # 融合区：横向 ±0.85 唇宽；纵向 上 1.25、下 2.2 唇高。
-    # 上限压得比较紧 —— 上唇上移幅度再大就会吃到鼻底，看起来像整块皮肤在滑。
+    # 融合区：横向 ±0.85 唇宽；纵向 上 0.95、下 1.10 唇高。
+    # 收得很紧 —— 范围一大就会把鼻子和下巴一起拖动，看起来像整块皮肤在滑。
     x0 = int(max(0, round(cx - mw * 0.85)))
     x1 = int(min(W, round(cx + mw * 0.85)))
-    ytop = int(max(0, round(cy - mh * 1.25)))
-    ybot = int(min(H, round(cy + mh * 2.2)))
-    cyi = int(round(cy))
-    # 中线落在唇缝上：上半片到 cyi 为止，下半片从 cyi 开始
-    cyi = min(max(cyi, ytop + 2), ybot - 2)
-    up = base.crop((x0, ytop, x1, cyi))
-    lo = base.crop((x0, cyi, x1, ybot))
-    mu = _half_mask(up.width, up.height, lower=False)
-    ml = _half_mask(lo.width, lo.height, lower=True)
-    return {"base": base, "up": up, "lo": lo, "mu": mu, "ml": ml,
-            "box": (x0, ytop, x1, ybot, cyi),
+    ytop = int(max(0, round(cy - mh * 0.95)))
+    ybot = int(min(H, round(cy + mh * 1.10)))
+    if x1 - x0 < 4:
+        x1 = min(W, x0 + 4)
+    if ybot - ytop < 4:
+        ybot = min(H, ytop + 4)
+    patch = base.crop((x0, ytop, x1, ybot))
+    mask = _soft_mask(patch.width, patch.height)
+    # 唇缝阴影层（比 patch 窄一点、扁一点，只覆盖唇部）
+    sw = max(4, int(round(mw * 0.92)))
+    sh = max(3, int(round(mh * 0.62)))
+    return {"base": base, "patch": patch, "mask": mask,
+            "box": (x0, ytop, x1, ybot),
+            "shadow_size": (sw, sh),
             "geom": (cx, cy, mw, mh), "wh": (W, H)}
 
 
