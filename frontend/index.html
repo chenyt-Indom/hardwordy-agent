@@ -1177,18 +1177,16 @@
 
 
 <script>
-/* TEMP_PROBE_AUTO 临时探针：展开自动化面板 → 点「＋ 新建任务」，截图核对后立即删除 */
+/* TEMP_PROBE_AUTO 临时探针：打开定时任务弹窗 → 点「看结果」，截图核对 markdown 排版后立即删除 */
 (function () {
   setTimeout(function () {
-    var p = document.getElementById('autoPanel');
-    if (!p) return;
-    var head = p.querySelector('.fold-head');
-    if (head && p.classList.contains('collapsed')) head.click();
+    var b = document.getElementById('autoWinBtn');
+    if (b) b.click();
   }, 1200);
   setTimeout(function () {
-    var b = document.getElementById('autoNewBtn');
-    if (b) b.click();
-  }, 2200);
+    var r = document.querySelector('#schedList button[data-act="result"]');
+    if (r) r.click();
+  }, 2600);
 })();
 </script>
 </body>
