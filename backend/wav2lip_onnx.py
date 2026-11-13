@@ -454,8 +454,13 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     # 紫色伪影与整块虚化（用户反馈"嘴太吓人"就是这个）。收窄到 0.56~0.76
     # 只覆盖唇部，下巴完全保留原图；羽化同步收窄到 0.03，避免过渡带太宽
     # 把上唇也稀释掉。
+    # 2026-11-14：融合带原来写死 0.56~0.76，换个形象图（人脸框比例不同）就会
+    # 错位。改成以真实嘴位 my_rel 为中心上下各留 _half，保证不管什么图都对准。
     cw, ch = x2 - x1, y2 - y1
-    msk = _feather_mask(ch, cw, top=0.56, bot=0.76, feather=0.03)
+    _half = 0.088
+    _mtop = max(0.0, my_rel - _half)
+    _mbot = min(1.0, my_rel + _half)
+    msk = _feather_mask(ch, cw, top=_mtop, bot=_mbot, feather=0.03)
 
     cmd = [exe, "-y", "-loglevel", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (W, H),
