@@ -1144,138 +1144,18 @@
 
 </body>
 <script>
-/* 临时探针：分步刷新，任何时刻截图都能读到最新数值。验证完删除 */
-(function () {
-  var d = document.createElement('div');
-  d.style.cssText = 'position:fixed;left:0;top:0;right:0;z-index:999999;background:#000;color:#0f0;font:26px/1.5 monospace;padding:20px 24px;white-space:pre;border-bottom:4px solid #0f0';
-  d.textContent = 'PROBE 启动…';
-  document.body.appendChild(d);
-  var out = [];
-  function show() { d.textContent = out.join('\n'); }
-  setTimeout(function () {
-    var sb = document.querySelector('#sidebar');
-    var logo = document.querySelector('#logoBtn');
-    out.push('URL=' + location.href.slice(0, 40) + ' sheets=' + document.styleSheets.length);
-    try {
-      var xhr = new XMLHttpRequest();
-      xhr.open('GET', '/static/style.css', false);
-      xhr.send();
-      var txt = xhr.responseText || '';
-      out.push('CSS长度=' + txt.length + ' 含pnlFold=' + (txt.indexOf('.pnl-fold > .pnl-fold-in') >= 0) + ' 含imp=' + (txt.indexOf('78px !important') >= 0));
-      var links = document.querySelectorAll('link[rel=stylesheet]');
-      var hrefs = [];
-      for (var li = 0; li < links.length; li++) hrefs.push(links[li].href.slice(-24));
-      out.push('links=' + links.length + ' ' + hrefs.join(' | '));
-    } catch (e) { out.push('XHRERR ' + e.message); }
-    out.push('A 初始宽=' + Math.round(sb.getBoundingClientRect().width) + 'px cls=' + sb.className);
-    show();
-    logo.click();
-    setTimeout(function () {
-      var cs = getComputedStyle(sb);
-      out.push('B 收起后宽=' + Math.round(sb.getBoundingClientRect().width) + 'px cls=' + sb.className);
-      out.push('C minW=' + cs.minWidth + ' pad=' + cs.paddingLeft);
-      out.push('W=' + window.innerWidth + ' inline=' + (sb.getAttribute('style') || 'none').slice(0, 70));
-      // 一锤定音：先禁掉过渡再写内联宽度
-      sb.style.transition = 'none';
-      sb.style.width = '78px';
-      sb.style.minWidth = '78px';
-      void sb.offsetHeight;
-      out.push('禁过渡后=' + Math.round(sb.getBoundingClientRect().width) + 'px minW=' + getComputedStyle(sb).minWidth);
-      out.push('过渡=' + getComputedStyle(sb).transition.slice(0, 40));
-      sb.style.transition = '';
-      sb.style.width = '';
-      sb.style.minWidth = '';
-      show();
-      var kb = document.querySelector('#kbPanel');
-      var inner = document.querySelector('#kbPanel > .pnl-fold > .pnl-fold-in');
-      out.push('D 知识库折叠前=' + Math.round(inner.getBoundingClientRect().height) + 'px');
-      show();
-      kb.querySelector('.sec-head').click();
-      setTimeout(function () {
-        // 不可见页面里 CSS transition 不推进，所以禁掉过渡量终值（真实浏览器里是动画到位）
-        inner.style.transition = 'none'; void inner.offsetHeight;
-        out.push('E 知识库终值=' + Math.round(inner.getBoundingClientRect().height) + 'px style.h=' + (inner.style.height || '-'));
-        inner.style.transition = '';
-        show();
-        var sc = document.querySelector('#scFold > .sc-fold-in');
-        sc.style.transition = 'none'; void sc.offsetHeight;
-        out.push('G 状态卡前=' + Math.round(sc.getBoundingClientRect().height) + 'px');
-        document.querySelector('#scToggle').click();
-        sc.style.transition = 'none'; void sc.offsetHeight;
-        out.push('H 状态卡终值=' + Math.round(sc.getBoundingClientRect().height) + 'px style.h=' + (sc.style.height || '-'));
-        sc.style.transition = '';
-        show();
-      }, 450);
-    }, 500);
-  }, 200);
-})();
-</script>
-<script>
-/* 临时诊断 v2：CSSOM 命中规则 + 折叠后真实 grid 值，稍后删除 */
-if (false) setTimeout(function () {
-  var out = [];
+/* 临时：不可见页面里 transition 不推进，这里禁掉过渡直接看收起后的静态样子 */
+setTimeout(function () {
   var sb = document.querySelector('#sidebar');
-  var logo = document.querySelector('#logoBtn');
-  out.push('vw=' + window.innerWidth + ' sheets=' + document.styleSheets.length);
-  // 找出所有命中 .sidebar 的规则
-  for (var i = 0; i < document.styleSheets.length; i++) {
-    var ss = document.styleSheets[i];
-    var rs;
-    try { rs = ss.cssRules; } catch (e) { out.push('sheet' + i + ' ERR ' + e.message); continue; }
-    for (var j = 0; j < rs.length; j++) {
-      var r = rs[j];
-      if (r.media) {
-        var cond = r.conditionText || '';
-        var inner;
-        try { inner = r.cssRules; } catch (e) { continue; }
-        for (var k = 0; k < inner.length; k++) {
-          var rr = inner[k];
-          if (rr.selectorText && rr.selectorText.indexOf('sidebar') >= 0) {
-            out.push('@' + cond + ' :: ' + rr.selectorText + ' :: w=' + (rr.style.width || '-') + ' mw=' + (rr.style.minWidth || '-'));
-          }
-        }
-      } else if (r.selectorText && r.selectorText.indexOf('sidebar') >= 0) {
-        out.push('top :: ' + r.selectorText + ' :: w=' + (r.style.width || '-') + ' mw=' + (r.style.minWidth || '-'));
-      }
-    }
-  }
-  // 直接问浏览器：这条 media 规则到底匹配不匹配
-  for (var s2 = 0; s2 < document.styleSheets.length; s2++) {
-    var rs2;
-    try { rs2 = document.styleSheets[s2].cssRules; } catch (e) { continue; }
-    for (var t2 = 0; t2 < rs2.length; t2++) {
-      var r2 = rs2[t2];
-      if (r2.media && (r2.conditionText || '').indexOf('769') >= 0) {
-        out.push('MEDIA text=' + r2.media.mediaText + ' matches=' + r2.media.matches);
-      }
-    }
-  }
-  out.length = 0; // 上面的 CSSOM 明细不再需要
-  logo.click();
-  setTimeout(function () {
-    var cs3 = getComputedStyle(sb);
-    out.push('A 侧栏宽=' + Math.round(sb.getBoundingClientRect().width) + 'px');
-    out.push('B minW=' + cs3.minWidth);
-    var kb = document.querySelector('#kbPanel');
-    var fold = document.querySelector('#kbPanel > .pnl-fold');
-    var inner2 = fold.firstElementChild;
-    out.push('C 知识库折叠前=' + Math.round(inner2.getBoundingClientRect().height) + 'px');
-    kb.querySelector('.sec-head').click();
-    setTimeout(function () {
-      out.push('D 知识库折叠后=' + Math.round(inner2.getBoundingClientRect().height) + 'px');
-      out.push('E style.height=' + (inner2.style.height || '-'));
-      out.push('F 面板class=' + (kb.classList.contains('collapsed') ? 'collapsed' : 'open'));
-      // 再展开回去，确认能恢复
-      kb.querySelector('.sec-head').click();
-      setTimeout(function () {
-        out.push('G 重新展开后=' + Math.round(inner2.getBoundingClientRect().height) + 'px');
-        out.push('H style.height=' + (inner2.style.height || '-'));
-      var d = document.createElement('div');
-      d.style.cssText = 'position:fixed;left:30px;top:90px;z-index:99999;background:#000;color:#0f0;font:27px monospace;padding:22px;white-space:pre;border:4px solid #0f0;line-height:1.6';
-      d.textContent = out.join('\n');
-      document.body.appendChild(d);
-    }, 700);
-  }, 900);
-}, 400);
+  var inner = document.querySelector('#kbPanel > .pnl-fold > .pnl-fold-in');
+  sb.style.transition = 'none';
+  inner.style.transition = 'none';
+  document.querySelector('#logoBtn').click();
+  document.querySelector('#kbPanel .sec-head').click();
+  void sb.offsetHeight;
+  // 让侧栏内部的元素也立刻到位
+  var kids = sb.querySelectorAll('*');
+  for (var i = 0; i < kids.length; i++) kids[i].style.transition = 'none';
+}, 300);
 </script>
 </html>
