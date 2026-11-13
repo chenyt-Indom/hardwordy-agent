@@ -6773,7 +6773,7 @@
       searchClear.onclick = () => { searchIn.value = ""; doSearch(); };
     }
 
-    list.onclick = async (ev) => {
+    const onAct = async (ev) => {
       const b = ev.target.closest("button[data-act]");
       if (!b) return;
       const box = b.closest(".sched-item");
