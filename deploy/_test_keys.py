@@ -54,15 +54,26 @@ try:
 
     # 5. 拒绝假密钥
     bad = "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n"
-    r2 = dk.save_ssh_key(bad)
-    print("[5] 保存假私钥 ->", r2)
-    chk("假密钥被拒绝", r2.get("ok") is False)
+    rejected = None
+    try:
+        r2 = dk.save_ssh_key(bad)
+        rejected = (r2.get("ok") is False)
+    except ValueError as e:
+        rejected = True
+        print("[5] 保存假私钥 raise ValueError ->", str(e)[:60])
+    chk("假密钥被拒绝", rejected)
     chk("拒绝后原私钥未被破坏", dk.reveal_ssh_key() == valid)
 
     # 6. 空值
-    r3 = dk.save_ssh_key("")
-    print("[6] 空私钥 ->", r3)
-    chk("空私钥被拒绝", r3.get("ok") is False)
+    rej2 = None
+    try:
+        r3 = dk.save_ssh_key("")
+        rej2 = (r3.get("ok") is False)
+        print("[6] 空私钥 ->", r3)
+    except ValueError as e:
+        rej2 = True
+        print("[6] 空私钥 raise ValueError ->", str(e)[:60])
+    chk("空私钥被拒绝", rej2)
 
     # 7. 中继密钥
     tok = dk.reveal_relay_token()
