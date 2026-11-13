@@ -11359,6 +11359,82 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
         # 收尾：把最后没推完的一小段推掉，别让界面卡在倒数第二句
         if not cancelled:
             _flush(force=True)
+
+        # ★ 2026-11-13：自开发工具执行循环（让群聊 @hd 也能真改代码）。
+        #   流程：模型吐调用 → 本地真执行 → 结果回填 → 再问一轮，
+        #   直到它不再调工具（或到轮数上限）。
+        #   第一轮是流式的（思考过程全员可见）；后续工具轮用非流式，稳定优先。
+        if tool_names and not cancelled and not err:
+            try:
+                _round_cap = max(1, min(8, int(cfg.get("max_tool_rounds") or 6)))
+                _ctx = {"images": images or [], "last_image": None, "mask": None,
+                        "shown_images": [],
+                        "ask_mode": str(cfg.get("ask_mode") or "quick"),
+                        "session": "hive:" + gid, "user_text": instruction,
+                        "image_key": "", "image_model": "", "ds_key": ""}
+                _msgs = [{"role": "user", "content": prompt}]
+                _texts = [text]
+                _rnd = 0
+                while _rnd < _round_cap:
+                    _calls, _clean = _split_text_tool_calls(
+                        _texts[-1], allowed=tool_names, bare=True)
+                    if not _calls:
+                        break
+                    _rnd += 1
+                    _texts[-1] = _clean
+                    # 让群里的人看见「它在动哪个文件」，而不是干等
+                    _hd_emit(gid, mid, "tool",
+                             task={"round": _rnd,
+                                   "tools": [str(c.get("name")) for c in _calls]})
+                    _res = []
+                    for _c in _calls:
+                        _nm = str(_c.get("name") or "")
+                        _ag = _c.get("arguments") or {}
+                        if _nm not in tool_names or not isinstance(_ag, dict):
+                            continue
+                        try:
+                            _out = tools.dispatch(_nm, _ag, [], _ctx)
+                        except Exception as _e:      # noqa: BLE001
+                            _out = "[工具执行失败] %s：%s" % (_nm, _e)
+                        logger.warning("[hive-hd] 自开发工具 %s → %s",
+                                       _nm, str(_out)[:160])
+                        _res.append("【%s 的结果】\n%s" % (_nm, str(_out)[:6000]))
+                    _msgs.append({"role": "assistant",
+                                  "content": _clean or "(调用工具)"})
+                    _msgs.append({"role": "user", "content":
+                                  "工具已执行完，结果如下：\n\n" + "\n\n".join(_res)
+                                  + "\n\n没完成就继续调工具；"
+                                    "完成了就用一两句话说明改了什么。"})
+                    try:
+                        if is_cloud:
+                            _dkey = _ds_key("")
+                            _buf = ""
+                            for _k, _v in deepseek_client.chat_stream(
+                                    _msgs, model=model, api_key=_dkey,
+                                    temperature=0.3, max_tokens=2400,
+                                    thinking=False):
+                                if ev.is_set():
+                                    cancelled = True
+                                    break
+                                if _k != "thinking" and _v:
+                                    _buf += _v
+                            _nxt = _buf
+                        else:
+                            _r2 = client.chat(_msgs, model=model, stream=False,
+                                              params={"temperature": 0.3,
+                                                      "max_tokens": 2400})
+                            _nxt = (((_r2.json() or {}).get("message") or {})
+                                    .get("content") or "")
+                    except Exception as _e:          # noqa: BLE001
+                        err = "%s: %s" % (type(_e).__name__, _e)
+                        break
+                    if cancelled or not str(_nxt or "").strip():
+                        break
+                    _texts.append(_nxt)
+                text = "\n\n".join([t for t in _texts if str(t).strip()])
+            except Exception:
+                logger.warning("@hd 自开发工具循环失败（已回答的部分照常落盘）",
+                               exc_info=True)
     except Exception as e:
         err = f"{type(e).__name__}: {e}" if not str(e) else str(e)
     finally:
