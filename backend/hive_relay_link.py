@@ -776,6 +776,18 @@ class RelayLink:
             "dropped": self.dropped,
             "uptime": round(time.time() - self.connected_at, 1) if self.connected_at else 0,
             "has_token": bool(self.token),
+            # ---------------- 直连状态 ----------------
+            "direct_ok": self.direct_ok,
+            "direct_fail": self.direct_fail,
+            "bypassed": self.bypassed,
+            "all_direct": self._all_direct(),
+            "signal_error": self.signal_error,
+            "p2p": [{"uid": k,
+                     "name": v.get("name", ""),
+                     "paddr": v.get("paddr", ""),
+                     "state": v.get("state", ""),
+                     "err": v.get("err", "")}
+                    for k, v in list(self.p2p.items())],
         }
 
 
