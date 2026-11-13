@@ -8485,10 +8485,21 @@
     el("hiveModalCopy").addEventListener("click", async () => {
       const b0 = el("hiveModalCopy");
       const src = b0.dataset.from === "input" ? el("hiveModalInput") : el("hiveModalCode");
-      const v = src.value;
+      // copyValue 优先：只复制那串字，不复制整框
+      const v = b0.dataset.value || src.value;
       try { await navigator.clipboard.writeText(v); }
       catch (e) {
-        src.select(); document.execCommand("copy");
+        // ⚠️ 用 http://192.168.x.x 这类非安全地址访问时 navigator.clipboard 是
+        // undefined，一定走这里。**绝不能** select() 可见的那个大文本框 ——
+        // 那会把「【同一 WiFi】…」整段说明一起复制走（用户实测报过）。
+        // 用隐藏 textarea 只装要复制的那串字。
+        const ta = document.createElement("textarea");
+        ta.value = v;
+        ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } catch (_) { /* 忽略 */ }
+        ta.remove();
       }
       const b = el("hiveModalCopy");
       const old = b.textContent;
