@@ -2339,13 +2339,14 @@
         const lip = $("#av2Lip");
         if (lip) {
           const opts = [];
+          // 文案要短：侧栏只有 300px，两个下拉 + 按钮并排，长文案会被截断
           if (st.wav2lip) {
-            opts.push('<option value="auto">口型：自动（真口型）</option>');
-            opts.push('<option value="wav2lip">口型：Wav2Lip 真口型</option>');
+            opts.push('<option value="auto">自动·真口型</option>');
+            opts.push('<option value="wav2lip">Wav2Lip</option>');
           } else {
-            opts.push('<option value="auto">口型：自动（形变）</option>');
+            opts.push('<option value="auto">自动·形变</option>');
           }
-          opts.push('<option value="param">口型：声学形变（不崩）</option>');
+          opts.push('<option value="param">声学形变</option>');
           lip.innerHTML = opts.join("");
           const saved = localStorage.getItem("av2_lipsync") || "auto";
           lip.value = saved;
