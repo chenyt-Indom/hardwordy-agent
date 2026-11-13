@@ -861,8 +861,8 @@ def status() -> dict:
         "max_seconds": MAX_SECONDS,
         "max_side": MAX_SIDE,
         "has_image": os.path.isfile(_img_path()),
-        "engines": (["wav2lip"] if w2l else []) + ["param"],
-        "note": ("真·口型（Wav2Lip 神经网络）" if w2l else "参数化口型（声学特征驱动）")
+        "engines": ["param"],
+        "note": "参数化口型（声学特征驱动）"
                 + ("，已启用字级对齐" if asr else "，未找到 ASR 模型，仅声学驱动"),
     }
 
