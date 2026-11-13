@@ -1176,5 +1176,16 @@
 
 
 
+<script>
+/* TEMP_PROBE_AUTO 临时探针：自动展开自动化面板，截图核对后立即删除 */
+(function () {
+  setTimeout(function () {
+    var p = document.getElementById('autoPanel');
+    if (!p) return;
+    var head = p.querySelector('.fold-head');
+    if (head && p.classList.contains('collapsed')) head.click();
+  }, 1500);
+})();
+</script>
 </body>
 </html>
