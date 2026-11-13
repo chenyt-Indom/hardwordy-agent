@@ -15,36 +15,68 @@ import time
 
 import requests
 
+# ⚠️ 2026-11-13（11.13f）：本机有 HTTP(S)_PROXY 指向本地代理。
+#   实测结论（别凭感觉选）：
+#     · api.github.com      —— 直连 0.61s、代理 0.88s，都能用；
+#     · uploads.github.com  —— **直连被本机策略掐断**（WinError 10053），
+#                              必须走代理；代理约 1.2~1.3 MB/s，长连接偶尔
+#                              ConnectionReset(10054) → 所以要带重试。
+#   设 GH_DIRECT=1 可强制直连（换网络环境时用来对比）。
+if os.environ.get("GH_DIRECT") == "1":
+    for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+               "ALL_PROXY", "all_proxy"):
+        os.environ.pop(_k, None)
+
 OWNER = "chenyt-Indom"
 REPO = "hardwordy-agent"
-TAG = "v2026.11.11b"
-NAME = "Hardwordy Agent 2026.11.11b（全量版）"
-BODY = """**全量版 · 2026.11.11b**（不含任何 API Key，请自行在程序里填）
+TAG = "v2026.11.13f"
+NAME = "Hardwordy Agent 2026.11.13f（全量版）"
+BODY = """**全量版 · 2026.11.13f**（不含任何 API Key，请自行在程序里填）
 
-## 这一版修了什么
+## 这一版新增：⏰ 自动化（定时任务）
 
-- **修掉一个致命 bug：后端报错时界面一个字都不显示**
-  根因是 `finishThinking()` 里的变量作用域错误（`ReferenceError: _prov is not defined`），
-  而它正好是错误分支的第一句 —— 一崩就把「显示错误原因」那行整个跳过，
-  界面上只剩一个「…」。顺带修好了「助手自己的回答没进历史 → 模型老是失忆」。
-- **大幅提速：8.0 秒 → 2.4 秒**
-  以前带图的消息会被 `str()` 成 Python repr 写进会话，整张图的 base64 以纯文本
-  永久留在历史里，之后每轮都当文字重发（实测一个会话里 3 条消息占了 18 万 token）。
-  现在落盘只保留文字，图片折成一句说明，并带自愈能力修历史脏数据。
-- **修掉流式错误被吞**：`error` 事件现在一定排在 `__end` 之前。
-- **自迭代片段锁加固**：同名锁定区现在逐处校验，删块/改块都会被拒。
+- **定时 / 长期任务**：支持「每 N 分钟」和「每天 HH:MM」两种周期。
+  时间用 24 档小时 + 60 档分钟两个下拉拼出来，不用手敲格式
+  （敲错就永远不触发，这种问题最难查）。
+- **结果落回会话**：第二天打开应用，在对应会话里就能看到
+  「【定时任务】昨晚跑了什么」；日志另存一份便于排查。
+- **固定走本机 Ollama**：半夜跑任务时没人给你送云端 Key
+  （Key 只存在浏览器本地，服务端从不存），所以这一路只认本地模型；
+  面板里可以指定用哪个本地模型。
+- **无人值守不做交互**：需要提问 / 确认的地方直接跳过或按通过处理 ——
+  弹一个没人点的框等于永久卡死，比「没问」更糟。
+- 侧栏与弹窗两个入口共用同一套卡片与动作处理；面板首次默认收起；
+  结果窗口里 markdown 正常渲染（标题 / 列表 / 代码块不再是一坨纯文本）。
+
+## 上一版（11.13e）还包含
+
+- 启动器与重启更稳：端口检测 bind + connect_ex 双路、校验 8000 应答的是自己、
+  bind 前确认端口空闲（避开 10048）、重启前等旧窗口关闭；
+  监听地址改 0.0.0.0，同一 WiFi 下手机可以直接打开界面。
+- 群聊 @hd 接入自开发工具循环；连接码多源探测公网 IP + 缓存 + lan_addr；
+  未知帧安全忽略不再崩连接。
+- 界面大改：侧栏去掉灰框改极淡底、输入区改带边框卡片、小屏收紧留白；
+  撤掉语音输入入口。
+
+## 更早的修修
+
+11.13d 群聊附件整套（单个坏附件不再阻断后续、纯附件消息可发、
+图片按真实 mime、历史附件进提示词、断线附件入补发队列）；
+11.13c 群聊补发重做 + P2P 双向连接去重；
+11.13b 知识库语义检索 + 记忆向量索引；
+11.13a TTS 与重启修复。
 
 ## 下载
 
 GitHub 单文件上限 2 GB，所以切两卷，下载后合并：
 
 ```cmd
-copy /b HardwordyAgent-Full-2026.11.11b.zip.part1 + HardwordyAgent-Full-2026.11.11b.zip.part2 HardwordyAgent-Full-2026.11.11b.zip
+copy /b HardwordyAgent-Full-2026.11.13f.zip.part1 + HardwordyAgent-Full-2026.11.13f.zip.part2 HardwordyAgent-Full-2026.11.13f.zip
 ```
 
 校验（合并后应等于）：
 ```
-aeabd29b9dff94759d6d677361bce9fca8b352ae72b059e8016c1d8acb618ed8
+fcc57b363628c6bb23c3feedc1ee17f6836491c44785e646e3a9db6ecba641e9
 ```
 
 解压 → 双击 `一键启动.bat`；顶栏 🔑 填自己的 DeepSeek Key。
@@ -92,45 +124,77 @@ def existing_asset(tok, rid, name):
     return None
 
 
-def upload(tok, rid, path, asset_name=None):
+def upload(tok, rid, path, asset_name=None, tries=6):
+    """分块上传 release asset，失败自动重试。
+
+    ⚠️ 2026-11-13（11.13f）：代理传 1.9GB 时会在任意进度被 ConnectionReset
+    (10054) 掐断。GitHub 的 asset 上传**不支持 Range 续传**，重试只能从头来，
+    所以这里每次失败先清掉残留的半截 asset（否则下一次会 422 已存在），
+    再退避重试。实测 1.2~1.3 MB/s，1946MB 约 25 分钟。
+    """
     name = asset_name or os.path.basename(path)
     size = os.path.getsize(path)
-    old = existing_asset(tok, rid, name)
-    if old:
-        print("已存在同名 asset（%d 字节），先删掉：" % old["size"])
-        api(tok, "DELETE", f"https://api.github.com/repos/{OWNER}/{REPO}/releases/assets/{old['id']}")
+
+    def drop_stale():
+        old = existing_asset(tok, rid, name)
+        if old:
+            api(tok, "DELETE",
+                f"https://api.github.com/repos/{OWNER}/{REPO}/releases/assets/{old['id']}")
+            return old["id"]
+        return None
+
+    if drop_stale():
+        print("已存在同名 asset，已删除（准备重传）")
 
     url = ("https://uploads.github.com/repos/%s/%s/releases/%d/assets?name=%s"
            % (OWNER, REPO, rid, requests.utils.quote(name)))
-    f = open(path, "rb")
-    t0 = time.time()
-    stop = threading.Event()
 
-    def beat():
-        while not stop.wait(10):
-            sent = f.tell()
-            print("   %.1f%%  %.0f/%.0f MB  %.0f KB/s"
-                  % (sent * 100.0 / size, sent / 1048576, size / 1048576,
-                     sent / max(time.time() - t0, 1) / 1024), flush=True)
+    for attempt in range(1, tries + 1):
+        f = open(path, "rb")
+        t0 = time.time()
+        stop = threading.Event()
 
-    th = threading.Thread(target=beat, daemon=True)
-    th.start()
-    try:
-        r = requests.post(url, headers={
-            "Authorization": "Bearer " + tok,
-            "Content-Type": "application/octet-stream",
-            "Accept": "application/vnd.github+json",
-        }, data=f, timeout=(30, 7200))
-    finally:
-        stop.set()
-        f.close()
-    dt = max(time.time() - t0, 0.001)
-    if r.status_code in (200, 201):
-        a = r.json()
-        print("完成 %s  %.2f MB  用时 %.1f 分钟  平均 %.0f KB/s"
-              % (a["name"], a["size"] / 1048576, dt / 60, a["size"] / dt / 1024))
-        return True
-    print("失败: HTTP %s  %s" % (r.status_code, r.text[:300]))
+        def beat():
+            while not stop.wait(15):
+                sent = f.tell()
+                print("   第%d次 %.1f%%  %.0f/%.0f MB  %.0f KB/s"
+                      % (attempt, sent * 100.0 / size, sent / 1048576,
+                         size / 1048576, sent / max(time.time() - t0, 1) / 1024),
+                      flush=True)
+
+        th = threading.Thread(target=beat, daemon=True)
+        th.start()
+        r = None
+        try:
+            r = requests.post(url, headers={
+                "Authorization": "Bearer " + tok,
+                "Content-Type": "application/octet-stream",
+                "Accept": "application/vnd.github+json",
+            }, data=f, timeout=(30, 7200))
+        except Exception as e:
+            print("   第%d次中断：%s %s" % (attempt, type(e).__name__, str(e)[:150]))
+        finally:
+            stop.set()
+            try:
+                f.close()
+            except Exception:
+                pass
+
+        if r is not None and r.status_code in (200, 201):
+            a = r.json()
+            dt = max(time.time() - t0, 0.001)
+            print("完成 %s  %.2f MB  用时 %.1f 分钟  平均 %.0f KB/s"
+                  % (a["name"], a["size"] / 1048576, dt / 60, a["size"] / dt / 1024))
+            return True
+        if r is not None:
+            print("   第%d次 HTTP %s  %s" % (attempt, r.status_code, r.text[:200]))
+
+        drop_stale()
+        if attempt < tries:
+            wait = min(20 * attempt, 90)
+            print("   %d 秒后重试（%d/%d）" % (wait, attempt + 1, tries), flush=True)
+            time.sleep(wait)
+    print("已重试 %d 次仍失败" % tries)
     return False
 
 
