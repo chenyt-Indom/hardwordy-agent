@@ -320,11 +320,27 @@
     if (b.parentNode !== w) w.appendChild(b);
     return b;
   }
-  // 单人模式的「归位」：只把这一张放回原位，全局仍是跟随（下一轮新卡片照旧浮起）
+  // ★ 2026-11-13 用户报 bug：点【归位】后「跟随视角」开关看着没变化，要连点两次才恢复跟随。
+  //   原因：归位只把这张卡挪回原位，全局 thinkFollow 仍是 true、按钮仍显示「🧠 跟随视角」；
+  //   用户点一次其实是把它关掉（卡片本来就在原位，界面毫无变化），必须点第二次才真的恢复。
+  //   修法：归位后如果已经没有任何卡片在浮动，就把全局开关同步关掉 ——
+  //   让开关状态永远等于「实际有没有卡片在跟随」，用户点一次就能恢复。
+  function syncFollowIdle() {
+    if (!thinkFollow) return;
+    const anyFloating = Array.from(_thinkBoxes).some(
+      (n) => n.isConnected && n.classList.contains("think-dock") && !n._noFollow
+    );
+    if (anyFloating) return;   // 还有卡片跟着 → 跟随仍成立，开关保持不动
+    thinkFollow = false;
+    try { localStorage.setItem("think_follow", "0"); } catch (e) { /* 隐私模式 */ }
+    syncThinkBtn();
+  }
+  // 单人模式的「归位」：只把这一张放回原位；没有别的卡在跟随时，全局开关一并关掉
   function sendThinkHome(w) {
     if (!w || !w.isConnected) return;
     w._noFollow = true;
     undockOne(w, true);
+    syncFollowIdle();
     if (typeof showToast === "function") showToast("思考卡片已归位", "");
   }
   function clearThinkDock() {
