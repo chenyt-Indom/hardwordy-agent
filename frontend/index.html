@@ -1126,50 +1126,6 @@
     })();
   </script>
 
-  <script>
-    /* TEMP-VERIFY-COPY-DELETED */
-      var modal = document.getElementById("hiveModal");
-      var inp = document.getElementById("hiveModalInput");
-      var code = document.getElementById("hiveModalCode");
-      var cp = document.getElementById("hiveModalCopy");
-      inp.value = "【同一 WiFi】对方只输密码就行，不用填地址\n    本机地址   10.34.95.82:8899\n\n【不同网络】把下面这行发给他，填进「对方地址」\n    219.136.70.5:8899\n    还需要在路由器上把 8899 端口映射到本机";
-      code.value = "";
-      modal.hidden = false;
-      cp.hidden = false;
-      cp.dataset.from = "input";
-      cp.dataset.value = "219.136.70.5:8899";
-      // 模拟 http://192.168.x.x：非安全上下文没有 navigator.clipboard
-      try {
-        Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
-      } catch (e) { /* 忽略 */ }
-      var got = "<没调用>";
-      document.execCommand = function () {
-        var a = document.activeElement;
-        got = a && a.value !== undefined ? a.value : (a ? a.textContent : "");
-        return true;
-      };
-      cp.click();
-      setTimeout(function () {
-        // 再测一次：没有 copyValue 时（群记忆等旧弹窗）应仍然复制整框
-        var got2 = "<没调用>";
-        document.execCommand = function () {
-          var a = document.activeElement;
-          got2 = a && a.value !== undefined ? a.value : (a ? a.textContent : "");
-          return true;
-        };
-        delete cp.dataset.value;
-        cp.click();
-        setTimeout(function () {
-          var box = document.createElement("pre");
-          box.style.cssText = "position:fixed;left:8px;top:8px;z-index:999999;background:#000;color:#0f0;padding:10px;font-size:13px;white-space:pre-wrap;max-width:95vw";
-          box.textContent = "A_CLIPBOARD=" + JSON.stringify(got) + "\nA_LEN=" + got.length
-            + "\nBTN=" + cp.textContent
-            + "\nB_旧行为_长度=" + got2.length + "\nB_前20=" + JSON.stringify(got2.slice(0, 20));
-          document.body.appendChild(box);
-        }, 250);
-      }, 250);
-    }, 1200);
-  </script>
 
 </body>
 </html>
