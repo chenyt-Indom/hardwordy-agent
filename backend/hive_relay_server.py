@@ -375,6 +375,25 @@ class RelayServer:
     # -------------------------------------------------- 单连接
 
     def _handle(self, sock: socket.socket, addr) -> None:
+        # 裸 TCP（hive4://）和 WebSocket（ws://，走 nginx 反代）共用同一个端口。
+        # 用 MSG_PEEK 偷看首字节判断：HTTP 请求以 "GET " 开头，我们的二进制
+        # 协议首字节是长度高位，不会是 'G'。偷看不会消费数据，裸 TCP 那条路
+        # 一个字节都不受影响。
+        try:
+            first = sock.recv(1, socket.MSG_PEEK)
+        except Exception:
+            first = b""
+        if first[:1] == b"G":
+            rest = ws_min.handshake_server(sock)
+            if rest is None:
+                log.debug("WS 握手失败 %s", addr)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                return
+            sock = ws_min.WSSock(sock, rest=rest, mask_out=False)
+            self.stats["ws"] = self.stats.get("ws", 0) + 1
         conn = Conn(sock, addr, self)
         self.stats["conns"] += 1
         try:
