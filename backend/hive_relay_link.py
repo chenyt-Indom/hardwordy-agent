@@ -320,6 +320,9 @@ class RelayLink:
         self.url = url.strip()
         self.host = p["host"]
         self.port = p["port"]
+        self.ws = bool(p.get("ws"))
+        self.tls = bool(p.get("tls"))
+        self.ws_path = str(p.get("path") or "/hive-relay")
         self.gid = gid
         self.token = token or ""
         self.last_seq = int(self._seqs.get(gid) or 0)
