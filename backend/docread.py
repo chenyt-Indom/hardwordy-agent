@@ -281,6 +281,8 @@ def read_bytes(raw: bytes, filename: str = "") -> dict:
             text, warn = _read_pdf(raw)
             if not text.strip():
                 return {"ok": False, "error": warn or "PDF 里没有可读的文字"}
+            # PDF 特有的两个坑：康熙部首、排版硬换行断词
+            text = _reflow(_normalize_cjk(text))
         elif kind == "doc":
             try:
                 text, warn = _read_doc(raw)
