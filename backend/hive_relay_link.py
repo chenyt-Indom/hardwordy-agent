@@ -173,6 +173,20 @@ def probe(url: str, token: str = "", timeout: float = 4.0) -> Dict[str, Any]:
                 "host": p["host"], "port": p["port"]}
     try:
         s.settimeout(timeout)
+        if p.get("ws"):
+            if p.get("tls"):
+                import ssl
+                s = ssl.create_default_context().wrap_socket(
+                    s, server_hostname=p["host"])
+                s.settimeout(timeout)
+            rest = ws_min.handshake_client(
+                s, "%s:%s" % (p["host"], p["port"]),
+                p.get("path") or "/hive-relay")
+            if rest is None:
+                return {"ok": False,
+                        "error": "WebSocket 握手失败（nginx 的 location 没配好？）",
+                        "host": p["host"], "port": p["port"]}
+            s = ws_min.WSSock(s, rest=rest, mask_out=True)
         got = _recv_pkt(s)
         if not got:
             return {"ok": False, "error": "连上了但没收到握手包"}
