@@ -546,10 +546,13 @@ def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS) -> list:
     #   0.59→0.35→0.67 的 5Hz 锯齿，看起来就是在抽搐。
     # 现版：能量^2.1 → 预平滑 → 非对称包络 → 软门 → 音节调制 → 尾部平滑
     #   实测 帧间|Δ| 0.065（-61%）、反转 19%（-50%）、二阶差分 0.055（-78%）
-    x = np.power(e, 2.10)
+    x = np.power(e, 2.70)
     x = _one_pole(x, 45, fps)
-    env = _asym_follow(x, att_ms=70, rel_ms=130, fps=fps)
-    gate = _smoothstep(e / 0.06)        # 软门：0~0.06 之间平滑过渡，不再硬切
+    env = _asym_follow(x, att_ms=70, rel_ms=170, fps=fps)
+    # ⚠ 门控必须用「已经平滑过的 env」，不能用瞬时能量 e：
+    #   实测音频里存在单帧掉零（e: 0.364 → 0.000 → 0.000），
+    #   拿 e 做门控会让 openness 一帧内从 0.82 塌到 0.41，就是那下抽搐。
+    gate = _smoothstep(env / 0.10)
     openness = env * (0.05 + 0.95 * gate)
 
     # 音节调制：按平均字长做 ±10% 的余弦起伏，给一点说话节奏。
