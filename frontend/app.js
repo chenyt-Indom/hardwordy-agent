@@ -10078,38 +10078,57 @@
       if (curGid) openGroup(curGid);
     });
 
-    // 2026-11-13：这个按钮原来填「云端中继地址」，现在改成「连接码」。
-    // 同一个 WiFi 下压根用不上它（UDP 广播自动发现），只有跨网络才需要：
-    // 把自己的码发给对方，他粘进来就连上，数据不经过任何服务器。
+    // 2026-11-13：这个按钮原来填「云端中继地址」，后来叫「连接码」，
+    // 现在改成「我的地址」—— 群主最常做的事就是把自己的地址发给别人。
+    // 同一个 WiFi 下压根用不上地址（UDP 广播自动发现），只有跨网络才需要。
     el("hiveRelayBtn").addEventListener("click", async () => {
       if (!curGid) { alert("先在左边选一个群"); return; }
-      let mine = "";
-      let mesh = {};
+      let d = {};
       try {
-        const d = await api("/api/hive/mesh/code?gid=" + encodeURIComponent(curGid));
-        mesh = d || {};
-        mine = d.wan_code || d.lan_code || "";
-      } catch (e) { /* 忽略 */ }
-      const lan = mesh.lan_code || "";
-      const wan = mesh.wan_code || "";
-      const hint = wan
-        ? "把这行发给对方（微信/QQ 都行），他粘进同一个框里点确定就连上。"
-          + " 同一个 WiFi 下不用发 —— 会自动发现。"
-        : "没探到公网地址（可能被防火墙挡了）。局域网内用：" + (lan || "?")
-          + "；跨网络需要在路由器上做端口映射。";
+        d = (await api("/api/hive/mesh/code?gid=" + encodeURIComponent(curGid))) || {};
+      } catch (e) { d = { ok: false, error: e.message }; }
+      if (!d.ok) {
+        openModal({
+          title: "📡 我的地址",
+          hint: "拿不到地址：" + (d.error || "未知原因")
+            + "\n\n点一下左边那个群的名字进入群聊，网络会自动启动，再回来看这里。",
+          noOk: true,
+        });
+        return;
+      }
+      const lan = d.lan_addr || (d.lan_ip ? d.lan_ip + ":" + d.port : "");
+      const wan = d.wan_addr || (d.public_ip ? d.public_ip + ":" + d.port : "");
+      const L = [];
+      L.push("【同一 WiFi】对方只输密码就行，不用填地址");
+      if (lan) L.push("    本机地址   " + lan);
+      L.push("");
+      if (wan) {
+        L.push("【不同网络】把下面这行发给他，填进「对方地址」");
+        L.push("    " + wan);
+        L.push("    还需要在路由器上把 " + d.port + " 端口映射到本机");
+      } else {
+        L.push("【不同网络】没探到公网地址（可能被防火墙挡了）");
+        L.push("    需要在路由器上做端口映射，或改用 Tailscale 这类组网工具");
+      }
       openModal({
-        title: "🔗 连接码",
-        hint: hint,
-        input: mine,
-        placeholder: "hive3://192.168.1.5:8899",
-        onOk: async (v) => {
-          const c = (v || "").trim();
-          // 没改动 = 只是看了看自己的码，不算操作
-          if (!c || c === mine || c === lan || c === wan) return true;
+        title: "📡 我的地址",
+        hint: "这是「你」这台机器的地址，点下面的「复制地址」就能发给别人。\n"
+          + "消息只在成员机器之间直连，不经过任何服务器。",
+        input: L.join("\n"),
+        readonly: true,
+        copyInput: true,
+        copyLabel: "📋 复制地址",
+        extra: "",
+        extraPlaceholder: "（可选）要主动连别人？把他的地址粘到这里，如 1.2.3.4:8899",
+        okText: "连接",
+        onOk: async (v, ex) => {
+          const c = (ex || "").trim();
+          // 没填对方地址 = 只是看看自己的地址，直接关掉
+          if (!c) return true;
           try {
-            const d = await api("/api/hive/mesh/connect", { gid: curGid, code: c });
-            if (!d.ok) {
-              alert("连不上：" + ((d.result || {}).error || d.error || "未知原因"));
+            const r = await api("/api/hive/mesh/connect", { gid: curGid, code: c });
+            if (!r.ok) {
+              alert("连不上：" + ((r.result || {}).error || r.error || "未知原因"));
               return false;
             }
           } catch (e) { alert("连接失败：" + e.message); return false; }
