@@ -540,6 +540,118 @@ class RelayLink:
         self.reconnects += 1 if self.reconnects else 0
         return True
 
+    # -------------------------------------------------- 信令 → 打洞
+
+    def _on_signal(self, c: Dict[str, Any]) -> None:
+        """服务器转来「某人的打洞地址」→ 后台去连他，连上就绕开服务器。"""
+        op = c.get("op")
+        if op == "signal_gone":
+            uid = str(c.get("uid") or "")
+            if uid:
+                with self._p2p_lock:
+                    self.p2p.pop(uid, None)
+                self._refresh_direct()
+            return
+        if op == "signal_list":
+            peers = c.get("peers") or []
+        else:
+            peers = [{"uid": c.get("uid"), "name": c.get("name"),
+                      "paddr": c.get("paddr")}]
+        for p in peers:
+            if not isinstance(p, dict):
+                continue
+            uid = str(p.get("uid") or "")
+            paddr = str(p.get("paddr") or "")
+            if not uid or ":" not in paddr:
+                continue
+            with self._p2p_lock:
+                cur = self.p2p.get(uid) or {}
+                if cur.get("state") == "ok":
+                    continue        # 已经连上了，别重连
+                if (cur.get("state") == "fail"
+                        and time.time() - float(cur.get("ts") or 0) < PUNCH_RETRY_AFTER):
+                    continue        # 刚失败过，等一会儿再试
+                if uid in self._punching:
+                    continue        # 正在连
+                self._punching.add(uid)
+                self.p2p[uid] = {"name": str(p.get("name") or ""),
+                                 "paddr": paddr, "state": "connecting",
+                                 "err": "", "ts": time.time()}
+            threading.Thread(target=self._try_punch, args=(uid, paddr),
+                             daemon=True).start()
+
+    def _try_punch(self, uid: str, paddr: str) -> None:
+        """后台对一个成员打洞。成功 → mesh 里多一条直连 Peer。
+
+        connect_punch() 打通后会把可靠 UDP 通道当普通 socket 交给 _serve，
+        所以之后的文字、附件、流式回答全部走这条直连，**不经过服务器**。
+        """
+        err = ""
+        try:
+            host, _, port_s = paddr.rpartition(":")
+            port = int(port_s)
+            node = MESH.node()
+            # 10 台以上的群会同时冒出几十次打洞，NAT 会扛不住 —— 限并发。
+            if not self._punch_sem.acquire(timeout=PUNCH_TIMEOUT * 2):
+                err = "排队超时（同时打洞的人太多，稍后自动重试）"
+            else:
+                try:
+                    r = node.connect_punch(host, port, self.gid,
+                                           timeout=PUNCH_TIMEOUT)
+                finally:
+                    self._punch_sem.release()
+                if not r.get("ok"):
+                    err = str(r.get("error") or "打洞失败")
+        except Exception as e:  # noqa: BLE001
+            err = "%s: %s" % (type(e).__name__, e)
+        with self._p2p_lock:
+            self._punching.discard(uid)
+            cur = self.p2p.get(uid) or {}
+            cur.update({"state": "fail" if err else "ok",
+                        "err": err, "ts": time.time()})
+            self.p2p[uid] = cur
+        self._refresh_direct()
+
+    def _refresh_direct(self) -> None:
+        with self._p2p_lock:
+            ok = sum(1 for v in self.p2p.values() if v.get("state") == "ok")
+            bad = sum(1 for v in self.p2p.values() if v.get("state") == "fail")
+        self.direct_ok = ok
+        self.direct_fail = bad
+
+    def _all_direct(self) -> bool:
+        """房间里所有人都已直连 → 这时消息完全不经服务器。
+
+        只要还有一个人没连上，就继续走服务器兜底，否则那个人会收不到消息。
+        """
+        with self._p2p_lock:
+            if not self.p2p:
+                return False
+            return all(v.get("state") == "ok" for v in self.p2p.values())
+
+    def _pub_signal(self) -> None:
+        """把自己的打洞地址报给服务器。服务器只负责转告，不碰消息内容。"""
+        try:
+            node = MESH.node()
+            a = node.punch_addr() if node.punch else {"ok": False}
+        except Exception as e:  # noqa: BLE001
+            a = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        if not a.get("ok"):
+            self.error = ("拿不到公网映射地址（%s）—— 可能是公共 STUN 被挡，"
+                          "不影响服务器转发" % (a.get("error") or "无响应"))
+            return
+        paddr = "%s:%s" % (a.get("ip"), a.get("port"))
+        sock = self.sock
+        if sock is None:
+            return
+        node = MESH.node()
+        with self._send_lock:
+            _send_pkt(sock, K_CTRL, json.dumps({
+                "op": "signal_pub", "uid": node.uid,
+                "name": node.uname, "paddr": paddr,
+            }, ensure_ascii=False).encode("utf-8"))
+        self.signal_pub_at = time.time()
+
     def _read_loop(self) -> None:
         sock = self.sock
         if sock is None:
