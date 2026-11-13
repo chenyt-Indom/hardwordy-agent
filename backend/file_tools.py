@@ -179,7 +179,7 @@ def resolve_path(path: str, roots=None, max_depth: int = SEARCH_MAX_DEPTH,
     timed_out = False
 
     for root in search_roots:
-        if timed_out or len(hits) >= SEARCH_MAX_HITS * 3:
+        if timed_out or len(hits) >= SEARCH_COLLECT_CAP:
             break
         if not os.path.isdir(root):
             continue
