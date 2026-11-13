@@ -4016,7 +4016,7 @@ def _do_avatar_speak(arguments, ui_events, context):
     """数字人说话视频：图 + 文字 → mp4。
 
     ⚠️ 渲染 8~15 秒，先发 status 别让界面看着像卡死。
-    ⚠️ 返回里必须写清"参数化口型"这个局限，别让用户以为这是 Wav2Lip。
+    ⚠️ 返回里必须写清"参数化口型"这个局限。
     """
     from . import avatar2
 
