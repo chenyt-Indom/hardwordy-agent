@@ -688,41 +688,14 @@ def _frame(prep: dict, openness: float, width: float):
 
 
 def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
-           fps: int = FPS, on_progress=None, engine: str = "param",
-           boost: float = 1.0, expr: dict = None) -> dict:
+           fps: int = FPS, on_progress=None, expr: dict = None) -> dict:
     """逐帧渲染 + ffmpeg 合成。返回 {ok, frames, duration, path}
 
-    engine="wav2lip" → 神经网络真口型（Wav2Lip ONNX）
-    engine="param"   → 本项目的声学特征形变（不崩但幅度小）
-    boost            → 口型幅度倍率，只对 wav2lip 生效（1.0 原样）
-    expr             → 表情层配置（avatar2_expr.resolve 的返回值），None 则不做
+    expr → 表情层配置（avatar2_expr.resolve 的返回值），None 则不做
     """
     exe = ffmpeg()
     if not exe:
         return {"ok": False, "error": "找不到 ffmpeg"}
-    # ---- 真口型引擎：交给 wav2lip_onnx，失败则回退到形变
-    if (engine or "").lower() == "wav2lip":
-        try:
-            from . import wav2lip_onnx as _w2l
-            r = _w2l.render(img_path, wav_path, out_mp4, fps=fps,
-                            on_progress=on_progress, boost=boost, expr=expr)
-            if r.get("ok"):
-                return r
-            fb = r.get("error") or "未知原因"
-            # 真口型失败不直接报死，退回形变并说明
-            r2 = render(img_path, wav_path, out_mp4, words=words, fps=fps,
-                        on_progress=on_progress, engine="param", expr=expr)
-            if r2.get("ok"):
-                r2["fallback_from"] = "wav2lip"
-                r2["fallback_reason"] = fb
-            return r2
-        except Exception as e:                          # noqa: BLE001
-            r2 = render(img_path, wav_path, out_mp4, words=words, fps=fps,
-                        on_progress=on_progress, engine="param", expr=expr)
-            if r2.get("ok"):
-                r2["fallback_from"] = "wav2lip"
-                r2["fallback_reason"] = "%s: %s" % (type(e).__name__, e)
-            return r2
     if not os.path.isfile(img_path):
         return {"ok": False, "error": "还没有形象图"}
 
