@@ -260,9 +260,23 @@ def save_bytes(raw: bytes, source: str = "") -> dict:
         im.save(_img_path(), "PNG")
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "保存形象失败：%s: %s" % (type(e).__name__, e)}
-    _write_json(_META, {"source": source or "",
-                        "updated": time.strftime("%Y-%m-%d %H:%M:%S")})
-    return info()
+    # 存完立刻自动定位嘴：上传照片和 AI 头像的构图差别极大，靠默认值一定偏，
+    # 检测到就覆盖 mouth.json；检测不到保留默认值，前端可手动拖动校准。
+    auto = detect_mouth(_img_path())
+    meta = {"source": source or "",
+            "updated": time.strftime("%Y-%m-%d %H:%M:%S")}
+    if auto.get("ok"):
+        set_mouth(auto["mouth"])
+        meta["auto_mouth"] = auto["mouth"]
+        meta["face_score"] = auto.get("score")
+    else:
+        meta["auto_mouth"] = None
+        meta["auto_error"] = auto.get("error") or ""
+    _write_json(_META, meta)
+    out = info()
+    out["auto_mouth"] = auto if auto.get("ok") else {
+        "ok": False, "error": auto.get("error") or "未检测到人脸"}
+    return out
 
 
 def save_from_path(src: str, source: str = "") -> dict:
