@@ -219,13 +219,18 @@ class WSSock:
     def _recvn(self, n: int):
         buf = b""
         while len(buf) < n:
+            if self._raw:                       # 先吃掉握手残留的字节
+                take = self._raw[:n - len(buf)]
+                del self._raw[:len(take)]
+                buf += bytes(take)
+                continue
             try:
-                c = self._s.recv(n - len(buf))
+                c = self._s.recv(65536)         # 一次多读点，减少系统调用
             except Exception:
                 return None
             if not c:
                 return None
-            buf += c
+            self._raw += c
         return buf
 
     def _fill(self) -> bool:
