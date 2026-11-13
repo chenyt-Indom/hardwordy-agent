@@ -723,8 +723,15 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     # 等于每帧都重新采样一次，本身就是抖动源。改成调制 sigma 就完全不用重采样。
     sig_h = 0.80 * mw * 0.5 * (1.0 + 0.18 * (wd - 1.0))
     wh = np.exp(-((xx - (cx - x0)) / max(sig_h, 1.0)) ** 2)
-    k = 1.0 - 0.72 * op * wv * wh
-    k = np.maximum(k, 0.40)      # 限制最大拉伸倍数（约 2.5x），再大就拉丝
+    # 幅度：amp 只做「温和」的强度调节，主体增益在 _build_params 的曲线上。
+    # 为什么不大幅调这里 —— 实测把系数拉到 0.72*1.4 + kmin 0.16 时，
+    # 唇缝能到 41px，但视觉复核判定「嘴角拉扯、上唇边缘平、下巴僵硬」。
+    # 所以这里只给 0.35 的斜率，kmin 下限停在 0.24（约 4.2x），再狠就拉丝。
+    _a = float(np.clip(amp, 0.60, 2.00))
+    coef = 0.72 * (1.0 + 0.35 * (_a - 1.0))
+    kmin = max(0.24, 0.40 - 0.16 * (_a - 1.0))
+    k = 1.0 - coef * op * wv * wh
+    k = np.maximum(k, kmin)
     src = np.clip(cyi + d * k, 0, ph - 1)
 
     i0 = np.floor(src).astype(np.int32)
