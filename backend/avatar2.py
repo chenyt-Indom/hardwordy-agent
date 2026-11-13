@@ -600,33 +600,45 @@ def _prep(img_path: str):
 def _frame(prep: dict, openness: float, width: float):
     """按口型参数生成一帧。
 
-    形变方式：把嘴部 patch 竖直方向按 openness 拉伸、水平按 width 拉伸，
-    以嘴部中心对齐贴回。openness 越大嘴越"张"，width 越大唇形越"扁"。
+    做法：先在唇缝位置画一个随张口度变大的"口腔"（暗色 + 上下牙），
+    再把上唇片往上、下唇片往下各推开一段 —— 这才像张嘴。
+    早期版本是把整块嘴部区域纵向 resize，实测在写实人脸上会变成
+    "橡皮泥"（嘴被拉长、下巴断层、没有牙齿），所以换掉了。
     """
-    from PIL import Image
-    base, patch, mask = prep["base"], prep["patch"], prep["mask"]
-    pw, ph = prep["size"]
-    W, H = prep["wh"]
-    cx, cy = prep["geom"][0], prep["geom"][1]
-    bx, by = prep["box"]
-
-    # 竖直：闭嘴时略微压扁（0.72），大张时拉到 1.55
-    sy = 0.72 + 1.30 * float(np.clip(openness, 0.0, 1.0)) ** 0.85
-    sx = float(np.clip(width, 0.55, 1.45))
-    # 张嘴时嘴唇会变窄一点，这是真实人脸的行为
-    sx *= 1.0 - 0.16 * float(np.clip(openness, 0.0, 1.0))
-
-    nw = max(2, int(round(pw * sx)))
-    nh = max(2, int(round(ph * sy)))
-    p2 = patch.resize((nw, nh), Image.BICUBIC)
-    m2 = mask.resize((nw, nh), Image.BICUBIC)
-
-    # 以嘴部中心为锚点对齐（不是 patch 中心），这样张嘴是"上下拉开"而不是整体位移
-    nbx = int(round(cx - (cx - bx) * sx))
-    nby = int(round(cy - (cy - by) * sy))
-
+    from PIL import ImageDraw
+    base = prep["base"]
     out = base.copy()
-    out.paste(p2, (nbx, nby), m2)
+    cx, cy, mw, mh = prep["geom"]
+    x0, ytop, x1, ybot, cyi = prep["box"]
+
+    op = float(np.clip(openness, 0.0, 1.0))
+    wd = float(np.clip(width, 0.70, 1.35))
+
+    # ---- 口腔：暗色底 + 上下排牙 ----
+    if op > 0.05:
+        ow = max(3.0, mw * 1.05 * wd)
+        oh = max(2.0, mh * (0.10 + op * 1.05))
+        d = ImageDraw.Draw(out)
+        d.ellipse([cx - ow / 2, cy - oh / 2, cx + ow / 2, cy + oh / 2],
+                  fill=(44, 19, 21))
+        # 上排牙：一条白，随张口度变高
+        th = max(1.0, oh * 0.30)
+        d.rounded_rectangle(
+            [cx - ow * 0.40, cy - oh / 2 + oh * 0.05,
+             cx + ow * 0.40, cy - oh / 2 + oh * 0.05 + th],
+            radius=max(1.0, th * 0.35), fill=(236, 233, 227))
+        # 下排牙：小一点、暗一点，别抢视线
+        bh = max(0.8, oh * 0.16)
+        d.rounded_rectangle(
+            [cx - ow * 0.36, cy + oh / 2 - bh - oh * 0.04,
+             cx + ow * 0.36, cy + oh / 2 - oh * 0.04],
+            radius=max(1.0, bh * 0.35), fill=(212, 206, 198))
+
+    # ---- 上下唇推开 ----
+    dy = op * mh * 0.46
+    if dy >= 0.5:
+        out.paste(prep["up"], (x0, int(round(ytop - dy))), prep["mu"])
+        out.paste(prep["lo"], (x0, int(round(cyi + dy))), prep["ml"])
     return out
 
 
