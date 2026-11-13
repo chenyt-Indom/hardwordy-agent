@@ -8,7 +8,7 @@ except Exception:
     pass
 
 URL = "http://127.0.0.1:8010"
-PORT = 9334
+PORT = 9341
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EDGES = [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
          r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"]
