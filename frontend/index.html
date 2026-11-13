@@ -56,10 +56,17 @@
       <button type="button" class="mode-tab" data-mode="hive">👥 群聊</button>
     </div>
 
+    <!-- 2026-11-13：模型状态卡改成可折叠 —— 标题行（圆点 + 模型名）常驻，
+         明细（说明 / 模型信息 / 下载 / 自检）收进 sc-fold，点标题行展开收起。 -->
     <div class="status-card" id="statusCard">
-      <span class="dot" id="statusDot"></span>
-      <div>
+      <div class="sc-head" id="scToggle" role="button" tabindex="0" aria-expanded="true"
+           title="点一下收起 / 展开模型状态">
+        <span class="dot" id="statusDot"></span>
         <b id="statusTitle">检测中…</b>
+        <span class="sc-caret">▾</span>
+      </div>
+      <div class="sc-fold" id="scFold">
+        <div class="sc-fold-in">
         <p id="statusDetail">正在连接本地模型</p>
         <!-- 实际在用的模型：**从 Ollama 现读**（名 / 参数量 / 量化 / 体积），
              不写死 —— 换模型后这里自动跟着变，用户能一眼确认到底生效了没有。
