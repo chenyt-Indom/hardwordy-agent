@@ -372,6 +372,8 @@ class HiveClient:
             "state": state,
             "mode": mode,
             "relay": relay or {},
+            "dir_ok": bool(self._dir_ok),
+            "dir_err": self._dir_err,
             "connected": peers > 0,
             "url": self._url or ("局域网" if m.started else ""),
             "gid": self._gid,
