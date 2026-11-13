@@ -638,9 +638,10 @@ class RelayLink:
         except Exception as e:  # noqa: BLE001
             a = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
         if not a.get("ok"):
-            self.error = ("拿不到公网映射地址（%s）—— 可能是公共 STUN 被挡，"
-                          "不影响服务器转发" % (a.get("error") or "无响应"))
+            self.signal_error = ("拿不到公网映射地址（%s）—— 可能是公共 STUN 被挡，"
+                                 "不影响服务器转发" % (a.get("error") or "无响应"))
             return
+        self.signal_error = ""
         paddr = "%s:%s" % (a.get("ip"), a.get("port"))
         sock = self.sock
         if sock is None:
