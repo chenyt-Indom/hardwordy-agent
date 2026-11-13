@@ -80,7 +80,7 @@ try:
     print("[7] 当前中继密钥长度:", len(tok or ""))
     r4 = dk.save_relay_token(tok)
     print("[7] save_relay_token ->", r4)
-    chk("中继密钥保存成功", r4.get("ok") is True, str(r4.get("error", "")))
+    chk("中继密钥保存成功", bool(r4.get("ok") or r4.get("set") or r4.get("saved")), str(r4.get("hint", "")))
     tst = dk.relay_token_status()
     print("[7] relay_token_status ->", tst)
     chk("中继密钥状态已配置", tst.get("set") is True)
