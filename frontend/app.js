@@ -2628,6 +2628,9 @@
       say("正在配音 → 口型对齐 → 合成，约 10 秒…");
       try {
         const lipSel = $("#av2Lip");
+        // rate 传 null 表示「用心情的建议语速」，不能传 0（那会把语速钉死）
+        const rateVal = rateSel && rateSel.value !== "auto"
+          ? parseInt(rateSel.value, 10) : null;
         const r = await api("/api/avatar2/speak", {
           method: "POST",
           body: JSON.stringify({
@@ -2635,6 +2638,8 @@
             voice: voiceSel.value,
             lipsync: lipSel ? lipSel.value : "auto",
             boost: boostIn ? parseFloat(boostIn.value) || 1.0 : 1.0,
+            mood: moodSel ? moodSel.value : "auto",
+            rate: rateVal,
           }),
         });
         if (!r.ok) throw new Error(r.error || "生成失败");
@@ -2644,8 +2649,16 @@
         } else if (r.lipsync_label) {
           tail = " · " + r.lipsync_label;
         }
+        if (r.mood_label) {
+          tail += " · 心情" + r.mood_label + (r.mood_auto ? "(自动)" : "") +
+                  " 语速" + (r.rate >= 0 ? "+" : "") + r.rate;
+        }
         say("已生成 " + r.duration + " 秒 · " + (r.size || []).join("×") +
             " · " + (r.align || "") + tail, r.fallback_from ? "err" : "");
+        // 自动判心情时把依据也说清楚，别让用户觉得是黑盒
+        if (r.mood_auto && (r.mood_why || []).length) {
+          say(hint.textContent + "\n判定依据：" + r.mood_why.slice(0, 3).join("；"));
+        }
         playVideo(r.name);
         loadVideos();
       } catch (e) {
