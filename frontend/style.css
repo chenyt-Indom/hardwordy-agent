@@ -4510,3 +4510,76 @@ html[data-theme="light"] select.pill-select option {
 }
 .tb-fold-btn.open { transform: rotate(180deg); }
 
+/* ================= 侧栏面板折叠（2026-11-13）=================
+   用户要求：知识库 / 音频 / 图片库 / 协作群这些面板也要能各自收起展开，带动画。
+   做法：JS 把 .sec-head 之后的兄弟节点包进 .pnl-fold > .pnl-fold-in，
+   用 grid-template-rows 1fr ↔ 0fr 做高度动画 —— 不需要预先知道内容高度，
+   也没有 max-height 那种"高度猜大了就卡一下"的毛病。 */
+.pnl-fold {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows .3s cubic-bezier(.4, 0, .2, 1);
+}
+.pnl-fold > .pnl-fold-in { overflow: hidden; min-height: 0; }
+.panel.collapsed .pnl-fold { grid-template-rows: 0fr; }
+.panel.collapsed .sec-head { margin-bottom: 0; }
+
+/* 可折叠面板的标题行：整行都能点，hover 有反馈 */
+.fold-head { cursor: pointer; user-select: none; justify-content: flex-start; }
+.fold-head .head-acts { margin-left: auto; }
+.fold-head:hover { background: rgba(255, 255, 255, .045); border-radius: 6px; }
+.fold-head:focus-visible {
+  box-shadow: 0 0 0 2px rgba(90, 150, 255, .45); border-radius: 6px; outline: none;
+}
+/* 标题右侧的小箭头：展开朝下、收起朝右（-90°） */
+.fold-chev {
+  flex: 0 0 auto; font-size: 10px; line-height: 1; color: var(--muted);
+  margin-left: 6px; display: inline-block;
+  transition: transform .3s cubic-bezier(.4, 0, .2, 1), color .18s ease;
+}
+.panel.collapsed .fold-chev { transform: rotate(-90deg); }
+.fold-head:hover .fold-chev { color: var(--text); }
+
+/* ---------- 模型状态卡：标题行常驻，明细折叠 ---------- */
+.status-card { flex-direction: column; align-items: stretch; gap: 0; }
+.sc-head {
+  display: flex; align-items: center; gap: 10px;
+  cursor: pointer; user-select: none; border-radius: 6px; padding: 1px 0;
+}
+.sc-head:hover { background: rgba(255, 255, 255, .045); }
+.sc-head:focus-visible {
+  box-shadow: 0 0 0 2px rgba(90, 150, 255, .45); border-radius: 6px; outline: none;
+}
+.sc-caret {
+  margin-left: auto; font-size: 10px; line-height: 1; color: var(--muted);
+  transition: transform .3s cubic-bezier(.4, 0, .2, 1), color .18s ease;
+}
+.status-card.collapsed .sc-caret { transform: rotate(-90deg); }
+.sc-head:hover .sc-caret { color: var(--text); }
+.sc-fold {
+  display: grid; grid-template-rows: 1fr;
+  transition: grid-template-rows .3s cubic-bezier(.4, 0, .2, 1);
+}
+.sc-fold > .sc-fold-in { overflow: hidden; min-height: 0; }
+.status-card.collapsed .sc-fold { grid-template-rows: 0fr; }
+
+/* ---------- 手机端：侧栏滑走后，用主区这个 logo 小按钮把它叫回来 ---------- */
+.sb-float-logo { display: none; }
+@media (max-width: 768px) {
+  .sb-float-logo {
+    display: inline-grid; place-items: center;
+    width: 34px; height: 34px; padding: 0; flex: 0 0 auto;
+    border-radius: 9px; border: none; font-size: 17px; line-height: 1; color: #fff;
+    background: linear-gradient(135deg, #4f8bf9, #7b5cf0);
+    box-shadow: 0 2px 10px rgba(79, 139, 249, .3);
+  }
+  .sb-float-logo:active { transform: scale(.94); }
+}
+
+/* 尊重"减少动效"的系统设置：全部动画降为瞬时 */
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .sidebar > *, .pnl-fold, .sc-fold, .fold-chev, .sc-caret, .logo {
+    transition: none !important;
+  }
+}
+
