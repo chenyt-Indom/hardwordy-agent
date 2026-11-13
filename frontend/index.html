@@ -1197,10 +1197,9 @@ setTimeout(function () {
     out.push('inner_before=' + Math.round(inner2.getBoundingClientRect().height));
     kb.querySelector('.sec-head').click();
     setTimeout(function () {
-      out.push('kb_h2=' + Math.round(kb.getBoundingClientRect().height));
-      out.push('inner_after=' + Math.round(inner2.getBoundingClientRect().height));
-      out.push('inner_style_h=' + (inner2.style.height || '-'));
-      out.push('kb_cls=' + kb.className);
+      out.push('D 知识库折叠后=' + Math.round(inner2.getBoundingClientRect().height) + 'px');
+      out.push('E style.height=' + (inner2.style.height || '-'));
+      out.push('F 面板class=' + (kb.classList.contains('collapsed') ? 'collapsed' : 'open'));
       // 再展开回去，确认能恢复
       kb.querySelector('.sec-head').click();
       setTimeout(function () {
