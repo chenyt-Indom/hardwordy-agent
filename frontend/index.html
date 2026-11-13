@@ -719,7 +719,13 @@
               <option value="daily">每天</option>
               <option value="every">每隔</option>
             </select>
-            <input id="schedTime" placeholder="09:00" value="09:00" title="每天几点（HH:MM）">
+            <!-- 2026-11-13 用户要求：「时间精确到分钟，不要输入用选择分档的形式，
+                 也就是 24 档加 60 档那样」—— 改成两个下拉，手打 HH:MM 容易打错 -->
+            <span class="sched-time">
+              <select id="schedHour" title="小时（0-23）"></select>
+              <span class="sched-colon">:</span>
+              <select id="schedMin" title="分钟（0-59）"></select>
+            </span>
             <input id="schedEvery" type="number" min="1" value="60" hidden title="每隔多少分钟">
             <button class="btn sm" id="schedAdd">添加</button>
           </div>
