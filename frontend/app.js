@@ -9571,8 +9571,12 @@
       const box = el("hiveGroupList");
       if (!box) return;
       if (!groups.length) {
-        box.innerHTML = '<p class="hint">还没有群。点「＋ 建群」开一个，'
-          + '或者用群主给的 12 位密码「密码入群」。</p>';
+        // 空状态要说清「我现在该点哪个」，而不是只陈述「还没有群」。
+        box.innerHTML = '<div class="hive-empty2">'
+          + '<b>还没有群</b>'
+          + '<span>自己开一个 → 点上面的「＋ 建群」，输个名字就行</span>'
+          + '<span>别人拉你 → 点「🔑 密码入群」，输他给你的 12 位密码</span>'
+          + '</div>';
         return;
       }
       box.innerHTML = groups.map((g) => {
