@@ -62,7 +62,14 @@ SERVICE = "hive-relay"
 
 
 def _log(msg: str) -> None:
-    print(msg, flush=True)
+    # Windows 控制台默认 GBK，打印 emoji / 部分符号会抛 UnicodeEncodeError
+    # 直接把部署脚本崩掉（实测踩过）。这里降级成 '?' 而不是中断。
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        enc = sys.stdout.encoding or "utf-8"
+        sys.stdout.write(msg.encode(enc, "replace").decode(enc, "replace") + "\n")
+        sys.stdout.flush()
 
 
 def load_server() -> dict:
