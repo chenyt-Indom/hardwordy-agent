@@ -28,11 +28,16 @@ proc = subprocess.Popen([
 ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def wait_ws():
+    """只挑真正打开 8010 的那个 page target。
+
+    ⚠️ 新 profile 下 Edge 会先开一个「同步数据 / 欢迎」页，直接取第一个
+    page 会连错地方（实测踩过：标题变成「正在同步浏览数据」）。
+    """
     for _ in range(40):
         try:
             d = json.loads(urllib.request.urlopen("http://127.0.0.1:%d/json" % PORT, timeout=2).read())
             for t in d:
-                if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                if t.get("type") == "page" and "127.0.0.1:8010" in (t.get("url") or ""):
                     return t["webSocketDebuggerUrl"]
         except Exception:
             pass
