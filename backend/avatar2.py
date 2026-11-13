@@ -568,7 +568,7 @@ def _half_mask(w: int, h: int, lower: bool) -> "object":
 
 
 def _prep(img_path: str):
-    """准备渲染素材：底图 + 嘴部 patch + 蒙版（只算一次，每帧复用）。"""
+    """准备渲染素材：底图 + 上唇/下唇两片 + 蒙版（只算一次，每帧复用）。"""
     from PIL import Image
     im = Image.open(img_path)
     im = im.convert("RGBA") if im.mode in ("RGBA", "LA", "P") else im.convert("RGB")
@@ -579,16 +579,21 @@ def _prep(img_path: str):
     m = mouth()
     cx, cy, mw, mh = _mouth_geom((W, H), m)
 
-    # 融合区取嘴部矩形的 1.9 倍（太小时形变边缘会被看出来）
-    pw = int(max(8, mw * 1.9))
-    ph = int(max(6, mh * 2.6))
-    x0 = int(round(cx - pw / 2.0))
-    y0 = int(round(cy - ph / 2.0))
-    # 贴回时的位置允许贴到图外一点点，PIL 会自己裁
-    patch = base.crop((x0, y0, x0 + pw, y0 + ph))
-    mask = _ellipse_mask(pw, ph)
-    return {"base": base, "patch": patch, "mask": mask,
-            "box": (x0, y0), "size": (pw, ph),
+    # 融合区：横向 ±0.85 唇宽；纵向 上 1.25、下 2.2 唇高。
+    # 上限压得比较紧 —— 上唇上移幅度再大就会吃到鼻底，看起来像整块皮肤在滑。
+    x0 = int(max(0, round(cx - mw * 0.85)))
+    x1 = int(min(W, round(cx + mw * 0.85)))
+    ytop = int(max(0, round(cy - mh * 1.25)))
+    ybot = int(min(H, round(cy + mh * 2.2)))
+    cyi = int(round(cy))
+    # 中线落在唇缝上：上半片到 cyi 为止，下半片从 cyi 开始
+    cyi = min(max(cyi, ytop + 2), ybot - 2)
+    up = base.crop((x0, ytop, x1, cyi))
+    lo = base.crop((x0, cyi, x1, ybot))
+    mu = _half_mask(up.width, up.height, lower=False)
+    ml = _half_mask(lo.width, lo.height, lower=True)
+    return {"base": base, "up": up, "lo": lo, "mu": mu, "ml": ml,
+            "box": (x0, ytop, x1, ybot, cyi),
             "geom": (cx, cy, mw, mh), "wh": (W, H)}
 
 
