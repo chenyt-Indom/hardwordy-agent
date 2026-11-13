@@ -2626,13 +2626,11 @@
       if (useBtn) useBtn.onclick = () => {
         const t = (docText.value || "").trim();
         if (!t) { say("预览里没有文字", "err"); return; }
-        if (t.length > 1200) {
-          textIn.value = t.slice(0, 1200);
-          say("超过 1200 字上限，只填了前 1200 字（可自行删减）", "err");
-        } else {
-          textIn.value = t;
-          say("已填入朗读框（" + t.length + " 字）");
-        }
+        // 不再截断：长文本由生成时自动分段处理（splitSpeech）
+        textIn.value = t;
+        const nSeg = splitSpeech(t, 260).length;
+        say("已填入朗读框（" + t.length + " 字" +
+            (nSeg > 1 ? "，将自动分 " + nSeg + " 段生成后合并" : "") + "）");
         docBox.hidden = true;
       };
       const closeBtn = $("#av2DocClose");
