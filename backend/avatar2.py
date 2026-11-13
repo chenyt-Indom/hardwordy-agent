@@ -819,7 +819,7 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
         for i, (op, wd) in enumerate(params):
-            fr = _frame(prep, op, wd)
+            fr = _frame(prep, op, wd, amp=_amp)
             if _ex_mod is not None:
                 try:
                     # 张口度本身就是「此刻在不在说话」的代理指标
