@@ -4537,8 +4537,8 @@ html[data-theme="light"] select.pill-select option {
 }
 /* 标题右侧的小箭头：展开朝下、收起朝右（-90°） */
 .fold-chev {
-  flex: 0 0 auto; font-size: 10px; line-height: 1; color: var(--muted);
-  margin-left: 6px; display: inline-block;
+  flex: 0 0 auto; font-size: 13px; line-height: 1; color: var(--muted);
+  margin-left: 7px; display: inline-block;
   transition: transform .3s cubic-bezier(.4, 0, .2, 1), color .18s ease;
 }
 .panel.collapsed .fold-chev { transform: rotate(-90deg); }
