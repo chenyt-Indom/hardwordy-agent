@@ -944,6 +944,13 @@
     // ① 顶栏只剩一行，清掉可能残留的「已收起」状态（否则顶栏会整行消失）
     try { localStorage.setItem('topbar_collapsed', '0'); } catch (e) {}
     document.body.classList.remove('topbar-collapsed');
+    // 「⋯ 更多」那套显隐（body.more-open + [data-more]）已经废弃，一并清掉，
+    // 否则 .tools-bar [data-more] { display:none !important } 会把抽屉里的按钮藏起来
+    try { localStorage.setItem('more_open', '0'); } catch (e) {}
+    document.body.classList.remove('more-open');
+    document.querySelectorAll('[data-more]').forEach(function (el) {
+      el.removeAttribute('data-more');
+    });
 
     // ② 抽屉骨架
     var mask = document.createElement('div');
