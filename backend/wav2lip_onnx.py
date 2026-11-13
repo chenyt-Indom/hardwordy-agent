@@ -459,6 +459,12 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
             # 模型输入输出都是 BGR（官方用 cv2 读图，未做通道转换），
             # 这里绝不能再 cvtColor，否则嘴唇会发紫。
             patch = cv2.resize(pred, (cw, ch), interpolation=cv2.INTER_CUBIC)
+            if _boost_on:
+                if _base_gap is None:
+                    _base_gap = _gap96(pred, my_rel)
+                _o = _lip_openness(pred, my_rel, _base_gap)
+                # boost 1.0→0；1.6→0.54；2.0→0.9（实测 0.9 已明显涂抹）
+                patch = _boost_patch(patch, _o, my_rel, k=(boost - 1.0) * 0.9)
             # 96x96 放大到原尺寸必然发糊，补一层温和 USM。
             # 实测 1.7/-0.7 会在下颌和发际线出白边，1.28/-0.28 是平衡点。
             if cw > 160 or ch > 160:
