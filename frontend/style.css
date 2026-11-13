@@ -2854,7 +2854,12 @@ html[data-theme="light"] body {
 .restart-banner {
   position: fixed;
   right: 18px;
-  bottom: 92px;
+  /* 2026-11-13：原来是 bottom: 92px —— 那个值正好落在输入框和「发送」键上，
+     像素采样确认它与输入框纵向重叠约 25px、把发送按钮上半截盖住了。
+     底部栏现在要做成一体式，这条提示浮在上面更显突兀，
+     干脆挪到右上角（消息区上方），彻底不碰底部。 */
+  top: 128px;
+  bottom: auto;
   z-index: 9998;
   display: none;
   align-items: center;
