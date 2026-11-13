@@ -2507,6 +2507,7 @@
             text: text,
             voice: voiceSel.value,
             lipsync: lipSel ? lipSel.value : "auto",
+            boost: boostIn ? parseFloat(boostIn.value) || 1.0 : 1.0,
           }),
         });
         if (!r.ok) throw new Error(r.error || "生成失败");
