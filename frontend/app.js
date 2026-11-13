@@ -2669,7 +2669,7 @@
                   " 语速" + (r.rate >= 0 ? "+" : "") + r.rate;
         }
         say("已生成 " + r.duration + " 秒 · " + (r.size || []).join("×") +
-            " · " + (r.align || "") + tail, r.fallback_from ? "err" : "");
+            " · " + (r.align || "") + tail);
         // 自动判心情时把依据也说清楚，别让用户觉得是黑盒
         if (r.mood_auto && (r.mood_why || []).length) {
           say(hint.textContent + "\n判定依据：" + r.mood_why.slice(0, 3).join("；"));
