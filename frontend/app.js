@@ -2550,6 +2550,39 @@
       };
     }
 
+    // —— 口型幅度 ——
+    // 增益作用在张口曲线上（不是硬拉伸）：同一段语音实测 1.0→1.6 时
+    // 最大开口 31px→56px、明显张开的帧从 0% 升到 40%。
+    // 默认 1.2：比原始观感明显一点，又不至于出嘴角张力。
+    const ampIn = $("#av2Amp"), ampVal = $("#av2AmpVal");
+    const AMP_KEY = "avatar2_amp";
+    function ampText(v) { return (Math.round(v * 100) / 100).toFixed(2).replace(/0$/, "") + "×"; }
+    function syncAmp() {
+      if (!ampIn) return 1.2;
+      let v = parseFloat(ampIn.value);
+      if (!isFinite(v)) v = 1.2;
+      v = Math.min(2, Math.max(0.6, v));
+      if (ampVal) ampVal.textContent = ampText(v);
+      return v;
+    }
+    if (ampIn) {
+      try {
+        const sv = parseFloat(localStorage.getItem(AMP_KEY));
+        if (isFinite(sv) && sv >= 0.6 && sv <= 2) ampIn.value = String(sv);
+      } catch (e) {}
+      syncAmp();
+      ampIn.oninput = () => {
+        const v = syncAmp();
+        try { localStorage.setItem(AMP_KEY, String(v)); } catch (e) {}
+      };
+      // 松手才提示，拖动时别刷屏
+      ampIn.onchange = () => {
+        const v = syncAmp();
+        say("口型幅度 " + ampText(v) +
+            (v <= 0.9 ? "（嘴会比较含蓄）" : v >= 1.6 ? "（更夸张，可能有嘴角张力）" : ""));
+      };
+    }
+
     // —— 导入文档朗读：先预览，用户自己删减后再填进朗读框 ——
     const docBtn = $("#av2DocBtn"), docIn = $("#av2Doc");
     const docBox = $("#av2DocBox"), docName = $("#av2DocName");
