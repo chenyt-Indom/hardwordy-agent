@@ -300,16 +300,30 @@ def _port_in_use(port: int = PORT, timeout: float = 0.35) -> bool:
     于是 `_wait_port_free()` **永远返回 True**、0.0 秒就过，等于没等 ——
     这就是 data/app.log 里那 3 次 `[Errno 10048]` 一直没被挡住的原因。
 
-    现在改成 connect 探测：连得上 = 有人在听 = 被占。实测准确
-    （占用 True / 空闲 False / 关闭后 False）。
+    现在改成两步探测（2026-11-13 逐个实测过）：
+      ① bind("0.0.0.0", port)，绑不上 = 被占。能挡住「别人监听 0.0.0.0」这个主场景
+         （实测 True），且反复探测 30 次结果稳定。
+      ② 再 connect 一次补漏 —— 万一对方**只绑了 127.0.0.1**，①能绑上（实测 False，
+         会漏），但 connect 连得上（实测 True）。
+    两步组合后：0.0.0.0 监听 / 127.0.0.1 监听 / 真实 8000 / 释放后，全部判断正确。
+    ⚠️ ②只调一次，不要循环重试 —— listen backlog 小的服务端会被反复 connect
+       占满，之后新连接被 RST，反而误判成「空闲」（实测踩到：1.5 秒才释放的端口
+       0.65 秒就被判空了）。
     """
     import socket
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
-            sk.settimeout(timeout)
-            return sk.connect_ex(("127.0.0.1", port)) == 0
+            sk.bind(("0.0.0.0", port))
     except OSError:
-        return False
+        return True                      # ① 绑不上 → 确实被占
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk2:
+            sk2.settimeout(timeout)
+            if sk2.connect_ex(("127.0.0.1", port)) == 0:
+                return True              # ② 只绑了回环地址的情况
+    except OSError:
+        pass
+    return False
 
 
 def _wait_port_free(timeout: float = 40.0) -> bool:
