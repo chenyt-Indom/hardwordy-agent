@@ -319,11 +319,14 @@ def apply(frame, t: float, cfg: dict, face=None, energy: float = 0.5):
     if cfg.get("sway", 0) <= 0 and cfg.get("nod", 0) <= 0 and cfg.get("rot", 0) <= 0:
         return frame
     try:
-        frame = _affine(frame, t, cfg)
+        out = _affine(frame, t, cfg)
         amt = float(cfg.get("brow", 0)) * (0.35 + 0.65 * max(0.0, min(1.0, energy)))
         # 眉眼位移本身也是缓慢起伏，不是一直往上顶
         wave = math.sin(2 * math.pi * float(cfg.get("freq", 0.3)) * 0.8 * t + 0.6)
-        frame = _brow_band(frame, face, amt * wave, t)
+        out = _brow_band(out, face, amt * wave, t)
+        # cv2.warpAffine / remap 都返回**新数组**，必须写回原 buffer，
+        # 否则调用方 `apply(f, ...)` 不接返回值时等于什么都没做（实测踩过）。
+        frame[...] = out
         return frame
     except Exception:                                   # noqa: BLE001
         return frame
