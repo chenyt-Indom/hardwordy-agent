@@ -852,7 +852,8 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
     except Exception:  # noqa: BLE001
         _boost = 1.0
     _boost = float(min(2.5, max(1.0, _boost)))
-    r = render(_img_path(), wav, out, words=words, engine=use, boost=_boost)
+    r = render(_img_path(), wav, out, words=words, engine=use, boost=_boost,
+               expr=expr_cfg)
     if not r.get("ok"):
         return r
     from urllib.parse import quote
@@ -868,6 +869,14 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
         "bytes": r["bytes"],
         "lipsync": used,
         "boost": _boost,
+        "mood": cfg.get("key", "calm"),
+        "mood_label": cfg.get("label", "平静"),
+        "mood_auto": bool(cfg.get("auto")),
+        "mood_confident": bool(cfg.get("auto_confident")),
+        "mood_why": cfg.get("auto_why") or [],
+        "rate": final_rate,
+        "style": final_style,
+        "expr": bool(expr),
         "lipsync_label": ("Wav2Lip 真口型" if used == "wav2lip"
                           else "声学形变口型"),
         "fallback_from": r.get("fallback_from", ""),
