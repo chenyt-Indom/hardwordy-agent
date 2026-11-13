@@ -37,6 +37,7 @@ from typing import Any, Dict, Optional
 
 import backend.hive as H
 import backend.hive_mesh as MESH
+from backend import ws_min
 
 PROTO = 1
 HDR = struct.Struct(">IB")
