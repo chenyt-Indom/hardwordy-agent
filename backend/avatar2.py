@@ -638,8 +638,8 @@ def _frame(prep: dict, openness: float, width: float):
     # ---- 唇部纵向伸缩（克制）----
     # 闭嘴 0.94（略微收紧）→ 大张 1.40（微张）。幅度不敢再大：
     # 实测拉到 1.8 以上时写实人脸会变成"橡皮泥"。
-    sy = 0.94 + 0.46 * op
-    sx = 1.0 + 0.04 * (wd - 1.0)
+    sy = 0.95 + 0.63 * op
+    sx = 1.0 + 0.05 * (wd - 1.0)
     nw = max(2, int(round(patch.width * sx)))
     nh = max(2, int(round(patch.height * sy)))
     p2 = patch.resize((nw, nh), Image.BICUBIC)
