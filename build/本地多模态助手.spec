@@ -84,7 +84,12 @@ def _dir_datas(src_root, dst_root, skip_suffixes=()):
 #   跳过 *.incomplete（没下完的残片，否则会把半个文件塞进包里）。
 _SD_ROOT = r"E:\local-multimodal-models\sdxl-base"           # 文生图 / 整图微改
 _INPAINT_ROOT = r"E:\local-multimodal-models\sdxl-inpaint"    # 局部重绘（精确微改）
-all_datas += _dir_datas(os.path.join(root, "frontend"), "frontend")
+# ⚠️ 2026-11-13（11.13e）：frontend 目录下留着撤语音功能时的
+#   app.js.bak_voice / style.css.bak_voice，_dir_datas 是整目录收，
+#   于是这两个备份被一起打进包里（首次构建文件数 7018，正常应 7016）。
+#   这里过滤掉 .bak / .bak_voice，别让备份文件混进交付包。
+all_datas += _dir_datas(os.path.join(root, "frontend"), "frontend",
+                        skip_suffixes=(".bak", ".bak_voice"))
 if os.path.isdir(_SD_ROOT):
     all_datas += _dir_datas(_SD_ROOT, "sd_model", skip_suffixes=(".incomplete",))
 # 局部重绘模型（约 6.5GB）：缺了它"只在指定区域重绘"就用不了，

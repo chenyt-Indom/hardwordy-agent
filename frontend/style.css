@@ -179,15 +179,21 @@ body {
   /* ⚠️ width / min-width 必须带 !important：
      .sidebar 的 min-width: 300px 会把宽度死死撑在 300px，
      实测收起后 computed 仍是 300×300（padding 却在动），就是这个原因。 */
+  /* 2026-11-13 修「按下 logo 时抖动、瞬间偏移」：
+     原来这里是 width 78 + padding 10 + flex-direction: column。
+     点击那一下 logo 要同时挪两个位置 —— 横向从 x=18（padding 18）跳到 x=16，
+     纵向因为 brand 从 row 变 column 又跳一次，看起来就是"抖一下"。
+     现在让 82 - 18*2 = 46，正好等于 logo 宽度：padding 与展开态完全一致，
+     brand 也保持 row（不再改 flex-direction），logo 原地不动，只有文字淡出。 */
   .sidebar.hidden {
-    width: 78px !important; min-width: 78px !important;
-    padding-left: 10px !important; padding-right: 10px !important;
+    width: 82px !important; min-width: 82px !important;
+    padding-left: 18px !important; padding-right: 18px !important;
     border-right-width: 1px; border-right-color: transparent;
     overflow: hidden;
   }
   .sidebar.hidden > * { opacity: 0; pointer-events: none; }
   .sidebar.hidden > .brand { opacity: 1; pointer-events: auto; }
-  .sidebar.hidden .brand { flex-direction: column; gap: 0; }
+  .sidebar.hidden .brand { gap: 0; }
   .sidebar.hidden .brand > div { display: none; }
 }
 
