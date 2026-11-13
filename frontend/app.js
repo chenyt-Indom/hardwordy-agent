@@ -2229,14 +2229,19 @@
           foldIn.style.transition = "";
           return;
         }
+        // ⚠️ 这里不用 requestAnimationFrame：页面在后台标签页时 rAF 会被挂起，
+        // 高度就永远停在起始值（实测折叠后仍是 55.5px）。改成「写起始值 →
+        // 强制重排 → 写目标值」，transition 照样从起始值动到目标值。
         if (collapsed) {
           const cur = foldIn.getBoundingClientRect().height;
           foldIn.style.height = cur + "px";
-          requestAnimationFrame(() => { foldIn.style.height = "0px"; });
+          void foldIn.offsetHeight;
+          foldIn.style.height = "0px";
         } else {
           const h = foldIn.scrollHeight;
           foldIn.style.height = "0px";
-          requestAnimationFrame(() => { foldIn.style.height = h + "px"; });
+          void foldIn.offsetHeight;
+          foldIn.style.height = h + "px";
           setTimeout(() => {
             if (!pnl.classList.contains("collapsed")) foldIn.style.height = "auto";
           }, 330);
