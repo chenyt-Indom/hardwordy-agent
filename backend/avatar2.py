@@ -715,7 +715,7 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
             return r2
         except Exception as e:                          # noqa: BLE001
             r2 = render(img_path, wav_path, out_mp4, words=words, fps=fps,
-                        on_progress=on_progress, engine="param")
+                        on_progress=on_progress, engine="param", expr=expr)
             if r2.get("ok"):
                 r2["fallback_from"] = "wav2lip"
                 r2["fallback_reason"] = "%s: %s" % (type(e).__name__, e)
