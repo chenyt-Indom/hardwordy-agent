@@ -320,9 +320,58 @@ def _feather_mask(h: int, w: int, top: float = 0.60, bot: float = 0.88,
 
 
 # ---------------------------------------------------------------- 推理
+def _lip_openness(pred96: np.ndarray, my_rel: float, base_gap: int) -> float:
+    """估这一帧的张口量（0~1），用于幅度增强。"""
+    import cv2
+    g = cv2.cvtColor(pred96, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    c = int(my_rel * 96)
+    a, b = max(0, c - 12), min(96, c + 12)
+    if b - a < 4:
+        return 0.0
+    prof = g[a:b].mean(axis=1)
+    mn = float(prof.min())
+    dark = prof < (mn + 12)
+    best = cur = 0
+    for v in dark:
+        cur = cur + 1 if v else 0
+        best = max(best, cur)
+    # 相对首帧的增量，映射到 0~1
+    extra = max(0.0, float(best - base_gap))
+    return float(min(1.0, extra / 4.0))
+
+
+def _boost_patch(patch: np.ndarray, open_amt: float, my_rel: float,
+                 k: float) -> np.ndarray:
+    """按张口量对嘴部做纵向位移放大（连续采样，不填色，避免断层/坑洞）。
+
+    实测：k<=0.5 时肉眼几乎看不出伪影；k=0.9 会出现明显涂抹。
+    """
+    import cv2
+    if k <= 0.001 or open_amt <= 0.02:
+        return patch
+    h, w = patch.shape[:2]
+    g = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    ym = int(my_rel * h)
+    a, b = max(0, ym - 18), min(h, ym + 18)
+    if b - a >= 4:
+        band = g[a:b].mean(axis=1)
+        ym = a + int(np.argmin(band))
+    r = 1.0 + k * open_amt
+    yy = np.arange(h, dtype=np.float32)
+    src = np.clip(ym + (yy - ym) / r, 0, h - 1)
+    y0 = np.floor(src).astype(np.int32)
+    y1_ = np.minimum(y0 + 1, h - 1)
+    fr = (src - y0)[:, None, None]
+    out = patch[y0].astype(np.float32) * (1 - fr) + patch[y1_].astype(np.float32) * fr
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
-           on_progress=None) -> dict:
-    """图片 + 音频 → 真口型视频。"""
+           on_progress=None, boost: float = 1.0) -> dict:
+    """图片 + 音频 → 真口型视频。
+
+    boost: 口型幅度倍率（1.0=原始输出；1.2~1.6 明显放大；>1.8 会出涂抹感）
+    """
     sess = session()
     if sess is None:
         return {"ok": False, "error": "没有 Wav2Lip 权重（data/models/wav2lip/wav2lip_gan.onnx）"}
