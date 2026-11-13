@@ -4557,12 +4557,10 @@ html[data-theme="light"] select.pill-select option {
 }
 .status-card.collapsed .sc-caret { transform: rotate(-90deg); }
 .sc-head:hover .sc-caret { color: var(--text); }
-.sc-fold {
-  display: grid; grid-template-rows: 1fr;
-  transition: grid-template-rows .3s cubic-bezier(.4, 0, .2, 1);
+.sc-fold > .sc-fold-in {
+  overflow: hidden;
+  transition: height .3s cubic-bezier(.4, 0, .2, 1);
 }
-.sc-fold > .sc-fold-in { overflow: hidden; min-height: 0; }
-.status-card.collapsed .sc-fold { grid-template-rows: 0fr; }
 
 /* ---------- 手机端：侧栏滑走后，用主区这个 logo 小按钮把它叫回来 ---------- */
 .sb-float-logo { display: none; }
