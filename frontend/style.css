@@ -4858,6 +4858,9 @@ html[data-theme="light"] select.pill-select option {
 }
 .av2panel textarea#av2Text::placeholder { color: var(--muted); }
 .av2-row { display: flex; gap: 6px; align-items: center; }
+/* 口型下拉独占一行：侧栏只有 300px，和音色/按钮挤在一起会被截成「口型：」 */
+.av2-row-lip { margin-top: 6px; }
+.av2-row-lip select { flex: 1 1 auto; }
 .av2-row select {
   flex: 1; min-width: 0; padding: 6px 8px; border-radius: 8px;
   font-size: 12px; background: var(--panel2); color: var(--text);
