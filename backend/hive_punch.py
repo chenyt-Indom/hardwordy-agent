@@ -441,8 +441,12 @@ class PunchNode:
                     t = ReliableUDPSock(self.udp, key, name="%s:%s" % key)  # type: ignore
                     self.tunnels[key] = t
             if fresh and self.on_tunnel:
+                # ⚠️ 必须起线程：_recv_loop 是单线程，上层回调里通常会阻塞读
+                # （hive_mesh 的 _serve 就是一直 recv），同步调用会把接收循环
+                # 卡死，之后所有数据包都进不来（实测踩过）。
                 try:
-                    self.on_tunnel(t, key)
+                    threading.Thread(target=self.on_tunnel, args=(t, key),
+                                     daemon=True).start()
                 except Exception:
                     pass
         elif kind == b"R":
