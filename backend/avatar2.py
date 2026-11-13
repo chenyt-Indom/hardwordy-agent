@@ -624,11 +624,13 @@ def _frame(prep: dict, openness: float, width: float):
     早期版本是把整块嘴部区域纵向 resize，实测在写实人脸上会变成
     "橡皮泥"（嘴被拉长、下巴断层、没有牙齿），所以换掉了。
     """
-    from PIL import ImageDraw
+    from PIL import Image
     base = prep["base"]
+    patch = prep["patch"]
+    mask = prep["mask"]
     out = base.copy()
     cx, cy, mw, mh = prep["geom"]
-    x0, ytop, x1, ybot, cyi = prep["box"]
+    x0, ytop, x1, ybot = prep["box"]
 
     op = float(np.clip(openness, 0.0, 1.0))
     wd = float(np.clip(width, 0.70, 1.35))
