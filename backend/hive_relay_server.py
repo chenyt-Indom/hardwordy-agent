@@ -355,6 +355,10 @@ class RelayServer:
         self.max_log_mb = max_log_mb
         self.rooms: dict = {}
         self.lock = threading.Lock()
+        # 群目录：fp(密码指纹) -> {gid, vt, name, ts}。只存指纹和验证标签，
+        # 不含密码、不含群密钥。让跨网的人凭密码就能找到群。
+        self.directory: dict = {}
+        self.dir_lock = threading.Lock()
         self.started_at = time.time()
         self.stop_flag = False
         self._srv = None
