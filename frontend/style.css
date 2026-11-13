@@ -4996,3 +4996,89 @@ html[data-theme="light"] select.pill-select option {
 @media (prefers-reduced-motion: reduce) {
   .av2-pin { transition: none; }
 }
+
+/* ---------- 密钥与部署弹窗（2026-11-14） ----------
+   两种密钥（SSH 私钥 / 中继密钥）都支持「拖文件」和「直接粘贴」，
+   默认打码，点眼睛才显示明文。样式独立，不复用通用弹窗，避免互相影响。 */
+.dp-mask {
+  position: fixed; inset: 0; z-index: 1200;
+  background: rgba(0, 0, 0, .55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px 16px;
+}
+.dp-mask[hidden] { display: none; }
+.dp-box {
+  width: 620px; max-width: 100%; max-height: 88vh;
+  display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: 0 22px 60px rgba(0, 0, 0, .55);
+  overflow: hidden;
+}
+.dp-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.dp-head b { flex: 1; }
+.dp-head button {
+  border: 0; background: transparent; color: var(--muted);
+  font-size: 15px; cursor: pointer; padding: 2px 6px; border-radius: 6px;
+}
+.dp-head button:hover { color: var(--text); background: var(--panel2); }
+.dp-body { padding: 14px 16px 16px; overflow-y: auto; }
+.dp-status {
+  font-size: 12.5px; line-height: 1.65; color: var(--muted);
+  background: var(--panel2); border: 1px solid var(--border);
+  border-radius: 9px; padding: 9px 11px; margin-bottom: 14px;
+  white-space: pre-wrap; word-break: break-all;
+}
+.dp-status b { color: var(--text); }
+.dp-sec { margin-bottom: 16px; }
+.dp-sec-h {
+  font-size: 12.5px; font-weight: 600; color: var(--text);
+  margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+}
+.dp-sec-h .dp-tag {
+  font-weight: 400; font-size: 11.5px; color: var(--muted);
+  background: var(--panel2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 1px 8px;
+}
+.dp-sec-h .dp-tag.ok { color: #57c98a; border-color: #24512f; background: #16321f; }
+.dp-sec-h .dp-tag.bad { color: #ff8a7a; border-color: #5a2a24; background: #3a1a16; }
+.dp-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 7px; }
+.dp-row label { font-size: 12px; color: var(--muted); }
+.dp-row input, .dp-body textarea {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 7px;
+  padding: 7px 9px; font-size: 12.5px; font-family: inherit;
+}
+.dp-row input { flex: 1 1 120px; min-width: 0; }
+.dp-row input:focus, .dp-body textarea:focus { outline: none; border-color: var(--accent); }
+.dp-row input.dp-num { flex: 0 0 78px; }
+.dp-body textarea {
+  width: 100%; box-sizing: border-box; margin-top: 8px;
+  height: 84px; resize: vertical; line-height: 1.5;
+  font-family: Consolas, Menlo, monospace; font-size: 11.5px;
+  word-break: break-all;
+}
+.dp-drop {
+  margin-top: 8px; padding: 14px 12px; text-align: center;
+  border: 1.5px dashed var(--border); border-radius: 9px;
+  color: var(--muted); font-size: 12.5px; cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.dp-drop:hover, .dp-drop.over {
+  border-color: var(--accent); background: var(--panel2); color: var(--text);
+}
+.dp-drop.over { border-style: solid; }
+.dp-log {
+  margin: 10px 0 0; padding: 10px 11px; max-height: 190px; overflow: auto;
+  background: #0d1117; color: #c9d1d9; border: 1px solid var(--border);
+  border-radius: 9px; font-size: 11.5px; line-height: 1.55;
+  font-family: Consolas, Menlo, monospace; white-space: pre-wrap;
+  word-break: break-all;
+}
+.dp-log:empty { display: none; }
+.dp-log .dp-ok { color: #57c98a; }
+.dp-log .dp-err { color: #ff8a7a; }
+.dp-hint { font-size: 11.5px; color: var(--muted); line-height: 1.6; margin-top: 6px; }
