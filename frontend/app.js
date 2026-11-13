@@ -2395,6 +2395,30 @@
       pinVid.onerror = () => pin.classList.remove("speaking");
     }
 
+    // 长文本按句子切段：每段 ≤ max 字。
+    // 单次请求渲染越久越容易在前端超时，所以先切成小段分别生成，最后合并。
+    // 优先在句号/问号/感叹号/分号/换行处断开，尽量不把一句话劈两半；
+    // 单句本身就超长时才硬切。
+    function splitSpeech(t, max) {
+      const src = String(t || "");
+      const sents = src.match(/[^。！？!?；;\n]+[。！？!?；;\n]*/g) || [src];
+      const out = [];
+      let cur = "";
+      for (const s of sents) {
+        if (s.length > max) {
+          if (cur) { out.push(cur); cur = ""; }
+          for (let i = 0; i < s.length; i += max) out.push(s.slice(i, i + max));
+        } else if ((cur + s).length <= max) {
+          cur += s;
+        } else {
+          if (cur) out.push(cur);
+          cur = s;
+        }
+      }
+      if (cur) out.push(cur);
+      return out.filter((x) => String(x).trim());
+    }
+
     const scopeSel = $("#av2Scope");
     const SCOPE_KEY = "avatar2_scope";
     if (scopeSel) {
