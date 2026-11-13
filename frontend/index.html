@@ -337,7 +337,10 @@
 
   <main class="main" id="main">
     <header class="chat-header">
-      <button class="icon-btn" id="toggleSidebar">☰</button>
+      <!-- ☰ 已删除（2026-11-13）：侧栏改由 logo 折叠。
+           但手机端侧栏是滑出式抽屉，收起后 logo 也一起滑走了，
+           所以这里留一个同款 logo 小按钮当"重新打开"的入口 —— 桌面端不显示。 -->
+      <button class="icon-btn sb-float-logo" id="sbFloat" title="打开侧栏" aria-label="打开侧栏">◉</button>
       <h2>智能体对话<span id="uiVer" title="当前界面版本（用来确认是否加载了最新前端）"
             style="font-size:11px;font-weight:400;opacity:.45;margin-left:8px;"></span></h2>
       <!-- 主题切换（2026-11-08）：深色 ⇄ 浅色，点一下立刻切，选择存 localStorage。
