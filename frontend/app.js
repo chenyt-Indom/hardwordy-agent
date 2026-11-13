@@ -11050,7 +11050,7 @@
         readonly: true,
         copyInput: !!copyAddr,
         copyValue: copyAddr || "",
-        copyLabel: "📋 复制" + (wan ? "公网" : "本机") + "地址",
+        copyLabel: "📋 复制" + (ts ? "Tailscale" : (wan ? "公网" : "本机")) + "地址",
         extra: "",
         extraPlaceholder: "（可选）要主动连别人？把他的地址粘到这里，如 1.2.3.4:8899",
         okText: "连接",
