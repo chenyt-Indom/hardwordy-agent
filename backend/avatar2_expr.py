@@ -72,7 +72,7 @@ MOODS = {
     "worried": {
         "label": "担忧", "emoji": "😟", "style": "sad",
         "rate": -6, "pitch": -2,
-        "sway": 0.7, "nod": 1.1, "rot": 0.25, "brow": 1.7, "freq": 0.24,
+        "sway": 1.4, "nod": 2.1, "rot": 0.36, "brow": 2.2, "freq": 0.24,
         "desc": "语速偏慢，眉眼带向下压",
     },
     "confident": {
