@@ -728,11 +728,8 @@ def _frame(prep: dict, openness: float, width: float):
     # ⚠ 这里不能按 |sx-1|>0.005 决定「缩不缩」：实测 175 帧里这个条件来回跨越 56 次，
     #   每次跨越整帧图像就换一次重采样路径（缩过 vs 没缩），肉眼表现为高频闪烁。
     #   所以一律走同一条路径，sx≈1 时 resize 到原尺寸是恒等变换，不会改变画面。
-    sx = 1.0 + 0.07 * (wd - 1.0)
-    nw = max(2, int(round(pw * sx)))
-    img = img.resize((nw, ph), Image.BICUBIC)
-    nbx = int(round(cx - (cx - x0) * sx))
-    m2 = mask.resize((nw, ph), Image.BICUBIC)
+    nbx = x0
+    m2 = mask
 
     # 纵向拉伸会把 1px 铺成 2.5px，分辨率损失表现为「涂抹感」。
     # 轻度 USM 补偿：percent=70 是实测平衡点（拉普拉斯均值 5.59 → 6.84），再高会出白边。
