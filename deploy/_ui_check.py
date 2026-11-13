@@ -1,5 +1,10 @@
 # 临时：用无头 Edge 走一遍「进群」交互，确认改动真的生效（验完即删）
 import subprocess, time, json, os, tempfile, urllib.request, asyncio, base64
+import sys
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 import websockets
 
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
