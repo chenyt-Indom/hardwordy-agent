@@ -2671,7 +2671,7 @@
     };
 
     // —— 启动 ——
-    loadInfo().then(() => { loadStatus(); loadVoices(); loadVideos(); });
+    loadInfo().then(() => { loadStatus(); loadVoices(); loadMoods(); loadVideos(); });
     setPin(localStorage.getItem(PIN_KEY) === "1");
   })();
 
