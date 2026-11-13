@@ -240,6 +240,9 @@ class RelayLink:
         self.url = ""
         self.host = ""
         self.port = 0
+        self.ws = False                 # 走 WebSocket（挂 nginx 反代时）
+        self.tls = False                # wss://
+        self.ws_path = "/hive-relay"
         self.gid = ""
         self.token = ""
         self.sock: Optional[socket.socket] = None
