@@ -2290,11 +2290,13 @@
       if (collapsed) {
         const cur = foldIn.getBoundingClientRect().height;
         foldIn.style.height = cur + "px";
-        requestAnimationFrame(() => { foldIn.style.height = "0px"; });
+        void foldIn.offsetHeight;
+        foldIn.style.height = "0px";
       } else {
         const h = foldIn.scrollHeight;
         foldIn.style.height = "0px";
-        requestAnimationFrame(() => { foldIn.style.height = h + "px"; });
+        void foldIn.offsetHeight;
+        foldIn.style.height = h + "px";
         setTimeout(() => {
           if (!card.classList.contains("collapsed")) foldIn.style.height = "auto";
         }, 330);
