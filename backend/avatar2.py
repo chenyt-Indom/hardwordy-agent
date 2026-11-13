@@ -564,7 +564,7 @@ def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS) -> list:
             openness = openness * (1.0 - 0.10 * (
                 0.5 + 0.5 * np.cos(2.0 * np.pi * ph / avg_dur)))
 
-    openness = _one_pole(openness, 55, fps)
+    openness = _one_pole(openness, 70, fps)
     # 归一到 99 分位（不用最大值，避免一声爆音把整体压扁）
     openness = np.clip(openness / max(_pct(openness, 99, 1e-3), 1e-3), 0.0, 1.0)
 
