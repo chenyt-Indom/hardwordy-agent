@@ -807,24 +807,9 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
         return {"ok": False, "error": "音频转码失败：%s: %s" % (type(e).__name__, e)}
 
     words = _asr_words(wav)
-    # 口型引擎：默认声学形变。
-    # 实测 Wav2Lip(96x96) 在正脸证件照上嘴位整体偏移、口腔糊成色块，
-    # 观感反而不如形变，所以不再默认启用；auto 也归到 param。
-    # 想试神经网络口型仍可显式传 lipsync="wav2lip"。
-    want = (lipsync or "param").lower()
-    use = "wav2lip" if want == "wav2lip" else "param"
     name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
     out = os.path.join(_vdir(), name)
-    try:
-        _boost = float(boost or 1.0)
-    except Exception:  # noqa: BLE001
-        _boost = 1.0
-    # 上限收到 1.4：实测 1.6 以上遮罩放得过宽，模型会"发明"整个下半脸，
-    # 出现黑腔、牙齿横条、下巴虚化（用户截图里那种吓人效果）。
-    # 1.0 = 官方整下半脸遮罩，是实测最自然的一档。
-    _boost = float(min(1.4, max(1.0, _boost)))
-    r = render(_img_path(), wav, out, words=words, engine=use, boost=_boost,
-               expr=expr_cfg)
+    r = render(_img_path(), wav, out, words=words, expr=expr_cfg)
     if not r.get("ok"):
         return r
     from urllib.parse import quote
