@@ -2340,19 +2340,21 @@
         if (lip) {
           const opts = [];
           // 文案要短：侧栏只有 300px，两个下拉 + 按钮并排，长文案会被截断
+          // 顺序按实测效果排：声学形变第一且默认（Wav2Lip 嘴位易偏、口腔糊）
+          opts.push('<option value="param">声学形变·推荐</option>');
           if (st.wav2lip) {
-            opts.push('<option value="auto">自动·真口型</option>');
-            opts.push('<option value="wav2lip">Wav2Lip</option>');
-          } else {
-            opts.push('<option value="auto">自动·形变</option>');
+            opts.push('<option value="wav2lip">Wav2Lip·实验</option>');
           }
-          opts.push('<option value="param">声学形变</option>');
           lip.innerHTML = opts.join("");
-          const saved = localStorage.getItem("av2_lipsync") || "auto";
+          // 老版本存的是 auto/wav2lip，换新选项后要回退到 param，否则会变成空选
+          const saved = localStorage.getItem("av2_lipsync") || "param";
           lip.value = saved;
+          if (!lip.value) lip.value = "param";
           lip.onchange = () => {
             try { localStorage.setItem("av2_lipsync", lip.value); } catch (e) {}
+            syncBoostRow();
           };
+          syncBoostRow();
         }
         if (st.wav2lip) {
           say(bits.join(" · ") + "。口型为神经网络重绘（真口型）。");
