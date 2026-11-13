@@ -24,6 +24,40 @@ MAX_CHARS = 200000          # 单次导入的硬上限，防止把整个大文�
 _ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "gbk", "big5", "utf-16", "latin-1")
 
 
+# CJK 部首补充区 (U+2E80-U+2EFF) **整个区都没有 NFKC 映射**（实测确认），
+# 只能手工对照。缺了这张表，PDF 抽出来的「⻘年」「⺠航」「⻓期」会原样进 TTS，
+# 朗读时直接读错或跳过。
+_RADICAL_MAP = {
+    0x2E81: "\u5382", 0x2E84: "\u4E59", 0x2E85: "\u4EBB", 0x2E88: "\u5200",
+    0x2E8A: "\u535C", 0x2E8C: "\u5C0F", 0x2E8D: "\u5C0F", 0x2E8E: "\u5140",
+    0x2E8F: "\u5C22", 0x2E90: "\u5C22", 0x2E91: "\u5C22", 0x2E92: "\u5DF3",
+    0x2E93: "\u5E7A", 0x2E94: "\u5F50", 0x2E95: "\u5F50", 0x2E96: "\u5FC4",
+    0x2E97: "\u5FC3", 0x2E98: "\u624C", 0x2E99: "\u6535", 0x2E9B: "\u65E1",
+    0x2E9C: "\u65E5", 0x2E9D: "\u6708", 0x2E9E: "\u6B79", 0x2E9F: "\u6BCD",
+    0x2EA0: "\u6C11", 0x2EA1: "\u6C35", 0x2EA2: "\u6C3A", 0x2EA3: "\u706C",
+    0x2EA4: "\u722B", 0x2EA5: "\u722B", 0x2EA6: "\u4E2C", 0x2EA7: "\u725B",
+    0x2EA8: "\u72AD", 0x2EA9: "\u738B", 0x2EAA: "\u758B", 0x2EAB: "\u7F52",
+    0x2EAC: "\u793B", 0x2EAD: "\u793B", 0x2EAE: "\u7AF9", 0x2EAF: "\u7CF9",
+    0x2EB0: "\u7E9F", 0x2EB1: "\u7F52", 0x2EB2: "\u7F52", 0x2EB3: "\u7F52",
+    0x2EB4: "\u7F52", 0x2EB5: "\u7F52", 0x2EB6: "\u7F8A", 0x2EB7: "\u7F8A",
+    0x2EB8: "\u7F8A", 0x2EB9: "\u8001", 0x2EBA: "\u8080", 0x2EBB: "\u807F",
+    0x2EBC: "\u6708", 0x2EBD: "\u81FC", 0x2EBE: "\u8279", 0x2EBF: "\u8279",
+    0x2EC0: "\u8279", 0x2EC1: "\u864E", 0x2EC2: "\u8864", 0x2EC3: "\u897F",
+    0x2EC4: "\u897F", 0x2EC5: "\u89C1", 0x2EC6: "\u89D2", 0x2EC7: "\u89D2",
+    0x2EC8: "\u8BA0", 0x2EC9: "\u8D1D", 0x2ECA: "\u8DB3", 0x2ECB: "\u8F66",
+    0x2ECC: "\u8FB6", 0x2ECD: "\u8FB6", 0x2ECE: "\u8FB6", 0x2ECF: "\u961D",
+    0x2ED0: "\u9485", 0x2ED1: "\u9577", 0x2ED2: "\u9578", 0x2ED3: "\u957F",
+    0x2ED4: "\u95E8", 0x2ED5: "\u961D", 0x2ED6: "\u961D", 0x2ED7: "\u96E8",
+    0x2ED8: "\u9752", 0x2ED9: "\u97E6", 0x2EDA: "\u9875", 0x2EDB: "\u98CE",
+    0x2EDC: "\u98DE", 0x2EDD: "\u98DF", 0x2EDE: "\u98DF", 0x2EDF: "\u98DF",
+    0x2EE0: "\u9963", 0x2EE1: "\u9996", 0x2EE2: "\u9A6C", 0x2EE3: "\u9AA8",
+    0x2EE4: "\u9B3C", 0x2EE5: "\u9C7C", 0x2EE6: "\u9E1F", 0x2EE7: "\u5364",
+    0x2EE8: "\u9EA6", 0x2EE9: "\u9EC4", 0x2EEA: "\u9EFE", 0x2EEB: "\u6589",
+    0x2EEC: "\u9F50", 0x2EED: "\u6B6F", 0x2EEE: "\u9F7F", 0x2EEF: "\u7ADC",
+    0x2EF0: "\u9F99", 0x2EF1: "\u9F9C", 0x2EF2: "\u4E80", 0x2EF3: "\u9F9F",
+}
+
+
 def _normalize_cjk(text: str) -> str:
     """把 CJK 部首/兼容字符还原成正常汉字。
 
