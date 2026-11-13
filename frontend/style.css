@@ -3090,7 +3090,7 @@ html[data-theme="light"] select.pill-select option {
   .chat-header h2 { font-size: 14.5px; }
 
   /* ③ 输入区：一行高、图标更小、去掉说明与采样条 */
-  .composer { padding: 6px 8px 10px; gap: 6px; }
+  .composer { padding: 6px 8px 10px; gap: 6px; margin: 0 6px 8px; }
   .composer .tip, .tip { display: none !important; }
   .composer-tools { display: none !important; }
   .mask-chip { margin: 0 0 6px; padding: 6px 8px; font-size: 12px; }
