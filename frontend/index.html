@@ -1224,5 +1224,23 @@
       });
     })();
   </script>
+  <script>
+    /* TEMP_PROBE_AV2 —— 临时展开数字人面板截图，验证完删除 */
+    setTimeout(function () {
+      try {
+        var p = document.getElementById("av2Panel");
+        if (!p) return;
+        p.classList.remove("collapsed");
+        p.removeAttribute("hidden");
+        p.style.display = "";
+        var b = p.querySelector(".sec-head");
+        if (b) b.click();
+        setTimeout(function () {
+          p.classList.remove("collapsed");
+          p.scrollIntoView({ block: "center" });
+        }, 300);
+      } catch (e) {}
+    }, 1800);
+  </script>
 </body>
 </html>
