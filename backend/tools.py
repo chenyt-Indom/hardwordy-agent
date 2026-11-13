@@ -1318,6 +1318,44 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
         {
             "type": "function",
             "function": {
+                "name": "avatar_speak",
+                "description": (
+                    "【数字人说话视频】把一张人物图片 + 一段文字，做成**会说话的 mp4 视频**：\n"
+                    "先用 TTS 配音，再按音频的声学特征驱动嘴部形变（本机有 ASR 模型时"
+                    "用字级时间戳对齐），最后用 ffmpeg 合成视频。\n"
+                    "用户说「让这个形象说话」「做个数字人视频」「用这张图念这段话」"
+                    "「数字人播报」时用它。\n"
+                    "⚠️ 需要先有形象：传 image 参数（本地图片路径），或用户已在「数字人」"
+                    "面板里设过形象（不传 image 就用现有的）。\n"
+                    "⚠️ 局限要如实说：这是**参数化口型**（按声音张闭嘴），不是 Wav2Lip "
+                    "那种神经网络重绘，不会精确做出 b/p/m 的闭唇口型。\n"
+                    "⚠️ 生成要 8~15 秒，先发一条 status 让界面有反馈。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string",
+                                 "description": "要念的文字，建议 1200 字以内（约 90 秒语音）"},
+                        "image": {"type": "string",
+                                  "description": "（可选）形象图本地绝对路径。"
+                                                 "不传就用面板里已设定的形象"},
+                        "voice": {"type": "string",
+                                  "description": "音色 id，默认 zh-CN-XiaoxiaoNeural（晓晓）。"
+                                                 "男声用 zh-CN-YunxiNeural，"
+                                                 "播音腔用 zh-CN-YunyangNeural"},
+                        "rate": {"type": "integer",
+                                 "description": "语速百分比，0 原速，20 快 20%，-15 慢 15%"},
+                        "style": {"type": "string",
+                                  "description": "情感预设：neutral / cheerful / gentle / "
+                                                 "serious / sad / news / excited"},
+                    },
+                    "required": ["text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "list_directory",
                 "description": "列出指定目录下的一级内容（文件/子目录）。用于浏览用户本机文件系统。",
                 "parameters": {
@@ -2685,6 +2723,8 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
         return _do_video_edit(arguments, ui_events, context)
     if name == "tts_speak":
         return _do_tts_speak(arguments, ui_events, context)
+    if name == "avatar_speak":
+        return _do_avatar_speak(arguments, ui_events, context)
     if name == "list_directory":
         return _do_list_directory(arguments)
     if name == "read_file":
@@ -3969,6 +4009,62 @@ def _do_tts_speak(arguments, ui_events, context):
     ]
     for w in (r.get("warnings") or []):
         lines.append("⚠️ %s" % w)
+    return "\n".join(lines)
+
+
+def _do_avatar_speak(arguments, ui_events, context):
+    """数字人说话视频：图 + 文字 → mp4。
+
+    ⚠️ 渲染 8~15 秒，先发 status 别让界面看着像卡死。
+    ⚠️ 返回里必须写清"参数化口型"这个局限，别让用户以为这是 Wav2Lip。
+    """
+    from . import avatar2
+
+    text = str(arguments.get("text") or "").strip()
+    if not text:
+        return "错误：text 是空的。把要让数字人念的文字给我。"
+    if len(text) > 1200:
+        text = text[:1200]
+
+    img = str(arguments.get("image") or "").strip()
+    if img:
+        r = avatar2.save_from_path(img, source="tool")
+        if not r.get("ok"):
+            return "设置形象失败：%s" % (r.get("error") or "未知原因")
+
+    st = avatar2.info()
+    if not st.get("has_image"):
+        return ("还没有数字人形象。请先给我一张人物图片（本地路径），"
+                "或者用 generate_image 生成一张再让我用。")
+
+    _ui(ui_events, {"type": "status",
+                    "text": "正在生成数字人视频（配音 → 口型 → 合成）…约 10 秒"})
+    try:
+        rate = int(arguments.get("rate") or 0)
+    except Exception:
+        rate = 0
+    r = avatar2.speak(text,
+                      voice=str(arguments.get("voice") or ""),
+                      rate=rate,
+                      style=str(arguments.get("style") or ""))
+    if not r.get("ok"):
+        return "数字人视频生成失败：%s" % (r.get("error") or "未知原因")
+
+    url = r.get("url") or ""
+    lines = [
+        "数字人视频已生成：**%s**" % r.get("name"),
+        "时长 %.1f 秒 · %dx%d · %d 帧 · %.0f KB"
+        % (float(r.get("duration") or 0),
+           int((r.get("size") or [0, 0])[0]), int((r.get("size") or [0, 0])[1]),
+           int(r.get("frames") or 0), float(r.get("bytes") or 0) / 1024.0),
+        "口型：%s" % (r.get("align") or "声学驱动"),
+        "[播放视频](%s)" % url,
+        "[下载视频](%s)" % url,
+        "",
+        "说明：这是**参数化口型**——按声音的音量/亮暗驱动嘴部张合，"
+        "不是 Wav2Lip 那种神经网络重绘，所以不会精确做出 b/p/m 的闭唇口型。"
+        "本机 Python 3.14 装不了 torch，跑不了 Wav2Lip。",
+    ]
     return "\n".join(lines)
 
 

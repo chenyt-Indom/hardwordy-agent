@@ -9978,127 +9978,129 @@ def audio_open_folder():
     return _open_folder_impl(tts.OUT_DIR)
 
 
-    # ---------- 数字人 2.0（一张图 + 一段话 → 会说话的视频） ----------
-    # ⚠️ 和其它路由一样必须放模块顶层：插进函数体里会被自动缩进，
-    #    装饰器在函数内执行、路由一个都注册不上（导入不报错但全 404）。
-    @app.get("/api/avatar2/info")
-    def avatar2_info():
-        """当前形象 + 嘴部矩形 + 来源信息。"""
-        return avatar2.info()
 
 
-    @app.get("/api/avatar2/status")
-    def avatar2_status():
-        """能力自检：ffmpeg / ASR / 人脸检测 / torch 各自可用与否。
-
-        前端拿它如实告诉用户"现在能做什么、缺什么"，不假装。
-        """
-        return avatar2.status()
-
-
-    @app.get("/api/avatar2/raw")
-    def avatar2_raw():
-        p = avatar2._img_path()
-        if not os.path.isfile(p):
-            raise HTTPException(status_code=404, detail="还没有形象图")
-        return FileResponse(p, media_type="image/png",
-                            headers={"Content-Disposition": "inline",
-                                     "Cache-Control": "no-store"})
+# ---------- 数字人 2.0（一张图 + 一段话 → 会说话的视频） ----------
+# ⚠️ 和其它路由一样必须放模块顶层：插进函数体里会被自动缩进，
+#    装饰器在函数内执行、路由一个都注册不上（导入不报错但全 404）。
+@app.get("/api/avatar2/info")
+def avatar2_info():
+    """当前形象 + 嘴部矩形 + 来源信息。"""
+    return avatar2.info()
 
 
-    @app.post("/api/avatar2/upload")
-    async def avatar2_upload(file: UploadFile = File(...)):
-        """上传一张形象图。存完会自动跑人脸检测定位嘴部。"""
-        raw = await file.read()
-        if not raw:
-            raise HTTPException(status_code=400, detail="空文件")
-        if len(raw) > 20 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="图片太大（上限 20MB）")
-        r = avatar2.save_bytes(raw, source=file.filename or "upload")
-        if not r.get("ok"):
-            raise HTTPException(status_code=400, detail=r.get("error") or "保存失败")
-        return r
+@app.get("/api/avatar2/status")
+def avatar2_status():
+    """能力自检：ffmpeg / ASR / 人脸检测 / torch 各自可用与否。
+
+    前端拿它如实告诉用户"现在能做什么、缺什么"，不假装。
+    """
+    return avatar2.status()
 
 
-    @app.post("/api/avatar2/from_library")
-    def avatar2_from_library(body: dict):
-        """把图片库/刚生成的那张图设为形象。body: {path}"""
-        body = body or {}
-        p = str(body.get("path") or "")
-        if not p:
-            raise HTTPException(status_code=400, detail="缺少 path")
-        r = avatar2.save_from_path(p, source=os.path.basename(p))
-        if not r.get("ok"):
-            raise HTTPException(status_code=400, detail=r.get("error") or "保存失败")
-        return r
+@app.get("/api/avatar2/raw")
+def avatar2_raw():
+    p = avatar2._img_path()
+    if not os.path.isfile(p):
+        raise HTTPException(status_code=404, detail="还没有形象图")
+    return FileResponse(p, media_type="image/png",
+                        headers={"Content-Disposition": "inline",
+                                 "Cache-Control": "no-store"})
 
 
-    @app.post("/api/avatar2/mouth")
-    def avatar2_mouth(body: dict):
-        """手动校准嘴部矩形（前端拖动）。body: {x,y,w,h}，归一化 0~1。"""
-        return {"ok": True, "mouth": avatar2.set_mouth(body or {})}
+@app.post("/api/avatar2/upload")
+async def avatar2_upload(file: UploadFile = File(...)):
+    """上传一张形象图。存完会自动跑人脸检测定位嘴部。"""
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="空文件")
+    if len(raw) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片太大（上限 20MB）")
+    r = avatar2.save_bytes(raw, source=file.filename or "upload")
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "保存失败")
+    return r
 
 
-    @app.post("/api/avatar2/detect_mouth")
-    def avatar2_detect_mouth():
-        """重新自动定位嘴部（手动拖偏了点一下复位）。"""
-        r = avatar2.detect_mouth(avatar2._img_path())
-        if r.get("ok"):
-            avatar2.set_mouth(r["mouth"])
-            return {"ok": True, "mouth": avatar2.mouth(), "score": r.get("score")}
-        return r
+@app.post("/api/avatar2/from_library")
+def avatar2_from_library(body: dict):
+    """把图片库/刚生成的那张图设为形象。body: {path}"""
+    body = body or {}
+    p = str(body.get("path") or "")
+    if not p:
+        raise HTTPException(status_code=400, detail="缺少 path")
+    r = avatar2.save_from_path(p, source=os.path.basename(p))
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "保存失败")
+    return r
 
 
-    @app.post("/api/avatar2/reset")
-    def avatar2_reset():
-        return avatar2.reset()
+@app.post("/api/avatar2/mouth")
+def avatar2_mouth(body: dict):
+    """手动校准嘴部矩形（前端拖动）。body: {x,y,w,h}，归一化 0~1。"""
+    return {"ok": True, "mouth": avatar2.set_mouth(body or {})}
 
 
-    @app.post("/api/avatar2/speak")
-    def avatar2_speak(body: dict):
-        """文本 → 配音 → 口型对齐 → mp4。body: {text, voice, rate, style, engine}
-
-        ⚠️ 同步路由：FastAPI 会丢到线程池跑，不阻塞事件循环。
-           10 秒左右的片子约 8~12 秒渲染完，前端要给"生成中"提示。
-        """
-        body = body or {}
-        text = str(body.get("text") or "").strip()
-        if not text:
-            raise HTTPException(status_code=400, detail="text 不能为空")
-        if len(text) > 1200:
-            raise HTTPException(status_code=400,
-                                detail="文本太长（上限 1200 字，约 90 秒语音）")
-        try:
-            rate = int(body.get("rate") or 0)
-        except Exception:
-            rate = 0
-        return avatar2.speak(text,
-                             voice=str(body.get("voice") or ""),
-                             rate=rate,
-                             style=str(body.get("style") or ""),
-                             engine=str(body.get("engine") or "auto"))
+@app.post("/api/avatar2/detect_mouth")
+def avatar2_detect_mouth():
+    """重新自动定位嘴部（手动拖偏了点一下复位）。"""
+    r = avatar2.detect_mouth(avatar2._img_path())
+    if r.get("ok"):
+        avatar2.set_mouth(r["mouth"])
+        return {"ok": True, "mouth": avatar2.mouth(), "score": r.get("score")}
+    return r
 
 
-    @app.get("/api/avatar2/videos")
-    def avatar2_videos():
-        """已生成的数字人视频列表，新的在前。"""
-        return {"ok": True, "items": avatar2.list_videos()}
+@app.post("/api/avatar2/reset")
+def avatar2_reset():
+    return avatar2.reset()
 
 
-    @app.get("/api/avatar2/video/{name}")
-    def avatar2_video(name: str):
-        p = avatar2.video_path(name)
-        if not p:
-            raise HTTPException(status_code=404, detail="视频不存在")
-        return FileResponse(p, media_type="video/mp4",
-                            headers={"Content-Disposition": "inline",
-                                     "Accept-Ranges": "bytes"})
+@app.post("/api/avatar2/speak")
+def avatar2_speak(body: dict):
+    """文本 → 配音 → 口型对齐 → mp4。body: {text, voice, rate, style, engine}
+
+    ⚠️ 同步路由：FastAPI 会丢到线程池跑，不阻塞事件循环。
+       10 秒左右的片子约 8~12 秒渲染完，前端要给"生成中"提示。
+    """
+    body = body or {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 不能为空")
+    if len(text) > 1200:
+        raise HTTPException(status_code=400,
+                            detail="文本太长（上限 1200 字，约 90 秒语音）")
+    try:
+        rate = int(body.get("rate") or 0)
+    except Exception:
+        rate = 0
+    return avatar2.speak(text,
+                         voice=str(body.get("voice") or ""),
+                         rate=rate,
+                         style=str(body.get("style") or ""),
+                         engine=str(body.get("engine") or "auto"))
 
 
-    @app.post("/api/avatar2/video/delete")
-    def avatar2_video_delete(body: dict):
-        body = body or {}
-        return avatar2.delete_video(str(body.get("name") or ""))
+@app.get("/api/avatar2/videos")
+def avatar2_videos():
+    """已生成的数字人视频列表，新的在前。"""
+    return {"ok": True, "items": avatar2.list_videos()}
+
+
+@app.get("/api/avatar2/video/{name}")
+def avatar2_video(name: str):
+    p = avatar2.video_path(name)
+    if not p:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    return FileResponse(p, media_type="video/mp4",
+                        headers={"Content-Disposition": "inline",
+                                 "Accept-Ranges": "bytes"})
+
+
+@app.post("/api/avatar2/video/delete")
+def avatar2_video_delete(body: dict):
+    body = body or {}
+    return avatar2.delete_video(str(body.get("name") or ""))
 
 
 # ---------- 前端 ----------
