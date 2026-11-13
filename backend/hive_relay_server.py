@@ -254,6 +254,26 @@ class Conn:
     def ctrl(self, obj: dict) -> bool:
         return self.push(K_CTRL, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
+    def graceful_close(self, timeout: float = 1.2) -> None:
+        """先把队列里剩下的包发完再关连接。
+
+        ⚠️ 为什么需要它：拒绝连接时会 `ctrl({"op":"err"})` 然后 return，
+        紧接着 finally 里就把 socket 关了 —— 队列里的 err 包**还没发出去**。
+        客户端看到的现象是「连上了、一句话没说就断了」，完全不知道是密钥错。
+        实测就是这个原因（错误密钥那条用例收不到任何回包）。
+        """
+        if not self.alive:
+            return
+        try:
+            self.q.put_nowait(None)
+        except Exception:
+            pass
+        try:
+            self._w.join(timeout)
+        except Exception:
+            pass
+        self.close()
+
     def close(self) -> None:
         if not self.alive:
             return
