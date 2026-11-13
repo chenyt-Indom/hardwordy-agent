@@ -30,7 +30,7 @@ MOODS = {
     "happy": {
         "label": "开心", "emoji": "😊", "style": "cheerful",
         "rate": 8, "pitch": 10,
-        "sway": 1.3, "nod": 1.2, "rot": 0.45, "brow": 1.6, "freq": 0.42,
+        "sway": 2.4, "nod": 2.2, "rot": 0.62, "brow": 2.0, "freq": 0.42,
         "desc": "语气轻快上扬，头部小幅摆动",
     },
     "calm": {
