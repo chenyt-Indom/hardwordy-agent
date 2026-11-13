@@ -386,10 +386,23 @@ class RelayServer:
         # 用 MSG_PEEK 偷看首字节判断：HTTP 请求以 "GET " 开头，我们的二进制
         # 协议首字节是长度高位，不会是 'G'。偷看不会消费数据，裸 TCP 那条路
         # 一个字节都不受影响。
+        # ⚠️ 必须用短超时：裸 TCP 客户端连上后是**等服务器先发 challenge** 的，
+        # 不会主动发任何数据。如果直接 peek，会一直阻塞到 60 秒的连接超时，
+        # 把正常连接全部卡死（实测踩过）。WS 客户端连上就立刻发 GET，1 秒足够。
         try:
+            _old_to = sock.gettimeout()
+        except Exception:
+            _old_to = None
+        try:
+            sock.settimeout(1.0)
             first = sock.recv(1, socket.MSG_PEEK)
         except Exception:
             first = b""
+        finally:
+            try:
+                sock.settimeout(_old_to)
+            except Exception:
+                pass
         if first[:1] == b"G":
             rest = ws_min.handshake_server(sock)
             if rest is None:
