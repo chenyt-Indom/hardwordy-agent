@@ -165,6 +165,22 @@ body {
 }
 .sidebar.hidden > * { opacity: 0; }
 
+/* 桌面端收起：不消失，收成一条 78px 窄条，只留 logo。
+   为什么不像原来那样收成 width:0 —— logo 现在是开关，收没了就再也点不回来。
+   窄条里除 .brand 外全部淡出且不可点，避免留一块看不见却点得到的区域。 */
+@media (min-width: 769px) {
+  .sidebar.hidden {
+    width: 78px; min-width: 78px;
+    padding-left: 10px; padding-right: 10px;
+    border-right-width: 1px; border-right-color: var(--border);
+    overflow: hidden;
+  }
+  .sidebar.hidden > * { opacity: 0; pointer-events: none; }
+  .sidebar.hidden > .brand { opacity: 1; pointer-events: auto; }
+  .sidebar.hidden .brand { flex-direction: column; gap: 0; }
+  .sidebar.hidden .brand > div { display: none; }
+}
+
 .brand { display: flex; gap: 12px; align-items: center; }
 /* 2026-11-13：logo 从 <div> 改成 <button> —— 它就是侧栏的折叠开关。
    按钮默认带边框/内边距/系统字体，这里全部清掉，让它看起来仍是那个方块 logo。 */
