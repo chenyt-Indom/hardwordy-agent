@@ -934,22 +934,60 @@ def status() -> dict:
     }
 
 
-def list_videos(limit: int = 50) -> list:
-    d = _vdir()
+def list_videos(limit: int = 50, scope: str = "avatar") -> list:
+    """列出可浏览的 mp4，按时间倒序。
+
+    scope="avatar"  → 数字人生成的视频（data/avatar2/videos）
+    scope="library" → 生成文库里的 mp4（视频编辑产物、样片等）
+    scope="all"     → 两边合并
+    每项带 scope 字段，删除时按它决定删哪边（两边删除语义不同：
+    数字人视频直接删；文库文件进回收站，可恢复）。
+    """
+    sc = (scope or "avatar").lower()
+    if sc not in ("avatar", "library", "all"):
+        sc = "avatar"
     items = []
-    for f in os.listdir(d):
-        if not f.lower().endswith(".mp4"):
-            continue
-        p = os.path.join(d, f)
+
+    if sc in ("avatar", "all"):
+        d = _vdir()
         try:
-            st = os.stat(p)
+            names = os.listdir(d)
         except OSError:
-            continue
-        items.append({"name": f, "bytes": st.st_size,
-                      "mtime": time.strftime("%Y-%m-%d %H:%M:%S",
-                                             time.localtime(st.st_mtime)),
-                      "url": "/api/avatar2/video/" + f})
-    items.sort(key=lambda x: x["mtime"], reverse=True)
+            names = []
+        for f in names:
+            if not f.lower().endswith(".mp4"):
+                continue
+            p = os.path.join(d, f)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            items.append({"name": f, "bytes": st.st_size,
+                          "mtime": time.strftime("%Y-%m-%d %H:%M:%S",
+                                                 time.localtime(st.st_mtime)),
+                          "_ts": st.st_mtime,
+                          "scope": "avatar", "rel": f, "folder": "",
+                          "url": "/api/avatar2/video/" + f})
+
+    if sc in ("library", "all"):
+        try:
+            from . import doclib
+            from urllib.parse import quote
+            for f in doclib.list_files():
+                if f.get("ext") not in (".mp4", ".mov", ".webm", ".mkv", ".m4v"):
+                    continue
+                items.append({"name": f["name"], "bytes": f["size"],
+                              "mtime": f["modified"], "_ts": f["mtime"],
+                              "scope": "library", "rel": f["rel"],
+                              "folder": f.get("folder", ""),
+                              "url": "/api/doclib/download?rel="
+                                     + quote(f["rel"])})
+        except Exception:                               # noqa: BLE001
+            pass
+
+    items.sort(key=lambda x: x.get("_ts", 0), reverse=True)
+    for it in items:
+        it.pop("_ts", None)
     return items[:limit]
 
 
@@ -962,7 +1000,14 @@ def video_path(name: str) -> str:
     return p if os.path.isfile(p) else ""
 
 
-def delete_video(name: str) -> dict:
+def delete_video(name: str, scope: str = "avatar") -> dict:
+    """删除视频。scope="library" 时走 doclib（进回收站，可恢复）。"""
+    if (scope or "").lower() == "library":
+        try:
+            from . import doclib
+            return doclib.delete_file(name)
+        except Exception as e:                          # noqa: BLE001
+            return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
     p = video_path(name)
     if not p:
         return {"ok": False, "error": "没有这个视频"}
