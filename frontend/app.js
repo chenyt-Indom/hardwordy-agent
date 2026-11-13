@@ -2374,8 +2374,17 @@
       } catch (e) {}
     }
 
-    function playVideo(name) {
-      const src = "/api/avatar2/video/" + encodeURIComponent(name);
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
+        { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    // nameOrItem：字符串 = 数字人视频名；对象 = 列表项（带 url，文库视频走下载地址）
+    function playVideo(nameOrItem) {
+      const it = typeof nameOrItem === "string"
+        ? { name: nameOrItem, url: "/api/avatar2/video/" + encodeURIComponent(nameOrItem) }
+        : nameOrItem;
+      const src = it.url;
       video.hidden = false;
       video.src = src;
       video.play().catch(() => {});
@@ -2386,18 +2395,57 @@
       pinVid.onerror = () => pin.classList.remove("speaking");
     }
 
+    const scopeSel = $("#av2Scope");
+    const SCOPE_KEY = "avatar2_scope";
+    if (scopeSel) {
+      const saved = localStorage.getItem(SCOPE_KEY);
+      if (saved) scopeSel.value = saved;
+      scopeSel.onchange = () => {
+        try { localStorage.setItem(SCOPE_KEY, scopeSel.value); } catch (e) {}
+        loadVideos();
+      };
+    }
+
     async function loadVideos() {
       try {
-        const r = await api("/api/avatar2/videos");
+        const sc = scopeSel ? scopeSel.value : "avatar";
+        const r = await api("/api/avatar2/videos?scope=" + encodeURIComponent(sc));
         const items = r.items || [];
-        list.innerHTML = items.length
-          ? items.map((it) =>
-              '<div class="av2-item" data-name="' + it.name + '" title="' + it.name + '">' +
-              '<span class="av2-name">' + String(it.name).replace(/^avatar_/, "") + "</span>" +
-              '<span class="av2-meta">' + String(it.mtime).slice(5, 16) + "</span></div>").join("")
-          : "";
+        if (!items.length) {
+          list.innerHTML = '<div class="hint av2-empty-list">这个目录里还没有视频</div>';
+          return;
+        }
+        list.innerHTML = items.map((it, i) =>
+          '<div class="av2-item" data-i="' + i + '" title="' + esc(it.name) + '">' +
+          '<span class="av2-name">' +
+          esc(String(it.name).replace(/^avatar_\d{8}_\d{6}_/, "")) +
+          (it.scope === "library" ? ' <i class="av2-tag">文库</i>' : "") + "</span>" +
+          '<span class="av2-meta">' + esc(String(it.mtime).slice(5, 16)) + "</span>" +
+          '<button type="button" class="av2-del" title="删除这个视频">✕</button>' +
+          "</div>").join("");
         list.querySelectorAll(".av2-item").forEach((el) => {
-          el.onclick = () => playVideo(el.dataset.name);
+          const it = items[parseInt(el.dataset.i, 10)];
+          el.querySelector(".av2-name").onclick = () => playVideo(it);
+          el.querySelector(".av2-meta").onclick = () => playVideo(it);
+          const del = el.querySelector(".av2-del");
+          del.onclick = async (ev) => {
+            ev.stopPropagation();
+            const where = it.scope === "library" ? "生成文库" : "数字人视频";
+            if (!confirm("删除「" + it.name + "」？\n（在" + where + "里）")) return;
+            try {
+              const d = await api("/api/avatar2/video/delete", {
+                method: "POST",
+                body: JSON.stringify({ name: it.rel || it.name, scope: it.scope }),
+              });
+              if (!d.ok) throw new Error(d.error || "删除失败");
+              if (video.getAttribute("src") &&
+                  decodeURIComponent(video.getAttribute("src")).indexOf(it.name) >= 0) {
+                video.pause(); video.hidden = true; video.removeAttribute("src");
+              }
+              say("已删除：" + it.name);
+              loadVideos();
+            } catch (e) { say("删除失败：" + e.message, "err"); }
+          };
         });
       } catch (e) {}
     }
