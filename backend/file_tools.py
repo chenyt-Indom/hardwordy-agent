@@ -181,6 +181,9 @@ def resolve_path(path: str, roots=None, max_depth: int = SEARCH_MAX_DEPTH,
     for root in search_roots:
         if timed_out or len(hits) >= SEARCH_COLLECT_CAP:
             break
+        # 上一个 root 里已经找到「文件名完全相等」的（100 分），不用再翻别处
+        if any(sc >= 100 for sc, _ in hits):
+            break
         if not os.path.isdir(root):
             continue
         root_depth = root.rstrip("\\/").count(os.sep)
