@@ -1149,6 +1149,13 @@ class MeshNode:
 
     def parse_code(self, code: str) -> Dict[str, Any]:
         c = (code or "").strip()
+        # punch:// 表示这是 UDP 打洞地址（端口是 UDP 的，不能拿 TCP 去连）
+        mode = "tcp"
+        for pre in ("punch://", "udp://"):
+            if c.startswith(pre):
+                c = c[len(pre):]
+                mode = "punch"
+                break
         for pre in ("hive3://", "hive2://", "hive://"):
             if c.startswith(pre):
                 c = c[len(pre):]
