@@ -107,7 +107,15 @@ try:
     r5 = dk.save_server_config(s.get("host") or "139.199.69.88",
                                s.get("port", 22), s.get("user", "root"),
                                s.get("relay_port", 18765))
-    chk("服务器信息可写", r5.get("ok") is True, str(r5.get("error", "")))
+    print("[9] save_server_config ->", r5)
+    chk("服务器信息可写", r5.get("host") == s.get("host") and r5.get("port") == s.get("port"),
+        "%s:%s" % (r5.get("host"), r5.get("port")))
+    # 粘贴 user@host:port 形式应被正确拆解
+    r6 = dk.save_server_config("root@139.199.69.88:2222")
+    print("[9] 粘 user@host:port ->", r6)
+    chk("自动拆解 user@host:port",
+        r6.get("host") == "139.199.69.88" and r6.get("user") == "root" and r6.get("port") == 2222,
+        "%s@%s:%s" % (r6.get("user"), r6.get("host"), r6.get("port")))
 
 finally:
     restore()
