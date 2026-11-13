@@ -677,7 +677,7 @@ def _h_mask(w: int, h: int, feather: int = 3) -> "object":
     return Image.fromarray(m, mode="L")
 
 
-def _frame(prep: dict, openness: float, width: float):
+def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     """按口型参数生成一帧：上下唇分离位移 + 缝隙用原图唇缝像素拉伸填充。
 
     演进过程（每一版都拿真实写实人像逐帧验证过，不靠想象）：
