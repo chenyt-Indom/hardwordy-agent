@@ -388,7 +388,12 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
             pred = np.clip(pred * 255.0, 0, 255).astype(np.uint8)
             # 模型输入输出都是 BGR（官方用 cv2 读图，未做通道转换），
             # 这里绝不能再 cvtColor，否则嘴唇会发紫。
-            patch = cv2.resize(pred, (cw, ch), interpolation=cv2.INTER_LINEAR)
+            patch = cv2.resize(pred, (cw, ch), interpolation=cv2.INTER_CUBIC)
+            # 96x96 放大到原尺寸必然发糊，补一层温和 USM。
+            # 实测 1.7/-0.7 会在下颌和发际线出白边，1.28/-0.28 是平衡点。
+            if cw > 160 or ch > 160:
+                _b = cv2.GaussianBlur(patch, (0, 0), 1.0)
+                patch = cv2.addWeighted(patch, 1.28, _b, -0.28, 0)
 
             frame = img.copy()
             roi = frame[y1:y2, x1:x2].astype(np.float32)
