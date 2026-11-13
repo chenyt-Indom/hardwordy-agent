@@ -439,7 +439,6 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
 
     both_lo = _both_for(1.0)     # 宽遮罩：嘴几乎不动，但绝不变形
     both_hi = _both_for(1.2)     # 窄遮罩：张得大，口腔会糊
-    both = both_hi if _w_hi >= 0.999 else both_lo
 
     # ------------------------------------------------ 融合蒙版（演进记录）
     # 这块参数前后改了三轮，每一轮都被用户看出问题，记下来免得再走回头路：
