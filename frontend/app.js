@@ -378,6 +378,7 @@
       new MutationObserver(() => {
         if (!thinkFollow) return;
         _thinkBoxes.forEach((w) => {
+          if (w._noFollow) return;   // 用户点过「归位」，别再把它弹回浮动
           if (w.isConnected && w.parentNode !== document.body) dockOne(w);
         });
       }).observe(messagesEl, { childList: true });
