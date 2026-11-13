@@ -475,17 +475,26 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     _base_gap = None
     _boost_on = bool(boost and boost > 1.001)
     try:
-        for i, ch_mel in enumerate(chunks):
-            m = ch_mel[None, None, :, :].astype(np.float32)  # (1,1,80,16)
+        def _infer(binput, mel_in):
+            """跑一次模型，返回 (96,96,3) 的 float32（0~255，BGR）。"""
             feeds = {}
             for nm in in_names:
                 low = nm.lower()
-                if "mel" in low or "audio" in low:
-                    feeds[nm] = m
-                else:
-                    feeds[nm] = both
-            pred = sess.run([out_name], feeds)[0]            # (1,3,96,96)
-            pred = pred[0].transpose(1, 2, 0)                # (96,96,3)
+                feeds[nm] = mel_in if ("mel" in low or "audio" in low) else binput
+            p = sess.run([out_name], feeds)[0][0].transpose(1, 2, 0)
+            return p
+
+        for i, ch_mel in enumerate(chunks):
+            m = ch_mel[None, None, :, :].astype(np.float32)  # (1,1,80,16)
+            # 两套遮罩各跑一次，再按权重混合（见上面 _w_hi 的说明）。
+            # w=1.0 时只跑窄遮罩，省一半时间。
+            if _w_hi >= 0.999:
+                pred = _infer(both_hi, m)
+            elif _w_hi <= 0.001:
+                pred = _infer(both_lo, m)
+            else:
+                pred = (_infer(both_lo, m) * (1.0 - _w_hi)
+                        + _infer(both_hi, m) * _w_hi)
             pred = np.clip(pred * 255.0, 0, 255).astype(np.uint8)
             # 模型输入输出都是 BGR（官方用 cv2 读图，未做通道转换），
             # 这里绝不能再 cvtColor，否则嘴唇会发紫。
