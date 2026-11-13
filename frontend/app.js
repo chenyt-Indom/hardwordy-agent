@@ -2268,7 +2268,9 @@
     try { folded = JSON.parse(localStorage.getItem(FOLD_KEY) || "{}") || {}; } catch (e) { folded = {}; }
     const saveFolded = () => { try { localStorage.setItem(FOLD_KEY, JSON.stringify(folded)); } catch (e) {} };
 
-    ["kbPanel", "audioPanel", "libraryPanel", "hivePanel"].forEach((id) => {
+    // 2026-11-13：autoPanel（⏰ 自动化）加入这套折叠机制 ——
+    // 它和其他面板共用同一套高度动画与 localStorage 记忆，观感一致。
+    ["autoPanel", "kbPanel", "audioPanel", "libraryPanel", "hivePanel"].forEach((id) => {
       const pnl = document.getElementById(id);
       if (!pnl) return;
       const head = pnl.querySelector(".sec-head");
