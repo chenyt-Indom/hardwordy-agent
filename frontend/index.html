@@ -1064,18 +1064,7 @@
       // 记住上次状态；第一次进来默认收起（用户要的就是「只剩一个箭头」）
       var wantFold = '0';
       try { wantFold = localStorage.getItem('tb_fold_open') || '0'; } catch (e) {}
-      setFold(true); /* TEMP-VERIFY */
-      setTimeout(function () {
-        var b = document.getElementById('tbFoldBtn');
-        var r = b.getBoundingClientRect();
-        var d = document.createElement('div');
-        d.id = 'tempVerify';
-        d.style.cssText = 'position:fixed;left:0;top:0;z-index:99999;background:#000;' +
-          'color:#0f0;font:14px monospace;padding:6px';
-        d.textContent = 'RECT ' + Math.round(r.left) + ',' + Math.round(r.top) +
-          ',' + Math.round(r.width) + ',' + Math.round(r.height);
-        document.body.appendChild(d);
-      }, 800);
+      setFold(wantFold === '1');
     }
 
     // ⑥ 抽屉开关
