@@ -345,9 +345,12 @@ class RelayServer:
         with self.lock:
             rooms = list(self.rooms.values())
         for r in rooms:
+            # ⚠️ 必须在**锁外**关连接：close() 会回调 srv.leave()，而 leave()
+            # 又要拿同一把 r.lock —— 持锁调用就是死锁（实测进程卡住不退出）。
             with r.lock:
-                for c in list(r.conns):
-                    c.close()
+                conns = list(r.conns)
+            for c in conns:
+                c.close()
 
     # -------------------------------------------------- 单连接
 
