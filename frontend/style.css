@@ -463,7 +463,12 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   border-radius: 50%; cursor: pointer;
 }
 
-.composer { border-top: 1px solid var(--border); padding: 12px 20px 14px; background: var(--panel); }
+/* 2026-11-13 用户要求「最底下的栏弄成一体式」：
+   原来是 border-top 一条实色横线 + background: var(--panel) 实色底，
+   在深色下和消息区（--bg）之间形成一条明显的"断开"。
+   现在两样都去掉，输入区跟页面共用同一层背景，
+   层次交给里面的输入框本身（--panel2 底 + 描边 + 圆角）表现。 */
+.composer { border-top: 1px solid transparent; padding: 12px 20px 14px; background: transparent; }
 .input-row { display: flex; gap: 10px; align-items: flex-end; }
 .input-row textarea {
   flex: 1; background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
