@@ -113,6 +113,10 @@ class Room:
         self.rk = hashlib.sha256(gid.encode("utf-8")).digest()[:4]
         self.lock = threading.Lock()
         self.conns: set = set()
+        # 信令表：conn -> {"uid","name","paddr","ts"}
+        # 服务器只保存「谁的打洞地址是什么」，**不碰消息内容** —— 它的唯一
+        # 作用是让两个人互相知道对方的地址，之后的聊天走 UDP 直连。
+        self.members: dict = {}
         self.seq = 0
         self.hist: list = []          # [(seq, frame_bytes)]，只留最近 HIST_MAX 条
         self.max_log = max_log_mb * 1024 * 1024
