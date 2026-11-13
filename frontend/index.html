@@ -1060,7 +1060,7 @@
       // 记住上次状态；第一次进来默认收起（用户要的就是「只剩一个箭头」）
       var wantFold = '0';
       try { wantFold = localStorage.getItem('tb_fold_open') || '0'; } catch (e) {}
-      setFold(true); /* TEMP-SHOT 临时截图用，马上还原 */
+      setFold(wantFold === '1');
     }
 
     // ⑥ 抽屉开关
