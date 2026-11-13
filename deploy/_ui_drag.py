@@ -125,6 +125,7 @@ with connect(ws_url, max_size=60 * 1024 * 1024) as ws:
     })()""")
     print("  ", r)
 
-proc.kill(); time.sleep(0.4)
+subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+time.sleep(0.8)
 shutil.rmtree(prof, ignore_errors=True)
 print("\n完成")
