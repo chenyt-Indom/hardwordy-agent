@@ -457,7 +457,9 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
     # 2026-11-14：融合带原来写死 0.56~0.76，换个形象图（人脸框比例不同）就会
     # 错位。改成以真实嘴位 my_rel 为中心上下各留 _half，保证不管什么图都对准。
     cw, ch = x2 - x1, y2 - y1
-    _half = 0.088
+    # 0.088 会连下巴上部一起换成 96x96 的模糊输出（用户看到"嘴唇下方一层糊"）。
+    # 嘴高在裁剪框内约 0.080，半高 0.040，取 0.055 只覆盖嘴唇 + 少量余量。
+    _half = 0.055
     _mtop = max(0.0, my_rel - _half)
     _mbot = min(1.0, my_rel + _half)
     msk = _feather_mask(ch, cw, top=_mtop, bot=_mbot, feather=0.03)
