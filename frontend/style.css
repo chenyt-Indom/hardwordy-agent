@@ -592,7 +592,8 @@ body.dragging .drop-overlay,
 }
 .sec-head h2 { margin: 0; }
 /* 面板标题右侧的按钮组，避免被 space-between 拆散 */
-.head-acts { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.head-acts { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+             flex-wrap: wrap; justify-content: flex-end; }
 .sessions-list { max-height: 230px; overflow-y: auto; }
 /* 标题行：点一下折叠 / 展开整块对话列表 */
 .sess-head {
