@@ -1005,21 +1005,31 @@ class MeshNode:
                     "error": "本机 P2P 网络还没启动（先点一下左边的群名进入群聊）"}
         pub = _public_ip()
         lip = lan_ip()
+        ts = tailscale_ip()
         # lan_addr / wan_addr 是**不带 hive3:// 前缀**的纯 IP:端口 ——
         # 「密码入群」的地址框要的就是这个格式，直接复制粘贴不会带出协议头。
+        if ts:
+            note = ("检测到 Tailscale：把「Tailscale 地址」发给对方，"
+                    "他粘进来就能连（跨网络也不用公网 IP）")
+        elif pub:
+            note = "把这个码发给对方，他粘进来就能连上（数据不经任何服务器）"
+        else:
+            note = ("家用宽带没有公网 IP，跨网络连不上。装一个 Tailscale（免费），"
+                    "两台机器登录同一账号后，这里会自动出现 100.x 的地址")
         return {
             "ok": True,
             "gid": gid,
             "port": self.port,
             "lan_ip": lip,
             "public_ip": pub,
+            "tailscale_ip": ts,
             "lan_addr": "%s:%s" % (lip, self.port),
             "wan_addr": ("%s:%s" % (pub, self.port)) if pub else "",
+            "ts_addr": ("%s:%s" % (ts, self.port)) if ts else "",
             "lan_code": "hive3://%s:%s" % (lip, self.port),
             "wan_code": ("hive3://%s:%s" % (pub, self.port)) if pub else "",
-            "note": ("公网地址没探到，跨网络需要路由器端口映射，"
-                     "或改用 Tailscale 这类组网工具") if not pub else
-                    "把这个码发给对方，他粘进来就能连上（数据不经任何服务器）",
+            "ts_code": ("hive3://%s:%s" % (ts, self.port)) if ts else "",
+            "note": note,
         }
 
     def parse_code(self, code: str) -> Dict[str, Any]:
