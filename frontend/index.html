@@ -384,7 +384,9 @@
         <option value="deepseek-flash-think">🧠 DS V4.1 思考</option>
         <option value="deepseek-v4-pro">🔮 DS V4 Pro</option>
       </select>
-           <button type="button" class="pill pill-btn settings-btn" id="settingsBtn"
+      <button type="button" class="pill pill-btn askmode-btn" id="askModeBtn"
+              title="模型在动手前会问你多少问题：快速了解 = 只问最关键的几条；深度询问 = 分多轮把关键信息问透。点这里切换（下一次提问生效）。">快速问</button>
+      <button type="button" class="pill pill-btn settings-btn" id="settingsBtn"
               title="设置：需要配 API Key 的 / 对话能力 / 模型与性能 / 开发与工具">⚙ 设置</button>
       <!-- 询问方式：**一个按钮**，按钮上直接显示当前选的是哪种，点开可切换。
            ⚠️ 故意**不加 data-cfg** —— 那条规则会把 .pill[data-cfg] 当成布尔开关处理
