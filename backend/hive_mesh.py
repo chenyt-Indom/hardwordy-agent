@@ -1175,7 +1175,7 @@ class MeshNode:
         if not (1 <= port_i <= 65535):
             return {"ok": False,
                     "error": "端口 %d 超出范围（应为 1~65535）" % port_i}
-        return {"ok": True, "host": host, "port": port_i}
+        return {"ok": True, "host": host, "port": port_i, "mode": mode}
 
     def probe(self, host: str, port: int, timeout: float = 3.0) -> Dict[str, Any]:
         """连到对方端口问一句「你有哪些群」，拿回 [{gid, vt, gn}]。
