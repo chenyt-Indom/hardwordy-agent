@@ -284,14 +284,34 @@ WantedBy=multi-user.target
             pass
 
 
-def _local_probe(host: str, port: int) -> int:
+def _pick_probe_url(host: str, port: int):
+    """决定自检该连哪个地址。
+
+    应用里的 relay.json 可能配的是 ws://host/hive-relay（走 nginx 80 反代，
+    绕过安全组）。那种情况下拿 hive4://host:18765 去测一定超时 —— 服务其实
+    是好的，只是这个端口在公网上被挡住了。所以优先沿用已配置的地址。
+    返回 (url, 说明)。
+    """
+    try:
+        if os.path.exists(RELAY_CFG):
+            with open(RELAY_CFG, "r", encoding="utf-8") as f:
+                u = str(json.load(f).get("url") or "").strip()
+            if u and u.lower().startswith(("ws://", "wss://", "http://", "https://")):
+                if host in u:
+                    return u, "应用里已配置的反代地址"
+    except Exception:
+        pass
+    return "hive4://%s:%d" % (host, port), ""
+
+
+def _local_probe(url: str) -> int:
     """从本机连一次公网中继，确认真的可用（不是只看服务进程活着）。"""
     try:
         from backend import hive_relay_link as L
     except Exception as e:
         _log("导入失败: %s" % e)
         return 1
-    r = L.probe("hive4://%s:%d" % (host, port), timeout=6.0)
+    r = L.probe(url, timeout=6.0)
     if r.get("ok"):
         h = r.get("health") or {}
         _log("      ✅ 公网可达  %sms  版本=%s 房间=%s 在线=%s 累计帧=%s"
