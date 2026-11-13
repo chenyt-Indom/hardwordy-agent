@@ -852,19 +852,6 @@ def status() -> dict:
         torch_ver = getattr(torch, "__version__", "")
     except Exception:                                   # noqa: BLE001
         torch_ok = False
-    # Wav2Lip 走 onnxruntime，不依赖 torch，所以单独探测
-    w2l = False
-    w2l_err = ""
-    w2l_info = {}
-    try:
-        from . import wav2lip_onnx as w2l_mod
-        w2l = bool(w2l_mod.available())
-        if w2l:
-            w2l_info = w2l_mod.model_info()
-        else:
-            w2l_err = "没有权重文件"
-    except Exception as e:                              # noqa: BLE001
-        w2l_err = "%s: %s" % (type(e).__name__, e)
     return {
         "ok": True,
         "ffmpeg": bool(exe),
