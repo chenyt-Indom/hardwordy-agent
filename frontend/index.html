@@ -213,6 +213,12 @@
             <option value="auto">口型：自动</option>
           </select>
         </div>
+        <div class="av2-row av2-row-boost">
+          <label class="av2-boost-lab">口型幅度 <b id="av2BoostVal">1.0×</b>
+            <input type="range" id="av2Boost" min="1.0" max="2.0" step="0.1" value="1.0"
+                   title="1.0 最自然；往右嘴张得更开，2.0 最明显但可能有涂抹感" />
+          </label>
+        </div>
         <div class="hint av2-hint" id="av2Hint"></div>
         <video id="av2Video" controls playsinline hidden></video>
         <div class="list av2-list" id="av2List"></div>
