@@ -774,14 +774,10 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
 
 # ---------------------------------------------------------------- 一站式
 def speak(text: str, voice: str = "", rate=None, style: str = "",
-          engine: str = "auto", lipsync: str = "param",
-          boost: float = 1.0, mood: str = "", expr: bool = True) -> dict:
+          engine: str = "auto", mood: str = "", expr: bool = True) -> dict:
     """文本 → TTS → 口型对齐 → mp4。这是给工具/前端调的主入口。
 
     engine  = TTS 引擎（auto/edge/sapi）
-    lipsync = 口型引擎：param（声学形变，默认）/ wav2lip（实验性，嘴位易偏）
-              auto 等同 param
-    boost   = 口型幅度倍率（1.0 原样，1.2~1.6 更明显，>1.8 会糊）
     mood    = 心情：auto/""（按语境自动判断）/ happy/calm/serious/gentle/
               sad/excited/surprise/worried/confident
     rate    = 语速 -50~50；None 表示用心情的建议值
