@@ -374,9 +374,6 @@
       <label class="pill" data-cfg="memory_enabled"><i class="sw"></i>记忆</label>
       <label class="pill" data-cfg="rag_enabled"><i class="sw"></i>知识库</label>
       <label class="pill" data-cfg="web_enabled" title="开着：搜索/网页/地图都联网查；关掉：全部走本地，地图只能用内置的常用地名表（没有底图、不显示地图缓存）"><i class="sw"></i>联网</label>
-      <button type="button" class="pill pill-btn" id="amapKeyBtn" title="填高德开放平台的 key —— 填了地图能搜到全国的小店、有真实评分和实时路况。不填也能用，只是退回 OpenStreetMap（数据弱一些）" onclick="window.__showAmapKey&&window.__showAmapKey()">高德</button>
-      <label class="pill" data-cfg="auto_memorize"><i class="sw"></i>自动记</label>
-      <label class="pill" data-cfg="code_auto_route" title="写代码时自动换用专用代码模型（非思考型，更稳更快）。具体用哪个、多少参数、多大体积，看左侧状态栏那行模型信息 —— 那里是从本机现读的，没下载时会自动回退到默认模型"><i class="sw"></i>专用</label>
       <label class="pill" data-cfg="code_exec_enabled" title="让模型在本机真跑 Python 把结果算出来（默认关闭；开启后模型写的代码会在你电脑上执行）"><i class="sw"></i>跑代码</label>
       <!-- 询问方式：**一个按钮**，按钮上直接显示当前选的是哪种，点开可切换。
            ⚠️ 故意**不加 data-cfg** —— 那条规则会把 .pill[data-cfg] 当成布尔开关处理
