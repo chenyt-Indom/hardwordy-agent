@@ -1,71 +1,34 @@
-# Hive 中继部署（放到你的腾讯云服务器）
+# Hive 中继部署（旧说明，已迁移）
 
-中继只做两件事：**转发密文** + **给消息定序**。
-它看不到任何聊天内容——群密钥只在成员之间通过二维码传递，服务器上没有。
+> **2026-11-14 更新**：这份文档原来对应 `backend/hive_relay.py`，
+> 那个文件曾在「改纯 P2P」时被删除，现在中继以新的形式回来了，
+> 文件名和协议都变了。
 
-## 一、上传文件
+**请改看新文档**：`deploy/HIVE中继部署手册.md`
 
-只需要一个文件：`backend/hive_relay.py`
+## 变了什么
 
-用 scp / 宝塔面板 / WinSCP 都行，传到服务器任意目录，比如 `/opt/hive/`。
+| 项 | 旧（hive_relay.py） | 新 |
+|---|---|---|
+| 服务器程序 | `hive_relay.py`，依赖 `websockets` | `backend/hive_relay_server.py`，**零依赖**（只用标准库） |
+| 协议 | WebSocket | 自定义定长头（`[4B 长度][1B 类型][载荷]`） |
+| 客户端 | `hive_client` 直连 ws:// | `backend/hive_relay_link.py`，作为**虚拟 peer** 挂进 mesh |
+| 鉴权 | 无（任何知道地址的人都能连） | HMAC 挑战应答，密钥**不在网络上传输** |
+| 补发 | 密文日志 | seq + 落盘 + 断线按水位补发 |
+| 部署 | 手工 scp + nohup | `deploy/hive_relay_deploy.py` 一条命令全自动 |
 
-## 二、装依赖并启动
+## 为什么换掉 WebSocket
 
-```bash
-cd /opt/hive
-pip3 install websockets
-python3 hive_relay.py --host 0.0.0.0 --port 8765 --data /opt/hive/data
-```
+服务器上少一个 pip 依赖，就少一个「部署时卡住」的理由。
+自定义协议的帧就是 mesh 层原样的字节，中继**完全不需要解析**——
+它连「这是文字还是文件」都不知道，只按路由键转发。
 
-想后台常驻：
-
-```bash
-nohup python3 hive_relay.py --host 0.0.0.0 --port 8765 --data /opt/hive/data > hive.log 2>&1 &
-```
-
-## 三、放行端口
-
-腾讯云控制台 → 安全组 → 入站规则 → 放行 **TCP 8765**。
-服务器本机防火墙（Ubuntu）：
+## 一分钟上手
 
 ```bash
-sudo ufw allow 8765/tcp
+# 本机（项目根目录）
+python deploy/hive_relay_deploy.py
 ```
 
-## 四、在应用里填地址
-
-左侧「群聊」模式 → 协作群面板 → **⋯** → **🌐 中继地址** → 填：
-
-```
-ws://你的服务器公网IP:8765
-```
-
-保存后，每个群成员都要各自填一次（各自连同一台中继）。
-
-## 五、验证连上了
-
-协作群面板的 **⋯** 菜单里有一行状态，应显示「🟢 已连接中继 · ws://…」。
-群聊界面顶部会显示群指纹和成员数。
-
-## 六、建议（生产环境）
-
-直接暴露 `ws://` 是明文传输（消息体本身是加密的，但连接不加密）。
-更稳妥的做法是前面挂 nginx + TLS，用 `wss://`：
-
-```nginx
-location /hive {
-    proxy_pass http://127.0.0.1:8765;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_read_timeout 3600s;
-}
-```
-
-然后应用里填 `wss://你的域名/hive`。
-
-## 常见问题
-
-- **连不上**：先 `telnet 你的IP 8765`，不通就是安全组没放行。
-- **能连但收不到消息**：确认两个人填的是**同一个中继地址**，并且加入的是**同一个群**（比对群指纹是否一致）。
-- **中继重启后消息还在吗**：在。密文日志存在 `--data` 指定的目录里，seq 也从那里恢复。
+然后应用里「群聊 → 🌐 中继」填 `hive4://你的IP:8765`。
+详见 `deploy/HIVE中继部署手册.md`。
