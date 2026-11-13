@@ -14,7 +14,8 @@ EDGES = [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
          r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"]
 exe = next((p for p in EDGES if os.path.exists(p)), None)
 prof = tempfile.mkdtemp(prefix="edge_dp2_")
-proc = subprocess.Popen([exe, "--headless=new", "--disable-gpu", "--no-first-run",
+proc = subprocess.Popen([exe, "--headless=new", "--disable-gpu", "--no-sandbox",
+                         "--disable-dev-shm-usage", "--no-first-run",
                          "--no-default-browser-check", "--remote-debugging-port=%d" % PORT,
                          "--user-data-dir=%s" % prof, "--window-size=1440,900", URL],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
