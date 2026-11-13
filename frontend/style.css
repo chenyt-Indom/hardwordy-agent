@@ -4864,6 +4864,9 @@ html[data-theme="light"] select.pill-select option {
 
 /* 口型幅度滑块：独占一行，标签 + 数值 + 滑条 */
 .av2-row-boost { margin-top: 4px; }
+/* 声学形变不使用 Wav2Lip 的遮罩幅度 → 滑块置灰，避免误以为调了有效果 */
+.av2-row-boost.av2-boost-off { opacity: .42; }
+.av2-row-boost.av2-boost-off input { cursor: not-allowed; }
 .av2-boost-lab {
   display: flex; align-items: center; gap: 8px;
   width: 100%; font-size: 12px; color: var(--muted);
