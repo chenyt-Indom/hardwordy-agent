@@ -41,6 +41,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import backend.hive as H
+from backend import hive_punch as HP
 
 logger = logging.getLogger("hive_mesh")
 
