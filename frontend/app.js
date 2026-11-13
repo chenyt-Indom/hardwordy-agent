@@ -2154,13 +2154,39 @@
   // 折叠整条侧栏。桌面端收起是「78px 窄条」（logo 还在，随时点回来），
   // 手机端是「滑出屏幕」——两种行为都还是靠 .hidden 表示，差异全在 CSS 里。
   const SB_KEY = "sidebar_collapsed";
+  // ⚠️ 桌面端收起时**直接写内联样式**，不完全依赖 style.css 的 .sidebar.hidden：
+  //    实测某些内核对那条规则（连老的 width:0 也是）不应用，收起后宽度仍是 300px。
+  //    内联样式优先级最高，且 .sidebar 本身有 transition，动画照常。
+  const applySbStyle = (collapsed) => {
+    const el = _sbEl(); if (!el) return;
+    if (window.innerWidth <= 768) {
+      // 手机端是抽屉（transform 控制），内联宽度会捣乱，全部清掉
+      el.style.width = ""; el.style.minWidth = "";
+      el.style.paddingLeft = ""; el.style.paddingRight = "";
+      return;
+    }
+    el.style.width = collapsed ? "78px" : "";
+    el.style.minWidth = collapsed ? "78px" : "";
+    el.style.paddingLeft = collapsed ? "10px" : "";
+    el.style.paddingRight = collapsed ? "10px" : "";
+  };
   const setSbCollapsed = (collapsed, persist) => {
     const el = _sbEl(); if (!el) return;
     if (collapsed) closeSidebar(); else openSidebar();
+    applySbStyle(collapsed);
     const b = document.querySelector("#logoBtn");
     if (b) b.setAttribute("aria-expanded", collapsed ? "false" : "true");
     if (persist) { try { localStorage.setItem(SB_KEY, collapsed ? "1" : "0"); } catch (e) {} }
   };
+  // 窗口跨过 768px 时把内联宽度清掉，避免桌面收起态带到手机抽屉上
+  let _sbRzT = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(_sbRzT);
+    _sbRzT = setTimeout(() => {
+      const el = _sbEl(); if (!el) return;
+      applySbStyle(el.classList.contains("hidden"));
+    }, 150);
+  });
   const _logoBtn = document.querySelector("#logoBtn");
   if (_logoBtn) {
     _logoBtn.onclick = () => {
