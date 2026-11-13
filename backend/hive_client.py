@@ -262,7 +262,7 @@ class HiveClient:
             return self.status()
 
         # 中继：hive4:// / ws:// / wss:// / tcp:// / 裸 host:port
-        # （本项目用的是自定义二进制协议，写 ws:// 只是习惯，不是真的 WebSocket）
+        # ws:// 现在是**真的 WebSocket**（挂 nginx 反代时用），不再是"剥前缀"。
         if u and not u.startswith(("hive3://", "hive2://", "hive://")):
             try:
                 lk = RELAY.link(RELAY_STATE)
@@ -273,6 +273,9 @@ class HiveClient:
                     self._error = ""
                     self._last_ok = time.time()
                     self._latency = float(st.get("rtt_ms") or 0)
+                    # 连上就把群登记到中继目录 —— 跨网的人凭密码就能找到群，
+                    # 不用再互发地址。这是「入群逻辑」最关键的一环。
+                    self._publish_dir(u, gid, cfg.get("token") or "")
                 else:
                     self._state = "error"
                     self._error = st.get("error") or "中继连不上"
