@@ -290,23 +290,36 @@ def _already_running() -> bool:
     return _running_health() is not None
 
 
+def _port_in_use(port: int = PORT, timeout: float = 0.35) -> bool:
+    """端口上有没有人在监听。
+
+    ⚠️⚠️ 2026-11-13 实测推翻旧做法：**不能用 bind 探测**。
+    原来这里 `sk.bind(("127.0.0.1", PORT))` 成功就当端口空闲。但 Windows 上
+    即使另一个 socket 正监听 `0.0.0.0:PORT`，再 bind `127.0.0.1:PORT` 依然成功
+    （实测：18097 被 0.0.0.0 监听时，bind 127.0.0.1 照样不报错）。
+    于是 `_wait_port_free()` **永远返回 True**、0.0 秒就过，等于没等 ——
+    这就是 data/app.log 里那 3 次 `[Errno 10048]` 一直没被挡住的原因。
+
+    现在改成 connect 探测：连得上 = 有人在听 = 被占。实测准确
+    （占用 True / 空闲 False / 关闭后 False）。
+    """
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
+            sk.settimeout(timeout)
+            return sk.connect_ex(("127.0.0.1", port)) == 0
+    except OSError:
+        return False
+
+
 def _wait_port_free(timeout: float = 40.0) -> bool:
     """等 8000 端口空出来（自开发重启时用：旧进程还没退干净，新进程别急着 bind）。"""
-    import socket
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        try:
-            # ⚠️ 这里**不能设 SO_REUSEADDR**（2026-11-08 实测踩坑）：
-            #   Windows 上带 SO_REUSEADDR 的 bind 会**"成功"抢占**已被监听的端口，
-            #   于是探测永远返回 True → 新进程立刻去 bind → 必然失败 → 启动即退出。
-            #   去掉它，bind 才会在端口被占用时如实抛 WSAEADDRINUSE。
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
-                # 固定用回环地址探测：HOST 现在是 0.0.0.0（监听所有网卡），
-                # 但"端口是否被占"这件事只跟端口有关，用 127.0.0.1 判断最准。
-                sk.bind(("127.0.0.1", PORT))
+    import time as _t
+    t0 = _t.time()
+    while _t.time() - t0 < timeout:
+        if not _port_in_use():
             return True
-        except OSError:
-            time.sleep(0.4)
+        _t.sleep(0.3)
     return False
 
 
