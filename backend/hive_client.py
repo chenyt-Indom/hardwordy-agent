@@ -343,9 +343,26 @@ class HiveClient:
             elif any(v > PROTO_VER for v in vers):
                 compat = "newer"
 
+        relay = None
+        if self._relay is not None:
+            try:
+                relay = self._relay.status()
+            except Exception:
+                relay = {"state": "error", "online": False, "error": "状态读取失败"}
+            if relay.get("online"):
+                state = "online"
+
+        mode = "mesh"
+        if relay:
+            mode = "relay"
+        elif (self._url or "").startswith(("hive3://", "hive2://", "hive://")):
+            mode = "direct"
+
         return {
             "ok": state != "error",
             "state": state,
+            "mode": mode,
+            "relay": relay or {},
             "connected": peers > 0,
             "url": self._url or ("局域网" if m.started else ""),
             "gid": self._gid,
