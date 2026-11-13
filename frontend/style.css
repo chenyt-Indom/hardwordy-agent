@@ -3404,6 +3404,48 @@ html[data-theme="light"] select.pill-select option {
   max-width: 100%;   /* 贴底时铺满整行，不然 70% 宽度看着歪 */
 }
 .think-dock .think-body.open { max-height: 32vh; }
+/* ---------- 思考卡片右上角「归位」（2026-11-13 用户要求）----------
+   只在「跟随视角」浮起时出现（.think-dock 下才显示），点一下让这一张回消息流原位。
+   用绝对定位放在卡片右上角，不占 flex 高度；标题胶囊限宽，保证永远不会被按钮压住。 */
+.think-home { display: none; }
+.think-dock > .think-home {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  top: 7px;
+  right: 9px;
+  z-index: 3;
+  height: 22px;
+  padding: 0 9px;
+  font-size: 12px;
+  line-height: 1;
+  font-family: inherit;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  opacity: .8;
+  transition: opacity .16s ease, background .16s ease, border-color .16s ease,
+              color .16s ease, transform .12s ease;
+}
+.think-dock > .think-home:hover {
+  opacity: 1;
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--hover-bg);
+}
+.think-dock > .think-home:active { transform: scale(.94); }
+.think-dock > .think-home:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* 给右上角的「归位」腾出位置：标题胶囊最宽到「卡片宽 - 56px」 */
+.think-dock .think-hdr { max-width: calc(100% - 56px); }
+@media (prefers-reduced-motion: reduce) {
+  .think-dock > .think-home { transition: none; }
+}
 /* ⚠️ 必须用 `.code-card > .code-toggle-b`（0,2,0）压过 `.btn.sm { width:auto }`，
    否则底部按钮只有 83px 宽、还丢掉 margin —— 实测过。 */
 .code-card > .code-toggle-b {
