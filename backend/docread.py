@@ -336,6 +336,12 @@ def read_bytes(raw: bytes, filename: str = "") -> dict:
                 return {"ok": False, "error": "没能从这份 .doc 里抽出文字"}
             text = _normalize_cjk(text)
         else:
+            # 未知扩展名（.bin/.exe/压缩包…）不能硬当文本读，
+            # 否则会返回一串乱码且 ok=True，用户拿去朗读才发现全是噪声。
+            if _looks_binary(raw):
+                return {"ok": False,
+                        "error": "这不是文本文档（像是二进制文件），读不出文字。"
+                                 "支持 .docx / .pdf / .doc / .txt / .md"}
             text, enc = _decode_text(raw)
 
         text = text.replace("\r\n", "\n").replace("\r", "\n")
