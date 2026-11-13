@@ -555,7 +555,13 @@ def latest_result(job_id: str, limit: int = 4000) -> str:
         k = txt.find("## 结果")
         if k >= 0:
             txt = txt[k + len("## 结果"):].lstrip()
-        return txt[:limit]
+        # 2026-11-13：limit<=0 表示**整篇返回**（用户要求「不要少字」）。
+        # 原来无条件 txt[:limit]，传 0 会直接返回空串，长报告也会被切在半句上。
+        try:
+            n = int(limit or 0)
+        except Exception:
+            n = 0
+        return txt if n <= 0 else txt[:n]
     except Exception:
         return ""
 
