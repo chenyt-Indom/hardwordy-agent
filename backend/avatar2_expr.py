@@ -176,10 +176,10 @@ def detect_mood(text: str) -> dict:
     # 平均句长 -> 语速微调（只影响 rate，不参与心情打分）
     parts = [p for p in _PUNCT.split(t) if p.strip()]
     avg_len = (sum(len(p) for p in parts) / len(parts)) if parts else len(t)
-    if avg_len <= 12:
-        rate_adj, len_note = 6, "短句为主（平均 %.0f 字），语速偏快" % avg_len
-    elif avg_len >= 40:
-        rate_adj, len_note = -6, "长句为主（平均 %.0f 字），语速放慢" % avg_len
+    if avg_len <= 15:
+        rate_adj, len_note = 5, "短句为主（平均 %.0f 字），语速略快" % avg_len
+    elif avg_len >= 50:
+        rate_adj, len_note = -5, "长句为主（平均 %.0f 字），语速放慢" % avg_len
     else:
         rate_adj, len_note = 0, "句长适中（平均 %.0f 字）" % avg_len
 
