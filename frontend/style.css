@@ -3706,6 +3706,13 @@ html[data-theme="light"] select.pill-select option {
 .hive-side-acts { display: flex; gap: 6px; margin-bottom: 8px; }
 .hive-side-acts .btn { flex: 1; min-width: 0; }
 .hive-list { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+/* 空状态（2026-11-14）：新手进来第一眼看到的东西，要直接告诉他点哪个按钮 */
+.hive-empty2 {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 4px 6px;
+}
+.hive-empty2 b { font-size: 13px; font-weight: 600; }
+.hive-empty2 span { font-size: 12px; color: var(--muted); line-height: 1.6; }
 .hive-item {
   display: flex; align-items: center; gap: 8px; padding: 7px 9px;
   border-radius: 9px; cursor: pointer; border: 1px solid transparent;
