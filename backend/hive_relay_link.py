@@ -558,6 +558,11 @@ class RelayLink:
                     continue
                 if c.get("op") == "pong":
                     self.rtt_ms = round((time.time() - float(c.get("t") or 0)) * 1000, 1)
+                elif c.get("op") in ("signal_list", "signal_peer", "signal_gone"):
+                    try:
+                        self._on_signal(c)
+                    except Exception as e:  # noqa: BLE001
+                        self.error = "信令处理异常：%s" % e
                 continue
             if kind != K_SEQ:
                 continue
