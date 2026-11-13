@@ -1126,5 +1126,25 @@
     })();
   </script>
 
+  <!-- TEMP_SHOT_START -->
+  <script>
+    (function () {
+      setTimeout(function () {
+        var tab = document.querySelector('.mode-tab[data-mode="hive"]');
+        if (tab) tab.click();
+        setTimeout(function () {
+          var list = document.getElementById('hiveGroupList');
+          var g = list && list.firstElementChild;
+          if (g) g.click();
+          setTimeout(function () {
+            var b = document.getElementById('hiveRelayBtn');
+            if (b) b.click();
+          }, 1200);
+        }, 700);
+      }, 1000);
+    })();
+  </script>
+  <!-- TEMP_SHOT_END -->
+
 </body>
 </html>
