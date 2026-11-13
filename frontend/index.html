@@ -221,6 +221,40 @@
                    title="1.0 最自然；往右嘴张得更开，2.0 最明显但可能有涂抹感" />
           </label>
         </div>
+        <!-- 心情：决定 TTS 的语气/音调，以及面部微表情幅度。
+             「自动」按文本关键词+标点+句长做规则判断，秒出。 -->
+        <div class="av2-row av2-row-mood">
+          <select id="av2Mood" title="心情：影响语气、音调与表情幅度">
+            <option value="auto">🤖 心情：自动判断</option>
+          </select>
+        </div>
+        <div class="av2-row av2-row-rate">
+          <select id="av2Rate" title="语速：自动时跟随心情建议值">
+            <option value="auto">语速：自动（跟随心情）</option>
+            <option value="-20">语速：很慢</option>
+            <option value="-10">语速：慢</option>
+            <option value="0">语速：正常</option>
+            <option value="10">语速：快</option>
+            <option value="20">语速：很快</option>
+          </select>
+        </div>
+        <div class="av2-acts av2-acts-doc">
+          <button class="btn sm ghost" id="av2DocBtn"
+                  title="导入 Word / PDF / txt / md，先预览再删减">📄 导入文档朗读</button>
+          <input type="file" id="av2Doc" accept=".docx,.doc,.pdf,.txt,.md,.markdown" hidden />
+        </div>
+        <div class="av2-doc" id="av2DocBox" hidden>
+          <div class="av2-doc-head">
+            <span class="av2-doc-name" id="av2DocName"></span>
+            <span class="head-acts">
+              <button class="btn sm ghost" id="av2DocUse" title="把预览框里的文字填进朗读框">用这段</button>
+              <button class="btn sm ghost ico" id="av2DocClose" title="关闭">✕</button>
+            </span>
+          </div>
+          <div class="hint av2-doc-meta" id="av2DocMeta"></div>
+          <textarea id="av2DocText" rows="5"
+                    placeholder="导入后在这里预览，可以自己删减再点「用这段」"></textarea>
+        </div>
         <div class="hint av2-hint" id="av2Hint"></div>
         <video id="av2Video" controls playsinline hidden></video>
         <div class="list av2-list" id="av2List"></div>
