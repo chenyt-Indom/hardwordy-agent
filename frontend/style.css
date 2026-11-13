@@ -2803,7 +2803,8 @@ html[data-theme="light"] body {
   .code-btns .btn { font-size: 11px; padding: 3px 7px; }
 
   /* --- 输入区：贴底、按钮不换行 --- */
-  .composer { padding: 8px 8px 12px; }
+  /* 卡片化后左右有外留白，窄屏要收紧，不然输入框被挤窄 */
+  .composer { padding: 8px 8px 12px; margin: 0 10px 10px; }
   .composer textarea { font-size: 15px; min-height: 44px; }
   .composer .row { gap: 6px; flex-wrap: nowrap; overflow-x: auto; }
   .send { padding: 8px 14px; }
