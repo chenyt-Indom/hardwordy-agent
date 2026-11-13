@@ -2629,7 +2629,7 @@
         if (!t) { say("预览里没有文字", "err"); return; }
         // 不再截断：长文本由生成时自动分段处理（splitSpeech）
         textIn.value = t;
-        const nSeg = splitSpeech(t, 260).length;
+        const nSeg = splitSpeech(t, 120).length;
         say("已填入朗读框（" + t.length + " 字" +
             (nSeg > 1 ? "，将自动分 " + nSeg + " 段生成后合并" : "") + "）");
         docBox.hidden = true;
