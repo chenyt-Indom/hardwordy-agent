@@ -1172,8 +1172,23 @@ setTimeout(function () {
       }
     }
   }
+  // 直接问浏览器：这条 media 规则到底匹配不匹配
+  for (var s2 = 0; s2 < document.styleSheets.length; s2++) {
+    var rs2;
+    try { rs2 = document.styleSheets[s2].cssRules; } catch (e) { continue; }
+    for (var t2 = 0; t2 < rs2.length; t2++) {
+      var r2 = rs2[t2];
+      if (r2.media && (r2.conditionText || '').indexOf('769') >= 0) {
+        out.push('MEDIA text=' + r2.media.mediaText + ' matches=' + r2.media.matches);
+      }
+    }
+  }
   logo.click();
   setTimeout(function () {
+    var cs3 = getComputedStyle(sb);
+    out.push('afterClick w=' + cs3.width + ' minw=' + cs3.minWidth + ' pad=' + cs3.paddingLeft);
+    out.push('inline=' + (sb.getAttribute('style') || 'none'));
+    out.push('rect=' + Math.round(sb.getBoundingClientRect().width));
     var kb = document.querySelector('#kbPanel');
     var fold = document.querySelector('#kbPanel > .pnl-fold');
     out.push('--collapsed--');
