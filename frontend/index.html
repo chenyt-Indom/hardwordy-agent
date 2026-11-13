@@ -206,10 +206,12 @@
                   placeholder="让数字人说什么…（1200 字以内）"></textarea>
         <div class="av2-row">
           <select id="av2Voice" title="音色"></select>
+          <button class="btn sm primary" id="av2Go">生成视频</button>
+        </div>
+        <div class="av2-row av2-row-lip">
           <select id="av2Lip" title="口型引擎">
             <option value="auto">口型：自动</option>
           </select>
-          <button class="btn sm primary" id="av2Go">生成视频</button>
         </div>
         <div class="hint av2-hint" id="av2Hint"></div>
         <video id="av2Video" controls playsinline hidden></video>
