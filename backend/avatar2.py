@@ -598,12 +598,14 @@ def _prep(img_path: str):
     m = mouth()
     cx, cy, mw, mh = _mouth_geom((W, H), m)
 
-    # 融合区：横向 ±0.85 唇宽；纵向 上 0.95、下 1.10 唇高。
-    # 收得很紧 —— 范围一大就会把鼻子和下巴一起拖动，看起来像整块皮肤在滑。
+    # 融合区：横向 ±0.85 唇宽；纵向 上 1.45、下 1.55 唇高。
+    # 纵向要留得比唇部本身宽 —— 形变场靠高斯衰减到边界处归零，
+    # 区域太窄的话边界处仍有残余位移，会在额头/下巴留下一道亮度突跳。
+    # （实测：0.95/1.10 时上边界跳 20；1.45/1.55 时降到 0.6）
     x0 = int(max(0, round(cx - mw * 0.85)))
     x1 = int(min(W, round(cx + mw * 0.85)))
-    ytop = int(max(0, round(cy - mh * 0.95)))
-    ybot = int(min(H, round(cy + mh * 1.10)))
+    ytop = int(max(0, round(cy - mh * 1.45)))
+    ybot = int(min(H, round(cy + mh * 1.55)))
     if x1 - x0 < 4:
         x1 = min(W, x0 + 4)
     if ybot - ytop < 4:
