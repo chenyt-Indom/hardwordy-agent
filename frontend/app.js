@@ -10147,8 +10147,13 @@
       if (!txt) return;
       const cur = hdCur(c);
       const t = document.createTextNode(txt);
-      if (cur.parentNode === c.think) c.think.insertBefore(t, cur);
-      else c.think.appendChild(t);
+      if (cur.parentNode === c.think) {
+        c.think.insertBefore(t, cur);
+      } else {
+        // 首次：文字在前，光标在后（光标要一直留在末尾）
+        c.think.appendChild(t);
+        c.think.appendChild(cur);
+      }
     }
     function hdThinkSet(c, full) {
       c.think.textContent = full;
