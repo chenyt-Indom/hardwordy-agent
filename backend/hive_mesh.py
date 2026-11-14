@@ -1291,12 +1291,15 @@ class MeshNode:
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": "打洞探测失败：%s" % e}
         finally:
-            # 对端收到 T_PROBE 后会主动关隧道（_serve 里 sock.close()），
-            # 所以这里也关掉；真正入群时 connect_punch 会重新打一次（约 0.12 秒）。
-            try:
-                sock.close()
-            except Exception:
-                pass
+            # 探群成功就**保留**这条隧道：服务端那边也改成探完不断开，
+            # 紧接着 connect_punch 会直接复用它（reused=True）。
+            # 这样既省掉一次 0.12 秒的重新打洞，也彻底避开
+            # 「上一代 BYE 把新隧道打掉」的竞态。
+            if not keep:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
 
     def seen_beacons(self, gid: str = "") -> List[Dict[str, Any]]:
         """局域网里听到的群（不限自己所在的群）—— 密码入群靠它搜。"""
