@@ -11574,6 +11574,36 @@ def _hive_collect_attachments(gid: str, body: dict, hist: list):
     return images, image_mimes, note
 
 
+# ★ 2026-11-14 用户报：「群功能的 ai 没法生成足够大的内容分发到我手里」。
+#   除了把 max_tokens 放开（2400 → 8000），还有一个「拿到手」的问题：
+#   就算模型写了 5000 字，它也只是一条聊天消息，别人想保存/转发得自己复制。
+#   所以正文超过这个字数时，**自动另存一份 .md 附件**跟着消息一起发出去 ——
+#   走的是普通附件那条已经验证过的分片广播链路，每个成员本机都会存一份。
+HIVE_LONG_CHARS = 3000
+
+
+def _hive_attach_long_text(gid: str, text: str, extra: dict) -> dict:
+    """长文自动转附件：返回可能带 files 的 extra（失败就原样返回）。
+
+    ⚠️ 正文**照常完整发送**，附件只是额外的一份可下载副本 ——
+    不这么做的话，群里看到的就是「一大段文字 + 一个文件」，看着像重复；
+    但实际上「能直接读」和「能存下来用」是两种需求，都该满足。
+    """
+    try:
+        if not text or len(text) < HIVE_LONG_CHARS:
+            return extra
+        nm = "AI长文_%s.md" % time.strftime("%Y%m%d_%H%M")
+        meta = hive.save_file(gid, nm, (text or "").encode("utf-8"),
+                              "text/markdown")
+        out = dict(extra or {})
+        out["files"] = list(out.get("files") or []) + [meta]
+        out["long_chars"] = len(text)
+        return out
+    except Exception:
+        logger.warning("长文转附件失败（正文照常发送）", exc_info=True)
+        return extra
+
+
 def _hive_run_model_now(gid: str, instruction: str, body: dict,
                         mid: str, asker: str, asker_id: str = "") -> None:
     """真正跑一次模型，全程流式推送思考和正文。
