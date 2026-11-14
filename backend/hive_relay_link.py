@@ -181,6 +181,78 @@ def parse_url(url: str) -> Dict[str, Any]:
             "path": path or "/hive-relay"}
 
 
+def candidates_for(url: str, extra: Any = None) -> List[Dict[str, Any]]:
+    """给一个地址，派生出一条主线路 + 若干备用线路。
+
+    为什么必须派生：服务器可能只开了 80、也可能只开了 443；nginx 路径
+    可能是 /hive-relay、也可能是 /hive。实测这台服务器三条都通：
+        ws://host/hive-relay        36ms   （80）
+        wss://host/hive-relay       67ms   （443）
+        ws://host:8080/hive         46ms   （8080）
+    任何一条断掉，其他条还能连上，用户不用手改配置。
+
+    顺序就是优先级：显式配置的额外地址 → 主地址 → 443 → 8080 → 80 → 裸端口。
+    裸 TCP 端口放最后，因为它最常被云安全组挡住（实测 18765 超时）。
+    """
+    out: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add(u: str) -> None:
+        u = (u or "").strip()
+        if not u:
+            return
+        p = parse_url(u)
+        if not p.get("ok"):
+            return
+        key = (p["host"], p["port"], bool(p.get("ws")), p.get("path"))
+        if key in seen:
+            return
+        seen.add(key)
+        p["url"] = u
+        out.append(p)
+
+    if isinstance(extra, (list, tuple)):
+        for u in extra:
+            add(str(u))
+    add(url)
+    p = parse_url(url)
+    if not p.get("ok"):
+        return out
+    host = p["host"]
+    if p.get("ws"):
+        for port in BACKUP_PORTS:
+            for path in BACKUP_PATHS:
+                scheme = "wss" if port == 443 else "ws"
+                add("%s://%s:%s%s" % (scheme, host, port, path))
+    # 裸 TCP 直连端口：安全组常挡，但万一放行了就是最快的一条（无 WS 开销）
+    add("hive4://%s:18765" % host)
+    return out
+
+
+def _set_keepalive(sock: socket.socket) -> None:
+    """开 TCP keepalive —— 让「对端机器直接掉线」这种情况能被系统发现。
+
+    光靠应用层心跳也能发现，但 keepalive 是内核级的，更底层也更省事。
+    Windows 的写法跟 Linux 不一样，两边都兜着。
+    """
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except Exception:
+        pass
+    try:
+        if hasattr(socket, "TCP_KEEPIDLE"):        # Linux / macOS
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 20)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except Exception:
+        pass
+    try:
+        if hasattr(socket, "SIO_KEEPALIVE_VALS"):  # Windows
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 20000, 5000))
+    except Exception:
+        pass
+
+
 def probe(url: str, token: str = "", timeout: float = 4.0) -> Dict[str, Any]:
     """连一下中继，取它的健康信息。用于「填地址前先测通不通」。"""
     p = parse_url(url)
