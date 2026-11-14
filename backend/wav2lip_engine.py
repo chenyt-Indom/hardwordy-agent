@@ -196,6 +196,31 @@ class Wav2LipEngine:
         return np.clip(out, 0, 255)
 
     @staticmethod
+    def _match_light(gen, ref, mask_keep=None, sigma=None):
+        """低频光照场校正：把 ref 的**局部**明暗迁移到 gen 上。
+
+        全局均值/方差对齐（_match_color）只能修整体偏色，修不了「额头亮、
+        下巴暗」这种空间渐变 —— 实测贴回后椭圆内平均色差 19.76，是椭圆外
+        的 2.2 倍，这就是「补丁感」的主因。
+
+        这里只迁移低频（大 sigma 模糊后的差），高频纹理完全保留，所以不会
+        把生成图的嘴部细节糊掉。mask_keep 用来把嘴部核心排除在外 ——
+        否则原图闭合的暗唇会把生成的张口暗部提亮，口型被洗掉。
+        """
+        g = gen.astype(np.float32)
+        r = ref.astype(np.float32)
+        h, w = g.shape[:2]
+        if sigma is None:
+            sigma = max(4.0, min(h, w) * 0.18)
+        gl = cv2.GaussianBlur(g, (0, 0), sigma)
+        rl = cv2.GaussianBlur(r, (0, 0), sigma)
+        corr = rl - gl
+        if mask_keep is not None:
+            k = cv2.GaussianBlur(mask_keep.astype(np.float32), (0, 0), sigma * 0.5)
+            corr = corr * k[..., None]
+        return np.clip(g + corr, 0, 255)
+
+    @staticmethod
     def _detail_inject(gen, orig, strength=0.6):
         """多尺度高频回注：把原图纹理注回生成图，缓解 96->大图放大的糊感"""
         g = gen.astype(np.float32)
