@@ -288,7 +288,7 @@ def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
     ew = prep["eye_gap"] * 0.42
     eh = ew * 0.62
     for (ex, ey) in prep["eyes"]:
-        dx, dy = _shift_of(prep, ex, ey, yaw, pitch)
+        dx, dy = _shift_of(prep, ex, ey, yaw, pitch, tx, ty)
         ex, ey = ex + dx, ey + dy
         x0 = int(max(0, ex - ew)); x1 = int(min(W, ex + ew))
         y0 = int(max(0, ey - eh)); y1 = int(min(H, ey + eh))
