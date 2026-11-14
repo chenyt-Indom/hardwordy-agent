@@ -244,11 +244,13 @@ def _mouth_frame(prep, op, wd, amp=1.0):
     p_top = max(0, cyi0 - half)
     p_bot = min(ph, cyi0 + half)
     patch = patch.crop((0, p_top, pw, p_bot))
-    mask = mask.crop((0, p_top, pw, p_bot))
     parr = np.asarray(patch, np.float32)
     ph = p_bot - p_top
     cyi = int(np.clip(cyi0 - p_top, 6, ph - 7))
     paste_y = ytop + p_top
+    # 蒙版重新生成（不用裁剪来的那份）：窄带的上下边界离唇很近，
+    # 只给 3px 羽化会留下一条亮度跳变，视觉上像「嘴唇上方糊了一块」。
+    mask = A2._h_mask(pw, ph, feather=max(4, int(mh * 0.22)))
 
     yy, xx = np.mgrid[0:ph, 0:pw].astype(np.float32)
     # 横向权重：嘴角固定（高斯，覆盖唇宽）
