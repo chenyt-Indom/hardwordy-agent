@@ -10340,7 +10340,7 @@ def avatar_lipsync_speak(body: dict):
             text, voice=str(body.get("voice") or ""), rate=rate,
             style=str(body.get("style") or ""),
             engine=str(body.get("engine") or "auto"),
-            blink=bool(body.get("blink", True)),
+            blink=bool(body.get("blink", False)),
             head=bool(body.get("head", True)),
             max_side=_ms, motion=_mo,
         )
