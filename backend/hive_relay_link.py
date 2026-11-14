@@ -1127,6 +1127,7 @@ class RelayLink:
             "state": self.state,
             # ---------------- 多线路 + 心跳 ----------------
             "active_url": self.active_url,
+            "tls_unverified": self.tls_unverified,
             "candidates": [str(c.get("url") or "") for c in (self.cands or [])],
             "cand_count": len(self.cands or []),
             "cand_tries": self.cand_tries,
