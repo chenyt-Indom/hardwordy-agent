@@ -119,7 +119,9 @@ def render(img_path, wav_path, out_mp4, fps=FPS, size=DEFAULT_SIZE,
                                      size=256, pts_base=base, feather=0.0)
         # 用覆盖蒙版把脸合成到柔和背景上（边缘羽化，避免硬切）
         cov = (frame.sum(axis=2) > 6).astype(np.uint8) * 255
-        cov = cv2.GaussianBlur(cov, (0, 0), 3.6)
+        # 先向内腐蚀 2px 再羽化：直接羽化时皮肤色会和深背景混出一圈灰白亮边
+        cov = cv2.erode(cov, np.ones((3, 3), np.uint8), iterations=2)
+        cov = cv2.GaussianBlur(cov, (0, 0), 2.4)
         if scale != 1.0:
             frame = cv2.resize(frame, (W, H), interpolation=cv2.INTER_CUBIC)
             cov = cv2.resize(cov, (W, H), interpolation=cv2.INTER_LINEAR)
