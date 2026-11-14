@@ -472,9 +472,9 @@ def _pose_curve(n, fps, energy):
     # 极轻微缩放：产生「前后」的空间感，0.8% 就够，再多会像镜头推拉
     scl = 1.0 + TZ_IDLE * np.sin(2 * math.pi * 0.19 * t + 0.5) \
         + 0.005 * (e - 0.30)
-    tx = np.clip(tx, -8.0, 8.0)
-    ty = np.clip(ty, -7.0, 7.0)
-    scl = np.clip(scl, 0.985, 1.018)
+    tx = np.clip(tx, -13.0, 13.0)
+    ty = np.clip(ty, -11.0, 11.0)
+    scl = np.clip(scl, 0.982, 1.020)
 
     # 眨眼：2.6~4.6 秒一次，单次 0.13 秒
     rng = np.random.RandomState(int(n * 7919 + 13) & 0xFFFF)
