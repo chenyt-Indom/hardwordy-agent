@@ -68,10 +68,31 @@ def safe_project(name: str) -> str:
 # 切换项目写进去了、读回来还是启动时那份，表现为"切了没反应、文件串项目"。
 _ACTIVE = ""
 
+# 线程级项目覆盖（2026-11-15）。
+# 为什么需要：群聊里 @hd 做开发时，它写的代码必须落在**这个群自己的项目**里，
+# 不能和单聊共用一个项目 —— 否则 A 群做的网站和 B 群做的脚本会互相覆盖，
+# 而且用户开着开发台时会被群里的写入搅乱。
+# 用 thread-local 而不是全局变量：群任务跑在自己的线程里，
+# 覆盖只在这个线程内生效，单聊 / 前端 / 开发台完全不受影响。
+_TLS = threading.local()
+
+
+def set_thread_project(name: str) -> None:
+    """只在当前线程内把项目固定成 name（传空串 = 取消覆盖）。"""
+    _TLS.project = str(name or "")
+
 
 def active_project() -> str:
     """当前项目（模型工具默认作用在这个项目上）。"""
     global _ACTIVE
+    _ov = getattr(_TLS, "project", "")
+    if _ov:
+        # 覆盖值也要保证目录存在，否则第一次写文件会因为目录不存在而失败
+        try:
+            os.makedirs(os.path.join(base(), safe_project(_ov)), exist_ok=True)
+        except Exception:
+            pass
+        return _ov
     if _ACTIVE and os.path.isdir(os.path.join(base(), _ACTIVE)):
         return _ACTIVE
     try:
