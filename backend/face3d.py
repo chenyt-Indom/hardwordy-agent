@@ -134,8 +134,7 @@ def render_mesh(tex, uv, pts, tri, size=256, bg=(0, 0, 0), shade=True,
     else:
         lam = np.ones(len(F), np.float32)
 
-    # 预取三角形顶点（避免循环内重复索引）
-    dst_all = xy[F]                      # (F,3,2)
+    dst_all = xy[F]                              # (F,3,2)
     src_all = np.stack([tx[F], ty[F]], axis=-1)  # (F,3,2)
     lo = np.floor(dst_all.min(axis=1)).astype(np.int32)
     hi = np.ceil(dst_all.max(axis=1)).astype(np.int32) + 1
@@ -143,31 +142,94 @@ def render_mesh(tex, uv, pts, tri, size=256, bg=(0, 0, 0), shade=True,
     hi = np.clip(hi, 0, size)
     bw = hi[:, 0] - lo[:, 0]
     bh = hi[:, 1] - lo[:, 1]
-    # 亚像素三角形（投影后不足 1px²）对画面几乎无贡献，跳过以提速
     area_px = np.abs((dst_all[:, 1, 0] - dst_all[:, 0, 0]) * (dst_all[:, 2, 1] - dst_all[:, 0, 1])
                      - (dst_all[:, 2, 0] - dst_all[:, 0, 0]) * (dst_all[:, 1, 1] - dst_all[:, 0, 1])) * 0.5
     ok = (bw >= 1) & (bh >= 1) & (area_px >= min_area)
+    if not ok.any():
+        return canvas
 
-    for i in np.nonzero(ok)[0]:
-        x0, y0 = int(lo[i, 0]), int(lo[i, 1])
-        w, h = int(bw[i]), int(bh[i])
-        s3 = src_all[i]
-        # 目标三角形从重心外扩 1.5%，消除相邻三角形之间的 1px 接缝
-        d3w = dst_all[i]
-        ctr = d3w.mean(axis=0)
-        d3 = (d3w - ctr) * 1.015 + ctr - np.array([x0, y0], np.float32)
-        M = cv2.getAffineTransform(s3, d3)
-        warped = cv2.warpAffine(tex, M, (w, h), flags=cv2.INTER_LINEAR,
-                                borderMode=cv2.BORDER_REPLICATE)
-        mask = np.zeros((h, w), np.uint8)
-        ip = np.round(d3).astype(np.int32)
-        cv2.fillConvexPoly(mask, ip, 255)
-        cv2.polylines(mask, [ip], True, 255, 1)
-        m = mask > 0
-        if not m.any():
-            continue
-        canvas[y0:y0 + h, x0:x0 + w][m] = np.clip(
-            warped[m].astype(np.float32) * lam[i], 0, 255).astype(np.uint8)
+    F = F[ok]
+    dst_all = dst_all[ok]
+    src_all = src_all[ok]
+    lo = lo[ok]
+    bw = bw[ok]
+    bh = bh[ok]
+    lam = lam[ok]
+    zf = z[F].mean(axis=1)
+
+    # ---- 向量化 z-buffer 光栅化：把所有三角形覆盖的像素一次性展开 ----
+    counts = (bw * bh).astype(np.int64)
+    total = int(counts.sum())
+    if total <= 0:
+        return canvas
+    tid = np.repeat(np.arange(len(F)), counts)
+    start = np.repeat(np.cumsum(counts) - counts, counts)
+    local = np.arange(total, dtype=np.int64) - start
+    px = lo[tid, 0] + (local % bw[tid])
+    py = lo[tid, 1] + (local // bw[tid])
+
+    v0 = dst_all[tid, 0]
+    v1 = dst_all[tid, 1]
+    v2 = dst_all[tid, 2]
+    den = ((v1[:, 1] - v2[:, 1]) * (v0[:, 0] - v2[:, 0])
+           + (v2[:, 0] - v1[:, 0]) * (v0[:, 1] - v2[:, 1]))
+    den = np.where(np.abs(den) < 1e-9, 1e-9, den)
+    fx = px.astype(np.float32) + 0.5
+    fy = py.astype(np.float32) + 0.5
+    w0 = ((v1[:, 1] - v2[:, 1]) * (fx - v2[:, 0]) + (v2[:, 0] - v1[:, 0]) * (fy - v2[:, 1])) / den
+    w1 = ((v2[:, 1] - v0[:, 1]) * (fx - v2[:, 0]) + (v0[:, 0] - v2[:, 0]) * (fy - v2[:, 1])) / den
+    w2 = 1.0 - w0 - w1
+    eps = -1.5 / np.maximum(np.abs(den), 1e-9)
+    inside = (w0 >= eps) & (w1 >= eps) & (w2 >= eps)
+    if not inside.any():
+        return canvas
+
+    tid_i = tid[inside]
+    px_i = px[inside]
+    py_i = py[inside]
+    b0, b1, b2 = w0[inside], w1[inside], w2[inside]
+
+    # 插值深度 + 纹理坐标
+    dep = b0 * zf[tid_i] + b1 * zf[tid_i] + b2 * zf[tid_i]
+    s0 = src_all[tid_i, 0]
+    s1 = src_all[tid_i, 1]
+    s2 = src_all[tid_i, 2]
+    u = b0 * s0[:, 0] + b1 * s1[:, 0] + b2 * s2[:, 0]
+    v = b0 * s0[:, 1] + b1 * s1[:, 1] + b2 * s2[:, 1]
+    u = np.clip(u, 0, tw - 1.001)
+    v = np.clip(v, 0, th - 1.001)
+
+    # z-buffer：每个像素保留最近（z 最小）的片元
+    flat = py_i * size + px_i
+    order = np.lexsort((dep, flat))
+    flat_s = flat[order]
+    first = np.ones(len(flat_s), bool)
+    first[1:] = flat_s[1:] != flat_s[:-1]
+    sel = order[first]
+
+    fx_i = flat[sel]
+    cx = fx_i % size
+    cy = fx_i // size
+    uu = u[sel]
+    vv = v[sel]
+    ll = lam[tid_i[sel]]
+    x0i = np.floor(uu).astype(np.int32)
+    y0i = np.floor(vv).astype(np.int32)
+    dx = uu - x0i
+    dy = vv - y0i
+    x1i = np.minimum(x0i + 1, tw - 1)
+    y1i = np.minimum(y0i + 1, th - 1)
+    c00 = tex[y0i, x0i].astype(np.float32)
+    c10 = tex[y0i, x1i].astype(np.float32)
+    c01 = tex[y1i, x0i].astype(np.float32)
+    c11 = tex[y1i, x1i].astype(np.float32)
+    w00 = (1 - dx) * (1 - dy)
+    w10 = dx * (1 - dy)
+    w01 = (1 - dx) * dy
+    w11 = dx * dy
+    col = (c00 * w00[:, None] + c10 * w10[:, None]
+           + c01 * w01[:, None] + c11 * w11[:, None]) * ll[:, None]
+    canvas[cy, cx] = np.clip(col, 0, 255).astype(np.uint8)
     return canvas
 
 
