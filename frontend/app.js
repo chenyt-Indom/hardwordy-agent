@@ -2772,6 +2772,13 @@
         base.motion = isNaN(mv) ? 1 : mv;
         try { localStorage.setItem("avatar2_motion", String(base.motion)); } catch (e) {}
       }
+      // 眨眼：单图没有「闭眼后」的眼皮纹理，合成出来是一块糊的皮肤，
+      // 所以默认不勾。只有用户主动勾了才传 true。
+      const blChk = $("#av2Blink");
+      if (blChk && (mode === "w2l" || mode === "p25d")) {
+        base.blink = !!blChk.checked;
+        try { localStorage.setItem("avatar2_blink", base.blink ? "1" : "0"); } catch (e) {}
+      }
       // 每帧耗时的实测值：2D ≈ 12ms、伪3D ≈ 36ms、真3D ≈ 150ms，
       // 所以分段长度按模式递减，保证每段都在请求超时窗口内。
       // Wav2Lip 实测 138 字 = 29 秒语音 = 37.7 秒渲染，接近超时线，

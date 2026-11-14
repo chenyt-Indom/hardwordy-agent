@@ -549,6 +549,11 @@ def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0,
         moved = cv2.remap(roi, xx.astype(np.float32), map_y, cv2.INTER_LINEAR,
                           borderMode=cv2.BORDER_REPLICATE)
 
+        # 纹理回注：源带被拉伸 ~1.9 倍后必然变糊，视觉复核会看到「一块平滑
+        # 肉色补丁」。用 unsharp 把高频提回来，闭眼处仍有皮肤颗粒感。
+        _blur = cv2.GaussianBlur(moved, (0, 0), 1.5)
+        moved = moved + (moved - _blur) * 0.6
+
         # 闭合线的眼睑厚度阴影：沿闭合位置压暗，避免「一块平铺的肉色」
         lid = np.clip(1.0 - np.abs(yy - (cy + eh * 0.05)) / (eh * 0.70), 0.0, 1.0)
         shade = 1.0 - 0.18 * a * lid
