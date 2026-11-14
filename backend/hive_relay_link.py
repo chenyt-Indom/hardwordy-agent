@@ -836,6 +836,8 @@ class RelayLink:
         self.state = "online"
         self.error = ""
         self.connected_at = time.time()
+        self.last_rx = time.time()
+        self.fail_streak = 0
         self.reconnects += 1 if self.reconnects else 0
         # 连上就报自己的打洞地址 → 服务器转告其他成员 → 双方自动直连。
         # 放在**独立线程**里：STUN 偶尔要等 1~2 秒，不能卡住握手返回。
