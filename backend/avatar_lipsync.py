@@ -70,6 +70,90 @@ def info() -> dict:
 
 
 # ------------------------------------------------------------------ 动作层
+def _energy_curve(y, sr, n, fps):
+    """每帧音频能量（0..1），让头跟着说话节奏动，而不是机械匀速摆。"""
+    e = np.zeros(n, np.float32)
+    if n <= 0 or len(y) == 0:
+        return e
+    for i in range(n):
+        a = int(i / float(fps) * sr)
+        b = int((i + 1) / float(fps) * sr)
+        if b > a and a < len(y):
+            seg = np.asarray(y[a:min(b, len(y))], np.float32)
+            if seg.size:
+                e[i] = float(np.sqrt(np.mean(seg * seg)))
+    ref = float(np.percentile(e, 95)) if n > 1 else float(e.max())
+    if ref < 1e-6:
+        return e
+    return np.clip(e / ref, 0.0, 1.0)
+
+
+def _apply_motion(frames, img_path, proc_side, y, sr, fps, blink, motion):
+    """在 Wav2Lip 生成帧上叠加头部动作。
+
+    优先走 25D 深度位移（3DMM 拟合出真实深度图，按头姿做位移 → 有真正的
+    转动和体积感）；3D 模型缺失或拟合失败时，回退到旧的「整体平移 + 眼带
+    压缩」，保证功能不会因为缺模型直接挂掉。
+    """
+    n = len(frames)
+    if n == 0:
+        return frames, "none"
+    m = float(max(0.0, min(2.0, motion)))
+
+    prep = None
+    poses = None
+    try:
+        from . import avatar25d as A25
+        if A25.available():
+            prep = A25._prep3d(img_path, max_side=proc_side)
+            poses = A25._pose_curve(n, fps, _energy_curve(y, sr, n, fps))
+    except Exception:                                   # noqa: BLE001
+        prep, poses = None, None
+
+    if prep is None or poses is None:
+        # ---- 回退：旧的平移 + 眼带压缩（无旋转，但保证能动）
+        out = []
+        for i, fr in enumerate(frames):
+            t = i / float(fps)
+            if m > 0.01:
+                fr = _head_move(fr, (0, 0, fr.shape[1], fr.shape[0]), t,
+                                amp_x=9.0 * m, amp_y=6.0 * m)
+            if blink:
+                fr = _blink_frame(fr, (0, 0, fr.shape[1], fr.shape[0]), t)
+            out.append(fr)
+        return out, "pan"
+
+    # ---- 25D：旋转 + 平移 + 缩放 + 眨眼（眼睛位置来自 3DMM，比固定眼带准）
+    out = []
+    for i, fr in enumerate(frames):
+        yaw, pit, rol, tx, ty, scl, bl = poses[i]
+        if abs(m - 1.0) > 1e-3:
+            yaw *= m
+            pit *= m * PITCH_BOOST
+            rol *= m
+            tx *= m
+            ty *= m
+            scl = 1.0 + (scl - 1.0) * m
+        else:
+            pit *= PITCH_BOOST
+        if m <= 0.01:
+            out.append(fr)
+            continue
+        fr = A25._warp(fr, prep, yaw=yaw, pitch=pit, roll=rol,
+                       tx=tx, ty=ty, scl=scl)
+        if blink and bl > 0.02:
+            fr = A25._blink(fr, prep, min(1.0, bl * max(m, 0.5)),
+                            yaw, pit, tx, ty)
+        out.append(fr)
+    return out, "25d"
+
+
+# 点头（pitch）在正脸照片上的透视变化天然很弱（实测 pitch=10° 全图差仅 2.0，
+# 而 yaw=6° 有 1.06 但左右不对称、肉眼立刻能看出）。所以给 pitch 单独加一档
+# 增益，让「说话时点头」这个最重要的动作看得出来。
+PITCH_BOOST = 2.0
+
+
 def _blink_frame(frame, face_box, t, period=3.2, dur=0.18):
     """在眼部做上下位移模拟眨眼（只压缩眼裂，不改五官）"""
     x1, y1, x2, y2 = face_box
