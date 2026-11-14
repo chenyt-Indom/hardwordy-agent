@@ -11978,8 +11978,15 @@ def _hive_tool_schemas(cfg: dict) -> list:
             if str((s.get("function") or {}).get("name") or "") not in _HIVE_BAN_TOOLS]
 
 
-def _hive_history_turns(hist: list, max_ctx: int = 40) -> list:
-    """群历史 → [(role, text)]。AI 消息算 assistant，其余算 user（带说话人）。"""
+def _hive_history_turns(hist: list, max_ctx: int = 14) -> list:
+    """群历史 → [(role, text)]。AI 消息算 assistant，其余算 user（带说话人）。
+
+    ⚠️ 2026-11-15 修「响应太慢」：原来是 40 条 × 每条最多 800 字 = 最多 3.2 万字
+       （≈2.4 万 token）**每轮都塞进请求**，长群里光历史就压过系统提示。
+       群记忆（gmem）已经给了这个群的摘要，历史不需要全量原文 —— 收紧到
+       最近 14 条 × 每条 500 字（≈7000 字），既保住"接着上文的语境"，
+       又把输入砍掉 3/4。
+    """
     out: list = []
     for m in (hist or [])[-max_ctx:]:
         body = (m.get("text") or "").strip()
