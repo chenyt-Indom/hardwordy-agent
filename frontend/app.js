@@ -2307,6 +2307,34 @@
     pin.querySelector("button").onclick = () => setPin(false);
     pinBtn.onclick = () => setPin(!pin.classList.contains("on"));
 
+    // —— 嘴部定位框 ——
+    // 调节条改的是归一化坐标（x/y 是中心点，w/h 是宽高），这里换算成
+    // 图片在预览区里的**实际显示矩形**再画框。形象图不是正方形时，
+    // object-fit: contain 会留白，所以不能直接按容器百分比算。
+    const mbox = $("#av2MouthBox");
+    const mouthState = { x: 0.5, y: 0.5, w: 0.2, h: 0.05 };
+    function paintMouthBox() {
+      if (!mbox) return;
+      const stage = $("#av2Stage");
+      if (!stage || img.hidden || !img.naturalWidth || !img.naturalHeight) {
+        mbox.hidden = true;
+        return;
+      }
+      const sw = stage.clientWidth, sh = stage.clientHeight;
+      if (!sw || !sh) { mbox.hidden = true; return; }
+      const k = Math.min(sw / img.naturalWidth, sh / img.naturalHeight);
+      const dw = img.naturalWidth * k, dh = img.naturalHeight * k;
+      const ox = (sw - dw) / 2, oy = (sh - dh) / 2;
+      const m = mouthState;
+      mbox.hidden = false;
+      mbox.style.left = (ox + (m.x - m.w / 2) * dw) + "px";
+      mbox.style.top = (oy + (m.y - m.h / 2) * dh) + "px";
+      mbox.style.width = Math.max(6, m.w * dw) + "px";
+      mbox.style.height = Math.max(4, m.h * dh) + "px";
+    }
+    img.addEventListener("load", paintMouthBox);
+    window.addEventListener("resize", paintMouthBox);
+
     function paintInfo(info) {
       const has = !!(info && info.has_image);
       img.hidden = !has;
