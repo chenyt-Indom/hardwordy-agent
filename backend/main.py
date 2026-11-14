@@ -12357,7 +12357,34 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                             continue
                     elif _et != "selfdev":
                         continue
-                    _codes.append(dict(_e))
+                    _c = dict(_e)
+                    # ★ 2026-11-15：workspace 事件只带 chars，**没有代码内容** ——
+                    #   卡片点开会是空的（"没有差异内容"），用户要的「显示代码」
+                    #   就落空了。这里直接把刚写好的文件读出来，做成 + 号 diff，
+                    #   这样群里点「详情」就能看到真正的代码。
+                    if _et == "workspace" and not _c.get("diff") \
+                            and str(_c.get("act") or "") == "write":
+                        try:
+                            from . import workspace as _wsx
+                            _proj = (str(_c.get("project") or "")
+                                     or _wsx.active_project())
+                            _p = _wsx.abs_path(str(_c.get("rel") or ""), _proj)
+                            if _p and os.path.isfile(_p):
+                                with open(_p, "r", encoding="utf-8",
+                                          errors="replace") as _f:
+                                    _txt = _f.read(40000)
+                                _lines = _txt.split("\n")
+                                _c["added"] = len(_lines)
+                                _c["removed"] = 0
+                                _c["diff"] = "\n".join(
+                                    "+" + _ln for _ln in _lines[:400])
+                                if len(_lines) > 400:
+                                    _c["diff"] += (
+                                        "\n…（全文 %d 行，这里显示前 400 行；"
+                                        "完整文件在群产物文件夹里）" % len(_lines))
+                        except Exception:
+                            pass
+                    _codes.append(_c)
                     if len(_codes) > 80:        # 极端情况别把消息撑爆
                         del _codes[:-80]
                     _hd_emit(gid, mid, "code", task={"code": _e})
