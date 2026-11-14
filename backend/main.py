@@ -11488,6 +11488,74 @@ def hive_artifact_list(gid: str):
         return {"ok": False, "error": str(e)}
 
 
+@app.post("/api/hive/{gid}/artifacts/put")
+def hive_artifact_put(gid: str, body: dict = None):
+    """把**本机文件**放进这个群的文件夹，并同步给所有成员（2026-11-15）。
+
+    和 `/upload` 的区别：`/upload` 只是落盘（随后由消息带 files 字段广播），
+    这里是「直接往共享文件夹里丢一个文件」—— 不需要发一条聊天消息，
+    但**本体和清单都会广播**，所以别人打开文件夹立刻能看到同一份内容。
+
+    body: {name, mime, data(base64), note?}
+    """
+    b = body or {}
+    try:
+        raw = b.get("data") or ""
+        if isinstance(raw, str) and raw.startswith("data:"):
+            raw = raw.split(",", 1)[-1]
+        data = base64.b64decode(raw)
+        me = hive.profile()
+        meta = hive.save_file(gid, b.get("name") or "file", data,
+                              b.get("mime") or "", tag="ai",
+                              source="本机上传")
+        # 同名只留最新一版（"文件夹内容统一"的语义就是同名=同一份文件的不同版本）
+        try:
+            hive.prune_artifact_name(gid, meta.get("name") or "",
+                                     keep_fid=meta.get("fid"))
+        except Exception:
+            pass
+
+        def _push():
+            # 先发本体，再发清单 —— 顺序不能反：对方按清单来拿时，
+            # 本机得已经有这份文件才能被 T_FREQ 找到。
+            try:
+                hive_client.client().send_file(gid, meta, data)
+            except Exception:
+                _queue_pending_file(gid, dict(meta))
+            try:
+                _hive_sync_now(gid, reason="put", force=True)
+            except Exception:
+                pass
+
+        threading.Thread(target=_push, daemon=True).start()
+        # 群里留一条记录，别人才知道"谁往文件夹里放了东西"
+        try:
+            note = str(b.get("note") or "").strip()
+            txt = "📁 %s 把「%s」放进了群文件夹" % (me.get("name") or "有人",
+                                                meta.get("name") or "文件")
+            if note:
+                txt += "：" + note[:120]
+            hive_client.client().send_message(gid, txt, mtype="text",
+                                              extra={"files": [meta]})
+        except Exception:
+            pass
+        _broadcast_hive({"type": "artifact_put", "gid": gid, "file": meta})
+        return {"ok": True, "file": meta, "max": hive.MAX_FILE}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/artifacts/sync")
+def hive_artifact_sync(gid: str, body: dict = None):
+    """手动触发一次群文件夹清单同步（前端"刷新/对齐"按钮用）。"""
+    try:
+        items, _fp = _hive_artifact_fingerprint(gid)
+        r = _hive_sync_now(gid, reason="manual", force=True)
+        return {"ok": bool(r.get("ok")), "count": len(items), "sent": r}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/api/hive/{gid}/artifacts/open")
 def hive_artifact_open(gid: str, body: dict = None):
     """在资源管理器里打开这个群的产物文件夹（本机操作，仅本机有效）。"""
