@@ -24,7 +24,7 @@ print("fid =", fid)
 chk("T_FREQ 已定义", getattr(hive_mesh, "T_FREQ", None) == 14,
     str(getattr(hive_mesh, "T_FREQ", None)))
 
-node = hive_mesh.MESH.node()
+node = hive_mesh.node()
 
 
 class _FakePeer:

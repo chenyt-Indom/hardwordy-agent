@@ -1335,12 +1335,42 @@ def drop_artifact_by_name(gid: str, name: str) -> int:
 def list_artifacts(gid: str, limit: int = 500) -> List[Dict[str, Any]]:
     """列出这个群的 AI 产物（新的在前）。
 
-    只读 `files.json` 索引，不扫目录 —— 索引里就有 name/size/kind/ts/source，
-    面板要显示的字段全在；扫目录在附件多时会从几十毫秒涨到几百毫秒。
+    两个来源合并：
+      · `files.json` 索引 —— 本机真的有的文件；
+      · **历史消息里的 files 字段** —— 后入群 / 换机器的人本机没有索引，
+        但他们能拉到历史消息，里面有产物的名字和元信息。
+    每条都带 `local`（本机有没有本体）：没有的，点开时前端会触发一次补发请求，
+    而不是直接告诉他"文件不存在"。
     """
+    got: Dict[str, Dict[str, Any]] = {}
     idx = _read_json(_files_index_path(gid), {}) or {}
-    out = [m for m in idx.values()
-           if isinstance(m, dict) and str(m.get("tag") or "") == "ai"]
+    for fid, m in idx.items():
+        if isinstance(m, dict) and str(m.get("tag") or "") == "ai":
+            got[fid] = dict(m)
+    # 合并历史消息里的产物（只认 tag=ai，用户自己发的不算"产物"）
+    try:
+        for msg in read_messages(gid, 0, 300):
+            for f in (msg.get("files") or []):
+                if not isinstance(f, dict):
+                    continue
+                if str(f.get("tag") or "") != "ai":
+                    continue
+                fid = str(f.get("fid") or "")
+                if fid and fid not in got:
+                    got[fid] = dict(f)
+    except Exception:
+        pass
+    ad = artifacts_dir(gid)
+    out = []
+    for fid, m in got.items():
+        m = dict(m)
+        m["fid"] = fid
+        try:
+            m["local"] = os.path.exists(os.path.join(
+                ad, fid + "__" + _safe_name(m.get("name") or "file")))
+        except Exception:
+            m["local"] = False
+        out.append(m)
     out.sort(key=lambda m: float(m.get("ts") or 0), reverse=True)
     return out[:max(1, int(limit))]
 
