@@ -11826,7 +11826,7 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                             _buf = ""
                             for _k, _v in deepseek_client.chat_stream(
                                     _msgs, model=model, api_key=_dkey,
-                                    temperature=0.3, max_tokens=2400,
+                                    temperature=0.3, max_tokens=_hive_mt,
                                     thinking=False):
                                 if ev.is_set():
                                     cancelled = True
