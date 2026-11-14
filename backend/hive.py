@@ -1184,7 +1184,24 @@ MAX_FILE = 20 * 1024 * 1024      # 单文件上限 20MB（走中继分片广播�
 
 
 def files_dir(gid: str) -> str:
+    """用户上传的附件目录。"""
     return os.path.join(_gdir(gid), "files")
+
+
+def artifacts_dir(gid: str) -> str:
+    """AI 产物目录（2026-11-15）。
+
+    为什么单独一个目录，而不是和用户上传的混在 `files/` 里：
+      用户明确要求「每个群聊旁边有一个产物文件夹，所有产物统一放进去」。
+      混在一起时，他打开文件夹看到的是一堆 `f_1a2b3c__` 前缀的上传件 + AI 产出，
+      分不清哪些是 AI 做的、哪些是自己发的。分开后这个目录本身就是"产物文件夹"，
+      在资源管理器里直接能看、能拷走。
+    """
+    return os.path.join(_gdir(gid), "artifacts")
+
+
+def _dir_for_tag(gid: str, tag: str) -> str:
+    return artifacts_dir(gid) if (tag or "user") == "ai" else files_dir(gid)
 
 
 def _files_index_path(gid: str) -> str:
