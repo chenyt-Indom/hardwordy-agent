@@ -43,7 +43,8 @@ def _engine():
     if _ENGINE is None:
         p = _paths()
         _DET = SCRFD(p["det"])
-        _ENGINE = W2L.Wav2LipEngine(p["onnx"], _DET, mel_npy=p["mel"])
+        _ENGINE = W2L.Wav2LipEngine(p["onnx"], _DET, mel_npy=p["mel"],
+                                    threads=8, sr_path=p.get("sr"))
     return _ENGINE
 
 
