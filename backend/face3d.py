@@ -280,15 +280,15 @@ def deform_mouth(pts, uv, openness, jaw=1.0):
     uy = uv[:, 1]
     upper = m & (uy < 0.70)
     lower = m & (uy >= 0.70)
-    out[1][upper] -= o * 6.0          # 上唇上抬（120 坐标系）
-    out[1][lower] += o * 10.0         # 下唇下压
+    out[1][upper] -= o * 3.2          # 上唇上抬（120 坐标系）
+    out[1][lower] += o * 5.6          # 下唇下压
     if jaw > 0:
         lo, hi = 0.70, 0.97
         w = np.clip((uy - lo) / (hi - lo), 0.0, 1.0)
         w = w * w * (3 - 2 * w)       # smoothstep，避免下巴断层
         w[uy <= lo] = 0.0
-        out[1] += o * jaw * 18.0 * w
-        out[2] += o * jaw * 3.0 * w   # 下颌略前移，侧面不显纸片
+        out[1] += o * jaw * 9.0 * w
+        out[2] += o * jaw * 1.6 * w   # 下颌略前移，侧面不显纸片
     return out
 
 
