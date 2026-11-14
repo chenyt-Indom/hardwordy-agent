@@ -1,55 +1,54 @@
-"""实验：roll/pitch 支点下移到颈椎底部，能否消掉脖子剪切。"""
+"""验证：脖子扭是否消除 + 脸部未被削弱 + 眨眼定位仍准。"""
 import sys, os, math
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np, cv2
 from backend import avatar25d as A25
 
 P = r"D:\local-multimodal-src\data\avatar2\avatar.png"
-base = A25._prep3d(P, max_side=1024)
-W, H = base["wh"]; mk = base["mask"]
+prep = A25._prep3d(P, max_side=1024)
+W, H = prep["wh"]; mk = prep["mask"]
 ys, xs = np.where(mk > 0); ymax = int(ys.max())
-cx, cy = base["cx"], base["cy"]
-img = base["img"]; gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)
-ny0, ny1 = ymax, min(H, ymax + 90)          # 脖子带
-fy0, fy1 = int(ys.min()) + 120, ymax - 60   # 脸部带
+cx, cy = prep["cx"], prep["cy"]
+img = prep["img"]; gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)
+ny0, ny1 = ymax, min(H, ymax + 90)
+fy0, fy1 = int(ys.min()) + 120, ymax - 60
+print(f"prep: cx={cx:.0f} cy={cy:.0f} 下颌线y={ymax} roll_pivot_y={prep['roll_pivot_y']:.0f}")
 
-def pivot_shift(deg, d):
-    """绕 (cx, cy+d) 旋转 = 绕 (cx,cy) 旋转 + 平移补偿。"""
-    r = math.radians(deg)
-    return d * math.sin(r), d * (1.0 - math.cos(r))
-
-def run(tag, roll=0.0, pitch=0.0, d_roll=0.0, d_pitch=0.0):
-    kw = {}
-    if roll:
-        tx, ty = pivot_shift(roll, d_roll)
-        kw.update(roll=roll, tx=tx, ty=ty)
-    if pitch:
-        # pitch 的支点：纵向压缩中心下移，用 ty 补偿近似
-        d = d_pitch
-        kw.update(pitch=pitch, ty=-d * (1 - math.cos(math.radians(pitch))) * -1)
-    out = A25._warp(img, base, **kw)
+def run(tag, **kw):
+    out = A25._warp(img, prep, **kw)
     g1 = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY).astype(np.float32)
     dn = np.abs(g1[ny0:ny1] - gray[ny0:ny1])
     df = np.abs(g1[fy0:fy1] - gray[fy0:fy1])
-    print(f" {tag:22s} 脖pixdiff={dn.mean():6.3f} >8={ (dn>8).mean()*100:5.2f}%  "
-          f"脸pixdiff={df.mean():6.2f} 脸位移≈{abs(kw.get('tx',0)):.1f}px")
+    (fx, _), _ = cv2.phaseCorrelate(gray[fy0:fy1], g1[fy0:fy1])
+    (nx, _), _ = cv2.phaseCorrelate(gray[ny0:ny1], g1[ny0:ny1])
+    same = "OK" if (abs(fx) < 0.2 or abs(nx) < 0.2 or (fx > 0) == (nx > 0)) else "REV!"
+    print(f" {tag:14s} 脖diff={dn.mean():6.3f} >8={ (dn>8).mean()*100:5.2f}% | "
+          f"脸diff={df.mean():6.2f} | 脸dx={fx:+5.2f} 脖dx={nx:+5.2f} {same}")
 
-print("=== roll=5，支点从脸中心下移 d ===")
-for d in (0, 80, 150, 230, 320):
-    run(f"roll5 d={d}", roll=5.0, d_roll=d)
+print("\n=== 修复后（roll 上限 3.2°，支点在下颌线）===")
+run("yaw +7.5", yaw=7.5)
+run("yaw -7.5", yaw=-7.5)
+run("pitch +6", pitch=6)
+run("pitch -5", pitch=-5)
+run("roll +3.2", roll=3.2)
+run("roll -3.2", roll=-3.2)
+run("roll5(旧值)", roll=5.0)
+run("组合典型", yaw=4, pitch=3, roll=2, tx=8, ty=5)
 
-print("\n=== roll=3，支点下移 ===")
-for d in (0, 150, 230):
-    run(f"roll3 d={d}", roll=3.0, d_roll=d)
-
-print("\n=== 参考：不动 ===")
-run("noop", roll=0.0)
-
-# 额外：把整条脖子+头作为刚体，用相位相关看脖子和脸是否同向
-print("\n=== 同向性（roll5 d=230）===")
-tx, ty = pivot_shift(5.0, 230)
-out = A25._warp(img, base, roll=5.0, tx=tx, ty=ty)
-g1 = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY).astype(np.float32)
-(fx, _), r1 = cv2.phaseCorrelate(gray[fy0:fy1], g1[fy0:fy1])
-(nx, _), r2 = cv2.phaseCorrelate(gray[ny0:ny1], g1[ny0:ny1])
-print(f" 脸 dx={fx:+.2f}(resp {r1:.3f})  脖 dx={nx:+.2f}(resp {r2:.3f})  同向={'是' if (fx>0)==(nx>0) else '否'}")
+# 眨眼定位一致性：_shift_of 与 _warp 实测是否吻合
+print("\n=== 眨眼定位一致性（眼睛点被头带到哪）===")
+for kw in (dict(yaw=6.0), dict(yaw=-6.0), dict(roll=3.0), dict(roll=-3.0),
+           dict(yaw=4, roll=2, pitch=2, tx=8, ty=5)):
+    dx, dy = A25._shift_of(prep, cx, cy - 150, **kw)   # 取一个眼睛附近的点
+    # 实测：用 _warp 把该点周围的块挪过去，看峰值在哪
+    x0, y0 = int(cx) - 40, int(cy) - 190
+    patch = gray[y0:y0+80, x0:x0+80]
+    out = A25._warp(img, prep, **kw)
+    g1 = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    tm = cv2.matchTemplate(g1[max(0,y0-60):y0+140, max(0,x0-60):x0+140],
+                           patch, cv2.TM_CCOEFF_NORMED)
+    _, mx, _, mloc = cv2.minMaxLoc(tm)
+    ex = mloc[0] + max(0, x0-60) - x0
+    ey = mloc[1] + max(0, y0-60) - y0
+    print(f" {str(kw):48s} 预测=({dx:+5.2f},{dy:+5.2f}) 实测=({ex:+5.2f},{ey:+5.2f}) "
+          f"误差={math.hypot(dx-ex, dy-ey):5.2f}px conf={mx:.3f}")
