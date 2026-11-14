@@ -565,8 +565,19 @@ class MeshNode:
                             for g in list(self.groups)]
                 _send_plain(sock, T_PROBE, {"svc": "hive-mesh",
                                             "ver": PROTO_VER, "groups": info})
-                sock.close()
-                return
+                if not isinstance(sock, HP.ReliableUDPSock):
+                    # 普通 TCP：探完就断，一个连接只干一件事
+                    sock.close()
+                    return
+                # 打洞隧道不拆：重新打洞要 0.12 秒，而且上一代隧道关闭时
+                # 发出的 BYE 还在路上，会把刚建好的新隧道立刻打掉
+                # （实测「探群成功、紧接着入群失败，耗时 0.00 秒」）。
+                # 所以继续读客户端接着发来的 HELLO，同一条隧道直接复用。
+                fr = _read_frame(sock)
+                if not fr:
+                    sock.close()
+                    return
+                typ, rk, body = fr
             if typ != T_HELLO:
                 sock.close()
                 return
