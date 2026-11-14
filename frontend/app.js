@@ -10046,6 +10046,82 @@
     }
 
     function msgNode(m) {
+    // ★ 2026-11-15：群聊里的「代码改动」卡片。
+    //   用户反馈「群里造软件时看不到任何代码」—— 根因是后端压根没把
+    //   selfdev / workspace 事件推给前端（单聊里 6452 行会渲染 diff 卡片）。
+    //   这里用**和单人模式完全相同的一套 class**（.sd-list/.sd-row/.sd-pre），
+    //   默认只占一行摘要，点「详情」才展开 diff，不会把聊天区撑变形。
+    function codeChangesHtml(items) {
+      const list = (items || []).filter((x) => x && (x.rel || x.project));
+      if (!list.length) return "";
+      let add = 0, del = 0;
+      list.forEach((x) => {
+        add += Number(x.added || 0); del += Number(x.removed || 0);
+      });
+      let rows = "";
+      list.forEach((x, i) => {
+        const actName = (x.type === "selfdev")
+          ? (x.act === "apply" ? "代码模型重写"
+            : (x.act === "patch" ? "局部替换" : "写入"))
+          : (x.act === "project" ? "新建项目" : "写入文件");
+        const rel = String(x.rel || x.project || "");
+        const diff = String(x.diff || "");
+        const body = diff ? diff.split("\n").map((ln) => {
+          const esc = hEsc(ln);
+          if (ln.indexOf("+++") === 0 || ln.indexOf("---") === 0
+              || ln.indexOf("@@") === 0) return '<span class="l-hdr">' + esc + "</span>";
+          if (ln.indexOf("+") === 0) return '<span class="l-add">' + esc + "</span>";
+          if (ln.indexOf("-") === 0) return '<span class="l-del">' + esc + "</span>";
+          return esc;
+        }).join("\n") : "（没有差异内容；成品文件在群产物文件夹里）";
+        rows += '<div class="sd-row" data-i="' + i + '">'
+          + '<div class="sd-head"><span class="sd-badge">🛠 ' + hEsc(actName) + "</span>"
+          + '<span class="sd-rel" title="' + hEsc(rel) + '">' + hEsc(rel) + "</span>"
+          + '<span class="sd-stat"><span class="sd-add">+' + Number(x.added || 0)
+          + '</span> <span class="sd-del">−' + Number(x.removed || 0) + "</span></span>"
+          + '<button class="sd-toggle" type="button">详情 ▾</button></div>'
+          + '<div class="sd-body" hidden><pre class="sd-pre">' + body + "</pre></div>"
+          + "</div>";
+      });
+      return '<div class="sd-list"><div class="sd-list-head">'
+        + '<span class="sd-list-arrow">▾</span>'
+        + '<span class="sd-list-title">🛠 本轮代码改动</span>'
+        + '<span class="sd-list-sum">' + list.length + " 处 · "
+        + '<span class="sd-add">+' + add + '</span> <span class="sd-del">−' + del
+        + "</span></span></div>"
+        + '<div class="sd-list-body">' + rows + "</div></div>";
+    }
+
+    // 交互：点列表头收起整列；点「详情」或整行展开该文件的 diff。
+    // 每次 innerHTML 重建都会产生新的 .sd-list 节点，所以用节点上的 __bound 判重。
+    function bindCodeChanges(root) {
+      if (!root) return;
+      const list = root.querySelector(".sd-list");
+      if (!list || list.__bound) return;
+      list.__bound = true;
+      const head = list.querySelector(".sd-list-head");
+      const body = list.querySelector(".sd-list-body");
+      if (head && body) {
+        head.addEventListener("click", () => {
+          const closed = !body.hidden;
+          body.hidden = closed;
+          head.querySelector(".sd-list-arrow").textContent = closed ? "▸" : "▾";
+        });
+      }
+      list.querySelectorAll(".sd-row").forEach((row) => {
+        const tg = row.querySelector(".sd-toggle");
+        const bd = row.querySelector(".sd-body");
+        const hd = row.querySelector(".sd-head");
+        if (!tg || !bd) return;
+        const toggle = () => {
+          bd.hidden = !bd.hidden;
+          tg.textContent = bd.hidden ? "详情 ▾" : "收起 ▴";
+        };
+        tg.addEventListener("click", (e) => { e.stopPropagation(); toggle(); });
+        if (hd) hd.addEventListener("click", (e) => { if (e.target !== tg) toggle(); });
+      });
+    }
+
       const wrap = document.createElement("div");
       const type = m.type || "text";
       // ★ 2026-11-13 用户要求：「单人和群聊的版式必须完全一样」。
