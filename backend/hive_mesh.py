@@ -1282,6 +1282,7 @@ class MeshNode:
             except Exception:
                 return {"ok": False, "error": "对方返回的内容看不懂"}
             groups = o.get("groups") if isinstance(o, dict) else None
+            keep = True
             return {"ok": True, "host": host, "port": int(port),
                     "groups": groups or [], "via": "punch"}
         except socket.timeout:
