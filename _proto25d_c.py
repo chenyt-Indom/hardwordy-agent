@@ -29,7 +29,9 @@ print("脸中心 (%.0f,%.0f) 宽 %.0f 高 %.0f  深度中位 %.1f 跨度 %.1f"
       % (cx, cy, face_w, face_h, z0, z_span))
 
 # 深度 -> 像素的换算：深度跨度对应脸宽的一半（鼻尖到耳后 ≈ 半脸宽）
-SCALE = (face_w * 0.5) / max(z_span, 1e-6) * 0.38   # 0.38 是实测的自然系数
+import os as _os
+GAIN = float(_os.environ.get("P25D_GAIN", "0.38"))
+SCALE = (face_w * 0.5) / max(z_span, 1e-6) * GAIN
 zn = np.clip((depth - z0) / max(z_span, 1e-6), -1.0, 1.0)
 
 # 位移权重：脸内为 1，向外 30px 渐变到 0（避免脖子/肩膀撕裂）
