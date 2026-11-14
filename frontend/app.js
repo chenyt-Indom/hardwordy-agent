@@ -2666,9 +2666,10 @@
         const parts = splitSpeech(text, segLen);
         let r;
         if (parts.length <= 1) {
-          say(mode === "3d" ? "正在 3D 重建 → 网格渲染 → 合成，约 30 秒…"
-            : mode === "p25d" ? "正在配音 → 深度位移 + 头姿 → 合成，约 10 秒…"
-              : "正在配音 → 口型对齐 → 合成，约 10 秒…");
+          say(mode === "w2l" ? "正在配音 → Wav2Lip 生成嘴型 → 合成，约 10 秒…"
+            : mode === "3d" ? "正在 3D 重建 → 网格渲染 → 合成，约 30 秒…"
+              : mode === "p25d" ? "正在配音 → 深度位移 + 头姿 → 合成，约 10 秒…"
+                : "正在配音 → 口型对齐 → 合成，约 10 秒…");
           r = await api(speakUrl, {
             method: "POST",
             body: JSON.stringify(Object.assign({}, base, { text: parts[0] || text })),
