@@ -10373,9 +10373,26 @@
         }
         // ★ 2026-11-15：优先用 full（累计全文）覆盖 —— 流式帧走泛洪、不重发，
         //   只靠增量累加的话，成员那边丢一帧就永久少一段，两人看到的思考不一样长。
-        if (typeof f.full === "string" && f.full) c.raw = f.full;
-        else c.raw = (c.raw || "") + String(f.delta || "");
-        c.think.textContent = c.raw + "▌";
+        // 优先用 full（累计全文）纠错：流式帧走泛洪、不重发，只靠增量累加的话，
+        // 成员那边丢一帧就永久少一段。但**不能每帧都整块重设**（那是卡顿的根源）——
+        // 全量快照和已有内容对得上就只追加差量，对不上才整块重设。
+        const _prev = c.raw || "";
+        const _full = (typeof f.full === "string" && f.full) ? f.full : "";
+        const _dlt = String(f.delta || "");
+        if (_full) {
+          if (_full === _prev) {
+            /* 没变化，什么都不做 */
+          } else if (_full.startsWith(_prev)) {
+            hdThinkAppend(c, _full.slice(_prev.length));
+            c.raw = _full;
+          } else {
+            hdThinkSet(c, _full);
+            c.raw = _full;
+          }
+        } else if (_dlt) {
+          hdThinkAppend(c, _dlt);
+          c.raw = _prev + _dlt;
+        }
       } else if (ph === "tool") {
         // ★ 2026-11-15：改成单人模式那一套 —— 每调一个工具就往 .tool-strip
         //   加一个 .tool-chip，标题按工具类型换文案（🎨 正在生成图片… / 🔧 正在调用工具：xxx）。
