@@ -2548,8 +2548,16 @@
         } catch (e) {}
       }, 220);
     }
-    my.oninput = pushMouth;
-    mw.oninput = pushMouth;
+    my.oninput = () => {
+      mouthState.y = parseFloat(my.value) || 0.5;
+      paintMouthBox();
+      pushMouth();
+    };
+    mw.oninput = () => {
+      mouthState.w = parseFloat(mw.value) || 0.2;
+      paintMouthBox();
+      pushMouth();
+    };
 
     // —— 心情 & 语速 ——
     const moodSel = $("#av2Mood"), rateSel = $("#av2Rate");
