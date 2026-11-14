@@ -12338,6 +12338,29 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 _ui_all.extend(_evs or [])
             except Exception:
                 pass
+            # ★ 2026-11-15：把「改了哪个文件、改了什么」推给前端。
+            #   单人模式在 6452 行收到 type=="selfdev" 会渲染可折叠的 diff 卡片；
+            #   群聊这条链路原来把它整个吞掉了（只用来存产物），所以群里造软件
+            #   时界面上只有思考和正文、**看不到一行代码**。
+            #   这里同时收两类：selfdev（改应用源码）和 workspace（写项目文件），
+            #   都推成 "code" 帧；跑完还会挂到消息的 codes 字段上，后进群也能回看。
+            try:
+                for _e in (_evs or []):
+                    if not isinstance(_e, dict):
+                        continue
+                    _et = str(_e.get("type") or "")
+                    if _et == "workspace":
+                        # 只有真正写了内容才有代码可看；mkdir/delete/move 跳过
+                        if str(_e.get("act") or "") not in ("write", "project"):
+                            continue
+                    elif _et != "selfdev":
+                        continue
+                    _codes.append(dict(_e))
+                    if len(_codes) > 80:        # 极端情况别把消息撑爆
+                        del _codes[:-80]
+                    _hd_emit(gid, mid, "code", task={"code": _e})
+            except Exception:
+                pass
             logger.warning("[hive-hd] 工具 %s → %s", name, str(out)[:160])
             return str(out)[:6000]
 
