@@ -9784,29 +9784,53 @@
           + "</span>"
           + '<span class="hive-art-acts">'
           + '<button type="button" class="btn sm ghost" data-view="' + fid
-          + '" title="打开看看">打开</button>'
+          + '" data-name="' + hEsc(nm) + '" title="打开看看">打开</button>'
           + '<button type="button" class="btn sm ghost" data-dl="' + fid
-          + '" title="下载保存到本机">⬇</button>'
+          + '" data-name="' + hEsc(nm) + '" title="下载保存到本机">⬇</button>'
           + "</span></div>";
       }).join("");
-      // 打开：图片/视频/音频直接新窗口预览，文档走浏览器内置预览
-      Array.prototype.forEach.call(box.querySelectorAll("[data-view]"), (b) => {
-        b.addEventListener("click", () => {
-          const u = base + encodeURIComponent(b.getAttribute("data-view"));
-          window.open(u, "_blank");
-        });
-      });
-      // 下载：download=1 让后端发 Content-Disposition: attachment
-      Array.prototype.forEach.call(box.querySelectorAll("[data-dl]"), (b) => {
-        b.addEventListener("click", () => {
-          const u = base + encodeURIComponent(b.getAttribute("data-dl")) + "?download=1";
+      // 取文件本体：先探测，再决定是显示还是提示补发。
+      // 不能直接用 <a download> —— 后端返回 425「正在向群成员补发」时，
+      // 浏览器会把那段提示文字当成文件存下来（用户拿到一个坏的 txt）。
+      async function grab(fid, name, asDownload) {
+        const u = base + encodeURIComponent(fid) + (asDownload ? "?download=1" : "");
+        let r;
+        try {
+          r = await fetch(u);
+        } catch (e) {
+          showToast("取文件失败：" + e.message, "warn");
+          return;
+        }
+        if (r.status === 425) {
+          showToast("本机还没有这份文件，已向群里请求补发 —— 等几秒再点一次", "warn");
+          return;
+        }
+        if (!r.ok) {
+          showToast("这份文件暂时拿不到（" + r.status + "）", "warn");
+          return;
+        }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        if (asDownload) {
           const a = document.createElement("a");
-          a.href = u;
-          a.download = "";
+          a.href = url;
+          a.download = name || "file";
           document.body.appendChild(a);
           a.click();
           a.remove();
-        });
+          setTimeout(() => URL.revokeObjectURL(url), 30000);
+        } else {
+          window.open(url, "_blank");
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        }
+      }
+      Array.prototype.forEach.call(box.querySelectorAll("[data-view]"), (b) => {
+        b.addEventListener("click", () => grab(b.getAttribute("data-view"),
+          b.getAttribute("data-name"), false));
+      });
+      Array.prototype.forEach.call(box.querySelectorAll("[data-dl]"), (b) => {
+        b.addEventListener("click", () => grab(b.getAttribute("data-dl"),
+          b.getAttribute("data-name"), true));
       });
     }
 
