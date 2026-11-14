@@ -92,6 +92,9 @@ T_FREQ = 14
 # 谁也不知道哪个是最新。这条帧广播「我这边每个文件名对应哪个 sha / 哪一版」，
 # 收到的人对比本地，缺的补、旧的换，于是大家看到的文件夹是同一个。
 T_FSYNC = 15
+# 全员删除产物（2026-11-15）：用户要求「文件可删除以释放空间」，默认只删本机，
+# **按住 Shift 删**才广播这条帧，让每个成员都把自己那份删掉。
+T_FDEL = 16
 
 _LOCK = threading.RLock()
 
@@ -352,6 +355,7 @@ class MeshNode:
         self.on_file = None     # Callable[[str, dict], None]  附件分片
         self.on_freq = None     # Callable[[str, dict], None]  附件补发请求
         self.on_fsync = None    # Callable[[str, dict], None]  群文件夹清单同步
+        self.on_fdel = None     # Callable[[str, dict], None]  全员删除产物
         self.on_peer = None     # Callable[[], None]
         self.on_members = None  # Callable[[str], None]  成员表有变化（收到别人的）
         self.on_gone = None     # Callable[[str, str], None]  某个群被群主删了（gid, 群名）
@@ -898,6 +902,18 @@ class MeshNode:
             ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
             if ttl > 0:
                 self._fanout(gid, T_FSYNC, dict(obj, ttl=ttl), skip=peer)
+            return
+        if typ == T_FDEL:
+            # 全员删除：有人按住 Shift 删了产物 → 每个成员把本机那份也删掉。
+            # 同样要继续转发（群里不是所有人都和我直连）。
+            if self.on_fdel:
+                try:
+                    self.on_fdel(gid, obj)
+                except Exception:
+                    pass
+            ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
+            if ttl > 0:
+                self._fanout(gid, T_FDEL, dict(obj, ttl=ttl), skip=peer)
             return
         # ★ 2026-11-13：走到这里 = **本机不认识这个帧类型**。
         #   最典型的场景就是「对方代码比本机新」（自开发改过、只有一边重启了）。

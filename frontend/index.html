@@ -1099,6 +1099,15 @@
         <button type="button" class="hm-x" id="hiveArtClose" title="关闭">✕</button>
       </div>
       <p class="hint" id="hiveArtHint">AI 在这个群里产出的图片 / 文档 / 代码都会自动放到这里。</p>
+      <!-- 拖拽 / 导入（2026-11-15 用户要求）：直接往这个文件夹丢文件，
+           本体立刻分片广播给每一位成员，大小不设上限，断了能续传。 -->
+      <div class="hive-art-drop" id="hiveArtDrop">
+        <span class="had-txt">📥 把文件拖到这里，或</span>
+        <button type="button" class="btn sm" id="hiveArtPick">选择文件…</button>
+        <span class="had-sub">大小不限 · 断点续传 · 导入后自动广播给所有成员</span>
+        <input type="file" id="hiveArtInput" multiple hidden>
+      </div>
+      <div class="hive-art-prog" id="hiveArtProg" hidden></div>
       <div class="hive-art-list" id="hiveArtList"></div>
       <div class="hm-acts">
         <button type="button" class="btn sm ghost" id="hiveArtDir"

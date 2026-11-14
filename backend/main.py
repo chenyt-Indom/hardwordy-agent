@@ -33,6 +33,8 @@ import math
 #    **群 AI 的产物永远广播不到别的成员**（实测：sync 返回
 #    "name 'hashlib' is not defined"，对方文件夹一直是空的）。
 import hashlib
+import shutil
+import secrets
 import time
 import asyncio
 import datetime
@@ -11072,6 +11074,27 @@ def _hive_on_fsync(gid: str, body: dict) -> None:
 hive_client.client().on_fsync = _hive_on_fsync
 
 
+def _hive_on_fdel(gid: str, body: dict) -> None:
+    """有人按住 Shift 删了产物 → 本机也删掉那一份（2026-11-15）。
+
+    用户要求「文件可删除以释放空间」，默认只删本机；全员删走这条广播。
+    ⚠️ 只删**本机副本**，不发回执、不反向广播 —— 帧本身已经在泛洪了，
+       再广播一次会变成无限循环。
+    """
+    try:
+        fid = str((body or {}).get("fid") or "")
+        if not fid:
+            return
+        hive.delete_file(gid, fid)
+        _broadcast_hive({"type": "artifact_del", "gid": gid, "fid": fid,
+                         "broadcast": True})
+    except Exception:
+        pass
+
+
+hive_client.client().on_fdel = _hive_on_fdel
+
+
 def _hive_on_gone(gid: str, name: str) -> None:
     """群主删了群：推一帧，前端立刻把这个群从列表里去掉。"""
     _broadcast_hive({"type": "group_gone", "gid": gid, "name": name or ""})
@@ -11609,8 +11632,18 @@ def _hive_send_files(gid: str, files: list) -> None:
             fid = (f or {}).get("fid")
             if not fid:
                 continue
-            data = hive.read_file_bytes(gid, fid)
-            r = cli.send_file(gid, f, data) or {}
+            # ⚠️ 2026-11-15（用户要求「大小不被限制」）：优先按**路径**发，
+            #    让 send_file 按片读盘。原来这里 read_file_bytes() 把整个文件
+            #    读成 bytes，2GB 的产物就是 2GB 内存，发一次机器就卡死。
+            try:
+                _p = hive.file_path(gid, fid)
+            except Exception:
+                _p = ""
+            if _p and os.path.isfile(_p):
+                r = cli.send_file(gid, f, path=_p) or {}
+            else:
+                data = hive.read_file_bytes(gid, fid)
+                r = cli.send_file(gid, f, data) or {}
             if not r.get("ok") or int(r.get("sent") or 0) <= 0:
                 _queue_pending_file(gid, dict(f))
         except Exception:
@@ -11790,6 +11823,248 @@ def hive_artifact_put(gid: str, body: dict = None):
             pass
         _broadcast_hive({"type": "artifact_put", "gid": gid, "file": meta})
         return {"ok": True, "file": meta, "max": hive.MAX_FILE}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------- 分片上传（大文件）
+#
+# 用户要求（2026-11-15）：「直接拖曳 / 导入文件进去，广播到每一位成员，大小不被限制」。
+#
+# 为什么不复用 /artifacts/put：那条是 base64 JSON **一次性传完** ——
+#   · 浏览器要把整个文件读成 base64 字符串（体积 ×1.37）；
+#   · 后端 json 解析时又是一份完整副本；
+#   · 传到 90% 断网/关页面，只能从头再来。
+# 1GB 文件这样搞，两边内存都得爆。所以大文件走「分片 + 会话」：
+#   init  → 建会话（同名同尺寸已有会话就直接返回它 = 断点续传）
+#   chunk → 一片一片写进 uploads/<uid>/parts/<idx>.bin
+#   finish→ 按顺序拼成 blob，流式搬进群目录，广播
+# 会话落在磁盘上，所以**关掉页面重开也能接着传**（前端按 name+size 找回同一个 uid）。
+
+HIVE_UP_CHUNK = 4 * 1024 * 1024     # 4MB 一片（base64 后约 5.3MB，HTTP body 完全扛得住）
+
+
+def _hive_upload_root(gid: str) -> str:
+    return os.path.join(hive._gdir(gid), "uploads")
+
+
+def _hive_upload_meta(gid: str, uid: str) -> dict:
+    p = os.path.join(_hive_upload_root(gid), uid, "meta.json")
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            return json.load(fh) or {}
+    except Exception:
+        return {}
+
+
+def _hive_upload_save_meta(gid: str, uid: str, meta: dict) -> None:
+    d = os.path.join(_hive_upload_root(gid), uid)
+    os.makedirs(os.path.join(d, "parts"), exist_ok=True)
+    p = os.path.join(d, "meta.json")
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, p)
+
+
+def _hive_upload_parts(gid: str, uid: str) -> set:
+    d = os.path.join(_hive_upload_root(gid), uid, "parts")
+    out = set()
+    try:
+        for n in os.listdir(d):
+            if n.endswith(".bin"):
+                try:
+                    out.add(int(n[:-4]))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return out
+
+
+@app.post("/api/hive/{gid}/artifacts/upload/init")
+def hive_artifact_upload_init(gid: str, body: dict = None):
+    """开一个分片上传会话。同名同尺寸的未完成会话会被**直接复用**（断点续传）。"""
+    b = body or {}
+    try:
+        if not hive.load_group(gid):
+            return {"ok": False, "error": "群不存在"}
+        name = str(b.get("name") or "file")
+        safe = hive._safe_name(name)
+        size = int(b.get("size") or 0)
+        if size <= 0:
+            return {"ok": False, "error": "文件是空的"}
+        mime = str(b.get("mime") or "")
+        tag = "ai" if str(b.get("tag") or "") == "ai" else "user"
+        source = str(b.get("source") or "本机上传")[:120]
+        chunk = HIVE_UP_CHUNK
+        total = max(1, (size + chunk - 1) // chunk)
+
+        root = _hive_upload_root(gid)
+        os.makedirs(root, exist_ok=True)
+        # 断点续传：按 (名字, 尺寸, tag) 找没完成的旧会话
+        for uid in list(os.listdir(root)):
+            if not uid.startswith("u_"):
+                continue
+            m = _hive_upload_meta(gid, uid)
+            if not m or m.get("done"):
+                continue
+            if (m.get("name") == safe and int(m.get("size") or 0) == size
+                    and str(m.get("tag") or "user") == tag):
+                got = sorted(_hive_upload_parts(gid, uid))
+                return {"ok": True, "upload_id": uid, "chunk": int(m.get("chunk") or chunk),
+                        "total": int(m.get("total") or total), "received": got,
+                        "resumed": True, "size": size}
+
+        uid = "u_" + secrets.token_hex(8)
+        _hive_upload_save_meta(gid, uid, {
+            "name": safe, "size": size, "mime": mime, "tag": tag,
+            "source": source, "chunk": chunk, "total": total,
+            "ts": time.time(), "done": False,
+        })
+        return {"ok": True, "upload_id": uid, "chunk": chunk, "total": total,
+                "received": [], "resumed": False, "size": size}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/artifacts/upload/chunk")
+def hive_artifact_upload_chunk(gid: str, body: dict = None):
+    """收一片。可以乱序、可以重传（同一 idx 覆盖写）。"""
+    b = body or {}
+    try:
+        uid = str(b.get("upload_id") or "")
+        idx = int(b.get("idx") or 0)
+        if not uid.startswith("u_"):
+            return {"ok": False, "error": "上传会话无效"}
+        meta = _hive_upload_meta(gid, uid)
+        if not meta:
+            return {"ok": False, "error": "上传会话不存在（可能已过期，请重新开始）"}
+        if meta.get("done"):
+            return {"ok": True, "done": True, "got": 0, "total": int(meta.get("total") or 0)}
+        raw = b.get("data") or ""
+        if isinstance(raw, str) and raw.startswith("data:"):
+            raw = raw.split(",", 1)[-1]
+        data = base64.b64decode(raw)
+        total = int(meta.get("total") or 0)
+        if idx < 0 or (total and idx >= total):
+            return {"ok": False, "error": "分片序号超出范围"}
+        d = os.path.join(_hive_upload_root(gid), uid, "parts")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, "%d.bin" % idx)
+        with open(p, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+        got = len(_hive_upload_parts(gid, uid))
+        return {"ok": True, "got": got, "total": total, "idx": idx}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/artifacts/upload/finish")
+def hive_artifact_upload_finish(gid: str, body: dict = None):
+    """所有分片齐了 → 按顺序拼成整文件 → 流式搬进群目录 → 广播给全员。"""
+    b = body or {}
+    try:
+        uid = str(b.get("upload_id") or "")
+        if not uid.startswith("u_"):
+            return {"ok": False, "error": "上传会话无效"}
+        meta = _hive_upload_meta(gid, uid)
+        if not meta:
+            return {"ok": False, "error": "上传会话不存在"}
+        total = int(meta.get("total") or 0)
+        got = _hive_upload_parts(gid, uid)
+        missing = [i for i in range(total) if i not in got]
+        if missing:
+            return {"ok": False, "error": "还缺 %d 片" % len(missing),
+                    "missing": missing[:200], "got": len(got), "total": total}
+        d = os.path.join(_hive_upload_root(gid), uid)
+        blob = os.path.join(d, "blob")
+        with open(blob, "wb") as out:
+            for i in range(total):
+                with open(os.path.join(d, "parts", "%d.bin" % i), "rb") as fh:
+                    shutil.copyfileobj(fh, out, 1024 * 1024)
+            out.flush()
+            try:
+                os.fsync(out.fileno())
+            except Exception:
+                pass
+        want = int(meta.get("size") or 0)
+        real = os.path.getsize(blob)
+        if want and real != want:
+            return {"ok": False, "error": "拼接后大小不符（%d != %d）" % (real, want)}
+        fm = hive.save_file_stream(
+            gid, meta.get("name") or "file", blob,
+            meta.get("mime") or "", tag=(meta.get("tag") or "user"),
+            source=meta.get("source") or "本机上传", move=True)
+        # 同名只留最新一版（和 /artifacts/put 的语义一致）
+        try:
+            hive.prune_artifact_name(gid, fm.get("name") or "", keep_fid=fm.get("fid"))
+        except Exception:
+            pass
+        meta["done"] = True
+        meta["fid"] = fm.get("fid")
+        _hive_upload_save_meta(gid, uid, meta)
+        # 清掉这个会话的临时文件（保留 meta.json 一小会儿，让前端能查到"已完成"）
+        try:
+            shutil.rmtree(os.path.join(d, "parts"), ignore_errors=True)
+            if os.path.exists(blob):
+                os.remove(blob)
+        except Exception:
+            pass
+
+        def _push():
+            try:
+                hive_client.client().send_file(
+                    gid, fm, path=hive.file_path(gid, fm["fid"]))
+            except Exception:
+                _queue_pending_file(gid, dict(fm))
+            try:
+                _hive_sync_now(gid, reason="upload", force=True)
+            except Exception:
+                pass
+
+        threading.Thread(target=_push, daemon=True).start()
+        # 群里留一条记录，别人才知道"谁往文件夹里放了东西"
+        try:
+            txt = "📁 %s 把「%s」放进了群文件夹" % (
+                hive.profile().get("name") or "有人", fm.get("name") or "文件")
+            hive_client.client().send_message(gid, txt, mtype="text",
+                                              extra={"files": [fm]})
+        except Exception:
+            pass
+        _broadcast_hive({"type": "artifact_put", "gid": gid, "file": fm})
+        return {"ok": True, "file": fm}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.delete("/api/hive/{gid}/artifacts/{fid}")
+def hive_artifact_delete(gid: str, fid: str, broadcast: int = 0):
+    """删产物。默认**只删本机这一份**；`broadcast=1` 才是全群一起删。
+
+    用户要求（2026-11-15）：「要支持被删除以保证空间不被占满，由用户操作」，
+    并且默认只删自己那份（一个人手滑不该把全群的产物删没），
+    想全员删就按住 Shift 点删除 → 前端传 broadcast=1。
+    """
+    try:
+        m = None
+        try:
+            m = hive.get_file_meta(gid, fid)
+        except Exception:
+            m = None
+        ok = hive.delete_file(gid, fid)
+        if broadcast:
+            try:
+                hive_client.client().send_del(gid, fid, m)
+            except Exception:
+                pass
+        _broadcast_hive({"type": "artifact_del", "gid": gid, "fid": fid,
+                         "broadcast": bool(broadcast)})
+        return {"ok": bool(ok), "fid": fid, "broadcast": bool(broadcast),
+                "file": m}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -12343,13 +12618,9 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
     _seen: set = set()          # 同一个文件可能触发多个事件（write+export），只收一次
 
     def _add(raw: bytes, name: str, mime: str, source: str) -> None:
+        """收一份内存里的内容（图片 b64 走这里，通常几 MB）。"""
         try:
             if not raw:
-                return
-            if len(raw) > hive.MAX_FILE:
-                # 超过群附件上限就别硬塞：只提示，不中断其他产物
-                logger.warning("[hive-art] 产物过大跳过：%s（%.1f MB）",
-                               name, len(raw) / 1048576.0)
                 return
             key = (name, len(raw), raw[:64])
             if key in _seen:
@@ -12363,6 +12634,34 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
                 pass
             metas.append(hive.save_file(gid, name, raw, mime,
                                         tag="ai", source=source))
+        except Exception:
+            logger.warning("[hive-art] 存产物失败：%s", name, exc_info=True)
+
+    def _add_path(path: str, name: str, mime: str, source: str) -> None:
+        """收一份**磁盘上已有**的产物，流式搬进群目录（2026-11-15）。
+
+        为什么必须走这条：用户要求「AI 生成的内容大小也不受限制」。
+        原来这里是 `fh.read(hive.MAX_FILE)` —— 超过 20MB 会**静默截断**，
+        存进产物文件夹的是一份坏文件（用户拿到打不开的视频/压缩包）。
+        现在整个文件从头到尾流式拷贝，多大都完整，且峰值内存只有 1MB。
+        """
+        try:
+            if not path or not os.path.isfile(path):
+                return
+            size = os.path.getsize(path)
+            if size <= 0:
+                return
+            key = (name, size, path)
+            if key in _seen:
+                return
+            _seen.add(key)
+            try:
+                hive.drop_artifact_by_name(gid, name)
+            except Exception:
+                pass
+            # move=False：源文件是用户的真实产物，不能搬走（搬走工作区就空了）
+            metas.append(hive.save_file_stream(
+                gid, name, path, mime, tag="ai", source=source, move=False))
         except Exception:
             logger.warning("[hive-art] 存产物失败：%s", name, exc_info=True)
 
@@ -12388,10 +12687,10 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
                     p = _dl.file_path(rel)
                     if not p or not os.path.isfile(p):
                         continue
-                    with open(p, "rb") as fh:
-                        raw = fh.read(hive.MAX_FILE)
-                    _add(raw, "AI产物_" + os.path.basename(rel),
-                         _art_mime(rel), "文库")
+                    # 2026-11-15：原来 fh.read(MAX_FILE) 会把超 20MB 的产物
+                    # **截断**保存（存下来是坏文件），改成按路径流式收。
+                    _add_path(p, "AI产物_" + os.path.basename(rel),
+                              _art_mime(rel), "文库")
                 except Exception:
                     continue
             elif kind == "workspace":
@@ -12400,13 +12699,9 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
                 if _act == "pack":
                     p = str(ev.get("path") or "")
                     if p and os.path.isfile(p):
-                        try:
-                            with open(p, "rb") as fh:
-                                raw = fh.read(hive.MAX_FILE)
-                            _add(raw, os.path.basename(p), "application/zip",
-                                 "打包 " + str(ev.get("project") or ""))
-                        except Exception:
-                            pass
+                        # 打包产物经常超 20MB，必须流式（原来 read(MAX_FILE) 会截断）
+                        _add_path(p, os.path.basename(p), "application/zip",
+                                  "打包 " + str(ev.get("project") or ""))
                     continue
                 # 只收"写了东西"的动作；mkdir/delete/move 没有内容可发
                 if _act not in ("write", "project"):
@@ -12420,16 +12715,55 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
                     p = _ws.abs_path(rel, proj)
                     if not p or not os.path.isfile(p):
                         continue
-                    with open(p, "rb") as fh:
-                        raw = fh.read(hive.MAX_FILE)
                     # 名字带上项目前缀：群里可能同时有多个项目的同名文件（app.py）
-                    _add(raw, "AI代码_%s__%s" % (proj, os.path.basename(rel)),
-                         _art_mime(rel), "项目 " + proj)
+                    _add_path(p, "AI代码_%s__%s" % (proj, os.path.basename(rel)),
+                              _art_mime(rel), "项目 " + proj)
                 except Exception:
                     continue
         except Exception:
             continue
     return metas
+
+
+def _push_one_artifact(gid: str, meta: dict) -> None:
+    """**生成即下发**：一个产物刚落盘就分片广播给全员，不等整个任务结束（2026-11-15）。
+
+    用户要求：「AI 生成内容时不用先生成到某个固定成员手中再广播，
+    而是生成时就给每位成员的文件夹生成一份一模一样的，确保所有人第一时间收到」。
+
+    为什么不能等任务结束：一次任务可能跑十几分钟，前面做好的图/文档要一直
+    等最后才发出去，别人只能干看着。现在每个产物一出现就走 512KB 分片泛洪，
+    谁在线谁立刻落一份（内容和执行者本机逐字节相同，fid 也相同）。
+    """
+    try:
+        fid = str((meta or {}).get("fid") or "")
+        if not fid:
+            return
+        try:
+            p = hive.file_path(gid, fid)
+        except Exception:
+            p = ""
+        if p and os.path.isfile(p):
+            r = hive_client.client().send_file(gid, meta, path=p) or {}
+        else:
+            r = {"ok": False, "sent": 0}
+        if not r.get("ok") or int(r.get("sent") or 0) <= 0:
+            # 没人在线：进补发队列，等有人上线由 _hive_on_peer 重发
+            _queue_pending_file(gid, dict(meta))
+    except Exception:
+        try:
+            _queue_pending_file(gid, dict(meta))
+        except Exception:
+            pass
+    # 清单也立刻同步一次，让对方按 sha 判断"是不是同一版"
+    try:
+        _hive_sync_now(gid, reason="ai-live", force=True)
+    except Exception:
+        pass
+    try:
+        _broadcast_hive({"type": "artifact_put", "gid": gid, "file": dict(meta)})
+    except Exception:
+        pass
 
 
 def _hive_run_model_now(gid: str, instruction: str, body: dict,
@@ -12585,6 +12919,8 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 "session": "hive:" + gid, "user_text": instruction,
                 "image_key": "", "image_model": "", "ds_key": ""}
         _ui_all: list = []          # 工具副作用（图片 / 文库文件）→ 存成群附件
+        # 已「生成即下发」过的产物（按 名字+大小 去重），避免同一份东西反复广播
+        _art_sent: set = set()
         # ★ 2026-11-15：代码改动清单（谁改了哪个文件、+几行 −几行、diff 是什么）。
         #   单人模式收到 selfdev 事件会渲染可折叠的 diff 卡片；群里原来只拿它
         #   去存产物、**一个字都不给前端看** —— 于是「群里造软件看不到任何代码」
@@ -12627,6 +12963,25 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 _ui_all.extend(_evs or [])
             except Exception:
                 pass
+            # ★ 2026-11-15「生成即下发」：这一轮工具产出的东西**立刻**存进群文件夹
+            #   并分片广播，不等整个任务结束 —— 用户要求「生成时就给每位成员一份，
+            #   确保所有人第一时间收到一模一样的产物」。
+            #   为什么不能等结束：一次任务可能跑十几分钟，前面做好的图/文档要一直
+            #   等到最后才发，别人只能干看着。
+            try:
+                _live = [e for e in (_evs or []) if isinstance(e, dict)]
+                if _live:
+                    for _m in (_hive_save_artifacts(gid, _live) or []):
+                        _k = (str(_m.get("name") or ""), int(_m.get("size") or 0))
+                        if _k in _art_sent:
+                            continue
+                        _art_sent.add(_k)
+                        threading.Thread(target=_push_one_artifact,
+                                         args=(gid, dict(_m)),
+                                         daemon=True).start()
+            except Exception:
+                logger.warning("@hd 产物即时下发失败（任务结束时会兜一次）",
+                               exc_info=True)
             # ★ 2026-11-15：把「改了哪个文件、改了什么」推给前端。
             #   单人模式在 6452 行收到 type=="selfdev" 会渲染可折叠的 diff 卡片；
             #   群聊这条链路原来把它整个吞掉了（只用来存产物），所以群里造软件

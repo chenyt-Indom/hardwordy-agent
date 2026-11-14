@@ -3239,6 +3239,10 @@
       window.Studio.onDropFiles(files);
       return;
     }
+    // 产物文件夹弹窗（2026-11-15）：拖进去 = 放进群文件夹并广播给全员。
+    // 面板自己有 drop 监听（artUpload），这里直接放手 ——
+    // 不 return 的话会**同时**当成聊天附件再传一遍（用户看到两份）。
+    if (tgt && tgt.closest && tgt.closest("#hiveArt")) return;
     // 群聊模式：拖进来的文件属于这个群，别塞进单人模式的附件区
     if (window.__hiveMode && typeof window.__hiveOnDrop === "function") {
       window.__hiveOnDrop(files);
@@ -9366,9 +9370,9 @@
         .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }
 
-    // 统一请求：body 有就是 POST，没有就是 GET
-    async function api(path, body) {
-      const opt = { method: body ? "POST" : "GET", headers: {} };
+    // 统一请求：body 有就是 POST，没有就是 GET；第三参数可指定 DELETE
+    async function api(path, body, method) {
+      const opt = { method: method || (body ? "POST" : "GET"), headers: {} };
       if (body) {
         opt.headers["Content-Type"] = "application/json";
         opt.body = JSON.stringify(body);
@@ -9665,6 +9669,7 @@
       const g = groups.find((x) => x.gid === gid);
       el("hiveArtGroup").textContent = g ? g.name : gid;
       el("hiveArt").hidden = false;
+      bindArtDrop();
       loadArtifacts();
     }
 
@@ -9719,6 +9724,11 @@
           + '" data-name="' + hEsc(nm) + '" title="打开看看">打开</button>'
           + '<button type="button" class="btn sm ghost" data-dl="' + fid
           + '" data-name="' + hEsc(nm) + '" title="下载保存到本机">⬇</button>'
+          // 删除（2026-11-15）：默认只删本机这一份释放磁盘；
+          // **按住 Shift 点**才让全群一起删（后端 broadcast=1）。
+          + '<button type="button" class="btn sm ghost hive-art-del" data-adel="' + fid
+          + '" data-name="' + hEsc(nm)
+          + '" title="删除本机这份（按住 Shift 点 = 让全群一起删）">🗑</button>'
           + "</span></div>";
       }).join("");
       // 取文件本体：先探测，再决定是显示还是提示补发。
@@ -9764,6 +9774,108 @@
         b.addEventListener("click", () => grab(b.getAttribute("data-dl"),
           b.getAttribute("data-name"), true));
       });
+      // 删除（2026-11-15）：ev.shiftKey 决定是"只删本机"还是"全群一起删"
+      Array.prototype.forEach.call(box.querySelectorAll("[data-adel]"), (b) => {
+        b.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          delArtifact(b.getAttribute("data-adel"), b.getAttribute("data-name"),
+            !!ev.shiftKey);
+        });
+      });
+    }
+
+    // 删一个产物。allMembers=true 时才广播给全群（用户要求：默认只删本机）
+    async function delArtifact(fid, name, allMembers) {
+      const gid = artGid;
+      if (!gid || !fid) return;
+      const tip = allMembers
+        ? "⚠️ 你按住了 Shift：这会让**群里每个成员**都把「" + (name || fid)
+          + "」删掉。\n\n确定要全员删除吗？"
+        : "只删本机这一份「" + (name || fid) + "」？\n\n"
+          + "别人那份不受影响。\n（想全群一起删，就按住 Shift 再点一次 🗑）";
+      if (!confirm(tip)) return;
+      try {
+        const d = await api("/api/hive/" + encodeURIComponent(gid) + "/artifacts/"
+          + encodeURIComponent(fid) + (allMembers ? "?broadcast=1" : ""),
+          null, "DELETE");
+        if (!d || !d.ok) throw new Error((d && d.error) || "删除失败");
+        toast(allMembers ? "已通知全群删除：" + (name || fid) : "已删除本机这份：" + (name || fid));
+      } catch (e) {
+        toast("删除失败：" + (e && e.message ? e.message : e), "warn");
+        return;
+      }
+      loadArtifacts();
+    }
+
+    // ---------------------------------------------------------- 拖拽 / 导入进群文件夹
+    // 用户要求（2026-11-15）：「直接拖曳文件或导入文件进去，广播到每一位成员，
+    // 大小不被限制」。走 hiveUploadBig（4MB 分片 + 断点续传），
+    // 导入完成后后端会立刻分片广播本体，其他成员第一时间各存一份。
+    function bindArtDrop() {
+      const drop = el("hiveArtDrop"), inp = el("hiveArtInput"), pick = el("hiveArtPick");
+      if (!drop || drop.dataset.bound === "1") return;
+      drop.dataset.bound = "1";
+      if (pick && inp) pick.addEventListener("click", () => inp.click());
+      if (inp) {
+        inp.addEventListener("change", () => {
+          const fs = Array.prototype.slice.call(inp.files || []);
+          inp.value = "";
+          artUpload(fs);
+        });
+      }
+      ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => {
+        e.preventDefault(); e.stopPropagation(); drop.classList.add("over");
+      }));
+      ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => {
+        e.preventDefault(); e.stopPropagation(); drop.classList.remove("over");
+      }));
+      drop.addEventListener("drop", (e) => {
+        const dt = e.dataTransfer;
+        let fs = [];
+        if (dt && dt.files && dt.files.length) fs = [...dt.files];
+        else if (dt && dt.items) {
+          for (const it of dt.items) {
+            if (it.kind === "file") { const f = it.getAsFile(); if (f) fs.push(f); }
+          }
+        }
+        artUpload(fs);
+      });
+    }
+
+    async function artUpload(files) {
+      const arr = Array.prototype.slice.call(files || []);
+      if (!arr.length) return;
+      if (!artGid) { toast("先选一个群", "warn"); return; }
+      const gid = artGid;
+      const prog = el("hiveArtProg");
+      if (prog) prog.hidden = false;
+      let done = 0;
+      for (const f of arr) {
+        try {
+          await hiveUploadBig(gid, f, {
+            tag: "ai", source: "本机上传",
+            onProgress: (p) => {
+              if (!prog) return;
+              const pct = p.total ? Math.round(p.got * 100 / p.total) : 0;
+              const head = p.phase === "done" ? "✅ 完成" : (pct + "%");
+              const tag = (p.resumed && p.phase === "start") ? "（断点续传）" : "";
+              prog.innerHTML = "📤 " + hEsc(p.name) + "　" + head + " " + tag
+                + '　<span style="opacity:.7">' + p.got + "/" + p.total + " 片</span>"
+                + '<div class="hap-bar"><div class="hap-fill" style="width:'
+                + pct + '%"></div></div>';
+            },
+          });
+          done++;
+        } catch (e) {
+          alert("「" + f.name + "」上传失败：" + (e && e.message ? e.message : e));
+        }
+      }
+      if (prog) {
+        prog.innerHTML = "✅ 已导入 " + done + " 个文件，正在分片广播给所有成员…";
+        setTimeout(() => { prog.hidden = true; prog.innerHTML = ""; }, 4000);
+      }
+      loadArtifacts();
     }
 
     function renderGroups() {
@@ -10598,6 +10710,67 @@
       });
     }
 
+    // ---------------------------------------------------------- 分片上传（大小不限）
+    // 2026-11-15 用户要求：「拖曳 / 导入文件进去，广播到每一位成员，大小不被限制」。
+    // 为什么不用 readAsDataURL 一次性传：
+    //   · 整个文件变 base64 要占 1.37 倍内存，2GB 文件浏览器直接崩；
+    //   · 传到 90% 断网 / 关页面，只能从头再来。
+    // 这里按 4MB 切片（和后端 HIVE_UP_CHUNK 一致），逐片传、失败重试 3 次；
+    // 会话落在后端磁盘上，所以**关掉页面重开还能接着传**（按 name+size 找回）。
+    const HIVE_UP_CHUNK = 4 * 1024 * 1024;
+
+    function blobToB64(blob) {
+      return new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => {
+          const s = String(r.result || "");
+          const i = s.indexOf(",");
+          res(i >= 0 ? s.slice(i + 1) : s);
+        };
+        r.onerror = () => rej(new Error("这一片读不出来"));
+        r.readAsDataURL(blob);
+      });
+    }
+
+    async function hiveUploadBig(gid, file, opts) {
+      opts = opts || {};
+      const onProg = typeof opts.onProgress === "function" ? opts.onProgress : function () {};
+      const base = "/api/hive/" + encodeURIComponent(gid) + "/artifacts/upload/";
+      const init = await api(base + "init", {
+        name: file.name, size: file.size, mime: file.type || "",
+        tag: opts.tag || "user", source: opts.source || "本机上传",
+      });
+      if (!init || !init.ok) throw new Error((init && init.error) || "初始化上传失败");
+      const uid = init.upload_id;
+      const chunk = Number(init.chunk) || HIVE_UP_CHUNK;
+      const total = Number(init.total) || Math.max(1, Math.ceil(file.size / chunk));
+      const got = new Set(init.received || []);
+      onProg({ phase: "start", got: got.size, total: total,
+               resumed: !!init.resumed, name: file.name });
+      for (let i = 0; i < total; i++) {
+        if (got.has(i)) continue;
+        const blob = file.slice(i * chunk, Math.min(file.size, (i + 1) * chunk));
+        const b64 = await blobToB64(blob);
+        let last = "";
+        let ok = false;
+        for (let k = 0; k < 3; k++) {
+          try {
+            const r = await api(base + "chunk", { upload_id: uid, idx: i, data: b64 });
+            if (r && r.ok) { ok = true; break; }
+            last = (r && r.error) || "上传被拒绝";
+          } catch (e) { last = e.message; }
+          await new Promise((res) => setTimeout(res, 400 * (k + 1)));
+        }
+        if (!ok) throw new Error("第 " + (i + 1) + "/" + total + " 片失败：" + last);
+        got.add(i);
+        onProg({ phase: "up", got: got.size, total: total, name: file.name });
+      }
+      const fin = await api(base + "finish", { upload_id: uid });
+      if (!fin || !fin.ok) throw new Error((fin && fin.error) || "合并失败");
+      onProg({ phase: "done", got: total, total: total, name: file.name });
+      return fin.file;
+    }
+
     function readAsDataURL(file) {
       return new Promise((res, rej) => {
         const r = new FileReader();
@@ -10613,11 +10786,9 @@
       if (!arr.length) return;
       uploading = true;
       for (const file of arr) {
-        if (file.size > HIVE_MAX_FILE) {
-          alert("「" + file.name + "」太大（" + fmtSize(file.size) + "），单个上限 "
-            + fmtSize(HIVE_MAX_FILE));
-          continue;
-        }
+        // 2026-11-15：去掉 20MB 上限（用户要求「大小不被限制」）。
+        // 小图片仍走 dataURL 快路（本地缩略图秒出），大文件走分片，
+        // 内存里永远只有一个 4MB 的切片，多大都不会把浏览器撑崩。
         const isImg = /^image\//.test(file.type || "");
         const item = {
           name: file.name, size: file.size,
@@ -10627,13 +10798,19 @@
         pendingFiles.push(item);
         renderAttachBar();
         try {
-          const dataUrl = await readAsDataURL(file);
-          if (isImg) item.preview = dataUrl;      // 缩略图先用本地 dataURL，秒出
-          const r = await api("/api/hive/" + encodeURIComponent(curGid) + "/upload",
-            { name: file.name, mime: file.type || "", data: dataUrl });
-          if (!r.ok) throw new Error(r.error || "上传失败");
-          item.meta = r.file;
-          item.kind = r.file.kind || item.kind;
+          if (isImg && file.size <= 2 * 1024 * 1024) {
+            const dataUrl = await readAsDataURL(file);
+            item.preview = dataUrl;               // 缩略图先用本地 dataURL，秒出
+            const r = await api("/api/hive/" + encodeURIComponent(curGid) + "/upload",
+              { name: file.name, mime: file.type || "", data: dataUrl });
+            if (!r.ok) throw new Error(r.error || "上传失败");
+            item.meta = r.file;
+            item.kind = r.file.kind || item.kind;
+          } else {
+            item.meta = await hiveUploadBig(curGid, file,
+              { tag: "user", source: "本机上传" });
+            item.kind = (item.meta && item.meta.kind) || item.kind;
+          }
           item.up = false;
         } catch (e) {
           item.up = false;
@@ -11876,6 +12053,14 @@
         if (d.type === "members" && d.gid === curGid) { loadStatus(); return; }
         // 有人上线/下线 → 立刻刷在线状态（顺带把积压附件补发的结果反映出来）
         if (d.type === "peers") { loadStatus(); return; }
+        // 群文件夹有变化（有人导入 / 有人全员删）→ 面板正开着这个群就立刻刷新。
+        // 2026-11-15：不加这条的话，别人拖进来的文件要等手动点「刷新」才看得见。
+        if ((d.type === "artifact_put" || d.type === "artifact_del")
+            && d.gid === artGid) {
+          const _pa = el("hiveArt");
+          if (_pa && !_pa.hidden) loadArtifacts();
+          return;
+        }
         // ★ 2026-11-15：原来条件是 `d.gid === curGid` —— 没打开那个群就把整帧丢掉，
         //   成员永远不知道群里 AI 在干什么。现在**先记群级状态**（群列表显示 ⚙），
         //   只有当前打开的那个群才把帧交给 hdStream 去建卡。

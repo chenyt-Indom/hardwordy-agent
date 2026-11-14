@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import threading
 import time
 import uuid
@@ -1180,7 +1181,12 @@ def add_system_message(gid: str, text: str) -> Dict[str, Any]:
 # 存储：data/hive/groups/<gid>/files/<fid>__<安全文件名>
 # 索引：data/hive/groups/<gid>/files.json   （fid -> 元信息）
 
-MAX_FILE = 20 * 1024 * 1024      # 单文件上限 20MB（走中继分片广播，再大不现实）
+# 2026-11-15 用户要求「大小不被限制」：从固定 20MB 改成**不设上限**（0 = 不限）。
+# 为什么能放开：文件走 512KB 分片泛洪，分片本身永远小于 mesh 帧上限 8MB；
+# 真正的瓶颈是「整个文件是否被读进内存」，所以发送/接收/上传三条路都改成了
+# 流式（见 save_file_stream / HiveClient.send_file(path=) / _on_file 写临时文件）。
+# 磁盘满了他自己删（面板里每个文件都有删除按钮），不由代码替他设限。
+MAX_FILE = 0                     # 0 = 不限制；非 0 时才作为硬上限
 
 
 def files_dir(gid: str) -> str:
@@ -1243,7 +1249,7 @@ def save_file(gid: str, name: str, data: bytes, mime: str = "",
     """
     if not data:
         raise ValueError("文件是空的")
-    if len(data) > MAX_FILE:
+    if MAX_FILE and len(data) > MAX_FILE:
         raise ValueError("文件太大（%.1f MB），单个文件上限 %d MB"
                          % (len(data) / 1048576.0, MAX_FILE // 1048576))
     if not load_group(gid):
@@ -1270,6 +1276,102 @@ def save_file(gid: str, name: str, data: bytes, mime: str = "",
         idx[fid] = meta
         _write_json(_files_index_path(gid), idx)
     return meta
+
+
+def save_file_stream(gid: str, name: str, src_path: str, mime: str = "",
+                     tag: str = "user", source: str = "", fid: str = "",
+                     move: bool = True) -> Dict[str, Any]:
+    """把**已经在磁盘上**的一个文件收进群目录，全程不读进内存（2026-11-15）。
+
+    为什么需要（用户要求「大小不被限制」）：
+      `save_file()` 收的是 bytes，调用方必须 `f.read()` 整个文件 ——
+      一个 2GB 视频就是 2GB 内存，几个成员同时传能把机器拖死。
+      这里改成「分块算 sha + 分块拷贝」，峰值内存约 1MB，多大的文件都一样。
+
+    move=True 时优先 `shutil.move`（同一分区是瞬间的 rename，不产生额外 IO）；
+    跨分区会回退成拷贝，两种都不会把文件读进内存。
+    """
+    if not src_path or not os.path.isfile(src_path):
+        raise ValueError("源文件不存在")
+    real = os.path.getsize(src_path)
+    if real <= 0:
+        raise ValueError("文件是空的")
+    if MAX_FILE and real > MAX_FILE:
+        raise ValueError("文件太大（%.1f MB），单个文件上限 %d MB"
+                         % (real / 1048576.0, MAX_FILE // 1048576))
+    if not load_group(gid):
+        raise ValueError("群不存在")
+    me = profile()
+    fid = fid or ("f_" + secrets.token_hex(8))
+    safe = _safe_name(name)
+    _tag = "ai" if (tag or "") == "ai" else "user"
+    d = _dir_for_tag(gid, _tag)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, fid + "__" + safe)
+
+    # sha 分块算：产物清单靠它判断「两边是不是同一份」，不能省
+    h = hashlib.sha256()
+    with open(src_path, "rb") as fh:
+        while True:
+            blk = fh.read(1024 * 1024)
+            if not blk:
+                break
+            h.update(blk)
+
+    ok = False
+    if move:
+        try:
+            shutil.move(src_path, path)
+            ok = True
+        except Exception:
+            ok = False
+    if not ok:
+        with open(src_path, "rb") as fsrc, open(path, "wb") as fdst:
+            shutil.copyfileobj(fsrc, fdst, 1024 * 1024)
+            fdst.flush()
+            try:
+                os.fsync(fdst.fileno())
+            except Exception:
+                pass
+    meta = {
+        "fid": fid, "name": safe, "size": real,
+        "mime": mime or "", "kind": kind_of(mime, safe),
+        "sha": h.hexdigest()[:16],
+        "by": me["user_id"], "by_name": me["name"], "ts": time.time(),
+        "tag": _tag, "source": str(source or "")[:120],
+    }
+    with _LOCK:
+        idx = _read_json(_files_index_path(gid), {}) or {}
+        idx[fid] = meta
+        _write_json(_files_index_path(gid), idx)
+    return meta
+
+
+def delete_file(gid: str, fid: str) -> bool:
+    """删掉**本机这一份**（索引 + 本体），返回是否真删了（2026-11-15）。
+
+    用户要求「文件可以被删除以保证空间不被占满，由用户操作」。
+    默认只删本机 —— 别人那份不动，否则一个人手滑就把全群的产物删没了。
+    「全员删」是另一条路（广播 T_FDEL），由前端按住 Shift 触发。
+    """
+    fid = str(fid or "")
+    if not fid:
+        return False
+    with _LOCK:
+        idx = _read_json(_files_index_path(gid), {}) or {}
+        m = idx.pop(fid, None)
+        if m is None:
+            return False
+        try:
+            name = _safe_name(m.get("name") or "file")
+            for d in (artifacts_dir(gid), files_dir(gid)):
+                p = os.path.join(d, fid + "__" + name)
+                if os.path.exists(p):
+                    os.remove(p)
+        except Exception:
+            pass
+        _write_json(_files_index_path(gid), idx)
+    return True
 
 
 def get_file_meta(gid: str, fid: str) -> Dict[str, Any]:
@@ -1445,6 +1547,58 @@ def prune_artifact_name(gid: str, name: str, keep_fid: str = "") -> int:
         if gone:
             _write_json(_files_index_path(gid), idx)
     return gone
+
+
+def store_incoming_path(gid: str, meta: Dict[str, Any], src_path: str) -> Dict[str, Any]:
+    """收到别人的附件（分片已攒成**临时文件**）→ 本机落一份，全程不读进内存。
+
+    2026-11-15 加：原来 `_on_file` 把所有分片攒在内存 dict 里，攒齐后
+    `b"".join(...)` 再整块写盘 —— 1GB 文件峰值要吃 2GB 内存（分片 + join 结果）。
+    现在边收边追加到临时文件，攒齐后 rename 过来，峰值内存只剩一个分片。
+    """
+    fid = str(meta.get("fid") or "")
+    if not fid:
+        raise ValueError("缺少 fid")
+    _tag = "ai" if str(meta.get("tag") or "") == "ai" else "user"
+    d = _dir_for_tag(gid, _tag)
+    os.makedirs(d, exist_ok=True)
+    name = _safe_name(meta.get("name") or "file")
+    path = os.path.join(d, fid + "__" + name)
+    if not os.path.exists(path):
+        moved = False
+        try:
+            shutil.move(src_path, path)
+            moved = True
+        except Exception:
+            moved = False
+        if not moved:
+            with open(src_path, "rb") as fsrc, open(path, "wb") as fdst:
+                shutil.copyfileobj(fsrc, fdst, 1024 * 1024)
+                fdst.flush()
+                try:
+                    os.fsync(fdst.fileno())
+                except Exception:
+                    pass
+    try:
+        if os.path.exists(src_path):
+            os.remove(src_path)
+    except Exception:
+        pass
+    out = dict(meta)
+    out["fid"] = fid
+    out["name"] = name
+    try:
+        out["size"] = os.path.getsize(path)
+    except Exception:
+        out["size"] = int(meta.get("size") or 0)
+    out["kind"] = out.get("kind") or kind_of(out.get("mime", ""), name)
+    out["tag"] = _tag
+    out["source"] = str(meta.get("source") or "")[:120]
+    with _LOCK:
+        idx = _read_json(_files_index_path(gid), {}) or {}
+        idx[fid] = out
+        _write_json(_files_index_path(gid), idx)
+    return out
 
 
 def store_incoming(gid: str, meta: Dict[str, Any], data: bytes) -> Dict[str, Any]:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import tempfile
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -109,6 +110,7 @@ class HiveClient:
         #   （之前"验证通过"是测试脚本直接调了函数，没走真实帧）。
         self.on_freq = None         # Callable[[str, dict], None] 附件补发请求
         self.on_fsync = None        # Callable[[str, dict], None] 群文件夹清单
+        self.on_fdel = None         # Callable[[str, dict], None] 全员删除产物
 
         self._state = "offline"
         self._gid = ""
@@ -139,7 +141,17 @@ class HiveClient:
         m.on_gone = self._on_gone
         m.on_freq = self._on_freq
         m.on_fsync = self._on_fsync
+        m.on_fdel = self._on_fdel
         self._hooked = True
+
+    def _on_fdel(self, gid: str, obj: Dict[str, Any]) -> None:
+        """有人按住 Shift 删了产物 → 本机也删掉那份，并通知界面刷新。"""
+        cb = getattr(self, "on_fdel", None)
+        if cb:
+            try:
+                cb(gid, obj)
+            except Exception:
+                pass
 
     def _on_freq(self, gid: str, obj: Dict[str, Any]) -> None:
         """别人缺附件、在问「谁有」→ 交给上层判断本机有没有。"""
@@ -200,41 +212,80 @@ class HiveClient:
                 pass
 
     def _on_file(self, gid: str, obj: Dict[str, Any]) -> None:
-        """附件分片到达：攒齐了才落盘（半截文件会被当成完整文件，很坑）。"""
+        """附件分片到达：**边收边写临时文件**，攒齐了才搬进群目录。
+
+        ⚠️ 2026-11-15 改（用户要求「大小不被限制」）：
+           原来把所有分片攒在内存 dict 里，攒齐后 `b"".join(...)` 再整块写盘 ——
+           1GB 文件峰值要吃 2GB 内存，两个人同时传就能把机器拖死。
+           现在按 `idx*CHUNK` 偏移直接写临时文件（泛洪不保证顺序，所以必须 seek），
+           攒齐后 truncate 到真实大小再 rename 过来，峰值内存只剩一个分片。
+        """
         fid = str(obj.get("fid") or "")
         if not fid:
             return
         total = int(obj.get("total") or 0)
         idx = int(obj.get("idx") or 0)
-        if total <= 0:
+        if total <= 0 or idx < 0 or idx >= total:
             return
+        CH = int(obj.get("chunk") or self.CHUNK or (512 * 1024))
+        try:
+            raw = base64.b64decode(obj.get("data") or "")
+        except Exception:
+            return
+        st = None
+        ready = False
         with self._flock:
             st = self._files.get(fid)
             if st is None:
-                st = {"parts": {}, "total": total, "meta": obj.get("meta") or {},
+                tmpdir = tempfile.mkdtemp(prefix="hivepart_")
+                tmp = os.path.join(tmpdir, "part.bin")
+                st = {"tmp": tmp, "tmpdir": tmpdir, "fh": open(tmp, "w+b"),
+                      "got": set(), "lens": {}, "total": total, "chunk": CH,
+                      "meta": obj.get("meta") or {},
                       "ts": time.time(), "gid": gid, "last": time.time(), "tries": 0}
                 self._files[fid] = st
             try:
-                st["parts"][idx] = base64.b64decode(obj.get("data") or "")
+                st["fh"].seek(idx * int(st.get("chunk") or CH))
+                st["fh"].write(raw)
             except Exception:
                 return
+            st["got"].add(idx)
+            st["lens"][idx] = len(raw)
             # 每收到一片就刷新活跃时间：sweep_partial() 靠它判断"是不是卡住了"
             st["last"] = time.time()
-            ready = len(st["parts"]) >= st["total"]
+            ready = len(st["got"]) >= int(st.get("total") or total)
             if ready:
                 self._files.pop(fid, None)
-        if ready:
-            meta = st["meta"] or {}
-            data = b"".join(st["parts"][i] for i in range(st["total"]))
+        if not ready:
+            return
+        meta = st.get("meta") or {}
+        tmp = st.get("tmp")
+        try:
+            st["fh"].flush()
+            st["fh"].close()
+            # 最后一片通常不满，按"各片实际长度之和"截断，否则文件尾巴是 0
+            os.truncate(tmp, sum(st.get("lens", {}).values()))
+        except Exception:
+            pass
+        try:
+            rec = H.store_incoming_path(gid, meta, tmp)
+        except Exception:
             try:
-                rec = H.store_incoming(gid, meta, data)
+                os.remove(tmp)
             except Exception:
-                return
-            if self.on_file:
-                try:
-                    self.on_file(gid, rec)
-                except Exception:
-                    pass
+                pass
+            return
+        try:
+            td = st.get("tmpdir") or ""
+            if td and os.path.isdir(td):
+                os.rmdir(td)
+        except Exception:
+            pass
+        if self.on_file:
+            try:
+                self.on_file(gid, rec)
+            except Exception:
+                pass
 
     def _on_peer(self) -> None:
         m = MESH.node()
@@ -524,12 +575,18 @@ class HiveClient:
         n = m.broadcast(gid, MESH.T_CANCEL, {"mid": mid, "by": by, "ttl": MESH.TTL_DEFAULT})
         return n > 0
 
-    def send_file(self, gid: str, meta: Dict[str, Any], data: bytes,
-                  mime: str = "", name: str = "") -> Dict[str, Any]:
-        """附件分片泛洪。单文件上限由 main.py 卡，这里只负责拆包和广播。
+    # 分片大小：发送和接收必须**完全一致**，接收端靠 idx*CHUNK 算写入偏移。
+    CHUNK = 512 * 1024
+
+    def send_file(self, gid: str, meta: Dict[str, Any], data: bytes = b"",
+                  mime: str = "", name: str = "", path: str = "") -> Dict[str, Any]:
+        """附件分片泛洪。大小不设上限，这里只负责拆包和广播。
 
         为什么不用大帧一次发完：mesh 的帧上限 8MB，而且一帧太大时一个丢包
         就得整帧重来。512KB 一片，丢一片补一片。
+
+        `path=` 是 2026-11-15 为「大小不被限制」加的：传磁盘路径时**按片读**，
+        整个文件永远不进内存（传 2GB 视频也只占一个分片的内存）。
         """
         self._hook()
         m = MESH.node()
@@ -541,20 +598,63 @@ class HiveClient:
         fid = str(meta.get("fid") or meta.get("id") or "")
         if not fid:
             return {"ok": False, "error": "缺少文件 id"}
-        CH = 512 * 1024
-        total = max(1, (len(data) + CH - 1) // CH)
+        CH = self.CHUNK
+        fh = None
+        if path:
+            try:
+                size = os.path.getsize(path)
+                fh = open(path, "rb")
+            except Exception as e:
+                return {"ok": False, "error": "读不到文件：%s" % e}
+        else:
+            size = len(data or b"")
+        if size <= 0:
+            return {"ok": False, "error": "文件是空的"}
+        total = max(1, (size + CH - 1) // CH)
         sent = 0
-        for i in range(total):
-            chunk = data[i * CH:(i + 1) * CH]
-            obj = {
-                "fid": fid, "idx": i, "total": total,
-                "meta": meta, "data": base64.b64encode(chunk).decode("ascii"),
-                "ttl": MESH.TTL_DEFAULT,
-            }
-            if m.broadcast(gid, MESH.T_FILE, obj) > 0:
-                sent += 1
-            time.sleep(0.02)   # 片之间留间隔，否则中间几片会被网络缓冲吞掉
-        return {"ok": True, "fid": fid, "total": total, "sent": sent}
+        try:
+            for i in range(total):
+                if fh is not None:
+                    chunk = fh.read(CH)
+                else:
+                    chunk = data[i * CH:(i + 1) * CH]
+                if not chunk:
+                    break
+                obj = {
+                    "fid": fid, "idx": i, "total": total, "chunk": CH,
+                    "size": size,
+                    "meta": meta, "data": base64.b64encode(chunk).decode("ascii"),
+                    "ttl": MESH.TTL_DEFAULT,
+                }
+                if m.broadcast(gid, MESH.T_FILE, obj) > 0:
+                    sent += 1
+                time.sleep(0.02)   # 片之间留间隔，否则中间几片会被网络缓冲吞掉
+        finally:
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+        return {"ok": True, "fid": fid, "total": total, "sent": sent,
+                "size": size}
+
+    def send_del(self, gid: str, fid: str,
+                 meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """广播「这个产物全群一起删掉」（2026-11-15）。
+
+        只有前端按住 Shift 点删除才走这条；普通删除只动本机
+        （一个人手滑不该把全群的产物删没）。
+        """
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return {"ok": False, "error": "网络未启动"}
+        fid = str(fid or "")
+        if not fid:
+            return {"ok": False, "error": "缺少文件 id"}
+        n = m.broadcast(gid, MESH.T_FDEL,
+                        {"fid": fid, "meta": meta or {}, "ttl": MESH.TTL_DEFAULT})
+        return {"ok": n > 0, "peers": n, "fid": fid}
 
     def request_file(self, gid: str, fid: str) -> Dict[str, Any]:
         """向群里问一声「谁有这个附件」，持有者会自动补发（2026-11-15）。
@@ -595,6 +695,23 @@ class HiveClient:
                 n = int(st.get("tries") or 0)
                 if n >= max_tries:
                     self._files.pop(fid, None)      # 放弃，别一直占内存
+                    # ⚠️ 2026-11-15：现在攒片落在**临时文件**上，放弃时必须清掉，
+                    #    否则传失败的大文件会在 temp 里留一堆 .part 把磁盘占满。
+                    try:
+                        st.get("fh") and st["fh"].close()
+                    except Exception:
+                        pass
+                    try:
+                        td = st.get("tmpdir") or ""
+                        if td and os.path.isdir(td):
+                            for _n in os.listdir(td):
+                                try:
+                                    os.remove(os.path.join(td, _n))
+                                except Exception:
+                                    pass
+                            os.rmdir(td)
+                    except Exception:
+                        pass
                     continue
                 st["tries"] = n + 1
                 st["last"] = now        # 重求之后重新计时，避免每次扫描都重发
