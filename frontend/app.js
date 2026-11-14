@@ -9723,6 +9723,93 @@
       } catch (e) { /* 忽略 */ }
     }
 
+    // ---------------------------------------------------------- 群产物文件夹
+    // 用户要求（2026-11-15）：每个群聊旁边有一个产物文件夹，AI 产出的东西
+    // 统一下发到那里，任何群成员都能打开或下载。
+    // 存储在后端 data/hive/groups/<gid>/artifacts/，与用户自己上传的 files/ 分开。
+    let artGid = "";
+
+    function openArtifacts(gid) {
+      if (!gid) { showToast("先选一个群", "warn"); return; }
+      artGid = gid;
+      const g = groups.find((x) => x.gid === gid);
+      el("hiveArtGroup").textContent = g ? g.name : gid;
+      el("hiveArt").hidden = false;
+      loadArtifacts();
+    }
+
+    async function loadArtifacts() {
+      const box = el("hiveArtList");
+      if (!box || !artGid) return;
+      box.innerHTML = '<div class="hive-art-item"><span class="hive-art-main">'
+        + '<span class="hive-art-name">正在读取…</span></span></div>';
+      let d;
+      try {
+        d = await api("/api/hive/" + encodeURIComponent(artGid) + "/artifacts");
+      } catch (e) {
+        box.innerHTML = '<div class="hive-art-item"><span class="hive-art-main">'
+          + '<span class="hive-art-name">读取失败：' + hEsc(e.message) + "</span></span></div>";
+        return;
+      }
+      if (!d || !d.ok) {
+        box.innerHTML = '<div class="hive-art-item"><span class="hive-art-main">'
+          + '<span class="hive-art-name">读取失败：' + hEsc((d && d.error) || "未知错误")
+          + "</span></span></div>";
+        return;
+      }
+      const list = d.artifacts || [];
+      el("hiveArtHint").textContent = list.length
+        ? ("共 " + list.length + " 个产物 · " + fmtSize(d.bytes)
+           + "。任何群成员都能在这里打开或下载（文件本体各人本地各存一份）。")
+        : "还没有产物。在群里 @hd 让它画张图、写个文档、做个网站，成品会自动出现在这里。";
+      const gid = artGid;
+      const base = "/api/hive/" + encodeURIComponent(gid) + "/files/";
+      box.innerHTML = list.map((m) => {
+        const fid = hEsc(m.fid || "");
+        const nm = m.name || "文件";
+        let ico = fileIco(m);
+        if ((m.kind || "") === "image") ico = "🖼";
+        else if ((m.kind || "") === "video") ico = "🎬";
+        const ts = Number(m.ts || 0) * 1000;
+        const when = ts ? new Date(ts).toLocaleString("zh-CN", {
+          month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+        }) : "";
+        const sub = [fmtSize(m.size), when, m.source || "", m.by_name || ""]
+          .filter(Boolean).join(" · ");
+        return '<div class="hive-art-item">'
+          + '<span class="hive-art-ico">' + ico + "</span>"
+          + '<span class="hive-art-main">'
+          + '<span class="hive-art-name" title="' + hEsc(nm) + '">' + hEsc(nm) + "</span>"
+          + '<span class="hive-art-sub">' + hEsc(sub) + "</span>"
+          + "</span>"
+          + '<span class="hive-art-acts">'
+          + '<button type="button" class="btn sm ghost" data-view="' + fid
+          + '" title="打开看看">打开</button>'
+          + '<button type="button" class="btn sm ghost" data-dl="' + fid
+          + '" title="下载保存到本机">⬇</button>'
+          + "</span></div>";
+      }).join("");
+      // 打开：图片/视频/音频直接新窗口预览，文档走浏览器内置预览
+      Array.prototype.forEach.call(box.querySelectorAll("[data-view]"), (b) => {
+        b.addEventListener("click", () => {
+          const u = base + encodeURIComponent(b.getAttribute("data-view"));
+          window.open(u, "_blank");
+        });
+      });
+      // 下载：download=1 让后端发 Content-Disposition: attachment
+      Array.prototype.forEach.call(box.querySelectorAll("[data-dl]"), (b) => {
+        b.addEventListener("click", () => {
+          const u = base + encodeURIComponent(b.getAttribute("data-dl")) + "?download=1";
+          const a = document.createElement("a");
+          a.href = u;
+          a.download = "";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        });
+      });
+    }
+
     function renderGroups() {
       const box = el("hiveGroupList");
       if (!box) return;
