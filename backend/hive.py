@@ -1327,6 +1327,8 @@ def store_incoming(gid: str, meta: Dict[str, Any], data: bytes) -> Dict[str, Any
     out["name"] = name
     out["size"] = len(data)
     out["kind"] = out.get("kind") or kind_of(out.get("mime", ""), name)
+    out["tag"] = _tag
+    out["source"] = str(meta.get("source") or "")[:120]
     with _LOCK:
         idx = _read_json(_files_index_path(gid), {}) or {}
         idx[fid] = out
