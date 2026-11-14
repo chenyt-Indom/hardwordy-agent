@@ -183,21 +183,23 @@ class Wav2LipEngine:
         out = out + 0.35 * (out - cv2.GaussianBlur(out, (0, 0), 1.0))
         return np.clip(out, 0, 255)
 
-    def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.50,
-                   feather=13):
-        """把生成的嘴部区域贴回原图：椭圆蒙版，边缘全在脸内，无矩形硬边"""
+    def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.54,
+                   feather=13, openness=1.0):
+        """把生成的嘴部区域贴回原图：椭圆蒙版 + 张嘴度自适应
+
+        openness 0..1：闭嘴时几乎不替换（保留原图清晰），张嘴时充分替换。
+        这是关键——Wav2Lip 的闭嘴帧本就该和原图一致，硬替换只会引入模糊。
+        """
         x1, y1, x2, y2 = box
         w, h = x2 - x1, y2 - y1
         if w <= 8 or h <= 8:
             return full_frame
 
-        # 生成图放大到 bbox 尺寸
         gen_big = cv2.resize(pred96.astype(np.uint8), (w, h), interpolation=cv2.INTER_CUBIC)
         orig_big = full_frame[y1:y2, x1:x2]
 
-        # 颜色校正 + 细节回注（缓解 96->大图放大的模糊）
         gen_big = self._match_color(gen_big, orig_big)
-        gen_big = self._detail_inject(gen_big, orig_big, strength=0.70)
+        gen_big = self._detail_inject(gen_big, orig_big, strength=0.85)
 
         # 椭圆蒙版：中心在嘴部，轴长收在 bbox 内部，绝不触及边界
         cx = int(w * 0.50)
@@ -208,10 +210,13 @@ class Wav2LipEngine:
         ay = max(4, min(ay, h // 2 - 3))
         mask = np.zeros((h, w), np.float32)
         cv2.ellipse(mask, (cx, cy), (ax, ay), 0, 0, 360, 1.0, -1)
-        # 羽化：先大幅模糊，再锐化边界
         k = max(3, (min(ax, ay) // 3) * 2 + 1)
         mask = cv2.GaussianBlur(mask, (k, k), 0)
-        mask = np.clip(mask, 0, 1)[..., None]
+        mask = np.clip(mask, 0, 1)
+        # 张嘴度调制：闭嘴时整体压低替换强度
+        w_open = float(np.clip(openness, 0.0, 1.0))
+        mask = mask * (0.15 + 0.85 * w_open)
+        mask = mask[..., None]
 
         blended = gen_big * mask + orig_big * (1 - mask)
         out = full_frame.copy()
