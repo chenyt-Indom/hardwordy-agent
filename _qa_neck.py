@@ -1,65 +1,50 @@
-"""定位整帧变糊的来源：编码参数 / warp / 缩放。"""
-import sys, os, glob, subprocess, json
+"""最终验证：三种渲染模式 + 眨眼 + 编译。"""
+import sys, os, glob
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np, cv2
 from backend import avatar25d as A25
-from backend import avatar_lipsync as AL
 
-vs = sorted(glob.glob(r"D:\local-multimodal-src\data\avatar2\videos\lipsync_20261114_185444*.mp4"))
-v = vs[0]
-print("视频:", os.path.basename(v), os.path.getsize(v)//1024, "KB")
-# ffprobe
-try:
-    out = subprocess.run(["ffprobe", "-v", "quiet", "-print_format", "json",
-                          "-show_streams", "-show_format", v],
-                         capture_output=True, text=True, timeout=30)
-    j = json.loads(out.stdout)
-    for s in j.get("streams", []):
-        if s.get("codec_type") == "video":
-            print(f"  codec={s.get('codec_name')} {s.get('width')}x{s.get('height')} "
-                  f"bit_rate={int(s.get('bit_rate',0))//1000}kbps fps={s.get('r_frame_rate')} "
-                  f"pix_fmt={s.get('pix_fmt')}")
-    print("  format bit_rate=", int(j.get("format", {}).get("bit_rate", 0))//1000, "kbps")
-except Exception as e:
-    print("  ffprobe 失败:", e)
-
-def lapv(a):
-    return cv2.Laplacian(a.astype(np.float32), cv2.CV_32F).var()
-
-prep = A25._prep3d(r"D:\local-multimodal-src\data\avatar2\avatar.png", max_side=1024)
+P = r"D:\local-multimodal-src\data\avatar2\avatar.png"
+prep = A25._prep3d(P, max_side=720)
 img = prep["img"]
-g0 = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-print(f"\n原图 {img.shape[1]}x{img.shape[0]} 清晰度: {lapv(g0):.2f}")
+print("prep OK", prep["wh"], "roll_pivot_y=", round(prep["roll_pivot_y"], 1))
 
-cap = cv2.VideoCapture(v)
-ok, f0 = cap.read(); cap.release()
-gv = cv2.cvtColor(f0, cv2.COLOR_BGR2GRAY)
-print(f"成片首帧 {gv.shape[1]}x{gv.shape[0]} 清晰度: {lapv(gv):.2f}  比值 {lapv(gv)/lapv(g0):.2f}")
+# 1) 伪3D 全流程一帧
+for kw in (dict(yaw=6, pitch=3, roll=2, tx=8, ty=4, scl=1.005),
+           dict(yaw=-6, roll=-2.5),
+           dict(pitch=5, ty=-8)):
+    o = A25._warp(img, prep, **kw)
+    assert o.shape == img.shape and o.dtype == np.uint8
+    print(f"  warp {str(kw)[:52]:54s} ok  mean={o.mean():.1f}")
 
-# 不经过任何处理：原图直接 H264 编码再解回，看纯编码损失
-tmp = r"D:\local-multimodal-src\_qa_out\_codec_test.mp4"
-os.makedirs(os.path.dirname(tmp), exist_ok=True)
-h, w = g0.shape
-vw = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), 25, (w, h))
-for _ in range(5):
-    vw.write(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-vw.release()
-cap = cv2.VideoCapture(tmp); ok, fc = cap.read(); cap.release()
-gc = cv2.cvtColor(fc, cv2.COLOR_BGR2GRAY)
-print(f"纯编码损失（原图→mp4v→解回）清晰度: {lapv(gc):.2f}  比值 {lapv(gc)/lapv(g0):.2f}")
+# 2) 眨眼仍可用（位置准）
+for amt in (0.4, 0.75, 1.0):
+    o = A25._blink(img, prep, amt, yaw=5, pitch=2, tx=6, ty=3, roll=2, scl=1.0)
+    print(f"  blink amt={amt} ok  shape={o.shape}")
 
-# warp 一次（静止参数，应等价于恒等）的损失
-gw = A25._warp(img, prep, yaw=0.0)
-print(f"warp(恒等) 清晰度: {lapv(cv2.cvtColor(gw, cv2.COLOR_RGB2GRAY)):.2f}")
+# 3) _shift_of 边界安全
+for x, y in ((0, 0), (1023, 1023), (511, 469), (-10, 500)):
+    dx, dy = A25._shift_of(prep, x, y, yaw=5, roll=2)
+    print(f"  shift_of({x},{y}) = ({dx:+.2f},{dy:+.2f})")
 
-# 实际一帧 warp 后（用视频里的姿态近似）
-for yaw in (2.0, 5.0):
-    g1 = A25._warp(img, prep, yaw=yaw)
-    print(f"warp(yaw={yaw}) 清晰度: {lapv(cv2.cvtColor(g1, cv2.COLOR_RGB2GRAY)):.2f}")
+# 4) 极端姿态不崩
+for kw in (dict(yaw=7.5, roll=3.2), dict(yaw=-7.5, roll=-3.2), dict(pitch=6, ty=-11)):
+    o = A25._warp(img, prep, **kw)
+    print(f"  极端 {str(kw):40s} ok")
 
-# 看 render 里用的编码器参数
-import inspect
-src = inspect.getsource(AL.render)
-for ln in src.splitlines():
-    if any(k in ln for k in ("ffmpeg", "crf", "preset", "libx264", "vcodec", "VideoWriter")):
-        print("  render>", ln.strip())
+# 5) 关键常量确认
+from backend import avatar_lipsync as AL
+print(f"\n常量: MOTION_GAIN={AL.MOTION_GAIN} ROLL_DAMP={AL.ROLL_DAMP} "
+      f"PITCH_BOOST={AL.PITCH_BOOST}")
+print(f"roll 实际上限 = 4.0 * {AL.MOTION_GAIN} * {AL.ROLL_DAMP} = "
+      f"{4.0*AL.MOTION_GAIN*AL.ROLL_DAMP:.2f}°  (再 clip 到 3.2°)")
+
+# 6) 视频文件完好
+vs = sorted(glob.glob(r"D:\local-multimodal-src\data\avatar2\videos\lipsync_20261114_185444*.mp4"))
+for v in vs:
+    cap = cv2.VideoCapture(v)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    print(f"\n演示片 {os.path.basename(v)}  {w}x{h}  {n}帧  {os.path.getsize(v)//1024}KB")
+print("\nALL OK")
