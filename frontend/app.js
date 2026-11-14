@@ -3139,6 +3139,12 @@
         (t.style ? " · 识别为 " + esc(t.style) : "") + "</div>" +
         (kv.length ? kv.join("")
           : '<span class="tune-why">本次全部落在默认值上</span>') +
+        // 用户亲手拖了「口型幅度」时，说清它盖掉了 AI 的哪个值 ——
+        // 否则面板里显示的和滑块对不上，会让人以为滑块又没生效。
+        ((t.amp_override && t.amp_override.to) ?
+          '<div class="tune-why">口型幅度：手动 ' + fmt(t.amp_override.to) +
+          "×（覆盖 AI 的 " + fmt(t.amp_override.from != null ? t.amp_override.from : 1) +
+          "×）</div>" : "") +
         (t.reason ? '<div class="tune-why">依据：' +
           esc(String(t.reason).slice(0, 150)) + "</div>" : "") +
         ((t.notes || []).length

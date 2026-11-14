@@ -209,7 +209,8 @@ def _head_move(frame, box, t, amp_x=9.0, amp_y=6.0):
 
 # ------------------------------------------------------------------ 主流程
 def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
-           on_progress=None, max_side=1600, motion=1.0, mode="auto", text=""):
+           on_progress=None, max_side=1600, motion=1.0, mode="auto", text="",
+           amp=None):
     exe = A2.ffmpeg()
     if not exe:
         return {"ok": False, "error": "找不到 ffmpeg"}
@@ -309,6 +310,23 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
         tune = {"ok": False, "params": None, "source": "preset",
                 "reason": "调参异常：%s" % _e}
 
+    # ---- 用户手动「口型幅度」覆盖 LLM 的 open_gain ----
+    # 用户既然亲手拖了滑块，就该以他为准（AI 再准也不如人眼当下要的效果）。
+    # 只覆盖这一项，其余十几项仍由 LLM 按形象给。
+    if amp is not None:
+        try:
+            _amp = float(amp)
+        except (TypeError, ValueError):
+            _amp = None
+        if _amp is not None and _amp > 0:
+            _amp = min(2.0, max(0.6, _amp))
+            _pr = dict((tune or {}).get("params") or {})
+            _old = _pr.get("open_gain")
+            _pr["open_gain"] = _amp
+            tune = dict(tune or {})
+            tune["params"] = _pr
+            tune["amp_override"] = {"from": _old, "to": _amp}
+
     t0 = time.time()
     frames, meta = eng.render(img, y.astype(np.float32), box=box_override,
                               mode=use_mode, mouth_cfg=A2.mouth(),
@@ -398,7 +416,9 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
                       "style": (tune or {}).get("style"),
                       "reason": (tune or {}).get("reason"),
                       "params": (tune or {}).get("params"),
-                      "notes": (tune or {}).get("notes")}
+                      "notes": (tune or {}).get("notes"),
+                      # 用户手动拖了「口型幅度」时，记下它覆盖了 AI 的哪个值
+                      "amp_override": (tune or {}).get("amp_override")}
                      if tune else None)}
 
 
@@ -442,7 +462,7 @@ def _grab_frames(mp4, n=2):
 
 def speak(text, voice="", rate=None, style="", engine="auto",
           blink=True, head=True, max_side=1600, motion=1.0,
-          mode="auto", variants=False, review=True):
+          mode="auto", variants=False, review=True, amp=None):
     """文本 → TTS → 口型 → mp4
 
     motion:   头部动作强度 0（完全不动）~ 1（标准）~ 1.6（活跃）
@@ -450,6 +470,11 @@ def speak(text, voice="", rate=None, style="", engine="auto",
     variants: True 时一次生成多个版本（画风优先 + 口型优先），各自质检，
               让用户自己挑。卡通形象下两版差别很大，值得都看一眼。
     review:   是否做质量检查（客观像素指标 + 多模态 LLM）
+    amp:      前端「口型幅度」滑块（0.6~2.0，默认 1.2）。语义是
+              **最大开口相对源图的倍率**，映射到 open_gain。
+              ⚠ 2026-11-15：这个滑块原来是个死控件 —— 前端一直在提交
+              amp，但本函数签名里没有它、路由层也没取，值被直接丢掉，
+              所以「拉高没效果」。现在接通，并且**用户手动值优先于 LLM**。
     """
     t = (text or "").strip()
     if not t:
@@ -496,7 +521,7 @@ def speak(text, voice="", rate=None, style="", engine="auto",
                 + uuid.uuid4().hex[:4] + ".mp4")
         out = os.path.join(A2._vdir(), name)
         r = render(src, wav, out, blink=blink, head=head,
-                   max_side=max_side, motion=motion, mode=md)
+                   max_side=max_side, motion=motion, mode=md, amp=amp)
         if not r.get("ok"):
             versions.append({"ok": False, "mode": md, "error": r.get("error")})
             continue

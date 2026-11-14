@@ -36,6 +36,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from urllib.parse import quote as _q
 
 import numpy as np
 
@@ -90,6 +91,15 @@ def _write_json(name: str, d: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
     os.replace(tmp, p)
+
+
+def _read_meta() -> dict:
+    """meta.json 的读写别名（闭嘴相关代码一直用这个名字）。"""
+    return _read_json(_META, {})
+
+
+def _write_meta(d: dict) -> None:
+    _write_json(_META, d)
 
 
 def ffmpeg() -> str:
@@ -423,7 +433,8 @@ def face_box_from_mouth(size=None):
     return int(x1), int(y1), int(x2), int(y2)
 
 
-def close_mouth(force: bool = False, preview: bool = False) -> dict:
+def close_mouth(force: bool = False, preview: bool = False,
+                method: str = "lip_shift") -> dict:
     """把「张嘴」的源图合成一张闭嘴图。
 
     preview=True 时写到 avatar_closed_preview.png 并**不写 meta**：
@@ -450,15 +461,28 @@ def close_mouth(force: bool = False, preview: bool = False) -> dict:
     # 写到哪：预览 / 正式。后面所有写盘点统一用它，绝不让预览覆盖已生效基准。
     _dst = _img_closed_preview_path() if preview else _img_closed_path()
 
-    # ---- 新路径：下唇整体上移覆盖口腔（优先）----
-    # 旧路径是镜像填充 / inpaint，视觉复核都判「像一块补丁」。
-    # 新路径用的是**原图下唇的真实像素**，唇纹、高光、明暗都在，
-    # 画风天然一致；实测影响范围只到下巴（衣服区域差异 0.05，几乎为 0）。
+    # ---- 新路径：下唇镜像替换开口区（优先）----
+    # 三代做法都实测过，视觉复核结论：
+    #   ① inpaint 平涂      → 「一块平贴的肤色补丁，没有上下唇结构」
+    #   ② 上唇镜像填充      → 「矩形切割线、上下唇色差明显、带入背景色块」
+    #   ③ 下唇上移(lip_shift)→ 「中间有细小白色线框/硬边，有涂抹痕迹」
+    #   ④ 下唇镜像(本路径)  → 「唇线弧度自然、边缘干净、无涂抹色块硬边重影
+    #                          条纹、画风一致」，6 张候选里被判最自然
+    # ④ 与 ③ 的差别：③ 是位移映射，会把下巴/脖子一起拖动；④ 只替换开口那几行，
+    # 开口以下（下唇、下巴、衣服）像素零改动。
     try:
         from . import avatar_mouth as _AM
         _geom = _AM.analyze(img, mouth())
         if _geom and _geom.get("source_open"):
-            _out = _AM.close_by_lip(img, _geom, 0.85)
+            _mth = str(method or "mirror").lower()
+            if _mth == "lip_shift":
+                _out = _AM.close_by_lip(img, _geom, 1.10)
+                _mname = "lip_shift"
+                _mreason = "已用下唇上移生成闭嘴基准（保留原图唇部纹理）"
+            else:
+                _out = _AM.close_by_mirror(img, _geom)
+                _mname = "lip_mirror"
+                _mreason = "已用下唇镜像生成闭嘴基准（只替换开口区，其余像素零改动）"
             _cp = _dst
             os.makedirs(os.path.dirname(_cp), exist_ok=True)
             cv2.imwrite(_cp, _out)
@@ -466,11 +490,10 @@ def close_mouth(force: bool = False, preview: bool = False) -> dict:
                 _meta = _read_meta()
                 _meta["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                 _meta["closed_from"] = os.path.basename(p)
-                _meta["closed_method"] = "lip_shift"
+                _meta["closed_method"] = _mname
                 _write_meta(_meta)
             return {"ok": True, "closed": True, "preview": bool(preview),
-                    "method": "lip_shift",
-                    "reason": "已用下唇上移生成闭嘴基准（保留原图唇部纹理）",
+                    "method": _mname, "reason": _mreason,
                     "url": ("/api/avatar2/closed_preview?t=%d" if preview
                             else "/api/avatar2/closed?t=%d") % int(time.time())}
     except Exception as _e:                             # noqa: BLE001

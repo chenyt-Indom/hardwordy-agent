@@ -121,6 +121,14 @@ def _call_ds(prompt, images, timeout=180):
     img = images[0] if isinstance(images, (list, tuple)) and images else images
     if not img:
         return None, "没有图片"
+    # ★ img 可能是文件路径（调用方常直接传 path），而 _shrink_b64 期望 base64。
+    #   不转换的话 b64decode(path) 抛异常 → except 原样返回路径 → 上游把路径当 base64
+    #   → 400 Invalid base64 data → 每次静默回退本地模型。
+    if isinstance(img, str) and os.path.isfile(img):
+        try:
+            img = _b64(img)
+        except Exception as e:                          # noqa: BLE001
+            return None, "读图失败：%s" % e
     img = _shrink_b64(img, side=_DS_SIDE)      # 压到 ~15KB，避免被 CDN 拦
     try:
         txt = vision_chat(prompt, img, DS_MODEL, key,

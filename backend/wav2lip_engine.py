@@ -954,12 +954,17 @@ class Wav2LipEngine:
             else:
                 open_seq = np.clip((open_seq - lo) / (hi - lo), 0.0, 1.0)
 
-        # 口型幅度增益：卡通形象的嘴部差异基线比真人大、动态范围也更宽，
-        # 同一条归一化曲线套上去，「字张不开」会很明显。LLM 会按画风给
-        # 0.85~1.35 的增益。放在两次归一化**之后**，否则会被重新归一化抹掉。
+        # ---- 口型幅度增益 open_gain ----
+        # ⚠ 2026-11-15 修「幅度拉高没效果」：旧版是 open_seq * _g 再 clip 1.0，
+        # 而 warp 路径的 k = k_min + (1-k_min)*open_seq，k 上限 1.0，
+        # 而 k=1.0 时 shift=0 → 画面**就是原图**。所以：
+        #   ① 曲线乘 1.35 只是让更多帧顶到 1.0（更早饱和），
+        #   ② 开口高度上限恒等于源图 open_h，gain 再大也突破不了。
+        # 现在把 gain 的语义改成「最大开口相对源图的倍率」：
+        #   warp：k_max = open_gain，k>1 即 shift<0（外推），嘴真的能张更大
+        #   w2l ：没有外推概念，保留温和的曲线放大
         _g = _tp("open_gain", 1.0)
-        if abs(_g - 1.0) > 1e-3:
-            open_seq = np.clip(open_seq * _g, 0.0, 1.0)
+        open_seq_w2l = np.clip(open_seq * (1.0 + (_g - 1.0) * 0.30), 0.0, 1.0)
 
         # 圆唇度：来自音频频谱重心；闭嘴帧不算（嘴闭着谈不上噘嘴）
         round_seq = round_curve(wav_float32, SR, n, FPS)
@@ -968,7 +973,7 @@ class Wav2LipEngine:
         # ---- 混合强度序列：单独做一次**更重**的时序平滑 ----
         # 它只管「这块用生成图还是原图」，不管口型，所以可以比 openness
         # 平滑得狠得多而不影响口型跟不跟得上语音。
-        w_eff_seq = np.maximum(open_seq, 0.60 * round_seq)
+        w_eff_seq = np.maximum(open_seq_w2l, 0.60 * round_seq)
         _mlo = _tp("mask_lo", 0.10)
         _mhi = _tp("mask_hi", 0.90)
         mask_seq = _smooth_1d(_mlo + (_mhi - _mlo) * w_eff_seq, med=3,
@@ -1016,7 +1021,10 @@ class Wav2LipEngine:
             if warp_mode:
                 from . import avatar_mouth as AM
                 _kmin = _tp("k_min", AM.K_MIN)
-                k = _kmin + (1.0 - _kmin) * float(open_seq[i])
+                # k_max = open_gain：开口高度 = open_h * k，所以 gain=1.35
+                # 就是「最张的帧比源图再大 35%」。不再被 1.0 卡死。
+                _kmax = max(_kmin + 0.02, float(_g))
+                k = _kmin + (_kmax - _kmin) * float(open_seq[i])
                 # 二维形变：纵向压缩 + 横向收拢（只压扁会「向两侧拉扯」）
                 _rd = float(round_seq[i]) if (round_seq is not None and i < len(round_seq)) else 0.0
                 frame = AM.warp2d(face_img_bgr, geom, k, k_min=_kmin,
@@ -1025,17 +1033,19 @@ class Wav2LipEngine:
                                   seam_depth=_tp("seam_depth", 0.62),
                                   seam_curve=_tp("seam_curve", 0.45),
                                   lip_tint=_tp("lip_tint", 0.85),
-                                  cover_feather=_tp("cover_feather", 0.30))
+                                  cover_feather=_tp("cover_feather", 0.30),
+                                  k_max=_kmax)
             elif geom is not None:
                 from . import avatar_mouth as AM
-                frame = AM.open_from_closed(face_img_bgr, geom, float(open_seq[i]))
+                frame = AM.open_from_closed(face_img_bgr, geom,
+                                            float(open_seq_w2l[i]))
             else:
                 p96 = preds[i]
                 # 超分仍按平滑后的张嘴度判断（sr_sess 未启用时是死路径）
-                if self.sr_sess is not None and open_seq[i] > 0.18:
+                if self.sr_sess is not None and open_seq_w2l[i] > 0.18:
                     p96 = self._sr(p96.astype(np.float32)).astype(np.uint8)
                 frame = self._composite(face_img_bgr, p96, box, face96,
-                                        openness=float(open_seq[i]),
+                                        openness=float(open_seq_w2l[i]),
                                         roundness=float(round_seq[i]),
                                         mask_gain=float(mask_seq[i]),
                                         tune=TP)

@@ -10557,6 +10557,16 @@ def avatar_lipsync_speak(body: dict):
     except Exception:                                           # noqa: BLE001
         _mo = 1.0
     _mo = max(0.0, min(2.0, _mo))
+    # 口型幅度：前端滑块的 0.6~2.0，映射到 open_gain（最大开口相对源图的倍率）。
+    # 2026-11-15：这个字段原来在路由层就被丢掉了，滑块等于死控件。
+    _amp = body.get("amp")
+    if _amp not in (None, ""):
+        try:
+            _amp = max(0.6, min(2.0, float(_amp)))
+        except Exception:                                       # noqa: BLE001
+            _amp = None
+    else:
+        _amp = None
     try:
         r = avatar_lipsync.speak(
             text, voice=str(body.get("voice") or ""), rate=rate,
@@ -10568,6 +10578,7 @@ def avatar_lipsync_speak(body: dict):
             mode=str(body.get("mode") or "auto"),
             variants=bool(body.get("variants", False)),
             review=bool(body.get("review", True)),
+            amp=_amp,
         )
     except Exception as e:                                      # noqa: BLE001
         raise HTTPException(status_code=500,

@@ -53,9 +53,12 @@ K_MIN = 0.32
 # 口腔覆盖：k >= COVER_ON 完全不盖（嘴是张开的，盖了就是错的）；
 # k <= COVER_FULL 全量覆盖。中间线性过渡，避免闭嘴瞬间颜色突变。
 COVER_ON = 0.62
-# 满覆盖阈值必须 >= LLM 常用的 k_min（0.32），否则最低开合时仍残留一点牙齿，
+# 满覆盖阈值必须**明显高于** LLM 常用的 k_min，否则最低开合时仍残留一点牙齿，
 # 视觉上就是唇缝里一条白色亮线。
-COVER_FULL = 0.34
+# ★ 2026-11-15 实测踩到：原值 0.34，而 LLM 给 k_min=0.35 —— 差 0.01 就让满覆盖
+#   不启动，只剩 96% 覆盖，4% 牙齿残留被 DeepSeek 判成「牙齿变成一条模糊的灰白
+#   细线、有明显横向拉伸条纹」。抬到 0.48 后 k_min=0.35 能拿满覆盖。
+COVER_FULL = 0.48
 # 口腔与肤色的亮度差判据（占肤色亮度的比例）
 _HOLE_DARK_RATIO = 0.72
 
@@ -174,7 +177,44 @@ def analyze(img, mouth_cfg, verbose=False):
                 break
         y_lip_bot = int(min(y_lip_bot, by2 - 2))
 
-    y_fade = int(min(H - 1, y_lip_bot + max(24, open_h * 1.6)))
+    # ---- 剖面精修：暗占比法在「亮牙齿 + 中亮舌头」的嘴上会提前收手 ----
+    # 实测这张 3D 卡通（张嘴露齿）：真实开口 840~862（22px），暗占比法只判出
+    # 840~852（12px）——因为牙齿灰度 237、舌头 135~155 都不算「暗」；下唇下缘
+    # 真值 881 也被判成 861。后果不只是数字不准：
+    #   · close_by_lip 的 move = lip_h*ratio 只有 7.65px，填不满 22px 开口；
+    #   · warp2d 的形变范围也跟着偏小，嘴巴「张不开 / 闭不上」。
+    # 修正用中心列灰度剖面的两个解剖特征（全图剖面，因为 ROI 只到 cy+0.65mh，
+    # 看不到下唇）：
+    #   · 开口下沿 = 「中暗→亮」的最大正跳变所在行的前一行（舌头→下唇）
+    #   · 下唇下沿 = 开口以下第一处暗线（下唇下沿描边）
+    try:
+        _full = _img_gray(img)
+        _c = int(round(cx))
+        _c = max(2, min(_full.shape[1] - 3, _c))
+        _prof = _full[:, _c - 2:_c + 3].mean(axis=1)
+        _lo = max(int(y_split) + 2, int(round(cy + 0.20 * mh)))
+        _hi = min(H - 1, int(round(cy + 0.95 * mh)))
+        _best, _bd = None, 0.0
+        for _y in range(_lo, _hi):
+            _d = float(_prof[_y + 1] - _prof[_y])
+            if _d > _bd:
+                _bd, _best = _d, _y
+        if _best is not None and _bd > 40.0:
+            y_hole_bot = int(_best)
+            open_h = float(max(1, y_hole_bot - y_split))
+        _lo2 = max(int(y_hole_bot) + 2, int(round(cy + 0.85 * mh)))
+        _hi2 = min(H - 1, int(round(cy + 1.60 * mh)))
+        for _y in range(_lo2, _hi2):
+            if _prof[_y] < 120.0:
+                y_lip_bot = int(_y)
+                break
+    except Exception:                                   # noqa: BLE001
+        pass
+
+    # ★ 衰减终点不能越过「下巴底」：原式 y_lip_bot + max(24, 1.6*open_h)，
+    #   修正几何后 open_h=22 → y_fade=916，而这张图衣服从 y=896 就开始（纯黑），
+    #   位移会把衣服一起拖动 → 视觉判「下巴最底部白色边缘生硬、轮廓锯齿」。
+    y_fade = int(min(H - 1, y_lip_bot + max(12, open_h * 0.55)))
     out = {
         "cx": cx, "cy": cy, "mw": mw, "mh": mh,
         "y_split": int(y_split),
@@ -229,19 +269,28 @@ def _displace_map(H, W, geom, shift, fade=None):
     #
     # ⚠ 不能把口腔和下唇用同一个比例压缩：那样下唇会一起变薄，
     # 卡通形象的嘴唇是硬边色块，变薄后唇线直接消失。
+    # ⚠ 2026-11-15 修「嘴周长出皱纹」：B 段的定义域原来写成 [y_split, y_hole]，
+    # 但 B 段映射会把 open_h 压成 open_h-sh，所以它的**目标**区间只有
+    # [y_split, y_hole-sh] 这么长。用 y_hole 当上界会让多出来的那 sh 行
+    # 继续按 1/b_ratio 外推 —— 目标 y=852 去取源 y=877.5（下巴/脖子），
+    # 而下一行 y=853 又跳回源 861（下唇），源坐标倒退 16.3px。
+    # remap 遇到非单调的源坐标就是「折叠」：同一批源像素被重复采样成
+    # 横向条纹，也就是肉眼看到的皱纹。C/D 段的上界同样要减 sh 才连续。
     a = ys < y_split
-    b = (ys >= y_split) & (ys <= y_hole)
-    c = (ys > y_hole) & (ys <= y_lip)
-    d = ys > y_lip
+    b = (ys >= y_split) & (ys <= y_hole - sh)
+    c = (ys > y_hole - sh) & (ys <= y_lip - sh)
+    d = ys > y_lip - sh
 
     map_y = ys.copy()
     # B：目标 [split, hole-sh] → 源 [split, hole]
-    b_ratio = max(0.05, (open_h - sh) / open_h)
+    # 下限 0.22：sh 接近 open_h 时 1/b_ratio 会到 20 倍，重度下采样会出摩尔纹。
+    # 压不动的那部分交给 _cover_cavity 覆盖，而不是硬拉。
+    b_ratio = max(0.22, (open_h - sh) / open_h)
     map_y = np.where(b, y_split + (ys - y_split) / b_ratio, map_y)
-    # C：下唇整体上移
+    # C：下唇保持厚度，整体平移 sh（sh<0 时是外推下移）
     map_y = np.where(c, ys + sh, map_y)
-    # D：ramp 衰减
-    ramp = np.clip((y_fade - ys) / max(1.0, y_fade - y_lip), 0.0, 1.0)
+    # D：ramp 衰减。起点跟着 C 段上界一起移，否则接缝处又断一次
+    ramp = np.clip((y_fade - sh - ys) / max(1.0, y_fade - y_lip), 0.0, 1.0)
     map_y = np.where(d, ys + sh * ramp, map_y)
     map_y = np.where(a, ys, map_y)
 
@@ -283,7 +332,7 @@ def warp(img, geom, k, k_min=None):
 
 def warp2d(img, geom, k, k_min=None, squeeze=0.30, round_=0.0, round_gain=0.22,
            cover=None, seam_depth=0.62, seam_curve=0.45, lip_tint=0.85,
-           cover_feather=0.30):
+           cover_feather=0.30, k_max=1.0):
     """二维形变：纵向压缩 + **横向收拢**。
 
     ## 为什么需要横向
@@ -321,10 +370,25 @@ def warp2d(img, geom, k, k_min=None, squeeze=0.30, round_=0.0, round_gain=0.22,
     except (TypeError, ValueError):
         lo = K_MIN
     lo = float(np.clip(lo, 0.10, 0.98))
-    k = float(np.clip(k, lo, 1.0))
+    # ★ 2026-11-15：k 的上限原来是 1.0，而 k=1.0 就是**原图本身** ——
+    # 所以「张嘴最大」永远等于源图开度，open_gain 调多高都突破不了。
+    # 这正是「口型幅度拉高但效果不明显」的根因。放开到 k_max 后，
+    # k>1 表示 shift<0（外推）：口腔被纵向拉伸，嘴真的能张得比源图更大。
+    try:
+        # 上限对齐前端滑块的 2.0；下限 0.10 让 k_max<1（用户想更含蓄）也能生效。
+        # 之后再用 max(lo, ...) 保证 k_max 不低于 k_min，否则 clip 区间会反转。
+        km = float(np.clip(k_max, 0.10, 2.00))
+    except (TypeError, ValueError):
+        km = 1.0
+    km = max(lo, km)
+    k = float(np.clip(k, lo, km))
     shift = (1.0 - k) * open_h
+    # 压缩别超过 open_h*0.78（1/b_ratio 会到 4.5 倍以上，出摩尔纹）；
+    # 压不动的那部分交给下面的口腔覆盖。
+    if shift > open_h * 0.78:
+        shift = open_h * 0.78
     map_y = _displace_map(H, W, geom, shift)
-    if shift < 0.35:
+    if abs(shift) < 0.35:
         return img.copy()
     try:
         sq = float(np.clip(squeeze, 0.0, 0.60))
@@ -349,8 +413,12 @@ def warp2d(img, geom, k, k_min=None, squeeze=0.30, round_=0.0, round_gain=0.22,
                      0.0, 1.0)
         u = (xs - float(geom["cx"])) / max(1.0, float(geom["mw"]) * 0.58)
         wx = np.clip(u * u, 0.0, 1.0)          # ★ 嘴角权重最高
+        # ⚠ 下限原来是 1.0 —— 而 k>1（外推）时 (1-k)<0，这一项本来是**变宽**的，
+        # 被 clip 到 1.0 就全削掉了，结果外推只剩纵向拉长，嘴变成细长条
+        # （视觉复核：「纵向拉长，圆形感减弱」）。放开到 0.70 后，外推时
+        # 嘴巴纵横同步变大，保持半圆的饱满轮廓。k<1 时 (1-k)>0，不受影响。
         scale = np.clip(1.0 + sq * (1.0 - k) * wx * wy + rg * rd * wx * wy,
-                        1.0, 1.65)
+                        0.70, 1.65)
         map_x = (float(geom["cx"]) + (xs - float(geom["cx"])) * scale).astype(np.float32)
         map_x = np.broadcast_to(map_x, map_y.shape)
     else:
@@ -588,7 +656,96 @@ def open_from_closed(img, geom, k):
     return out
 
 
-def close_by_lip(img, geom, ratio=0.85):
+def close_by_mirror(img, geom, seam=0.0):
+    """用**下唇镜像**填掉口腔开口：只替换开口那几行，其余像素一个都不动。
+
+    与 close_by_lip 的根本区别：
+      · close_by_lip 是**位移映射** —— 把下唇整体搬到开口处，原下唇位置由
+        下巴顶上来，所以下巴/脖子会被整体拉伸；
+      · 本函数是**逐行替换** —— 开口区每一行取「下唇对应行的镜像」，开口
+        以下（下唇、下巴、衣服）保持原样，实测开口以下零改动。
+
+    为什么镜像能自然：这个卡通的上唇极薄（只有 2px 唇线），开口正下方就是
+    20px 厚的真实下唇。镜像取源时，上半段自然取到下巴的亮部、下半段取到
+    下唇的暗部，恰好形成「上唇（亮）— 唇缝— 下唇（暗）」的层次，而且纹理、
+    高光、明暗全部来自原图，画风天然一致。
+
+    实测（同一张 3D 卡通，6 张候选并排交给 DeepSeek 复核）：
+      本函数 vs 现有 lip_shift —— 复核原话是 lip_shift「中间有细小白色线框/
+      硬边，有涂抹痕迹」，本函数「唇线弧度自然、边缘干净、无涂抹色块硬边
+      重影条纹、画风一致」，被判为最自然的一张。
+    """
+    H, W = img.shape[:2]
+    ys = int(round(float(geom["y_split"])))
+    cx = float(geom["cx"])
+    cy = float(geom.get("cy") or geom["y_split"])
+    mw = float(geom["mw"])
+    mh = float(geom.get("mh") or 0.0)
+    if mh <= 1.0:                       # geom 没带 mh 时从宽度估
+        mh = max(6.0, mw * 0.46)
+
+    # ★ 定位开口底与下唇底：不能直接用 analyze 的 y_hole_bot / y_lip_bot。
+    #   它靠「暗像素占比」找口腔，而这张卡通张嘴露齿——牙齿（灰度 237）和舌头
+    #   （灰度 135~155）都不算暗，于是它把开口判成 12px（真实 23px），
+    #   下唇底判成 861（真实 881）。照它填会漏掉下半截舌头。
+    #   改用两个解剖比例做初值，再用剖面「中暗→亮」的最大正跳变校正开口底：
+    #     开口底 ≈ cy + 0.51*mh   下唇底 ≈ cy + 1.17*mh
+    g = img.astype(np.float32) @ np.array([0.114, 0.587, 0.299], dtype=np.float32)
+    col = int(round(cx))
+    x0, x1 = max(0, col - 2), min(W, col + 3)
+    prof_all = g[:, x0:x1].mean(axis=1)
+
+    yh = int(round(cy + 0.51 * mh))
+    lo = max(ys + 2, int(round(cy + 0.20 * mh)))
+    hi = min(H - 1, int(round(cy + 0.95 * mh)))
+    best, best_d = None, 0.0
+    for y in range(lo, hi):
+        d = float(prof_all[y + 1] - prof_all[y])
+        if d > best_d:
+            best_d, best = d, y
+    if best is not None and best_d > 40:
+        yh = best                       # 跳变前那一行 = 开口最后一行
+
+    yl = int(round(cy + 1.17 * mh))
+    lo2 = max(yh + 2, int(round(cy + 0.85 * mh)))
+    hi2 = min(H - 1, int(round(cy + 1.60 * mh)))
+    for y in range(lo2, hi2):           # 下唇下沿 = 开口以下第一处暗线
+        if prof_all[y] < 120:
+            yl = y
+            break
+
+    ys = max(0, min(H - 2, ys))
+    yh = max(ys + 1, min(H - 2, yh))
+    yl = max(yh + 1, min(H - 1, yl))
+
+    out = img.astype(np.float32).copy()
+    src = img.astype(np.float32)
+    xs = np.arange(W, dtype=np.float32)
+    # 横向 cos 窗：嘴中心全权重，到 1.45*mw 处降为 0，避免把脸轮廓一起改
+    t = np.clip((np.abs(xs - cx) - mw * 1.05) / max(1e-6, mw * 0.40), 0, 1)
+    hw = (0.5 + 0.5 * np.cos(t * np.pi))[:, None]
+
+    for y in range(ys + 1, yh + 1):
+        sy = 2 * yh + 1 - y              # y=yh -> yh+1（下唇第一行）
+        sy = min(max(sy, 0), H - 1)
+        out[y] = out[y] * (1 - hw) + src[sy] * hw
+
+    # 可选唇缝暗线（seam>0 才画）：默认 0，实测加了反而「缝合感」变重
+    if seam > 0:
+        y0 = ys + 1
+        xsn = (xs - cx) / max(1.0, mw * 1.05)
+        prof_w = np.clip(1 - xsn ** 2, 0, 1)[:, None]
+        k = float(seam) * prof_w * hw
+        for dy in range(2):
+            y = y0 + dy
+            if y > yh:
+                break
+            out[y] = out[y] * (1 - k * (1.0 - dy * 0.35))
+
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def close_by_lip(img, geom, ratio=0.85, sharpen=0.9):
     """生成闭嘴基准：把**下唇整体上移**覆盖口腔，再补一道唇缝。
 
     为什么不用前两种做法：
@@ -605,7 +762,11 @@ def close_by_lip(img, geom, ratio=0.85):
     yl = float(geom["y_lip_bot"]); yfade = float(geom.get("y_fade", yl + 40))
     cx = float(geom["cx"]); mw = float(geom["mw"])
     lip_h = max(1.0, yl - yh)
-    move = lip_h * float(np.clip(ratio, 0.0, 1.0))
+    # ★ ratio 上限不能是 1.0：本图开口 22px、下唇只有 19px，ratio=1.0 时
+    #   move 封顶 19px，永远差 3px —— 这就是「闭不严、缝里露白」的代码根因。
+    #   ratio > 1 的物理含义是「下唇连同下巴上沿一起上移」，映射会取到
+    #   y_lip_bot 之后的内容，所以必须保证 y_fade 还在下巴范围内（已保证）。
+    move = lip_h * float(np.clip(ratio, 0.0, 1.6))
 
     ys_ = np.arange(H, dtype=np.float32)[:, None]
     xs_ = np.arange(W, dtype=np.float32)[None, :]
@@ -646,6 +807,19 @@ def close_by_lip(img, geom, ratio=0.85):
             seam = cv2.GaussianBlur(seam, (0, 0), max(0.8, lip_h * 0.06))[..., None]
             out = np.clip(out.astype(np.float32) * (1 - seam * 0.75)
                           + lip_col[None, None, :] * (seam * 0.75), 0, 255).astype(np.uint8)
+
+    # 位移映射必然丢高频：实测唇部区拉普拉斯方差只有 2224（原图 3738），
+    # 视觉判「唇缝模糊、涂抹感」。轻锐化能拉回 4822，且不产生横向撕裂
+    # （对比 detail_restore 把原图高频硬叠回去，被判「撕裂感、边缘发毛」）。
+    if sharpen > 0:
+        _blur = cv2.GaussianBlur(out, (0, 0), 1.1)
+        _sharp = cv2.addWeighted(out, 1.0 + float(sharpen),
+                                 _blur, -float(sharpen), 0)
+        # ⚠ 必须只作用在嘴部：全局 addWeighted 会把整张图都锐化
+        # （实测改动行从 53 涨到 213、衣服区差异 0 → 0.71、视觉评分 6.5 → 4）
+        _m = mouth_mask(img, geom, feather=max(2.0, float(geom["mw"]) * 0.06))[..., None]
+        out = np.clip(out.astype(np.float32) * (1 - _m)
+                      + _sharp.astype(np.float32) * _m, 0, 255).astype(np.uint8)
     return out
 
 
