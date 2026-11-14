@@ -70,7 +70,7 @@ def info() -> dict:
 
 
 # ------------------------------------------------------------------ 动作层
-def _blink_frame(frame, face_box, t, period=3.7, dur=0.16):
+def _blink_frame(frame, face_box, t, period=3.2, dur=0.18):
     """在眼部做上下位移模拟眨眼（只压缩眼裂，不改五官）"""
     x1, y1, x2, y2 = face_box
     h = y2 - y1
