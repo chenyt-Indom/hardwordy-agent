@@ -1280,9 +1280,20 @@ def get_file_meta(gid: str, fid: str) -> Dict[str, Any]:
 
 
 def file_path(gid: str, fid: str) -> str:
-    """按索引里登记的名字拼路径 —— **绝不用前端传来的名字拼路径**。"""
+    """按索引里登记的名字拼路径 —— **绝不用前端传来的名字拼路径**。
+
+    ⚠️ 兼容两种老情况：meta 里没有 tag（AI 产物上线前存的），
+       以及 tag 写了 ai 但文件其实还在 files/（迁移前的历史附件）。
+       找不到就走另一个目录兜底，别让历史附件直接 404。
+    """
     m = get_file_meta(gid, fid)
-    return os.path.join(files_dir(gid), fid + "__" + m["name"])
+    p = os.path.join(_dir_for_tag(gid, m.get("tag") or "user"),
+                     fid + "__" + m["name"])
+    if os.path.exists(p):
+        return p
+    alt = os.path.join(_dir_for_tag(gid, "ai" if (m.get("tag") or "") != "ai"
+                                    else "user"), fid + "__" + m["name"])
+    return alt if os.path.exists(alt) else p
 
 
 def read_file_bytes(gid: str, fid: str) -> bytes:
