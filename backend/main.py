@@ -12387,7 +12387,7 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                     _codes.append(_c)
                     if len(_codes) > 80:        # 极端情况别把消息撑爆
                         del _codes[:-80]
-                    _hd_emit(gid, mid, "code", task={"code": _e})
+                    _hd_emit(gid, mid, "code", task={"code": _c})
             except Exception:
                 pass
             logger.warning("[hive-hd] 工具 %s → %s", name, str(out)[:160])
