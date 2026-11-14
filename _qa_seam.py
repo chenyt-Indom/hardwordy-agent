@@ -9,7 +9,7 @@ OUT = "_qa_out"
 os.makedirs(OUT, exist_ok=True)
 
 # 1) 造测试语音
-mp3 = os.path.join(OUT, "t.mp3")
+mp3 = os.path.join(OUT, "t2.mp3")
 TEXT = "这是修复后的效果，请看嘴部。"
 if not os.path.isfile(mp3):
     async def gen():
