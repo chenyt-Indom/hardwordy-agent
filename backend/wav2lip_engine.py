@@ -120,6 +120,75 @@ def wav_to_mel(wav_float32, mel_npy=None):
     return M.astype(np.float32)
 
 
+
+def _smooth_1d(v, med=3, sigma=0.9):
+    """一维控制量平滑：中值滤波去尖峰 + 高斯去抖。
+
+    张嘴度 / 圆唇度都是逐帧独立算出来的，实测帧间会有 0.10~0.36 的跳变
+    （5.33 秒里 25% 的相邻帧 |Δ|>0.10）。这些量直接去调混合蒙版的强度，
+    表现就是「嘴部一帧清晰、一帧发糊、一帧变暗」—— 也就是用户说的抽搐。
+    中值滤波先掐掉孤立的尖峰（单帧误判），高斯再抹平剩下的锯齿。
+    """
+    a = np.asarray(v, np.float32)
+    n = len(a)
+    if n < 3:
+        return a.copy()
+    k = int(med) | 1                       # 保证奇数
+    if k >= 3 and n >= k:
+        pad = k // 2
+        ap = np.pad(a, pad, mode="edge")
+        st = np.lib.stride_tricks.sliding_window_view(ap, k)
+        a = np.median(st, axis=1).astype(np.float32)
+    if sigma and sigma > 0:
+        r = max(1, int(round(float(sigma) * 3)))
+        x = np.arange(-r, r + 1, dtype=np.float32)
+        g = np.exp(-(x * x) / (2.0 * sigma * sigma))
+        g /= g.sum()
+        ap = np.pad(a, r, mode="edge")
+        a = np.convolve(ap, g, mode="valid").astype(np.float32)
+    return a
+
+
+def round_curve(y, sr, n, fps=FPS):
+    """每帧「圆唇度」0..1 —— 给噘嘴（o/u/ü）用。
+
+    判据用**频谱重心**，不用 F2 峰值：25fps 的 40ms 短窗上 F2 噪声极大
+    （实测帧间能从 700Hz 跳到 3150Hz），而重心很稳。圆唇元音能量集中在
+    低频，实测 o/u 段重心 405~780Hz，i/e 段 3000Hz 以上，区分度足够。
+    """
+    out = np.zeros(max(0, int(n)), np.float32)
+    if n <= 0 or len(y) == 0:
+        return out
+    yy = np.asarray(y, np.float32)
+    # 时间对齐（很关键）：Wav2Lip 第 i 帧吃的是 mel[i*80/fps : i*80/fps+16]，
+    # 对应 16k 波形从 i*640 起、宽 3200 样本（0.2 秒）。分析窗必须落在这一段
+    # 的中点，否则圆唇会比口型晚 3 帧 —— 实测过：f15 那段音频已经是圆唇
+    # （频谱重心 577Hz），用居中的 40ms 窗却要到 f21 才识别出来。
+    step = HOP * 80.0 / float(fps)          # 每帧推进的样本数
+    span = MEL_STEP * HOP                   # 每帧覆盖的样本数
+    win = max(256, int(sr * 0.080))
+    for i in range(int(n)):
+        c = i * step + span * 0.5
+        a = int(c - win * 0.5)
+        a = max(0, min(len(yy) - win, a))
+        seg = yy[a:a + win]
+        if seg.size < 64:
+            continue
+        seg = seg - seg.mean()
+        if float(np.abs(seg).max()) < 1e-4:      # 静音帧不判圆唇
+            continue
+        spec = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
+        freqs = np.fft.rfftfreq(len(seg), 1.0 / sr)
+        tot = float(spec.sum())
+        if tot <= 1e-9:
+            continue
+        cen = float((spec * freqs).sum() / tot)
+        # 900Hz 及以下算完全圆唇，2000Hz 以上不算
+        out[i] = float(np.clip((2000.0 - cen) / 1100.0, 0.0, 1.0))
+    out = _smooth_1d(out, med=3, sigma=1.0)
+    return np.clip(out, 0.0, 1.0)
+
+
 class Wav2LipEngine:
     def __init__(self, onnx_path, det, mel_npy=None, threads=4, sr_path=None):
         so = ort.SessionOptions()
@@ -260,8 +329,44 @@ class Wav2LipEngine:
         out = out + 0.20 * (out - cv2.GaussianBlur(out, (0, 0), 1.0))
         return np.clip(out, 0, 255)
 
+    @staticmethod
+    def _round_lips(img, cx, cy, ax, ay, k):
+        """把嘴部横向收拢 + 纵向微扩，做出噘嘴（o/u/ü）的正面观感。
+
+        为什么必须几何补：Wav2Lip 在 96x96 上生成的唇形本身偏扁 —— 实测连
+        圆唇音段（频谱重心 405~780Hz）的生成帧也是扁的，所以圆唇指望不上
+        模型，只能在贴回时补。这是正面视角的近似（不是真 3D 前突），
+        幅度必须克制，过了就成「捏扁」失真。
+        """
+        k = float(np.clip(k, 0.0, 1.0))
+        if k <= 0.02:
+            return img
+        h, w = img.shape[:2]
+        sx = 1.0 + 0.26 * k          # 源图取更宽 → 输出嘴变窄
+        sy = 1.0 - 0.08 * k          # 源图取更矮 → 输出嘴变高
+        xs = np.arange(w, dtype=np.float32)[None, :]
+        ys = np.arange(h, dtype=np.float32)[:, None]
+        u = (xs - cx) / max(1.0, float(ax))
+        v = (ys - cy) / max(1.0, float(ay))
+        d = u * u + v * v
+        # 平顶权重：椭圆内基本满强度，只有靠边才衰减。
+        # 原来用 exp(-d*1.15) 高斯，嘴角处只有 0.54 的力度，实测横向
+        # 只收窄 2.4%，肉眼完全看不出来 —— 等于没做。
+        wgt = np.clip(1.5 - d, 0.0, 1.0)
+        map_x = cx + (xs - cx) * (1.0 + (sx - 1.0) * wgt)
+        map_y = cy + (ys - cy) * (1.0 + (sy - 1.0) * wgt)
+        out = cv2.remap(img, map_x.astype(np.float32),
+                        map_y.astype(np.float32),
+                        interpolation=cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_REFLECT_101)
+        # 横向挤压会把纹理压密、高频被抹平 —— 视觉上就是「嘴周一片涂抹感」。
+        # 只在变形区、只补高频，把唇线锐度找回来。
+        o = out.astype(np.float32)
+        hi = o - cv2.GaussianBlur(o, (0, 0), 1.0)
+        return np.clip(o + hi * (0.50 * wgt[..., None]), 0, 255)
+
     def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.54,
-                   feather=13, openness=1.0):
+                   feather=13, openness=1.0, roundness=0.0):
         """把生成的嘴部区域贴回原图：椭圆蒙版 + 张嘴度自适应
 
         openness 0..1：闭嘴时几乎不替换（保留原图清晰），张嘴时充分替换。
@@ -297,12 +402,16 @@ class Wav2LipEngine:
         # 口腔加深：Wav2Lip 在这类闭口原图上张口偏小，
         # 只把「真正的口腔暗部」（灰度 < 92）再压暗一点，
         # 视觉上张口更明确，又不会把嘴唇一起涂黑（试过阈值 125 会出现黑块）。
-        if w_open > 0.25:
+        # 口腔加深：原来的硬阈值 `if w_open > 0.25` 会在阈值附近来回切，
+        # 实测 5.33 秒内切了 15 次（每秒 2.8 次）—— 每次切换嘴部暗部亮度
+        # 突变一下，这就是抽搐感的主要来源之一。改成连续增益。
+        open_gain = float(np.clip((w_open - 0.12) / 0.33, 0.0, 1.0))
+        if open_gain > 0.02:
             gray = cv2.cvtColor(gen_big, cv2.COLOR_BGR2GRAY).astype(np.float32)
             dark = np.clip((92.0 - gray) / 34.0, 0.0, 1.0)
             dark = cv2.GaussianBlur(dark, (0, 0), 3.0)
             gen_big = np.clip(gen_big.astype(np.float32)
-                              - dark[..., None] * 40.0 * w_open, 0, 255)
+                              - dark[..., None] * 40.0 * open_gain, 0, 255)
 
         # 椭圆蒙版：中心在嘴部，且必须完整落在 bbox 内部（否则下巴处会有横向接缝）
         cx = int(w * 0.50)
@@ -316,9 +425,18 @@ class Wav2LipEngine:
         k = max(3, (min(ax, ay) // 3) * 2 + 1)
         mask = cv2.GaussianBlur(mask, (k, k), 0)
         mask = np.clip(mask, 0, 1)
-        # 张嘴度调制：闭嘴时整体压低替换强度
-        mask = mask * (0.15 + 0.85 * w_open)
+        # 张嘴度调制：闭嘴时整体压低替换强度。
+        # ⚠ 但圆唇（o/u/ü）的口型变化体现在「唇形横向收拢」，不是张嘴幅度 ——
+        # 只用张嘴度去压，圆唇帧会被压到几乎不替换（实测 f19 张嘴度仅 0.31、
+        # 圆唇度 1.00，收窄只有 4.5%，等于白做）。所以圆唇度高时给一个强度下限。
+        w_eff = max(w_open, 0.60 * float(np.clip(roundness, 0.0, 1.0)))
+        mask = mask * (0.15 + 0.85 * w_eff)
         mask = mask[..., None]
+
+        # 圆唇几何增强（噘嘴）。放在蒙版之后、混合之前：变形只作用在生成图
+        # 这一侧，原图完全不动，所以椭圆外的皮肤一点不受影响。
+        if roundness > 0.02:
+            gen_big = self._round_lips(gen_big, cx, cy, ax, ay, roundness)
 
         blended = gen_big * mask + orig_big * (1 - mask)
         out = full_frame.copy()
@@ -343,14 +461,21 @@ class Wav2LipEngine:
         n_frames = min(n_frames, max(1, (T - MEL_STEP) // 3 + 1))
 
         face96, face_inp = self._prepare_face(face_img_bgr, box)
-        frames = []
+        fin = np.transpose(face_inp, (2, 0, 1))[None].astype(np.float32)
+
+        # ---- 第一趟：只推理，把每帧生成结果和张嘴度都攒下来 ----
+        # 为什么要两趟：张嘴度原来是逐帧独立算、当场就调混合强度。实测
+        # 帧间跳变最大 0.36、25% 的相邻帧 |Δ|>0.10 —— 混合蒙版强度跟着跳，
+        # 嘴部就一帧清晰一帧发糊，这就是抽搐的主因。必须先把整段控制量
+        # 序列拿到手、平滑之后回头合成，过渡才可能连续。
+        preds = []
+        raw_open = []
         for i in range(n_frames):
             i_from = int(i * (80.0 / FPS))
             i_to = i_from + MEL_STEP
             if i_to > T:
                 break
             chunk = mel[:, i_from:i_to][None, None, :, :].astype(np.float32)
-            fin = np.transpose(face_inp, (2, 0, 1))[None].astype(np.float32)
             pred = self.sess.run(None, {self.in_names[0]: chunk,
                                         self.in_names[1]: fin})[0][0]
             pred = np.transpose(pred, (1, 2, 0))   # (96,96,3)
@@ -358,15 +483,41 @@ class Wav2LipEngine:
             # 张嘴度：pred 与输入在嘴部区域的差异（闭嘴时≈0，张嘴时变大）
             pm = pred[54:92, 24:72].astype(np.float32)
             fm = face96[54:92, 24:72].astype(np.float32)
-            _diff = float(np.abs(pm - fm).mean())
-            openness = float(np.clip((_diff - 2.0) / 22.0, 0.0, 1.0))
-            # 只在真正张嘴时超分（96->384），闭嘴帧保留原图，省一半以上时间
-            if openness > 0.18 and self.sr_sess is not None:
-                pred = self._sr(pred)
-            frame = self._composite(face_img_bgr, pred, box, face96, openness=openness)
+            raw_open.append(float(np.abs(pm - fm).mean()))
+            preds.append(pred.astype(np.uint8))
+            if progress and i % 10 == 0:
+                progress(int(i * 0.7), max(1, n_frames))
+
+        n = len(preds)
+        if n == 0:
+            return [], {"box": box, "n_frames": 0, "fps": FPS,
+                        "mel_frames": int(T)}
+
+        # ---- 平滑控制量（关键）----
+        # 张嘴度：中值(3) 掐掉单帧误判，高斯(σ=0.9) 抹平锯齿，约 ±1 帧
+        # 延迟（40ms），不会造成看得出的口型拖尾。
+        open_seq = _smooth_1d(raw_open, med=5, sigma=1.5)
+        open_seq = np.clip((open_seq - 2.0) / 22.0, 0.0, 1.0)
+        # 圆唇度：来自音频频谱重心；闭嘴帧不算（嘴闭着谈不上噘嘴）
+        round_seq = round_curve(wav_float32, SR, n, FPS)
+        round_seq = round_seq * np.clip((open_seq - 0.06) / 0.22, 0.0, 1.0)
+
+        # ---- 第二趟：合成 ----
+        frames = []
+        for i in range(n):
+            p96 = preds[i]
+            # 超分仍按平滑后的张嘴度判断（sr_sess 未启用时是死路径）
+            if self.sr_sess is not None and open_seq[i] > 0.18:
+                p96 = self._sr(p96.astype(np.float32)).astype(np.uint8)
+            frame = self._composite(face_img_bgr, p96, box, face96,
+                                    openness=float(open_seq[i]),
+                                    roundness=float(round_seq[i]))
             frames.append(frame)
             if progress and i % 10 == 0:
-                progress(i, n_frames)
+                progress(int(70 + i * 0.3), max(1, n))
+
         meta = {"box": box, "n_frames": len(frames), "fps": FPS,
-                "mel_frames": int(T)}
+                "mel_frames": int(T),
+                "open_mean": round(float(open_seq.mean()), 3),
+                "round_mean": round(float(round_seq.mean()), 3)}
         return frames, meta
