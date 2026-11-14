@@ -11619,6 +11619,16 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
         model = cfg.get("default_model") or ""
         if not model:
             raise RuntimeError("没有配置默认模型（先在设置里选一个）")
+        # ★ 2026-11-14 用户报：「群功能的 ai 没法生成足够大的内容分发到我手里」。
+        #   根因是这里写死 max_tokens=2400 —— 约 1200~1500 个汉字，
+        #   让它写一篇长文档/长报告，必然在半路被硬截断。
+        #   现在可配置（config.json 的 hive_max_tokens），默认 8000（≈4000~5000 汉字）。
+        #   夹到 512~16000：太小没意义，太大云端会直接报参数错误。
+        try:
+            _hive_mt = int(cfg.get("hive_max_tokens") or 8000)
+        except Exception:
+            _hive_mt = 8000
+        _hive_mt = max(512, min(16000, _hive_mt))
         # 「工作全过程」的起点：把这次任务的输入条件也播出去
         # （注入了多少条历史、提示词多长），让人看得出模型是基于什么在干。
         _hd_emit(gid, mid, "start",
