@@ -309,13 +309,13 @@ def deform_blink(pts, uv, amount):
     a = float(np.clip(amount, 0.0, 1.0))
     m = eye_region(uv)
     uy = uv[:, 1]
-    lid = m & (uy < 0.43)
+    # 只取眼睑这一窄带（含眉毛会把眉毛拉下来，形成色块）
+    lid = m & (uy > 0.365) & (uy < 0.425)
     if not lid.any():
         return pts
     out = pts.copy()
-    # 越靠上的眼睑压得越多，形成自然的闭合曲线
-    w = np.clip((0.43 - uy) / 0.09, 0.0, 1.0)
-    out[1][lid] += a * 3.6 * w[lid]
+    w = np.clip((0.425 - uy) / 0.06, 0.0, 1.0)
+    out[1][lid] += a * 2.2 * w[lid]
     return out
 
 
