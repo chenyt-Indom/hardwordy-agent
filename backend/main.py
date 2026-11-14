@@ -11772,6 +11772,7 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
     err = ""
     cancelled = False
     resp = None
+    _artifacts: list = []       # 工具产出的图片/文档（见 _hive_save_artifacts）
     try:
         hist = hive.read_messages(gid, 0, 60)
         # 群记忆：按群聊内容整理过的长期背景（用户要求「记忆库上下文根据群聊内容重新构建」）。
