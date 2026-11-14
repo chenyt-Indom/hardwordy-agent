@@ -516,6 +516,9 @@ class RelayLink:
         self.last_rx = 0.0                       # 最后一次收到任何包的时刻
         self.heartbeat_fail = 0                  # 心跳超时次数
         self._hb_thread: Optional[threading.Thread] = None
+        self.tls_unverified = False              # 是否用了不校验证书的 TLS
+        self._cand_fail: Dict[str, int] = {}     # 候选线路连续失败次数
+        self._cand_until: Dict[str, float] = {}  # 候选线路冷却到期时刻
         self._load_state()
 
     # -------------------------------------------------- 水位持久化
