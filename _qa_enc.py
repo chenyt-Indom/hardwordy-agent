@@ -23,14 +23,8 @@ for i in range(40):
                   ty=float(2 * np.sin(4 * np.pi * t)), scl=1.0)
     frames.append(o)
 
-exe = None
-for c in ("ffmpeg", os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", "ffmpeg.exe")):
-    try:
-        subprocess.run([c, "-version"], capture_output=True, timeout=10)
-        exe = c
-        break
-    except Exception:
-        pass
+from backend import avatar2 as A2
+exe = A2.ffmpeg()
 print("ffmpeg:", exe)
 
 tmpd = tempfile.mkdtemp()
