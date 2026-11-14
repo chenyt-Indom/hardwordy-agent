@@ -124,18 +124,21 @@ def _apply_motion(frames, img_path, proc_side, y, sr, fps, blink, motion):
         return out, "pan"
 
     # ---- 25D：旋转 + 平移 + 缩放 + 眨眼（眼睛位置来自 3DMM，比固定眼带准）
+    # 增益：25D 那套常量是为「伪3D 全屏」调的，套到 Wav2Lip 成片上视觉复核
+    # 判定「几乎静止」。实测 ±13px 只是画面 1.3%，而真人说话头部摆动是
+    # 1.5~3%，所以这里乘 1.3 补上。pitch 已有独立 boost，不再重复乘。
     out = []
     for i, fr in enumerate(frames):
         yaw, pit, rol, tx, ty, scl, bl = poses[i]
-        if abs(m - 1.0) > 1e-3:
-            yaw *= m
-            pit *= m * PITCH_BOOST
-            rol *= m
-            tx *= m
-            ty *= m
-            scl = 1.0 + (scl - 1.0) * m
-        else:
-            pit *= PITCH_BOOST
+        yaw *= m * MOTION_GAIN
+        pit *= m * PITCH_BOOST
+        rol *= m * MOTION_GAIN
+        tx *= m * MOTION_GAIN
+        ty *= m * MOTION_GAIN
+        scl = 1.0 + (scl - 1.0) * m
+        # 单图侧面没有纹理，旋转超过 ~7.5° 就开始露馅，这里兜一道
+        yaw = max(-7.5, min(7.5, yaw))
+        rol = max(-5.0, min(5.0, rol))
         if m <= 0.01:
             out.append(fr)
             continue
