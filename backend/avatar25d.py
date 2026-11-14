@@ -460,8 +460,6 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
         u, v = cx + du * cr - dv * sr, cy + du * sr + dv * cr
 
     # 2) 迭代求源坐标：透视压缩 + 深度视差（两次足够收敛）
-    zn = prep["zn"]
-    wg = prep["wgt"]
     su, sv = u.copy(), v.copy()
     for _ in range(max(1, int(iters))):
         zs = cv2.remap(zn, su, sv, cv2.INTER_LINEAR,
