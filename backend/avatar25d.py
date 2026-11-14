@@ -436,6 +436,14 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
     （0~255 尺度，肉眼不可见），但省 19% 时间 —— Wav2Lip 每帧都要做一次，
     累积起来很可观，所以那条链路传 1；伪3D 保持 2 次的精度。
     """
+    # 强制成 Python float：若上层传进来 numpy 标量（np.float64），
+    # 后面 `tx * w0` 会把整张 u/v 网格提升成 float64，
+    # cv2.remap 只接受 CV_32FC1 的 map，直接抛
+    # "Assertion failed ((map1.type() == CV_32FC2 || ...)"。
+    # 真实链路传的是 Python float 所以没炸过，但这是个埋着的雷。
+    yaw, pitch, roll = float(yaw), float(pitch), float(roll)
+    tx, ty, scl = float(tx), float(ty), float(scl)
+
     if (abs(yaw) < 0.01 and abs(pitch) < 0.01 and abs(roll) < 0.01
             and abs(tx) < 0.05 and abs(ty) < 0.05 and abs(scl - 1.0) < 0.0005):
         return img
