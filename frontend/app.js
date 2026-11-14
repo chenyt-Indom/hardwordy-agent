@@ -10198,6 +10198,9 @@
         });
       }
 
+      // 代码改动卡片：绑定折叠交互（和单人模式的 sd-card 行为一致）
+      try { bindCodeChanges(wrap.querySelector(".hmsg-codes")); } catch (e) { /* 忽略 */ }
+
       const bubble = wrap.querySelector(".hmsg-body");
       const raw = String(m.text == null ? "" : m.text);
       if (type === "system" || type === "unknown" || m.pending) {
@@ -10245,16 +10248,28 @@
       const empty = box.querySelector(".hive-empty");
       if (empty) empty.remove();
       const node = document.createElement("div");
-      // 实时进度卡片同样用单人模式那套 class（.msg.bot / .bubble / .think-hdr）
+      // ★ 2026-11-15：**和单人模式完全同一套 DOM 结构**（用户要求「把群模式和
+      //   单人模式统一成单人模式的风格」）。
+      //   原来这里是「.hd-live-head（呼吸圆点 + 阶段文字 + 取消按钮）+ 思考卡 + 正文」，
+      //   而单人模式是「思考卡 → 工具小条 → 正文 → 🛠 本轮代码改动」：
+      //     · 标题文案不同（群里固定写「思考过程」，单人是「🧠 思考中…（N 字）」）
+      //     · 群里根本没有工具小条，只有一行「正在执行工具（第 N 轮）」
+      //     · 群里根本没有代码卡片 —— 造软件时一行代码都看不到
+      //   现在四段结构、class、文案全部照单人那份来，两边看起来就是同一个功能。
       node.className = "msg bot hd-live";
       node.innerHTML = '<span class="hmsg-who"></span>'
-        + '<div class="hd-live-head"><span class="hd-dot"></span>'
-        + '<span class="hd-phase">排队中…</span>'
-        + '<button class="hd-cancel" type="button">取消</button></div>'
-        + '<div class="bubble think-hdr hd-think"><span class="hd-think-lbl">🧠 思考过程</span>'
-        + '<span class="arrow">▸</span></div>'
-        + '<div class="think-body"></div>'
-        + '<div class="bubble hmsg-body hd-out"></div>';
+        + '<div class="bubble think-hdr hd-think"><span class="hd-think-lbl">🧠 思考中…</span>'
+        + '<span class="arrow">▾</span></div>'
+        + '<div class="think-body open"></div>'
+        + '<div class="tool-strip hd-tools"></div>'
+        + '<div class="bubble hmsg-body hd-out"></div>'
+        + '<div class="sd-list hd-sd" hidden>'
+        + '<button class="sd-list-head" type="button">'
+        + '<span class="sd-list-arrow">▾</span>'
+        + '<span class="sd-list-title">🛠 本轮代码改动</span>'
+        + '<span class="sd-list-sum">0 处</span>'
+        + "</button>"
+        + '<div class="sd-list-body"></div></div>';
       box.appendChild(node);
       box.scrollTop = box.scrollHeight;
       c = {
