@@ -24,8 +24,8 @@ import json
 import os
 import re
 import shutil
-import time
 import sys
+import threading
 import time
 import zipfile
 from .procwin import NOWIN as _NOWIN
