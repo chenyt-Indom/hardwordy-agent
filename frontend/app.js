@@ -10177,10 +10177,11 @@
       box.appendChild(node);
       box.scrollTop = box.scrollHeight;
       c = {
-        node: node, think: node.querySelector(".think-body"),
+        node: node, thinkNode: thinkNode,
+        think: thinkNode.querySelector(".think-body"),
         out: node.querySelector(".hd-out"),
         who: node.querySelector(".hmsg-who"),
-        details: node.querySelector(".hd-think"),
+        details: thinkNode.querySelector(".hd-think"),
         // ★ 2026-11-15：标题要像单人模式那样实时显示字数（用户要求「思考卡片
         //   的内容与单人模式一模一样」）。原来固定写「思考过程」，字数只在一个
         //   进度条里，和单聊的「🧠 思考中…（N 字）」不是一回事。
