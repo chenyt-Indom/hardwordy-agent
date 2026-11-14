@@ -637,9 +637,9 @@ def _pose_curve(n, fps, energy):
             if ti + j < n:
                 p = j / float(span - 1)
                 if p < 0.4:
-                    bl[ti + j] = 0.85 * math.sin(math.pi * 0.5 * (p / 0.4))
+                    bl[ti + j] = 0.75 * math.sin(math.pi * 0.5 * (p / 0.4))
                 else:
-                    bl[ti + j] = 0.85 * math.cos(math.pi * 0.5 * ((p - 0.4) / 0.6))
+                    bl[ti + j] = 0.75 * math.cos(math.pi * 0.5 * ((p - 0.4) / 0.6))
         ti += int(fps * rng.uniform(2.8, 4.8))
 
     # 统一时间低通：不管上游怎么算，送进渲染的曲线必须连续 ——
