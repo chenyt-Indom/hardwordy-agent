@@ -832,7 +832,8 @@ class RelayLink:
         # 握手：先收 challenge，再回 HMAC
         got = _recv_pkt(sock)
         if not got:
-            self.error = "中继没有响应握手"
+            self.error = "中继没有响应握手（这个入口连上了，但对面不是我们的中继）"
+            self._fail_hard = True
             sock.close()
             return False
         try:
