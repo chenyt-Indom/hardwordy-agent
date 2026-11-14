@@ -10043,7 +10043,7 @@
         + '<div class="hd-live-head"><span class="hd-dot"></span>'
         + '<span class="hd-phase">排队中…</span>'
         + '<button class="hd-cancel" type="button">取消</button></div>'
-        + '<div class="bubble think-hdr hd-think"><span>🧠 思考过程</span>'
+        + '<div class="bubble think-hdr hd-think"><span class="hd-think-lbl">🧠 思考过程</span>'
         + '<span class="arrow">▸</span></div>'
         + '<div class="think-body"></div>'
         + '<div class="bubble hmsg-body hd-out"></div>';
@@ -10055,6 +10055,11 @@
         phase: node.querySelector(".hd-phase"),
         who: node.querySelector(".hmsg-who"),
         details: node.querySelector(".hd-think"),
+        // ★ 2026-11-15：标题要像单人模式那样实时显示字数（用户要求「思考卡片
+        //   的内容与单人模式一模一样」）。原来固定写「思考过程」，字数只在一个
+        //   进度条里，和单聊的「🧠 思考中…（N 字）」不是一回事。
+        lbl: node.querySelector(".hd-think-lbl"),
+        raw: "",
       };
       // 实时卡片的思考框：点标题也能折叠（和正式消息一致）
       c.details.addEventListener("click", () => {
