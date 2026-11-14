@@ -612,34 +612,108 @@ class RelayLink:
 
     # -------------------------------------------------- 连接循环
 
+    def _sleep(self, sec: float) -> None:
+        """可被 stop() 打断的 sleep。"""
+        end = time.time() + max(0.0, sec)
+        while not self._stop and time.time() < end:
+            time.sleep(0.1)
+
     def _loop(self) -> None:
-        backoff = [1, 2, 4, 8, 15, 30]
-        i = 0
+        """连接循环：轮着试所有候选线路，任何一条通了就干活。
+
+        跟旧版的区别（只在「连不上 / 断了」时才看得出来）：
+          · 旧版只有一条路，那条挂了就一直干等，退避到 30 秒才重试一次；
+          · 新版一条挂了**立刻换下一条**（实测这台服务器 3 条都通），
+            全部都不通才退避，上限 8 秒，还带 ±25% 随机抖动 ——
+            服务器重启时所有客户端不会同一毫秒一起冲上来。
+        """
         while not self._stop:
-            try:
-                ok = self._connect_once()
-            except Exception as e:
-                self.error = "%s: %s" % (type(e).__name__, e)
-                ok = False
+            cands = self.cands or []
+            if not cands:
+                self.state = "error"
+                self.error = "没有可用的服务器地址"
+                self._sleep(1.0)
+                continue
+
+            ok = False
+            n = len(cands)
+            start = self.cand_idx % n
+            for k in range(n):
+                if self._stop:
+                    break
+                idx = (start + k) % n
+                p = cands[idx]
+                self.cand_idx = idx
+                self.cand_tries += 1
+                try:
+                    ok = self._connect_once(p, last=(k == n - 1))
+                except Exception as e:
+                    self.error = "%s: %s" % (type(e).__name__, e)
+                    ok = False
+                if ok:
+                    self.active_url = str(p.get("url") or "")
+                    self.last_ok_url = self.active_url
+                    break
+                # 这条不通 → 立刻换下一条，不等待
+            if self._stop:
+                break
+
             if ok:
-                i = 0
+                t_conn = time.time()
                 self._read_loop()
+                lived = time.time() - t_conn
                 self._teardown()
                 if self._stop:
                     break
                 self.state = "connecting"
                 self.error = "连接断开，正在重连"
+                if lived >= STABLE_SECONDS:
+                    self.fail_streak = 0
+                    continue      # 稳定跑过一阵才断的 → 立刻重连，不等待
+                self.short_lived += 1
             else:
                 self._teardown()
                 if self._stop:
                     break
-                self.state = "connecting" if self.state != "error" else "error"
-            delay = backoff[min(i, len(backoff) - 1)]
-            i += 1
-            for _ in range(int(delay * 10)):
-                if self._stop:
-                    break
-                time.sleep(0.1)
+                self.state = "error"
+                self.error = "所有线路都连不上（已试 %d 条）：%s" % (
+                    n, self.error or "")
+
+            self.fail_streak += 1
+            delay = min(BACKOFF_MAX,
+                        BACKOFF_BASE * (1.6 ** min(self.fail_streak - 1, 8)))
+            delay *= 1.0 + random.uniform(-0.25, 0.25)
+            self._sleep(delay)
+
+    def _heartbeat_loop(self) -> None:
+        """心跳：主动发 ping，同时看「多久没收到任何包」。
+
+        为什么必须有：TCP 连接在对端机器直接断电、NAT 表项被清、云厂商
+        静默丢包这些情况下**不会报错**，socket 一直「可写」，看起来在线，
+        实际消息全丢。应用层心跳能在 45 秒内发现并主动断开重连。
+        """
+        while not self._stop:
+            self._sleep(HB_EVERY)
+            if self._stop:
+                return
+            if self.state != "online":
+                continue
+            now = time.time()
+            idle = now - (self.last_rx or now)
+            if idle > HB_IDLE:
+                self.heartbeat_fail += 1
+                self.error = "心跳超时（%.0f 秒没收到任何包），主动断开重连" % idle
+                sock = self.sock
+                if sock is not None:
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                continue
+            try:
+                self.ping()
+            except Exception:
+                pass
 
     def _connect_once(self) -> bool:
         try:
