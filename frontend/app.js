@@ -2349,7 +2349,12 @@
       if (info && info.mouth) {
         my.value = info.mouth.y;
         mw.value = info.mouth.w;
+        mouthState.x = +info.mouth.x || 0.5;
+        mouthState.y = +info.mouth.y || 0.5;
+        mouthState.w = +info.mouth.w || 0.2;
+        mouthState.h = +info.mouth.h || 0.05;
       }
+      paintMouthBox();
     }
 
     async function loadInfo() {
