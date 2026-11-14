@@ -165,6 +165,53 @@ def _prep3d(img_path: str, max_side: int = 0) -> dict:
             "roi": (x0, y0, x1, y1), "zspan": zspan}
 
 
+def _head_region(img, mk, xs, ys, fw, fh):
+    """圈出「脸 + 头发」的整体区域（位移权重就用它）。
+
+    做法：拿图像四角估背景色 → 颜色距离分出前景 → 把脸框上方/左右的前景
+    并进头部 → 只保留与脸相连的连通域（避免画面别处的前景被拉进来）。
+    背景不是纯色时会自然退化成「只扩脸框」，不会比原来更差。
+    """
+    H, W = mk.shape
+    base = (mk > 0).astype(np.uint8)
+    try:
+        p = 24
+        corners = [img[:p, :p], img[:p, -p:], img[-p:, :p], img[-p:, -p:]]
+        bg = np.median(np.concatenate([c.reshape(-1, 3) for c in corners], 0), 0)
+        diff = np.linalg.norm(img.astype(np.float32) - bg.astype(np.float32), axis=2)
+        fg = (diff > 16.0).astype(np.uint8)
+
+        x0 = max(0, int(xs.min() - fw * 0.45))
+        x1 = min(W, int(xs.max() + fw * 0.45))
+        y0 = max(0, int(ys.min() - fh * 0.75))      # 头发在脸框上方
+        y1 = min(H, int(ys.max() + fh * 0.08))
+        win = np.zeros((H, W), np.uint8)
+        win[y0:y1, x0:x1] = 1
+
+        head = ((mk > 0) | ((fg > 0) & (win > 0))).astype(np.uint8)
+        head = cv2.morphologyEx(
+            head, cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21)))
+        head = cv2.morphologyEx(
+            head, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+
+        n, lab = cv2.connectedComponents(head)
+        if n > 1:
+            keep = np.unique(lab[mk > 0])
+            keep = keep[keep > 0]
+            if keep.size:
+                head = np.isin(lab, keep).astype(np.uint8)
+        # 膨胀一点，把发丝和轮廓外沿也带上（否则边缘一圈还是不跟着动）
+        head = cv2.dilate(
+            head, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+        if (head > 0).mean() < 0.02:
+            head = base
+    except Exception:                                   # noqa: BLE001
+        head = base
+    return head
+
+
 def _raster_depth(P, z, tri, W, H, DS=512):
     """把三角面光栅化成深度图（向量化 z-buffer，最近片元胜出）。"""
     k = DS / float(max(W, H))
