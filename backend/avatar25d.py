@@ -527,7 +527,7 @@ def _pose_curve(n, fps, energy):
     # 25fps 下逐帧 1° 的跳变就是肉眼可见的抽搐（实测 yaw 最大跳 1.09°、
     # pitch 1.09°、ty 1.65px）。这里做一道 0.20s 汉宁低通，低频（0.2~0.7Hz
     # 的摆动）几乎不衰减，音节级的突跳被抹平。眨眼曲线不参与。
-    def _lp(v, sec=0.20):
+    def _lp(v, sec=0.26):
         if n <= 2:
             return v
         k = max(1, int(fps * sec))
