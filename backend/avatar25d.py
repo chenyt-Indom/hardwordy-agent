@@ -258,8 +258,10 @@ def _mouth_frame(prep, op, wd, amp=1.0):
     w = wx * wy
 
     a = float(np.clip(amp, 0.60, 2.00))
-    # 张口总位移：mh 是唇高（上下唇总厚度），大张口约 1.05 倍唇高
-    total = op * mh * 1.05 * (1.0 + 0.25 * (a - 1.0))
+    # 张口总位移：单图没有口腔/牙齿信息，张口越大越像贴色块。
+    #   实测 mh*1.05 时视觉判定「深棕色色块、边缘笔直」，
+    #   收到 mh*0.62（最大约 26px 的一半）才是单图能自然做到的上限。
+    total = op * mh * 0.62 * (1.0 + 0.22 * (a - 1.0))
     up = total * 0.40        # 上唇上抬（少）
     dn = total * 0.60        # 下唇下压（多，符合真人）
 
@@ -267,10 +269,11 @@ def _mouth_frame(prep, op, wd, amp=1.0):
     up_w = up * w
     dn_w = dn * w
     # 分区反向映射：上唇区、下唇区、中间缝隙区
-    in_gap = (d >= -up_w) & (d <= dn_w)
+    # 缝隙用 0.34 的斜率（≈3 倍拉伸）：保留原图唇缝本身的明暗渐变，
+    #   写 0.18（5.5 倍）时渐变被抹平，视觉上就是一条均匀色带。
     src = np.where(d < -up_w, yy + up_w,
                    np.where(d > dn_w, yy - dn_w,
-                            cyi + d * 0.18))     # 缝隙：唇缝那一行轻微渐变
+                            cyi + d * 0.34))
     src = np.clip(src, 0, ph - 1)
 
     i0 = np.floor(src).astype(np.int32)
