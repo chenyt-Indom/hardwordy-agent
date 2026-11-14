@@ -1304,6 +1304,34 @@ def read_file_bytes(gid: str, fid: str) -> bytes:
         return f.read()
 
 
+def drop_artifact_by_name(gid: str, name: str) -> int:
+    """删掉同名的旧 AI 产物，返回删了几个。
+
+    为什么需要：模型做项目时会把同一个文件改好几遍（index.html 写 3 次），
+    每次都往产物文件夹里塞一份的话，一次任务就多出十几个同名文件，
+    用户打开文件夹根本分不清哪个是最终版。
+    产物文件夹的语义是"最新成品"，版本历史在工作区的回收站里。
+    """
+    nm = _safe_name(name)
+    with _LOCK:
+        idx = _read_json(_files_index_path(gid), {}) or {}
+        gone = [fid for fid, m in idx.items()
+                if isinstance(m, dict) and str(m.get("tag") or "") == "ai"
+                and _safe_name(m.get("name") or "") == nm]
+        if not gone:
+            return 0
+        for fid in gone:
+            try:
+                p = os.path.join(artifacts_dir(gid), fid + "__" + nm)
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+            idx.pop(fid, None)
+        _write_json(_files_index_path(gid), idx)
+    return len(gone)
+
+
 def list_artifacts(gid: str, limit: int = 500) -> List[Dict[str, Any]]:
     """列出这个群的 AI 产物（新的在前）。
 
