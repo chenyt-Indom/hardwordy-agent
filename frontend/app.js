@@ -10500,8 +10500,16 @@
       node._noFollow = true;
       node.classList.remove("think-dock");
       node.style.left = node.style.top = node.style.width = node.style.bottom = "";
-      const box = el("hiveMsgs");
-      if (box) box.appendChild(node);
+      // ★ 2026-11-15：归位要回到「正文节点之前」= 它原来的位置。
+      //   原来无条件 appendChild(box) 是错的 —— 那样思考框会被丢到所有消息最下面，
+      //   和这轮的工具条/正文彻底分家。_home 是 hdEnsure 里记下的正文节点。
+      const home = node._home;
+      if (home && home.isConnected && home.parentNode) {
+        home.parentNode.insertBefore(node, home);
+      } else {
+        const box = el("hiveMsgs");
+        if (box) box.appendChild(node);
+      }
       // ★ 2026-11-13 同上：没有别的实时卡片在跟随时，把群聊的「跟随视角」开关一并关掉，
       //   否则开关仍显示「跟随视角」，用户点一次只是关掉它，得连点两次才恢复。
       if (hvThinkFollow) {
