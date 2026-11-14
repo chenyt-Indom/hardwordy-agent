@@ -608,9 +608,15 @@ class HiveClient:
 
         if not cands:
             if net_err:
+                base = net_err.rstrip("。")
+                if mode == "punch":
+                    tail2 = ("。跨网打洞要两边都能出网，对方没开机或防火墙拦 UDP "
+                             "都会失败；配置中继后这种情况会自动兜底。")
+                else:
+                    tail2 = ("。请确认对方地址和端口，"
+                             "或者确认双方在同一 WiFi。")
                 return {"ok": False, "stage": "network",
-                        "error": net_err + "。请确认对方地址和端口，"
-                                           "或者确认双方在同一 WiFi。"}
+                        "error": base + tail2}
             if probe_ok:
                 return {"ok": False, "stage": "password",
                         "error": "密码不对：对方在线，但他的群没有一个和这个密码匹配。"}
