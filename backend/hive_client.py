@@ -353,6 +353,8 @@ class HiveClient:
         state = self._state
         if state == "error":
             pass
+        elif state == "connecting":
+            pass          # 正在换线路试，保持 connecting，别显示成 offline
         elif not m.started:
             state = "offline"
         elif peers > 0:
