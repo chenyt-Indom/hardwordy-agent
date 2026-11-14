@@ -550,9 +550,25 @@ class RelayLink:
         self.last_seq = int(self._seqs.get(gid) or 0)
         self.error = ""
         self._stop = False
+        # 候选线路：主地址 + 自动派生的备用入口
+        self.cands = candidates_for(self.url, extra_urls)
+        self.cand_idx = 0
+        if self.last_ok_url:
+            for i, c in enumerate(self.cands):
+                if c.get("url") == self.last_ok_url:
+                    self.cand_idx = i      # 上次哪条通，这次先试它
+                    break
+        self.active_url = ""
+        self.fail_streak = 0
+        self.short_lived = 0
+        self.heartbeat_fail = 0
+        self.last_rx = time.time()
         self.state = "connecting"
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+        # 心跳：每 5 秒查一次，45 秒没有任何入站包就判定死链、主动断开重连
+        self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._hb_thread.start()
         # 给第一次连接一点时间，让调用方拿到真实状态
         for _ in range(40):
             if self.state in ("online", "error"):
