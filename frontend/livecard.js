@@ -434,6 +434,10 @@ window.LiveCard = (function () {
         if (pending) { text += pending; pending = ""; }
       },
 
+      // 外部强制设定基准文本（后端 thinking_reset / done 兜底整段覆盖时用）。
+      // 不清空 pending：那些是还没吐出来的增量，仍要接着播。
+      set(t) { text = String(t == null ? "" : t); },
+
       text() { return text; },
       isRunning() { return timer !== null; },
       pendingLen() { return pending.length; },
