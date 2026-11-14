@@ -255,6 +255,10 @@ class Wav2LipEngine:
         roi = np.ones((h, w), bool)
         roi[int(h * 0.55):int(h * 0.95), int(w * 0.18):int(w * 0.82)] = False
         gen_big = self._match_color(gen_big, orig_big, roi=roi)
+        # 局部光照场校正：全局统计修不了「额头亮、下巴暗」的空间渐变，
+        # 不修就是一块色偏的补丁（实测椭圆内色差是外面的 2.2 倍）
+        gen_big = self._match_light(gen_big, orig_big,
+                                    mask_keep=roi.astype(np.float32))
         # 超分过的图（>96）自带真实纹理，只做很轻的细节回注；
         # 未超分的 96x96 才需要强回注补纹理
         was_sr = pred96.shape[0] > 96
