@@ -481,6 +481,17 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
     out = img.copy()
     out[y0:y1, x0:x1] = cv2.remap(sub, su - x0, sv - y0, cv2.INTER_LINEAR,
                                   borderMode=cv2.BORDER_REPLICATE)
+
+    # 重采样补偿：实测 warp 一次，头部锐度（拉普拉斯方差）掉 28~55%
+    # （yaw -28.6% / pitch -36.1% / roll -55.0%），而背景权重=0 不动、锐度不变
+    # → 头和脖子/背景之间出现**清晰度断层**，视觉上就是「头糊了、像贴上去」。
+    # 这里按 wgt 加权做 unsharp：头部补回锐度，背景权重 0 完全不动。
+    # amt=0.15 实测把 yaw 的 -28.6% 拉回 -1.0%。
+    if abs(yaw) > 0.01 or abs(pitch) > 0.01 or abs(roll) > 0.01:
+        f = out.astype(np.float32)
+        blur = cv2.GaussianBlur(f, (0, 0), 1.0)
+        amt = (0.15 + 0.14 * min(1.0, abs(roll) / 5.0)) * wg[..., None]
+        out = np.clip(f + amt * (f - blur), 0, 255).astype(np.uint8)
     return out
 
 
