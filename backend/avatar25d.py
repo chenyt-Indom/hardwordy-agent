@@ -460,9 +460,17 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
     return out
 
 
-def _shift_of(prep, x, y, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
-    """某点在新姿态下被挪到哪（用来让眼睛跟着头走）。"""
-    if abs(yaw) < 0.01 and abs(pitch) < 0.01 and abs(tx) < 0.05 and abs(ty) < 0.05:
+def _shift_of(prep, x, y, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0,
+              roll=0.0, scl=1.0):
+    """某点在新姿态下被挪到哪（用来让眼睛跟着头走）。
+
+    ⚠️ 必须用**正向**变换。旧版照抄了 _warp 里的反向映射公式
+    （`cx + (x-cx)/cyw - ...`），方向正好反了：yaw=7.5°、z=±1 时偏差能到
+    20px，眨眼就画在错的位置 —— 这是「眨眼位置偏移」的直接原因。
+    旧版还完全没算 roll 和缩放，roll=4° 时脸缘又能差 14px。
+    """
+    if (abs(yaw) < 0.01 and abs(pitch) < 0.01 and abs(roll) < 0.01
+            and abs(tx) < 0.05 and abs(ty) < 0.05 and abs(scl - 1.0) < 0.0005):
         return 0.0, 0.0
     ry, rx = math.radians(yaw), math.radians(pitch)
     cyw = max(math.cos(ry), 0.55)
@@ -472,10 +480,20 @@ def _shift_of(prep, x, y, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
     yi = int(np.clip(y, 0, prep["wh"][1] - 1))
     z = float(prep["zn"][yi, xi])
     w = float(prep["wgt"][yi, xi])
-    # 与 _warp 的正向变换一致：源 → 视差 → 平移
-    nx = cx + (x - cx) / cyw - prep["scale"] * z * math.sin(ry) * w / cyw
-    ny = cy + (y - cy) / cxp - prep["scale"] * z * math.sin(rx) * w / cxp
-    return nx + tx - x, ny + ty - y
+    # 1) 正向视差（_warp 反向映射的逆过程）
+    u = cx + (x - cx) * cyw + prep["scale"] * z * math.sin(ry) * w
+    v = cy + (y - cy) * cxp + prep["scale"] * z * math.sin(rx) * w
+    # 2) roll（与 _warp 的 roll 同向）
+    if abs(roll) > 1e-6:
+        rz = math.radians(roll)
+        cr, sr = math.cos(rz), math.sin(rz)
+        du, dv = u - cx, v - cy
+        u, v = cx + du * cr - dv * sr, cy + du * sr + dv * cr
+    # 3) 缩放 + 平移
+    _s = max(0.90, min(1.10, float(scl)))
+    u = cx + (u - cx) * _s + tx
+    v = cy + (v - cy) * _s + ty
+    return u - x, v - y
 
 
 def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
