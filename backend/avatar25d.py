@@ -273,7 +273,7 @@ def _mouth_frame(prep, op, wd, amp=1.0):
     #   写 0.18（5.5 倍）时渐变被抹平，视觉上就是一条均匀色带。
     src = np.where(d < -up_w, yy + up_w,
                    np.where(d > dn_w, yy - dn_w,
-                            cyi + d * 0.34))
+                            cyi + d * 0.16))
     src = np.clip(src, 0, ph - 1)
 
     i0 = np.floor(src).astype(np.int32)
