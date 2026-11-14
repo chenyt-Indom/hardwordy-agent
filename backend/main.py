@@ -11812,6 +11812,15 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
        非流式要等模型全部算完才拿到结果，中间几十秒群里一片死寂。
     """
     t0 = time.time()
+    # ★ 2026-11-15：这个群的任务只在**本群自己的开发项目**里动文件。
+    #   没有这一步，A 群做的网站会和 B 群做的脚本互相覆盖（都用 active_project），
+    #   而且用户开着开发台时会被群里的写入搅乱。thread-local，只影响本线程。
+    _proj = _hive_workspace_project(gid)
+    try:
+        from . import workspace as _ws_mod
+        _ws_mod.set_thread_project(_proj)
+    except Exception:
+        logger.warning("[hive-hd] 绑定群开发项目失败（工具照常可用）", exc_info=True)
     _hd_waiting.pop(mid, None)      # 轮到它了，从等待表移出
     # 复用入队时建的那个 Event：如果排队期间已经有人取消，这里能直接看到
     ev = _hd_cancel.setdefault(mid, threading.Event())
