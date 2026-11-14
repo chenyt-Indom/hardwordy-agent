@@ -2641,12 +2641,16 @@
       // rate 传 null 表示「用心情的建议语速」，不能传 0（那会把语速钉死）
       const rateVal = rateSel && rateSel.value !== "auto"
         ? parseInt(rateSel.value, 10) : null;
+      const mode3d = !!($("#av2Mode3D") && $("#av2Mode3D").checked);
+      const speakUrl = mode3d ? "/api/avatar3d/speak" : "/api/avatar2/speak";
       const base = {
         voice: voiceSel.value,
         mood: moodSel ? moodSel.value : "auto",
         rate: rateVal,
         amp: syncAmp(),
       };
+      // 3D 每帧要跑一次网格光栅化，比 2D 慢 3~5 倍，所以分段更小
+      const segLen = mode3d ? 60 : 120;
       try {
         // 长文本切成多段分别生成，每段都在请求超时窗口内，最后合并成一个视频。
         // 之前一次性发整篇，字数一多就渲染超时（用户反馈的那个问题）。
