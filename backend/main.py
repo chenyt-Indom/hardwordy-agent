@@ -11860,6 +11860,41 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 pend_c = ""
             last_push = now
 
+        # 工具执行上下文：和单人模式同构（session 用 "hive:<gid>"，
+        # 这样「技能 / 记忆分区 / 工作区」这些按 session 区分的东西行为一致）。
+        _ctx = {"images": list(images or []), "last_image": None, "mask": None,
+                "shown_images": [],
+                "ask_mode": str(cfg.get("ask_mode") or "quick"),
+                "session": "hive:" + gid, "user_text": instruction,
+                "image_key": "", "image_model": "", "ds_key": ""}
+        _ui_all: list = []          # 工具副作用（图片 / 文库文件）→ 存成群附件
+        _t_round = [0]
+
+        def _exec_tool(name: str, args: dict) -> str:
+            """原生工具调用的统一执行入口（云端 / 本地共用）。
+
+            ⚠️ 这里**必须真的执行**并回填结果 —— 群里的人看得见「它在动哪个工具」，
+            但真正决定它有没有干活的是这一段（用户报过"嘴上说改好了、一行没动"）。
+            """
+            _t_round[0] += 1
+            try:
+                _hd_emit(gid, mid, "tool",
+                         task={"round": _t_round[0], "tools": [str(name)]})
+            except Exception:
+                pass
+            _evs: list = []
+            try:
+                out = tools.dispatch(name, args if isinstance(args, dict) else {},
+                                     _evs, _ctx)
+            except Exception as _e:      # noqa: BLE001
+                out = "[工具执行失败] %s：%s" % (name, _e)
+            try:
+                _ui_all.extend(_evs or [])
+            except Exception:
+                pass
+            logger.warning("[hive-hd] 工具 %s → %s", name, str(out)[:160])
+            return str(out)[:6000]
+
         if is_cloud:
             dkey = _ds_key("")
             if not dkey:
@@ -11869,8 +11904,9 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             # thinking=True：这次任务的意义就在于「思考过程全员可见」，
             # 所以哪怕模型默认不思考，这里也显式打开。
             # 有图时走 OpenAI 的多模态 content 数组（DeepSeek-VL 接口格式）
+            ds_msgs = list(msgs)
             if images:
-                content = [{"type": "text", "text": prompt}]
+                content = [{"type": "text", "text": str(ds_msgs[-1].get("content") or "")}]
                 for _i, _b64 in enumerate(images):
                     # mime 用真实类型：原来一律写死 image/jpeg，
                     # 传 PNG/WebP 时声明和内容不符，部分接口会直接拒图。
@@ -11878,13 +11914,16 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                            else "image/png")
                     content.append({"type": "image_url", "image_url": {
                         "url": "data:" + _mt + ";base64," + _b64}})
-                ds_msgs = [{"role": "user", "content": content}]
-            else:
-                ds_msgs = [{"role": "user", "content": prompt}]
-            for kind, val in deepseek_client.chat_stream(
-                    ds_msgs, model=model,
-                    api_key=dkey, temperature=0.3, max_tokens=_hive_mt,
-                    thinking=True):
+                ds_msgs[-1] = {"role": "user", "content": content}
+            # ★ 2026-11-15：走**带工具的流式对话**（和单人 /api/chat 同一条通道），
+            #   系统提示单独传（本函数会放在最前面），消息序列保持 user/assistant 结构。
+            for kind, val in deepseek_client.chat_stream_with_tools(
+                    ds_msgs, model=model, api_key=dkey,
+                    tools=tool_schemas or [],
+                    tool_executor=_exec_tool,
+                    max_rounds=max(1, min(40, int(cfg.get("max_tool_rounds") or 12))),
+                    temperature=0.3, max_tokens=_hive_mt,
+                    thinking=True, system_prompt=sys_prompt):
                 if ev.is_set():
                     cancelled = True
                     break
@@ -11893,42 +11932,76 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 if kind == "thinking":
                     thinking += val
                     pend_t += val
-                else:
+                elif kind == "content":
                     text += val
                     pend_c += val
+                elif kind == "tool_start":
+                    _hd_emit(gid, mid, "tool",
+                             task={"round": _t_round[0] + 1, "tools": [str(val)]})
+                elif kind == "note":
+                    _hd_emit(gid, mid, "note", {"text": str(val)})
                 _flush()
         else:
-            _msg_in = {"role": "user", "content": prompt}
+            # 本地 Ollama：**原生 tools 通道** + 自己跑工具循环（协议和单人一致）。
+            _work = [{"role": "system", "content": sys_prompt}] + list(msgs)
             if images:
-                _msg_in["images"] = images      # Ollama 的多模态字段
-            resp = client.chat([_msg_in],
-                               model=model, stream=True,
-                               params={"temperature": 0.3,
-                                       "max_tokens": _hive_mt})
-            for raw in resp.iter_lines(chunk_size=64, decode_unicode=False):
+                _work[-1]["images"] = images      # Ollama 的多模态字段
+            _round_cap = max(1, min(12, int(cfg.get("max_tool_rounds") or 6)))
+            for _rnd in range(_round_cap):
                 if ev.is_set():
                     cancelled = True
                     break
-                line = (raw.decode("utf-8", "ignore") if isinstance(raw, bytes)
-                        else str(raw)).strip()
-                if not line:
-                    continue
                 try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                msg = obj.get("message") or {}
-                th = msg.get("thinking") or ""
-                ct = msg.get("content") or ""
-                if th:
-                    thinking += th
-                    pend_t += th
-                if ct:
-                    text += ct
-                    pend_c += ct
-                _flush()
-                if obj.get("done"):
+                    resp = client.chat(_work, model=model, stream=True,
+                                       params={"temperature": 0.3,
+                                               "max_tokens": _hive_mt},
+                                       tools=tool_schemas or None)
+                except ollama_client.OllamaError as _e:
+                    raise RuntimeError(str(_e))
+                _r_content, _r_calls = "", []
+                for raw in resp.iter_lines(chunk_size=64, decode_unicode=False):
+                    if ev.is_set():
+                        cancelled = True
+                        break
+                    line = (raw.decode("utf-8", "ignore") if isinstance(raw, bytes)
+                            else str(raw)).strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    msg = obj.get("message") or {}
+                    th = msg.get("thinking") or ""
+                    ct = msg.get("content") or ""
+                    if th:
+                        thinking += th
+                        pend_t += th
+                    if ct:
+                        text += ct
+                        pend_c += ct
+                        _r_content += ct
+                    if msg.get("tool_calls"):
+                        _r_calls.extend(msg["tool_calls"])
+                    _flush()
+                    if obj.get("done"):
+                        break
+                if cancelled or not _r_calls:
                     break
+                # 把这一轮的调用和结果回填，让模型接着干
+                _work.append({"role": "assistant", "content": _r_content,
+                              "tool_calls": _r_calls})
+                for _c in _r_calls:
+                    _fn = (_c.get("function") or {})
+                    _nm = str(_fn.get("name") or "")
+                    _ag = _fn.get("arguments")
+                    if isinstance(_ag, str):
+                        try:
+                            _ag = json.loads(_ag)
+                        except Exception:
+                            _ag = {}
+                    _out = _exec_tool(_nm, _ag if isinstance(_ag, dict) else {})
+                    _work.append({"role": "tool", "name": _nm, "content": _out})
         # 收尾：把最后没推完的一小段推掉，别让界面卡在倒数第二句
         if not cancelled:
             _flush(force=True)
