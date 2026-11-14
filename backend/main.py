@@ -11860,8 +11860,21 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
                 except Exception:
                     continue
             elif kind == "workspace":
+                _act = str(ev.get("act") or "")
+                # 打包（workspace_pack）：直接读它落盘的 zip，整包发到群里
+                if _act == "pack":
+                    p = str(ev.get("path") or "")
+                    if p and os.path.isfile(p):
+                        try:
+                            with open(p, "rb") as fh:
+                                raw = fh.read(hive.MAX_FILE)
+                            _add(raw, os.path.basename(p), "application/zip",
+                                 "打包 " + str(ev.get("project") or ""))
+                        except Exception:
+                            pass
+                    continue
                 # 只收"写了东西"的动作；mkdir/delete/move 没有内容可发
-                if str(ev.get("act") or "") not in ("write", "project"):
+                if _act not in ("write", "project"):
                     continue
                 rel = str(ev.get("rel") or "")
                 if not rel:
