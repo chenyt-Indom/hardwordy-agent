@@ -11652,7 +11652,7 @@ def _hive_attach_long_text(gid: str, text: str, extra: dict) -> dict:
             return extra
         nm = "AI长文_%s.md" % time.strftime("%Y%m%d_%H%M")
         meta = hive.save_file(gid, nm, (text or "").encode("utf-8"),
-                              "text/markdown")
+                              "text/markdown", tag="ai", source="长文")
         out = dict(extra or {})
         out["files"] = list(out.get("files") or []) + [meta]
         out["long_chars"] = len(text)
