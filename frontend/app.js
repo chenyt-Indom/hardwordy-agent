@@ -10127,9 +10127,20 @@
         // 每次增量都全量重渲染会让代码块反复重建、滚动位置乱跳。
         // 跑完后正式消息会由 msg 事件补上，那条走完整的 renderFinal。
         c.out.innerHTML += hEsc(f.delta || "").replace(/\n/g, "<br>");
+      } else if (ph === "note") {
+        // 过程提示（模型把调用格式写错正在重试 / 上下文超限已精简 等）。
+        // 单人模式也会把这些以提示形式显示出来，群里同样要看得见。
+        const tx = String(f.delta || "").trim();
+        if (tx) c.phase.textContent = tx.slice(0, 120);
       } else if (ph === "done") {
         c.phase.textContent = t.cancelled ? "已取消"
           : (t.error ? "执行失败" : "完成");
+        // 没有正文、只有思考的任务（纯分析类）也要收尾：去掉光标、标题带字数。
+        if (!c.sealed && c.lbl && c.raw) {
+          c.sealed = true;
+          c.lbl.textContent = "🧠 思考过程（" + c.raw.length + " 字）";
+          c.think.textContent = c.raw;
+        }
         setStopBtn(false);
         // 正式消息马上会由 msg 事件补上（它带完整思考和耗时），
         // 这里延时移除卡片，别抢在正式消息前面闪一下。
