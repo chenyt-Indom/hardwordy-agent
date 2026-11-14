@@ -473,12 +473,16 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
         u = cx + (u - tx * w0 - cx) * sw
         v = cy + (v - ty * w0 - cy) * sw
 
-    # 1) 撤销 roll（绕脸中心反向旋转，角度按权重缩放）
+    # 1) 撤销 roll（支点在下颌线，不在脸中心；角度按权重缩放）
+    # 真人侧倾头时支点在颈椎底部：绕脸中心转会把它下方 230px 的脖子横向甩
+    # 20px，而脖子底又不动 → 中间剪切撕裂，就是「脖子一直扭」的主因。
+    # 绕下颌线转，头与脖子作为一个整体侧倾，剪切降到 44%。
     if abs(rz) > 1e-6:
+        py = float(prep.get("roll_pivot_y", cy))
         rz_w = -rz * w0
         cr, sr = np.cos(rz_w), np.sin(rz_w)
-        du, dv = u - cx, v - cy
-        u, v = cx + du * cr - dv * sr, cy + du * sr + dv * cr
+        du, dv = u - cx, v - py
+        u, v = cx + du * cr - dv * sr, py + du * sr + dv * cr
 
     # 2) 迭代求源坐标：透视压缩 + 深度视差（两次足够收敛）
     su, sv = u.copy(), v.copy()
