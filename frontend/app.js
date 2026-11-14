@@ -10185,7 +10185,7 @@
         // ★ 2026-11-15：标题要像单人模式那样实时显示字数（用户要求「思考卡片
         //   的内容与单人模式一模一样」）。原来固定写「思考过程」，字数只在一个
         //   进度条里，和单聊的「🧠 思考中…（N 字）」不是一回事。
-        lbl: node.querySelector(".hd-think-lbl"),
+        lbl: thinkNode.querySelector(".hd-think-lbl"),
         tools: node.querySelector(".hd-tools"),     // 工具小条（和单人 .tool-strip 同一套）
         sd: node.querySelector(".hd-sd"),           // 🛠 本轮代码改动（和单人 .sd-list 同一套）
         sdBody: node.querySelector(".hd-sd .sd-list-body"),
