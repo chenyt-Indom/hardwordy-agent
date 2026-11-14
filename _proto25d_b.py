@@ -51,14 +51,16 @@ def raster_depth(P, z, tri, W, H, DS=512):
     v0, v1, v2 = a[tid], b[tid], c[tid]
     den = ((v1[:, 1] - v2[:, 1]) * (v0[:, 0] - v2[:, 0])
            + (v2[:, 0] - v1[:, 0]) * (v0[:, 1] - v2[:, 1]))
-    den = np.where(np.abs(den) < 1e-9, 1e-9, den)
+    # 退化三角形（den≈0）会让重心坐标炸掉，插值出 -10 万这种荒谬深度。
+    # 直接按面积筛掉：den 就是 2 倍有向面积，像素尺度下 < 0.02 的面积贡献不了任何可见像素。
+    good = np.abs(den) > 0.02
+    den = np.where(good, den, 1.0)
     fx = px.astype(np.float32) + 0.5
     fy = py.astype(np.float32) + 0.5
     w0 = ((v1[:, 1] - v2[:, 1]) * (fx - v2[:, 0]) + (v2[:, 0] - v1[:, 0]) * (fy - v2[:, 1])) / den
     w1 = ((v2[:, 1] - v0[:, 1]) * (fx - v2[:, 0]) + (v0[:, 0] - v2[:, 0]) * (fy - v2[:, 1])) / den
     w2 = 1.0 - w0 - w1
-    eps = -1.5 / np.maximum(np.abs(den), 1e-9)
-    inside = (w0 >= eps) & (w1 >= eps) & (w2 >= eps)
+    inside = good & (w0 >= -0.02) & (w1 >= -0.02) & (w2 >= -0.02)
     if not inside.any():
         return np.zeros((DS, DS), np.float32), np.zeros((DS, DS), np.uint8)
 
