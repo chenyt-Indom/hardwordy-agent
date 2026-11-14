@@ -355,7 +355,8 @@ def _pose_curve(n, fps, energy):
                 p = j / float(span - 1)
                 bl[ti + j] = 1.0 - abs(2.0 * p - 1.0)     # 闭-开
         ti += int(fps * rng.uniform(2.6, 4.6))
-    return [(float(yaw[i]), float(pit[i]), float(rol[i]), float(bl[i]))
+    return [(float(yaw[i]), float(pit[i]), float(rol[i]),
+             float(tx[i]), float(ty[i]), float(scl[i]), float(bl[i]))
             for i in range(n)]
 
 
