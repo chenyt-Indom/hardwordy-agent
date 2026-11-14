@@ -39,7 +39,7 @@ try:
     # A：群主，另起一个节点
     a = HM.MeshNode()
     a.start(0, [])
-    a.add_group(gid, vt=g["vt"], gname="打洞测试群")
+    a.add_group(gid, vt=_g.get("vt") or "", gname="打洞测试群")
     time.sleep(0.4)
     chk("A 打洞通道就绪", bool(a.punch),
         "udp=%s" % (a.punch.port if a.punch else None))
