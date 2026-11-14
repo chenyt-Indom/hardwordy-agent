@@ -4300,6 +4300,15 @@ html[data-theme="light"] select.pill-select option {
   opacity: .5;
 }
 .hi-art:hover { opacity: 1; background: var(--hover-bg); }
+/* 「这个群的 AI 正在工作」标记（2026-11-15）。
+   用旋转的齿轮表示"在转"，比一个静态小圆点更能说明"还没结束"；
+   prefers-reduced-motion 下不转，避免眩晕敏感的人不舒服。 */
+.hi-live {
+  flex: none; font-size: 11px; line-height: 1; color: var(--accent, #2e75b6);
+  animation: hi-spin 2.4s linear infinite;
+}
+@keyframes hi-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .hi-live { animation: none; } }
 
 /* ---- 建群向导（中继地址 + 连通检测日志） ---- */
 .hive-modal-in.wide { width: min(520px, 94vw); }
