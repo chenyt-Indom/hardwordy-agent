@@ -10263,7 +10263,10 @@ def avatar25d_speak(body: dict):
         motion = min(2.0, max(0.0, float(body.get("motion", 1.0))))
     except Exception:                                            # noqa: BLE001
         motion = 1.0
-    blink = bool(body.get("blink", True))
+    # 眨眼默认关：单图没有闭眼后的眼皮纹理，任何合成都是把上方皮肤拉下来
+    # （视觉复核三次都判「斜线 + 内眼角尖角 + 涂抹感」）。这是单图方案的
+    # 物理上限，不是参数没调好。留着开关让用户自己选。
+    blink = bool(body.get("blink", False))
 
     try:
         r = avatar25d.speak(text, voice=str(body.get("voice") or ""),
