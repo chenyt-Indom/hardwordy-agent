@@ -112,7 +112,7 @@ def _head_move(frame, box, t, amp_x=9.0, amp_y=6.0):
 
 # ------------------------------------------------------------------ 主流程
 def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
-           on_progress=None):
+           on_progress=None, max_side=1024):
     exe = A2.ffmpeg()
     if not exe:
         return {"ok": False, "error": "找不到 ffmpeg"}
