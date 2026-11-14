@@ -10160,14 +10160,14 @@ def avatar3d_speak(body: dict):
         except Exception:                                   # noqa: BLE001
             rate = None
     try:
-        amp = float(np.clip(float(body.get("amp") or 1.4), 0.6, 2.0))
+        amp = min(2.0, max(0.6, float(body.get("amp") or 1.4)))
     except Exception:                                       # noqa: BLE001
         amp = 1.4
     try:
         size = int(body.get("size") or 512)
     except Exception:                                       # noqa: BLE001
         size = 512
-    size = int(np.clip(size, 256, 1024))
+    size = max(256, min(1024, size))
     try:
         head_move = float(body.get("head_move", 1.0))
     except Exception:                                       # noqa: BLE001
