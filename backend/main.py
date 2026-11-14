@@ -12110,6 +12110,12 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             但真正决定它有没有干活的是这一段（用户报过"嘴上说改好了、一行没动"）。
             """
             _t_round[0] += 1
+            if _budget_s and (time.time() - t0) > _budget_s:
+                # 到点了就把剩下的活交回给人：明确说清"不是失败了，是时间到了"，
+                # 群里其他人也能看到，不会以为 AI 卡死。
+                return ("[时间预算用尽] 这个任务已经连续跑了 %d 分钟（上限 %d 分钟）。"
+                        "已完成的成果都在群产物文件夹里；要继续就在群里说一句「接着做」。"
+                        % (int((time.time() - t0) // 60), int(_budget_s // 60)))
             try:
                 _hd_emit(gid, mid, "tool",
                          task={"round": _t_round[0], "tools": [str(name)]})
