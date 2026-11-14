@@ -26,10 +26,10 @@ print("   gid =", gid)
 chk("建群成功", bool(gid))
 
 # 先塞两条历史，验证"群聊背景"真的进了上下文
-hive.append_message(gid, {"type": "text", "name": "张三", "from": "u_zhang",
-                          "text": "我们上次决定用 Python 写这个工具。"})
-hive.append_message(gid, {"type": "ai", "name": "助手", "from": "u_bot",
-                          "text": "好的，用 Python。"})
+hive.send_message(gid, "我们上次决定用 Python 写这个工具。", mtype="text",
+                  extra={"name": "张三", "from": "u_zhang"})
+hive.send_message(gid, "好的，用 Python。", mtype="ai",
+                  extra={"name": "助手", "from": "u_bot", "by": "张三"})
 
 print("2) 真跑一次 @hd")
 instr = "用一句话回答：我们上次决定用什么语言写这个工具？"
