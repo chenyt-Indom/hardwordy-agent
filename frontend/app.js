@@ -10095,13 +10095,7 @@
           + '<div class="sd-body" hidden><pre class="sd-pre">' + body + "</pre></div>"
           + "</div>";
       });
-      return '<div class="sd-list"><div class="sd-list-head">'
-        + '<span class="sd-list-arrow">▾</span>'
-        + '<span class="sd-list-title">🛠 本轮代码改动</span>'
-        + '<span class="sd-list-sum">' + list.length + " 处 · "
-        + '<span class="sd-add">+' + add + '</span> <span class="sd-del">−' + del
-        + "</span></span></div>"
-        + '<div class="sd-list-body">' + rows + "</div></div>";
+      return rows;
     }
 
     // 交互：点列表头收起整列；点「详情」或整行展开该文件的 diff。
