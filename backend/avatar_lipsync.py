@@ -43,8 +43,9 @@ def _engine():
     if _ENGINE is None:
         p = _paths()
         _DET = SCRFD(p["det"])
-        _ENGINE = W2L.Wav2LipEngine(p["onnx"], _DET, mel_npy=p["mel"],
-                                    threads=8, sr_path=p.get("sr"))
+        # 注：4x 超分(bigface_x4.onnx)实测在合成阶段是负收益
+        # （嘴部最终显示尺寸远小于 384，超分高频被缩放与细节回注吃掉），故不启用
+        _ENGINE = W2L.Wav2LipEngine(p["onnx"], _DET, mel_npy=p["mel"], threads=8)
     return _ENGINE
 
 
