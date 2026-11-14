@@ -229,6 +229,12 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
     u, v = np.meshgrid(np.arange(x0, x1, dtype=np.float32),
                        np.arange(y0, y1, dtype=np.float32))
 
+    # 0) 撤销平移 + 缩放（绕脸中心）
+    _s = max(0.90, min(1.10, float(scl)))
+    if abs(tx) > 1e-4 or abs(ty) > 1e-4 or abs(_s - 1.0) > 1e-6:
+        u = cx + (u - tx - cx) / _s
+        v = cy + (v - ty - cy) / _s
+
     # 1) 撤销 roll（绕脸中心反向旋转）
     if abs(rz) > 1e-6:
         cr, sr = math.cos(-rz), math.sin(-rz)
