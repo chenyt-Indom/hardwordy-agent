@@ -10450,7 +10450,7 @@
         if (!c.sealed && c.lbl && c.raw) {
           c.sealed = true;
           c.lbl.textContent = "🧠 思考过程（" + c.raw.length + " 字）";
-          c.think.textContent = c.raw;
+          hdThinkSeal(c);
         }
         setStopBtn(false);
         // 正式消息马上会由 msg 事件补上（它带完整思考和耗时），
