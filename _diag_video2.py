@@ -66,8 +66,10 @@ for name, ids in groups:
         tiles.append(crop)
     if not tiles:
         continue
-    w = tiles[0].shape[1]
-    sheet = np.hstack(tiles)
+    while len(tiles) % 4:
+        tiles.append(np.zeros_like(tiles[0]))
+    rows = [np.hstack(tiles[i:i + 4]) for i in range(0, len(tiles), 4)]
+    sheet = np.vstack(rows)
     p = os.path.join(OUT, "blink_%s.png" % name)
     cv2.imwrite(p, sheet)
     print("已写", p, sheet.shape)
