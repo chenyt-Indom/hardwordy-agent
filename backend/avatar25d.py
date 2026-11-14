@@ -455,8 +455,16 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
                        borderMode=cv2.BORDER_REPLICATE)
         ws = cv2.remap(wg, su, sv, cv2.INTER_LINEAR,
                        borderMode=cv2.BORDER_REPLICATE)
-        su = cx + (u - cx) / cyw - scale * zs * syw * ws / cyw
-        sv = cy + (v - cy) / cxp - scale * zs * sxp * ws / cxp
+        # ⚠️ 透视压缩 (u-cx)/cyw 必须也按 ws 加权！
+        # 旧版写成 cx + (u-cx)/cyw - ...，压缩项与权重无关 → 背景（ws≈0）
+        # 照样被按 yaw 缩放。实测 yaw=7.5° 时 ROI 内 89% 的背景像素被改动、
+        # 最大差 68 灰度级，而 ROI 外背景纹丝不动 → ROI 边界上一条横贯全画面
+        # 的硬切线，这就是「割裂」的主因。
+        # 加权后：ws=0 → su=u（完全不动）；ws=1 → 与旧式等价。
+        kx = 1.0 + (1.0 / cyw - 1.0) * ws
+        ky = 1.0 + (1.0 / cxp - 1.0) * ws
+        su = cx + (u - cx) * kx - scale * zs * syw * ws / cyw
+        sv = cy + (v - cy) * ky - scale * zs * sxp * ws / cxp
 
     sub = img[y0:y1, x0:x1]
     out = img.copy()
