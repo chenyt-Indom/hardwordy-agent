@@ -2633,10 +2633,26 @@
         const v = parseFloat(moSel0.value) || 0;
         say(v === 0 ? "动作：静止，只有嘴在动（适合固定机位播报）"
           : v < 0.9 ? "动作：轻微，头部小幅摆动"
-            : v <= 1.1 ? "动作：自然，头部转动 + 点头 + 眨眼跟着语气走"
+            : v <= 1.1 ? "动作：自然，头部转动 + 点头跟着语气走"
               : "动作：活跃，幅度更大，像主持人在讲");
       };
     }
+
+    // —— 眨眼开关（默认关：单图合成闭眼必然是一块糊的皮肤） ——
+    (function initBlink() {
+      const chk = $("#av2Blink");
+      if (!chk) return;
+      try {
+        const saved = localStorage.getItem("avatar2_blink");
+        chk.checked = saved === "1";          // 没存过 = 不勾
+      } catch (e) { chk.checked = false; }
+      chk.onchange = () => {
+        try { localStorage.setItem("avatar2_blink", chk.checked ? "1" : "0"); } catch (e) {}
+        say(chk.checked
+          ? "眨眼已开：单图没有闭眼后的眼皮纹理，闭眼那一下会像一块模糊的皮肤，建议先看一眼再决定留不留"
+          : "眨眼已关（推荐）：睁眼状态全程干净，不会有眼皮合成痕迹");
+      };
+    })();
 
     // —— 嘴部调节条的适用范围 ——
     // 说清楚它到底管不管用，比让人瞎拖强。
