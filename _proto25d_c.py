@@ -83,5 +83,6 @@ tiles = [img] + [c[1] for c in cases]
 names = ["original"] + [c[0] for c in cases]
 tiles = [cv2.resize(t, (300, 300), interpolation=cv2.INTER_AREA) for t in tiles]
 strip = np.hstack(tiles)
-cv2.imwrite("_p25d_strip.png", cv2.cvtColor(strip, cv2.COLOR_RGB2BGR))
-print("已存 _p25d_strip.png")
+out = "_p25d_strip_%s.png" % str(GAIN).replace(".", "")
+cv2.imwrite(out, cv2.cvtColor(strip, cv2.COLOR_RGB2BGR))
+print("已存", out, " GAIN =", GAIN)
