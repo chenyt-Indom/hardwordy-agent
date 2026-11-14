@@ -124,16 +124,22 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
     img = cv2.imread(img_path)
     if img is None:
         return {"ok": False, "error": "形象图读取失败"}
-    # 限制尺寸（Wav2Lip 只要脸，大图徒增编码开销；但嘴部显示尺寸正比于原图，
-    # 所以分辨率越高嘴部越大越清楚 —— 由前端「输出分辨率」决定）
+    # 尺寸策略（两条线分开，很重要）：
+    #   · 处理尺寸 proc —— Wav2Lip 只在 96x96 上生成嘴部，喂给它更大的图**不会**
+    #     增加嘴部信息量，反而让脸框更大、贴回时放大倍数更高。所以处理尺寸
+    #     取 min(用户选择, 原图长边)，绝不上采样原图。
+    #   · 输出尺寸 out —— 用户要的画面尺寸，靠渲染完再放大（纯插值）。
+    # 结果：选 1536 得到更大的画面，但嘴部细节仍由 96x96 决定 —— 这点已在
+    # 前端选项文案里如实写明，不吹成"更清晰"。
     H, W = img.shape[:2]
     try:
         max_side = int(max_side)
     except (TypeError, ValueError):
         max_side = 1024
     max_side = max(480, min(1920, max_side))
-    if max(H, W) > max_side:
-        s = max_side / float(max(H, W))
+    proc_side = min(max_side, max(H, W))
+    if max(H, W) > proc_side:
+        s = proc_side / float(max(H, W))
         img = cv2.resize(img, (int(W * s) // 2 * 2, int(H * s) // 2 * 2),
                          interpolation=cv2.INTER_AREA)
     H, W = img.shape[:2]
