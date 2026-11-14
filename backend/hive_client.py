@@ -137,7 +137,27 @@ class HiveClient:
         m.on_peer = self._on_peer
         m.on_members = self._on_members
         m.on_gone = self._on_gone
+        m.on_freq = self._on_freq
+        m.on_fsync = self._on_fsync
         self._hooked = True
+
+    def _on_freq(self, gid: str, obj: Dict[str, Any]) -> None:
+        """别人缺附件、在问「谁有」→ 交给上层判断本机有没有。"""
+        cb = getattr(self, "on_freq", None)
+        if cb:
+            try:
+                cb(gid, obj)
+            except Exception:
+                pass
+
+    def _on_fsync(self, gid: str, obj: Dict[str, Any]) -> None:
+        """别人发来他那边群文件夹的清单 → 交给上层做一致性对齐。"""
+        cb = getattr(self, "on_fsync", None)
+        if cb:
+            try:
+                cb(gid, obj)
+            except Exception:
+                pass
 
     def _on_gone(self, gid: str, name: str) -> None:
         """群主把群删了：通知界面把这个群从列表里去掉。"""
