@@ -554,7 +554,7 @@ def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0,
         # 会看到「眼下硬边 / 肉色补丁」。水平方向椭圆收口。
         top = np.clip((yy - (cy - 1.95 * eh)) / (eh * 0.45), 0.0, 1.0)
         bot = np.clip(((cy + eh * 1.00) - yy) / (eh * 0.40), 0.0, 1.0)
-        side = np.clip((ew * 1.05 - np.abs(xx - cx)) / (ew * 0.45), 0.0, 1.0)
+        side = np.clip((ew * 1.18 - np.abs(xx - cx)) / (ew * 0.32), 0.0, 1.0)
         m = (top * bot * side)[:, :, None]
 
         out[ry0:ry1, rx0:rx1] = np.clip(moved * m + roi * (1.0 - m),
