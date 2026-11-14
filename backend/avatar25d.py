@@ -434,6 +434,9 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
     u, v = np.meshgrid(np.arange(x0, x1, dtype=np.float32),
                        np.arange(y0, y1, dtype=np.float32))
 
+    zn = prep["zn"]
+    wg = prep["wgt"]
+
     # 位移权重（ROI 网格直接索引，省一次 remap）
     # ⚠️ 平移/缩放/roll 原本是**全局**变换，与权重无关 —— 实测纯背景角落的
     # 帧间差 0.436、背景/头部变化比 0.506，背景在跟着头一起晃；而 ROI 外又
