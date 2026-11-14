@@ -490,7 +490,7 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
     if abs(yaw) > 0.01 or abs(pitch) > 0.01 or abs(roll) > 0.01:
         f = out.astype(np.float32)
         blur = cv2.GaussianBlur(f, (0, 0), 1.0)
-        amt = (0.15 + 0.14 * min(1.0, abs(roll) / 5.0)) * wg[..., None]
+        amt = (0.15 + 0.28 * min(1.0, abs(roll) / 5.0)) * wg[..., None]
         out = np.clip(f + amt * (f - blur), 0, 255).astype(np.uint8)
     return out
 
