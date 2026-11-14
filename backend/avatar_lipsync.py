@@ -29,6 +29,7 @@ def _paths():
         "onnx": os.path.join(_MODELS, "wav2lip_gan.onnx"),
         "det": os.path.join(_MODELS, "scrfd_2.5g_bnkps.onnx"),
         "mel": os.path.join(_MODELS, "_mel_basis.npy"),
+        "sr": os.path.join(_MODELS, "bigface_x4.onnx"),
     }
 
 
