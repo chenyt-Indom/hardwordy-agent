@@ -10635,6 +10635,14 @@ def _hive_on_stream(gid: str, frame: dict) -> None:
 
 
 hive_client.client().on_stream = _hive_on_stream
+# ★ 2026-11-15：实测发现一个真实脆弱点 —— 回调只在 `client().start()` 里通过
+#   `_hook()` 挂到 mesh 上。如果某个成员**还没点开群**（没走 start），
+#   mesh 的 on_stream 就是 None，别人 @hd 的实时思考他一帧也收不到。
+#   这里在模块加载时就挂一次，和 start 里的那次是幂等的。
+try:
+    hive_client.client()._hook()
+except Exception:
+    logger.warning("挂载 @hd 流式回调失败（不影响消息收发）", exc_info=True)
 
 
 def _hive_on_cancel(gid: str, body: dict) -> None:
