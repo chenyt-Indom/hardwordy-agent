@@ -72,6 +72,8 @@ print("1) 初始连接：%s（%.2fs，走 %s）"
 if not ok:
     sys.exit(1)
 
+ca0 = lk.connected_at
+tries0 = lk.cand_tries
 ssh = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=8",
        "root@139.199.69.88"]
 print("2) 重启服务器端中继服务…", flush=True)
@@ -80,16 +82,21 @@ p = subprocess.run(ssh + ["systemctl restart hive-relay; sleep 1; systemctl is-a
                    capture_output=True, text=True, timeout=60)
 print("   服务状态：%s" % (p.stdout or "").strip(), flush=True)
 
-# 3) 等它自己发现断线
-ok, sec = wait_state(("connecting", "error"), 30)
-print("3) 察觉断线：%s（%.2fs）state=%s" % ("是" if ok else "否", sec, lk.state), flush=True)
-
-# 4) 等它自己连回来
-ok, sec = wait_state(("online",), 60)
+# 3) 等「新的连接建立」（connected_at 变了），同时记录中间是否观察到断开
+seen_down = False
+ok = False
+while time.time() - t_restart < 60:
+    if lk.state != "online":
+        seen_down = True
+    if lk.connected_at and lk.connected_at != ca0 and lk.state == "online":
+        ok = True
+        break
+    time.sleep(0.02)
 total = round(time.time() - t_restart, 2)
-print("4) 自动恢复：%s（重启后 %.2fs 回到 online，走 %s）"
+print("3) 观察到中间掉线：%s" % ("是" if seen_down else "没抓到（重连太快）"), flush=True)
+print("4) 自动恢复：%s（重启后 %.2fs 建立了新连接，走 %s）"
       % ("是" if ok else "否", total, lk.active_url), flush=True)
-print("   累计尝试 %d 次，失败连击 %d" % (lk.cand_tries, lk.fail_streak), flush=True)
+print("   尝试次数 %d → %d" % (tries0, lk.cand_tries), flush=True)
 
 lk._stop = True
 ok2 = ok and total < 45
