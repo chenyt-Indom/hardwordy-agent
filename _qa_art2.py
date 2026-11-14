@@ -17,7 +17,7 @@ from backend import hive, workspace, main
 cli = TestClient(main.app)
 
 # ---------- 1) 建群
-r = cli.post("/api/hive/groups", json={"name": "产物E2E测试群"})
+r = cli.post("/api/hive/create", json={"name": "产物E2E测试群"})
 d = r.json()
 gid = d.get("gid") or (d.get("group") or {}).get("gid") or ""
 chk("建群", bool(gid), json.dumps(d, ensure_ascii=False)[:200])
