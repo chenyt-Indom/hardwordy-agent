@@ -5307,27 +5307,27 @@
     //   后端可能卡在工具里（比如等一个没人回答的确认框，最长 15 分钟），
     //   这段时间界面看起来"活着"其实什么都没发生。这里加个看门狗：
     //   90 秒没有任何事件 → 移掉光标 + 明确告诉用户，别让人干等。
-    let _lastEventAt = Date.now();
-    const _t0 = Date.now();
-    const _watchdog = setInterval(() => {
-      if (!streaming) { clearInterval(_watchdog); return; }
-      // 硬上限：5 分钟还没结束 → 直接中止并保留已生成内容
-      if (Date.now() - _t0 > 3600000) {   // 硬上限 20 分钟 → 60 分钟
-        clearInterval(_watchdog);
+    // ★ 2026-11-15：看门狗实现搬到 livecard.js 的 makeWatchdog()，单聊和群聊共用。
+    //   阈值沿用原来的实际值（硬上限 60 分钟、空闲 10 分钟才提示、每 5 秒检查一次），
+    //   提示文案和光标清理动作也一字未改。
+    let _lastEventAt = Date.now();      // 保留：6463 行仍在写它，语义不变
+    const _watchdog = window.LiveCard.makeWatchdog({
+      isActive: () => streaming,
+      onHardAbort: () => {
         try { abortCtl.abort(); } catch (e) { /* ignore */ }
         answerBubble.querySelectorAll(".stream-cursor").forEach((n) => n.remove());
         showToast("这轮超过 20 分钟还没结束，已自动中断并保留已生成的部分", "warn");
-        return;
-      }
-      if (Date.now() - _lastEventAt < 600000) return;   // 90 秒 → 10 分钟才提示
-      clearInterval(_watchdog);
-      answerBubble.querySelectorAll(".stream-cursor").forEach((n) => n.remove());
-      showToast("已经 90 秒没有任何新内容 —— 模型可能卡在某个工具里了，"
-                + "可以点「■ 终止」重来", "warn");
-      if (thinkStatus && thinkStatus.textContent.indexOf("思考中") === 0) {
-        thinkStatus.textContent = "🧠 卡住了（90 秒无响应）";
-      }
-    }, 5000);
+      },
+      onIdle: () => {
+        answerBubble.querySelectorAll(".stream-cursor").forEach((n) => n.remove());
+        showToast("已经 90 秒没有任何新内容 —— 模型可能卡在某个工具里了，"
+                  + "可以点「■ 终止」重来", "warn");
+        if (thinkStatus && thinkStatus.textContent.indexOf("思考中") === 0) {
+          thinkStatus.textContent = "🧠 卡住了（90 秒无响应）";
+        }
+      },
+    });
+    _watchdog.start();
     const paintAnswer = (force) => {
       const now = Date.now();
       if (!force && now - _paintAt < 120) {
