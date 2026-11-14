@@ -382,7 +382,7 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
     zn = prep["zn"]
     wg = prep["wgt"]
     su, sv = u.copy(), v.copy()
-    for _ in range(2):
+    for _ in range(max(1, int(iters))):
         zs = cv2.remap(zn, su, sv, cv2.INTER_LINEAR,
                        borderMode=cv2.BORDER_REPLICATE)
         ws = cv2.remap(wg, su, sv, cv2.INTER_LINEAR,
