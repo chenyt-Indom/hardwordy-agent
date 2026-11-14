@@ -643,10 +643,22 @@ class HiveClient:
         self._error = ""
         self._last_ok = time.time()
         self._started_at = self._started_at or time.time()
+        warn = ""
         if hit["src"] == "addr" and hit["host"]:
-            m.connect(hit["host"], int(hit["port"] or MESH.MESH_PORT), hit["gid"])
-        return {"ok": True, "group": g, "via": hit["src"],
-                "matched": len(cands), "password": H.format_password(pw_n)}
+            if hit.get("mode") == "punch":
+                cr = m.connect_punch(hit["host"], int(hit["port"]),
+                                     hit["gid"], timeout=10.0)
+                if not cr.get("ok"):
+                    warn = cr.get("error") or "打洞连接失败"
+            else:
+                m.connect(hit["host"], int(hit["port"] or MESH.MESH_PORT),
+                          hit["gid"])
+        out = {"ok": True, "group": g, "via": hit["src"],
+               "matched": len(cands), "password": H.format_password(pw_n)}
+        if warn:
+            # 已经进群了（密钥对得上），只是没连上人 —— 别当成入群失败
+            out["warn"] = warn
+        return out
 
     def connect_code(self, gid: str) -> Dict[str, Any]:
         self._hook()
