@@ -30,7 +30,7 @@ def lip_gap(fr):
 
 tiles = []
 for op in (0.0, 0.5, 1.0):
-    fr = A2._frame(p2, op, 1.0, amp=1.2)
+    fr = A25._mouth_frame(p2, op, 1.0, amp=1.2)
     fr = np.asarray(fr.convert("RGB"))
     g, mn, base = lip_gap(fr)
     print("op=%.1f  暗带行数 %d  最暗 %.1f  基准 %.1f" % (op, g, mn, base))
