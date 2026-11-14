@@ -141,7 +141,7 @@ def render_mesh(tex, uv, pts, tri, size=256, bg=(0, 0, 0), shade=True):
     np.clip(hi, 0, size)
     bw = hi[:, 0] - lo[:, 0]
     bh = hi[:, 1] - lo[:, 1]
-    ok = (bw >= 1) & (bh >= 1)
+    ok = (bw >= 1) & (bh >= 1) & (lo[:, 0] < size) & (lo[:, 1] < size)
 
     for i in np.nonzero(ok)[0]:
         x0, y0 = int(lo[i, 0]), int(lo[i, 1])
