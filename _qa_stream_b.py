@@ -44,15 +44,18 @@ def on_stream(g, obj):
 
 cli = hive_client.client()
 cli.on_stream = on_stream
-try:
-    cli.status()          # 触发 _hook，把 on_stream 挂到 mesh 上
-except Exception:
-    pass
-
 m = hive_mesh.node()
+m.on_peer = lambda *a, **k: print("B on_peer:", a, k, flush=True)
+
 print("B mesh.start:", m.start(port=0, groups=[gid]), flush=True)
+# start 之后**强制重挂**：确认回调真的在 mesh 上（_hooked 缓存会跳过重复挂载）
+cli._hooked = False
+cli._hook()
+print("B on_stream 已挂:", getattr(m, "on_stream", None) is not None, flush=True)
 time.sleep(0.8)
 print("B connect:", m.connect("127.0.0.1", PORT, gid), flush=True)
+time.sleep(1.5)
+print("B 此刻 peers:", getattr(m, "peer_count", lambda: "?")() if hasattr(m, "peer_count") else "?", flush=True)
 
 time.sleep(7)
 print("B 总共收到:", len(got), "帧", flush=True)
