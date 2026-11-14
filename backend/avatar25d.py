@@ -515,7 +515,7 @@ def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
 
         # 每列的下拉量：中间最多 2.2*eh，眼角按 cos 衰减到 0 → 弧形眼皮
         u = np.clip((xx - cx) / ew, -1.0, 1.0)
-        fall = np.cos(u * np.pi / 2.0) ** 0.75
+        fall = np.maximum(np.cos(u * np.pi / 2.0), 0.0) ** 0.75
         pull = (2.2 * eh * a) * fall
 
         # 采样：当前像素取它上方 pull 处的颜色（把上眼皮往下拉）
