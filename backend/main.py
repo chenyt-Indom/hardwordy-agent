@@ -10672,6 +10672,50 @@ def _hive_on_file(gid: str, meta: dict) -> None:
 
 hive_client.client().on_file = _hive_on_file
 
+# 补发节流：同一份文件 60 秒内只补发一次。
+# 请求是泛洪的，群里 5 个人就会有 5 条到达（还会被转发几轮），
+# 不节流的话一个人打开一个旧产物，全网立刻互相灌几十遍 20MB 文件。
+_freq_sent: dict = {}
+_freq_lock = threading.Lock()
+
+
+def _hive_on_freq(gid: str, body: dict) -> None:
+    """有人缺附件、在问「谁有」→ 本机有就补发一次（2026-11-15）。
+
+    这是「任何成员都能打开产物」的最后一环：后入群的人没有早期广播的附件本体，
+    他点开产物时本机会发 T_FREQ，群里任何一个持有者都会把它补回来。
+    """
+    try:
+        fid = str((body or {}).get("fid") or "")
+        if not fid:
+            return
+        key = gid + "/" + fid
+        now = time.time()
+        with _freq_lock:
+            if now - float(_freq_sent.get(key) or 0) < 60:
+                return
+            _freq_sent[key] = now
+            if len(_freq_sent) > 500:      # 别让这张表无限长
+                for k in list(_freq_sent)[:200]:
+                    _freq_sent.pop(k, None)
+        try:
+            meta = hive.get_file_meta(gid, fid)
+        except Exception:
+            return                          # 本机也没有，别人会补
+        try:
+            data = hive.read_file_bytes(gid, fid)
+        except Exception:
+            return
+        # 异步补发：on_freq 在收包线程里被调用，同步发几十片会把读循环卡住
+        threading.Thread(
+            target=lambda: hive_client.client().send_file(gid, meta, data),
+            daemon=True).start()
+    except Exception:
+        pass
+
+
+hive_client.client().on_freq = _hive_on_freq
+
 
 def _hive_on_gone(gid: str, name: str) -> None:
     """群主删了群：推一帧，前端立刻把这个群从列表里去掉。"""
