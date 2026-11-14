@@ -10,7 +10,7 @@ os.makedirs(OUT, exist_ok=True)
 
 # 1) 造测试语音
 mp3 = os.path.join(OUT, "t.mp3")
-TEXT = "大家好，这是修复之后的数字人效果，请看看嘴部和背景是否还有割裂感。"
+TEXT = "这是修复后的效果，请看嘴部。"
 if not os.path.isfile(mp3):
     async def gen():
         import edge_tts
