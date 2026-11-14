@@ -2746,6 +2746,14 @@
       if (mode === "w2l" && resSel) {
         base.max_side = parseInt(resSel.value, 10) || 1024;
       }
+      // 人物动作强度：0 静止 / 1 自然 / 1.6 活跃。
+      // Wav2Lip 与伪3D 都支持；2D 和真3D 没有这套动作层，不传。
+      const moSel = $("#av2Motion");
+      if (moSel && (mode === "w2l" || mode === "p25d")) {
+        const mv = parseFloat(moSel.value);
+        base.motion = isNaN(mv) ? 1 : mv;
+        try { localStorage.setItem("av2_motion", String(base.motion)); } catch (e) {}
+      }
       // 每帧耗时的实测值：2D ≈ 12ms、伪3D ≈ 36ms、真3D ≈ 150ms，
       // 所以分段长度按模式递减，保证每段都在请求超时窗口内。
       // Wav2Lip 实测 138 字 = 29 秒语音 = 37.7 秒渲染，接近超时线，
