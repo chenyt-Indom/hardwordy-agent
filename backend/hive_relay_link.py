@@ -300,9 +300,7 @@ def probe(url: str, token: str = "", timeout: float = 4.0) -> Dict[str, Any]:
         s.settimeout(timeout)
         if p.get("ws"):
             if p.get("tls"):
-                import ssl
-                s = ssl.create_default_context().wrap_socket(
-                    s, server_hostname=p["host"])
+                s, _verified = _wrap_tls(s, p["host"], p["port"], timeout)
                 s.settimeout(timeout)
             rest = ws_min.handshake_client(
                 s, "%s:%s" % (p["host"], p["port"]),
