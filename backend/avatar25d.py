@@ -520,7 +520,7 @@ def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0,
     ew = max(6.0, gap * 0.17)          # 眼裂半宽
     eh = max(5.0, gap * 0.085)         # 眼裂半高
     for (ex, ey) in prep["eyes"]:
-        dx, dy = _shift_of(prep, ex, ey, yaw, pitch, tx, ty)
+        dx, dy = _shift_of(prep, ex, ey, yaw, pitch, tx, ty, roll, scl)
         ex, ey = ex + dx, ey + dy
         # ROI 上方要多留皮肤当「上眼皮料」：最多下拉 2.2*eh，再留 1 个 eh 余量
         rx0 = int(max(0, ex - ew * 1.18)); rx1 = int(min(W, ex + ew * 1.18))
