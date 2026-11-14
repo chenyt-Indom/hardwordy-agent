@@ -152,12 +152,17 @@ def render_mesh(tex, uv, pts, tri, size=256, bg=(0, 0, 0), shade=True,
         x0, y0 = int(lo[i, 0]), int(lo[i, 1])
         w, h = int(bw[i]), int(bh[i])
         s3 = src_all[i]
-        d3 = dst_all[i] - np.array([x0, y0], np.float32)
+        # 目标三角形从重心外扩 1.5%，消除相邻三角形之间的 1px 接缝
+        d3w = dst_all[i]
+        ctr = d3w.mean(axis=0)
+        d3 = (d3w - ctr) * 1.015 + ctr - np.array([x0, y0], np.float32)
         M = cv2.getAffineTransform(s3, d3)
         warped = cv2.warpAffine(tex, M, (w, h), flags=cv2.INTER_LINEAR,
                                 borderMode=cv2.BORDER_REPLICATE)
         mask = np.zeros((h, w), np.uint8)
-        cv2.fillConvexPoly(mask, np.round(d3).astype(np.int32), 255)
+        ip = np.round(d3).astype(np.int32)
+        cv2.fillConvexPoly(mask, ip, 255)
+        cv2.polylines(mask, [ip], True, 255, 1)
         m = mask > 0
         if not m.any():
             continue
