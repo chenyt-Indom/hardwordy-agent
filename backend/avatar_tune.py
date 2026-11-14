@@ -352,6 +352,224 @@ def tune(img_path, geom=None, subject=None, timeout=90, use_cache=True,
             "notes": notes, "style": style, "key": key}
 
 
+_CLOSE_FALLBACK_PROMPT = (
+    "closed mouth of a 3D cartoon character, lips gently pressed together, "
+    "natural upper and lower lip with a soft lip line, subtle highlight, "
+    "smooth skin, cel shaded, same warm skin tone, clean corners, high detail")
+_CLOSE_FALLBACK_NEG = (
+    "open mouth, teeth, tongue, black gap, dark hole, black dots, blurry, "
+    "smear, patch, hard edge, scar, red lips, different style, low quality")
+
+_CLOSE_PROMPT = """你是数字人形象修图师。这张图要改成「闭嘴」的样子，用来当说话动画的基准图。
+
+请仔细看图，然后**只输出一个 JSON**（不要解释、不要 markdown 代码块）：
+{
+  "mode": "inpaint" 或 "whole",
+  "prompt": "英文 inpainting 提示词",
+  "negative": "英文负面提示词",
+  "cs": 300,
+  "n": 1,
+  "style": "画风，如 3d卡通 / 2D动漫 / 写实",
+  "reason": "中文一句话说明你为什么这么定"
+}
+
+要点：
+1. prompt **只描述嘴部**（不要描述整张图）：闭嘴后的唇形、唇线、唇色、
+   与周围皮肤的衔接、画风词。纯色块卡通要加 clean flat colors / no texture；
+   写实要加 photorealistic / skin pores。原图什么风格就保持什么风格。
+2. negative 要把这些排除掉：open mouth, teeth, tongue, black gap, dark hole,
+   blurry, smear, patch, hard edge, different style。
+3. mode 选 "inpaint"（只重绘嘴周，主形象像素完全不动）或 "whole"（整张重绘，
+   光影更协调但脸型/配饰会变）。默认 inpaint。
+4. cs 是嘴周裁剪框边长（200~420），嘴在画面里越大就越取大。
+5. n 是出图张数（1~3）：画风越特殊、风险越高越要多出几张挑。
+"""
+
+_JUDGE_PROMPT = """你在验收一张数字人形象的「闭嘴」修图结果。
+图1 = 原图（嘴张开）　图2 = 修图后的结果。
+
+**只输出一个 JSON**（不要解释、不要 markdown 代码块）：
+{
+  "score": 0-10,
+  "closed": true/false,
+  "natural": true/false,
+  "seamless": true/false,
+  "issues": ["具体问题1", "具体问题2"],
+  "fix": "如果还要改进，prompt 该怎么改（英文，一句话）",
+  "reason": "中文一句话结论"
+}
+
+判分标准（严格打分，不要给面子分）：
+· closed  —— 嘴真的闭了吗？还露牙齿/舌头/黑色口腔就是 false
+· natural —— 唇形自然吗？有上唇+唇线+下唇体块才算；一条细线、一块平涂都是 false
+· seamless—— 与周围皮肤衔接无缝吗？硬边、矩形框、色块、涂抹感、色差都是 false
+· 7 分以上 = 可以直接用；5~6 = 勉强；5 分以下 = 不能用
+"""
+
+
+def plan_close(img_path, geom=None, timeout=90):
+    """让 LLM 看图，决定「闭嘴基准」怎么重绘（mode / prompt / cs / n）。
+
+    返回 dict：ok / mode / prompt / negative / cs / n / style / reason / raw
+    失败时 ok=False，调用方用内置默认值。
+    """
+    out = {"ok": False, "mode": "inpaint", "cs": 300, "n": 1,
+           "prompt": _CLOSE_FALLBACK_PROMPT, "negative": _CLOSE_FALLBACK_NEG,
+           "style": "", "reason": "", "raw": ""}
+    b64 = _b64_small(img_path, side=640)
+    if not b64:
+        out["reason"] = "形象图读取失败"
+        return out
+
+    hint = []
+    if geom:
+        hint.append("图像算法测到的嘴部：中心=(%.0f,%.0f)、嘴宽=%.0f、开口高=%.0f、源图嘴%s"
+                    % (float(geom.get("cx") or 0), float(geom.get("cy") or 0),
+                       float(geom.get("mw") or 0), float(geom.get("open_h") or 0),
+                       "张开" if geom.get("source_open") else "闭合"))
+        try:
+            _H = float(geom.get("img_h") or 0)
+            if _H > 0:
+                hint.append("画面高度 %.0f，嘴中心在 %.0f%% 高度处"
+                            % (_H, 100.0 * float(geom.get("cy") or 0) / _H))
+        except Exception:                               # noqa: BLE001
+            pass
+    prompt = _CLOSE_PROMPT
+    if hint:
+        prompt += "\n补充信息（可直接参考）：\n" + "\n".join(hint)
+
+    try:
+        from . import avatar_vision as AV
+    except Exception as e:                              # noqa: BLE001
+        out["reason"] = "视觉模块不可用：%s" % e
+        return out
+
+    txt, err = AV._call_ds(prompt, [b64], timeout=timeout)
+    if err or not txt:
+        out["reason"] = "云端规划失败（%s）" % (err or "空返回")
+        return out
+    out["raw"] = (txt or "")[:400]
+
+    obj = AV._json_of(txt)
+    if not isinstance(obj, dict):
+        out["reason"] = "云端返回不是 JSON"
+        return out
+
+    mode = str(obj.get("mode") or "inpaint").strip().lower()
+    out["mode"] = mode if mode in ("inpaint", "whole") else "inpaint"
+    p = str(obj.get("prompt") or "").strip()
+    if len(p) >= 20:
+        out["prompt"] = p[:900]
+    ng = str(obj.get("negative") or "").strip()
+    if len(ng) >= 5:
+        out["negative"] = ng[:600]
+    try:
+        out["cs"] = int(max(200, min(420, int(obj.get("cs") or 300))))
+    except Exception:                                   # noqa: BLE001
+        out["cs"] = 300
+    try:
+        out["n"] = int(max(1, min(3, int(obj.get("n") or 1))))
+    except Exception:                                   # noqa: BLE001
+        out["n"] = 1
+    out["style"] = str(obj.get("style") or "")[:40]
+    out["reason"] = str(obj.get("reason") or "")[:400]
+    out["ok"] = True
+    return out
+
+
+def judge_close(before_b64, after_b64, timeout=90):
+    """LLM 验收：原图 vs 修图结果，打分并指出问题。
+
+    返回 dict：ok / score(0~10) / closed / natural / seamless / issues / fix / reason
+    """
+    out = {"ok": False, "score": 0.0, "closed": False, "natural": False,
+           "seamless": False, "issues": [], "fix": "", "reason": ""}
+    if not before_b64 or not after_b64:
+        out["reason"] = "缺图"
+        return out
+    try:
+        from . import avatar_vision as AV
+    except Exception as e:                              # noqa: BLE001
+        out["reason"] = "视觉模块不可用：%s" % e
+        return out
+
+    txt, err = AV._call_ds(_JUDGE_PROMPT, [before_b64, after_b64], timeout=timeout)
+    if err or not txt:
+        out["reason"] = "云端验收失败（%s）" % (err or "空返回")
+        return out
+    obj = AV._json_of(txt)
+    if not isinstance(obj, dict):
+        out["reason"] = "验收返回不是 JSON"
+        return out
+    try:
+        out["score"] = float(max(0.0, min(10.0, float(obj.get("score") or 0))))
+    except Exception:                                   # noqa: BLE001
+        out["score"] = 0.0
+    for k in ("closed", "natural", "seamless"):
+        out[k] = bool(obj.get(k))
+    iss = obj.get("issues")
+    if isinstance(iss, list):
+        out["issues"] = [str(x)[:120] for x in iss[:6]]
+    out["fix"] = str(obj.get("fix") or "")[:400]
+    out["reason"] = str(obj.get("reason") or "")[:400]
+    out["ok"] = True
+    return out
+
+
+def pick_best(montage_b64, n, timeout=90):
+    """LLM 从 n 张候选里挑最好的（横向拼图，从左到右第 1..n 张）。
+
+    为什么不直接用 judge_close 的单张分数：2026-11-15 实测，同一个 DeepSeek
+    对**同一张图**先后给出过「优秀、立体感强、画风高度一致」和「4 分、
+    仅一条极细线、生硬」两种相反结论 —— 单张绝对分数不可靠。
+    而把多张并排做**相对比较**时判断稳定得多：实测能明确排出
+    「第 3 格最好」，并说清另两张差在哪（模糊/亮斑/不对称）。
+
+    返回 dict：ok / best(1..n，0=没选出来) / reason
+    """
+    out = {"ok": False, "best": 0, "reason": ""}
+    try:
+        n = int(n)
+    except Exception:                                   # noqa: BLE001
+        n = 0
+    if not montage_b64 or n < 1:
+        out["reason"] = "缺图"
+        return out
+    try:
+        from . import avatar_vision as AV
+    except Exception as e:                              # noqa: BLE001
+        out["reason"] = "视觉模块不可用：%s" % e
+        return out
+
+    prompt = (
+        "这张图是把同一个 3D 卡通角色的 **%d 个闭嘴方案**横向并排"
+        "（从左到右第 1 到第 %d 个，之间用白色竖条分隔）。\n"
+        "请挑出最自然的一个，标准：\n"
+        "① 嘴完全闭合、不露牙不露舌、没有暗红缝隙；\n"
+        "② 唇线自然，上唇/唇缝/下唇有立体感 —— 既不是一条细线，也不是一块平涂；\n"
+        "③ 没有硬边、涂抹、色块、黑点；\n"
+        "④ 画风与原图一致。\n"
+        '只输出 JSON：{"best": 序号(1..%d), "reason": "一句话说明它为什么最好"}'
+        % (n, n, n)
+    )
+    txt, err = AV._call_ds(prompt, [montage_b64], timeout=timeout)
+    if err or not txt:
+        out["reason"] = "云端选优失败（%s）" % (err or "空返回")
+        return out
+    obj = AV._json_of(txt)
+    if not isinstance(obj, dict):
+        out["reason"] = "选优返回不是 JSON"
+        return out
+    try:
+        b = int(obj.get("best") or 0)
+    except Exception:                                   # noqa: BLE001
+        b = 0
+    out["best"] = b if 1 <= b <= n else 0
+    out["reason"] = str(obj.get("reason") or "")[:300]
+    out["ok"] = out["best"] > 0
+    return out
+
+
 def explain(params):
     """把参数转成给用户看的中文短句（只列偏离默认的项）。"""
     out = []

@@ -178,7 +178,26 @@ class DeepSeekError(RuntimeError):
     """DeepSeek 调用失败。message 已脱敏。"""
 
 
-def vision_chat(prompt: str, image_b64: str, model: str, api_key: str,
+def _vision_content(prompt: str, image_b64) -> list:
+    """组装多模态 content。image_b64 可以是单张 base64，也可以是列表。
+
+    ⚠️ 2026-11-15 修：原来这里**只拼一张图**，于是「把原图和修图结果一起发过去
+    让模型对比」这类任务，模型从头到尾只看到第一张，验收/选片全部失效
+    （它会说「只收到一张图，无法验收」）。多图时按顺序编号，方便 prompt 里指代。
+    """
+    imgs = image_b64 if isinstance(image_b64, (list, tuple)) else [image_b64]
+    imgs = [x for x in imgs if x]
+    text = prompt or "描述这张图片"
+    if len(imgs) > 1:
+        text = "下面依次是 %d 张图（图1、图2…）：\n" % len(imgs) + text
+    content = [{"type": "text", "text": text}]
+    for b in imgs[:4]:
+        content.append({"type": "image_url",
+                        "image_url": {"url": "data:image/png;base64," + str(b)}})
+    return content
+
+
+def vision_chat(prompt: str, image_b64, model: str, api_key: str,
                 max_tokens: int = 900, timeout: tuple = (15, 180),
                 temperature: float | None = None) -> str:
     """**看图**：把图片按 OpenAI 多模态格式发给模型，返回文字回答。
@@ -200,11 +219,7 @@ def vision_chat(prompt: str, image_b64: str, model: str, api_key: str,
         #   reasoning_content，content 为空 → 我们这边判定"模型没有返回内容"
         #   然后退回本地小模型（白瞎了 DS 的视力）。
         "thinking": {"type": "disabled"},
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": prompt or "描述这张图片"},
-            {"type": "image_url",
-             "image_url": {"url": "data:image/png;base64," + image_b64}},
-        ]}],
+        "messages": [{"role": "user", "content": _vision_content(prompt, image_b64)}],
     }
     # 坐标/质检类任务要可复现：给了就带上（不给则沿用服务端默认）
     if temperature is not None:

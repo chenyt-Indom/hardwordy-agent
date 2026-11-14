@@ -228,6 +228,100 @@ def set_mouth(d: dict) -> dict:
     return mouth()
 
 
+def _any_image_key(image_key: str = "") -> str:
+    """统一取图像 Key：前端传了用前端的，没传用后端保管的那把。
+
+    2026-11-15 用户要求「所有 key 统一，一把多用」：在 🎨 里存一次，
+    文生图 / 图像微改 / 数字人闭嘴 / 定时任务全部共享，不用各自再配。
+    """
+    k = str(image_key or "").strip()
+    if k:
+        return k
+    try:
+        from . import keyvault
+        return keyvault.get_image_key()
+    except Exception:
+        return ""
+
+
+def close_plan(image_key: str = "") -> dict:
+    """当前这台机器该用哪种方式生成闭嘴基准（只探测，不加载模型）。
+
+    ⚠️ 为什么要这个（2026-11-15 实测）：SDXL 在 **CPU** 上根本不可用 ——
+       · fp16 加载后进程内存 15.4GB，推理峰值 **22.8GB**；
+       · 单步（**仅 256×256**）**20.1 秒**，按面积外推 1024×1024 单步约 322 秒，
+         32 步 ≈ **2.9 小时**。
+       低配机（16GB / 无独显）既吃不下内存，也等不起时间。所以必须先探测再决定，
+       不能让用户点一下「闭嘴基准」就卡几小时。
+
+    返回：
+      tier      —— gpu_high / gpu_mid / gpu_low / cpu
+      method    —— 建议的方法（sdxl_hires / lip_shift）
+      gen_ok    —— 本机能不能在合理时间内跑生成式（扩散）
+      eta       —— 预计耗时（人话）
+      why       —— 为什么是这个结论
+      can_force —— 能不能强制跑生成式（CPU 上也能，只是很慢）
+    """
+    out = {"ok": True, "tier": "cpu", "method": "lip_shift", "gen_ok": False,
+           "eta": "", "why": "", "can_force": False, "gpu": None,
+           "vram_gb": None, "device": "cpu",
+           # 云端生成式：不占本地算力，是低配机拿到高质量效果的正路。
+           # 2026-11-15：Key 统一保管 —— 前端没传时用后端存的那把（同一个 Key 多通道共用）。
+           "cloud_ok": bool(_any_image_key(image_key)), "best": ""}
+    try:
+        from . import t2i as _t2i
+        d = _t2i.device_info()
+    except Exception as e:                              # noqa: BLE001
+        out["why"] = "设备探测失败：%s" % e
+        return out
+    out["device"] = d.get("device") or "cpu"
+    out["gpu"] = d.get("gpu")
+    vram = None
+    if out["device"] == "cuda":
+        try:
+            import torch
+            vram = float(torch.cuda.get_device_properties(0).total_memory) / (1024 ** 3)
+        except Exception:                               # noqa: BLE001
+            vram = None
+    out["vram_gb"] = round(vram, 1) if vram else None
+
+    if out["device"] == "cuda" and vram:
+        if vram >= 10:
+            out.update(tier="gpu_high", method="sdxl_hires", gen_ok=True,
+                       eta="约 20~40 秒",
+                       why="显卡 %s（%.0fGB 显存），可跑 SDXL 高分辨率重绘" % (out["gpu"], vram))
+        elif vram >= 6:
+            out.update(tier="gpu_mid", method="sdxl_hires", gen_ok=True,
+                       eta="约 25~50 秒",
+                       why="显卡 %s（%.0fGB 显存），用中等分辨率重绘（更省显存）" % (out["gpu"], vram))
+        else:
+            out.update(tier="gpu_low", method="sdxl_hires", gen_ok=True,
+                       eta="约 40~90 秒",
+                       why="显卡 %s（%.0fGB 显存），用小分辨率重绘（最省显存）" % (out["gpu"], vram))
+        out["can_force"] = True
+        out["best"] = "local"          # 本地有显卡：快、免费，优先本地
+        return out
+
+    # 纯 CPU：生成式在物理上不可行（内存 + 时间都过不去）
+    out.update(
+        tier="cpu", method="lip_shift", gen_ok=False, can_force=True,
+        eta="约 5~20 分钟（不推荐）",
+        why=("本机没有可用显卡。SDXL 在 CPU 上推理峰值内存约 23GB、"
+             "1024×1024 跑 32 步约 3 小时（实测单步 20 秒，还是 256×256 的尺寸），"
+             "所以本地不跑扩散。"))
+    if out["cloud_ok"]:
+        out["best"] = "cloud"
+        out["method"] = "cloud"
+        out["eta"] = "约 20~60 秒（云端）"
+        out["why"] += "已检测到图片 API Key，走云端生成式重绘（不占本地算力）。"
+    else:
+        out["best"] = "deterministic"
+        out["eta"] = "约 1 秒（确定性，效果有限）"
+        out["why"] += ("也没填图片 API Key，只能用确定性合成。"
+                       "要生成式质量：填 Key 走云端，或在有显卡的机器上生成后拷图。")
+    return out
+
+
 def info() -> dict:
     p = _img_path()
     has = os.path.isfile(p)
@@ -260,6 +354,8 @@ def info() -> dict:
                                % int(os.path.getmtime(_img_closed_preview_path())))
         if has_closed_preview() else "",
         "videos_dir": _vdir(),
+        # 这台机器适合怎么生成闭嘴基准（低配机据此走确定性、不硬跑扩散）
+        "close_plan": close_plan(),
     }
 
 
@@ -433,8 +529,581 @@ def face_box_from_mouth(size=None):
     return int(x1), int(y1), int(x2), int(y2)
 
 
+def _b64_png(pil):
+    """PIL → base64 PNG（RGBA 也能存，mask 要用）。"""
+    import base64 as _b64
+    import io as _io
+    b = _io.BytesIO()
+    pil.save(b, "PNG")
+    return _b64.b64encode(b.getvalue()).decode()
+
+
+def _pil_of_b64(b64):
+    """base64 → RGB PIL。"""
+    import base64 as _b64
+    import io as _io
+
+    from PIL import Image
+    s = b64.split(",", 1)[1] if str(b64).startswith("data:") else b64
+    return Image.open(_io.BytesIO(_b64.b64decode(s))).convert("RGB")
+
+
+def _letterbox_rgb(pil, tw, th):
+    """等比缩放 + 居中补边（不拉伸变形）。返回 (图, (pad_x, pad_y, w, h))。"""
+    from PIL import Image
+    w, h = pil.size
+    s = min(tw / float(w), th / float(h))
+    nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+    im = pil.resize((nw, nh), Image.LANCZOS)
+    canvas = Image.new("RGB", (tw, th), (0, 0, 0))
+    px, py = (tw - nw) // 2, (th - nh) // 2
+    canvas.paste(im, (px, py))
+    return canvas, (px, py, nw, nh)
+
+
+def _blend_mouth_back(img_bgr, patched_rgb, geom, x0, y0, cs):
+    """把重绘后的嘴周块贴回原图。
+
+    与 `_sdxl_hires_close` 同一套后处理（那边已验证过视觉结果）：
+      只贴口腔椭圆内部 → 椭圆加权色对齐 → 去小块暗斑。
+    用椭圆而不是矩形，是因为矩形羽化在实测里被判「明显的矩形拼接边缘、像贴纸」。
+    """
+    import numpy as _np
+    from PIL import Image
+
+    H, W = img_bgr.shape[:2]
+    cx = float(geom.get("cx") or W * 0.5)
+    mw = float(geom.get("mw") or 80.0)
+    ys = float(geom.get("y_split") or (float(geom.get("cy") or H * 0.6)))
+    yh = float(geom.get("y_hole_bot") or (float(geom.get("cy") or H * 0.6) + 12))
+
+    base = _np.array(Image.fromarray(img_bgr[:, :, ::-1])).astype(_np.float32)
+    patch = _np.array(patched_rgb.resize((cs, cs), Image.LANCZOS)).astype(_np.float32)
+
+    _cx = cx - x0
+    _cy = (ys + yh) * 0.5 - y0
+    # 贴回蒙版与送云端的 mask 对齐（略大 4% 做羽化过渡）。
+    # 蒙版比 mask 大太多 = 把原图本来好的唇线也换成模型画的，实测会被磨平。
+    _rx = max(10.0, 0.94 * mw)
+    _ry = max(8.0, (yh - ys) * 0.5)
+    yy, xx = _np.mgrid[0:cs, 0:cs]
+    dist = ((xx - _cx) / _rx) ** 2 + ((yy - _cy) / _ry) ** 2
+    alpha = _np.clip((1.18 - dist) / 0.36, 0, 1).astype(_np.float32)[..., None]
+    region = base[y0:y0 + cs, x0:x0 + cs]
+    base[y0:y0 + cs, x0:x0 + cs] = region * (1 - alpha) + patch * alpha
+
+    # 椭圆加权色对齐（必须按椭圆，不能按矩形 —— 实测矩形会留方形色差）
+    ref = _np.array(Image.fromarray(img_bgr[:, :, ::-1])).astype(_np.float32)
+    # ⚠️ 统计范围只比椭圆大 3px。原来扩 6px 时，上边界会越过唇线碰到护目镜下沿，
+    #   实测有 135 个像素被改动（视觉上看不出，但「主形象不动」就该是零改动）。
+    ay0, ay1 = max(0, int(_cy + y0 - _ry - 3)), min(H, int(_cy + y0 + _ry + 3))
+    ax0, ax1 = max(0, int(_cx + x0 - _rx - 3)), min(W, int(_cx + x0 + _rx + 3))
+    if ay1 - ay0 > 6 and ax1 - ax0 > 6:
+        a_sub = base[ay0:ay1, ax0:ax1]
+        b_sub = ref[ay0:ay1, ax0:ax1]
+        w_sub = alpha[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0][..., 0]
+        for c in range(3):
+            ma, sa = float(a_sub[:, :, c].mean()), float(a_sub[:, :, c].std()) + 1e-6
+            mb, sb = float(b_sub[:, :, c].mean()), float(b_sub[:, :, c].std()) + 1e-6
+            adj = (a_sub[:, :, c] - ma) / sa * sb + mb
+            a_sub[:, :, c] = a_sub[:, :, c] * (1 - 0.55 * w_sub) + adj * (0.55 * w_sub)
+
+    # 去小块暗斑（云端也常在嘴角留杂点）
+    # ⚠️ 只在**口腔内部**去暗斑。原来从 ys-14 开始，上边界落在护目镜下沿，
+    #   实测把护目镜边缘的 135 个像素当成"杂点"改掉了（主形象不该动）。
+    try:
+        from scipy import ndimage
+        vy0, vy1 = max(0, int(ys + 1)), min(H, int(yh + 2))
+        vx0, vx1 = max(0, int(cx - 0.74 * mw)), min(W, int(cx + 0.74 * mw))
+        sub = base[vy0:vy1, vx0:vx1]
+        dark = sub.max(axis=2) < 122
+        if dark.any():
+            lab, n = ndimage.label(dark)
+            for i in range(1, n + 1):
+                m = lab == i
+                if m.sum() <= 60:
+                    ys_i, xs_i = _np.where(m)
+                    for _y, _x in zip(ys_i, xs_i):
+                        _a = sub[max(0, _y - 4):_y + 5, max(0, _x - 4):_x + 5].reshape(-1, 3)
+                        _light = _a[_a.max(axis=1) > 135]
+                        if len(_light):
+                            sub[_y, _x] = _light.mean(axis=0)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+    return _np.clip(base, 0, 255).astype(_np.uint8)[:, :, ::-1]
+
+
+def _cloud_close(img_bgr, geom, key, plan, timeout=300):
+    """用**云端 image2.5**（/images/edits）生成闭嘴基准 —— 低配机路线。
+
+    本机完全不加载生成模型，只做「裁剪 → 送云端 → 贴回」，所以
+    没有显卡、显存 <4GB 的机器也能跑。
+
+    plan 来自 avatar_tune.plan_close()：mode(inpaint/whole) / prompt / negative / cs / n
+
+    返回 dict：ok / images(多张 BGR) / mode / cost / err
+    """
+    import time as _t
+
+    import numpy as _np
+    from PIL import Image
+
+    from . import cloud_image as CI
+
+    if not str(key or "").strip():
+        return {"ok": False, "images": [], "err": "没有图片 API Key（点右上角 🎨 填入）"}
+
+    H, W = img_bgr.shape[:2]
+    cx = float(geom.get("cx") or W * 0.5)
+    cy = float(geom.get("cy") or H * 0.6)
+    mw = float(geom.get("mw") or 80.0)
+    ys = float(geom.get("y_split") or cy)
+    yh = float(geom.get("y_hole_bot") or cy + 12)
+
+    prompt = str(plan.get("prompt") or "").strip()
+    if not prompt:
+        return {"ok": False, "images": [], "err": "LLM 没给出提示词"}
+    neg = str(plan.get("negative") or "").strip()
+    if neg:
+        # OpenAI 兼容接口没有 negative_prompt 字段，用文本规避（实测有效）
+        prompt = prompt + "\n\nAvoid: " + neg
+
+    mode = str(plan.get("mode") or "inpaint").strip().lower()
+    if mode not in ("inpaint", "whole"):
+        mode = "inpaint"
+    try:
+        n = int(max(1, min(3, int(plan.get("n") or 1))))
+    except Exception:                                   # noqa: BLE001
+        n = 1
+
+    t0 = _t.time()
+    outs = []
+    try:
+        if mode == "whole":
+            # 整图重绘：letterbox 到 2:3，回来裁掉补边再缩回原尺寸（不拉伸）
+            src = Image.fromarray(img_bgr[:, :, ::-1])
+            big, (px, py, nw, nh) = _letterbox_rgb(src, 1024, 1536)
+            imgs = CI.edit(prompt, key, _b64_png(big), size="1024x1536", n=n)
+            for b64 in imgs:
+                got = _pil_of_b64(b64)
+                got = got.crop((px, py, px + nw, py + nh)).resize((W, H), Image.LANCZOS)
+                outs.append(_np.array(got)[:, :, ::-1].copy())
+        else:
+            cs = int(max(200, min(420, int(plan.get("cs") or 300))))
+            cs = int(max(160, min(cs, min(W, H))))
+            x0 = int(max(0, min(W - cs, cx - cs / 2.0)))
+            y0 = int(max(0, min(H - cs, cy - cs / 2.0)))
+            crop = Image.fromarray(img_bgr[y0:y0 + cs, x0:x0 + cs][:, :, ::-1])
+            BIG = 1024
+            big = crop.resize((BIG, BIG), Image.LANCZOS)
+
+            # mask：口腔椭圆 = 编辑区（白 + 不透明），其余黑 + 全透明。
+            # 这样无论服务端按「白=改」还是按「透明=不改」解释，结果都一样。
+            # ⚠️ mask 必须**只圈口腔**（唇线以下、下唇以上）。
+            #   2026-11-15 三档对比（DeepSeek 判）：1.08mw/-7/+12 会圈到鼻底和两侧腮红，
+            #   0.95mw/-4/+5 仍碰到腮红边缘，0.90mw/-1/+3 才精准贴住口腔轮廓。
+            #   mask 圈太大 = 把原本好好的唇线也交给模型重画，必被磨平。
+            mx0 = cx - 0.90 * mw - x0
+            mx1 = cx + 0.90 * mw - x0
+            my0 = ys - 1.0 - y0
+            my1 = yh + 3.0 - y0
+            s = BIG / float(cs)
+            rgx0, rgy0 = max(0.0, mx0) * s, max(0.0, my0) * s
+            rgx1, rgy1 = min(float(cs), mx1) * s, min(float(cs), my1) * s
+            if rgx1 - rgx0 < 16 or rgy1 - rgy0 < 10:
+                return {"ok": False, "images": [], "err": "嘴部区域太小，无法重绘"}
+
+            from PIL import ImageDraw
+            m = Image.new("RGBA", (BIG, BIG), (0, 0, 0, 0))
+            ImageDraw.Draw(m).ellipse([rgx0, rgy0, rgx1, rgy1],
+                                      fill=(255, 255, 255, 255))
+            imgs = CI.edit(prompt, key, _b64_png(big), mask_b64=_b64_png(m),
+                           size="1024x1024", n=n)
+            for b64 in imgs:
+                got = _pil_of_b64(b64)
+                outs.append(_blend_mouth_back(img_bgr, got, geom, x0, y0, cs))
+    except Exception as e:                              # noqa: BLE001
+        msg = str(e)
+        try:
+            from . import cloud_image as _CI
+            msg = _CI.scrub(msg)
+        except Exception:                               # noqa: BLE001
+            pass
+        return {"ok": False, "images": [], "err": msg[:300], "mode": mode}
+
+    cost = _t.time() - t0
+    if not outs:
+        return {"ok": False, "images": [], "err": "云端没有返回图片",
+                "mode": mode, "cost": cost}
+    return {"ok": True, "images": outs, "mode": mode, "cost": cost, "n": len(outs)}
+
+
+def _sdxl_hires_close(img_bgr, geom, strength: float = 0.96,
+                      steps: int = 34, cs: int = 300, big: int = 1024):
+    """用 SDXL **高分辨率局部重绘**生成闭嘴基准（生成式，不是像素拼接）。
+
+    流程：裁嘴周 cs×cs → 放大到 1024 → 只对口腔区域打 mask 重绘
+          → 缩回 cs×cs → 羽化贴回 → 颜色对齐原图 → 去小块暗斑
+
+    为什么这么做（2026-11-15 一轮实测，同一张图同一个 mask）：
+      · 直接在原图上 inpaint：mask 只有 26×112 像素，SDXL 能画的像素太少，
+        出来是「扁平色块/涂抹」（唇部 std 70.5 → **26.9**）；
+      · 整图 img2img：连护目镜都被改掉 30.9%，主形象保不住；
+      · 本方案：嘴周放大 3.4 倍再重绘，SDXL 有 1024 像素可用 ——
+        唇部 std 保持 **61.3**（≈原图 70.5），区域外强改 **0.016%**。
+        视觉复核（DeepSeek）结论：「比 CUR 好非常多，质的飞跃，基本没有明显缺陷」。
+
+    失败（模型没装 / 显存不够 / 超时）返回 None，调用方自动退回确定性方法。
+    """
+    try:
+        from . import t2i as _t2i
+        from PIL import Image
+        import numpy as _np
+    except Exception:                                   # noqa: BLE001
+        return None
+    if not _t2i.inpaint_ready():
+        return None
+
+    H, W = img_bgr.shape[:2]
+    cx = float(geom.get("cx") or W * 0.5)
+    cy = float(geom.get("cy") or H * 0.6)
+    mw = float(geom.get("mw") or 80.0)
+    ys = float(geom.get("y_split") or cy)
+    yh = float(geom.get("y_hole_bot") or cy + 12)
+
+    # 裁剪框：以嘴心为中心的正方形，贴边时向内收（不越界）
+    cs = int(max(160, min(cs, min(W, H))))
+    x0 = int(max(0, min(W - cs, cx - cs / 2.0)))
+    y0 = int(max(0, min(H - cs, cy - cs / 2.0)))
+    crop_bgr = img_bgr[y0:y0 + cs, x0:x0 + cs]
+    crop = Image.fromarray(crop_bgr[:, :, ::-1])       # BGR→RGB
+    # 重绘分辨率按显存档位决定：1024 质量最好但吃显存，512 省显存但细节少。
+    BIG = int(max(384, min(1024, int(big or 1024))))
+    BIG = (BIG // 64) * 64                              # SD 要求 64 的倍数
+    big_img = crop.resize((BIG, BIG), Image.LANCZOS)
+
+    # mask：只圈口腔（含嘴角），放大到 1024 后的归一化坐标
+    # ⚠️ 横向用 1.08×mw：`mw` 是**用户标定的嘴部框宽**（本图 63px），
+    #   而这张图大笑时实际开口宽 **112px** —— 按 0.60×mw 圈只盖住中间 76px，
+    #   两侧嘴角的原口腔没被重绘，实测嘴部暗占比反而从 0.095 升到 0.121。
+    mx0 = cx - 1.08 * mw - x0
+    mx1 = cx + 1.08 * mw - x0
+    my0 = ys - 7.0 - y0
+    my1 = yh + 12.0 - y0
+    s = BIG / float(cs)
+    reg = [[max(0.0, mx0) * s / BIG, max(0.0, my0) * s / BIG,
+            min(float(cs), mx1) * s / BIG, min(float(cs), my1) * s / BIG]]
+    if reg[0][2] - reg[0][0] < 0.02 or reg[0][3] - reg[0][1] < 0.01:
+        return None
+
+    # prompt 迭代记录（2026-11-15 三组 A/B，同一 mask 同一图）：
+    #   v1「lips gently pressed together + subtle highlight」→ 视觉复核判
+    #      「偏直的细线、腮红被糊开、画风偏写实」；
+    #   v2 加入「cupid bow / 上下唇体块 / 皮肤纹理延续 / 边缘无缝」后 →
+    #      「完全闭合、唇线自然、有明暗过渡的厚度感、与原图高度一致」。
+    prompt = ("closed mouth of a 3D cartoon character, soft natural lip line, "
+              "subtle upper lip and gentle lower lip volume, cupid bow, "
+              "skin texture with fine shading continuing around the mouth, "
+              "lip edges blending seamlessly into surrounding skin, "
+              "cel shaded 3D render, same warm pink skin tone, clean corners, high detail")
+    neg = ("open mouth, teeth, tongue, black gap, dark hole, black dots, "
+           "flat smear, patch, hard edge, scar, bright red lips, different style, "
+           "low quality, flat shading")
+
+    # 临时文件（SDXL 走路径入参）
+    import tempfile
+    tmp = os.path.join(tempfile.gettempdir(), "_av2_big_%d.png" % int(time.time() * 1000))
+    big_img.save(tmp)
+    try:
+        r = _t2i.inpaint(tmp, prompt, regions=reg, negative_prompt=neg,
+                         strength=strength, steps=steps, feather=12)
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:                               # noqa: BLE001
+            pass
+    if not r or not r.get("ok"):
+        return None
+    try:
+        import base64 as _b64, io as _io
+        patched = Image.open(_io.BytesIO(_b64.b64decode(r["b64"]))).convert("RGB")
+    except Exception:                                   # noqa: BLE001
+        return None
+
+    # ---- 缩回 + 羽化贴回 ----
+    base = _np.array(Image.fromarray(img_bgr[:, :, ::-1])).astype(_np.float32)
+    patch = _np.array(patched.resize((cs, cs), Image.LANCZOS)).astype(_np.float32)
+    # ⚠️⚠️ 只贴回**口腔椭圆内部**，不要贴整块 300×300。
+    #   2026-11-15 实测踩到：SDXL 输出的整块都经过 VAE 编解码，全区域都有微小色差；
+    #   按矩形边界羽化贴回时，视觉复核判「嘴部左右两侧有明显的矩形拼接边缘（垂直硬边）、
+    #   像贴纸浮在脸上」。改成椭圆蒙版后，替换范围就是口腔本身，
+    #   而口腔边缘天然有唇线，看不出接缝。
+    _cx = cx - x0
+    _cy = (ys + yh) * 0.5 - y0
+    _rx = max(10.0, 1.08 * mw)
+    _ry = max(8.0, (yh - ys) * 0.5 + 11.0)
+    yy, xx = _np.mgrid[0:cs, 0:cs]
+    dist = ((xx - _cx) / _rx) ** 2 + ((yy - _cy) / _ry) ** 2
+    alpha = _np.clip((1.18 - dist) / 0.36, 0, 1).astype(_np.float32)[..., None]
+    region = base[y0:y0 + cs, x0:x0 + cs]
+    base[y0:y0 + cs, x0:x0 + cs] = region * (1 - alpha) + patch * alpha
+
+    # ---- 颜色对齐：把嘴周颜色分布拉回原图（抑制 SDXL 偏红/偏亮） ----
+    # ⚠️⚠️ 必须**按椭圆加权**做，不能按矩形范围做。
+    #   2026-11-15 实测踩到：按 (ys-18..yh+26, cx±0.75mw) 的矩形范围调色，
+    #   椭圆之外也被拉了一遍 → 视觉复核反复判「非常明显的矩形硬边、方形处理框痕迹」。
+    #   改成用同一个椭圆 alpha 做权重后，调色范围与替换范围一致，矩形边消失。
+    ref = _np.array(Image.fromarray(img_bgr[:, :, ::-1])).astype(_np.float32)
+    ay0, ay1 = max(0, int(_cy + y0 - _ry - 6)), min(H, int(_cy + y0 + _ry + 6))
+    ax0, ax1 = max(0, int(_cx + x0 - _rx - 6)), min(W, int(_cx + x0 + _rx + 6))
+    if ay1 - ay0 > 6 and ax1 - ax0 > 6:
+        a_sub = base[ay0:ay1, ax0:ax1]
+        b_sub = ref[ay0:ay1, ax0:ax1]
+        # alpha 是 (h,w,1)，这里要 (h,w) 才能和 a_sub[:,:,c] 相乘（否则广播失败）
+        w_sub = alpha[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0][..., 0]      # 0~1 椭圆权重
+        for c in range(3):
+            ma, sa = float(a_sub[:, :, c].mean()), float(a_sub[:, :, c].std()) + 1e-6
+            mb, sb = float(b_sub[:, :, c].mean()), float(b_sub[:, :, c].std()) + 1e-6
+            adj = (a_sub[:, :, c] - ma) / sa * sb + mb
+            a_sub[:, :, c] = a_sub[:, :, c] * (1 - 0.55 * w_sub) + adj * (0.55 * w_sub)
+
+    # ---- 去小块暗斑（SDXL 常在嘴角留几个黑点） ----
+    try:
+        from scipy import ndimage
+        vy0, vy1 = max(0, int(ys - 14)), min(H, int(yh + 18))
+        vx0, vx1 = max(0, int(cx - 0.74 * mw)), min(W, int(cx + 0.74 * mw))
+        sub = base[vy0:vy1, vx0:vx1]
+        dark = sub.max(axis=2) < 122
+        if dark.any():
+            lab, n = ndimage.label(dark)
+            for i in range(1, n + 1):
+                m = lab == i
+                if m.sum() <= 60:                       # 小块=杂点，大块=真实唇缝保留
+                    ys_i, xs_i = _np.where(m)
+                    for _y, _x in zip(ys_i, xs_i):
+                        _a = sub[max(0, _y - 4):_y + 5, max(0, _x - 4):_x + 5].reshape(-1, 3)
+                        _light = _a[_a.max(axis=1) > 135]
+                        if len(_light):
+                            sub[_y, _x] = _light.mean(axis=0)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+    return _np.clip(base, 0, 255).astype(_np.uint8)[:, :, ::-1]     # RGB→BGR
+
+
+def _montage_mouths(img_bgr, outs, geom, side=300):
+    """把 n 个候选的嘴部裁出来横排拼成一张（白条分隔），返回 base64。
+
+    为什么要拼成一张：让 LLM 做**相对比较**。分成多张图传过去时，
+    它会对每张独立打绝对分 —— 实测绝对分极不稳（同一张图给出过
+    「优秀」和「4 分」两种结论）。
+    """
+    import cv2
+    import numpy as _np
+    import base64 as _b64
+
+    H, W = img_bgr.shape[:2]
+    cx = float(geom.get("cx") or W * 0.5)
+    mw = float(geom.get("mw") or 80.0)
+    ys = float(geom.get("y_split") or H * 0.6)
+    yh = float(geom.get("y_hole_bot") or ys + 20)
+    half = max(40.0, 1.75 * mw)
+    x0 = int(max(0, cx - half)); x1 = int(min(W, cx + half))
+    y0 = int(max(0, ys - 26)); y1 = int(min(H, yh + 40))
+    if x1 - x0 < 20 or y1 - y0 < 12:
+        x0, x1 = int(max(0, cx - 80)), int(min(W, cx + 80))
+        y0, y1 = int(max(0, ys - 30)), int(min(H, yh + 45))
+
+    tiles = []
+    for o in outs:
+        if o is None:
+            continue
+        t = o[y0:y1, x0:x1]
+        if t.size == 0:
+            continue
+        h, w = t.shape[:2]
+        sc = side / float(max(1, h))
+        tiles.append(cv2.resize(t, (max(1, int(w * sc)), side),
+                                interpolation=cv2.INTER_CUBIC))
+    if not tiles:
+        return ""
+    sep = _np.full((side, 10, 3), 255, _np.uint8)
+    row = []
+    for i, t in enumerate(tiles):
+        row.append(t)
+        if i < len(tiles) - 1:
+            row.append(sep)
+    mont = _np.hstack(row)
+    ok, buf = cv2.imencode(".jpg", mont, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    return _b64.b64encode(buf).decode() if ok else ""
+
+
+def _sdxl_hires_best(img_bgr, geom, n: int = 3, use_llm: bool = True, **kw):
+    """跑 n 次生成式重绘，用 LLM **相对比较**挑最好的那张。
+
+    为什么要跑 n 次：SDXL 的 inpaint 没有固定 seed。同一 prompt、同一 mask
+    连跑三次，实测嘴部暗占比 0.077 / 0.085 / 0.104、唇部 std 36.7 / 40.5 / 42.6
+    —— 波动明显，单次结果不可控（其中一次还被判「唇间留暗红缝隙」）。
+
+    为什么让 LLM 选而不是自己算分：暗占比最低 ≠ 最好看（太低往往是
+    「压成一条细线、丢唇形」），std 最高也不等于自然。把 n 张并排交给
+    LLM 做相对比较时，它能稳定选出「唇线自然、无亮斑」的那张并说明理由。
+
+    返回 (bgr 或 None, detail)
+    """
+    n = max(1, min(5, int(n or 1)))
+    outs = []
+    t_all = time.time()
+    for _i in range(n):
+        try:
+            o = _sdxl_hires_close(img_bgr, geom, **kw)
+        except Exception:                                # noqa: BLE001
+            o = None
+        if o is not None:
+            outs.append(o)
+    det = {"n_try": n, "n_ok": len(outs),
+           "gen_sec": round(time.time() - t_all, 1)}
+    if not outs:
+        return None, det
+    if len(outs) == 1:
+        det["picked"] = 1
+        return outs[0], det
+
+    if use_llm:
+        try:
+            from . import avatar_tune as AT
+            mont = _montage_mouths(img_bgr, outs, geom)
+            r = AT.pick_best(mont, len(outs))
+            det["llm"] = {"best": r.get("best"), "reason": r.get("reason")}
+            if r.get("ok") and 1 <= int(r["best"]) <= len(outs):
+                det["picked"] = int(r["best"])
+                return outs[int(r["best"]) - 1], det
+        except Exception as e:                           # noqa: BLE001
+            det["llm_err"] = "%s: %s" % (type(e).__name__, e)
+    det["picked"] = 1
+    return outs[0], det
+
+
+def _bgr_b64_small(bgr, side=512):
+    """BGR ndarray → 小图 base64 JPEG（送 LLM 验收用，省 token）。"""
+    try:
+        import base64 as _b64
+
+        import cv2
+        h, w = bgr.shape[:2]
+        s = min(1.0, side / float(max(h, w)))
+        if s < 1.0:
+            bgr = cv2.resize(bgr, (max(1, int(w * s)), max(1, int(h * s))),
+                             interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 84])
+        if not ok:
+            return ""
+        return _b64.b64encode(buf.tobytes()).decode()
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
+def _cloud_close_flow(img_path, img_bgr, geom, key, use_llm=True, max_rounds=2):
+    """云端重绘 + LLM 选片 + 不合格自动重试。
+
+    返回 (最佳图或None, 方法名, 说明, 附加信息)。
+    LLM 在这里管四件事：
+      ① 定 prompt / mode / cs / n（plan_close）
+      ② 对每张候选打分并指出问题（judge_close）
+      ③ 选分数最高那张
+      ④ 不到 7 分 → 用它给的 fix 改写 prompt，再生成一轮（最多 max_rounds 轮）
+    """
+    from . import avatar_tune as AT
+
+    plan = {"mode": "inpaint", "cs": 300, "n": 1,
+            "prompt": AT._CLOSE_FALLBACK_PROMPT,
+            "negative": AT._CLOSE_FALLBACK_NEG,
+            "style": "", "reason": "（未启用 LLM，用内置方案）"}
+    if use_llm:
+        try:
+            _p = AT.plan_close(img_path, geom)
+            if _p.get("ok"):
+                plan = _p
+            else:
+                plan["reason"] = "LLM 规划失败，用内置方案：%s" % (_p.get("reason") or "")
+        except Exception as e:                          # noqa: BLE001
+            plan["reason"] = "LLM 规划异常，用内置方案：%s" % e
+
+    PASS = 7.0          # 7 分及以上才算「可以直接用」
+    info = {"plan": {k: plan.get(k) for k in
+                     ("mode", "cs", "n", "style", "reason", "prompt")},
+            "cost_s": 0.0, "cands": 0, "judge": [], "rounds": []}
+    before = _bgr_b64_small(img_bgr) if use_llm else ""
+
+    best, best_score = None, -1.0
+    plan_cur = dict(plan)
+    mode_used = plan.get("mode") or "inpaint"
+
+    for rnd in range(max(1, int(max_rounds))):
+        r = _cloud_close(img_bgr, geom, key, plan_cur)
+        info["cost_s"] = round(info["cost_s"] + float(r.get("cost") or 0), 1)
+        if not r.get("ok"):
+            info["cloud_err"] = r.get("err") or "云端重绘失败"
+            if best is None:
+                return None, "", "", info
+            break                                  # 已经有一张能用的，就别再追
+        mode_used = r.get("mode") or mode_used
+        cands = r["images"]
+        info["cands"] += len(cands)
+
+        round_scores = []
+        fix_hint = ""
+        for i, c in enumerate(cands):
+            if not use_llm:
+                if best is None:
+                    best = c
+                continue
+            try:
+                j = AT.judge_close(before, _bgr_b64_small(c))
+            except Exception as e:                  # noqa: BLE001
+                j = {"ok": False, "score": 0.0, "reason": str(e)}
+            sc = float(j.get("score") or 0) if j.get("ok") else -1.0
+            round_scores.append(sc)
+            info["judge"].append({
+                "round": rnd + 1, "i": i, "score": j.get("score"),
+                "closed": j.get("closed"), "natural": j.get("natural"),
+                "seamless": j.get("seamless"),
+                "reason": j.get("reason") or "", "issues": j.get("issues") or []})
+            if sc > best_score:
+                best_score, best = sc, c
+            # 收集改进建议：取这一轮里最低分那张的 fix
+            if j.get("fix") and (not fix_hint or sc == min(round_scores)):
+                fix_hint = str(j.get("fix"))
+
+        info["rounds"].append({"round": rnd + 1, "n": len(cands),
+                               "scores": [None if s < 0 else s for s in round_scores],
+                               "prompt": (plan_cur.get("prompt") or "")[:200]})
+        if not use_llm:
+            break
+        if best_score >= PASS:
+            break                                  # 合格就停，不浪费额度
+        # 不合格 → 用 LLM 的 fix 改写 prompt 再试一轮（这是「自动重试」的核心）
+        if rnd + 1 < max(1, int(max_rounds)) and fix_hint:
+            plan_cur = dict(plan_cur)
+            plan_cur["prompt"] = fix_hint
+            plan_cur["reason"] = "上一轮 %.0f 分未达标，按 LLM 建议改写提示词重试" % best_score
+
+    if best is None:
+        return None, "", "", info
+    info["best_score"] = best_score if best_score >= 0 else None
+    info["pass"] = bool(best_score >= PASS)
+    how = "局部重绘（只改嘴周）" if mode_used == "inpaint" else "整图重绘"
+    reason = ("已用云端 image2.5 %s，共 %d 张候选、%d 轮，LLM 选片（最高 %s 分%s）"
+              % (how, info["cands"], len(info["rounds"]),
+                 ("%.0f" % best_score) if best_score >= 0 else "?",
+                 "，达标" if info["pass"] else "，未达 7 分但已是最好的一张"))
+    return best, ("cloud_inpaint" if mode_used == "inpaint" else "cloud_whole"), reason, info
+
+
 def close_mouth(force: bool = False, preview: bool = False,
-                method: str = "lip_shift") -> dict:
+                method: str = "cloud", image_key: str = "",
+                use_llm: bool = True, max_rounds: int = 2) -> dict:
     """把「张嘴」的源图合成一张闭嘴图。
 
     preview=True 时写到 avatar_closed_preview.png 并**不写 meta**：
@@ -450,6 +1119,9 @@ def close_mouth(force: bool = False, preview: bool = False,
     「贴了一块颜色不一样的补丁」。
     """
     import cv2
+
+    # 统一 Key：前端没带就用后端保管的那把（一把 Key 多通道共用）
+    image_key = _any_image_key(image_key)
 
     p = _img_path()
     if not os.path.isfile(p):
@@ -474,15 +1146,111 @@ def close_mouth(force: bool = False, preview: bool = False,
         from . import avatar_mouth as _AM
         _geom = _AM.analyze(img, mouth())
         if _geom and _geom.get("source_open"):
-            _mth = str(method or "mirror").lower()
-            if _mth == "lip_shift":
+            _mth = str(method or "auto").lower()
+            # auto = 按这台机器自己的档位选：高配走本机显卡、低配且填了 Key 走云端、
+            # 两者都没有才退回确定性。前端默认传 auto，不再写死 cloud ——
+            # 写死 cloud 时，没 Key 的机器会先白等一次云端失败才降级。
+            if _mth in ("auto", ""):
+                try:
+                    _mth = str((close_plan(image_key) or {}).get("method")
+                               or "lip_shift").lower()
+                except Exception:                       # noqa: BLE001
+                    _mth = "lip_shift"
+            _out = None
+            _mname = ""
+            _mreason = ""
+            _detail = {}
+
+            # ★★ 首选（低配机路线）：云端 image2.5 生成式重绘。
+            #   本机零生成模型、零显存，只要联网 + 图片 API Key。
+            #   ⚠️ 明确指定 cloud 却失败时**如实报错**，不静默换成像素拼接 ——
+            #     之前正是「静默 fallback 到拼接」导致用户看到的永远是补丁感。
+            if _mth in ("cloud", "api", "image25", "cloud_edit"):
+                try:
+                    _out, _mname, _mreason, _detail = _cloud_close_flow(
+                        p, img, _geom, image_key, use_llm=use_llm,
+                        max_rounds=max_rounds)
+                except Exception as _ce:                # noqa: BLE001
+                    _out = None
+                    _detail = {"cloud_err": "%s: %s" % (type(_ce).__name__, _ce)}
+                if _out is None:
+                    _ce_msg = _detail.get("cloud_err") or "云端重绘失败"
+                    _plan0 = close_plan(image_key)
+                    if not str(image_key or "").strip() and _plan0.get("gen_ok"):
+                        # 没填 key，但这台机器自己跑得动 → 直接改用本地生成式，
+                        # 别让用户卡在一句「云端重绘失败」上（高配机的默认体验）。
+                        _detail["cloud_skipped"] = _ce_msg
+                        _mth = "sdxl_hires"
+                    else:
+                        # 低配机 + 没 key：这条路走不通，把两条真实出路说清楚。
+                        _hint = ""
+                        if not str(image_key or "").strip():
+                            _hint = ("\n本机也没有可用显卡（生成式只能走云端或高性能机器）。"
+                                     "两条路：①在 🎨 面板填入图片 API Key，云端生成（约 20 秒）；"
+                                     "②在有显卡的机器上生成闭嘴基准，把 avatar_closed.png "
+                                     "拷到本机同目录（点「📁 打开文件夹」可看到路径）。")
+                        return {"ok": False, "closed": False, "preview": bool(preview),
+                                "method": "cloud", "plan": _plan0,
+                                "error": _ce_msg + _hint, "detail": _detail}
+            # ★ 首选：SDXL 高分辨率局部重绘（生成式，2026-11-15 实测视觉最优：
+            #   DeepSeek 判「比像素拼接好非常多，质的飞跃」）。
+            #   失败（模型没装 / 显存不够 / 超时）自动退回确定性方法，不让功能挂掉。
+            # ★ 按机器档位决定要不要跑生成式（2026-11-15 实测：SDXL 在 CPU 上
+            #   推理峰值 23GB 内存、1024×1024/32步 约 3 小时 —— 低配机必须绕开）。
+            #   · method=sdxl / sdxl_hires：用户明确要生成式，照跑（慢也认）
+            #   · method=auto（默认）：只有本机跑得动才用生成式，否则走确定性
+            _plan = close_plan(image_key)
+            _tier = _plan.get("tier") or "cpu"
+            _want_gen = (_mth in ("sdxl", "sdxl_hires")) or (
+                _mth in ("auto", "") and bool(_plan.get("gen_ok")))
+            if _want_gen:
+                _big = {"gpu_high": 1024, "gpu_mid": 768, "gpu_low": 512}.get(_tier, 512)
+                _stp = {"gpu_high": 34, "gpu_mid": 26, "gpu_low": 20}.get(_tier, 20)
+                # 生成几张：高配 3 张（约 60s），中配 2 张，低配 1 张。
+                # 为什么要多张：SDXL inpaint 没有固定 seed，单次结果波动大
+                # （实测同一参数三次：暗占比 0.077/0.085/0.104，
+                #   其中一次唇间留暗红缝隙被判不合格）。
+                _bn = 3 if _tier == "gpu_high" else (2 if _tier == "gpu_mid" else 1)
+                _bdet = {}
+                try:
+                    _out, _bdet = _sdxl_hires_best(
+                        img, _geom, n=_bn, use_llm=bool(use_llm),
+                        steps=_stp, big=_big)
+                except Exception:                       # noqa: BLE001
+                    _out, _bdet = None, {}
+                if _bdet:
+                    _detail["best_of"] = _bdet
+                if _out is not None:
+                    _mname = "sdxl_hires"
+                    _mreason = ("已用 SDXL 生成式局部重绘生成闭嘴基准"
+                                "（%s，%dpx/%d步；生成 %d 张、AI 选第 %d 张；"
+                                "主形象像素未动）"
+                                % (_plan.get("why") or _tier, _big, _stp,
+                                   _bdet.get("n_ok") or 1, _bdet.get("picked") or 1))
+                else:
+                    _plan["gen_failed"] = True
+            if _out is None and _mth == "lip_shift":
                 _out = _AM.close_by_lip(img, _geom, 1.10)
                 _mname = "lip_shift"
                 _mreason = "已用下唇上移生成闭嘴基准（保留原图唇部纹理）"
-            else:
+            if _out is None and _mth in ("mirror", "lip_mirror"):
                 _out = _AM.close_by_mirror(img, _geom)
                 _mname = "lip_mirror"
                 _mreason = "已用下唇镜像生成闭嘴基准（只替换开口区，其余像素零改动）"
+            if _out is None:
+                # 没跑成生成式 → 退回确定性（比报错好）。
+                # 原因要说清：低配机是「主动选择」（跑不动扩散），
+                # 高配机才是「生成失败」（模型没装/显存被占）。
+                _out = _AM.close_by_lip(img, _geom, 1.10)
+                _mname = "lip_shift_fallback"
+                if _plan.get("gen_ok"):
+                    _mreason = ("生成式重绘没跑成（模型未装或显存不足），"
+                                "已退回下唇上移（保留原图唇部纹理）")
+                else:
+                    _mreason = ("本机跑不动生成式（%s），已用确定性合成"
+                                "（保留原图唇部纹理）。想要生成式效果："
+                                "①在有显卡的机器上生成后把 avatar_closed.png 拷过来；"
+                                "②或强制开启（会很慢）。" % (_plan.get("why") or "无可用显卡"))
             _cp = _dst
             os.makedirs(os.path.dirname(_cp), exist_ok=True)
             cv2.imwrite(_cp, _out)
@@ -493,7 +1261,8 @@ def close_mouth(force: bool = False, preview: bool = False,
                 _meta["closed_method"] = _mname
                 _write_meta(_meta)
             return {"ok": True, "closed": True, "preview": bool(preview),
-                    "method": _mname, "reason": _mreason,
+                    "method": _mname, "reason": _mreason, "detail": _detail,
+                    "plan": _plan,
                     "url": ("/api/avatar2/closed_preview?t=%d" if preview
                             else "/api/avatar2/closed?t=%d") % int(time.time())}
     except Exception as _e:                             # noqa: BLE001

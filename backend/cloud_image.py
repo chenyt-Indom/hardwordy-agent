@@ -171,8 +171,31 @@ _IMG_HINTS = ("image", "dall", "flux", "sd", "mj", "midjourney", "seedream",
               "ideogram", "playground", "stable")
 
 
+def _key(k: str) -> str:
+    """统一 Key 入口（2026-11-15 用户要求「所有 key 统一，一把多用」）。
+
+    前端传了就用前端的；没传（比如定时任务、数字人后台线程、
+    或用户在 🎨 里存过但这次请求忘了带头）就自动用后端保管的那把。
+    这样同一个 Key 只需存一次，文生图 / 图像微改 / 数字人 / 定时任务全部共享。
+    """
+    k = str(k or "").strip()
+    if k:
+        try:                                  # 用户只配一次：第一次带过来就记住
+            from . import keyvault
+            keyvault.remember_image_key(k)
+        except Exception:
+            pass
+        return k
+    try:
+        from . import keyvault
+        return keyvault.get_image_key()
+    except Exception:
+        return ""
+
+
 def list_models(key: str, cfg: dict | None = None) -> list:
     """用这个 Key 问服务商：**你能用哪些模型**（不同分组能用的不一样）。"""
+    key = _key(key)
     if not key:
         return []
     try:
@@ -345,6 +368,7 @@ def generate(prompt: str, key: str, *, size: str = "", aspect: str = "",
     prompt = (prompt or "").strip()
     if not prompt:
         raise CloudImageError("提示词为空，没法画")
+    key = _key(key)
     if not key:
         raise CloudImageError("没有配置图片 API Key（点右上角 🎨 填入）")
 
@@ -415,6 +439,7 @@ def edit(prompt: str, key: str, image_b64: str, *, mask_b64: str = "",
     prompt = (prompt or "").strip()
     if not prompt:
         raise CloudImageError("提示词为空，不知道要改成什么样")
+    key = _key(key)
     if not key:
         raise CloudImageError("没有配置图片 API Key（点右上角 🎨 填入）")
     if not image_b64:
@@ -478,6 +503,7 @@ def edit(prompt: str, key: str, image_b64: str, *, mask_b64: str = "",
 
 def check_key(key: str, cfg: dict | None = None) -> dict:
     """校验 Key 能不能用（GET /models，不花钱）。"""
+    key = _key(key)
     if not key:
         return {"ok": False, "msg": "没有填 Key"}
     try:

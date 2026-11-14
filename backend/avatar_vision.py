@@ -118,18 +118,28 @@ def _call_ds(prompt, images, timeout=180):
         key = ""
     if not key:
         return None, "没有可用的 DeepSeek Key"
-    img = images[0] if isinstance(images, (list, tuple)) and images else images
-    if not img:
+    # ⚠️⚠️ 2026-11-15 修：原来这里是 `img = images[0]` —— **只取第一张**。
+    #   于是「原图 vs 修图结果」这类对比任务，模型只看到原图，必然回答
+    #   「只收到一张图，无法验收」，LLM 选片/质检全部形同虚设。
+    #   现在把列表里每张都缩好传下去（最多 4 张）。
+    _lst = images if isinstance(images, (list, tuple)) else [images]
+    out = []
+    for _x in _lst:
+        if not _x:
+            continue
+        # ★ 可能是文件路径（调用方常直接传 path），而 _shrink_b64 期望 base64。
+        #   不转换的话 b64decode(path) 抛异常 → 上游把路径当 base64 → 400。
+        if isinstance(_x, str) and os.path.isfile(_x):
+            try:
+                _x = _b64(_x)
+            except Exception as e:                      # noqa: BLE001
+                return None, "读图失败：%s" % e
+        _x = _shrink_b64(_x, side=_DS_SIDE)     # 压到 ~15KB，避免被 CDN 拦
+        if _x:
+            out.append(_x)
+    if not out:
         return None, "没有图片"
-    # ★ img 可能是文件路径（调用方常直接传 path），而 _shrink_b64 期望 base64。
-    #   不转换的话 b64decode(path) 抛异常 → except 原样返回路径 → 上游把路径当 base64
-    #   → 400 Invalid base64 data → 每次静默回退本地模型。
-    if isinstance(img, str) and os.path.isfile(img):
-        try:
-            img = _b64(img)
-        except Exception as e:                          # noqa: BLE001
-            return None, "读图失败：%s" % e
-    img = _shrink_b64(img, side=_DS_SIDE)      # 压到 ~15KB，避免被 CDN 拦
+    img = out if len(out) > 1 else out[0]
     try:
         txt = vision_chat(prompt, img, DS_MODEL, key,
                           max_tokens=900, timeout=(15, timeout))

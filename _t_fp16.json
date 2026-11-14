@@ -1,0 +1,61 @@
+{
+ "stages": [
+  {
+   "stage": "load_float16",
+   "sec": 0.6,
+   "ok": true,
+   "mem": {
+    "used_gb": 15.35,
+    "avail_gb": 18.41
+   }
+  },
+  {
+   "stage": "infer_float16",
+   "sec": 40.3,
+   "per_step": 20.14,
+   "mem": {
+    "used_gb": 22.76,
+    "avail_gb": 10.99
+   }
+  },
+  {
+   "stage": "free_float16",
+   "sec": 0.0,
+   "mem": {
+    "used_gb": 16.02,
+    "avail_gb": 17.73
+   }
+  },
+  {
+   "stage": "load_bfloat16",
+   "sec": 2.4,
+   "ok": true,
+   "mem": {
+    "used_gb": 22.51,
+    "avail_gb": 11.24
+   }
+  },
+  {
+   "stage": "infer_bfloat16",
+   "sec": 33.4,
+   "per_step": 16.69,
+   "mem": {
+    "used_gb": 23.46,
+    "avail_gb": 10.29
+   }
+  },
+  {
+   "stage": "free_bfloat16",
+   "sec": 0.0,
+   "mem": {
+    "used_gb": 22.33,
+    "avail_gb": 11.43
+   }
+  }
+ ],
+ "base_mem": {
+  "used_gb": 15.27,
+  "avail_gb": 18.48
+ },
+ "ok": true
+}

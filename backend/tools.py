@@ -3525,8 +3525,12 @@ def _region_mask_b64(image_b64: str, regions: list, area: str = "") -> str:
         return ""
     for x0, y0, x1, y1 in boxes:
         d.rectangle([int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)], fill=255)
+    # 2026-11-15 修：云端 /images/edits 要求「遮罩必须为包含透明通道的 PNG」，
+    # 原来存的是单通道 L 灰度图，服务端直接 400。转成 RGBA：RGB 全白，
+    # alpha 用蒙版本体 —— 透明(alpha=0)=保留原样，不透明(alpha=255)=要重绘。
+    rgba = Image.merge("RGBA", (mask, mask, mask, mask))
     buf = io.BytesIO()
-    mask.save(buf, format="PNG")
+    rgba.save(buf, format="PNG")
     return _b64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -3801,13 +3805,29 @@ def _do_edit_image(arguments, ui_events, context):
             "only change the masked area, keep everything outside the mask pixel-identical")
     boosted = ", ".join(x for x in (prompt, keep, style_pos) if x)
 
+    # 2026-11-15 修（用户报「主形象被压变形」）：原来 size 传空串，
+    # cloud_image.size_for() 于是返回默认 1024x1024 —— **任何竖图/横图做微改
+    # 都会被压成方形**。实测 787x1400 的竖版角色图，微改结果变成 1024x1024，
+    # 脸被横向拉宽、身高被压矮。这里按底图真实长宽比自动选尺寸。
+    _size_arg = str(arguments.get("size") or "").strip()
+    if not _size_arg:
+        try:
+            from PIL import Image as _PIL
+            _raw0 = img_b64.split(",", 1)[1] if img_b64.startswith("data:") else img_b64
+            _im0 = _PIL.open(io.BytesIO(_b64.b64decode(_raw0)))
+            _w0, _h0 = _im0.size
+            _r0 = _w0 / float(_h0 or 1)
+            _size_arg = cloud_image.size_for(
+                "portrait" if _r0 < 0.85 else ("landscape" if _r0 > 1.18 else "square"))
+        except Exception:                            # noqa: BLE001
+            _size_arg = ""
     start = time.time()
     try:
         # 微改可以单独指定模型（有的服务商 edits 只对某几个模型开放）
         _edit_model = (str(cfg.get("image_api_model_edit") or "").strip()
                        or str(ctx.get("image_model") or ""))
         imgs = cloud_image.edit(boosted, key, img_b64, mask_b64=mask_b64,
-                                size=str(arguments.get("size") or ""),
+                                size=_size_arg,
                                 cfg=cfg, model=_edit_model)
     except cloud_image.CloudImageError as e:
         return ("图片微改失败：%s。请把原因**原样**转告用户（不要笼统化）。"

@@ -2471,20 +2471,33 @@
       if (clbtn) clbtn.onclick = async () => {
         clbtn.disabled = true;
         const old = clbtn.textContent;
-        clbtn.textContent = "合成中…";
+        clbtn.textContent = "AI 重绘中…";
         try {
+          // 图片 API Key 存在 localStorage（🎨 面板填的那个），
+          // 后端不落盘，所以每次调用都从浏览器带过去。
+          // ⚠️ api() 的 headers 是整体覆盖（Object.assign 浅合并），
+          //    Content-Type 必须一起带上，否则后端解析不了 body。
+          const _ik = localStorage.getItem("img_api_key") || "";
+          const _hdr = { "Content-Type": "application/json" };
+          if (_ik) _hdr["X-Image-Key"] = _ik;
           const d = await api("/api/avatar2/close_mouth", {
-            method: "POST", body: JSON.stringify({ preview: true }) });
+            method: "POST", headers: _hdr,
+            body: JSON.stringify({ preview: true, method: "auto", use_llm: true }) });
           if (d.closed) {
             say("预览已生成，看看满意吗 —— 满意就点「用这个」");
             if (cpImg && d.url) cpImg.src = d.url;
             if (cpBox) cpBox.hidden = false;
+            paintCloseAI(d);
           } else {
             say(d.reason || "看起来已经是闭嘴，不用处理");
             if (cpBox) cpBox.hidden = true;
           }
           if (d.info) paintInfo(d.info);
-        } catch (e) { say("闭嘴合成失败：" + e.message, "err"); }
+        } catch (e) {
+          const m = String(e.message || e);
+          say("闭嘴合成失败：" + m +
+              (/Key/.test(m) ? "（先点右上角 🎨 填图片 API Key）" : ""), "err");
+        }
         clbtn.disabled = false;
         clbtn.textContent = old;
       };
@@ -2507,6 +2520,65 @@
         } catch (e) { say("丢弃失败：" + e.message, "err"); }
       };
     })();
+
+    // 把「LLM 怎么定的 / 打分多少」摊开给用户看（不藏参数）
+    function paintCloseAI(d) {
+      const box = $("#av2ClosedAI");
+      if (!box) return;
+      const dt = (d && d.detail) || {};
+      const pl = dt.plan || {};
+      const bits = [];
+      if (d.method === "cloud_inpaint") bits.push("云端局部重绘");
+      else if (d.method === "cloud_whole") bits.push("云端整图重绘");
+      else if (d.method) bits.push(d.method);
+      if (pl.style) bits.push("画风 " + pl.style);
+      if (pl.cs) bits.push("裁剪 " + pl.cs + "px");
+      if (dt.cost_s) bits.push(dt.cost_s + "s");
+      const line1 = bits.join(" · ");
+      let line2 = "";
+      if (dt.rounds && dt.rounds.length) {
+        // 有重试时把每轮分数都摊开，让用户看到 AI 试了几次、分数怎么变的
+        line2 = "LLM 打分 " + dt.rounds.map(r => {
+          const s = (r.scores || []).map(v => (v == null ? "?" : v)).join("/");
+          return (dt.rounds.length > 1 ? ("第" + r.round + "轮 " + s) : s);
+        }).join("　");
+      } else if (dt.judge && dt.judge.length) {
+        line2 = "LLM 打分 " + dt.judge.map(j => (j.score == null ? "?" : j.score)).join(" / ");
+      }
+      if (line2 && dt.best_score != null) {
+        line2 += " → 取 " + dt.best_score + " 分" + (dt.pass ? "（达标）" : "（未达 7 分）");
+      }
+      if (dt.judge && dt.judge.length) {
+        const bad = dt.judge.filter(j => j.score != null && j.score < 7);
+        if (bad.length) {
+          const iss = (bad[0].issues || []).slice(0, 2).join("；");
+          if (iss) line2 += "｜仍存在：" + iss;
+        }
+      }
+      const line3 = pl.reason ? "判断依据：" + pl.reason : "";
+      // 这台机器是怎么生成出来的：本机显卡 / 云端 / 确定性。
+      // 低配机据此就能判断「要不要去填图片 API Key」。
+      let line4 = "";
+      const dplan = (d && d.plan) || {};
+      if (dplan.best) {
+        const tierTxt = dplan.best === "local" ? "本机显卡生成"
+          : dplan.best === "cloud" ? "云端生成"
+          : "确定性合成（效果有限）";
+        line4 = "本机方案：" + tierTxt + (dplan.eta ? "（" + dplan.eta + "）" : "");
+      }
+      // AI 生成几张、最后选了第几张（多张并排做相对比较，比单张打分稳）
+      let line5 = "";
+      const bo = dt.best_of || {};
+      if (bo.n_ok && bo.n_ok > 1) {
+        line5 = "生成 " + bo.n_ok + " 张，AI 选第 " + (bo.picked || 1) + " 张";
+        const rr = (bo.llm || {}).reason;
+        if (rr) line5 += "：" + rr;
+      }
+      const html = [line1, line2, line3, line4, line5].filter(Boolean)
+        .map(s => "<div>" + esc(s) + "</div>").join("");
+      box.innerHTML = html;
+      box.hidden = !html;
+    }
 
     function paintInfo(info) {
       const has = !!(info && info.has_image);
@@ -8302,6 +8374,18 @@
     if (!btn || !sel) return;
 
     let lastData = null;
+    // 自动把浏览器里的 Key 同步到后端（2026-11-15 用户要求「一把 Key 多用」）：
+    // 以前 Key 只在 localStorage，后端拿不到 → 每个功能都要单独配一次。
+    // 这里静默补存一次，之后文生图 / 图像微改 / 数字人 / 定时任务全部共用。
+    (async () => {
+      try {
+        const k = localStorage.getItem("img_api_key") || "";
+        if (!k) return;
+        const st = await (await fetch("/api/image/key/status")).json();
+        if (st && st.has_key) return;
+        await fetch("/api/image/key/save", { method: "POST", headers: { "X-Image-Key": k } });
+      } catch (e) { /* 静默：同步失败不影响本地使用 */ }
+    })();
 
     const paintBtn = () => {
       const has = !!localStorage.getItem("img_api_key");
@@ -8668,6 +8752,11 @@
               method: "POST", headers: { "X-Image-Key": v } })).json();
             if (!r.ok) { say("❌ " + (r.msg || "Key 无效"), "#e06c6c"); return; }
             localStorage.setItem("img_api_key", v);
+            // 同步存到后端：这样文生图 / 图像微改 / 数字人后台 / 定时任务
+            // 都能用这一把，不用各自再配一次（2026-11-15 用户要求）
+            try {
+              await fetch("/api/image/key/save", { method: "POST", headers: { "X-Image-Key": v } });
+            } catch (e) { /* 后端没存上也不影响本次使用，localStorage 还在 */ }
           } catch (e) { say("❌ 校验失败：" + e.message, "#e06c6c"); return; }
         }
         if (mEdit) localStorage.setItem("img_api_model_edit", mEdit);

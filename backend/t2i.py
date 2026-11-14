@@ -498,9 +498,23 @@ def free_ollama_vram() -> list:
         m = str(cfg.get(key) or "").strip()
         if m and m not in names:
             names.append(m)
+    base = str(cfg.get("ollama_url") or "http://127.0.0.1:11434").rstrip("/")
+    # ⚠️⚠️ 2026-11-15 修：光卸载 config 里列的那几个名字**不够**。
+    #   实测本机 `qwen3-vl:8b` 常驻占 **9.6GB 显存**（12.8GB 的卡只剩 3GB），
+    #   而它并不在 config 的 default/code/vision/embed 四个字段里 ——
+    #   于是 SDXL 一加载就 `MemoryError`（对外表现为"图生图引擎加载失败"）。
+    #   ⇒ 必须再把 `/api/ps` 里**实际加载着的**模型全部加进来。
+    try:
+        with urllib.request.urlopen(base + "/api/ps", timeout=10) as _r:
+            _ps = json.load(_r)
+        for _m in (_ps.get("models") or []):
+            _n = str(_m.get("name") or "").strip()
+            if _n and _n not in names:
+                names.append(_n)
+    except Exception:
+        pass                      # Ollama 没开：忽略，别把画图搞挂
     if not names:
         return []
-    base = str(cfg.get("ollama_url") or "http://127.0.0.1:11434").rstrip("/")
     freed = []
     _t0 = time.time()
     for m in names:

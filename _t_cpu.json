@@ -1,0 +1,18 @@
+{
+ "stages": [
+  {
+   "stage": "load_pipe",
+   "sec": 10.6,
+   "device": "cpu",
+   "mem": {
+    "used_gb": 28.2,
+    "avail_gb": 5.55
+   }
+  }
+ ],
+ "torch": "2.14.1+cu130",
+ "cuda": true,
+ "cpu_count": 24,
+ "cpu_name": "AVX2",
+ "forced": "cpu"
+}

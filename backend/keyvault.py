@@ -77,6 +77,69 @@ def set_key(key: str) -> dict:
     return {"ok": True, "has_key": True, "path": _path()}
 
 
+# ---------------- 图像通道（2026-11-15 用户要求「所有 key 统一保管」）----------------
+# 背景：图像 Key 原来只存在浏览器 localStorage，后端从不落盘。
+# 后果是**每个功能都要单独配一次**：文生图要带 header、图像微改要带 header、
+# 数字人后台闭嘴要带 header、定时任务（半夜无浏览器）根本拿不到 → 全部失败。
+# 现在统一：用户在 🎨 面板存一次，前端同步落盘到这里；任何通道取不到 Key 时自动兜底。
+# 安全边界不变：只存用户主动点保存的那把、不回显明文、日志走 scrub()。
+def get_image_key() -> str:
+    """图像通道的 Key：环境变量优先，其次本机保管。"""
+    k = str(os.environ.get("IMAGE_API_KEY") or "").strip()
+    if k:
+        return k
+    return str(_read().get("image_api_key") or "").strip()
+
+
+def set_image_key(key: str) -> dict:
+    key = str(key or "").strip()
+    if not key:
+        return {"ok": False, "error": "Key 不能为空"}
+    d = _read()
+    d["image_api_key"] = key
+    d["image_updated"] = __import__("time").strftime("%Y-%m-%d %H:%M:%S")
+    _write(d)
+    return {"ok": True, "has_key": True, "path": _path()}
+
+
+def remember_key(key: str) -> bool:
+    """前端带来的 DeepSeek Key：后端还没存过就顺手记下来（只写一次）。
+
+    2026-11-15 用户要求「Key 只需配一次，以后新功能直接用这个就行」。
+    这样不管用户是在聊天框、🎨 面板还是哪个新功能里填的，
+    第一次用过后后端就有了 —— 定时任务、后台线程、以后新加的功能都能直接取，
+    不需要每个功能各配一次。
+    """
+    key = str(key or "").strip()
+    if not key or get_key():          # 已有（含环境变量）就不覆盖
+        return False
+    try:
+        set_key(key)
+        return True
+    except Exception:
+        return False
+
+
+def remember_image_key(key: str) -> bool:
+    """前端带来的图像 Key：后端还没存过就顺手记下来（只写一次）。"""
+    key = str(key or "").strip()
+    if not key or get_image_key():
+        return False
+    try:
+        set_image_key(key)
+        return True
+    except Exception:
+        return False
+
+
+def clear_image_key() -> dict:
+    d = _read()
+    d.pop("image_api_key", None)
+    d.pop("image_updated", None)
+    _write(d)
+    return {"ok": True, "has_key": False}
+
+
 def clear() -> dict:
     d = _read()
     d.pop("deepseek_api_key", None)

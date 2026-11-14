@@ -227,7 +227,11 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
     # 源图要是闭着的就没东西可压（会退化成 open_from_closed 的几何外推，
     # 质量差一档）。而 render_source() 在有闭嘴基准时会优先返回闭嘴图，
     # 所以这里对 warp 单独换回原图。
-    if str(mode).lower() == "warp":
+    # ⚠️ 2026-11-15 实测踩到：这里原来只判断 mode=="warp"，而 UI 默认是 auto，
+    #   于是 auto 拿到的是**闭嘴基准**，geom.source_open=False → 退化成
+    #   open_from_closed（黑色条块 + 硬边，视觉复核判「明显贴图痕迹」）。
+    #   auto 的语义是「自动选最好的」，所以它也该用张嘴原图走 warp。
+    if str(mode).lower() in ("warp", "auto", ""):
         try:
             alt_p = A2._img_path()
             if os.path.isfile(alt_p) and os.path.abspath(alt_p) != os.path.abspath(img_path):

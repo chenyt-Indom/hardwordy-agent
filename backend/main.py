@@ -150,8 +150,21 @@ def _env_ds_key() -> str:
 
 
 def _ds_key(header_key: str = "") -> str:
-    """请求头里的 Key 优先（用户在浏览器填的），没有再退回服务器环境变量。"""
-    return (header_key or "").strip() or _env_ds_key()
+    """请求头里的 Key 优先（用户在浏览器填的），没有再退回服务器环境变量。
+
+    2026-11-15 用户要求「Key 只需配一次，以后所有功能直接用这个就行」：
+    请求头带了 Key、而后端还没存过时**顺手记下来**（只写一次）。
+    之后后台线程 / 定时任务 / 以后新加的功能都不用再让用户配一次。
+    """
+    k = (header_key or "").strip()
+    if k:
+        try:
+            from . import keyvault
+            keyvault.remember_key(k)
+        except Exception:
+            pass
+        return k
+    return _env_ds_key()
 
 
 def _remember_image(images: list) -> None:
@@ -6463,6 +6476,36 @@ def image_check(x_image_key: str = Header(default="")):
     return cloud_image.check_key(x_image_key, config.load_config() or {})
 
 
+@app.post("/api/image/key/save")
+def image_key_save(x_image_key: str = Header(default="")):
+    """把图片 Key 存到本机，供**所有通道**复用（2026-11-15 用户要求）。
+
+    原来图像 Key 只在浏览器里，导致文生图 / 图像微改 / 数字人后台 / 定时任务
+    各要一份、各配一次。现在存一次就够。
+    安全：只存用户主动点保存的这把，接口只回 has_key，不回显明文。
+    """
+    from . import keyvault
+    k = str(x_image_key or "").strip()
+    if not k:
+        return {"ok": False, "msg": "Key 不能为空"}
+    return keyvault.set_image_key(k)
+
+
+@app.get("/api/image/key/status")
+def image_key_status():
+    """图像 Key 是否已由后端保管（只回布尔，不回显）。"""
+    from . import keyvault
+    k = keyvault.get_image_key()
+    return {"ok": True, "has_key": bool(k), "masked": (k[:4] + "***" + k[-4:]) if len(k) > 8 else ""}
+
+
+@app.post("/api/image/key/clear")
+def image_key_clear():
+    """忘掉后端保管的图片 Key。"""
+    from . import keyvault
+    return keyvault.clear_image_key()
+
+
 @app.get("/api/image/models")
 def image_models_list():
     """图片模型总清单：云端（当前配置的）+ 本地（含是否已装、占用多少）。"""
@@ -10133,18 +10176,28 @@ def avatar2_closed_preview():
 
 
 @app.post("/api/avatar2/close_mouth")
-def avatar2_close_mouth(body: dict = None):
-    """把「张嘴」的源图合成一张闭嘴图。
+def avatar2_close_mouth(body: dict = None,
+                        x_image_key: str = Header(default="")):
+    """把「张嘴」的源图变成闭嘴基准。
 
-    body: {force?: true, preview?: true}
+    body: {force?, preview?, method?, use_llm?}
       · preview=true 只生成预览图，不动已生效基准、不改 meta ——
         用户先在界面上看效果，满意了再调 /closed_apply 转正。
       · force=true 开孔占比太小时也强制处理。
+      · method="cloud"（默认）走云端 image2.5 生成式重绘（低配机可用）；
+        "sdxl_hires" 走本机 SDXL；"lip_shift"/"mirror" 是确定性像素法。
+      · use_llm=false 时不调 LLM（省 token，用内置 prompt、不选片）。
+    图片 API Key 由前端放在 X-Image-Key 头里传（和 🎨 面板同一个）。
     """
     body = body or {}
     try:
-        r = avatar2.close_mouth(force=bool(body.get("force")),
-                                preview=bool(body.get("preview")))
+        r = avatar2.close_mouth(
+            force=bool(body.get("force")),
+            preview=bool(body.get("preview")),
+            method=str(body.get("method") or "cloud"),
+            image_key=x_image_key,
+            use_llm=bool(body.get("use_llm", True)),
+            max_rounds=int(body.get("max_rounds") or 2))
     except Exception as e:                                       # noqa: BLE001
         raise HTTPException(status_code=500,
                             detail="闭嘴合成失败：%s: %s" % (type(e).__name__, e))
