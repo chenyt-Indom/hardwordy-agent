@@ -887,6 +887,18 @@ class MeshNode:
             if ttl > 0:
                 self._fanout(gid, T_FREQ, dict(obj, ttl=ttl), skip=peer)
             return
+        if typ == T_FSYNC:
+            # 群文件夹清单：对方告诉我「他那边每个文件是哪一版」。
+            # 同样必须继续转发 —— 群里不是所有人都和我直连。
+            if self.on_fsync:
+                try:
+                    self.on_fsync(gid, obj)
+                except Exception:
+                    pass
+            ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
+            if ttl > 0:
+                self._fanout(gid, T_FSYNC, dict(obj, ttl=ttl), skip=peer)
+            return
         # ★ 2026-11-13：走到这里 = **本机不认识这个帧类型**。
         #   最典型的场景就是「对方代码比本机新」（自开发改过、只有一边重启了）。
         #   必须**安全忽略**：不抛异常、不断连 —— 否则两台机器代码一不同步，
