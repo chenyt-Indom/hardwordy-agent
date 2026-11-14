@@ -15,8 +15,12 @@ import tempfile
 import cv2
 import numpy as np
 
-import avatar2 as A2
-import face3d
+try:                        # 包内导入（服务实际走这条路：backend.main → from . import avatar3d）
+    from . import avatar2 as A2
+    from . import face3d
+except ImportError:         # 直接跑脚本时（cwd=backend/）退回绝对导入
+    import avatar2 as A2
+    import face3d
 
 FPS = 25
 DEFAULT_SIZE = 512
