@@ -239,6 +239,16 @@ class Wav2LipEngine:
             st = 0.85 - 0.60 * w_open      # 未超分：0.85 -> 0.25
         gen_big = self._detail_inject(gen_big, orig_big, strength=max(0.18, st))
 
+        # 口腔加深：Wav2Lip 在这类闭口原图上张口偏小，
+        # 只把「真正的口腔暗部」（灰度 < 92）再压暗一点，
+        # 视觉上张口更明确，又不会把嘴唇一起涂黑（试过阈值 125 会出现黑块）。
+        if w_open > 0.25:
+            gray = cv2.cvtColor(gen_big, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            dark = np.clip((92.0 - gray) / 34.0, 0.0, 1.0)
+            dark = cv2.GaussianBlur(dark, (0, 0), 3.0)
+            gen_big = np.clip(gen_big.astype(np.float32)
+                              - dark[..., None] * 40.0 * w_open, 0, 255)
+
         # 椭圆蒙版：中心在嘴部，且必须完整落在 bbox 内部（否则下巴处会有横向接缝）
         cx = int(w * 0.50)
         cy = int(h * 0.76)
