@@ -2463,22 +2463,48 @@
         lbtn.textContent = old;
       };
 
+      // —— 闭嘴：先出预览，满意再转正 ——
+      // 直接写正式基准的话，用户只有「生成完才知道丑」这一条路。
+      // 现在预览写独立文件，主形象和已生效基准全程不动。
+      const cpBox = $("#av2ClosedPrev"), cpImg = $("#av2ClosedImg");
+      const cpUse = $("#av2ClosedUse"), cpDrop = $("#av2ClosedDrop");
       if (clbtn) clbtn.onclick = async () => {
         clbtn.disabled = true;
         const old = clbtn.textContent;
         clbtn.textContent = "合成中…";
         try {
           const d = await api("/api/avatar2/close_mouth", {
-            method: "POST", body: "{}" });
+            method: "POST", body: JSON.stringify({ preview: true }) });
           if (d.closed) {
-            say("已生成闭嘴基准，之后生成就用它驱动（原图不用动）");
+            say("预览已生成，看看满意吗 —— 满意就点「用这个」");
+            if (cpImg && d.url) cpImg.src = d.url;
+            if (cpBox) cpBox.hidden = false;
           } else {
             say(d.reason || "看起来已经是闭嘴，不用处理");
+            if (cpBox) cpBox.hidden = true;
           }
           if (d.info) paintInfo(d.info);
         } catch (e) { say("闭嘴合成失败：" + e.message, "err"); }
         clbtn.disabled = false;
         clbtn.textContent = old;
+      };
+      if (cpUse) cpUse.onclick = async () => {
+        cpUse.disabled = true;
+        try {
+          const d = await api("/api/avatar2/closed_apply", { method: "POST", body: "{}" });
+          if (cpBox) cpBox.hidden = true;
+          say("已设为闭嘴基准，之后生成就用它驱动（原图没动）");
+          if (d.info) paintInfo(d.info);
+        } catch (e) { say("转正失败：" + e.message, "err"); }
+        cpUse.disabled = false;
+      };
+      if (cpDrop) cpDrop.onclick = async () => {
+        try {
+          const d = await api("/api/avatar2/closed_drop", { method: "POST", body: "{}" });
+          if (cpBox) cpBox.hidden = true;
+          say("已丢掉预览，什么都没改");
+          if (d.info) paintInfo(d.info);
+        } catch (e) { say("丢弃失败：" + e.message, "err"); }
       };
     })();
 
@@ -2505,6 +2531,16 @@
         dirPath = info.videos_dir || info.dir;
         const pv = $("#av2Path");
         if (pv) { pv.hidden = false; pv.textContent = dirPath; }
+      }
+      // 刷新页面后预览块要能恢复：预览文件还在就把它显示出来
+      const cpB = $("#av2ClosedPrev"), cpI = $("#av2ClosedImg");
+      if (cpB) {
+        if (info && info.closed_preview && info.closed_preview_url) {
+          if (cpI) cpI.src = info.closed_preview_url;
+          cpB.hidden = false;
+        } else {
+          cpB.hidden = true;
+        }
       }
       paintMouthBox();
     }

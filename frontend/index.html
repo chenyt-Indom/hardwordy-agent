@@ -217,6 +217,19 @@
           <button class="btn sm ghost" id="av2CopyPath" title="复制视频目录的完整路径">📋 复制路径</button>
         </div>
         <div class="av2-path" id="av2Path" hidden></div>
+        <!-- 闭嘴预览：先看效果再决定。预览是独立文件，主形象和已生效基准都不动 -->
+        <div class="av2-closed" id="av2ClosedPrev" hidden>
+          <div class="av2-closed-head">
+            <span>👄 闭嘴预览<span class="av2-closed-tag" id="av2ClosedTag">未生效</span></span>
+            <span class="head-acts">
+              <button class="btn sm primary" id="av2ClosedUse"
+                      title="把这张设为闭嘴基准，之后生成就用它">✓ 用这个</button>
+              <button class="btn sm ghost ico" id="av2ClosedDrop"
+                      title="丢掉预览，什么都不改">✕</button>
+            </span>
+          </div>
+          <img id="av2ClosedImg" alt="闭嘴效果预览" />
+        </div>
         <div class="av2-locate" id="av2LocateOut" hidden></div>
         <div class="av2-versions" id="av2Versions" hidden></div>
         <div class="av2-tune" id="av2Tune" hidden></div>

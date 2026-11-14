@@ -10121,20 +10121,97 @@ def avatar2_closed():
                                  "Cache-Control": "no-store"})
 
 
+@app.get("/api/avatar2/closed_preview")
+def avatar2_closed_preview():
+    """闭嘴**预览**图：只给用户看，不参与渲染。"""
+    p = avatar2._img_closed_preview_path()
+    if not os.path.isfile(p):
+        raise HTTPException(status_code=404, detail="还没有预览图")
+    return FileResponse(p, media_type="image/png",
+                        headers={"Content-Disposition": "inline",
+                                 "Cache-Control": "no-store"})
+
+
 @app.post("/api/avatar2/close_mouth")
 def avatar2_close_mouth(body: dict = None):
-    """把「张嘴」的源图合成一张闭嘴基准，之后生成就用它驱动。
+    """把「张嘴」的源图合成一张闭嘴图。
 
-    body: {force?: true} —— 开孔占比太小时会跳过，force 强制处理。
+    body: {force?: true, preview?: true}
+      · preview=true 只生成预览图，不动已生效基准、不改 meta ——
+        用户先在界面上看效果，满意了再调 /closed_apply 转正。
+      · force=true 开孔占比太小时也强制处理。
     """
     body = body or {}
     try:
-        r = avatar2.close_mouth(force=bool(body.get("force")))
+        r = avatar2.close_mouth(force=bool(body.get("force")),
+                                preview=bool(body.get("preview")))
     except Exception as e:                                       # noqa: BLE001
         raise HTTPException(status_code=500,
                             detail="闭嘴合成失败：%s: %s" % (type(e).__name__, e))
     if not r.get("ok"):
         raise HTTPException(status_code=400, detail=r.get("error") or "处理失败")
+    r["info"] = avatar2.info()
+    return r
+
+
+@app.post("/api/avatar2/closed_apply")
+def avatar2_closed_apply():
+    """把预览图转正成正式基准（用户点「用这个」时调用）。"""
+    r = avatar2.apply_closed_preview()
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "转正失败")
+    return r
+
+
+@app.post("/api/avatar2/closed_drop")
+def avatar2_closed_drop():
+    """丢弃预览图，已生效基准与主形象都不动。"""
+    r = avatar2.drop_closed_preview()
+    r["info"] = avatar2.info()
+    return r
+
+
+@app.post("/api/avatar2/close_preview")
+def avatar2_close_preview(body: dict = None):
+    """用 SDXL 局部重绘生成闭嘴预览候选（只重绘嘴部方块，主形象零改动）。
+
+    body: {n?: 1~4, style?: natural|smile|neutral|mix, steps?: 28}
+    ⚠ 每张约 20~30 秒（GPU）；这是一次性操作，选定后日常渲染仍走轻量形变。
+    """
+    body = body or {}
+    try:
+        r = avatar2.preview_closed_inpaint(
+            n=int(body.get("n") or 3),
+            style=str(body.get("style") or "mix"),
+            steps=int(body.get("steps") or 28),
+        )
+    except Exception as e:                                       # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="生成闭嘴预览失败：%s: %s" % (type(e).__name__, e))
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "生成失败")
+    r["all"] = avatar2.closed_candidates()
+    return r
+
+
+@app.get("/api/avatar2/closed_candidate/{name}")
+def avatar2_closed_candidate(name: str):
+    """看某一张候选图。"""
+    p = os.path.join(avatar2._closed_cand_dir(), os.path.basename(name))
+    if not os.path.isfile(p):
+        raise HTTPException(status_code=404, detail="没有这张候选")
+    return FileResponse(p, media_type="image/png",
+                        headers={"Content-Disposition": "inline",
+                                 "Cache-Control": "no-store"})
+
+
+@app.post("/api/avatar2/close_apply")
+def avatar2_close_apply(body: dict = None):
+    """选定某张候选作为闭嘴基准（body: {id}）。"""
+    body = body or {}
+    r = avatar2.apply_closed_candidate(str(body.get("id") or ""))
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "选定失败")
     r["info"] = avatar2.info()
     return r
 

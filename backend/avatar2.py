@@ -244,6 +244,11 @@ def info() -> dict:
         "closed": has_closed(),
         "closed_url": ("/api/avatar2/closed?v=%d" % int(os.path.getmtime(_img_closed_path())))
         if has_closed() else "",
+        # 闭嘴**预览**：只给看不生效，用户点「用这个」才转正
+        "closed_preview": has_closed_preview(),
+        "closed_preview_url": ("/api/avatar2/closed_preview?v=%d"
+                               % int(os.path.getmtime(_img_closed_preview_path())))
+        if has_closed_preview() else "",
         "videos_dir": _vdir(),
     }
 
@@ -271,11 +276,12 @@ def save_bytes(raw: bytes, source: str = "") -> dict:
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "保存形象失败：%s: %s" % (type(e).__name__, e)}
     # 闭嘴基准是按**旧图**合成的，换了形象必须清掉，否则新形象会用旧图的嘴
-    try:
-        if os.path.isfile(_img_closed_path()):
-            os.remove(_img_closed_path())
-    except OSError:
-        pass
+    for _stale in (_img_closed_path(), _img_closed_preview_path()):
+        try:
+            if os.path.isfile(_stale):
+                os.remove(_stale)
+        except OSError:
+            pass
     # 存完立刻自动定位嘴：上传照片和 AI 头像的构图差别极大，靠默认值一定偏，
     # 检测到就覆盖 mouth.json；检测不到保留默认值，前端可手动拖动校准。
     auto = detect_mouth(_img_path())
@@ -315,7 +321,7 @@ def save_from_b64(b64: str, source: str = "") -> dict:
 
 
 def reset() -> dict:
-    for p in (_img_path(), _img_closed_path()):
+    for p in (_img_path(), _img_closed_path(), _img_closed_preview_path()):
         if os.path.isfile(p):
             try:
                 os.remove(p)
@@ -329,8 +335,54 @@ def _img_closed_path() -> str:
     return os.path.join(_dir(), "avatar_closed.png")
 
 
+def _img_closed_preview_path() -> str:
+    """闭嘴效果的**预览**图：先给用户看，满意了点「用这个」才转正。
+
+    单独一个文件，绝不碰 avatar_closed.png —— 预览就是预览，
+    不满意关掉即可，主形象和已生效的基准都不受影响。
+    """
+    return os.path.join(_dir(), "avatar_closed_preview.png")
+
+
 def has_closed() -> bool:
     return os.path.isfile(_img_closed_path())
+
+
+def has_closed_preview() -> bool:
+    return os.path.isfile(_img_closed_preview_path())
+
+
+def apply_closed_preview() -> dict:
+    """把预览图转正成 avatar_closed.png（用户点「用这个」才走到这里）。"""
+    src = _img_closed_preview_path()
+    if not os.path.isfile(src):
+        return {"ok": False, "error": "还没有预览图，先点「闭嘴基准」生成一张"}
+    try:
+        shutil.copyfile(src, _img_closed_path())
+    except Exception as e:                                   # noqa: BLE001
+        return {"ok": False, "error": "转正失败：%s: %s" % (type(e).__name__, e)}
+    meta = _read_json(_META, {})
+    meta["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    meta["closed_from"] = os.path.basename(_img_path())
+    meta["closed_method"] = "preview_apply"
+    _write_json(_META, meta)
+    # 转正了就不需要预览了：留着会让界面一直挂着预览块
+    try:
+        os.remove(src)
+    except OSError:
+        pass
+    return {"ok": True, "closed": True, "info": info()}
+
+
+def drop_closed_preview() -> dict:
+    """丢掉预览（不满意时用），已生效的基准和主形象都不动。"""
+    p = _img_closed_preview_path()
+    if os.path.isfile(p):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return {"ok": True, "dropped": True}
 
 
 def render_source() -> str:
@@ -371,8 +423,12 @@ def face_box_from_mouth(size=None):
     return int(x1), int(y1), int(x2), int(y2)
 
 
-def close_mouth(force: bool = False) -> dict:
-    """把「张嘴」的源图合成一张闭嘴基准图（avatar_closed.png）。
+def close_mouth(force: bool = False, preview: bool = False) -> dict:
+    """把「张嘴」的源图合成一张闭嘴图。
+
+    preview=True 时写到 avatar_closed_preview.png 并**不写 meta**：
+    用户先看效果，满意了再调 apply_closed_preview() 转正。
+    默认（preview=False）直接写 avatar_closed.png，之后渲染就用它。
 
     为什么需要：Wav2Lip 是拿参考脸当条件的生成模型。源图嘴张着，生成的
     闭嘴帧也带着张开的口型 —— 念「一、二、三」时嘴合不拢，看着像一直在笑。
@@ -391,6 +447,8 @@ def close_mouth(force: bool = False) -> dict:
     if img is None:
         return {"ok": False, "error": "形象图读取失败"}
     H, W = img.shape[:2]
+    # 写到哪：预览 / 正式。后面所有写盘点统一用它，绝不让预览覆盖已生效基准。
+    _dst = _img_closed_preview_path() if preview else _img_closed_path()
 
     # ---- 新路径：下唇整体上移覆盖口腔（优先）----
     # 旧路径是镜像填充 / inpaint，视觉复核都判「像一块补丁」。
@@ -401,17 +459,20 @@ def close_mouth(force: bool = False) -> dict:
         _geom = _AM.analyze(img, mouth())
         if _geom and _geom.get("source_open"):
             _out = _AM.close_by_lip(img, _geom, 0.85)
-            _cp = _img_closed_path()
+            _cp = _dst
             os.makedirs(os.path.dirname(_cp), exist_ok=True)
             cv2.imwrite(_cp, _out)
-            _meta = _read_meta()
-            _meta["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            _meta["closed_from"] = os.path.basename(p)
-            _meta["closed_method"] = "lip_shift"
-            _write_meta(_meta)
-            return {"ok": True, "closed": True, "method": "lip_shift",
+            if not preview:
+                _meta = _read_meta()
+                _meta["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                _meta["closed_from"] = os.path.basename(p)
+                _meta["closed_method"] = "lip_shift"
+                _write_meta(_meta)
+            return {"ok": True, "closed": True, "preview": bool(preview),
+                    "method": "lip_shift",
                     "reason": "已用下唇上移生成闭嘴基准（保留原图唇部纹理）",
-                    "url": "/api/avatar2/closed?t=%d" % int(time.time())}
+                    "url": ("/api/avatar2/closed_preview?t=%d" if preview
+                            else "/api/avatar2/closed?t=%d") % int(time.time())}
     except Exception as _e:                             # noqa: BLE001
         _new_err = "%s: %s" % (type(_e).__name__, _e)
     else:
@@ -460,14 +521,16 @@ def close_mouth(force: bool = False) -> dict:
             cavity = (lab == best_lab)
     cav_px = int(cavity.sum())
     if cav_px == 0:
-        # 已经是闭嘴：把可能存在的旧基准删掉，别拿它污染渲染
-        try:
-            if os.path.isfile(_img_closed_path()):
-                os.remove(_img_closed_path())
-        except OSError:
-            pass
+        # 已经是闭嘴：把可能存在的旧基准删掉，别拿它污染渲染。
+        # 预览模式不动任何已生效的文件 —— 预览只负责「看」。
+        if not preview:
+            try:
+                if os.path.isfile(_img_closed_path()):
+                    os.remove(_img_closed_path())
+            except OSError:
+                pass
         if not force:
-            return {"ok": True, "closed": False,
+            return {"ok": True, "closed": False, "preview": bool(preview),
                     "reason": "看起来已经是闭嘴（没有找到成块的口腔区域），不用处理"}
 
     # 结构来源：闭嘴的物理过程就是「下唇抬起来贴住上唇」，所以直接拿开口
@@ -512,14 +575,17 @@ def close_mouth(force: bool = False) -> dict:
     blended = np.clip(blended, 0, 255).astype(np.uint8)
 
     # 颜色匹配：把补丁区的均值拉到周围皮肤/唇色，避免「一块偏色」
-    dst = _img_closed_path()
+    dst = _dst
     cv2.imwrite(dst, blended)
-    meta = _read_json(_META, {})
-    meta["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    meta["closed_from"] = os.path.basename(p)
-    _write_json(_META, meta)
-    return {"ok": True, "closed": True, "path": dst,
-            "cavity_px": cav_px, "url": "/api/avatar2/closed?v=%d" % int(os.path.getmtime(dst))}
+    if not preview:
+        meta = _read_json(_META, {})
+        meta["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        meta["closed_from"] = os.path.basename(p)
+        _write_json(_META, meta)
+    return {"ok": True, "closed": True, "preview": bool(preview), "path": dst,
+            "cavity_px": cav_px,
+            "url": ("/api/avatar2/closed_preview?v=%d" if preview
+                    else "/api/avatar2/closed?v=%d") % int(os.path.getmtime(dst))}
 
 
 # ---------------------------------------------------------------- 音频处理
@@ -1356,4 +1422,169 @@ def _probe_duration(path: str) -> float:
         return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
     except Exception:                                  # noqa: BLE001
         return 0.0
+# ------------------------------------------- 闭嘴预览候选（SDXL 局部重绘）
+# 2026-11-15：用户报「闭嘴那块像贴上去的色块，恶心」。
+# 旧路径 close_mouth() 是**确定性像素搬运**（下唇上移 + 唇色覆盖），
+# 2D 压缩做不出唇珠/唇线起伏，视觉复核原话是「珊瑚红的心形色块浮在皮肤上」。
+# 新路径让扩散模型**重画**嘴唇，画风光影跟着原图走。
+#
+# ★ 主形象零改动的关键：只裁一个以嘴为中心的方块送去重绘，重绘完按原坐标贴回。
+#   整图送去重绘会被 SDXL 缩到 680x1216 再还原（原图 787x1400），等于全图重采样
+#   —— 实测 107326 个像素被改，违反「主形象不能变」。裁 512x512 时
+#   _fit_working_size 返回 (512,512) 不缩放，块外像素实测 0 改动。
+
+_CLOSED_PROMPTS = {
+    "natural": ("a closed mouth, lips gently pressed together, natural closed lips, "
+                "3D cartoon character, soft matte clay material, smooth skin, "
+                "soft shading, subtle lip line, high quality"),
+    "smile": ("a closed mouth with a gentle smile, lips softly closed, corners slightly up, "
+              "3D cartoon character, soft matte clay material, smooth skin, "
+              "soft shading, high quality"),
+    "neutral": ("a relaxed closed mouth, calm expression, lips together, subtle lip line, "
+                "3D cartoon character, soft matte clay material, smooth skin, "
+                "soft shading, high quality"),
+}
+_CLOSED_NEG = ("open mouth, teeth, tongue, red lips, lipstick, exaggerated lips, "
+               "blurry, deformed, extra mouth, text, watermark, low quality, "
+               "harsh edges, color patch")
+_CLOSED_STYLES = ("natural", "smile", "neutral")
+
+
+def _closed_cand_dir() -> str:
+    d = os.path.join(_dir(), "closed_candidates")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def closed_candidates() -> list:
+    """列出已生成的候选（按时间倒序）。"""
+    d = _closed_cand_dir()
+    out = []
+    cm = _read_meta().get("cand_style") or {}
+    for f in sorted(glob.glob(os.path.join(d, "*.png")),
+                    key=os.path.getmtime, reverse=True):
+        n = os.path.basename(f)
+        out.append({"id": n, "style": cm.get(n, ""),
+                    "url": "/api/avatar2/closed_candidate/" + _q(n),
+                    "ts": time.strftime("%H:%M:%S", time.localtime(os.path.getmtime(f)))})
+    return out
+
+
+def preview_closed_inpaint(n: int = 3, style: str = "mix", steps: int = 28,
+                           patch: int = 512) -> dict:
+    """用 SDXL 局部重绘生成闭嘴预览候选（**主形象零改动**）。
+
+    n     : 生成几张（1~4）
+    style : natural / smile / neutral / mix（mix = 依次轮换三种描述）
+    steps : 采样步数，默认 28
+    patch : 送进模型的方块边长；512 时不会被 _fit_working_size 缩放
+    """
+    import base64
+    import io
+    from PIL import Image, ImageDraw, ImageFilter
+
+    p = _img_path()
+    if not os.path.isfile(p):
+        return {"ok": False, "error": "还没有形象图，先上传一张"}
+    try:
+        from . import t2i as _t2i
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "局部重绘模块加载失败：%s" % e}
+    try:
+        if not _t2i.inpaint_ready():
+            return {"ok": False,
+                    "error": "还没装「局部重绘」模型（目录：%s）" % _t2i.inpaint_model_dir()}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "检查重绘模型失败：%s" % e}
+
+    im = Image.open(p).convert("RGB")
+    W, H = im.size
+    cx, cy, mw, mh = _mouth_geom((W, H), mouth())
+    patch = max(256, min(512, int(patch or 512)))
+    if W < patch or H < patch:
+        patch = max(128, (min(W, H) // 2) * 2)
+    px = int(round(cx - patch / 2.0))
+    py = int(round(cy - patch / 2.0))
+    px = max(0, min(W - patch, px))
+    py = max(0, min(H - patch, py))
+    block = im.crop((px, py, px + patch, py + patch))
+    # 蒙版：椭圆盖住嘴（上下留余量，够模型画出唇线）
+    m = Image.new("L", (patch, patch), 0)
+    dr = ImageDraw.Draw(m)
+    bx, by = cx - px, cy - py
+    dr.ellipse([bx - mw * 1.05, by - mh * 2.1,
+                bx + mw * 1.05, by + mh * 2.1], fill=255)
+    m = m.filter(ImageFilter.GaussianBlur(max(3.0, mh * 0.30)))
+
+    tmpd = tempfile.mkdtemp(prefix="closecand_")
+    bpath = os.path.join(tmpd, "block.png")
+    mpath = os.path.join(tmpd, "mask.png")
+    block.save(bpath)
+    m.save(mpath)
+
+    if style == "mix":
+        styles = list(_CLOSED_STYLES)
+    else:
+        styles = [style if style in _CLOSED_PROMPTS else "natural"]
+    d = _closed_cand_dir()
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    made, errs = [], []
+    try:
+        for i in range(max(1, min(4, int(n or 3)))):
+            st = styles[i % len(styles)]
+            r = _t2i.inpaint(bpath, prompt=_CLOSED_PROMPTS[st],
+                             negative_prompt=_CLOSED_NEG,
+                             mask=mpath, strength=0.95, steps=steps)
+            if not r.get("ok"):
+                errs.append(r.get("error"))
+                continue
+            nb = Image.open(io.BytesIO(base64.b64decode(r["b64"]))).convert("RGB")
+            if nb.size != (patch, patch):
+                nb = nb.resize((patch, patch), Image.LANCZOS)
+            out = im.copy()
+            out.paste(nb, (px, py), m)      # ★ 块外像素原样保留
+            name = "cand_%s_%d.png" % (ts, i + 1)
+            out.save(os.path.join(d, name))
+            made.append({"id": name, "style": st,
+                         "url": "/api/avatar2/closed_candidate/" + _q(name),
+                         "work_size": r.get("work_size")})
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
+
+    if not made:
+        return {"ok": False,
+                "error": "全部候选都失败了：%s" % ("; ".join(str(e) for e in errs[:3]))}
+    _meta = _read_meta()
+    cm = dict(_meta.get("cand_style") or {})
+    for it in made:
+        cm[it["id"]] = it["style"]
+    _meta["cand_style"] = cm
+    _write_meta(_meta)
+    return {"ok": True, "count": len(made), "candidates": made,
+            "box": [px, py, patch], "errors": errs[:3],
+            "note": "只重绘了嘴部 %dx%d 方块，方块外像素零改动" % (patch, patch)}
+
+
+def apply_closed_candidate(cid: str) -> dict:
+    """把用户选中的候选设为 avatar_closed.png（之后渲染就用它）。"""
+    cid = os.path.basename(str(cid or "").strip())
+    if not cid or not cid.endswith(".png"):
+        return {"ok": False, "error": "候选 id 不对"}
+    src = os.path.join(_closed_cand_dir(), cid)
+    if not os.path.isfile(src):
+        return {"ok": False, "error": "找不到这张候选：%s" % cid}
+    try:
+        shutil.copyfile(src, _img_closed_path())
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "写入闭嘴基准失败：%s" % e}
+    _meta = _read_meta()
+    _meta["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    _meta["closed_from"] = os.path.basename(_img_path())
+    _meta["closed_method"] = "inpaint"
+    _meta["closed_candidate"] = cid
+    _write_meta(_meta)
+    return {"ok": True, "method": "inpaint", "id": cid,
+            "url": "/api/avatar2/closed?t=%d" % int(time.time())}
+
+
 # __TEST_MARKER_1794594093__
