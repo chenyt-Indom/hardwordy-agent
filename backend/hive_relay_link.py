@@ -753,6 +753,7 @@ class RelayLink:
                 self.state = "error"
                 self.error = "所有线路都连不上（已试 %d 条）：%s" % (
                     n, self.error or "")
+                self._degraded = True
 
             self.fail_streak += 1
             delay = min(BACKOFF_MAX,
