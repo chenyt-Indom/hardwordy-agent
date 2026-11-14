@@ -14,8 +14,8 @@ import paramiko
 
 SRV_HOST = "139.199.69.88"
 SRV_USER = "root"
-SRV_KEY = r"C:\Users\Administrator\.ssh\id_rsa"
-SRV_KEY2 = r"C:\Users\user\.ssh\id_rsa"
+SRV_KEY = r"C:\Users\19853\.ssh\id_rsa"
+SRV_KEY2 = r"C:\Users\19853\.ssh\id_ed25519"
 
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(("0.0.0.0", 0))
