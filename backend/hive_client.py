@@ -490,8 +490,14 @@ class HiveClient:
             return 0
 
     def send_stream(self, gid: str, mid: str, phase: str, delta: str = "",
-                    task: Optional[Dict[str, Any]] = None, seq_in: int = 0) -> Dict[str, Any]:
-        """@hd 实时进度。不落盘，直接泛洪 —— 刷屏内容没必要写进日志。"""
+                    task: Optional[Dict[str, Any]] = None, seq_in: int = 0,
+                    full: str = "") -> Dict[str, Any]:
+        """@hd 实时进度。不落盘，直接泛洪 —— 刷屏内容没必要写进日志。
+
+        `full` 是**当前累计全文**（可选）。流式帧走泛洪、不排队不重发，
+        只发增量的话任何一次丢包都会让成员那边的思考永久少一段；
+        带上全文后，下一帧就把缺的补齐（幂等，重复收到也无害）。
+        """
         self._hook()
         m = MESH.node()
         if not m.started:
@@ -503,6 +509,8 @@ class HiveClient:
             "from": me.get("user_id", ""), "name": me.get("name", ""),
             "ts": time.time(), "ttl": MESH.TTL_DEFAULT,
         }
+        if full:
+            obj["full"] = full
         n = m.broadcast(gid, MESH.T_STREAM, obj)
         return {"ok": True, "peers": n}
 
