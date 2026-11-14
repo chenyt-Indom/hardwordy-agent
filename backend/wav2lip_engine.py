@@ -121,7 +121,7 @@ def wav_to_mel(wav_float32, mel_npy=None):
 
 
 class Wav2LipEngine:
-    def __init__(self, onnx_path, det, mel_npy=None, threads=4):
+    def __init__(self, onnx_path, det, mel_npy=None, threads=4, sr_path=None):
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -129,6 +129,24 @@ class Wav2LipEngine:
         self.in_names = [i.name for i in self.sess.get_inputs()]
         self.det = det
         self.mel_npy = mel_npy
+        self.sr_sess = None
+        if sr_path and os.path.isfile(sr_path):
+            so2 = ort.SessionOptions()
+            so2.intra_op_num_threads = threads
+            so2.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            self.sr_sess = ort.InferenceSession(sr_path, so2, providers=["CPUExecutionProvider"])
+            self.sr_in = self.sr_sess.get_inputs()[0].name
+
+    def _sr(self, pred96):
+        """96x96 BGR -> 384x384 BGR（BigFace 4x 超分）"""
+        if self.sr_sess is None:
+            return pred96
+        x = pred96.astype(np.float32) / 255.0
+        x = x[:, :, ::-1]                      # BGR -> RGB
+        x = np.transpose(x, (2, 0, 1))[None]
+        out = self.sr_sess.run(None, {self.sr_in: x})[0][0]
+        out = np.transpose(out, (1, 2, 0))[:, :, ::-1]   # RGB -> BGR
+        return np.clip(out * 255.0, 0, 255)
 
     # ---------- 内部 ----------
     @staticmethod
