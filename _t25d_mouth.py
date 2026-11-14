@@ -18,14 +18,24 @@ print("画布 %dx%d  嘴中心 (%.0f,%.0f) 唇宽 %.0f 唇高 %.0f" % (W, H, cx,
 
 
 def lip_gap(fr):
-    """量唇缝：嘴部矩形里逐行亮度，找最暗的一条带的宽度（>阈值算张开）。"""
-    x0 = int(max(0, cx - mw * 0.6)); x1 = int(min(W, cx + mw * 0.6))
-    y0 = int(max(0, cy - mh * 1.6)); y1 = int(min(H, cy + mh * 1.6))
+    """量唇缝：只看嘴**中心那一窄条**的逐行亮度，找连续暗带的行数。
+
+    取整条嘴宽会被两颊和下巴阴影稀释（上一版就是这样，32→33 看不出变化）。
+    """
+    x0 = int(max(0, cx - mw * 0.12)); x1 = int(min(W, cx + mw * 0.12))
+    y0 = int(max(0, cy - mh * 2.0)); y1 = int(min(H, cy + mh * 2.0))
     roi = cv2.cvtColor(fr[y0:y1, x0:x1], cv2.COLOR_RGB2GRAY).astype(np.float32)
     row = roi.mean(axis=1)
-    base = np.median(row)
-    dark = row < (base - 12)
-    return int(dark.sum()), float(row.min()), base
+    top = float(np.percentile(row, 90))          # 皮肤亮度
+    bot = float(row.min())
+    thr = bot + (top - bot) * 0.45               # 明显暗于皮肤算唇缝
+    dark = row < thr
+    # 最长连续暗带
+    best = cur = 0
+    for v in dark:
+        cur = cur + 1 if v else 0
+        best = max(best, cur)
+    return int(best), bot, top
 
 
 tiles = []
