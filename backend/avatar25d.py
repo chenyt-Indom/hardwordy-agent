@@ -52,7 +52,14 @@ def _prep3d(img_path: str) -> dict:
     if not F3.available():
         raise RuntimeError("3D 模型文件不全（data/models/face3d/）")
 
-    img = np.asarray(Image.open(img_path).convert("RGB"))
+    # ⚠ 必须和 A2._prep 用同一个尺寸基准（MAX_SIDE=720），否则 _frame 输出的
+    #   720×720 和这里按原图 1024 算的 ROI 对不上，warp 会直接广播报错。
+    im = Image.open(img_path)
+    im = im.convert("RGBA") if im.mode in ("RGBA", "LA", "P") else im.convert("RGB")
+    W0, H0 = A2._fit_size(im.width, im.height)
+    if (W0, H0) != im.size:
+        im = im.resize((W0, H0), Image.LANCZOS)
+    img = np.asarray(im.convert("RGB"))
     H, W = img.shape[:2]
     f3 = F3.get()
 
