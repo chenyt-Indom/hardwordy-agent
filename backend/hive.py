@@ -1234,8 +1234,13 @@ def kind_of(mime: str, name: str) -> str:
     return "doc"
 
 
-def save_file(gid: str, name: str, data: bytes, mime: str = "") -> Dict[str, Any]:
-    """把本机要发的附件存进群目录，返回元信息（随后写进消息的 files 字段）。"""
+def save_file(gid: str, name: str, data: bytes, mime: str = "",
+              tag: str = "user", source: str = "") -> Dict[str, Any]:
+    """把本机要发的附件存进群目录，返回元信息（随后写进消息的 files 字段）。
+
+    tag="ai" → 存进 `artifacts/`（AI 产物文件夹），并在 meta 里留 source
+    （哪个工具/项目产出的），前端产物面板按它分组显示。
+    """
     if not data:
         raise ValueError("文件是空的")
     if len(data) > MAX_FILE:
