@@ -521,7 +521,8 @@ class RelayLink:
 
     # -------------------------------------------------- 生命周期
 
-    def start(self, url: str, gid: str, token: str = "") -> Dict[str, Any]:
+    def start(self, url: str, gid: str, token: str = "",
+              extra_urls: Any = None) -> Dict[str, Any]:
         p = parse_url(url)
         if not p.get("ok"):
             self.state = "error"
