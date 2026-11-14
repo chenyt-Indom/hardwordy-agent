@@ -103,7 +103,9 @@ window.LiveCard = (function () {
     if (name === "edit_image") return "🖼 正在微改图片…";
     if (name === "remember" || name === "search_memory") return "🧠 正在读写记忆…";
     if (name === "web_search") return "🌐 正在联网检索…";
-    return "🔧 正在调用工具：" + labelOf(name);
+    // ⚠️ 这里用 LABELS[name] || name，不能用 labelOf()：
+    //   labelOf 会给未知工具补一个 "🔧 " 前缀，拼出来就是「🔧 正在调用工具：🔧 xxx」。
+    return "🔧 正在调用工具：" + (LABELS[name] || name);
   }
 
   // 折叠高度补间：卡片里有 display:none 的元素，纯 CSS 会「啪一下弹出来」。
