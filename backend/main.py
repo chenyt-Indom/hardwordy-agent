@@ -10110,6 +10110,104 @@ def avatar2_speak(body: dict):
                          amp=_amp)
 
 
+@app.get("/api/avatar3d/info")
+def avatar3d_info():
+    """3D 数字人能力自检：模型是否就绪、能做什么。"""
+    try:
+        from . import face3d
+        ok = face3d.available()
+    except Exception as e:                                  # noqa: BLE001
+        return {"ok": False, "available": False,
+                "error": "%s: %s" % (type(e).__name__, e)}
+    return {
+        "ok": True,
+        "available": bool(ok),
+        "engine": "3dmm",
+        "verts": 38365,
+        "tris": 76073,
+        "features": ["真 3D 人脸网格", "头部偏航/俯仰", "张嘴（含下颌）", "眨眼"],
+        "limits": [
+            "单图重建：侧面没有纹理，转头幅度建议 ≤12°",
+            "口型为网格微张，不是生成式重绘，大张口会失真",
+        ],
+    }
+
+
+@app.post("/api/avatar3d/speak")
+def avatar3d_speak(body: dict):
+    """文本 → TTS → 3D 网格渲染 → mp4。body: {text, voice, rate, style, engine, amp, size, head_move}"""
+    body = body or {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 不能为空")
+    if len(text) > 2000:
+        raise HTTPException(status_code=400,
+                            detail="3D 模式单次最多 2000 字（渲染较慢，建议分段）")
+    try:
+        from . import avatar3d, face3d
+    except Exception as e:                                  # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="3D 模块加载失败：%s: %s" % (type(e).__name__, e))
+    if not face3d.available():
+        raise HTTPException(status_code=400,
+                            detail="3D 模型没就绪（data/models/face3d 缺少文件）")
+
+    _r = body.get("rate")
+    rate = None
+    if _r not in (None, ""):
+        try:
+            rate = int(_r)
+        except Exception:                                   # noqa: BLE001
+            rate = None
+    try:
+        amp = float(np.clip(float(body.get("amp") or 1.4), 0.6, 2.0))
+    except Exception:                                       # noqa: BLE001
+        amp = 1.4
+    try:
+        size = int(body.get("size") or 512)
+    except Exception:                                       # noqa: BLE001
+        size = 512
+    size = int(np.clip(size, 256, 1024))
+    try:
+        head_move = float(body.get("head_move", 1.0))
+    except Exception:                                       # noqa: BLE001
+        head_move = 1.0
+
+    from . import tts as tts_mod
+    a = tts_mod.synth(text, voice=str(body.get("voice") or ""), rate=rate or 0,
+                      engine=str(body.get("engine") or "auto"),
+                      style=str(body.get("style") or ""))
+    if not a.get("ok"):
+        raise HTTPException(status_code=400, detail="配音失败：%s" % a.get("error"))
+    wav = avatar2._to_wav16k(a.get("path") or "")
+    words = avatar2._asr_words(wav)
+
+    name = "avatar3d_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
+    out = os.path.join(avatar2._vdir(), name)
+    try:
+        r = avatar3d.render(avatar2._img_path(), wav, out, words=words,
+                            amp=amp, size=size, head_move=head_move)
+    except Exception as e:                                  # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="3D 渲染失败：%s: %s" % (type(e).__name__, e))
+    from urllib.parse import quote
+    return {
+        "ok": True,
+        "name": name,
+        "url": "/api/avatar2/video/" + quote(name),
+        "path": out,
+        "duration": r["duration"],
+        "size": r["size"],
+        "frames": r["frames"],
+        "amp": amp,
+        "head_move": head_move,
+        "lipsync_label": "3D 网格口型",
+        "audio_url": a.get("url") or "",
+        "align": ("字级对齐 %d 字" % len(words)) if words else "声学驱动",
+        "text": text[:200],
+    }
+
+
 @app.post("/api/avatar2/concat")
 def avatar2_concat(body: dict):
     """把多段数字人视频拼成一个。body: {names: [...], out_name?}
