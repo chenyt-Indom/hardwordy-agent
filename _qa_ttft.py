@@ -11,6 +11,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import backend.main as M  # noqa
+import backend.config as C  # noqa
 import backend.deepseek_client as DS  # noqa
 
 
