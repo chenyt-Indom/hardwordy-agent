@@ -797,6 +797,7 @@ class RelayLink:
             pass
         _set_keepalive(sock)
         self.tls_unverified = False
+        self._fail_hard = False      # True = 这条不是我们的中继，别频繁重试
 
         # ws:// / wss:// 先升级成 WebSocket，再把 sock 包成 WSSock ——
         # 之后的 _recv_pkt / _send_pkt 完全不用改（接口和普通 socket 一致）。
