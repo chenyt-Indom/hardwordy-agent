@@ -10394,6 +10394,10 @@
         // 正式消息马上会由 msg 事件补上（它带完整思考和耗时），
         // 这里延时移除卡片，别抢在正式消息前面闪一下。
         setTimeout(() => {
+          // ★ 2026-11-15：思考节点和正文节点是**平级**的，而且跟随视角时思考节点
+          //   被挪到了 body 上 —— 只 remove(c.node) 会留下一个浮在左上角、再也
+          //   收不回去的思考框。两个都清掉。
+          try { if (c.thinkNode) c.thinkNode.remove(); } catch (e) { /* 忽略 */ }
           try { c.node.remove(); } catch (e) { /* 忽略 */ }
           delete hdCards[f.mid || "?"];
         }, 1200);
