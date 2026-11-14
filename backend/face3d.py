@@ -137,11 +137,14 @@ def render_mesh(tex, uv, pts, tri, size=256, bg=(0, 0, 0), shade=True):
     src_all = np.stack([tx[F], ty[F]], axis=-1)  # (F,3,2)
     lo = np.floor(dst_all.min(axis=1)).astype(np.int32)
     hi = np.ceil(dst_all.max(axis=1)).astype(np.int32) + 1
-    np.clip(lo, 0, size)
-    np.clip(hi, 0, size)
+    lo = np.clip(lo, 0, size)
+    hi = np.clip(hi, 0, size)
     bw = hi[:, 0] - lo[:, 0]
     bh = hi[:, 1] - lo[:, 1]
-    ok = (bw >= 1) & (bh >= 1) & (lo[:, 0] < size) & (lo[:, 1] < size)
+    # 亚像素三角形（投影后不足 1px²）对画面几乎无贡献，跳过以提速
+    area_px = np.abs((dst_all[:, 1, 0] - dst_all[:, 0, 0]) * (dst_all[:, 2, 1] - dst_all[:, 0, 1])
+                     - (dst_all[:, 2, 0] - dst_all[:, 0, 0]) * (dst_all[:, 1, 1] - dst_all[:, 0, 1])) * 0.5
+    ok = (bw >= 1) & (bh >= 1) & (area_px >= min_area)
 
     for i in np.nonzero(ok)[0]:
         x0, y0 = int(lo[i, 0]), int(lo[i, 1])
