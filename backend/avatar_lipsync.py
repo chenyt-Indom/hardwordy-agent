@@ -156,6 +156,9 @@ def _apply_motion(frames, img_path, proc_side, y, sr, fps, blink, motion):
 # 增益，让「说话时点头」这个最重要的动作看得出来。
 PITCH_BOOST = 2.0
 
+# 平移 / 左右转 / 侧倾的整体增益（pitch 不乘这个，它有自己的 boost）
+MOTION_GAIN = 1.3
+
 
 def _blink_frame(frame, face_box, t, period=3.2, dur=0.18):
     """在眼部做上下位移模拟眨眼（只压缩眼裂，不改五官）"""
