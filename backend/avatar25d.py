@@ -408,12 +408,14 @@ def render(img_path: str, wav_path: str, out_mp4: str, words=None,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
         for i, (op, wd) in enumerate(params):
-            yaw, pit, rol, bl = poses[i]
+            yaw, pit, rol, tx, ty, scl, bl = poses[i]
             fr = A2._frame(prep2d, op, wd, amp=_amp)          # 先做嘴（原图坐标最准）
             fr = np.asarray(fr.convert("RGB"))
-            fr = _warp(fr, prep3d, yaw * _mot, pit * _mot, rol * _mot)
+            fr = _warp(fr, prep3d, yaw * _mot, pit * _mot, rol * _mot,
+                       tx * _mot, ty * _mot, 1.0 + (scl - 1.0) * _mot)
             if blink and bl > 0.02:
-                fr = _blink(fr, prep3d, bl, yaw * _mot, pit * _mot)
+                fr = _blink(fr, prep3d, bl, yaw * _mot, pit * _mot,
+                            tx * _mot, ty * _mot)
             proc.stdin.write(np.ascontiguousarray(fr).tobytes())
             if on_progress and (i % 10 == 0 or i == n - 1):
                 try:
