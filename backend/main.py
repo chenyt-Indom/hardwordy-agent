@@ -11780,33 +11780,43 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             gmem = hive.memory_context(gid, 2500)
         except Exception:
             gmem = ""
-        prompt = hive.build_hd_prompt(instruction, hist, asker, memory=gmem)
+        # ★ 2026-11-15：系统提示直接用**单人模式那一个函数**（同一份文本、同一套规范）。
+        #   这是「群里和单聊里像同一个人」的根本 —— 原来群聊压根没有系统提示。
+        sys_prompt = _SystemPrompt.build(instruction, "hive:" + gid)
+        msgs = _hive_chat_messages(instruction, hist, asker, gmem=gmem)
 
         # 附件：本次指令的 + 历史消息里的，一起交给模型
         images, image_mimes, attach_note = _hive_collect_attachments(
             gid, body, hist)
         if attach_note:
-            prompt += "\n\n【群里的附件（含本次指令与之前聊天里发过的）】" + attach_note
+            # ⚠️ 附件说明挂在**最后一条 user 消息**上，绝不碰系统提示 ——
+            #    系统提示 + 工具定义要作为稳定前缀被缓存（见 _SystemPrompt.build 的说明）。
+            msgs[-1]["content"] += ("\n\n【群里的附件（含本次指令与之前聊天里发过的）】"
+                                    + attach_note)
 
         cfg = config.load_config() or {}
         model = cfg.get("default_model") or ""
         if not model:
             raise RuntimeError("没有配置默认模型（先在设置里选一个）")
-        # ★ 2026-11-14 用户报：「群功能的 ai 没法生成足够大的内容分发到我手里」。
-        #   根因是这里写死 max_tokens=2400 —— 约 1200~1500 个汉字，
-        #   让它写一篇长文档/长报告，必然在半路被硬截断。
-        #   现在可配置（config.json 的 hive_max_tokens），默认 8000（≈4000~5000 汉字）。
-        #   夹到 512~16000：太小没意义，太大云端会直接报参数错误。
+        # 输出额度：默认**跟随单人配置**（用户要求能力一致），
+        # hive_max_tokens 只在显式配置时才覆盖。
         try:
-            _hive_mt = int(cfg.get("hive_max_tokens") or 8000)
+            _hive_mt = int(cfg.get("hive_max_tokens") or 0)
         except Exception:
-            _hive_mt = 8000
-        _hive_mt = max(512, min(16000, _hive_mt))
+            _hive_mt = 0
+        if _hive_mt <= 0:
+            try:
+                _hive_mt = int(cfg.get("max_tokens") or 8192)
+            except Exception:
+                _hive_mt = 8192
+        _hive_mt = max(512, min(32000, _hive_mt))
+        prompt = msgs[-1]["content"]      # 兼容下面的旧引用
         # 「工作全过程」的起点：把这次任务的输入条件也播出去
         # （注入了多少条历史、提示词多长），让人看得出模型是基于什么在干。
         _hd_emit(gid, mid, "start",
                  task={"asker": asker, "model": model, "hist": len(hist),
-                       "prompt_chars": len(prompt),
+                       "prompt_chars": (len(sys_prompt) + sum(
+                           len(str(m.get("content") or "")) for m in msgs)),
                        "images": len(images),
                        "files": len(((body or {}).get("extra") or {}).get("files") or []),
                        "instruction": (instruction or "")[:120]})
