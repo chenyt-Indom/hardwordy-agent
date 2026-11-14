@@ -12497,3 +12497,387 @@
   })();
 
 })();
+
+/* =====================================================================
+   AI 自我迭代抽屉（2026-11-15 用户要求）
+     · 右侧滑入面板：AI 的自我反思 / 对用户的观察 / 可增加的功能 /
+       网上最新技术动态 / 它想改什么；
+     · 想改的会列成「动作」，**必须点批准才动手**（批准时可填备注，
+       相当于给它的微调意见）；
+     · 逐条批准、整批批准都支持；执行前自动备份，可一键回滚；
+     · 显示「建议采纳率」= 真做了多少条 / 一共提了多少条。
+   数据在后端 data/self_iterate/，纯本地。
+   ===================================================================== */
+(function () {
+  const btn = document.getElementById("iterBtn");
+  if (!btn) return;
+  const dot = document.getElementById("iterDot");
+
+  let el = null;          // 抽屉 DOM
+  let data = null;        // overview 结果
+  let busy = false;
+  let noteFor = null;     // {id, kind:'approve'|'reject'} —— 备注框展开中
+  let lastSent = "";      // 已上报过的最后一条用户消息（避免重复累积）
+
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+  async function api(url, body) {
+    const opt = body === undefined ? {} :
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body) };
+    try {
+      const r = await fetch(url, opt);
+      return await r.json();
+    } catch (e) {
+      return { ok: false, error: "请求失败：" + e.message };
+    }
+  }
+
+  // ---- 顶栏红点：有等你批准的动作就亮
+  async function refreshDot() {
+    if (!dot) return;
+    try {
+      const d = await api("/api/selfiter/overview");
+      if (!d || !d.ok) return;
+      const n = (d.pending || 0) + (d.approved_waiting || 0);
+      dot.hidden = n <= 0;
+      dot.textContent = n > 0 ? (n > 9 ? "9+" : String(n)) : "";
+      dot.title = n > 0 ? ("有 " + n + " 个动作等你批准") : "";
+    } catch (e) { /* 忽略 */ }
+  }
+
+  // ---- 把最近几轮对话喂给后端，作为「最近发生了什么」的素材
+  function grabRecent() {
+    const out = [];
+    try {
+      const nodes = document.querySelectorAll(".messages .msg");
+      const arr = Array.prototype.slice.call(nodes, -10);
+      arr.forEach(function (n) {
+        if (n.querySelector(".thinking") || n.classList.contains("tip")) return;
+        const isUser = n.classList.contains("user");
+        const t = (n.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500);
+        if (t) out.push({ role: isUser ? "user" : "bot", text: t });
+      });
+    } catch (e) { /* 忽略 */ }
+    return out;
+  }
+
+  let pushing = false;
+  async function pushSignals() {
+    if (pushing) return;
+    pushing = true;
+    try {
+      const arr = grabRecent();
+      let lastUser = "";
+      for (let i = 0; i < arr.length; i++) {
+        if (arr[i].role === "user") lastUser = arr[i].text;
+      }
+      if (!lastUser || lastUser === lastSent) return;
+      for (let i = 0; i < arr.length; i++) {
+        if (arr[i].role !== "user") continue;
+        const nxt = (arr[i + 1] && arr[i + 1].role === "bot") ? arr[i + 1].text : "";
+        await api("/api/selfiter/signal", { user: arr[i].text, assistant: nxt });
+        i++;
+      }
+      lastSent = lastUser;
+    } finally {
+      pushing = false;
+    }
+  }
+
+  function say(t, kind) {
+    if (!el) return;
+    const m = el.querySelector(".iter-msg");
+    m.textContent = t || "";
+    m.className = "iter-msg " + (kind || "");
+  }
+
+  function layer() {
+    if (el) return el;
+    el = document.createElement("div");
+    el.className = "iter-layer";
+    el.innerHTML =
+      '<div class="iter-panel">' +
+        '<div class="iter-head">' +
+          '<span class="iter-title">🌱 AI 迭代想法</span>' +
+          '<button type="button" class="btn sm ghost iter-close">关闭</button>' +
+        '</div>' +
+        '<div class="iter-stats"></div>' +
+        '<div class="iter-bar">' +
+          '<button type="button" class="btn sm iter-run">🔄 现在反思一次</button>' +
+          '<input class="iter-focus" maxlength="200" ' +
+            'placeholder="这次想让我重点关注什么？（可留空）">' +
+        '</div>' +
+        '<div class="iter-msg"></div>' +
+        '<div class="iter-body"></div>' +
+      '</div>';
+    document.body.appendChild(el);
+    el.addEventListener("click", function (e) { if (e.target === el) hide(); });
+    el.querySelector(".iter-close").onclick = hide;
+    el.querySelector(".iter-run").onclick = runReflect;
+    el.querySelector(".iter-body").addEventListener("click", onBodyClick);
+    return el;
+  }
+
+  function hide() {
+    if (el) { el.remove(); el = null; }
+    noteFor = null;
+  }
+
+  function show() {
+    layer();
+    render();
+    load();
+    pushSignals();
+  }
+
+  // ---------------------------------------------------------- 渲染
+  const RISK_LABEL = { low: "低风险", mid: "中风险", high: "高风险" };
+  const ST_LABEL = { pending: "待批准", approved: "已批准·待执行",
+                     rejected: "已拒绝", done: "已执行", failed: "失败" };
+
+  function sec(title, inner) {
+    return '<div class="iter-sec"><div class="iter-sec-t">' + esc(title) + '</div>' +
+           inner + '</div>';
+  }
+
+  function actionsHtml(actions) {
+    actions = actions || [];
+    if (!actions.length) {
+      return '<div class="iter-li">这次没有提出要改代码的动作。</div>';
+    }
+    let h = '<div class="iter-act-btns" style="margin-bottom:10px">' +
+      '<button type="button" class="btn sm iter-all-ok">✓ 全部批准</button>' +
+      '<button type="button" class="btn sm ghost iter-exec">▶ 执行已批准的</button>' +
+      '<button type="button" class="btn sm ghost iter-rb">↩ 回滚已执行的</button>' +
+      '</div>';
+    actions.forEach(function (a) {
+      const risk = a.risk || "mid";
+      h += '<div class="iter-act risk-' + esc(risk) + '" data-id="' + esc(a.id) + '">' +
+        '<div class="iter-act-head">' +
+          '<span class="iter-act-t">' + esc(a.title) + '</span>' +
+          '<span class="iter-risk">' + esc(RISK_LABEL[risk] || risk) + '</span>' +
+          '<span class="iter-act-st">' + esc(ST_LABEL[a.status] || a.status) + '</span>' +
+        '</div>' +
+        '<div class="iter-act-d">' + esc(a.detail) + '</div>' +
+        '<div class="iter-act-f">' + esc((a.files || []).join(" · ") || "（未指定文件）") + '</div>';
+      if (a.error) {
+        h += '<div class="iter-li" style="border-color:#fed7d7;color:#c53030">' +
+             esc(a.error) + '</div>';
+      }
+      if (a.note) {
+        h += '<div class="iter-li">你的备注：' + esc(a.note) + '</div>';
+      }
+      if (noteFor && noteFor.id === a.id) {
+        h += '<textarea class="iter-note" placeholder="' +
+          (noteFor.kind === "approve" ? "要不要补充点什么？（比如「只做最小改动」「注意别动 XX」），可留空" : "拒绝的理由（可留空）") +
+          '"></textarea>' +
+          '<div class="iter-act-btns" style="margin-top:8px">' +
+            '<button type="button" class="btn sm iter-confirm">确认' +
+              (noteFor.kind === "approve" ? "批准" : "拒绝") + '</button>' +
+            '<button type="button" class="btn sm ghost iter-cancel">取消</button>' +
+          '</div>';
+      } else if (a.status === "pending" || a.status === "rejected") {
+        h += '<div class="iter-act-btns">' +
+          '<button type="button" class="btn sm iter-ok">✓ 批准</button>' +
+          '<button type="button" class="btn sm ghost iter-no">✕ 拒绝</button>' +
+          '</div>';
+      }
+      h += '</div>';
+    });
+    return h;
+  }
+
+  function listHtml(items, kind) {
+    items = items || [];
+    if (!items.length) return '<div class="iter-li">（这次没有）</div>';
+    return items.map(function (it) {
+      let h = '<div class="iter-li">';
+      if (kind === "w" && it.severity) {
+        h += '<span class="iter-tag">' + esc(it.severity) + '</span>';
+      }
+      h += '<b>' + esc(it.title || "") + '</b>';
+      if (it.detail) h += ' — ' + esc(it.detail);
+      if (it.why) h += '<br>为什么：' + esc(it.why);
+      if (it.how) h += '<br>怎么做：' + esc(it.how);
+      if (it.suggestion) h += '<br>建议：' + esc(it.suggestion);
+      if (it.effort) h += ' <span class="iter-tag">工作量 ' + esc(it.effort) + '</span>';
+      h += '</div>';
+      return h;
+    }).join("");
+  }
+
+  function techHtml(p) {
+    const tk = p.tech_takeaways || [];
+    const raw = p.tech_raw || {};
+    let h = "";
+    if (tk.length) {
+      h += tk.map(function (t) {
+        return '<div class="iter-tech"><b>' + esc(t.title || "") + '</b>' +
+          (t.source ? ' <span class="iter-tag">' + esc(t.source) + '</span>' : "") +
+          (t.url ? ' <a href="' + esc(t.url) + '" target="_blank" rel="noopener">原文</a>' : "") +
+          '<br>' + esc(t.takeaway || "") +
+          (t.applicable ? '<br><i>对我们：' + esc(t.applicable) + '</i>' : "") +
+          '</div>';
+      }).join("");
+    }
+    const names = { arxiv: "arXiv 论文", github: "GitHub 热门", hn: "Hacker News", cn: "中文技术媒体" };
+    let rawH = "";
+    Object.keys(raw).forEach(function (k) {
+      const arr = raw[k] || [];
+      if (!arr.length) return;
+      rawH += '<div class="iter-tech" style="margin-top:6px"><b>' +
+        esc(names[k] || k) + '</b><br>' +
+        arr.map(function (it) {
+          return '· <a href="' + esc(it.url || "#") + '" target="_blank" rel="noopener">' +
+            esc(it.title || "") + '</a>';
+        }).join("<br>") + '</div>';
+    });
+    if (!h && !rawH) return '<div class="iter-li">这次没抓到（可能没联网）。</div>';
+    return h + (rawH ? '<details><summary class="iter-li" style="cursor:pointer">展开原始抓取结果</summary>' + rawH + '</details>' : "");
+  }
+
+  function render() {
+    if (!el) return;
+    const d = data || {};
+    const st = d.stats || {};
+    el.querySelector(".iter-stats").innerHTML =
+      '<span class="iter-chip">采纳率 <b>' + (st.rate || 0) + '%</b></span>' +
+      '<span class="iter-chip">提了 <b>' + (st.proposed || 0) + '</b> 条</span>' +
+      '<span class="iter-chip">真做了 <b>' + (st.done || 0) + '</b> 条</span>' +
+      '<span class="iter-chip">待批准 <b>' + (d.pending || 0) + '</b></span>' +
+      '<span class="iter-chip">对话样本 <b>' + (d.signals || 0) + '</b></span>';
+
+    const body = el.querySelector(".iter-body");
+    const p = d.latest;
+    if (!p) {
+      body.innerHTML = '<div class="iter-empty">还没有反思过。<br><br>' +
+        '点上面的「🔄 现在反思一次」，我会先看最近的对话和网上的新技术（arXiv / GitHub / HackerNews / 中文媒体），' +
+        '然后告诉你：我哪里做得不好、你在怎么用我、可以加什么功能、以及我想改哪些代码。<br><br>' +
+        '⚠️ 想改的东西**不会自己动手**，都要你点批准。</div>';
+      return;
+    }
+    let h = "";
+    h += sec("⏳ 我打算做的改动（" + (p.actions || []).length + " 条，等你批准）",
+             actionsHtml(p.actions));
+    h += sec("🪞 我对自己的反思", listHtml(p.weaknesses, "w"));
+    h += sec("👤 我对你的观察", listHtml(p.user_insights, "u"));
+    h += sec("💡 可以加的功能", listHtml(p.features, "f"));
+    h += sec("🌐 网上最新动态（抓到 " + (p.tech_total || 0) + " 条）", techHtml(p));
+    h += sec("📜 历史反思", (d.history || []).map(function (x) {
+      return '<div class="iter-hist">' + esc(x.ts) + " · " + esc(x.summary || "") +
+             " · " + (x.actions || 0) + " 条动作</div>";
+    }).join("") || '<div class="iter-li">（暂无）</div>');
+    body.innerHTML = h;
+  }
+
+  // ---------------------------------------------------------- 动作
+  async function load() {
+    const d = await api("/api/selfiter/overview");
+    if (d && d.ok) data = d;
+    render();
+    refreshDot();
+  }
+
+  async function runReflect() {
+    if (busy) return;
+    const box = layer();
+    const focus = (box.querySelector(".iter-focus").value || "").trim();
+    busy = true;
+    say("反思中…先抓 arXiv / GitHub / HackerNews / 中文媒体，再让模型想一遍，约 20~40 秒");
+    await pushSignals();
+    const r = await api("/api/selfiter/reflect",
+      { trigger: "manual", use_web: true, focus: focus });
+    busy = false;
+    if (!r || !r.ok) { say((r && r.error) || "反思失败", "bad"); return; }
+    say("反思完成：" + ((r.plan && r.plan.summary) || ""), "good");
+    await load();
+  }
+
+  async function doApprove(ids, note) {
+    if (busy || !data || !data.latest) return;
+    busy = true; say("批准中…");
+    const r = await api("/api/selfiter/approve",
+      { id: data.latest.id, action_ids: ids, note: note || "" });
+    busy = false; noteFor = null;
+    if (!r || !r.ok) { say((r && r.error) || "批准失败", "bad"); return; }
+    say("已批准 " + (r.approved || 0) + " 条。点「▶ 执行已批准的」我才会真的改代码。", "good");
+    await load();
+  }
+
+  async function doReject(ids, note) {
+    if (busy || !data || !data.latest) return;
+    busy = true; say("处理中…");
+    const r = await api("/api/selfiter/reject",
+      { id: data.latest.id, action_ids: ids, note: note || "" });
+    busy = false; noteFor = null;
+    if (!r || !r.ok) { say((r && r.error) || "操作失败", "bad"); return; }
+    say("已拒绝 " + (r.rejected || 0) + " 条。", "good");
+    await load();
+  }
+
+  async function doExecute() {
+    if (busy || !data || !data.latest) return;
+    busy = true;
+    say("执行中…会先备份原文件，改完做语法校验，失败自动回滚");
+    const r = await api("/api/selfiter/execute", { id: data.latest.id });
+    busy = false;
+    if (!r || !r.ok) { say((r && r.error) || "执行失败", "bad"); await load(); return; }
+    const bad = (r.results || []).filter(function (x) { return !x.ok; });
+    let msg = "执行完成：" + (r.done || 0) + "/" + (r.total || 0) + " 成功。";
+    if (bad.length) msg += " 失败 " + bad.length + " 条：" + (bad[0].error || "");
+    if (r.need_restart) msg += " ⚠️ 改了代码，需要重启后端才生效。";
+    say(msg, bad.length ? "warn" : "good");
+    await load();
+  }
+
+  async function doRollback() {
+    if (busy || !data || !data.latest) return;
+    if (!confirm("把这次已经执行过的改动全部回滚到改动前？")) return;
+    busy = true; say("回滚中…");
+    const r = await api("/api/selfiter/rollback", { id: data.latest.id });
+    busy = false;
+    if (!r || !r.ok) { say((r && r.error) || "没有可回滚的改动", "bad"); return; }
+    say("已回滚 " + (r.rolled_back || 0) + " 条。", "good");
+    await load();
+  }
+
+  function onBodyClick(e) {
+    const t = e.target;
+    const card = t.closest ? t.closest(".iter-act") : null;
+
+    if (!card) {
+      if (t.classList.contains("iter-all-ok")) { noteFor = null; doApprove(null, ""); return; }
+      if (t.classList.contains("iter-exec")) { doExecute(); return; }
+      if (t.classList.contains("iter-rb")) { doRollback(); return; }
+      return;
+    }
+    const id = card.getAttribute("data-id");
+    if (t.classList.contains("iter-ok") || t.classList.contains("iter-no")) {
+      noteFor = { id: id, kind: t.classList.contains("iter-ok") ? "approve" : "reject" };
+      render();
+      return;
+    }
+    if (t.classList.contains("iter-confirm")) {
+      const ta = card.querySelector(".iter-note");
+      const note = ta ? ta.value : "";
+      if (noteFor && noteFor.kind === "approve") doApprove([id], note);
+      else doReject([id], note);
+      return;
+    }
+    if (t.classList.contains("iter-cancel")) { noteFor = null; render(); }
+  }
+
+  btn.addEventListener("click", function (e) {
+    e.preventDefault();
+    if (el) hide(); else show();
+  });
+
+  refreshDot();
+  setInterval(refreshDot, 60000);
+  // 每 20 秒静默补记一次最近对话 —— 用户可能一直不打开抽屉，
+  // 但「每日自我反思」和点按钮反思都需要「最近发生了什么」当素材。
+  setInterval(function () { if (!document.hidden) pushSignals(); }, 20000);
+})();

@@ -130,16 +130,53 @@ def analyze(img, mouth_cfg, verbose=False):
     #   ① 整行全暗（背景/描边/衣服，暗占比 >90%）
     #   ② 横向撑满框（护目镜/脸部描边，跨度比 >0.85）← 本次新增，关键
     #   ③ 暗占比太低（根本不在暗区）
-    cand = np.where((dr >= 0.12) & (dr <= 0.90) & (span_ratio <= 0.85))[0]
+    _cand0 = np.where((dr >= 0.12) & (dr <= 0.90) & (span_ratio <= 0.85))[0]
+    # ★ 2026-11-15 用户报「全乱了、位置偏离太过严重」的根治。
+    #   旧逻辑：暗占比+跨度比筛选后，取**离预期中心最近的峰**。
+    #   实测这张 3D 卡通（787x1400）在大框下会同时命中两条带：
+    #     口腔     y=845~852（段宽 47→40px，段中心 x=390 ≈ 框中心）
+    #     下唇阴影 y=878~881（段宽 124→58px）
+    #   旧逻辑挑到了下唇阴影（y_split=877，真值 845，偏 32px），
+    #   形变于是从下巴开始压 —— 用户看到的就是「位置偏离太过严重」。
+    #   根因是 mouth.json 被 yunet 写错（cy=921，真值 853）：框一偏，
+    #   「预期中心」跟着偏，最近峰必然选错。
+    # 新增两条**与框尺寸无关**的判据：
+    #   · 段宽绝对上限：口腔暗段是物理尺寸（实测 47px），护目镜/描边/衣服
+    #     是 174~210px。用 max(60, 0.55*mw) 作上限，框变大也不受影响。
+    #   · 段中心对齐：口腔暗段一定居中在嘴部框里（实测距框中心 1~2px），
+    #     护目镜下沿偏左 63px（=0.56*mw）。
+    # 再按**解剖约束**取最靠上的连续带：口腔一定在下唇阴影之上。
+    _framec = cx - bx1
+    _segc = np.where(_right >= _left, (_left + _right) / 2.0, -1e6)
+    _span_lim = max(60.0, mw * 0.55)
+    _okrow = ((dr >= 0.12) & (dr <= 0.90) & (span_ratio <= 0.85)
+              & (_span <= _span_lim)
+              & (np.abs(_segc - _framec) <= max(6.0, mw * 0.35)))
+    cand = np.where(_okrow)[0]
     if cand.size:
-        # 取离「预期口腔中心」最近的峰。预期中心 = 标定 cy 上方 0.35*mh 处
-        # （实测口腔中心 820 vs 标定 854，差 34 ≈ 0.63*mh，取 0.35 更稳）
+        groups = []
+        _cur = [int(cand[0])]
+        for _i in cand[1:]:
+            _i = int(_i)
+            if _i == _cur[-1] + 1:
+                _cur.append(_i)
+            else:
+                groups.append(_cur)
+                _cur = [_i]
+        groups.append(_cur)
+        _g = ([x for x in groups if len(x) >= 4]
+              or [x for x in groups if len(x) >= 2] or groups)
+        _g.sort(key=lambda x: (x[0], -float(np.mean([dr[i] for i in x]))))
+        _g0 = _g[0]
+        peak = int(_g0[int(np.argmax([dr[i] for i in _g0]))])
+    elif _cand0.size:
+        # 兜底：没有合格带时，仍用「离预期中心最近」的老办法
         target = cy - mh * 0.35 - by1
         peaks = []
-        for i in cand:
+        for i in _cand0:
             if dr[i] >= dr[max(0, i - 1)] and dr[i] >= dr[min(len(dr) - 1, i + 1)]:
                 peaks.append(i)
-        pool = peaks if peaks else list(cand)
+        pool = peaks if peaks else list(_cand0)
         peak = int(min(pool, key=lambda i: abs(i - target)))
     else:
         peak = int(np.argmax(dr))
@@ -154,8 +191,13 @@ def analyze(img, mouth_cfg, verbose=False):
         # 扩展时同样受「横向跨度」约束：护目镜/描边那片区域虽然暗占比达标，
         # 但跨度比接近 1.0，必须在这里挡住 —— 否则峰值找对了、扩展又会跑偏。
         def _ok(i):
+            # 2026-11-15：扩展同样要受「段宽上限 + 段中心对齐」约束。
+            # 否则峰值找对了、扩展又会一路吃进下唇阴影（实测 hole_bot 881）
+            # 甚至衣服（947），y_fade 跟着越过衣服边界。
             return (0 <= i < len(dr) and dr[i] >= peak_val * 0.45
-                    and span_ratio[i] <= 0.85)
+                    and span_ratio[i] <= 0.85
+                    and _span[i] <= _span_lim
+                    and abs(_segc[i] - _framec) <= max(6.0, mw * 0.35))
         lo = peak
         while _ok(lo - 1):
             lo -= 1
@@ -191,19 +233,56 @@ def analyze(img, mouth_cfg, verbose=False):
         _full = _img_gray(img)
         _c = int(round(cx))
         _c = max(2, min(_full.shape[1] - 3, _c))
-        _prof = _full[:, _c - 2:_c + 3].mean(axis=1)
-        _lo = max(int(y_split) + 2, int(round(cy + 0.20 * mh)))
-        _hi = min(H - 1, int(round(cy + 0.95 * mh)))
+        # 采样加宽到 ±5px：mouth 框的 x 只差 3px（LLM 框 cx=391 vs 真值 388）
+        # 单点采样就会错过「舌头→下唇」那个亮跳变，精修整段失效。
+        _prof = _full[:, max(0, _c - 5):_c + 6].mean(axis=1)
+        # 2026-11-15：窗口起点只跟 y_split 走，不再用 cy+0.20*mh。
+        # 框一大（mh=44/60）时 cy+0.20mh 会越过真实开口底（860），
+        # 精修窗口整段跳过开口，y_hole_bot 于是停在 881 / 947，
+        # open_h 被放大到 37 / 104（真值 19）—— 形变幅度全跟着错。
+        _lo = int(y_split) + 2
+        _hi = min(H - 1, _lo + max(24, int(mh * 1.2)))
+        # ★ 窗口必须收紧到 y_split + 0.8*mh。原来用 mh*1.2，框一大就把
+        #   下唇下沿描边（y=881 暗线、y=882 跳 +70）也圈进窗口：
+        #   实测 A 框（mh=44）→ hole_bot=882、错误框（mh=60）→ 947。
+        #   收紧后窗口内最大跳变就是「舌头→下唇」（y=862，+86），
+        #   C/A/B/错误/LLM 五种框实测全部落到 862（真值 860）。
+        _hi = min(H - 1, _lo + max(20, int(mh * 0.8)))
+        # 肤色参考取嘴周 ±120 行的 p90（≈脸颊亮度）。
+        _zone = _prof[max(0, _lo - 120):min(H, _lo + 120)]
+        _lit = float(np.percentile(_zone, 90))
         _best, _bd = None, 0.0
         for _y in range(_lo, _hi):
+            # ★ 下唇下沿有一条**单行描边暗线**（实测 y=881 灰度 82.8），
+            #   它到 y=882 的跳变是 +101.6，比真正的「舌头→下唇」（y=862，
+            #   +86.4）还大 —— 只按「最大跳变」挑，框一大就选到它，
+            #   hole_bot 变成 881，形变范围跟着多吃 20 行。
+            #   解剖上开口底的两侧必须是：跳变前=口腔内的中暗，跳变后=亮唇。
+            if _prof[_y] < _lit * 0.45 or _prof[_y + 1] < _lit * 0.75:
+                continue
             _d = float(_prof[_y + 1] - _prof[_y])
-            if _d > _bd:
-                _bd, _best = _d, _y
+            if _d >= 35.0:
+                # ★ 取**第一个**合格跳变，不按幅度挑。
+                #   实测 862（舌头→下唇）与 882（下唇描边→皮肤）的跳变幅度
+                #   非常接近（±5 采样 81 vs 70、±11 采样 50 vs 63，后者反而更大），
+                #   谁大完全取决于采样位置 → 按大小挑必然抖。
+                #   解剖上开口底一定在下唇描边之上，取最靠上的那个才稳。
+                _best, _bd = _y, _d
+                break
+        if _best is None:
+            # 兜底：图很暗/口腔很暗时上面的亮度约束可能全落空，
+            # 退回「窗口内最大跳变」，至少不比旧版差。
+            for _y in range(_lo, _hi):
+                _d = float(_prof[_y + 1] - _prof[_y])
+                if _d > _bd:
+                    _bd, _best = _d, _y
         if _best is not None and _bd > 40.0:
             y_hole_bot = int(_best)
             open_h = float(max(1, y_hole_bot - y_split))
-        _lo2 = max(int(y_hole_bot) + 2, int(round(cy + 0.85 * mh)))
-        _hi2 = min(H - 1, int(round(cy + 1.60 * mh)))
+        # 下唇下缘的窗口同样只跟 y_hole_bot 走（原来用 cy+0.85mh，
+        # 框大时起点直接越过下唇，y_lip_bot 落到 900/976）。
+        _lo2 = int(y_hole_bot) + 2
+        _hi2 = min(H - 1, _lo2 + max(24, int(mh * 1.2)))
         for _y in range(_lo2, _hi2):
             if _prof[_y] < 120.0:
                 y_lip_bot = int(_y)
@@ -214,7 +293,10 @@ def analyze(img, mouth_cfg, verbose=False):
     # ★ 衰减终点不能越过「下巴底」：原式 y_lip_bot + max(24, 1.6*open_h)，
     #   修正几何后 open_h=22 → y_fade=916，而这张图衣服从 y=896 就开始（纯黑），
     #   位移会把衣服一起拖动 → 视觉判「下巴最底部白色边缘生硬、轮廓锯齿」。
-    y_fade = int(min(H - 1, y_lip_bot + max(12, open_h * 0.55)))
+    # 2026-11-15：+12 → +8。warp2d 的位移在衰减区还会再向下延伸约 5px
+    # （ramp 里减了 sh），893 实测会拖到 898，而这张图衣服从 896 就是纯黑，
+    # 拖动会在下巴底留下生硬边缘。
+    y_fade = int(min(H - 1, y_lip_bot + max(8, open_h * 0.42)))
     out = {
         "cx": cx, "cy": cy, "mw": mw, "mh": mh,
         "y_split": int(y_split),

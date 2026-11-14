@@ -344,9 +344,64 @@ def T_dispatch(name, args, events, ctx):
     return _T.dispatch(name, args, events, ctx)
 
 
+def _run_selfiter(job: dict) -> dict:
+    """内置任务：每日自我反思（kind="selfiter"）。
+
+    2026-11-15：用户要「每天定时自动跑一次」反思。
+    让模型自己在对话里"记得去调反思工具"太不可靠（它经常忘），
+    所以做成内置分支，到点必定执行；产出的计划仍然**要用户批准**才动手。
+    """
+    from . import self_iterate as _si
+    try:
+        r = _si.reflect(trigger="daily", use_web=True,
+                        focus=str(job.get("focus") or ""))
+    except Exception as e:                              # noqa: BLE001
+        r = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    if not r.get("ok"):
+        raise RuntimeError("自我反思失败：%s" % r.get("error"))
+
+    p = r.get("plan") or {}
+    answer = ("【每日自我反思】%s\n\n"
+              "- 自我反思：%d 条\n- 对你的观察：%d 条\n- 可加功能：%d 条\n"
+              "- 技术动态：%d 条\n- 等你批准的动作：%d 条\n\n"
+              "打开顶栏「🌱 迭代想法」看详情。想改的代码要你点批准才会动手。"
+              % (p.get("summary") or "", len(p.get("weaknesses") or []),
+                 len(p.get("user_insights") or []), len(p.get("features") or []),
+                 p.get("tech_total") or 0, len(p.get("actions") or [])))
+
+    sid = str(job.get("session") or "")
+    if not sid:
+        try:
+            sid = sessions.ensure_default().get("id") or ""
+        except Exception:                               # noqa: BLE001
+            sid = ""
+    try:
+        old = sessions.get_messages(sid) or []
+        stamp = _now()
+        old.append({"role": "user", "ts": stamp,
+                    "content": "【定时任务·%s】每日自我反思" % (job.get("name") or "自我迭代")})
+        old.append({"role": "assistant", "ts": stamp, "content": answer})
+        sessions.save_messages(sid, old)
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        pth = os.path.join(_logs_dir(), "%s_%s.md" % (job.get("id"),
+                                                      time.strftime("%Y%m%d_%H%M%S")))
+        with open(pth, "w", encoding="utf-8") as f:
+            f.write("# %s\n\n- 时间：%s\n- 类型：每日自我反思\n\n## 结果\n\n%s\n"
+                    % (job.get("name") or "", _now(), answer))
+    except Exception:                                   # noqa: BLE001
+        pass
+    return {"answer": answer, "model": "selfiter", "channel": "builtin", "session": sid}
+
+
 def _run_once(job: dict) -> dict:
     """真的跑一次：自动挑通道（本机 / 云端）+ 工具循环，结果写回会话。"""
     from . import tools as T
+
+    # ★ 内置任务（每日自我反思）—— 不走 LLM 工具循环
+    if str(job.get("kind") or "") == "selfiter":
+        return _run_selfiter(job)
 
     cfg = config.load_config() or {}
     prompt = str(job.get("prompt") or "").strip()
@@ -471,9 +526,15 @@ def run_now(job_id: str, background: bool = True) -> dict:
 
 # ---------------------------------------------------------------- 增删改查
 def add(name: str, prompt: str, *, every_minutes: int = 0, at_time: str = "",
-        session: str = "", model: str = "") -> dict:
+        session: str = "", model: str = "", kind: str = "", focus: str = "") -> dict:
+    """新建定时任务。
+
+    kind：内置任务类型。目前只有 "selfiter"（每日自我反思）——
+    这类任务不走 LLM 工具循环，直接调 self_iterate.reflect()，
+    所以允许 prompt 为空。
+    """
     prompt = (prompt or "").strip()
-    if not prompt:
+    if not prompt and not kind:
         return {"ok": False, "error": "任务内容不能为空"}
     sch = {}
     if every_minutes:
@@ -485,9 +546,10 @@ def add(name: str, prompt: str, *, every_minutes: int = 0, at_time: str = "",
     else:
         return {"ok": False, "error": "要么给 every_minutes（每几分钟），要么给 at_time（每天几点）"}
     job = {"id": uuid.uuid4().hex[:8],
-           "name": (name or prompt[:20]).strip()[:40],
+           "name": (name or prompt[:20] or kind).strip()[:40],
            "prompt": prompt, "schedule": sch,
            "session": session, "model": model,
+           "kind": kind, "focus": focus,
            "enabled": True, "created": _now(),
            "last_run": "", "last_status": "", "last_preview": "",
            "next_run": _next_run({"schedule": sch})}

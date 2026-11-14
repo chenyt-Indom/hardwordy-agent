@@ -41,7 +41,11 @@ from urllib.parse import quote as _q
 import numpy as np
 
 # 嘴部默认位置：脸的中下部。默认值不会对所有图都准，前端可以拖动校准。
-DEFAULT_MOUTH = {"x": 0.50, "y": 0.735, "w": 0.155, "h": 0.062}
+# 2026-11-15：y 0.735 → 0.66。analyze 的搜索框是 cy-1.55*mh ~ cy+0.65*mh，
+# y=0.735（cy=1029）时整段落在下巴/脖子上，根本看不到嘴（实测 y_split=995）。
+# 0.66 时搜索框覆盖 826~965，能包住真实唇缝。h 同时收小到 0.045，
+# 避免搜索框纵向过宽把下唇阴影也圈进去。
+DEFAULT_MOUTH = {"x": 0.50, "y": 0.66, "w": 0.155, "h": 0.045}
 
 _IMG = "avatar.png"
 _MOUTH = "mouth.json"
@@ -393,10 +397,24 @@ def save_bytes(raw: bytes, source: str = "") -> dict:
     auto = detect_mouth(_img_path())
     meta = {"source": source or "",
             "updated": time.strftime("%Y-%m-%d %H:%M:%S")}
-    if auto.get("ok"):
+    # ★ 2026-11-15「全乱了、位置偏离太过严重」的直接原因就在这里：
+    #   yunet 在卡通/戴护目镜的形象上不可靠 —— 实测这张图 score 只有 0.605
+    #   （阈值 0.6 勉强过），嘴角关键点偏下 76px，mouth.json 被写成 cy=921
+    #   （真值 853）。框一偏，analyze 的「预期口腔中心」跟着偏，
+    #   形变范围从 55 行扩大到 164 行、下界从 889 拖到 1008（越过衣服 112px）。
+    # 低分时不覆盖：宁可保留默认值/旧值，也不要把好值冲掉；
+    # 前端「AI 定位」按钮走的是多模态 LLM，实测给 841（真值 845，差 4px）。
+    _sc = float(auto.get("score") or 0.0)
+    if auto.get("ok") and _sc >= 0.72:
         set_mouth(auto["mouth"])
         meta["auto_mouth"] = auto["mouth"]
-        meta["face_score"] = auto.get("score")
+        meta["face_score"] = _sc
+    elif auto.get("ok"):
+        # 分数偏低：只记录，不写 mouth.json
+        meta["auto_mouth"] = auto["mouth"]
+        meta["face_score"] = _sc
+        meta["auto_skipped"] = (
+            "人脸检测分 %.3f 偏低，未覆盖嘴部标定；请在面板点「AI 定位」校准" % _sc)
     else:
         meta["auto_mouth"] = None
         meta["auto_error"] = auto.get("error") or ""

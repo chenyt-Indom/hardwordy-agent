@@ -1991,6 +1991,101 @@ def skills_pending(session: str = ""):
     return {"ok": True, "item": ({"id": it["id"], "name": it["name"]} if it else None)}
 
 # ---------------------------------------------------------------- 分享 / 导入
+# =====================================================================
+#  自我迭代（self-iterate）—— 2026-11-15 用户要求：
+#    · 前端一个「AI 迭代想法」按钮，能看到 AI 的自我反思、对用户的观察、
+#      可增加的功能、以及从网上抓的最新动态；
+#    · AI 可以自主形成改代码的计划，但**必须等用户批准**才动手；
+#    · 批准后可填备注，逐条/整批都支持；改动前自动备份，可一键回滚。
+#  ⚠️ 数据在 data/self_iterate/（纯本地）；执行只允许改 backend/ frontend/。
+# =====================================================================
+@app.get("/api/selfiter/overview")
+def selfiter_overview():
+    from . import self_iterate as _si
+    try:
+        return _si.overview()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfiter/plan")
+def selfiter_plan(id: str = ""):
+    from . import self_iterate as _si
+    try:
+        return _si.get_plan(id)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/reflect")
+def selfiter_reflect(body: dict):
+    """跑一次反思：联网抓技术动态 + 调 LLM 出方案。约 20~40 秒。"""
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        return _si.reflect(trigger=str(b.get("trigger") or "manual"),
+                           use_web=bool(b.get("use_web", True)),
+                           focus=str(b.get("focus") or ""))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/approve")
+def selfiter_approve(body: dict):
+    """批准。action_ids 为空 = 整批批准。"""
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        return _si.approve(str(b.get("id") or ""), b.get("action_ids") or None,
+                           str(b.get("note") or ""))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/reject")
+def selfiter_reject(body: dict):
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        return _si.reject(str(b.get("id") or ""), b.get("action_ids") or None,
+                          str(b.get("note") or ""))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/execute")
+def selfiter_execute(body: dict):
+    """执行所有已批准的动作（备份 + 语法校验 + 失败自动回滚）。"""
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        return _si.execute_approved(str(b.get("id") or ""))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/rollback")
+def selfiter_rollback(body: dict):
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        return _si.rollback(str(b.get("id") or ""))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/signal")
+def selfiter_signal(body: dict):
+    """前端每轮对话结束后上报一段摘要，反思时当作「最近发生了什么」。"""
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        return _si.add_signal(b.get("user"), b.get("assistant"), b.get("meta"))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------- 分享 / 导入
 @app.post("/api/skills/share")
 def skills_share(body: dict):
     """把一个技能导出成「可粘给任何 AI 的话 + 机器可读分享码」。"""
