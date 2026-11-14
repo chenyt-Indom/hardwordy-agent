@@ -852,11 +852,18 @@ class Wav2LipEngine:
                     _kmin = _tp("k_min", AMa.K_MIN)
                     _sq = _tp("squeeze", 0.30)
                     _rg = _tp("round_gain", 0.22)
+                    # 闭嘴覆盖外观（LLM 定）：原来这四项是硬编码，闭嘴永远是
+                    # 一块平涂皮肤色。现在按原图真实四层唇色铺，LLM 决定深浅。
+                    _cvkw = dict(
+                        seam_depth=_tp("seam_depth", 0.62),
+                        seam_curve=_tp("seam_curve", 0.45),
+                        lip_tint=_tp("lip_tint", 0.85),
+                        cover_feather=_tp("cover_feather", 0.30))
                     frames = [AMa.warp2d(face_img_bgr, geom,
                                          _kmin + (1.0 - _kmin) * float(oseq[i]),
                                          k_min=_kmin, squeeze=_sq,
                                          round_=(float(rseq[i]) if rseq is not None else 0.0),
-                                         round_gain=_rg)
+                                         round_gain=_rg, **_cvkw)
                               for i in range(n_frames)]
                     if progress:
                         progress(100, max(1, len(frames)))
@@ -1014,7 +1021,11 @@ class Wav2LipEngine:
                 _rd = float(round_seq[i]) if (round_seq is not None and i < len(round_seq)) else 0.0
                 frame = AM.warp2d(face_img_bgr, geom, k, k_min=_kmin,
                                   squeeze=_tp("squeeze", 0.30),
-                                  round_=_rd, round_gain=_tp("round_gain", 0.22))
+                                  round_=_rd, round_gain=_tp("round_gain", 0.22),
+                                  seam_depth=_tp("seam_depth", 0.62),
+                                  seam_curve=_tp("seam_curve", 0.45),
+                                  lip_tint=_tp("lip_tint", 0.85),
+                                  cover_feather=_tp("cover_feather", 0.30))
             elif geom is not None:
                 from . import avatar_mouth as AM
                 frame = AM.open_from_closed(face_img_bgr, geom, float(open_seq[i]))

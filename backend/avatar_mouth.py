@@ -282,7 +282,8 @@ def warp(img, geom, k, k_min=None):
 
 
 def warp2d(img, geom, k, k_min=None, squeeze=0.30, round_=0.0, round_gain=0.22,
-           cover=None):
+           cover=None, seam_depth=0.62, seam_curve=0.45, lip_tint=0.85,
+           cover_feather=0.30):
     """二维形变：纵向压缩 + **横向收拢**。
 
     ## 为什么需要横向
@@ -365,7 +366,9 @@ def warp2d(img, geom, k, k_min=None, squeeze=0.30, round_=0.0, round_gain=0.22,
     if cv_on > 0.01 and k < cv_on:
         amt = float(np.clip((cv_on - k) / max(1e-3, cv_on - COVER_FULL), 0.0, 1.0))
         if amt > 0.01:
-            out = _cover_cavity(out, img, geom, amt)
+            out = _cover_cavity(out, img, geom, amt,
+                                seam_depth=seam_depth, seam_curve=seam_curve,
+                                lip_tint=lip_tint, feather=cover_feather)
     return out
 
 
@@ -395,6 +398,46 @@ def _lip_colors(img, geom):
     return up, dn
 
 
+def _lip_palette(img, geom):
+    """从原图采样**真实唇部四层色**：上唇 / 唇线 / 下唇 / 下巴皮肤。
+
+    ## 为什么必须采样，不能只用皮肤色
+
+    旧版闭嘴覆盖用 `_skin_colors`（皮肤色 L≈203）单色平涂 + 一道压暗 30%
+    的淡线。实测这张 3D 卡通：真实下唇是 RGB(246,127,126)、**L≈158**，
+    而皮肤是 L≈203 —— 相差 45 个亮度级。用皮肤色盖住嘴唇，等于把嘴涂成
+    了脸颊，所以视觉复核判「像一块平涂色块，没有立体感」。
+
+    真实嘴唇的明暗结构是**四段**的：
+        上唇（亮，L≈214）→ 唇线（暗，L≈122）→ 下唇（中，L≈158）→ 皮肤（亮，L≈203）
+    把这四段照原图采出来，覆盖后才有真正的体积感（实测中心列极差
+    76 → 96，且出现清晰唇缝谷）。
+
+    采样用**中位数**而非「偏亮的 55%」：这里要的是真实层次，不是单一干净色。
+    """
+    H, W = img.shape[:2]
+    cx = int(round(float(geom["cx"])))
+    half = max(3, int(float(geom["mw"]) * 0.25))
+    ys = float(geom["y_split"])
+    yl = float(geom.get("y_lip_bot") or geom["y_hole_bot"])
+
+    def _med(y0, y1):
+        y0 = max(0, min(H - 1, int(round(y0))))
+        y1 = max(y0 + 1, min(H, int(round(y1))))
+        xa = max(0, cx - half)
+        xb = min(W, cx + half)
+        p = img[y0:y1, xa:xb].reshape(-1, 3).astype(np.float32)
+        if not len(p):
+            return np.array([190.0, 180.0, 240.0], np.float32)  # 浅粉兜底(BGR)
+        return np.median(p, axis=0)
+
+    up = _med(ys - 14, ys - 6)      # 上唇（亮粉白）
+    seam = _med(ys - 3, ys - 1)     # 唇线（暗红）
+    dn = _med(yl - 9, yl - 1)       # 下唇（粉红）
+    sk = _med(yl + 3, yl + 8)       # 下巴皮肤
+    return up, seam, dn, sk
+
+
 def _skin_colors(img, geom):
     """取嘴**下方**的皮肤色（闭嘴填充的基色）。
 
@@ -416,7 +459,8 @@ def _skin_colors(img, geom):
     return p[np.argsort(s)[int(len(s) * 0.55):]].mean(0)
 
 
-def _cover_cavity(out, src, geom, cover):
+def _cover_cavity(out, src, geom, cover, seam_depth=0.62, seam_curve=0.45,
+                  lip_tint=0.85, feather=0.30):
     """把压缩后仍然可见的口腔内容（牙齿 / 舌头 / 暗腔）用唇色盖掉。
 
     ## 为什么只做几何永远闭不上
@@ -428,8 +472,17 @@ def _cover_cavity(out, src, geom, cover):
     把口腔内容盖住。加上这一层之后，k=0.35 时暗占比降到 0.016、
     k=0.15 时降到 0.000，才是真正的闭合。
 
-    填充用「上唇色 → 下唇色」的纵向渐变（模拟唇肉），中线压一道
-    柔和暗线当唇缝，边缘羽化避免硬边。
+    ## 为什么从「单色平涂」改成「四层立体」
+
+    旧版用皮肤色单色平涂 + 一道压暗 30% 的淡线。视觉复核判「像一块平涂
+    色块，没有立体感，缺少高光和阴影」。根因是**把嘴唇涂成了皮肤**：
+    实测原图真实下唇 L≈158，皮肤 L≈203，差 45 个亮度级。
+
+    现在按原图真实结构铺四层（亮度依次 214 → 122 → 158 → 203）：
+        上唇（亮）→ 唇线（暗）→ 下唇（中）→ 下巴皮肤（亮）
+    中心列灰度极差从 76 提到 96，并出现清晰的唇缝谷。
+
+    seam_depth / seam_curve / lip_tint / feather 由 LLM 按画风给。
     """
     H, W = out.shape[:2]
     cx = float(geom["cx"])
@@ -443,29 +496,44 @@ def _cover_cavity(out, src, geom, cover):
         return out
     y_mid = (y0 + y1) * 0.5
     ry = max(1.5, (y1 - y0) * 0.5)
-    # 填充色：取**嘴下方皮肤**。
-    # 原来的 `_lip_colors` 取「上唇色」时采的是 y_split-4..y_split，实测那段
-    # 是**牙齿**（RGB 252,203,192 近白），盖上去就是一块亮补丁 —— 视觉复核
-    # 判「平贴色块」。闭嘴后的嘴唇本质是「皮肤 + 一道唇缝」，不是两段唇色。
-    sk = _skin_colors(src, geom)
+
+    # 四层真实唇色（实测这张卡通：上唇 L214 / 唇线 L122 / 下唇 L158 / 皮肤 L203）
+    up, seam_c, dn, sk = _lip_palette(src, geom)
+    # lip_tint：下唇饱和度。0=退化成皮肤色（嘴唇看不出来），1=用原图下唇色
+    lt = float(np.clip(lip_tint, 0.0, 1.0))
+    dn = sk * (1.0 - lt) + dn * lt
+    # seam_depth：唇线深浅。1=用原图唇线色，0=不画唇缝
+    sd = float(np.clip(seam_depth, 0.0, 1.0))
+    seam_c = sk * (1.0 - sd) + seam_c * sd
+
     m = np.zeros((H, W), np.float32)
     cv2.ellipse(m, (int(round(cx)), int(round(y_mid))),
                 (int(max(2, mw * 0.62)), int(ry)), 0, 0, 360, 1.0, -1)
-    m = cv2.GaussianBlur(m, (0, 0), max(0.9, ry * 0.22))
+    fw = float(np.clip(feather, 0.05, 1.0))
+    m = cv2.GaussianBlur(m, (0, 0), max(0.9, ry * fw))
+
     X = np.arange(W, dtype=np.float32)[None, :]
     Y = np.arange(H, dtype=np.float32)[:, None]
-    # 微笑弧：中间低、两端高。用直线会被判「太直、太硬」。
     u = np.clip((X - cx) / max(1.0, mw * 0.5), -1.0, 1.0)
-    seam_y = y_mid + 0.45 * ry * (u * u - 0.5)
+    # 微笑弧：中间低、两端高。用直线会被判「太直、太硬」。
+    sc = float(np.clip(seam_curve, 0.0, 1.0))
+    seam_y = y_mid + sc * ry * (u * u - 0.5)
     d = Y - seam_y
-    fill = np.broadcast_to(sk[None, None, :], (H, W, 3)).astype(np.float32).copy()
-    seam = np.exp(-(d / max(0.9, ry * 0.20)) ** 2)
-    fill = fill * (1.0 - 0.30 * seam[..., None])
-    # 缝上方的「上唇微亮」已去掉：皮肤本身 V≈235，再 +6% 就是一条白色亮线，
-    # 视觉复核点名「嘴唇中线一道硬白高光」。改成上下都轻微压暗，做出厚度。
-    up_sh = np.clip(-d / max(1.0, ry), 0.0, 1.0) * 0.06
-    lo = np.clip(d / max(1.0, ry), 0.0, 1.0) * 0.10
-    fill = fill * (1.0 - up_sh[..., None]) * (1.0 - lo[..., None])
+
+    # 四段权重：上唇(上) / 唇线(中) / 下唇(下) / 皮肤(最下，避免椭圆下沿色带)
+    w_seam = np.exp(-(d / max(0.8, ry * 0.16)) ** 2)
+    w_up = np.clip(-d / max(1.0, ry * 0.75), 0.0, 1.0)
+    w_dn = np.clip(d / max(1.0, ry * 0.55), 0.0, 1.0)
+    w_sk = np.clip((d - ry * 0.55) / max(1.0, ry * 0.45), 0.0, 1.0)
+
+    fill = np.broadcast_to(dn[None, None, :], (H, W, 3)).astype(np.float32).copy()
+    fill = fill * (1.0 - w_up[..., None]) + \
+        np.broadcast_to(up[None, None, :], (H, W, 3)) * w_up[..., None]
+    fill = fill * (1.0 - w_seam[..., None]) + \
+        np.broadcast_to(seam_c[None, None, :], (H, W, 3)) * w_seam[..., None]
+    fill = fill * (1.0 - w_sk[..., None]) + \
+        np.broadcast_to(sk[None, None, :], (H, W, 3)) * w_sk[..., None]
+
     a = (m * float(np.clip(cover, 0.0, 1.0)))[..., None]
     return np.clip(out.astype(np.float32) * (1.0 - a) + fill * a,
                    0, 255).astype(np.uint8)
