@@ -10687,9 +10687,23 @@ def hive_join(body: dict):
     via, matched = "", 0
     try:
         if pw:
+            # 地址框允许整串粘贴：punch://IP:端口 / udp:// / hive3:// / IP:端口。
+            # 前端虽然也会拆，但别人口述转发的字符串常常带前缀，
+            # 这里再解析一次，避免「punch://」被当成主机名塞进 socket。
+            host = str(b.get("host") or "").strip()
+            port = int(b.get("port") or 0)
+            mode = str(b.get("mode") or "").strip()
+            if host:
+                try:
+                    pc = hive_client.MESH.node().parse_code(host)
+                    if pc.get("ok"):
+                        host = pc["host"]
+                        port = int(pc["port"])
+                        mode = pc.get("mode") or mode
+                except Exception:
+                    pass
             r = hive_client.client().join_by_password(
-                pw, b.get("name") or "",
-                str(b.get("host") or "").strip(), int(b.get("port") or 0))
+                pw, b.get("name") or "", host, port, mode)
             if not r.get("ok"):
                 return r                      # 带 stage，前端能分清错在哪一类
             g = r["group"]
