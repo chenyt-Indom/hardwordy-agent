@@ -2531,6 +2531,11 @@
         if (!r.ok) { say("没检测到人脸：" + (r.error || "未知"), "err"); return; }
         my.value = r.mouth.y;
         mw.value = r.mouth.w;
+        mouthState.x = +r.mouth.x || 0.5;
+        mouthState.y = +r.mouth.y || 0.5;
+        mouthState.w = +r.mouth.w || 0.2;
+        mouthState.h = +r.mouth.h || 0.05;
+        paintMouthBox();
         say("已重新定位嘴部（置信度 " + r.score + "）");
       } catch (e) { say("检测失败：" + e.message, "err"); }
     };
