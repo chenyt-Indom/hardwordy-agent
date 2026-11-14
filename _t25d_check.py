@@ -60,8 +60,8 @@ print("头部位移范围: x %.0f~%.0f  y %.0f~%.0f" % (min(dxs), max(dxs), min(
 print("不同平移量的帧占比: %d/%d" % (len(set(shifts)), len(shifts)))
 
 # 嘴部区域变化（720 尺度：嘴在 y≈0.515*720=371, 宽 0.255*720=184）
-mx0, mx1 = int(0.50 * 720 - 92), int(0.50 * 720 + 92)
-my0, my1 = int(0.515 * 720 - 22), int(0.515 * 720 + 22)
+mx0, mx1 = int(0.4976 * 720 - 62), int(0.4976 * 720 + 62)
+my0, my1 = int(0.5868 * 720 - 26), int(0.5868 * 720 + 26)
 mdiffs = [np.abs(frames[i][my0:my1, mx0:mx1].astype(np.float32)
                  - frames[i - 1][my0:my1, mx0:mx1].astype(np.float32)).mean()
           for i in range(1, len(frames))]
