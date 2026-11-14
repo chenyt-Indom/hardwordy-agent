@@ -235,8 +235,20 @@ def _mouth_frame(prep, op, wd, amp=1.0):
         return base
 
     pw, ph = patch.size
+    cyi0 = int(np.clip(round(cy - ytop), 8, ph - 9))
+
+    # ⚠ patch 的垂直范围是唇高 ×1.45/×1.55，上边界已经碰到鼻子。
+    #   整块重采样 + USM 会把鼻翼糊掉（视觉复核明确指出「鼻子崩坏」）。
+    #   所以这里只保留唇部 ±1.3 唇高的窄带，其余原样不动。
+    half = max(10, int(round(mh * 1.30)))
+    p_top = max(0, cyi0 - half)
+    p_bot = min(ph, cyi0 + half)
+    patch = patch.crop((0, p_top, pw, p_bot))
+    mask = mask.crop((0, p_top, pw, p_bot))
     parr = np.asarray(patch, np.float32)
-    cyi = int(np.clip(round(cy - ytop), 8, ph - 9))
+    ph = p_bot - p_top
+    cyi = int(np.clip(cyi0 - p_top, 6, ph - 7))
+    paste_y = ytop + p_top
 
     yy, xx = np.mgrid[0:ph, 0:pw].astype(np.float32)
     # 横向权重：嘴角固定（高斯，覆盖唇宽）
