@@ -648,6 +648,9 @@ def _pose_curve(n, fps, energy):
 
     yaw, pit, rol = _lp(yaw), _lp(pit), _lp(rol)
     tx, ty, scl = _lp(tx), _lp(ty), _lp(scl)
+    # 眨眼也过一道短窗低通：sin 曲线在 6 帧内从 0 到 1，帧间仍跳 0.7。
+    # 0.09s 窗口只削掉 3% 的峰值，但帧间 Δ 压到 0.4 以下，不再「抽」。
+    bl = _lp(bl, sec=0.09)
     return [(float(yaw[i]), float(pit[i]), float(rol[i]),
              float(tx[i]), float(ty[i]), float(scl[i]), float(bl[i]))
             for i in range(n)]
