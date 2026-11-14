@@ -25,7 +25,7 @@ print("wav %.1fKB" % (os.path.getsize(wav16)/1024))
 
 # 2) 出片
 t0 = time.time()
-res = AL.render("data/avatar2/avatar.png", mp3, os.path.join(OUT, "fixed.mp4"),
+res = AL.render("data/avatar2/avatar.png", wav16, os.path.join(OUT, "fixed.mp4"),
                 blink=False, head=True, max_side=1024, motion=1.0)
 print("render:", {k: res.get(k) for k in ("ok", "frames", "duration", "size", "motion", "error")})
 print("耗时 %.1fs" % (time.time()-t0))
