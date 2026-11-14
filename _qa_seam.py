@@ -9,18 +9,8 @@ OUT = "_qa_out"
 os.makedirs(OUT, exist_ok=True)
 
 # 1) 造测试语音
-mp3 = os.path.join(OUT, "t2.mp3")
-TEXT = "这是修复后的效果，请看嘴部。"
-if not os.path.isfile(mp3):
-    async def gen():
-        import edge_tts
-        c = edge_tts.Communicate(TEXT, "zh-CN-XiaoxiaoNeural")
-        await c.save(mp3)
-    asyncio.run(gen())
-print("语音 %.1fKB" % (os.path.getsize(mp3)/1024))
-wav16 = os.path.join(OUT, "t2.wav")
-subprocess.run([A2.ffmpeg(), "-y", "-loglevel", "error", "-i", mp3,
-                "-ar", "16000", "-ac", "1", wav16], check=False)
+wav16 = os.path.join(OUT, "s.wav")
+assert os.path.isfile(wav16), "先跑 _bench.py 生成测试语音"
 print("wav %.1fKB" % (os.path.getsize(wav16)/1024))
 
 # 2) 出片
