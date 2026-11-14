@@ -3454,7 +3454,12 @@ html[data-theme="light"] select.pill-select option {
   width: 420px;
   max-width: calc(100vw - 32px);
   max-height: 46vh;
-  overflow: hidden;
+  /* ★ 2026-11-15 真 bug：原来是 overflow:hidden —— 内容超过 46vh 时
+     **直接裁掉且无法滚动**。实测视口高 320px 时 46vh=147px，而卡片内容
+     有 ~360px（思考 + 工具条 + 正文 + 🛠 代码改动），下面整块看不见。
+     改成纵向可滚动：矮屏/内容多的时候能翻到底，而不是凭空消失。 */
+  overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 6px;
