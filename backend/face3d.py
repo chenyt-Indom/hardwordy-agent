@@ -367,29 +367,32 @@ def _draw_cavity(img, uv, pts, openness, size=256, src_size=120.0):
 
     out = img.copy()
     ov = out.copy()
-    # 口腔底色：深红黑
-    cv2.ellipse(ov, (int(round(cx)), int(round(cy))),
-                (int(round(half_w)), int(round(half_h))),
-                0, 0, 360, (28, 22, 34), -1, lineType=cv2.LINE_AA)
-    # 上排牙齿：靠上的一条浅色带
-    if half_h > 2.5:
-        ty = int(round(cy - half_h * 0.52))
-        th = max(1, int(round(half_h * 0.42)))
-        cv2.ellipse(ov, (int(round(cx)), ty),
-                    (int(round(half_w * 0.86)), th),
-                    0, 0, 360, (232, 236, 238), -1, lineType=cv2.LINE_AA)
-    # 下唇内侧一点点高光，避免死黑
-    if half_h > 3:
-        cv2.ellipse(ov, (int(round(cx)), int(round(cy + half_h * 0.35))),
-                    (int(round(half_w * 0.7)), max(1, int(round(half_h * 0.22)))),
-                    0, 0, 360, (92, 62, 70), -1, lineType=cv2.LINE_AA)
-    # 软边蒙版：只在椭圆内混合
+    # 口腔：纵向渐变（上深下略亮），模拟口腔内壁的进深
+    steps = max(4, int(half_h * 2))
+    for s in range(steps):
+        yy = cy - half_h + (s + 0.5) * (2 * half_h / steps)
+        tt = (yy - (cy - half_h)) / max(2 * half_h, 1e-6)     # 0 上 → 1 下
+        col = (int(18 + 30 * tt), int(14 + 22 * tt), int(24 + 26 * tt))
+        rr = half_w * math.sqrt(max(0.0, 1.0 - ((yy - cy) / max(half_h, 1e-6)) ** 2))
+        if rr < 0.6:
+            continue
+        cv2.line(ov, (int(round(cx - rr)), int(round(yy))),
+                 (int(round(cx + rr)), int(round(yy))), col, 1, lineType=cv2.LINE_AA)
+    # 牙齿：只有明显张开才露出一条，且很窄
+    if half_h > 3.0 and o > 0.45:
+        ty = int(round(cy - half_h * 0.62))
+        th = max(1, int(round(half_h * 0.22 * min(1.0, (o - 0.45) / 0.4))))
+        tw = int(round(half_w * 0.72))
+        if th >= 1 and tw >= 2:
+            cv2.ellipse(ov, (int(round(cx)), ty), (tw, th),
+                        0, 0, 360, (222, 226, 228), -1, lineType=cv2.LINE_AA)
+    # 软边蒙版：椭圆内混合，边缘羽化
     mask = np.zeros((size, size), np.uint8)
     cv2.ellipse(mask, (int(round(cx)), int(round(cy))),
                 (int(round(half_w)), int(round(half_h))),
                 0, 0, 360, 255, -1, lineType=cv2.LINE_AA)
-    mask = cv2.GaussianBlur(mask, (5, 5), 0).astype(np.float32) / 255.0
-    a = (mask * min(1.0, 0.55 + 0.45 * o))[..., None]
+    mask = cv2.GaussianBlur(mask, (7, 7), 0).astype(np.float32) / 255.0
+    a = (mask * min(1.0, 0.60 + 0.35 * o))[..., None]
     return (ov.astype(np.float32) * a + out.astype(np.float32) * (1 - a)).astype(np.uint8)
 
 
