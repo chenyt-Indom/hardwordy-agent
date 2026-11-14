@@ -12297,9 +12297,13 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 pend_t = ""
             if pend_c:
                 seq_in += 1
+                # 正文可能几万字：每帧都带全文会把弱网拖死（6 帧/秒 × 40KB），
+                # 所以**每 8 帧兜底一次全文**，中间照旧发增量。
+                # 思考则每帧都带（见上）—— 它才是"实时看到 AI 在想什么"的主体，
+                # 且长度通常只有几千字。
                 _hd_emit(gid, mid, "content", pend_c,
                          {**base, "chars": len(text)}, seq_in,
-                         full=text)
+                         full=(text if seq_in % 8 == 0 else ""))
                 pend_c = ""
             last_push = now
 
