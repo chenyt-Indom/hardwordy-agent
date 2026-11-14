@@ -429,6 +429,8 @@ def render_avatar(model, tex, uv, tri, ry=0.0, rx=0.0, rz=0.0,
     pts = pts_base if pts_base is not None else model["pts_front"]
     if openness > 0.001:
         pts = deform_mouth(pts, uv, openness)
+    if blink > 0.02:
+        pts = deform_blink(pts, uv, blink)
     if ry or rx or rz:
         pts = pose_pts(pts, ry=ry, rx=rx, rz=rz)
     img = render_mesh(tex, uv, pts, tri, size=size, bg=bg, min_area=min_area)
