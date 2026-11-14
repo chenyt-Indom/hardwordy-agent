@@ -867,6 +867,18 @@ class MeshNode:
             if ttl > 0:
                 self._fanout(gid, T_FILE, dict(obj, ttl=ttl), skip=peer)
             return
+        if typ == T_FREQ:
+            # 有人缺附件、在问「谁有」。先交给上层判断本机有没有，再继续转发 ——
+            # 转发是必须的：请求方可能只和群里某一个人直连，不转发就找不到持有者。
+            if self.on_freq:
+                try:
+                    self.on_freq(gid, obj)
+                except Exception:
+                    pass
+            ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
+            if ttl > 0:
+                self._fanout(gid, T_FREQ, dict(obj, ttl=ttl), skip=peer)
+            return
         # ★ 2026-11-13：走到这里 = **本机不认识这个帧类型**。
         #   最典型的场景就是「对方代码比本机新」（自开发改过、只有一边重启了）。
         #   必须**安全忽略**：不抛异常、不断连 —— 否则两台机器代码一不同步，
