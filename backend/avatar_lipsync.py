@@ -306,6 +306,7 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
             "size": [W, H], "path": out_mp4,
             "bytes": os.path.getsize(out_mp4),
             "infer_sec": round(t_infer, 2),
+            "motion": motion_mode, "motion_sec": round(t_motion, 2),
             "box": box, "fps": fps}
 
 
