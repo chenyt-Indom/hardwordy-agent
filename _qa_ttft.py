@@ -19,7 +19,7 @@ def tok(chars):
     return int((chars or 0) * 0.75)
 
 
-cfg = M.load_cfg()
+cfg = C.load_config()
 key = M._ds_key()
 model = str(cfg.get("model") or "deepseek-flash")
 print("模型: %s  key: %s" % (model, "有" if key else "无"))
