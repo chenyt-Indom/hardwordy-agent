@@ -415,8 +415,6 @@ def render_avatar(model, tex, uv, tri, ry=0.0, rx=0.0, rz=0.0,
     if ry or rx or rz:
         pts = pose_pts(pts, ry=ry, rx=rx, rz=rz)
     img = render_mesh(tex, uv, pts, tri, size=size, bg=bg, min_area=min_area)
-    if openness > 0.02:
-        img = _draw_cavity(img, uv, pts, openness, size=size)
     if blink > 0.02:
         img = blink_2d(img, uv, pts, blink, size=size)
     return img
