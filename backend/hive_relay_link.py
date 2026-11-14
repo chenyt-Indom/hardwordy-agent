@@ -68,6 +68,7 @@ HB_IDLE = 45.0             # 这么久没有任何入站包 → 判定死链，�
 STABLE_SECONDS = 5.0       # 连上后活过这么久才算「稳定」，否则按失败计
 HS_TIMEOUT = 6.0           # 握手总超时（含 WS 升级 + challenge + ready）
 CAND_COOLDOWN = 180.0      # 一条候选连续失败后，冷却多久不再优先试它
+CAND_COOLDOWN_HARD = 3600.0  # 「对面不是我们中继」这类，冷 1 小时
 CAND_FAIL_LIMIT = 2        # 连续失败几次进入冷却
 
 
