@@ -10176,7 +10176,13 @@
       const ts = m.ts ? new Date(m.ts * 1000).toLocaleTimeString("zh-CN",
         { hour: "2-digit", minute: "2-digit" }) : "";
 
-      wrap.innerHTML = who + think + refBlock(m)
+      // ★ 2026-11-15：代码改动卡片 —— 放在思考之下、正文之上。
+      //   和单人模式位置一致（单人也是接在回答气泡后面那一列），
+      //   默认只占一行摘要，不会把聊天记录冲走。
+      const codesHtml = (type === "ai" && m.codes) ? codeChangesHtml(m.codes) : "";
+      wrap.innerHTML = who + think
+        + (codesHtml ? '<div class="hmsg-codes">' + codesHtml + "</div>" : "")
+        + refBlock(m)
         + '<div class="bubble hmsg-body"></div>'
         + '<div class="hive-acts"></div>'
         + (ts ? '<span class="hmsg-ts">' + ts + "</span>" : "");
