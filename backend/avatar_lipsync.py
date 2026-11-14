@@ -338,7 +338,7 @@ def speak(text, voice="", rate=None, style="", engine="auto",
     name = "lipsync_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
     out = os.path.join(A2._vdir(), name)
     r = render(A2._img_path(), wav, out, blink=blink, head=head,
-               max_side=max_side)
+               max_side=max_side, motion=motion)
     if not r.get("ok"):
         return r
     from urllib.parse import quote
