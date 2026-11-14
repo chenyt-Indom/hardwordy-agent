@@ -10217,7 +10217,10 @@
       cbtn.onclick = () => hdCancel(mid);
       c.tools.appendChild(cbtn);
       hdCards[mid] = c;
-      hvDock(node);          // 「跟随视角」开着就浮到左上角（和单人模式一致）
+      // ★ 2026-11-15：跟随视角**只浮思考节点**（工具条和正文留在消息流里，和单人模式一致）。
+      //   _home 记下正文节点：用户点「归位」时插回它前面，而不是丢到消息流最末尾。
+      thinkNode._home = node;
+      hvDock(thinkNode);
       return c;
     }
 
