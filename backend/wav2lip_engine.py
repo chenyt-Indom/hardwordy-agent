@@ -208,9 +208,12 @@ class Wav2LipEngine:
         orig_big = full_frame[y1:y2, x1:x2]
 
         w_open = float(np.clip(openness, 0.0, 1.0))
-        gen_big = self._match_color(gen_big, orig_big)
-        # 张嘴时降低细节回注（否则会把原图闭合的唇线注回去，把口型洗掉）
-        gen_big = self._detail_inject(gen_big, orig_big, strength=0.90 - 0.55 * w_open)
+        # 颜色统计排除嘴部中心区（张嘴的暗部不能参与均值，否则会被提亮）
+        roi = np.ones((h, w), bool)
+        roi[int(h * 0.55):int(h * 0.95), int(w * 0.18):int(w * 0.82)] = False
+        gen_big = self._match_color(gen_big, orig_big, roi=roi)
+        # 张嘴时大幅降低细节回注（否则会把原图闭合的唇线注回去，把口型洗掉）
+        gen_big = self._detail_inject(gen_big, orig_big, strength=0.85 - 0.70 * w_open)
 
         # 椭圆蒙版：中心在嘴部，轴长收在 bbox 内部，绝不触及边界
         cx = int(w * 0.50)
