@@ -260,9 +260,9 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
     return out
 
 
-def _shift_of(prep, x, y, yaw=0.0, pitch=0.0):
-    """某点在新姿态下被挪到哪（用来让嘴/眼跟着头走）。"""
-    if abs(yaw) < 0.01 and abs(pitch) < 0.01:
+def _shift_of(prep, x, y, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
+    """某点在新姿态下被挪到哪（用来让眼睛跟着头走）。"""
+    if abs(yaw) < 0.01 and abs(pitch) < 0.01 and abs(tx) < 0.05 and abs(ty) < 0.05:
         return 0.0, 0.0
     ry, rx = math.radians(yaw), math.radians(pitch)
     cyw = max(math.cos(ry), 0.55)
@@ -272,12 +272,13 @@ def _shift_of(prep, x, y, yaw=0.0, pitch=0.0):
     yi = int(np.clip(y, 0, prep["wh"][1] - 1))
     z = float(prep["zn"][yi, xi])
     w = float(prep["wgt"][yi, xi])
-    dx = (cx + (x - cx) / cyw - prep["scale"] * z * math.sin(ry) * w / cyw) - x
-    dy = (cy + (y - cy) / cxp - prep["scale"] * z * math.sin(rx) * w / cxp) - y
-    return dx, dy
+    # 与 _warp 的正向变换一致：源 → 视差 → 平移
+    nx = cx + (x - cx) / cyw - prep["scale"] * z * math.sin(ry) * w / cyw
+    ny = cy + (y - cy) / cxp - prep["scale"] * z * math.sin(rx) * w / cxp
+    return nx + tx - x, ny + ty - y
 
 
-def _blink(img, prep, amount, yaw=0.0, pitch=0.0):
+def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
     """眨眼：眼部区域纵向压缩 + 压一条眼睑线（不填色块，避免棕色方块）。"""
     if amount <= 0.02:
         return img
