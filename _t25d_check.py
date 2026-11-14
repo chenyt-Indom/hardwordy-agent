@@ -45,8 +45,8 @@ shifts = []
 for i in range(0, len(crops), max(1, len(crops) // 30)):
     c = crops[i]
     best, bd = (0, 0), 1e18
-    for dy in range(-12, 13, 3):
-        for dx in range(-12, 13, 3):
+    for dy in range(-18, 19, 2):
+        for dx in range(-18, 19, 2):
             m = c[max(0, dy):c.shape[0] + min(0, dy), max(0, dx):c.shape[1] + min(0, dx)]
             b = base[max(0, -dy):base.shape[0] + min(0, -dy), max(0, -dx):base.shape[1] + min(0, -dx)]
             if m.shape != b.shape or m.size == 0:
