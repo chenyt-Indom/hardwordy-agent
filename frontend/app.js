@@ -2550,6 +2550,23 @@
       };
     }
 
+    // —— 输出分辨率（只影响 Wav2Lip 模式） ——
+    const resSel0 = $("#av2Res");
+    const RES_KEY = "avatar2_res";
+    if (resSel0) {
+      try {
+        const saved = localStorage.getItem(RES_KEY);
+        if (saved) resSel0.value = saved;
+      } catch (e) {}
+      resSel0.onchange = () => {
+        try { localStorage.setItem(RES_KEY, resSel0.value); } catch (e) {}
+        const v = resSel0.value;
+        say(v === "1024" ? "分辨率：1024（原生最佳）"
+          : v === "720" ? "分辨率：720p，出片最快，适合先看效果"
+            : "分辨率：" + v + "，画面更大，但嘴部细节仍是 1024 的水平（插值放大）");
+      };
+    }
+
     // —— 口型幅度 ——
     // 增益作用在张口曲线上（不是硬拉伸）：同一段语音实测 1.0→1.6 时
     // 最大开口 31px→56px、明显张开的帧从 0% 升到 40%。
