@@ -65,11 +65,19 @@ def mask_relay(d: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def set_relay_config(url: str = "", token: str = "", enabled: bool = True,
-                     keep_token: bool = True) -> Dict[str, Any]:
+                     keep_token: bool = True,
+                     urls: Any = None) -> Dict[str, Any]:
     """写中继配置。token 留空且 keep_token=True 时保留原密钥。"""
     old = relay_config()
     tok = (token or "").strip() or (old.get("token") or "" if keep_token else "")
-    d = {"url": (url or "").strip(), "token": tok, "enabled": bool(enabled)}
+    if urls is None:
+        ulist = list(old.get("urls") or [])
+    elif isinstance(urls, str):
+        ulist = [x.strip() for x in urls.replace("\n", ",").split(",") if x.strip()]
+    else:
+        ulist = [str(x).strip() for x in urls if str(x).strip()]
+    d = {"url": (url or "").strip(), "token": tok, "enabled": bool(enabled),
+         "urls": ulist}
     os.makedirs(H._DATA, exist_ok=True)
     tmp = RELAY_CFG + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
