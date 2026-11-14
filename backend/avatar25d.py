@@ -174,9 +174,17 @@ def _prep3d(img_path: str, max_side: int = 0) -> dict:
     y0 = max(0, int(hy.min()) - pad)
     y1 = min(H, int(hy.max()) + pad)
 
+    # roll 支点：真人侧倾头的支点在颈椎底部，不在脸中心。实测（形象图 1024²，
+    # 脖子带 = 下颌线下 0~90px）roll=5° 时脖子带像素变化：
+    #   支点=脸中心(cy=469) → 4.665、12.74% 像素变化 >8 灰度级（剪切撕裂）
+    #   支点下移 150px      → 2.648、6.44%
+    #   支点下移 230px(=下颌线 y=699) → 2.048、4.45%  ← 最优
+    #   支点下移 320px      → 2.474、5.99%（过头，脖子底部也被拖）
+    # 所以支点取下颌线 y 坐标。
     return {"img": img, "wh": (W, H), "zn": zn, "wgt": wgt,
             "mask": mk, "scale": scale,
             "cx": cx, "cy": cy, "fw": fw, "fh": fh,
+            "roll_pivot_y": float(ys.max()),
             "eyes": [(float(lm[0][0]), float(lm[0][1])),
                      (float(lm[1][0]), float(lm[1][1]))],
             "eye_gap": float(np.linalg.norm(lm[0] - lm[1])),
