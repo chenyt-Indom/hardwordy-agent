@@ -150,6 +150,7 @@ print("  候选 %d 条：%s" % (len(lk2.cands), [c.get("url") for c in lk2.cands
 lk2._stop = False
 lt2 = threading.Thread(target=lk2._loop, daemon=True)
 lt2.start()
+threading.Thread(target=lk2._heartbeat_loop, daemon=True).start()
 ok, sec = wait_state(lk2, ("online",), timeout=25.0)
 record("B1 主线路坏掉后仍能上线", ok,
        "用时 %.2fs，state=%s" % (sec, lk2.state))
