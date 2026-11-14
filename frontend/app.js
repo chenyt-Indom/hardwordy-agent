@@ -10135,15 +10135,24 @@
     //   用户看到的现象就是「模型响应太慢」（其实模型 0.8 秒就出首字）。
     //   改成**增量追加**：正常帧只往末尾插几个字（DOM 开销几乎为 0），
     //   每 3 帧来一次全量快照时校验前缀，丢帧才整块重设。
+    function hdCur(c) {
+      if (!c.cur) {
+        c.cur = document.createElement("span");
+        c.cur.className = "hd-cur";
+        c.cur.textContent = "▌";
+      }
+      return c.cur;
+    }
     function hdThinkAppend(c, txt) {
       if (!txt) return;
+      const cur = hdCur(c);
       const t = document.createTextNode(txt);
-      if (c.cur && c.cur.parentNode === c.think) c.think.insertBefore(t, c.cur);
+      if (cur.parentNode === c.think) c.think.insertBefore(t, cur);
       else c.think.appendChild(t);
     }
     function hdThinkSet(c, full) {
       c.think.textContent = full;
-      if (c.cur) c.think.appendChild(c.cur);   // 光标永远在最后
+      c.think.appendChild(hdCur(c));   // 光标永远在最后
     }
     function hdThinkSeal(c) {
       if (c.cur && c.cur.parentNode) c.cur.remove();
