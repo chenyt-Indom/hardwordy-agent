@@ -11745,7 +11745,8 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 _msg_in["images"] = images      # Ollama 的多模态字段
             resp = client.chat([_msg_in],
                                model=model, stream=True,
-                               params={"temperature": 0.3, "max_tokens": 2400})
+                               params={"temperature": 0.3,
+                                       "max_tokens": _hive_mt})
             for raw in resp.iter_lines(chunk_size=64, decode_unicode=False):
                 if ev.is_set():
                     cancelled = True
