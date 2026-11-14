@@ -58,11 +58,27 @@ await send("Page.enable");
 await send("Runtime.enable");
 await sleep(3500);
 
-// 1) 找到群
-const groups = await evaluate(`JSON.stringify(Array.from(document.querySelectorAll('.hive-item')).map(n=>n.getAttribute('data-gid')))`);
-console.log("群列表:", groups);
-const gids = JSON.parse(groups || "[]");
-if (!gids.length) { console.log("FAIL: 没有群，无法验证"); ws.close(); proc.kill(); process.exit(2); }
+// 1) 找到群（轮询等前端把列表渲染出来）
+let groups = null, gids = [];
+for (let i = 0; i < 40; i++) {
+  groups = await evaluate(`JSON.stringify(Array.from(document.querySelectorAll('.hive-item')).map(n=>n.getAttribute('data-gid')))`);
+  try { gids = JSON.parse(groups || "[]"); } catch (e) { gids = []; }
+  if (gids.length) break;
+  await sleep(500);
+}
+console.log("群列表:", groups, "| 等了几轮:", 40);
+if (!gids.length) {
+  const diag = await evaluate(`JSON.stringify({
+    title: document.title,
+    ready: document.readyState,
+    bodyLen: (document.body.innerText||'').length,
+    head: (document.body.innerText||'').slice(0,200),
+    boxes: Array.from(document.querySelectorAll('[id]')).map(n=>n.id).filter(x=>/hive|group/i.test(x)),
+  })`);
+  console.log("诊断:", diag);
+  console.log("FAIL: 没有群，无法验证");
+  ws.close(); proc.kill(); process.exit(2);
+}
 
 // 2) 点进第一个群
 await evaluate(`document.querySelector('.hive-item').click()`);
