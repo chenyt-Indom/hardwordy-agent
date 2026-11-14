@@ -1,0 +1,342 @@
+# -*- coding: utf-8 -*-
+"""数字人渲染参数：由多模态 LLM 按形象逐张给出一套微调预设。
+
+为什么需要这一层
+----------------
+两条渲染管线里散着十几个可调参数：椭圆大小/位置、羽化、纹理回注、
+口腔加深、圆唇收拢幅度、时间平滑强度、开合增益、最小开合……它们现在的
+取值是照「真人正脸」调出来的固定值。换一张 3D 卡通、动漫、侧脸、
+戴护目镜的图，一半参数就不合适了 —— 用户看到的是「割裂、糊、张不开嘴」。
+
+离线规则判断不了「这张图是 3D 卡通还是真人照片」「源图嘴是张着还是闭着」
+「皮肤是纯色块还是有真实纹理」。多模态 LLM 恰好擅长这类语义判断，
+所以让它直接输出参数，比让用户手调、或让规则瞎猜都靠谱。
+
+实测（2026-11-15，同一张 3D 卡通形象）：
+  · DeepSeek V4.1 Flash 看图约 1.4 秒返回完整参数 + 判断依据；
+  · 本地 qwen2.5vl:3b 会把衣服上的 logo 当成嘴（偏 287px），
+    所以定位类任务默认只走云端（见 avatar_vision._call_ds 的说明）。
+
+设计约束
+--------
+1. **必须能兜底**：云端不通、返回不是 JSON、字段越界，都要退回预设，
+   绝不能让「AI 调参失败」导致生成不出来。
+2. **必须可复现**：同一张图 + 同一套几何 → 走缓存，不重复调云端
+   （调一次 1.4 秒，每次生成都等不划算，而且云端输出有随机性）。
+3. **只能调「安全范围」**：每个参数都有硬上下界，LLM 给超了就地夹回，
+   并记录下来。它不懂引擎内部实现，给个 5.0 的羽化会直接出糊块。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+
+# 参数表：name -> (最小, 最大, 默认, 中文说明)
+# 上下界不是「能接受的极端值」，而是「不会把画面做坏的边界」。
+# 参数表版本：SCHEMA 的默认值/范围改过就 +1，让旧缓存自动失效。
+# 教训：k_min 默认从 0.78 改到 0.32 后，命中旧缓存仍返回 0.78，
+# 嘴永远闭不到覆盖阈值以下，看起来「改了没效果」。
+_SCHEMA_VER = 2
+
+SCHEMA = {
+    # ---- 时间轴（决定闪不闪、跟不跟得上语音）----
+    "open_sigma":        (0.50, 2.00, 0.90, "张嘴度平滑强度（大=更稳但爆破音变钝）"),
+    "mask_sigma":        (1.00, 3.20, 2.00, "混合强度平滑（只影响清晰度切换，不影响口型）"),
+    "temporal_mild":     (0.00, 0.30, 0.10, "生成帧全局轻滤（大=更稳但整体偏软）"),
+    "temporal_strength": (0.60, 0.95, 0.88, "孤立跳变帧的修正力度"),
+    # ---- 开合幅度（决定「字张不张嘴」）----
+    "open_gain":         (0.85, 1.35, 1.00, "口型幅度增益（大=嘴张得更开）"),
+    "k_min":             (0.10, 0.94, 0.32, "形变模式最小开合（小=能闭得更紧；<=0.62 会触发唇色覆盖）"),
+    # ---- 贴回几何（w2l 模式，决定脖子割不割裂、糊不糊）----
+    "ell_w":             (0.24, 0.34, 0.29, "贴回椭圆横向半径（占裁剪框宽）"),
+    "ell_h":             (0.13, 0.22, 0.175, "贴回椭圆纵向半径（占裁剪框高）"),
+    "ell_cy":            (0.70, 0.80, 0.75, "贴回椭圆中心高度（大=往下，容易带上脖子）"),
+    "feather":           (0.60, 2.20, 1.00, "羽化倍数（大=更柔和但更糊）"),
+    "detail":            (0.45, 0.95, 0.75, "原图纹理回注强度（保画风一致）"),
+    "dark_gain":         (18.0, 62.0, 40.0, "口腔加深强度（让张口更明确）"),
+    "round":             (0.10, 0.34, 0.26, "圆唇收拢幅度（o/u 音噘嘴）"),
+    # ---- 二维形变（warp 模式：纵向压缩 + 横向收拢）----
+    # 只做纵向压扁会让嘴「向两侧拉扯」、像贴图被挤；加上横向收拢才有
+    # 口轮匝肌收缩的立体感。圆脸/宽嘴/厚唇要更大，方脸/薄唇要更小。
+    "squeeze":           (0.00, 0.55, 0.30, "闭嘴时嘴角向内收的幅度（0=只压扁）"),
+    # 圆唇（u/ü/o）的横向收拢强度。**独立于开口度**：说「乌」时嘴本来就
+    # 张得小，用 (1-k) 驱动会过强；说「啊」时 k=1，收拢又变 0。
+    # 所以单独一项，由 LLM 逐字标注的圆唇度驱动。
+    # 实测 0.22 对应约 18% 的唇宽收拢，视觉自然；>0.35 开始「嘴唇变窄发尖」。
+    "round_gain":        (0.00, 0.40, 0.22, "圆唇横向收拢强度（u/ü 音的撮嘴幅度）"),
+    # 纯音频路径（低配机 / onnxruntime 不可用）的开合平滑强度。
+    # 小=跟得紧但会抖，大=稳但口型偏钝。实测 3.0 是「二阶尖峰最小且
+    # 只有 1 帧滞后」的平衡点。
+    "audio_sigma":       (1.50, 4.50, 3.00, "纯音频开合的平滑强度（大=更稳）"),
+    "mask_lo":           (0.02, 0.24, 0.10, "闭嘴帧的替换下限（大=闭嘴也糊）"),
+    "mask_hi":           (0.80, 1.00, 0.90, "张嘴帧的替换上限（大=张得开）"),
+    # ---- 编码 ----
+    "crf":               (14.0, 20.0, 16.0, "编码画质（小=更清晰但更大）"),
+}
+
+NUMERIC = {k: v for k, v in SCHEMA.items()}
+DEFAULTS = {k: v[2] for k, v in SCHEMA.items()}
+
+# 两套兜底预设：LLM 不可用时按「有没有检测到人脸 + 源图嘴开没开」选一套。
+PRESET_HUMAN = dict(DEFAULTS)
+
+PRESET_CARTOON = dict(DEFAULTS, **{
+    # 3D 卡通是纯色块，纹理回注给太强会把色块打出噪点；口腔是硬边色块，
+    # 加深要更狠才看得出张嘴；源图张嘴 → 允许闭得更紧（k_min 更小）。
+    "open_gain": 1.12,
+    "k_min": 0.74,
+    "detail": 0.58,
+    "dark_gain": 52.0,
+    "temporal_mild": 0.14,
+    "open_sigma": 1.05,
+    "mask_sigma": 2.30,
+})
+
+_TUNE_DIR = None
+
+
+def _dir():
+    """缓存目录 data/avatar_tune/（跟着项目的数据根走）。"""
+    global _TUNE_DIR
+    if _TUNE_DIR:
+        return _TUNE_DIR
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "data", "avatar_tune")
+    try:
+        os.makedirs(root, exist_ok=True)
+    except Exception:                                   # noqa: BLE001
+        pass
+    _TUNE_DIR = root
+    return root
+
+
+def _sha(path):
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for blk in iter(lambda: f.read(1 << 20), b""):
+                h.update(blk)
+        return h.hexdigest()[:16]
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
+def _geom_sig(geom):
+    if not geom:
+        return "none"
+    keys = ("cx", "cy", "mw", "mh", "y_split", "y_hole_bot", "y_lip_bot", "source_open")
+    return "|".join("%s=%.1f" % (k, float(geom.get(k) or 0)) if k != "source_open"
+                    else "so=%s" % bool(geom.get("source_open")) for k in keys)
+
+
+def normalize(raw):
+    """把任意 dict 收进合法范围。返回 (params, notes)。
+
+    notes 里记「被夹回」和「被忽略」的字段，用于排查 LLM 给了什么离谱值。
+    """
+    out = dict(DEFAULTS)
+    notes = []
+    if not isinstance(raw, dict):
+        return out, ["返回不是对象，全部用默认值"]
+    for k, v in raw.items():
+        if k not in NUMERIC:
+            continue
+        lo, hi, _d, _desc = NUMERIC[k]
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            notes.append("%s 不是数字，已忽略" % k)
+            continue
+        if f != f:                                      # NaN
+            notes.append("%s 是 NaN，已忽略" % k)
+            continue
+        c = min(hi, max(lo, f))
+        if abs(c - f) > 1e-6:
+            notes.append("%s=%.3g 越界，夹到 %.3g" % (k, f, c))
+        out[k] = c
+    # crf 必须是整数，否则 ffmpeg 报错
+    out["crf"] = float(int(round(out["crf"])))
+    return out, notes
+
+
+def preset(kind="human"):
+    return dict(PRESET_CARTOON if kind == "cartoon" else PRESET_HUMAN)
+
+
+_PROMPT = """你是数字人视频的口型合成调参专家。下面这张图要被做成"会说话"的数字人，
+引擎只会在嘴部做替换/形变。请判断这张图的画风与嘴部状态，并给出一套最合适的参数。
+
+先看图回答这几点（写在 reason 里）：
+1) 画风：真人照片 / 3D 卡通 / 2D 动漫 / 插画 / 其他
+2) 嘴部状态：源图嘴是张开还是闭合？有没有露出牙齿或口腔？
+3) 皮肤质感：真实纹理 / 纯色块（色块形象不能用太强的纹理回注）
+4) 有没有遮挡（护目镜、口罩、头盔、面罩、胡子）
+5) 这张图最容易出问题的地方（例如纯色块容易糊、暗背景容易有补丁边）
+
+然后输出参数（全部必须给，数值必须在范围内）：
+{spec}
+
+规则：
+- 纯色块/卡通形象：detail 取 0.5~0.65（太强会打噪点），dark_gain 取 45~60（硬边色块需要更强加深才看得出张嘴）
+- 真实人像：detail 取 0.72~0.88，dark_gain 取 30~45
+- 源图嘴闭着：k_min 取 0.85~0.92（没东西可压，别硬压）
+- 源图嘴微张（开口 5~15px）：k_min 取 0.28~0.38（能压到触发唇色覆盖=真正闭合）
+- 源图嘴张得很大（开口 >15px，露牙/舌头）：k_min 取 0.30~0.40
+  （太低会让牙齿被压成横条，即使有覆盖也会显脏）
+- 想要口型更清晰：mask_sigma 取小一点（1.4~1.8）、mask_hi 取 0.92~1.0
+- 想要更稳不抖：temporal_mild 取大一点（0.16~0.24）、open_sigma 取 1.1~1.5
+- squeeze（闭嘴时嘴角向内收的幅度）：**只做纵向压扁会让嘴"向两侧拉扯"、像贴图被挤**。
+  圆脸/厚唇/嘴很宽的形象取 0.35~0.50（收得明显才有立体感）；
+  方脸/薄唇/嘴窄的取 0.15~0.28；真人照片取 0.20~0.30（真人横向变化本来就不大）
+- audio_sigma（纯音频路径的开合平滑）：卡通取 3.0~3.8（更稳），真人取 2.2~3.0（跟得紧）
+
+只输出一个 JSON 对象，不要解释文字、不要 markdown 代码块。格式：
+{{"reason":"上面 5 点的简短回答","style":"3d卡通","open_gain":1.1, ...}}
+"""
+
+
+def _spec_text():
+    lines = []
+    for k, (lo, hi, d, desc) in NUMERIC.items():
+        lines.append("- %s：%g~%g，默认 %g —— %s" % (k, lo, hi, d, desc))
+    return "\n".join(lines)
+
+
+def _load_cache(key):
+    p = os.path.join(_dir(), key + ".json")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and isinstance(d.get("params"), dict):
+            return d
+    except Exception:                                   # noqa: BLE001
+        pass
+    return None
+
+
+def _save_cache(key, data):
+    try:
+        with open(os.path.join(_dir(), key + ".json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def _b64_small(path, side=512):
+    """送云端前缩图（原图 POST 会被 CDN 概率拦截，实测过）。"""
+    try:
+        import base64
+        import io as _io
+
+        import cv2
+        from PIL import Image
+        im = cv2.imread(path)
+        if im is None:
+            return ""
+        h, w = im.shape[:2]
+        s = min(1.0, side / float(max(h, w)))
+        if s < 1.0:
+            im = cv2.resize(im, (max(1, int(w * s)), max(1, int(h * s))),
+                            interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", im, [int(cv2.IMWRITE_JPEG_QUALITY), 84])
+        if not ok:
+            return ""
+        pil = Image.open(_io.BytesIO(buf.tobytes())).convert("RGB")
+        b = _io.BytesIO()
+        pil.save(b, "JPEG", quality=84)
+        return base64.b64encode(b.getvalue()).decode()
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
+def tune(img_path, geom=None, subject=None, timeout=90, use_cache=True,
+         force=False, kind_hint=None):
+    """给一张形象图产出渲染参数。
+
+    返回 dict：
+      params  —— 合法化之后的参数（一定齐全）
+      source  —— "llm" / "cache" / "preset"
+      reason  —— LLM 的判断依据（预设时为说明）
+      notes   —— 被夹回/忽略的字段
+      style   —— LLM 判断的画风
+      key     —— 缓存键
+    """
+    key = ""
+    try:
+        key = "%s_%s_v%s" % (_sha(img_path), hashlib.sha1(
+            _geom_sig(geom).encode()).hexdigest()[:8], _SCHEMA_VER)
+    except Exception:                                   # noqa: BLE001
+        key = ""
+
+    if use_cache and key and not force:
+        c = _load_cache(key)
+        if c:
+            p, _n = normalize(c.get("params"))
+            return {"ok": True, "params": p, "source": "cache",
+                    "reason": c.get("reason") or "", "notes": [],
+                    "style": c.get("style") or "", "key": key}
+
+    # ---- 兜底预设：先按「源图嘴开没开 / 有没有人脸」选一套 ----
+    kind = kind_hint
+    if not kind:
+        if geom and geom.get("source_open"):
+            kind = "cartoon" if (subject in (None, "", "cartoon", "unknown")) else "human"
+        else:
+            kind = "human"
+    base = preset(kind)
+
+    b64 = _b64_small(img_path)
+    if not b64:
+        return {"ok": False, "params": base, "source": "preset",
+                "reason": "形象图读取失败，用预设", "notes": [], "style": "", "key": key}
+
+    hint = []
+    if geom:
+        hint.append("嘴部中心=(%.0f,%.0f)、嘴宽=%.0f、开口高度=%.0f、源图嘴%s"
+                    % (float(geom.get("cx") or 0), float(geom.get("cy") or 0),
+                       float(geom.get("mw") or 0), float(geom.get("open_h") or 0),
+                       "张开" if geom.get("source_open") else "闭合"))
+    if subject:
+        hint.append("检测到的形象类型：%s" % subject)
+    prompt = _PROMPT.format(spec=_spec_text())
+    if hint:
+        prompt += "\n补充信息（图像算法测出来的，可直接参考）：\n" + "\n".join(hint)
+
+    try:
+        from . import avatar_vision as AV
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "params": base, "source": "preset",
+                "reason": "视觉模块不可用：%s" % e, "notes": [], "style": "", "key": key}
+
+    txt, err = AV._call_ds(prompt, [b64], timeout=timeout)
+    if err or not txt:
+        return {"ok": False, "params": base, "source": "preset",
+                "reason": "云端调参失败（%s），用预设" % (err or "空返回"),
+                "notes": [], "style": "", "key": key}
+
+    obj = AV._json_of(txt)
+    if not isinstance(obj, dict):
+        return {"ok": False, "params": base, "source": "preset",
+                "reason": "云端返回不是 JSON，用预设", "notes": [],
+                "style": "", "key": key, "raw": (txt or "")[:300]}
+
+    params, notes = normalize(obj)
+    reason = str(obj.get("reason") or "")[:600]
+    style = str(obj.get("style") or "")[:40]
+    if key:
+        _save_cache(key, {"params": params, "reason": reason, "style": style})
+    return {"ok": True, "params": params, "source": "llm", "reason": reason,
+            "notes": notes, "style": style, "key": key}
+
+
+def explain(params):
+    """把参数转成给用户看的中文短句（只列偏离默认的项）。"""
+    out = []
+    for k, (lo, hi, d, desc) in NUMERIC.items():
+        v = params.get(k, d)
+        if abs(float(v) - float(d)) < 1e-6:
+            continue
+        out.append("%s %g→%g" % (desc.split("（")[0], d, v))
+    return out

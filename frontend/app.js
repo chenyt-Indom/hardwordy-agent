@@ -2412,6 +2412,57 @@
           say("浏览器拦了剪贴板，路径已显示，手动选中复制", "err");
         }
       };
+      // —— AI 识别五官：识别后先给用户看，确认了才写入标定 ——
+      const lbtn = $("#av2Locate"), lout = $("#av2LocateOut");
+      function renderLocate(d) {
+        if (!lout) return;
+        const m = d.mouth || [];
+        const pct = (v) => (Math.round(v * 1000) / 10) + "%";
+        const src = d.source === "auto"
+          ? '<span class="loc-ok">图像算法定位</span>'
+          : (d.source === "llm"
+            ? '<span class="loc-warn">模型给的位置（可能不准）</span>'
+            : "未知来源");
+        const warn = (d.warns || []).length
+          ? '<div class="loc-warn">⚠ ' + (d.warns || []).map(esc).join("；") + "</div>" : "";
+        lout.hidden = false;
+        lout.innerHTML =
+          '<div class="loc-row"><span class="loc-tag">' + esc(d.kind || "未判断类型") +
+          '</span><span class="loc-tag">' + (d.mouth_open ? "嘴是张开的" : "嘴是闭着的") +
+          '</span><span class="loc-tag">' + esc(src.replace(/<[^>]+>/g, "")) + "</span></div>" +
+          '<div>嘴部位置：x ' + pct(m[0]) + " ~ " + pct(m[2]) + "，y " + pct(m[1]) + " ~ " + pct(m[3]) + "</div>" +
+          (d.note ? '<div style="opacity:.75">' + esc(d.note) + "</div>" : "") +
+          warn +
+          '<div class="loc-row"><button class="btn sm primary" id="av2LocateApply">用这个位置</button>' +
+          '<span style="opacity:.6">不满意就继续用下面的滑块微调</span></div>';
+        const ap = $("#av2LocateApply");
+        if (ap) ap.onclick = async () => {
+          ap.disabled = true; ap.textContent = "写入中…";
+          try {
+            const r2 = await api("/api/avatar2/locate", {
+              method: "POST", body: JSON.stringify({ use_llm: false, apply: true }) });
+            if (r2.info) paintInfo(r2.info);
+            say("嘴部位置已更新");
+            lout.hidden = true;
+          } catch (e) { say("写入失败：" + e.message, "err"); ap.disabled = false; ap.textContent = "用这个位置"; }
+        };
+      }
+      if (lbtn) lbtn.onclick = async () => {
+        lbtn.disabled = true;
+        const old = lbtn.textContent;
+        lbtn.textContent = "识别中…";
+        if (lout) { lout.hidden = false; lout.textContent = "正在看图…（图像算法 + 多模态模型，约 3~10 秒）"; }
+        try {
+          const d = await api("/api/avatar2/locate", {
+            method: "POST", body: JSON.stringify({ use_llm: true }) });
+          renderLocate(d);
+        } catch (e) {
+          if (lout) lout.innerHTML = '<span class="loc-warn">识别失败：' + esc(e.message) + "</span>";
+        }
+        lbtn.disabled = false;
+        lbtn.textContent = old;
+      };
+
       if (clbtn) clbtn.onclick = async () => {
         clbtn.disabled = true;
         const old = clbtn.textContent;
@@ -2873,6 +2924,14 @@
       const resSel = $("#av2Res");
       if (mode === "w2l" && resSel) {
         base.max_side = parseInt(resSel.value, 10) || 1024;
+        // 一次出两版让用户自己挑：
+        //   · 画风优先 = 只用口型时序、像素全来自原图（卡通/3D 不违和）
+        //   · 口型优先 = 贴 Wav2Lip 生成像素（真人更自然）
+        // 实测卡通形象下两者差别很大（客观分 7.8 vs 5.8，嘴部清晰度比
+        // 1.31 vs 0.54），值得都看一眼。真人两版差别小，但多花的时间
+        // 也就几秒，一起给更省事。
+        base.variants = true;
+        base.review = true;
       }
       // 人物动作强度：0 静止 / 1 自然 / 1.6 活跃。
       // Wav2Lip 与伪3D 都支持；2D 和真3D 没有这套动作层，不传。
@@ -2963,6 +3022,8 @@
         if (r.mood_auto && (r.mood_why || []).length) {
           say(hint.textContent + "\n判定依据：" + r.mood_why.slice(0, 3).join("；"));
         }
+        renderVersions(r);
+        renderTune(r);
         playVideo(r.name);
         loadVideos();
       } catch (e) {
@@ -2977,6 +3038,76 @@
     // —— 启动 ——
     loadInfo().then(() => { loadStatus(); loadVoices(); loadMoods(); loadVideos(); });
     setPin(localStorage.getItem(PIN_KEY) === "1");
+
+    // 多版本对比：一次生成两版（画风优先 / 口型优先），各自有质检分，
+    // 用户点哪个就播哪个。默认播分数高的那一版。
+    function renderVersions(r) {
+      const box = $("#av2Versions");
+      if (!box) return;
+      const vs = (r && r.versions) || [];
+      if (vs.length <= 1) { box.hidden = true; box.innerHTML = ""; return; }
+      const num = (v) => (v === null || v === undefined || isNaN(v)) ? "-" : v;
+      box.hidden = false;
+      box.innerHTML = '<div class="av2-ver-head">已生成 ' + vs.length +
+        " 个版本，挑一个你喜欢的（默认播分数最高的）：</div>" +
+        vs.map((v) => {
+          if (!v.ok) {
+            return '<div class="av2-ver-item"><span class="loc-warn">' +
+              esc(v.mode || "?") + " 失败：" + esc(v.error || "") + "</span></div>";
+          }
+          const q = v.qa || {};
+          const o = q.detail_objective || {};
+          const sel = v.name === r.name;
+          return '<div class="av2-ver-item' + (sel ? " on" : "") + '">' +
+            '<div class="av2-ver-t">' + esc(v.label || v.mode) + (sel ? " · 已选" : "") + "</div>" +
+            '<div class="av2-ver-s">质量 ' + num(v.qa_score) + " 分（像素指标 " +
+            num(q.score_objective) + " / 模型 " + num(q.score_llm) + "）· 清晰度比 " +
+            num(o.sharp_ratio) + " · " + Math.round((v.bytes || 0) / 1024) + "KB</div>" +
+            '<button class="btn sm ghost" data-play="' + esc(v.name) + '">▶ 播放这版</button>' +
+            "</div>";
+        }).join("");
+      box.querySelectorAll("[data-play]").forEach((b) => {
+        b.onclick = () => playVideo(b.getAttribute("data-play"));
+      });
+    }
+
+    // AI 口型调参结果展示（只读）。
+    // 参数是 LLM 按形象自己定的，用户有权看到「到底调了什么」——
+    // 否则就是黑盒，出了问题也说不清是哪一项不合适。
+    function renderTune(r) {
+      const box = $("#av2Tune");
+      if (!box) return;
+      const t = (r && r.tune) || null;
+      if (!t || !t.params) { box.hidden = true; box.innerHTML = ""; return; }
+      const LABEL = {
+        open_gain: "口型幅度", k_min: "最小开合", open_sigma: "口型平滑",
+        mask_sigma: "清晰度平滑", temporal_mild: "稳帧", temporal_strength: "跳变修正",
+        ell_w: "贴回宽", ell_h: "贴回高", ell_cy: "贴回位置", feather: "羽化",
+        detail: "纹理回注", dark_gain: "口腔加深", round: "圆唇",
+        mask_lo: "闭嘴替换", mask_hi: "张嘴替换", crf: "编码画质",
+      };
+      const DEF = {
+        open_gain: 1, k_min: 0.78, open_sigma: 0.9, mask_sigma: 2, temporal_mild: 0.1,
+        temporal_strength: 0.88, ell_w: 0.29, ell_h: 0.175, ell_cy: 0.75, feather: 1,
+        detail: 0.75, dark_gain: 40, round: 0.26, mask_lo: 0.1, mask_hi: 0.9, crf: 16,
+      };
+      const fmt = (v) => String(Math.round(+v * 100) / 100);
+      const kv = Object.keys(t.params).filter((k) =>
+        DEF[k] !== undefined && Math.abs(+t.params[k] - DEF[k]) > 1e-6
+      ).map((k) => '<span class="tune-kv">' + esc(LABEL[k] || k) + " " +
+        fmt(DEF[k]) + "→" + fmt(t.params[k]) + "</span>");
+      const src = t.source === "llm" ? "AI 看图定参"
+        : t.source === "cache" ? "AI 参数（已缓存）" : "预设参数（AI 未参与）";
+      box.hidden = false;
+      box.innerHTML = '<div class="tune-head">🎛 ' + esc(src) +
+        (t.style ? " · 识别为 " + esc(t.style) : "") + "</div>" +
+        (kv.length ? kv.join("")
+          : '<span class="tune-why">本次全部落在默认值上</span>') +
+        (t.reason ? '<div class="tune-why">依据：' +
+          esc(String(t.reason).slice(0, 150)) + "</div>" : "") +
+        ((t.notes || []).length
+          ? '<div class="tune-warn">' + esc(t.notes.join("；")) + "</div>" : "");
+    }
   })();
 
   (function initFoldablePanels() {

@@ -5040,6 +5040,68 @@ html[data-theme="light"] select.pill-select option {
 /* 闭嘴基准 / 打开文件夹 / 复制路径：三个按钮挤一行，字小一号 */
 .av2-acts-mouth { margin-top: 2px; gap: 5px; }
 .av2-acts-mouth .btn { flex: 1 1 auto; font-size: 11.5px; padding: 4px 6px; }
+.av2-locate {
+  margin: 6px 0 2px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(90, 160, 255, .10);
+  border: 1px solid rgba(90, 160, 255, .35);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--fg, #d8dee9);
+}
+.av2-locate .loc-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.av2-locate .loc-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(90, 160, 255, .22);
+  font-size: 10.5px;
+}
+.av2-locate .loc-warn { color: #e0a94a; }
+.av2-locate .loc-ok { color: #63c58a; }
+.av2-locate .btn { margin-top: 5px; }
+.av2-versions {
+  margin: 6px 0 2px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(120, 200, 140, .08);
+  border: 1px solid rgba(120, 200, 140, .30);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.av2-versions .av2-ver-head { margin-bottom: 5px; opacity: .8; }
+.av2-versions .av2-ver-item {
+  padding: 5px 7px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  background: rgba(255, 255, 255, .03);
+}
+.av2-versions .av2-ver-item.on { background: rgba(120, 200, 140, .16); }
+.av2-versions .av2-ver-t { font-weight: 600; }
+.av2-versions .av2-ver-s { opacity: .72; margin: 2px 0 4px; }
+.av2-versions .btn { padding: 2px 8px; font-size: 11px; }
+/* AI 口型调参：只读展示这次按形象挑了哪些参数 */
+.av2-tune {
+  margin: 6px 0 2px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(120, 160, 230, .08);
+  border: 1px solid rgba(120, 160, 230, .28);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.av2-tune .tune-head { font-weight: 600; margin-bottom: 3px; }
+.av2-tune .tune-why { opacity: .74; margin-bottom: 4px; }
+.av2-tune .tune-kv {
+  display: inline-block;
+  margin: 0 8px 2px 0;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .05);
+  font: 11px/1.4 ui-monospace, Consolas, monospace;
+}
+.av2-tune .tune-warn { color: #e0a94a; }
 /* 路径显示：等宽、可换行、可选文本（方便手动复制） */
 .av2-path {
   font: 11px/1.5 ui-monospace, Consolas, monospace;

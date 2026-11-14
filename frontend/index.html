@@ -208,6 +208,8 @@
         </div>
         <!-- 卡通 / 非人类形象自动检测不到人脸，只能手动框嘴：直接在预览图上拖一个框 -->
         <div class="av2-acts av2-acts-mouth">
+          <button class="btn sm ghost" id="av2Locate"
+                  title="用图像算法 + 多模态模型自动识别脸和嘴的位置（卡通、动物、插画都能用）">🔍 AI 识别五官</button>
           <button class="btn sm ghost" id="av2Close"
                   title="源图嘴本来就是张开的时，先合成一张闭嘴基准图（否则念「一二三」时嘴合不拢）">👄 闭嘴基准</button>
           <button class="btn sm ghost" id="av2Folder"
@@ -215,6 +217,9 @@
           <button class="btn sm ghost" id="av2CopyPath" title="复制视频目录的完整路径">📋 复制路径</button>
         </div>
         <div class="av2-path" id="av2Path" hidden></div>
+        <div class="av2-locate" id="av2LocateOut" hidden></div>
+        <div class="av2-versions" id="av2Versions" hidden></div>
+        <div class="av2-tune" id="av2Tune" hidden></div>
         <textarea id="av2Text" rows="3"
                   placeholder="让数字人说什么…（长文会自动按句分段生成再合并）"></textarea>
         <div class="av2-row">

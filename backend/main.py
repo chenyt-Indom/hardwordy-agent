@@ -10139,6 +10139,43 @@ def avatar2_close_mouth(body: dict = None):
     return r
 
 
+@app.post("/api/avatar2/locate")
+def avatar2_locate(body: dict = None):
+    """用「图像算法 + 多模态 LLM」自动识别形象的五官位置。
+
+    body: {apply?: true, use_llm?: true, model?: "qwen2.5vl:3b"}
+      apply=true 时把识别到的嘴部直接写进 mouth.json（前端在用户确认后调用）。
+
+    返回 mouth/face/eyes 都是 0~1 归一化坐标，前端叠加在图上给用户看/微调。
+    """
+    body = body or {}
+    try:
+        from . import avatar_vision as AV
+    except Exception as e:                                      # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="视觉模块加载失败：%s: %s" % (type(e).__name__, e))
+    p = avatar2._img_path()
+    if not os.path.isfile(p):
+        raise HTTPException(status_code=400, detail="还没有形象图，请先上传一张")
+    model = str(body.get("model") or AV.MODEL_FAST)
+    try:
+        r = AV.locate(p, model=model, use_llm=bool(body.get("use_llm", True)))
+    except Exception as e:                                      # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="识别失败：%s: %s" % (type(e).__name__, e))
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "识别失败")
+    if body.get("apply") and r.get("mouth"):
+        m = r["mouth"]
+        avatar2.set_mouth({"x": (m[0] + m[2]) / 2.0,
+                           "y": (m[1] + m[3]) / 2.0,
+                           "w": max(0.02, (m[2] - m[0])),
+                           "h": max(0.015, (m[3] - m[1]))})
+        r["applied"] = True
+        r["info"] = avatar2.info()
+    return r
+
+
 @app.post("/api/avatar2/reveal")
 def avatar2_reveal(body: dict = None):
     """在系统资源管理器里打开数字人目录 / 定位某个视频文件。
@@ -10451,6 +10488,9 @@ def avatar_lipsync_speak(body: dict):
             blink=bool(body.get("blink", False)),
             head=bool(body.get("head", True)),
             max_side=_ms, motion=_mo,
+            mode=str(body.get("mode") or "auto"),
+            variants=bool(body.get("variants", False)),
+            review=bool(body.get("review", True)),
         )
     except Exception as e:                                      # noqa: BLE001
         raise HTTPException(status_code=500,

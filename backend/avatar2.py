@@ -391,6 +391,32 @@ def close_mouth(force: bool = False) -> dict:
     if img is None:
         return {"ok": False, "error": "形象图读取失败"}
     H, W = img.shape[:2]
+
+    # ---- 新路径：下唇整体上移覆盖口腔（优先）----
+    # 旧路径是镜像填充 / inpaint，视觉复核都判「像一块补丁」。
+    # 新路径用的是**原图下唇的真实像素**，唇纹、高光、明暗都在，
+    # 画风天然一致；实测影响范围只到下巴（衣服区域差异 0.05，几乎为 0）。
+    try:
+        from . import avatar_mouth as _AM
+        _geom = _AM.analyze(img, mouth())
+        if _geom and _geom.get("source_open"):
+            _out = _AM.close_by_lip(img, _geom, 0.85)
+            _cp = _img_closed_path()
+            os.makedirs(os.path.dirname(_cp), exist_ok=True)
+            cv2.imwrite(_cp, _out)
+            _meta = _read_meta()
+            _meta["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            _meta["closed_from"] = os.path.basename(p)
+            _meta["closed_method"] = "lip_shift"
+            _write_meta(_meta)
+            return {"ok": True, "closed": True, "method": "lip_shift",
+                    "reason": "已用下唇上移生成闭嘴基准（保留原图唇部纹理）",
+                    "url": "/api/avatar2/closed?t=%d" % int(time.time())}
+    except Exception as _e:                             # noqa: BLE001
+        _new_err = "%s: %s" % (type(_e).__name__, _e)
+    else:
+        _new_err = None
+
     cx, cy, mw, mh = _mouth_geom((W, H), mouth())
     # 开孔椭圆（要填掉的区域）与融合椭圆（羽化范围）
     rx, ry = max(6.0, mw * 0.60), max(5.0, mh * 0.60)

@@ -209,7 +209,7 @@ def _head_move(frame, box, t, amp_x=9.0, amp_y=6.0):
 
 # ------------------------------------------------------------------ 主流程
 def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
-           on_progress=None, max_side=1024, motion=1.0):
+           on_progress=None, max_side=1600, motion=1.0, mode="auto", text=""):
     exe = A2.ffmpeg()
     if not exe:
         return {"ok": False, "error": "找不到 ffmpeg"}
@@ -221,6 +221,23 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
     img = cv2.imread(img_path)
     if img is None:
         return {"ok": False, "error": "形象图读取失败"}
+
+    # warp 模式必须用「本身张着嘴」的源图 —— 它的原理是把嘴压小，
+    # 源图要是闭着的就没东西可压（会退化成 open_from_closed 的几何外推，
+    # 质量差一档）。而 render_source() 在有闭嘴基准时会优先返回闭嘴图，
+    # 所以这里对 warp 单独换回原图。
+    if str(mode).lower() == "warp":
+        try:
+            alt_p = A2._img_path()
+            if os.path.isfile(alt_p) and os.path.abspath(alt_p) != os.path.abspath(img_path):
+                alt = cv2.imread(alt_p)
+                if alt is not None:
+                    from . import avatar_mouth as _AM
+                    _g = _AM.analyze(alt, A2.mouth())
+                    if _g and _g.get("source_open"):
+                        img_path, img = alt_p, alt
+        except Exception:                               # noqa: BLE001
+            pass
     # 尺寸策略（两条线分开，很重要）：
     #   · 处理尺寸 proc —— Wav2Lip 只在 96x96 上生成嘴部，喂给它更大的图**不会**
     #     增加嘴部信息量，反而让脸框更大、贴回时放大倍数更高。所以处理尺寸
@@ -258,14 +275,45 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
     # 卡通 / 非人类形象（实测 SCRFD 返回 0 个框）：退回用「用户框出来的
     # 嘴部」反推一个裁剪框。这样任何形象都能生成，不再直接报「未检测到人脸」。
     box_override = None
-    dets, _ = eng.det.detect(img, thresh=0.5)
+    # 低配机保底：onnxruntime 不兼容 / 模型缺失时 detect 会抛异常（实测
+    # 'InferenceSession' object has no attribute 'is_webgpu_graph_capture_enabled'）。
+    # 卡通形象本来就不需要人脸框 —— 捕获后按「0 个框」处理，自动走 warp。
+    try:
+        dets, _ = eng.det.detect(img, thresh=0.5)
+    except Exception:                                   # noqa: BLE001
+        dets = np.zeros((0, 5), np.float32)
+    # 合成模式：auto = 能检测到人脸就走 Wav2Lip 贴回，检测不到（卡通/3D）就走
+    # 原图像素形变。实测卡通形象贴 96x96 像素时贴回区清晰度只有 400~680
+    # （原图 3751），形变路径 3200~4500，而且画风 100% 一致。
+    use_mode = str(mode or "auto").lower()
+    if use_mode not in ("w2l", "warp"):
+        use_mode = "w2l" if len(dets) > 0 else "warp"
     if len(dets) == 0:
         box_override = A2.face_box_from_mouth((W, H))
         if box_override is None:
             return {"ok": False,
                     "error": "没检测到人脸，也没标定嘴部位置 —— 先在形象图上框一下嘴"}
+    # ---- LLM 按这张形象给一套渲染参数 ----
+    # 椭圆大小、羽化、纹理回注、口腔加深、圆唇幅度、时间平滑、开合增益
+    # 这十几个值原来都是照真人正脸写死的，换一张 3D 卡通就有大半不合适。
+    # 这里让多模态 LLM 看图直接给（结果按「图片 sha + 嘴部几何」缓存，
+    # 同一张形象只调一次；云端不通就退回预设，不会挡住生成）。
+    tune = None
+    try:
+        from . import avatar_mouth as _AMt
+        from . import avatar_tune as _ATt
+        _geom_t = _AMt.analyze(img, A2.mouth())
+        tune = _ATt.tune(img_path, geom=_geom_t,
+                         subject=("human" if len(dets) > 0 else "cartoon"))
+    except Exception as _e:                             # noqa: BLE001
+        tune = {"ok": False, "params": None, "source": "preset",
+                "reason": "调参异常：%s" % _e}
+
     t0 = time.time()
-    frames, meta = eng.render(img, y.astype(np.float32), box=box_override)
+    frames, meta = eng.render(img, y.astype(np.float32), box=box_override,
+                              mode=use_mode, mouth_cfg=A2.mouth(),
+                              tune=(tune or {}).get("params"),
+                              text=text)
     t_infer = time.time() - t0
     if not frames:
         return {"ok": False, "error": "没有生成任何帧"}
@@ -289,6 +337,14 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
         frames = [cv2.resize(f, (oW, oH), interpolation=cv2.INTER_CUBIC)
                   for f in frames]
         W, H = oW, oH
+
+    # libx264 + yuv420p 要求宽高都是偶数。上面的偶数对齐只在「放大」分支里做，
+    # 原生分辨率（这张形象 787×1400，宽是奇数）会直接让 ffmpeg 断管：
+    # 实测报 BrokenPipeError: [Errno 32]，产出 0 字节文件。这里统一补 1px。
+    if W % 2 or H % 2:
+        frames = [cv2.copyMakeBorder(f, 0, H % 2, 0, W % 2,
+                                     cv2.BORDER_REPLICATE) for f in frames]
+        H, W = frames[0].shape[:2]
 
     n = len(frames)
     cmd = [exe, "-y", "-loglevel", "error",
@@ -335,14 +391,65 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
             "bytes": os.path.getsize(out_mp4),
             "infer_sec": round(t_infer, 2),
             "motion": motion_mode, "motion_sec": round(t_motion, 2),
-            "box": box, "fps": fps}
+            "box": box, "fps": fps,
+            "mode": meta.get("mode") or "w2l",
+            "mouth_geom": meta.get("mouth_geom"),
+            "tune": ({"source": (tune or {}).get("source"),
+                      "style": (tune or {}).get("style"),
+                      "reason": (tune or {}).get("reason"),
+                      "params": (tune or {}).get("params"),
+                      "notes": (tune or {}).get("notes")}
+                     if tune else None)}
+
+
+def _grab_frames(mp4, n=2):
+    """从成片里抽 n 帧（质检用）。抽不出来就返回空列表，不抛异常。"""
+    exe = A2.ffmpeg()
+    if not exe or not os.path.isfile(mp4):
+        return []
+    out = []
+    tmpdir = os.path.join(os.path.dirname(mp4), "_qa")
+    try:
+        os.makedirs(tmpdir, exist_ok=True)
+    except Exception:                                   # noqa: BLE001
+        return []
+    try:
+        probe = subprocess.run([exe, "-i", mp4], capture_output=True, text=True, timeout=20)
+        import re as _re
+        m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", probe.stderr or "")
+        dur = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) if m else 2.0
+        for i in range(n):
+            t = dur * (i + 0.5) / max(1, n)
+            p = os.path.join(tmpdir, "qa_%d.jpg" % i)
+            subprocess.run([exe, "-y", "-loglevel", "error", "-ss", "%.2f" % t,
+                            "-i", mp4, "-vframes", "1", "-q:v", "2", p],
+                           capture_output=True, timeout=30)
+            if os.path.isfile(p):
+                im = cv2.imread(p)
+                if im is not None:
+                    out.append(im)
+    except Exception:                                   # noqa: BLE001
+        pass
+    finally:
+        try:
+            for f in os.listdir(tmpdir):
+                os.remove(os.path.join(tmpdir, f))
+            os.rmdir(tmpdir)
+        except Exception:                               # noqa: BLE001
+            pass
+    return out
 
 
 def speak(text, voice="", rate=None, style="", engine="auto",
-          blink=True, head=True, max_side=1024, motion=1.0):
-    """文本 → TTS → Wav2Lip → mp4
+          blink=True, head=True, max_side=1600, motion=1.0,
+          mode="auto", variants=False, review=True):
+    """文本 → TTS → 口型 → mp4
 
-    motion: 头部动作强度 0（完全不动）~ 1（标准）~ 1.6（活跃）
+    motion:   头部动作强度 0（完全不动）~ 1（标准）~ 1.6（活跃）
+    mode:     auto / w2l / warp
+    variants: True 时一次生成多个版本（画风优先 + 口型优先），各自质检，
+              让用户自己挑。卡通形象下两版差别很大，值得都看一眼。
+    review:   是否做质量检查（客观像素指标 + 多模态 LLM）
     """
     t = (text or "").strip()
     if not t:
@@ -363,27 +470,87 @@ def speak(text, voice="", rate=None, style="", engine="auto",
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "音频转码失败：%s: %s" % (type(e).__name__, e)}
 
-    name = "lipsync_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
-    out = os.path.join(A2._vdir(), name)
-    r = render(A2.render_source(), wav, out, blink=blink, head=head,
-               max_side=max_side, motion=motion)
-    if not r.get("ok"):
-        return r
+    src = A2.render_source()
+    # 多版本：卡通形象下「原图像素形变」和「贴 Wav2Lip 像素」差别很大
+    # （实测综合分 7.0 vs 5.6，嘴部清晰度比 1.31 vs 0.54），值得都生成一遍
+    # 让用户自己看。真人形象两版差别小，默认只出一版。
+    modes = ["warp", "w2l"] if variants else [mode]
+    try:
+        from . import avatar_vision as AV
+    except Exception:                                   # noqa: BLE001
+        AV = None
+
+    # 质检用的几何（objective_score 需要嘴部椭圆）
+    try:
+        from . import avatar_mouth as AM
+        _img = cv2.imread(src)
+        _cfg = A2.mouth()
+        _geom = AM.analyze(_img, _cfg) if (_img is not None and _cfg) else None
+    except Exception:                                   # noqa: BLE001
+        _geom = None
+
     from urllib.parse import quote
+    versions = []
+    for md in modes:
+        name = ("lipsync_" + time.strftime("%Y%m%d_%H%M%S") + "_"
+                + uuid.uuid4().hex[:4] + ".mp4")
+        out = os.path.join(A2._vdir(), name)
+        r = render(src, wav, out, blink=blink, head=head,
+                   max_side=max_side, motion=motion, mode=md)
+        if not r.get("ok"):
+            versions.append({"ok": False, "mode": md, "error": r.get("error")})
+            continue
+        qa = None
+        if review and AV is not None:
+            try:
+                # 几何必须用 render **实际使用**的那一套：w2l 走闭嘴基准、
+                # warp 走原图，两者的嘴部位置/清晰度基线不同，混用会让
+                # 「清晰度比」失真（实测混用时 w2l 从 0.54 虚高到 0.98）。
+                _g2 = r.get("mouth_geom") or _geom
+                if _g2 and "cx" not in _g2 and _geom:
+                    _g2 = dict(_geom, **{k: v for k, v in _g2.items() if v is not None})
+                qa = AV.review_frames(_grab_frames(out, 2), n=1, geom=_g2)
+            except Exception as e:                      # noqa: BLE001
+                qa = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        label = ("画风优先（原图像素形变）" if r.get("mode") == "warp"
+                 else "口型优先（Wav2Lip 生成像素）")
+        versions.append({
+            "ok": True, "name": name,
+            "url": "/api/avatar2/video/" + quote(name),
+            "path": out,
+            "mode": r.get("mode"), "label": label,
+            "duration": r["duration"], "size": r["size"],
+            "frames": r["frames"], "bytes": r["bytes"],
+            "infer_sec": r.get("infer_sec"),
+            "qa": qa,
+            "qa_score": (qa or {}).get("score"),
+            "tune": r.get("tune"),
+        })
+
+    good = [v for v in versions if v.get("ok")]
+    if not good:
+        return versions[0] if versions else {"ok": False, "error": "没有生成成功"}
+    # 按质检分选最优；都没质检就取第一个
+    best = max(good, key=lambda v: (v.get("qa_score") if v.get("qa_score") is not None else -1))
     return {
-        "ok": True, "name": name,
-        "url": "/api/avatar2/video/" + quote(name),
-        "path": out,
-        "duration": r["duration"], "size": r["size"],
-        "frames": r["frames"], "bytes": r["bytes"],
-        "infer_sec": r.get("infer_sec"),
+        "ok": True,
+        "name": best["name"], "url": best["url"], "path": best["path"],
+        "mode": best["mode"], "label": best["label"],
+        "duration": best["duration"], "size": best["size"],
+        "frames": best["frames"], "bytes": best["bytes"],
+        "infer_sec": best.get("infer_sec"),
+        "qa": best.get("qa"),
+        "qa_score": best.get("qa_score"),
+        "tune": best.get("tune"),
+        "versions": versions,
         "blink": bool(blink), "head": bool(head),
-        "motion": r.get("motion"), "motion_sec": r.get("motion_sec"),
+        "motion": best.get("motion"), "motion_sec": best.get("motion_sec"),
         # ⚠ 不能写 float(motion or 1.0)：motion=0（静止档）是 falsy，
         #   回显会被悄悄改成 1.0，前端看起来像没生效。
         "motion_level": float(motion) if motion is not None else 1.0,
         "max_side": max(480, min(1920, int(max_side or 1024))),
-        "lipsync_label": "Wav2Lip 生成式口型",
+        "lipsync_label": ("原图像素形变" if best.get("mode") == "warp"
+                          else "Wav2Lip 生成式口型"),
         "audio_url": a.get("url") or "",
         "audio_engine": a.get("engine") or "",
         "text": t[:200],

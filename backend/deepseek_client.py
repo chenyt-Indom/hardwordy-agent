@@ -179,7 +179,8 @@ class DeepSeekError(RuntimeError):
 
 
 def vision_chat(prompt: str, image_b64: str, model: str, api_key: str,
-                max_tokens: int = 900, timeout: tuple = (15, 180)) -> str:
+                max_tokens: int = 900, timeout: tuple = (15, 180),
+                temperature: float | None = None) -> str:
     """**看图**：把图片按 OpenAI 多模态格式发给模型，返回文字回答。
 
     2026-11-08 实测：DeepSeek（deepseek-chat / deepseek-flash）**接受 image_url**
@@ -205,6 +206,9 @@ def vision_chat(prompt: str, image_b64: str, model: str, api_key: str,
              "image_url": {"url": "data:image/png;base64," + image_b64}},
         ]}],
     }
+    # 坐标/质检类任务要可复现：给了就带上（不给则沿用服务端默认）
+    if temperature is not None:
+        body["temperature"] = float(temperature)
     try:
         r = _session().post(f"{BASE}/chat/completions", json=body,
                             headers={"Authorization": f"Bearer {api_key}",
