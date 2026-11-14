@@ -10923,8 +10923,17 @@
         onOk: async (v, ex) => {
           const pw = (v || "").trim();
           if (!pw) { alert("密码不能为空"); return false; }
-          // 地址兼容三种写法：hive3://IP:端口 / IP:端口 / 只写 IP（用默认端口）
-          const raw = (ex || "").trim().replace(/^hive3?:\/\//i, "");
+          // 地址兼容五种写法：punch://IP:端口 / udp:// / hive3:// / IP:端口 / 只写 IP
+          // ⚠️ 必须剥掉 punch:// —— 它是 UDP 打洞地址，带前缀传给后端会变成
+          //    host="punch://1.2.3.4"，socket 直接报 getaddrinfo failed。
+          let raw = (ex || "").trim();
+          let mode = "";
+          if (/^(punch|udp):\/\//i.test(raw)) {
+            mode = "punch";
+            raw = raw.replace(/^(punch|udp):\/\//i, "");
+          } else {
+            raw = raw.replace(/^hive[23]?:\/\//i, "");
+          }
           let host = "", port = 0;
           if (raw) {
             const m = raw.match(/^\[?([^\]]+?)\]?:(\d+)$/);
@@ -10934,7 +10943,7 @@
           let d;
           try {
             d = await api("/api/hive/join",
-              { password: pw, host: host, port: port });
+              { password: pw, host: host, port: port, mode: mode });
           } catch (e) { alert("入群失败：" + e.message); return false; }
           if (!d.ok) {
             // 没填地址、又没找到群 → 直接把地址框展开重来，别让他卡在这一步
