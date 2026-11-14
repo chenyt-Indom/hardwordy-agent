@@ -10331,6 +10331,79 @@
       } catch (e) { alert("取消失败：" + e.message); }
     }
 
+    // ★ 2026-11-15：群聊实时卡里的「🛠 本轮代码改动」。
+    //   结构和单人模式 makeSelfdevCard 产出的 .sd-row **完全一致**（同样的 class、
+    //   同样一行摘要 + 点开看 diff），所以两边的 CSS 直接复用、不会走样。
+    //   为什么要在这里单独写一份、而不直接调 makeSelfdevCard：那个函数往
+    //   `answerWrap` 里挂（单人会话的作用域），群聊这张卡是另一个 DOM 节点。
+    function hdAddCode(c, code) {
+      if (!c || !c.sd || !c.sdBody || !code) return;
+      const rel = String(code.rel || code.project || "").trim();
+      if (!rel) return;
+      const act = String(code.act || "");
+      const actName = act === "apply" ? "代码模型重写"
+        : act === "patch" ? "局部替换"
+          : act === "project" ? "项目"
+            : "写入";
+      const add = Number(code.added || 0);
+      const del = Number(code.removed || 0);
+
+      const row = document.createElement("div");
+      row.className = "sd-row";
+      row.dataset.add = add;
+      row.dataset.del = del;
+
+      const head = document.createElement("div");
+      head.className = "sd-head";
+      head.innerHTML = '<span class="sd-badge">🛠 ' + hEsc(actName) + "</span>"
+        + '<span class="sd-rel" title="' + hEsc(rel) + '">' + hEsc(rel) + "</span>"
+        + '<span class="sd-stat"><span class="sd-add">+' + add
+        + '</span> <span class="sd-del">−' + del + "</span></span>"
+        + '<button class="sd-toggle" type="button">详情 ▾</button>';
+      row.appendChild(head);
+
+      const body = document.createElement("div");
+      body.className = "sd-body";
+      body.hidden = true;
+      const pre = document.createElement("pre");
+      pre.className = "sd-pre";
+      const diffText = String(code.diff || "").trim()
+        || "（这个操作没有 diff 内容 —— 比如新建文件、或整份内容重写）";
+      // 只按行首上色，不解析内容（和单人 makeSelfdevCard 的做法一致）
+      pre.innerHTML = diffText.split("\n").map((ln) => {
+        const esc = hEsc(ln);
+        if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("@@"))
+          return '<span class="l-hdr">' + esc + "</span>";
+        if (ln.startsWith("+")) return '<span class="l-add">' + esc + "</span>";
+        if (ln.startsWith("-")) return '<span class="l-del">' + esc + "</span>";
+        return esc;
+      }).join("\n");
+      body.appendChild(pre);
+      row.appendChild(body);
+
+      const tg = head.querySelector(".sd-toggle");
+      const toggle = () => {
+        body.hidden = !body.hidden;
+        tg.textContent = body.hidden ? "详情 ▾" : "收起 ▴";
+      };
+      tg.onclick = (e) => { e.stopPropagation(); toggle(); };
+      head.onclick = (e) => { if (e.target !== tg) toggle(); };
+
+      c.sd.hidden = false;
+      c.sdBody.appendChild(row);
+      // 汇总行：N 处 · +X −Y（和单人 refreshSelfdevSum 同一个格式）
+      let sumAdd = 0, sumDel = 0, n = 0;
+      c.sdBody.querySelectorAll(".sd-row").forEach((r) => {
+        n += 1;
+        sumAdd += Number(r.dataset.add || 0);
+        sumDel += Number(r.dataset.del || 0);
+      });
+      if (c.sdSum) {
+        c.sdSum.innerHTML = n + ' 处 · <span class="sd-add">+' + sumAdd
+          + '</span> <span class="sd-del">−' + sumDel + "</span>";
+      }
+    }
+
     function hdStream(f) {
       const c = hdEnsure(f);
       const t = f.task || {};
