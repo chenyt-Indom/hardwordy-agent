@@ -10386,7 +10386,10 @@
           c.think.classList.add("open");
           c.details.querySelector(".arrow").textContent = "▾";
         }
-        c.raw = (c.raw || "") + String(f.delta || "");
+        // ★ 2026-11-15：优先用 full（累计全文）覆盖 —— 流式帧走泛洪、不重发，
+        //   只靠增量累加的话，成员那边丢一帧就永久少一段，两人看到的思考不一样长。
+        if (typeof f.full === "string" && f.full) c.raw = f.full;
+        else c.raw = (c.raw || "") + String(f.delta || "");
         c.think.textContent = c.raw + "▌";
       } else if (ph === "tool") {
         // ★ 2026-11-15：改成单人模式那一套 —— 每调一个工具就往 .tool-strip
