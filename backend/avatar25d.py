@@ -496,7 +496,8 @@ def _shift_of(prep, x, y, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0,
     return u - x, v - y
 
 
-def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
+def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0,
+           roll=0.0, scl=1.0):
     """眨眼：上眼皮**弧形下落**覆盖眼球（不是把眼睛压扁）。
 
     迭代记录：
