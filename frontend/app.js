@@ -11290,11 +11290,16 @@
             return true;
           }
           let t = {};
-          try { t = await api("/api/hive/relay/test", { url: u }) || {}; }
+          try { t = await api("/api/hive/relay/probe_all", { url: u }) || {}; }
           catch (e) { t = { ok: false, error: e.message }; }
-          alert(t.ok
-            ? "已保存，服务器可达（" + t.ms + "ms）"
-            : "已保存，但连不上：" + (t.error || "未知原因"));
+          if (t.ok) {
+            alert("已保存。线路体检：" + t.alive + "/" + t.total + " 条可用"
+              + (t.alive > 1 ? "（断一条会自动换下一条）"
+                 : t.alive === 1 ? "（只有一条，没有冗余）"
+                 : "（全都不通，检查服务器和防火墙）"));
+          } else {
+            alert("已保存，但探测失败：" + (t.error || "未知原因"));
+          }
           return true;
         },
       });
