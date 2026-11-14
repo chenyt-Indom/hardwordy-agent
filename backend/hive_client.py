@@ -575,13 +575,16 @@ class HiveClient:
         net_err = ""
         probe_ok = False
         if host:
-            pr = m.probe(host, int(port) if port else MESH.MESH_PORT)
+            if mode == "punch":
+                pr = m.probe_punch(host, int(port))
+            else:
+                pr = m.probe(host, int(port) if port else MESH.MESH_PORT)
             if pr.get("ok"):
                 probe_ok = True
                 for g in (pr.get("groups") or []):
                     _add(g.get("gid") or "", g.get("vt") or "",
                          g.get("gn") or "", "addr", host,
-                         int(pr.get("port") or port or 0))
+                         int(pr.get("port") or port or 0), mode)
             else:
                 net_err = pr.get("error") or "连不上"
 
