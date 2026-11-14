@@ -351,7 +351,9 @@ def speak(text, voice="", rate=None, style="", engine="auto",
         "infer_sec": r.get("infer_sec"),
         "blink": bool(blink), "head": bool(head),
         "motion": r.get("motion"), "motion_sec": r.get("motion_sec"),
-        "motion_level": float(motion or 1.0),
+        # ⚠ 不能写 float(motion or 1.0)：motion=0（静止档）是 falsy，
+        #   回显会被悄悄改成 1.0，前端看起来像没生效。
+        "motion_level": float(motion) if motion is not None else 1.0,
         "max_side": max(480, min(1920, int(max_side or 1024))),
         "lipsync_label": "Wav2Lip 生成式口型",
         "audio_url": a.get("url") or "",
