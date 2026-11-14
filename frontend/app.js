@@ -5352,33 +5352,23 @@
       answerBubble.appendChild(_cur);
     };
     // ---------- 思考过程平滑逐字播放 ----------
-    // Ollama 对 qwen3-vl 等推理模型常把 thinking 一次性整体返回（非逐 token），
-    // 为避免"和回答一起弹出来"，这里把到达的增量拆成小块逐步渲染，
-    // 使思考内容在答案输出之前就能持续、实时地逐字增长。
-    let thinkPending = "";      // 待逐字播放的增量缓冲
-    let thinkTimer = null;
-    const pushThinking = (delta) => {
-      thinkPending += delta;
-      if (thinkTimer === null) {
-        thinkTimer = setInterval(() => {
-          // ⚠️ 每帧字数**不能写死**。原来固定 5 字/26ms ≈ 190 字/秒，
-          // 模型思考一旦比这快，待播队列就越积越长 —— 表现是"思考半天不动、
-          // 结束前突然刷一大段"，正是用户说的"不是逐字"。
-          // 改成跟着积压量自适应：积压越多每帧吐越多，既保持平滑又**永远不落后**。
-          const STEP = Math.max(5, Math.ceil(thinkPending.length / 10));
-          if (thinkPending) {
-            const take = Math.min(STEP, thinkPending.length);
-            thinking += thinkPending.slice(0, take);
-            thinkPending = thinkPending.slice(take);
-            updateThinkStatus();
-            if (thinkBody.classList.contains("open")) thinkBody.textContent = thinking + "▌";
-          }
-        }, 26);                                  // 帧间隔 ≈ 每帧约 26ms
-      }
-    };
+    // ★ 2026-11-15：实现搬到 livecard.js 的 makeThinkPlayer()，单聊和群聊共用。
+    //   「每帧字数不能写死、要跟着积压量自适应」这条逻辑原样保留 ——
+    //   写死 5 字/26ms 时，模型思考一旦更快，队列就越积越长，
+    //   表现是「思考半天不动、结束前突然刷一大段」。
+    //   thinking 仍是**唯一真实来源**（收尾、兜底、重试分支都直接读写它），
+    //   player 每吐一次字就把它同步回来，所以那些读取点一行都不用改。
+    const _thinkPlayer = window.LiveCard.makeThinkPlayer({
+      onTick: (text) => {
+        thinking = text;
+        updateThinkStatus();
+        if (thinkBody.classList.contains("open")) thinkBody.textContent = thinking + "▌";
+      },
+    });
+    const pushThinking = (delta) => _thinkPlayer.push(delta);
     const stopThinking = () => {
-      if (thinkTimer !== null) { clearInterval(thinkTimer); thinkTimer = null; }
-      if (thinkPending) { thinking += thinkPending; thinkPending = ""; }
+      _thinkPlayer.stop();
+      thinking = _thinkPlayer.text();   // 待播的剩余一次性补齐（与旧行为一致）
     };
     // ★ 2026-11-15：文案映射（含「正在生成图片…」这些状态话术）搬进 livecard.js，
     //   单聊和群聊共用同一份 —— 原来群聊那套少了几个分支，工具状态就显示得不一样。
