@@ -244,7 +244,7 @@ class Wav2LipEngine:
             pred = self.sess.run(None, {self.in_names[0]: chunk,
                                         self.in_names[1]: face_inp[None]})[0][0]
             pred = np.transpose(pred, (1, 2, 0))   # (96,96,3)
-            pred = np.clip(pred, 0, 255)
+            pred = np.clip(pred, 0.0, 1.0) * 255.0
             frame = self._composite(face_img_bgr, pred, box, face96)
             frames.append(frame)
             if progress and i % 10 == 0:
