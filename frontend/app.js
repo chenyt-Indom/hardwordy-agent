@@ -7802,6 +7802,12 @@
           txt = "当前正在用：v" + (vst.total || "?") + " · " + (run.hash || "-")
             + (run.boot_at ? "（" + String(run.boot_at).slice(5, 16) + " 启动）" : "");
           txt += cur.dirty ? " · 有 " + cur.dirty + " 处未提交改动（重启前自动存快照）" : " · 工作区干净";
+          // ★ 2026-11-15：一个任务一个版本 —— 让它看得见"本任务攒了几处、还没合并"
+          const _tk = vst && vst.task;
+          if (_tk && _tk.active) {
+            txt += " · 本任务已改 " + (_tk.files || 0) + " 个文件（" + (_tk.steps || 0) +
+                   " 步），**任务结束时合并成一个版本**";
+          }
           verTxt.style.color = "#cfd6e2";
         }
         verTxt.textContent = txt;
@@ -7817,9 +7823,13 @@
         }
         list.innerHTML = bs.map((b) => {
           const h = b.hash;
-          return '<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid #2a2a31">' +
+          // ★ 2026-11-15：任务被中断 / 失败时提交的版本带「（未完成）」，显示成灰色
+          const _bad = /未完成/.test(b.subject || "");
+          return '<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid #2a2a31' +
+            (_bad ? ";opacity:.6" : "") + '">' +
             '<div style="flex:1;min-width:0">' +
-            '<div style="font-size:12.5px;color:#cfd6e2">' + (b.subject || "（没有说明）") + '</div>' +
+            '<div style="font-size:12.5px;color:' + (_bad ? "#9a9aa2" : "#cfd6e2") + '">' +
+            (b.subject || "（没有说明）") + '</div>' +
             '<div style="font-size:11.5px;color:#828b99;margin-top:3px;line-height:1.6">' +
             '<span style="font-family:ui-monospace,monospace">' + h + '</span> · ' + (b.time || '') +
             ' · ' + (b.files || 0) + ' 个文件</div>' +
@@ -7854,6 +7864,31 @@
       };
 
       list.onclick = async (ev) => {
+        // ---- 精细退回：回到任务内某一步之前（2026-11-15）----
+        const sb = ev.target.closest("button[data-step]");
+        if (sb) {
+          const h = sb.dataset.stephash;
+          const i = parseInt(sb.dataset.step, 10);
+          if (!confirm("把这一步之前的代码退回来吗？\n\n· 用那一步的备份还原对应文件\n"
+            + "· 会生成一个新版本（可再退回）\n· 重启应用后生效")) return;
+          sb.disabled = true; sb.textContent = "退回中…";
+          try {
+            const r = await (await fetch("/api/version/step_restore", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ hash: h, index: i }) })).json();
+            say(r.ok ? "✅ " + (r.msg || "已退回") : "❌ " + (r.error || "退回失败"),
+                r.ok ? "#7bd88f" : "#e06c6c");
+            if (r.ok) {
+              try { vst = await (await fetch("/api/version/status")).json(); } catch (e) {}
+              try { vlist = await (await fetch("/api/version/list?limit=30")).json(); } catch (e) {}
+              verPaint(); render(vlist);
+            } else { sb.disabled = false; sb.textContent = "退回"; }
+          } catch (e) {
+            sb.disabled = false; sb.textContent = "退回";
+            say("❌ " + e.message, "#e06c6c");
+          }
+          return;
+        }
         // ---- git 版本：回滚 / 看改动 ----
         const rb = ev.target.closest("button[data-hash]");
         if (rb) {
@@ -7892,6 +7927,33 @@
               '<div class="sd-diff-hd">' + f.rel + ' <span style="color:#5fd08a">+' + f.added +
               '</span> <span style="color:#e07a7a">−' + f.deleted + '</span></div>').join("")
               || '<div class="sd-diff-hd">这个版本没有文件变更</div>';
+            // ★ 2026-11-15：一个任务一个版本 —— 这里展开看「任务内的每一步」，
+            //   并能精确退回某一步之前（版本列表上仍然只显示任务版本，不刷屏）。
+            const _h = dd.dataset.detail;
+            const sp = await (await fetch("/api/version/steps?hash=" + encodeURIComponent(_h))).json();
+            if (sp && sp.ok && (sp.steps || []).length) {
+              const esc = (s) => String(s == null ? "" : s)
+                .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
+              if (sp.summary) {
+                html += '<div class="sd-diff-hd" style="margin-top:8px;color:#9fb6d0">'
+                  + '这次改了什么：' + esc(sp.summary) + '</div>';
+              }
+              html += '<div class="sd-diff-hd" style="margin-top:8px;color:#8ab6e0">'
+                + '任务内的每一步（点「退回」= 回到这一步之前）</div>';
+              html += sp.steps.map((s) =>
+                '<div class="sd-diff-hd" style="display:flex;gap:8px;align-items:center">'
+                + '<span style="flex:1;min-width:0">' + (s.i + 1) + '. ' + esc(s.act) + ' '
+                + esc(s.rel) + ' <span style="color:#5fd08a">+' + (s.added || 0) + '</span> '
+                + '<span style="color:#e07a7a">−' + (s.removed || 0) + '</span>'
+                + (s.note ? '<span style="color:#828b99"> · ' + esc(s.note) + '</span>' : '')
+                + '</span>'
+                + ((s.can_restore || s.has_backup)
+                   ? '<button data-step="' + s.i + '" data-stephash="' + _h + '" style="' + btnStyle
+                     + ';border:1px solid #3a4a5a;color:#8ab6e0">退回</button>'
+                   : '<span style="font-size:11px;color:#5a616b">无法退回</span>')
+                + '</div>').join("");
+            }
           } catch (e) { html = '<div class="sd-diff-hd">读取失败：' + e.message + '</div>'; }
           box.innerHTML = html;
           box.hidden = false;

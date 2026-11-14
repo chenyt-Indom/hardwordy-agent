@@ -28,6 +28,8 @@ import subprocess
 from .procwin import NOWIN as _NOWIN
 import time
 import json
+import threading
+import contextvars
 
 
 # ---------------------------------------------------------------- 基础
@@ -111,12 +113,24 @@ def current() -> dict:
 
 # ---------------------------------------------------------------- 快照
 
-def snapshot(message, allow_empty=False) -> dict:
-    """把当前工作区提交成一个快照。没有改动时直接返回 skipped。"""
+def snapshot(message, allow_empty=False, paths=None) -> dict:
+    """把当前工作区提交成一个快照。没有改动时直接返回 skipped。
+
+    paths 为空 = 提交工作区**全部**改动（重启前兜底、回滚后提交走这条）；
+    paths 给了列表 = **只提交这些文件** —— 任务级提交必须走这条。
+    为什么：`git add -A` 会把**另一个任务**（另一个群 / 单聊）正在改的文件
+    一起提交走，于是"群任务的改动"混进了"单聊任务的版本"，
+    回滚一个任务会把另一个任务也带走（2026-11-15 实测确认）。
+    """
+    _clear_stale_lock()
     av = available()
     if not av.get("ok"):
         return {"ok": False, "error": av.get("error")}
-    ok, out = _run(["add", "-A"])
+    only = [str(p) for p in (paths or []) if p]
+    if only:
+        ok, out = _run(["add", "--"] + only)
+    else:
+        ok, out = _run(["add", "-A"])
     if not ok:
         return {"ok": False, "error": "git add 失败：%s" % out[:300]}
     # 有东西待提交吗
@@ -143,6 +157,388 @@ def snapshot(message, allow_empty=False) -> dict:
 
 
 # ---------------------------------------------------------------- 列表 / 详情
+# ---------------------------------------------------------------- 任务级提交
+# 用户要求（2026-11-15）：**一个任务只产出一个版本**。
+#
+# 背景：以前 write/patch 每成功一次就 commit 一次。模型改一个涉及 5 个文件的
+# 功能，版本列表里就冒出 5 条，同一个任务把列表刷屏，回滚时也分不清
+# 「这是一次任务」还是「五个独立改动」。
+#
+# 现在改成两段式：
+#   ① 工具每次改动只**登记**（stage）到 data/version_task.json，不 commit；
+#   ② 任务结束时（模型说做完了 / 重启前 / 用户手动）一次性 commit 成一个版本，
+#      说明里汇总「改了哪些文件 + 每文件增删行 + AI 自己写的小结」。
+#   ③ 任务中途失败或被终止 → 照样提交，但标「（未完成）」，前端显示成灰色。
+#
+# 任务内的每一步都存档到 data/version_tasks/<hash>.json，
+# 前端「详情」里可以精确退回某一步 —— 列表上仍然只显示任务版本。
+
+_TASK_LOCK = threading.Lock()
+
+# ★ 为什么要 owner：单聊和群聊（甚至两个群）可能**同时**在改代码。
+#   如果共用一个池子，单聊任务结束时会把群里正在改的文件一起提交走，
+#   回滚时就成了"一次任务"里混着两个不相干的东西。
+#   owner 用 contextvars 传（群聊跑在独立线程里，会显式 set 一次）。
+_OWNER = contextvars.ContextVar("version_owner", default="")
+
+
+def set_owner(owner) -> None:
+    """标记"当前正在跑的是哪个任务"（单聊：chat:<session>，群聊：hive:<gid>）。"""
+    try:
+        _OWNER.set(str(owner or ""))
+    except Exception:
+        pass
+
+
+def get_owner() -> str:
+    try:
+        return _OWNER.get() or ""
+    except Exception:
+        return ""
+
+
+def _task_path() -> str:
+    """本次任务待提交的改动池（放 data/，不进版本库）。"""
+    return os.path.join(project_root(), "data", "version_task.json")
+
+
+def _task_archive_dir() -> str:
+    """已提交任务的逐步记录（按版本号存档，供「详情里精细退回」）。"""
+    return os.path.join(project_root(), "data", "version_tasks")
+
+
+def _atomic_write_json(path, obj) -> None:
+    """原子写：先写 .tmp 再 replace，避免半截 JSON 把任务池弄坏。"""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def _task_read() -> dict:
+    """读改动池。⚠️ 任何异常都必须返回**带 steps 的空结构** ——
+    返回纯 {} 会让调用方 `d["steps"].append(...)` 直接 KeyError
+    （2026-11-15 实测：池子文件还不存在时，第一次 stage 就崩）。
+    """
+    try:
+        with open(_task_path(), encoding="utf-8") as f:
+            d = json.load(f) or {}
+    except Exception:
+        return {"steps": []}
+    if not isinstance(d, dict):
+        return {"steps": []}
+    if not isinstance(d.get("steps"), list):
+        d["steps"] = []
+    return d
+
+
+def _task_write(d: dict) -> None:
+    _atomic_write_json(_task_path(), d)
+
+
+def _clear_stale_lock(max_age=90) -> bool:
+    """清掉陈旧的 .git/index.lock。
+
+    为什么需要：git 进程被强杀（或本应用重启时打断了一次 commit）会在仓库里
+    留下 index.lock，之后**所有** git 操作都失败并报
+    「Unable to create '...index.lock': File exists」——
+    版本功能会整体瘫掉，用户只能手动去删。这里自动清理。
+    只删「存在超过 max_age 秒」的，避免误删正在进行的 git 操作。
+    """
+    p = os.path.join(project_root(), ".git", "index.lock")
+    try:
+        if os.path.isfile(p) and (time.time() - os.path.getmtime(p)) > max_age:
+            os.remove(p)
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _syntax_check(rels=None) -> dict:
+    """语法自检：这些 .py 还能不能编译。
+
+    用户要求（2026-11-15）：回滚后如果代码是坏的、应用起不来，
+    必须自动撤销回滚并说明原因 —— 否则用户会卡在"回滚完就启动失败"。
+    rels 为空 = 检查 backend/*.py + 根目录 *.py（整轮回滚时用）。
+    """
+    import py_compile
+    import tempfile
+    root = project_root()
+    targets = []
+    if rels:
+        for r in rels:
+            r = str(r or "")
+            if r.endswith(".py") and ".." not in r:
+                targets.append(r)
+    else:
+        bdir = os.path.join(root, "backend")
+        if os.path.isdir(bdir):
+            for dirpath, dirnames, filenames in os.walk(bdir):
+                dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+                for fn in filenames:
+                    if fn.endswith(".py"):
+                        targets.append(os.path.relpath(os.path.join(dirpath, fn), root))
+        try:
+            for fn in os.listdir(root):
+                if fn.endswith(".py"):
+                    targets.append(fn)
+        except OSError:
+            pass
+    tmpdir = tempfile.mkdtemp(prefix="verchk_")
+    bad = []
+    checked = 0
+    for i, r in enumerate(targets[:400]):
+        p = os.path.join(root, r)
+        if not os.path.isfile(p):
+            continue
+        checked += 1
+        try:
+            py_compile.compile(p, cfile=os.path.join(tmpdir, "c%d.pyc" % i),
+                               doraise=True)
+        except Exception as e:  # noqa: BLE001
+            bad.append({"rel": r, "error": str(e)[:200]})
+    return {"ok": not bad, "checked": checked, "bad": bad[:5],
+            "error": ("%s：%s" % (bad[0]["rel"], bad[0]["error"])) if bad else ""}
+
+
+def stage(act, rel="", note="", backup="", added=0, removed=0, owner=None) -> dict:
+    """登记一次源码改动（**不提交**）。
+
+    任务结束时由 flush_task 合成一个版本。同一次任务里改同一个文件多次，
+    每次都会记成一步（给「详情里精细退回」用），但版本列表只算一条。
+    """
+    own = get_owner() if owner is None else str(owner or "")
+    with _TASK_LOCK:
+        d = _task_read()
+        d["steps"].append({
+            "act": str(act or ""), "rel": str(rel or ""),
+            "note": str(note or "")[:120], "backup": str(backup or ""),
+            "added": int(added or 0), "removed": int(removed or 0),
+            "owner": own,
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ts": time.strftime("%H:%M:%S"),
+        })
+        try:
+            _task_write(d)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": "登记失败：%s" % e}
+        mine = [s for s in d["steps"] if (s.get("owner") or "") == own]
+        rels = []
+        for s in mine:
+            r = s.get("rel") or ""
+            if r and r not in rels:
+                rels.append(r)
+        return {"ok": True, "staged": True, "owner": own,
+                "files": len(rels), "steps": len(mine)}
+
+
+def task_state(owner=None) -> dict:
+    """本任务已经登记了多少改动（前端显示「待合并成一个版本」用）。"""
+    own = get_owner() if owner is None else str(owner or "")
+    d = _task_read()
+    steps = [s for s in (d.get("steps") or [])
+             if own == "*" or (s.get("owner") or "") == own]
+    rels = []
+    started = ""
+    for s in steps:
+        r = s.get("rel") or ""
+        if r and r not in rels:
+            rels.append(r)
+        at = s.get("at") or ""
+        if at and (not started or at < started):
+            started = at
+    return {"ok": True, "active": bool(steps), "owner": own,
+            "started": started,
+            "files": len(rels), "steps": len(steps), "rels": rels[:40]}
+
+
+def flush_task(reason="任务结束", summary="", incomplete=False, owner=None) -> dict:
+    """把本次任务登记的所有改动**合成一个版本**提交。
+
+    incomplete=True → 说明里标「（未完成）」，前端显示成灰色、不算正式版本。
+    owner 指定只提交哪个任务的改动（"*" = 全部）；其余任务的步骤留在池子里，
+    不会被这次提交带走 —— 单聊和群聊可能同时在改代码。
+    提交失败时**保留改动池**（下次再试），绝不把改动记录丢掉。
+    """
+    own = get_owner() if owner is None else str(owner or "")
+    with _TASK_LOCK:
+        _clear_stale_lock()
+        d = _task_read()
+        allsteps = d.get("steps") or []
+        if own == "*":
+            steps = list(allsteps)
+            keep = []
+        else:
+            steps = [s for s in allsteps if (s.get("owner") or "") == own]
+            keep = [s for s in allsteps if (s.get("owner") or "") != own]
+        if not steps:
+            return {"ok": True, "skipped": True, "reason": "本任务没有源码改动"}
+        rels = []
+        per = {}
+        for s in steps:
+            r = s.get("rel") or ""
+            if not r:
+                continue
+            if r not in rels:
+                rels.append(r)
+            v = per.setdefault(r, {"acts": [], "added": 0, "removed": 0})
+            a = s.get("act") or ""
+            if a and a not in v["acts"]:
+                v["acts"].append(a)
+            v["added"] += int(s.get("added") or 0)
+            v["removed"] += int(s.get("removed") or 0)
+        if not rels:
+            _task_write({"steps": keep})
+            return {"ok": True, "skipped": True, "reason": "本任务没有源码改动"}
+
+        # ---- 提交说明：第一行要能一眼看出「一个任务 = 一条版本」----
+        head = "自迭代任务 · %d 个文件%s" % (
+            len(rels), "（未完成）" if incomplete else "")
+        lines = [head]
+        sm = (summary or "").strip().replace("\r", "")
+        if sm:
+            lines.append("")
+            lines.append(sm[:300])
+        lines.append("")
+        for r in rels[:40]:
+            v = per.get(r) or {}
+            lines.append("- %s（%s，+%d −%d）" % (
+                r, "/".join(v.get("acts") or []) or "改动",
+                int(v.get("added") or 0), int(v.get("removed") or 0)))
+        if len(rels) > 40:
+            lines.append("- …另有 %d 个文件" % (len(rels) - 40))
+        msg = "\n".join(lines)
+
+        # 只提交本任务涉及的文件 —— 别的任务正在改的文件不能被这次提交带走
+        res = snapshot(msg, paths=rels)
+        if not res.get("ok"):
+            return {"ok": False, "error": str(res.get("error") or "")[:300],
+                    "kept": True}
+        h = res.get("hash") or ""
+        # 存档：前端「详情」里据此精确退回某一步
+        try:
+            _started = ""
+            for s in steps:
+                at = s.get("at") or ""
+                if at and (not _started or at < _started):
+                    _started = at
+            _atomic_write_json(
+                os.path.join(_task_archive_dir(), "%s.json" % (h or "unknown")),
+                {"task_id": d.get("task_id") or "", "owner": own,
+                 "started": _started,
+                 "ended": time.strftime("%Y-%m-%d %H:%M:%S"), "hash": h,
+                 "reason": str(reason or "")[:120], "incomplete": bool(incomplete),
+                 "summary": sm[:600], "steps": steps})
+        except Exception:
+            pass
+        # 只清掉本任务的步骤（提交已成功，留着会导致下次重复提交同一批）；
+        # 别的任务（另一个群 / 单聊）还在跑的步骤**原样保留**。
+        try:
+            _task_write({"steps": keep})
+        except Exception:
+            pass
+        return {"ok": True, "skipped": bool(res.get("skipped")), "hash": h,
+                "files": len(rels), "steps": len(steps),
+                "incomplete": bool(incomplete), "subject": head}
+
+
+def steps_of(hash) -> dict:
+    """某个任务版本内部的每一步（「详情」里展示 / 精细退回用）。"""
+    if not hash or not _valid_ref(hash):
+        return {"ok": False, "error": "版本号不合法", "steps": []}
+    p = os.path.join(_task_archive_dir(), "%s.json" % hash)
+    if not os.path.isfile(p):
+        return {"ok": True, "steps": [],
+                "note": "这个版本没有逐步记录（可能是重启前快照或手动快照）"}
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f) or {}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": "读逐步记录失败：%s" % e, "steps": []}
+    out = []
+    for i, s in enumerate(d.get("steps") or []):
+        bak = str(s.get("backup") or "")
+        cmt = str(s.get("commit") or "")
+        out.append({"i": i, "act": s.get("act") or "",
+                    "rel": s.get("rel") or "", "note": s.get("note") or "",
+                    "ts": s.get("ts") or "",
+                    "added": int(s.get("added") or 0),
+                    "removed": int(s.get("removed") or 0),
+                    # 能退回的两种依据：写盘前的 .bak 备份，或历史里对应的那一步提交
+                    "has_backup": bool(bak and os.path.isfile(bak)),
+                    "can_restore": bool((bak and os.path.isfile(bak))
+                                        or (cmt and _valid_ref(cmt)))})
+    return {"ok": True, "hash": hash, "summary": d.get("summary") or "",
+            "incomplete": bool(d.get("incomplete")),
+            "started": d.get("started") or "", "ended": d.get("ended") or "",
+            "reason": d.get("reason") or "", "steps": out}
+
+
+def restore_step(hash, idx) -> dict:
+    """把某个任务里的第 idx 步**退回**（用那一步的备份还原文件）。
+
+    这是「精细退回」，藏在详情里用；它本身会生成一个新版本，
+    所以在版本列表里仍然看得见（可再退回来）。
+    """
+    if not hash or not _valid_ref(hash):
+        return {"ok": False, "error": "版本号不合法"}
+    p = os.path.join(_task_archive_dir(), "%s.json" % hash)
+    if not os.path.isfile(p):
+        return {"ok": False, "error": "找不到这个版本的逐步记录"}
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f) or {}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": "读逐步记录失败：%s" % e}
+    steps = d.get("steps") or []
+    try:
+        idx = int(idx)
+    except Exception:
+        return {"ok": False, "error": "步骤号不合法"}
+    if idx < 0 or idx >= len(steps):
+        return {"ok": False, "error": "没有第 %d 步" % (idx + 1)}
+    st = steps[idx] or {}
+    rel = str(st.get("rel") or "")
+    bak = str(st.get("backup") or "")
+    cmt = str(st.get("commit") or "")
+    if not rel or ".." in rel:
+        return {"ok": False, "error": "这一步没有可还原的文件"}
+    how = "用备份还原到这一步之前"
+    if bak and os.path.isfile(bak):
+        dst = os.path.join(project_root(), rel)
+        try:
+            with open(bak, "rb") as f:
+                data = f.read()
+            os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+            with open(dst, "wb") as f:
+                f.write(data)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": "还原失败：%s" % e}
+    elif cmt and _valid_ref(cmt):
+        # 没有 .bak（可能已被清理）→ 用历史里那一步提交**之前**的内容恢复。
+        # 这比 .bak 更可靠：备份文件会被后续写入覆盖，提交不会。
+        ok_c, out_c = _run(["checkout", "%s^" % cmt, "--", rel])
+        if not ok_c:
+            return {"ok": False, "error": "从历史提交恢复失败：%s" % out_c[:200]}
+        how = "从历史提交还原到这一步之前"
+    else:
+        return {"ok": False, "error": "这一步没有备份也没有历史提交，无法精确退回；"
+                                     "请改用「回滚」整个任务"}
+    chk = _syntax_check([rel])
+    if not chk.get("ok"):
+        return {"ok": False,
+                "error": "退回后语法有错，已中止（文件可能被改坏）：%s"
+                         % chk.get("error")}
+    # 登记这次还原：否则池子是空的，flush_task 会直接 skipped，不留下版本记录
+    stage("restore", rel, "退回第 %d 步" % (idx + 1), "", 0, 0)
+    r = flush_task("手动退回「%s」第 %d 步" % (hash, idx + 1),
+                   summary="退回 %s 到第 %d 步之前（%s）" % (rel, idx + 1, how))
+    return {"ok": True, "rel": rel, "how": how, "version": r,
+            "msg": "已把 %s %s。重启后生效。" % (rel, how)}
+
+
 
 def count() -> int:
     """仓库里一共有多少个版本（前端显示「当前版本 vN」用）。"""
@@ -337,6 +733,23 @@ def rollback(hash, files=None, note="") -> dict:
                         restored.append("删除 " + rel)
                 except OSError:
                     pass
+
+    # 2.5) 自检：回滚后的 .py 必须还能编译。
+    #      用户要求（2026-11-15）：回滚到坏代码会导致应用起不来，
+    #      必须**自动撤销**这次回滚并说明原因，不能把人晾在"启动失败"上。
+    _chk = _syntax_check(targets if targets else None)
+    if not _chk.get("ok"):
+        undone = False
+        if restore_hash:
+            ok_u, _out_u = _run(["checkout", str(restore_hash), "--", "."])
+            undone = bool(ok_u)
+        return {"ok": False, "restore_hash": restore_hash,
+                "auto_undone": undone,
+                "error": ("回滚后的代码语法有错（%s）。已自动撤销这次回滚，"
+                          "当前仍是回滚前的代码。%s"
+                          % (_chk.get("error"),
+                             "" if undone else
+                             "⚠️ 自动撤销也失败了，请点「↩ 撤销上次回撤」手动恢复。"))}
 
     # 3) 把这次回滚也提交成一个版本，历史保持线性
     tag = "整轮" if not targets else "%d 个文件" % len(targets)

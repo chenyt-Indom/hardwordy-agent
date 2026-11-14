@@ -1908,44 +1908,44 @@ def _sd_patch_fixed(rel: str, find: str, replace: str, note: str = "") -> dict:
 
 
 def _version_commit(act: str, r: dict, note: str = "") -> dict:
-    """★ 用户要求（2026-11-11）：自开发的**每一次**文件改动都要进版本库。
+    """★ 用户要求（2026-11-15）：**一个任务只产出一个版本**。
 
-    以前只有「重启前」才自动打一次快照，中间连续改好几个文件时，
-    万一某一轮改坏了，用户没有中间点可退 —— 只能退回上一次重启，
-    那次重启之后的全部改动一起丢掉。现在改成：write / patch /
-    insert_after / apply 每成功一次就 commit 一次，版本列表里
-    就是一步步的脚印，可以精确退回到任意一步。
+    历史沿革（别改回去）：
+      · 2026-11-11 用户要求"每次改动都进版本库"，于是 write/patch 每成功一次
+        就 commit 一次 —— 结果模型改一个涉及 5 个文件的功能，版本列表里
+        冒出 5 条，同一个任务把列表刷屏，回滚时也分不清哪些属于同一次任务。
+      · 2026-11-15 用户要求改成"任务结束才算一个版本"，所以这里**只登记**
+        （写进 data/version_task.json），不再 commit。
 
-    失败**不影响**这次改动本身（文件已经写进磁盘了），只是把原因
-    附在工具返回里，让用户知道这一版没进版本库。
+    真正的提交发生在任务结束时（main.py 里生成结束处 / 重启前 / 用户手动），
+    由 version.flush_task() 把所有登记合成**一条**提交，说明里汇总
+    "改了哪些文件 + 每个文件增删行 + AI 自己写的小结"。
+
+    登记失败**不影响**这次改动本身（文件已经写进磁盘了），只是把原因
+    附在工具返回里，让用户知道这一步没能记进版本库。
     """
     try:
         from . import version as _ver
-        rel = str(r.get("rel") or "")
-        msg = "自迭代 · %s %s" % (act, rel)
-        nt = (note or "").strip()
-        if nt:
-            msg += " · " + nt[:60]
-        res = _ver.snapshot(msg)
+        d = (r or {}).get("diff") or {}
+        res = _ver.stage(act, str((r or {}).get("rel") or ""),
+                         note or "", str((r or {}).get("backup") or ""),
+                         int(d.get("added") or 0), int(d.get("removed") or 0))
     except Exception as e:                            # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
-    if not res.get("ok"):
-        return {"ok": False, "error": str(res.get("error") or "")[:200]}
-    if res.get("skipped"):
-        return {"ok": True, "skipped": True, "hash": res.get("hash") or ""}
-    return {"ok": True, "hash": res.get("hash") or "",
-            "files": int(res.get("files") or 0)}
+    return res
 
 
 def _version_commit_line(v: dict) -> str:
     """把 _version_commit 的结果拼成一行给模型/用户看的说明。"""
     if not v:
         return ""
-    if v.get("ok") and not v.get("skipped"):
-        return "已自动上传版本库：%s（这一版可单独退回）。" % (v.get("hash") or "")
+    if v.get("ok") and v.get("staged"):
+        return ("已登记到**本次任务**（累计 %d 个文件 / %d 步），"
+                "任务结束时合并成**一个**版本提交。"
+                % (int(v.get("files") or 0), int(v.get("steps") or 0)))
     if v.get("ok") and v.get("skipped"):
-        return "版本库无新增改动，本次未产生新快照。"
-    return ("⚠️ 本次改动**没能进版本库**：%s（文件已写入，但这一步无法单独退回）。"
+        return "版本库无新增改动。"
+    return ("⚠️ 本次改动**没能登记进版本库**：%s（文件已写入，但这一步可能无法单独退回）。"
             % (v.get("error") or "未知原因"))
 
 

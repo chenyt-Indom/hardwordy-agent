@@ -5259,6 +5259,25 @@ async def chat(req: ChatRequest,
         #    于是前面第一次 `client.chat(..., tools=tool_schemas)` 直接
         #    UnboundLocalError: cannot access local variable（实测踩过）。
         nonlocal tool_schemas, _native_tool_names
+        # ★ 用户要求（2026-11-15）：一个任务一个版本。
+        #   如果上一次任务没正常结束（用户按了「终止」/ 关掉页面 / 进程崩），
+        #   它的改动还留在池子里。这里先把它作为一个**「未完成」版本**收掉，
+        #   免得和本次任务的改动混成一条，回滚时说不清哪些是哪个任务的。
+        _vown = "chat:%s" % (session or "default")
+        try:
+            from . import version as _ver_prev
+            _ver_prev.set_owner(_vown)
+            _prev = _ver_prev.task_state(_vown)
+            if _prev.get("active"):
+                _pr = _version_flush_task("上一次任务未正常结束", "",
+                                          incomplete=True, owner=_vown)
+                if _pr.get("ok") and not _pr.get("skipped"):
+                    yield json.dumps({"note": (
+                        "上一次任务没有正常收尾，我已把它的 %d 个文件改动单独存成"
+                        "一个版本 %s（标为「未完成」，可整体退回）。"
+                        % (int(_pr.get("files") or 0), _pr.get("hash") or ""))}) + "\n"
+        except Exception:
+            logger.warning("收尾上一次残留任务失败（不影响本次对话）", exc_info=True)
         # 每轮对话的本地工作消息序列 = system + 用户历史
         #
         # ⚠️ 较早对话摘要**必须并进第一条 system 消息**，不能再加一条 system。
@@ -6299,6 +6318,23 @@ async def chat(req: ChatRequest,
         # （上一版就是这么把一个刚建好的项目目录清空的）。
         for _n in _reconcile_streamed(_wsstate, [], final=True):
             yield json.dumps({"note": _n}) + "\n"
+
+        # ★★ 用户要求（2026-11-15）：**一个任务只产出一个版本**。
+        #    到这里整次生成才算结束（模型不再调工具 = 它认为做完了），
+        #    把本次任务登记的所有改动合并成**一条**提交。
+        #    模型改了 5 个文件 → 版本列表只多 1 条，不是 5 条。
+        try:
+            _vt = _version_flush_task("任务完成", final_text, owner=_vown)
+            if _vt.get("ok") and not _vt.get("skipped"):
+                yield json.dumps({"note": (
+                    "已把本次任务合并成**一个**版本 %s（%d 个文件、%d 步），"
+                    "在「版本历史」里可整体退回。"
+                    % (_vt.get("hash") or "", int(_vt.get("files") or 0),
+                       int(_vt.get("steps") or 0)))}) + "\n"
+            elif _vt.get("error"):
+                logger.warning("[version] 任务版本提交失败：%s", _vt.get("error"))
+        except Exception:
+            logger.warning("任务结束提交版本失败（不影响对话）", exc_info=True)
 
         # 对话结束：归档历史会话（供记忆检索）+ 保存会话文件（供重启后恢复）
         # **必须用 all_messages（完整历史）**，不能用裁剪后的 messages，
@@ -10508,10 +10544,69 @@ class VersionRollbackReq(BaseModel):
     note: str = ""
 
 
+def _version_task_summary(text: str, limit: int = 200) -> str:
+    """从模型的收尾回答里取一句「这次改了什么」，作为版本说明里的小结。
+
+    用户要求（2026-11-15）：版本说明里要有「AI 自己写的改动小结」。
+    这里**不额外调一次模型**（那会多等 1~2 秒，用户已经在抱怨慢），
+    直接用它的收尾回答：去掉代码块和 markdown 记号，取开头有内容的几句。
+    """
+    s = str(text or "")
+    if not s.strip():
+        return ""
+    import re as _re
+    s = _re.sub(r"```.*?```", "", s, flags=_re.S)
+    out = []
+    total = 0
+    for ln in s.splitlines():
+        t = ln.strip().lstrip("#>*-• ").strip()
+        if not t:
+            continue
+        out.append(t)
+        total += len(t)
+        if total >= limit:
+            break
+    return " ".join(out)[:limit]
+
+
+def _version_flush_task(reason: str, text: str = "", incomplete: bool = False,
+                        owner=None) -> dict:
+    """任务结束时把本次登记的改动合成**一个**版本。失败不影响对话。
+
+    owner=None → 用当前上下文里的任务标记（单聊 / 群聊各一个）；
+    owner="*" → 全部合并（重启前兜底用）。
+    """
+    try:
+        from . import version as _ver
+        st = _ver.task_state(owner)
+        if not st.get("active"):
+            return {"ok": True, "skipped": True, "reason": "本任务没有源码改动"}
+        r = _ver.flush_task(reason, _version_task_summary(text), incomplete,
+                            owner=owner)
+        if r.get("ok") and not r.get("skipped"):
+            logger.info("[version] 任务版本 %s：%s（%s 个文件）",
+                        r.get("hash"), reason, r.get("files"))
+        return r or {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("任务结束提交版本失败（不影响对话）：%s", e)
+        return {"ok": False, "error": str(e)}
+
+
 def _version_autosnapshot(reason: str) -> dict:
     """重启前自动打一次本地快照（只 commit，不 push）。失败绝不影响重启。"""
     try:
         from . import version as _ver
+        # ① 先把本任务登记的改动合并成**一个**版本（一个任务一个版本）
+        try:
+            _ft = _ver.flush_task("重启前 · %s" % str(reason or "")[:40],
+                                  owner="*")
+            if _ft.get("ok") and not _ft.get("skipped"):
+                logger.info("重启前已把本任务合并成一个版本 %s（%s 个文件）",
+                            _ft.get("hash"), _ft.get("files"))
+        except Exception:
+            logger.warning("重启前合并任务版本失败（继续打快照）", exc_info=True)
+        # ② 再打一次兜底快照：run_python 之类直接写盘的改动不走任务池，
+        #    只有这里能兜住（否则这些改动永远进不了版本库）。
         r = _ver.snapshot("自迭代快照 · " + str(reason or "重启前")[:60])
         if r.get("ok") and not r.get("skipped"):
             logger.info("重启前已打版本快照 %s（%s 个文件）",
@@ -10531,6 +10626,7 @@ def version_status():
         return {"ok": False, "error": av.get("error")}
     return {"ok": True, "current": _ver.current(), "root": av.get("root"),
             "running": _BOOT_VER, "total": _ver.count(),
+            "task": _ver.task_state(),
             "undo": _ver.get_undo()}
 
 
@@ -10598,6 +10694,38 @@ def version_undo():
         except Exception:
             logger.warning("撤销回滚后标记待生效失败", exc_info=True)
     return r
+
+
+@app.get("/api/version/steps")
+def version_steps(hash: str = ""):
+    """某个任务版本内部的每一步（「详情」里展开看 / 精细退回用）。"""
+    from . import version as _ver
+    return _ver.steps_of(hash)
+
+
+class VersionStepReq(BaseModel):
+    hash: str = ""
+    index: int = -1
+
+
+@app.post("/api/version/step_restore")
+def version_step_restore(req: VersionStepReq):
+    """精细退回：把某个任务里的第 index 步退回去（用那一步的备份还原文件）。"""
+    from . import version as _ver
+    r = _ver.restore_step(req.hash, req.index)
+    if isinstance(r, dict) and r.get("ok"):
+        try:
+            from . import pending as _pend
+            _pend.mark(str(r.get("rel") or ""), "精细退回第 %d 步" % (req.index + 1))
+        except Exception:
+            logger.warning("精细退回后标记待生效失败", exc_info=True)
+    return r
+
+
+@app.post("/api/version/flush")
+def version_flush():
+    """手动把本任务已登记的改动合并成一个版本（平时不用点，任务结束会自动做）。"""
+    return _version_flush_task("用户手动合并", "", incomplete=False)
 
 
 # ---------- 多人协作群（Hive）----------
@@ -12199,6 +12327,15 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
        非流式要等模型全部算完才拿到结果，中间几十秒群里一片死寂。
     """
     t0 = time.time()
+    # ★ 用户要求（2026-11-15）：一个任务一个版本。
+    #   群里的开发任务按群隔离 owner —— 两个群、或群和单聊同时改代码时，
+    #   各自的版本不会把对方的文件一起带走（群聊跑在独立线程，owner 只在本线程有效）。
+    _vown = "hive:%s" % str(gid or "")[:12]
+    try:
+        from . import version as _ver_hd
+        _ver_hd.set_owner(_vown)
+    except Exception:
+        logger.warning("[hive-hd] 标记版本归属失败（不影响任务）", exc_info=True)
     # ★ 2026-11-15：这个群的任务只在**本群自己的开发项目**里动文件。
     #   没有这一步，A 群做的网站会和 B 群做的脚本互相覆盖（都用 active_project），
     #   而且用户开着开发台时会被群里的写入搅乱。thread-local，只影响本线程。
@@ -12659,6 +12796,19 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                    "think_chars": len(thinking), "out_chars": len(text)})
     _hd_cancel.pop(mid, None)
     _hd_running.pop(gid, None)
+
+    # ★ 用户要求（2026-11-15）：一个任务一个版本 —— 整次任务结束才合并提交。
+    #   被取消 / 出错 → 标「（未完成）」，不算正式版本（前端显示成灰色）。
+    try:
+        _vt = _version_flush_task(
+            "群任务结束 · %s" % str(gid or "")[:8],
+            (text or "") if not cancelled else "",
+            incomplete=bool(cancelled or err), owner=_vown)
+        if _vt.get("ok") and not _vt.get("skipped"):
+            logger.info("[hive-hd] 群任务版本 %s（%s 个文件）",
+                        _vt.get("hash"), _vt.get("files"))
+    except Exception:
+        logger.warning("[hive-hd] 群任务提交版本失败（不影响结果）", exc_info=True)
 
 
 # ---------------------------------------------------------------- P2P 网络
