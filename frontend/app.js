@@ -2752,7 +2752,7 @@
       if (moSel && (mode === "w2l" || mode === "p25d")) {
         const mv = parseFloat(moSel.value);
         base.motion = isNaN(mv) ? 1 : mv;
-        try { localStorage.setItem("av2_motion", String(base.motion)); } catch (e) {}
+        try { localStorage.setItem("avatar2_motion", String(base.motion)); } catch (e) {}
       }
       // 每帧耗时的实测值：2D ≈ 12ms、伪3D ≈ 36ms、真3D ≈ 150ms，
       // 所以分段长度按模式递减，保证每段都在请求超时窗口内。
