@@ -280,7 +280,8 @@ class HiveClient:
         if u and not u.startswith(("hive3://", "hive2://", "hive://")):
             try:
                 lk = RELAY.link(RELAY_STATE)
-                st = lk.start(u, gid, cfg.get("token") or "")
+                st = lk.start(u, gid, cfg.get("token") or "",
+                              extra_urls=cfg.get("urls"))
                 self._relay = lk
                 if st.get("online"):
                     self._state = "online"
@@ -290,6 +291,10 @@ class HiveClient:
                     # 连上就把群登记到中继目录 —— 跨网的人凭密码就能找到群，
                     # 不用再互发地址。这是「入群逻辑」最关键的一环。
                     self._publish_dir(u, gid, cfg.get("token") or "")
+                elif st.get("state") == "connecting":
+                    # 还在换线路试 —— 不是失败，后台会继续，别急着报错
+                    self._state = "connecting"
+                    self._error = st.get("error") or "正在连接服务器…"
                 else:
                     self._state = "error"
                     self._error = st.get("error") or "中继连不上"
