@@ -145,8 +145,9 @@ def _apply_motion(frames, img_path, proc_side, y, sr, fps, blink, motion):
         fr = A25._warp(fr, prep, yaw=yaw, pitch=pit, roll=rol,
                        tx=tx, ty=ty, scl=scl, iters=1)
         if blink and bl > 0.02:
+            # roll / scl 必须一起传：侧倾 4° 时脸缘能差 14px，漏传就是眨眼偏位
             fr = A25._blink(fr, prep, min(1.0, bl * max(m, 0.5)),
-                            yaw, pit, tx, ty)
+                            yaw, pit, tx, ty, rol, scl)
         out.append(fr)
     return out, "25d"
 
