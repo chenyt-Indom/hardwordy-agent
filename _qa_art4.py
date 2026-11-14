@@ -42,7 +42,7 @@ print("耗时 %.1fs" % (time.time() - t0), flush=True)
 
 # ---------- 1) 消息落盘 + 无报错
 msgs = hive.read_messages(gid, 0, 50)
-ai = [m for m in msgs if m.get("role") == "ai"]
+ai = [m for m in msgs if m.get("type") == "ai" or m.get("role") == "ai"]
 chk("AI 回复已落盘", len(ai) >= 1, "n=%d" % len(ai))
 if ai:
     last = ai[-1]
@@ -50,7 +50,7 @@ if ai:
     chk("有正文", len(str(last.get("text") or "")) > 30,
         str(last.get("text") or "")[:120])
     print("--- AI 正文（前 600 字）---")
-    print(str(last.get("text") or "")[:600])
+    print(str(last.get("text") or "")[:600].encode("gbk", "replace").decode("gbk"))
 
 # ---------- 2) 文件真的落在群项目里
 root = workspace.root(proj)
@@ -101,6 +101,9 @@ if arts:
     chk("下载可用", r.status_code == 200 and len(r.content) > 0,
         "%s bytes" % len(r.content))
 
+names = [a["name"] for a in arts]
+chk("产物无重名（同名只留最终版）", len(names) == len(set(names)), str(names))
+
 print("\n==== 通过 %d ====" % len(OK))
 for x in OK:
     print("  OK  " + x)
@@ -108,5 +111,5 @@ if BAD:
     print("==== 失败 %d ====" % len(BAD))
     for x in BAD:
         print("  FAIL " + x)
-print("\n[保留测试群供人工查看] gid=%s  proj=%s" % (gid, proj))
+print("\n[测试群] gid=%s  proj=%s" % (gid, proj))
 sys.exit(1 if BAD else 0)

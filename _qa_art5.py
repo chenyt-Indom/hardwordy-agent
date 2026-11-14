@@ -48,9 +48,12 @@ try:
         chk("zip source 标了打包", "打包" in str(zipm[0].get("source")),
             str(zipm[0].get("source")))
 
-    # 重复事件去重
+    # 同名只留最新版：再收一遍同一批事件，列表里不该出现重名
     dup = main._hive_save_artifacts(gid, all_evs)
-    chk("重复事件去重（同名同大小不再收）", len(dup) == 0, str(len(dup)))
+    after = hive.list_artifacts(gid)
+    nm_list = [m["name"] for m in after]
+    chk("同名只留一份", len(nm_list) == len(set(nm_list)), str(nm_list))
+    chk("重收后总数仍为 3", len(after) == 3, str(len(after)))
 finally:
     workspace.set_thread_project("")
 
@@ -61,7 +64,7 @@ m2 = main._hive_save_artifacts(gid, evs2)
 chk("回归：图片仍能收", len(m2) == 1 and m2[0]["kind"] == "image", str(m2))
 
 arts = hive.list_artifacts(gid)
-chk("产物列表总数 4", len(arts) == 4, str(len(arts)))
+chk("产物列表总数 4（3+1图片）", len(arts) == 4, str(len(arts)))
 
 import shutil
 shutil.rmtree(hive._gdir(gid), ignore_errors=True)
