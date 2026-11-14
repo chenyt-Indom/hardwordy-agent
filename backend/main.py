@@ -12298,10 +12298,15 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             base = {"asker": asker, "model": model}
             if pend_t:
                 seq_in += 1
-                # full=thinking：成员那边用全文覆盖，丢帧不会留下残缺思考
+                # full=thinking：成员那边用全文覆盖，丢帧不会留下残缺思考。
+                # ⚠️ 2026-11-15 修「响应太慢」：原来**每帧**都带累计全文，
+                #   思考写到 5000 字时就是 6.7 帧/秒 × 5000 字 ≈ 33KB/s 的重复传输，
+                #   前端每帧还要整块替换 DOM —— 长思考时明显卡。
+                #   改成**每 3 帧兜底一次**（约 0.45 秒）：丢帧最多残 0.45 秒，
+                #   下一帧就被纠正，而带宽和重排降到 1/3。
                 _hd_emit(gid, mid, "thinking", pend_t,
                          {**base, "chars": len(thinking)}, seq_in,
-                         full=thinking)
+                         full=(thinking if seq_in % 3 == 0 else ""))
                 pend_t = ""
             if pend_c:
                 seq_in += 1
