@@ -10231,10 +10231,9 @@
       };
       // 光标做成独立节点：原来把 "▌" 拼进 textContent，导致每帧都得整块重设；
       // 现在它挂在末尾，追加文字时插到它前面即可（DOM 开销几乎为 0）。
-      c.cur = document.createElement("span");
-      c.cur.className = "hd-cur";
-      c.cur.textContent = "▌";
-      c.think.appendChild(c.cur);
+      // ⚠️ 这里**不立刻挂**：`.think-body:not(.open):empty` 靠 :empty 隐藏空壳，
+      //    一挂 span 就不再 empty 了。所以等第一次真有思考文字时再懒加载（见 hdThinkAppend）。
+      c.cur = null;
       // 实时卡片的思考框：点标题也能折叠（和正式消息一致）
       c.details.addEventListener("click", () => {
         const open = c.think.classList.contains("open");
