@@ -416,33 +416,47 @@ def _shift_of(prep, x, y, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
 
 
 def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
-    """眨眼：眼部区域纵向压缩 + 压一条眼睑线（不填色块，避免棕色方块）。"""
+    """眨眼：只压眼裂那一小块，椭圆羽化居中融合（不填色块、不留色带）。
+
+    原来 ROI 取 eye_gap*0.42 当半宽，实测单眼 ROI 宽 147px = 眼距的 84%、
+    脸宽的 36% —— 眉毛、鼻梁、甚至部分脸颊都被框进去；压缩后底部还用
+    「最后一行」填充，于是每次眨眼整片脸都在扭（用户反馈的「位置偏移 /
+    抽搐」）。现在按真实眼裂尺寸取（半宽 0.17 眼距、半高 0.085 眼距），
+    压缩结果**居中**放回，并用椭圆蒙版融合，眼外像素一个都不动。
+    """
     if amount <= 0.02:
         return img
     a = float(np.clip(amount, 0.0, 1.0))
+    gap = float(prep.get("eye_gap", 0.0))
+    if gap < 4.0:
+        return img
     out = img.copy()
     H, W = prep["wh"]
-    ew = prep["eye_gap"] * 0.42
-    eh = ew * 0.62
+    ew = max(6.0, gap * 0.17)          # 半宽
+    eh = max(5.0, gap * 0.085)         # 半高
     for (ex, ey) in prep["eyes"]:
         dx, dy = _shift_of(prep, ex, ey, yaw, pitch, tx, ty)
         ex, ey = ex + dx, ey + dy
         x0 = int(max(0, ex - ew)); x1 = int(min(W, ex + ew))
         y0 = int(max(0, ey - eh)); y1 = int(min(H, ey + eh))
-        if x1 - x0 < 6 or y1 - y0 < 6:
+        if x1 - x0 < 8 or y1 - y0 < 6:
             continue
-        roi = out[y0:y1, x0:x1]
-        nh = max(2, int(round((y1 - y0) * (1.0 - 0.42 * a))))
-        small = cv2.resize(roi, (x1 - x0, nh), interpolation=cv2.INTER_AREA)
-        canvas = np.empty_like(roi)
-        canvas[:nh] = small
-        canvas[nh:] = small[-1:]
-        # 边缘羽化，避免出现一条硬边
-        m = np.ones((y1 - y0, 1), np.float32)
-        m[:2] = 0.4
-        m[-2:] = 0.4
-        out[y0:y1, x0:x1] = (canvas * m[:, :, None]
-                             + roi * (1.0 - m[:, :, None])).astype(np.uint8)
+        roi = out[y0:y1, x0:x1].astype(np.float32)
+        h, w = roi.shape[:2]
+        nh = max(2, int(round(h * (1.0 - 0.55 * a))))
+        if nh >= h:
+            continue
+        small = cv2.resize(roi, (w, nh), interpolation=cv2.INTER_AREA)
+        canvas = roi.copy()
+        top = (h - nh) // 2
+        canvas[top:top + nh] = small               # 眼裂变窄，上下各留一点原样
+        # 椭圆羽化：中心 1、边缘 0，保证眼外像素完全不动
+        yy = np.linspace(-1.0, 1.0, h, dtype=np.float32)[:, None]
+        xx = np.linspace(-1.0, 1.0, w, dtype=np.float32)[None, :]
+        rr = np.sqrt(xx * xx + yy * yy)
+        m = np.clip((1.0 - rr) / 0.45, 0.0, 1.0)[:, :, None]
+        out[y0:y1, x0:x1] = np.clip(canvas * m + roi * (1.0 - m),
+                                    0, 255).astype(np.uint8)
     return out
 
 
