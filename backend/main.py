@@ -11761,21 +11761,31 @@ _HD_PUSH_CHARS = 400        # 或者攒够 400 字就推，长段落不会拖太
 
 
 def _hd_emit(gid: str, mid: str, phase: str, delta: str = "",
-             task: dict | None = None, seq_in: int = 0) -> None:
+             task: dict | None = None, seq_in: int = 0,
+             full: str = "") -> None:
     """推一帧 @hd 执行进度。
 
     两条路都要走：
       · `_broadcast_hive` —— 本机前端立刻看到（不依赖中继，本机模式下也能看）；
       · `send_stream` —— 通过中继广播给其他成员（没连中继时静默失败）。
+
+    ★ 2026-11-15 用户要求「思考 / 行为 / 回答必须实时广播给全体成员」。
+      原来 `delta` 是**增量**，而 T_STREAM 是泛洪、不排队也不重发 ——
+      任何一个成员丢一帧，那段思考就**永久缺失**，两边看到的思考长度对不上。
+      所以每帧再带一个 `full`（当前累计全文）：前端优先用它覆盖，
+      丢帧就自动被下一帧纠正。帧里同时保留 delta，老前端照旧能用。
     """
     frame = {"mid": mid, "phase": phase, "delta": delta,
              "task": task or {}, "seq_in": seq_in, "ts": time.time()}
+    if full:
+        frame["full"] = full
     try:
         _broadcast_hive({"type": "hd_stream", "gid": gid, "frame": frame})
     except Exception:
         pass
     try:
-        hive_client.client().send_stream(gid, mid, phase, delta, task or {}, seq_in)
+        hive_client.client().send_stream(gid, mid, phase, delta, task or {},
+                                         seq_in, full=full)
     except Exception:
         pass
 
