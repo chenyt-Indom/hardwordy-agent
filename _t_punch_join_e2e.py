@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""端到端：A 建群 → B 拿 punch:// 地址按密码入群 → 打洞连上。
-测完自动删掉测试群，不污染你的数据。"""
+"""端到端：A 建群 → 清掉本地记录（模拟「另一台机器」）→ B 拿 punch:// 地址入群。"""
 import io
 import os
 import sys
@@ -32,19 +31,24 @@ g = H.create_group("打洞测试群", "A")
 gid = g["gid"]
 pw = g["password"]
 _g = H.load_group(gid) or {}
+vt = _g.get("vt") or ""
 print("测试群 %s 密码 %s" % (gid, pw))
 
 a = None
 try:
-    # A：群主，另起一个节点
     a = HM.MeshNode()
     a.start(0, [])
-    a.add_group(gid, vt=_g.get("vt") or "", gname="打洞测试群")
+    a.add_group(gid, vt=vt, gname="打洞测试群")
     time.sleep(0.4)
     chk("A 打洞通道就绪", bool(a.punch),
         "udp=%s" % (a.punch.port if a.punch else None))
 
-    # B：用全局单例，走真实 join_by_password
+    # 关键：删掉本机记录，模拟「群在另一台机器上」
+    H.delete_group(gid, force=True)
+    time.sleep(0.2)
+    chk("本地记录已清除（模拟另一台机器）", gid not in H.all_group_ids(),
+        "groups=%d" % len(H.all_group_ids()))
+
     b = HC.client()
     bnode = HC.MESH.node()
     bnode.start(0, [])
@@ -52,21 +56,21 @@ try:
 
     addr = "punch://127.0.0.1:%d" % a.punch.port
     print("  B 用地址 %s 入群" % addr)
-    t0 = time.time()
-    # 走路由同一套：先 parse_code 拆解，再交给 join_by_password
     pc = bnode.parse_code(addr)
     chk("parse_code 拆出 punch 模式",
         pc.get("ok") and pc.get("mode") == "punch", str(pc))
+    t0 = time.time()
     r = b.join_by_password(pw, "B", pc["host"], pc["port"], pc["mode"])
     dt = time.time() - t0
     print("  -> ok=%s via=%s warn=%s %.2fs"
           % (r.get("ok"), r.get("via"), r.get("warn") or "", dt))
     chk("B 入群成功", r.get("ok"), r.get("error") or "")
-    chk("来源标记为指定地址", r.get("via") == "addr", str(r.get("via")))
-    chk("入群后打洞连接成功（没有 warn）", not r.get("warn"),
+    chk("来源是「指定地址」（不是本地/局域网）",
+        r.get("via") == "addr", str(r.get("via")))
+    chk("入群后打洞连接成功（无 warn）", not r.get("warn"),
         str(r.get("warn") or ""))
 
-    time.sleep(0.5)
+    time.sleep(0.6)
     peers = bnode.peers_of(gid)
     chk("B 侧看到 A 的直连 peer", len(peers) >= 1, "peers=%d" % len(peers))
 finally:
