@@ -5380,17 +5380,10 @@
       if (thinkTimer !== null) { clearInterval(thinkTimer); thinkTimer = null; }
       if (thinkPending) { thinking += thinkPending; thinkPending = ""; }
     };
+    // ★ 2026-11-15：文案映射（含「正在生成图片…」这些状态话术）搬进 livecard.js，
+    //   单聊和群聊共用同一份 —— 原来群聊那套少了几个分支，工具状态就显示得不一样。
     const addToolChip = (name) => {
-      const chip = document.createElement("span");
-      chip.className = "tool-chip";
-      chip.textContent = TOOL_LABELS[name] || ("🔧 " + name);
-      toolWrap.appendChild(chip);
-      chip.scrollIntoView({ block: "nearest" });
-      if (name === "generate_image") thinkStatus.textContent = "🎨 正在生成图片…";
-      else if (name === "edit_image") thinkStatus.textContent = "🖼 正在微改图片…";
-      else if (name === "remember" || name === "search_memory") thinkStatus.textContent = "🧠 正在读写记忆…";
-      else if (name === "web_search") thinkStatus.textContent = "🌐 正在联网检索…";
-      else thinkStatus.textContent = "🔧 正在调用工具：" + (TOOL_LABELS[name] || name);
+      _tools.add(name, (t) => { thinkStatus.textContent = t; });
     };
 
     // ---------- 代码卡片：模型跑了什么代码、结果怎样，都能直接看、直接改、直接重跑 ----------
