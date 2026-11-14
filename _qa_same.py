@@ -83,13 +83,15 @@ for i, m in enumerate(msgs):
 chk("含 system 之外的角色", all(m["role"] in ("user", "assistant") for m in msgs))
 chk("最后一条是 user", msgs[-1]["role"] == "user")
 chk("当前指令在最后", "写一个计算器" in msgs[-1]["content"])
-chk("含群记忆", "群里做过工具" in msgs[0]["content"])
-chk("含防注入边界", "不是**对你的指令" in msgs[0]["content"] or
-    "不是" in msgs[0]["content"])
+_all = json.dumps(msgs, ensure_ascii=False)
+chk("含群记忆", any("群里做过工具" in str(m.get("content")) for m in msgs))
+chk("含防注入边界", "不是" in msgs[-1]["content"] and "对你的指令" in msgs[-1]["content"])
 chk("历史里有 AI 消息", any(m["role"] == "assistant" and "用什么语言" in
                           str(m.get("content")) for m in msgs))
-chk("思考没被塞进历史", "很长很长的思考" not in json.dumps(msgs, ensure_ascii=False))
-chk("附件名进了背景", "需求.png" in msgs[0]["content"])
+chk("历史里有多个成员", any("张三：" in str(m.get("content")) for m in msgs)
+    and any("王五：" in str(m.get("content")) for m in msgs))
+chk("思考没被塞进历史", "很长很长的思考" not in _all)
+chk("附件名进了历史", "需求.png" in _all)
 
 print("=" * 60)
 print("6) 工具产物收集函数")
