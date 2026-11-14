@@ -256,6 +256,35 @@ def _set_keepalive(sock: socket.socket) -> None:
         pass
 
 
+def _wrap_tls(sock: socket.socket, host: str, port: int, timeout: float):
+    """给 socket 套 TLS，返回 (新 socket, 是否校验证书)。
+
+    先严格校验；失败再宽松一次。为什么必须这样：用户填的是**IP**，
+    而证书是签给域名的（实测 443 端口 SSL 报
+    `SSLCertVerificationError`），严格校验等于把这条路彻底废掉。
+
+    宽松模式失去的是传输层的中间人防护；但聊天内容本身是
+    AES-256-GCM 密文 + HMAC 鉴权，中间人既解不开也伪造不了，
+    所以「能连上」比「证书链完美」在这里更重要。
+    """
+    import ssl
+    try:
+        ctx = ssl.create_default_context()
+        s = ctx.wrap_socket(sock, server_hostname=host)
+        return s, True
+    except Exception:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    # 宽松重试：重新建一条连接再包
+    s2 = socket.create_connection((host, port), timeout=timeout)
+    s2.settimeout(timeout)
+    ctx = ssl._create_unverified_context()
+    s = ctx.wrap_socket(s2, server_hostname=host)
+    return s, False
+
+
 def probe(url: str, token: str = "", timeout: float = 4.0) -> Dict[str, Any]:
     """连一下中继，取它的健康信息。用于「填地址前先测通不通」。"""
     p = parse_url(url)
