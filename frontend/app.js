@@ -10438,10 +10438,13 @@
         //   加一个 .tool-chip，标题按工具类型换文案（🎨 正在生成图片… / 🔧 正在调用工具：xxx）。
         //   原来群聊只有一行「正在执行工具（第 N 轮）：a、b」，和单聊的横向小条完全两样。
         const names = (t.tools || []).map(String).filter(Boolean);
+        // ⚠️ 群聊和单人是**两个平级 IIFE**，这里的 TOOL_LABELS 拿不到 ——
+        //    用主模块挂在 window 上的那一份（同源，不会走样）。
+        const _TL = window.__TOOL_LABELS || {};
         names.forEach((nm) => {
           const chip = document.createElement("span");
           chip.className = "tool-chip";
-          chip.textContent = TOOL_LABELS[nm] || ("🔧 " + nm);
+          chip.textContent = _TL[nm] || ("🔧 " + nm);
           // 取消按钮要永远留在最后
           const cb = c.tools.querySelector(".hd-cancel-chip");
           if (cb) c.tools.insertBefore(chip, cb); else c.tools.appendChild(chip);
@@ -10449,7 +10452,7 @@
           else if (nm === "edit_image") setLbl("🖼 正在微改图片…");
           else if (nm === "remember" || nm === "search_memory") setLbl("🧠 正在读写记忆…");
           else if (nm === "web_search") setLbl("🌐 正在联网检索…");
-          else setLbl("🔧 正在调用工具：" + (TOOL_LABELS[nm] || nm));
+          else setLbl("🔧 正在调用工具：" + (_TL[nm] || nm));
         });
       } else if (ph === "code") {
         // ★ 2026-11-15：**这就是「造软件看不到代码」的修复**。
