@@ -286,7 +286,13 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (W, H),
            "-r", str(fps), "-i", "-",
            "-i", wav_path,
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+           # 实测（40 帧 1024²，与原帧锐度 54.82 比）：
+           #   veryfast/crf20 → 42.02 (76.6%)  153KB   ← 旧设置，掉 23%
+           #   medium/crf18   → 51.13 (93.3%)  307KB
+           #   medium/crf16   → 53.06 (96.8%)  431KB   ← 现在用的
+           #   slow/crf14     → 54.58 (99.6%)  605KB   （更慢，收益小）
+           # veryfast 会跳过大量分析，是「画面发糊」的直接来源之一。
+           "-c:v", "libx264", "-preset", "medium", "-crf", "16",
            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
            "-movflags", "+faststart", out_mp4]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
