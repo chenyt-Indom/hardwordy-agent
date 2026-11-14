@@ -10372,7 +10372,19 @@
       const box = el("hiveMsgs");
       // 状态文案统一写进**思考卡标题**（单人模式就是这么做的：thinkStatus），
       // 不再有独立的「阶段条」—— 那是群聊独有的东西，用户截图对比后要求去掉。
-      const setLbl = (tx) => { if (c.lbl) c.lbl.textContent = tx; };
+      // ★ 2026-11-15 修「响应太慢」：标题里「🧠 思考中…（N 字）」每帧都在变，
+      //   而改标题会让整条消息列表重新布局 —— 长列表时这是 6.7 次/秒的整页重排。
+      //   字数类文案做 400ms 节流（状态类文案照旧立即显示）。
+      const setLbl = (tx) => {
+        if (!c.lbl) return;
+        if (c.lbl.textContent === tx) return;
+        if (/字）/.test(tx)) {
+          const now = (window.performance || Date).now();
+          if (now - (c._lblT || 0) < 400) return;
+          c._lblT = now;
+        }
+        c.lbl.textContent = tx;
+      };
       if (ph === "queued") {
         setLbl("🧠 思考中…");
         c.who.textContent = (t.asker || "成员") + " 唤醒了模型"
