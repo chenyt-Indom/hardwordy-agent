@@ -679,7 +679,22 @@ class RelayLink:
             ok = False
             n = len(cands)
             start = self.cand_idx % n
-            order = [(start + k) % n for k in range(n)]
+            # 上一轮「所有线路都不通」→ 本轮只探最优那条（上次成功的 / 主地址）。
+            # 为什么：所有候选其实指向同一台服务器，服务器挂了的时候，
+            # 把 7 条全试一遍纯属浪费时间（实测恢复要 19.9 秒）。只探一条，
+            # 服务一回来下一轮就能接上（退避上限 8 秒内）。每 5 轮做一次全扫，
+            # 防止「主地址坏了但别的能通」这种情况被漏掉。
+            if self._degraded and self._sweep_skip < 4:
+                self._sweep_skip += 1
+                idx = 0
+                for i, c in enumerate(cands):
+                    if str(c.get("url") or "") == self.last_ok_url:
+                        idx = i
+                        break
+                order = [idx]
+            else:
+                self._sweep_skip = 0
+                order = [(start + k) % n for k in range(n)]
             # 冷却中的线路排到最后 —— 既不会每次白等一个超时，
             # 也不会因为一次抖动就永久放弃一条路（服务器哪天又开了呢）。
             now = time.time()
