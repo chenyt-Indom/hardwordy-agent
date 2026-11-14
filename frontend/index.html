@@ -239,6 +239,17 @@
             <option value="1920">1920 · 最大画面（插值放大）</option>
           </select>
         </div>
+        <!-- 动作强度：头部旋转/点头/眨眼都由音频能量驱动，这里调整体幅度。
+             实测同一段语音（25.5 秒）头部位移：1.0 时 ±13px、1.6 时 ±20px。
+             静止档只保留嘴部，适合做固定机位播报。 -->
+        <div class="av2-row av2-row-motion">
+          <select id="av2Motion" title="人物动作强度：头部转动、点头、眨眼的整体幅度">
+            <option value="0">动作：静止（只有嘴动）</option>
+            <option value="0.6">动作：轻微</option>
+            <option value="1" selected>动作：自然（推荐）</option>
+            <option value="1.6">动作：活跃</option>
+          </select>
+        </div>
         <!-- 口型幅度：增益作用在「张口曲线」上，不是硬拉伸。
              实测同一段语音：1.0 时最大开口 31px、1.6 时 56px，张开帧比例也翻倍。
              往右更明显但有代价（嘴角张力、唇纹拉伸），交给用户自己权衡。 -->
