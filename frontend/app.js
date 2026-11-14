@@ -2654,6 +2654,11 @@
         rate: rateVal,
         amp: syncAmp(),
       };
+      // 输出分辨率只对 Wav2Lip 有意义（其它模式走各自的原生尺寸）
+      const resSel = $("#av2Res");
+      if (mode === "w2l" && resSel) {
+        base.max_side = parseInt(resSel.value, 10) || 1024;
+      }
       // 每帧耗时的实测值：2D ≈ 12ms、伪3D ≈ 36ms、真3D ≈ 150ms，
       // 所以分段长度按模式递减，保证每段都在请求超时窗口内。
       // Wav2Lip 实测 138 字 = 29 秒语音 = 37.7 秒渲染，接近超时线，
