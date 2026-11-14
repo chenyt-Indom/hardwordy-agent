@@ -179,41 +179,39 @@ class Wav2LipEngine:
         out = blur_g + high * strength
         return np.clip(out, 0, 255)
 
-    def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.42,
-                   feather=9):
-        """把生成的嘴部区域贴回原图，只改下半脸"""
+    def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.50,
+                   feather=13):
+        """把生成的嘴部区域贴回原图：椭圆蒙版，边缘全在脸内，无矩形硬边"""
         x1, y1, x2, y2 = box
         w, h = x2 - x1, y2 - y1
-        if w <= 2 or h <= 2:
+        if w <= 8 or h <= 8:
             return full_frame
-        # 嘴部起止行（相对 bbox）
-        m_top = int(h * (1.0 - mouth_ratio))
-        m_top = max(0, min(h - 3, m_top))
 
         # 生成图放大到 bbox 尺寸
         gen_big = cv2.resize(pred96.astype(np.uint8), (w, h), interpolation=cv2.INTER_CUBIC)
         orig_big = full_frame[y1:y2, x1:x2]
 
-        # 颜色校正（用上半脸做参考）
+        # 颜色校正 + 细节回注（缓解 96->大图放大的模糊）
         gen_big = self._match_color(gen_big, orig_big)
-        # 细节回注
-        gen_big = self._detail_inject(gen_big, orig_big, strength=0.55)
+        gen_big = self._detail_inject(gen_big, orig_big, strength=0.70)
 
-        # 只取嘴部条带
-        strip_gen = gen_big[m_top:, :]
-        strip_orig = orig_big[m_top:, :]
+        # 椭圆蒙版：中心在嘴部，轴长收在 bbox 内部，绝不触及边界
+        cx = int(w * 0.50)
+        cy = int(h * (1.0 - mouth_ratio * 0.55))
+        ax = int(w * 0.38)
+        ay = int(h * mouth_ratio * 0.62)
+        ax = max(4, min(ax, w // 2 - 3))
+        ay = max(4, min(ay, h // 2 - 3))
+        mask = np.zeros((h, w), np.float32)
+        cv2.ellipse(mask, (cx, cy), (ax, ay), 0, 0, 360, 1.0, -1)
+        # 羽化：先大幅模糊，再锐化边界
+        k = max(3, (min(ax, ay) // 3) * 2 + 1)
+        mask = cv2.GaussianBlur(mask, (k, k), 0)
+        mask = np.clip(mask, 0, 1)[..., None]
 
-        # 羽化蒙版
-        sh = strip_gen.shape[0]
-        mask = np.ones((sh, w), np.float32)
-        f = min(feather, max(1, sh // 3))
-        ramp = np.linspace(0, 1, f, dtype=np.float32)
-        mask[:f, :] *= ramp[:, None]
-        mask = cv2.GaussianBlur(mask, (0, 0), 2.0)
-
-        blended = strip_gen * mask[..., None] + strip_orig * (1 - mask[..., None])
+        blended = gen_big * mask + orig_big * (1 - mask)
         out = full_frame.copy()
-        out[y1 + m_top:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
+        out[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
         return out
 
     # ---------- 对外 ----------
