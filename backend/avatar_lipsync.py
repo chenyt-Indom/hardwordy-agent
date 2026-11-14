@@ -140,7 +140,7 @@ def _apply_motion(frames, img_path, proc_side, y, sr, fps, blink, motion):
             out.append(fr)
             continue
         fr = A25._warp(fr, prep, yaw=yaw, pitch=pit, roll=rol,
-                       tx=tx, ty=ty, scl=scl)
+                       tx=tx, ty=ty, scl=scl, iters=1)
         if blink and bl > 0.02:
             fr = A25._blink(fr, prep, min(1.0, bl * max(m, 0.5)),
                             yaw, pit, tx, ty)
