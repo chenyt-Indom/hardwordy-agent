@@ -213,6 +213,12 @@ class ReliableUDPSock:
         elif typ == PKT_PING:
             self._ack(seq)
         elif typ == PKT_BYE:
+            # 同一个 peer 重新打洞时，上一代隧道关闭时发出的 BYE 可能还在路上，
+            # 它会把刚建好的新隧道立刻打掉 —— 表现就是「探群成功、紧接着入群
+            # 立刻失败，耗时 0.00 秒」。刚建好且一个数据包都没收过的隧道，
+            # 短窗口内的 BYE 一律忽略（真正的断开由重传超时兜底关闭）。
+            if self.stats["recv"] == 0 and time.time() - self.created < 0.6:
+                return
             self.close()
 
     def _retx_loop(self) -> None:
