@@ -1,4 +1,4 @@
-"""A/B 实验：脖子 zn 归零 + 权重快速衰减，看能不能消掉反向对拉。"""
+"""实验：roll/pitch 支点下移到颈椎底部，能否消掉脖子剪切。"""
 import sys, os, math
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np, cv2
@@ -6,48 +6,50 @@ from backend import avatar25d as A25
 
 P = r"D:\local-multimodal-src\data\avatar2\avatar.png"
 base = A25._prep3d(P, max_side=1024)
-W, H = base["wh"]; mk = base["mask"]; wg0 = base["wgt"]; zn0 = base["zn"]
-ys, xs = np.where(mk > 0)
-ymax = int(ys.max()); cx, cy = base["cx"], base["cy"]
-img = base["img"]
-gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+W, H = base["wh"]; mk = base["mask"]
+ys, xs = np.where(mk > 0); ymax = int(ys.max())
+cx, cy = base["cx"], base["cy"]
+img = base["img"]; gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)
+ny0, ny1 = ymax, min(H, ymax + 90)          # 脖子带
+fy0, fy1 = int(ys.min()) + 120, ymax - 60   # 脸部带
 
-# 脖子带：网格底以下 0~90px（真正的脖子）
-ny0, ny1 = ymax, min(H, ymax + 90)
-face_y0, face_y1 = int(ys.min()) + 100, ymax - 40   # 脸部参考带
+def pivot_shift(deg, d):
+    """绕 (cx, cy+d) 旋转 = 绕 (cx,cy) 旋转 + 平移补偿。"""
+    r = math.radians(deg)
+    return d * math.sin(r), d * (1.0 - math.cos(r))
 
-def variant(zn_mode, w_mode):
-    p = dict(base)
-    zn = zn0.copy(); wg = wg0.copy()
-    yy = np.arange(H, dtype=np.float32)[:, None] * np.ones((1, W), np.float32)
-    below = np.clip((yy - ymax) / 70.0, 0.0, 1.0)      # 0=下巴线 1=下方70px
-    if zn_mode == "zero":
-        # 脖子是中轴，深度应居中于脸（zn≈0），不能沿用下巴侧面的深度
-        zn = zn * (1.0 - below)
-    if w_mode == "fast":
-        # 脖子权重按距离快速衰减，而不是 sigma=14 的高斯各向同性扩散
-        wg = wg * (1.0 - below) ** 1.5
-    p["zn"] = zn.astype(np.float32); p["wgt"] = wg.astype(np.float32)
-    return p
+def run(tag, roll=0.0, pitch=0.0, d_roll=0.0, d_pitch=0.0):
+    kw = {}
+    if roll:
+        tx, ty = pivot_shift(roll, d_roll)
+        kw.update(roll=roll, tx=tx, ty=ty)
+    if pitch:
+        # pitch 的支点：纵向压缩中心下移，用 ty 补偿近似
+        d = d_pitch
+        kw.update(pitch=pitch, ty=-d * (1 - math.cos(math.radians(pitch))) * -1)
+    out = A25._warp(img, base, **kw)
+    g1 = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    dn = np.abs(g1[ny0:ny1] - gray[ny0:ny1])
+    df = np.abs(g1[fy0:fy1] - gray[fy0:fy1])
+    print(f" {tag:22s} 脖pixdiff={dn.mean():6.3f} >8={ (dn>8).mean()*100:5.2f}%  "
+          f"脸pixdiff={df.mean():6.2f} 脸位移≈{abs(kw.get('tx',0)):.1f}px")
 
-def measure(p, tag):
-    rows = []
-    for name, kw in (("yaw7.5", dict(yaw=7.5)), ("yaw-7.5", dict(yaw=-7.5)),
-                     ("roll5", dict(roll=5)), ("pitch6", dict(pitch=6))):
-        out = A25._warp(img, p, **kw)
-        g1 = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        g0 = gray.astype(np.float32)
-        (fx, _), _ = cv2.phaseCorrelate(g0[face_y0:face_y1], g1[face_y0:face_y1])
-        (nx, _), _ = cv2.phaseCorrelate(g0[ny0:ny1], g1[ny0:ny1])
-        d = np.abs(g1[ny0:ny1] - g0[ny0:ny1])
-        rows.append((name, fx, nx, d.mean(), (d > 8).mean() * 100))
-    print(f"\n--- {tag} ---")
-    print(" pose      脸dx    脖dx   同向?  脖pixdiff  >8占比")
-    for name, fx, nx, dm, dp in rows:
-        same = "OK" if (fx == 0 or nx == 0 or (fx > 0) == (nx > 0)) else "REV!"
-        print(f" {name:8s} {fx:+6.2f} {nx:+6.2f}  {same:4s}  {dm:7.3f}  {dp:6.2f}%")
+print("=== roll=5，支点从脸中心下移 d ===")
+for d in (0, 80, 150, 230, 320):
+    run(f"roll5 d={d}", roll=5.0, d_roll=d)
 
-measure(base, "原版")
-measure(variant("zero", "none"), "A: 脖子 zn→0")
-measure(variant("none", "fast"), "B: 脖子权重快速衰减")
-measure(variant("zero", "fast"), "A+B 同时")
+print("\n=== roll=3，支点下移 ===")
+for d in (0, 150, 230):
+    run(f"roll3 d={d}", roll=3.0, d_roll=d)
+
+print("\n=== 参考：不动 ===")
+run("noop", roll=0.0)
+
+# 额外：把整条脖子+头作为刚体，用相位相关看脖子和脸是否同向
+print("\n=== 同向性（roll5 d=230）===")
+tx, ty = pivot_shift(5.0, 230)
+out = A25._warp(img, base, roll=5.0, tx=tx, ty=ty)
+g1 = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY).astype(np.float32)
+(fx, _), r1 = cv2.phaseCorrelate(gray[fy0:fy1], g1[fy0:fy1])
+(nx, _), r2 = cv2.phaseCorrelate(gray[ny0:ny1], g1[ny0:ny1])
+print(f" 脸 dx={fx:+.2f}(resp {r1:.3f})  脖 dx={nx:+.2f}(resp {r2:.3f})  同向={'是' if (fx>0)==(nx>0) else '否'}")
