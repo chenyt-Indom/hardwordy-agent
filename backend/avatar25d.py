@@ -522,7 +522,12 @@ def render(img_path: str, wav_path: str, out_mp4: str, words=None,
             if blink and bl > 0.02:
                 fr = _blink(fr, prep3d, bl, yaw * _mot, pit * _mot,
                             tx * _mot, ty * _mot)
-            proc.stdin.write(np.ascontiguousarray(fr).tobytes())
+            try:
+                proc.stdin.write(np.ascontiguousarray(fr).tobytes())
+            except (BrokenPipeError, OSError):
+                # -shortest 让 ffmpeg 在音频结束时先退出，此时视频帧可能还多出半帧。
+                # 这是正常收尾，不是错误（实测 186 帧 vs 7.42 秒音频会触发）。
+                break
             if on_progress and (i % 10 == 0 or i == n - 1):
                 try:
                     on_progress(i + 1, n)
