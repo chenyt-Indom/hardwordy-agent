@@ -137,7 +137,12 @@ def _prep3d(img_path: str, max_side: int = 0) -> dict:
             from scipy import ndimage as _ndi
             idx = _ndi.distance_transform_edt(
                 mk == 0, return_distances=False, return_indices=True)
-            zn = np.where(mk > 0, zn, zn[tuple(idx)]).astype(np.float32)
+            zn_out = zn[tuple(idx)]
+            # 最近邻填充是 Voronoi 分片：不同分片取到脸的不同部位（额头/脸颊）
+            # 深度差好几个单位，分片边界是台阶。头发区每帧 warp 时这些台阶
+            # 互相拉扯，就是「抽搐」的另一个来源。平滑后再合并。
+            zn_out = cv2.GaussianBlur(np.ascontiguousarray(zn_out), (0, 0), 18.0)
+            zn = np.where(mk > 0, zn, zn_out).astype(np.float32)
         except Exception:                               # noqa: BLE001
             pass
     # 位移权重：头部内饱和到 1（头发与脸同速，不会裂），边界羽化 14px
