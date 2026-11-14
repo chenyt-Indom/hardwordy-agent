@@ -5208,6 +5208,15 @@ def _do_workspace_pack(arguments=None, ui_events=None) -> str:
         saved = fp
     except Exception:
         pass
+    # 2026-11-15：打包结果也要能进群产物文件夹 ——
+    # 群里让它做完项目再打包，成员应该能直接下载到 zip，而不是只有执行者本机有。
+    if isinstance(ui_events, list) and saved:
+        try:
+            ui_events.append({"type": "workspace", "act": "pack", "rel": name,
+                              "path": saved, "project": proj,
+                              "chars": len(data)})
+        except Exception:
+            pass
     lines = ["已把项目「%s」打包好：%s（%.1f KB）。" % (proj, name, len(data) / 1024.0)]
     lines.append("下载链接（直接点就能存下来）：/api/ws/zip?proj=%s" % proj)
     if saved:
