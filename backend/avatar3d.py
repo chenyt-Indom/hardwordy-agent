@@ -100,9 +100,12 @@ def render(img_path, wav_path, out_mp4, fps=FPS, size=DEFAULT_SIZE,
 
     # 背景：原图缩放后强模糊。纯黑背景下羽化边缘会显灰白硬边，
     # 用柔和的原图色作背景，脸部边缘过渡才自然。
-    bg = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
-    bg = cv2.GaussianBlur(bg, (0, 0), max(6.0, W / 40.0))
-    bg = (bg.astype(np.float32) * 0.55).astype(np.uint8)   # 压暗一点，突出人脸
+    # 背景：深色纵向渐变（比纯黑柔和，比模糊原图干净）
+    top = np.array([26, 28, 34], np.float32)
+    bot = np.array([54, 56, 64], np.float32)
+    ramp = np.linspace(0.0, 1.0, H, dtype=np.float32)[:, None, None]
+    bg = (top[None, None, :] * (1 - ramp) + bot[None, None, :] * ramp)
+    bg = np.repeat(bg, W, axis=1).astype(np.uint8)
 
     for i in range(n):
         t = i / float(fps)
