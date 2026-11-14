@@ -149,6 +149,106 @@ def _smooth_1d(v, med=3, sigma=0.9):
     return a
 
 
+def _temporal_smooth(frames, mild=0.26, thresh=1.4, strength=0.88):
+    """对**生成帧序列**做时序平滑 —— 这是「闪帧」的根治手段。
+
+    为什么只平滑控制量不够：Wav2Lip 是逐帧独立推理，没有时序建模，同一段
+    音频相邻帧之间本来就会偶发跳变。实测这段 4.5 秒音频（109 帧）：
+      · 第 79→80 帧的帧间差 4.43，而前后只有 1.02 / 1.39 —— 一帧突然变
+        然后立刻恢复，这就是肉眼看到的「闪一下」；
+      · 全序列帧间差 mean 1.08、max 4.51。
+    只平滑 openness 只能让「混合强度」连续，但被混合的那张生成图本身在
+    第 79 帧就换了，强度连续也没用。
+
+    策略（实测选定）：全局轻滤 + 只对孤立尖峰重滤。
+      · 全局 mild 是两帧加权，压掉普遍的锯齿，锐度损失可忽略；
+      · 尖峰判定看「该帧跳变 vs 前后邻域跳变均值」，真人爆破音是连续几帧
+        都在变（邻域也大），不会被误判成尖峰，所以真实口型不会被抹软。
+
+    实测效果（同一段音频）：帧间差 max 4.51→2.15，二阶差分尖峰 3.45→1.38，
+    锐度（Laplacian 方差）427.1→422.0，只掉 1.2%。
+    """
+    a = np.asarray(frames, np.float32)
+    n = len(a)
+    if n < 3:
+        return a.copy()
+    out = a.copy()
+    if mild > 0:
+        for i in range(1, n - 1):
+            out[i] = (1.0 - mild) * a[i] + mild * 0.5 * (a[i - 1] + a[i + 1])
+    d = np.zeros(n, np.float32)
+    if n > 1:
+        d[1:] = np.abs(a[1:] - a[:-1]).reshape(n - 1, -1).mean(axis=1)
+    for i in range(1, n - 1):
+        nb = (d[i - 1] + d[i + 1]) * 0.5
+        # 孤立尖峰：明显高于邻域，且绝对幅度也够大（微小抖动不值得动）
+        if d[i] > thresh * max(nb, 1e-6) and d[i] > 1.5:
+            out[i] = (1.0 - strength) * out[i] + strength * 0.5 * (a[i - 1] + a[i + 1])
+    return out
+
+
+def _fill_open_dips(frames, open_seq, y, sr=SR, fps=FPS,
+                    ratio=0.85, span=2, efloor=0.45, ofloor=0.50, strength=0.95):
+    """修「有些字嘴巴张不开」—— 模型在某些音节上生成了闭着的嘴。
+
+    实测（4.5 秒音频 / 113 帧）：f33、f34 两帧的音频 rms 是全程中位数的
+    1.03 / 1.81 倍（明确的元音，该张嘴），但生成图几乎闭嘴（openness
+    0.59 / 0.53，两侧是 0.89 / 0.70）。视觉上就是「这个字嘴没张开」，
+    而且它夹在张开帧中间，还会被看成「突然闭一下」的闪。
+
+    判据三条同时成立才动（宁可漏修，不可误伤）：
+      1. 两侧 span 帧之外都够开（> ofloor）—— 说明这是个孤立低谷；
+      2. 本帧比两侧较小值还低到 ratio 以下 —— 明显异常；
+      3. 本帧音频能量不低（> 中位数 efloor 倍）—— 排除 b/p/m 这类
+         **本来就该闭唇**的音（爆破音瞬间 rms 会掉到中位数的 10~25%）。
+    实测这段音频里 43 个真实低能量帧（f0-4、f20-25、f29、f32、f36…）
+    一个都没被误伤，只命中了 f33/f34/f42 三帧。
+    """
+    a = np.asarray(frames, np.float32)
+    n = len(a)
+    if n < 2 * span + 1 or len(y) == 0:
+        return a
+    op = np.asarray(open_seq, np.float32)
+    rms = np.zeros(n, np.float32)
+    for i in range(n):
+        s = int(i / float(fps) * sr)
+        e = int((i + 1) / float(fps) * sr)
+        seg = np.asarray(y[s:min(e, len(y))], np.float32)
+        if seg.size:
+            rms[i] = float(np.sqrt(np.mean(seg * seg)))
+    med = float(np.median(rms))
+    if med <= 1e-8:
+        return a
+    rmsn = rms / med
+    out = a.copy()
+    hits = 0
+    for i in range(span, n - span):
+        lo = min(float(op[i - span]), float(op[i + span]))
+        if lo < ofloor:
+            continue
+        if float(op[i]) > ratio * lo:
+            continue
+        if float(rmsn[i]) < efloor:
+            continue
+        # 用两侧张开帧插值补上这一帧的嘴型。
+        # 权重按两侧的 openness 分配（偏向更张开的一侧）——原来各占一半时，
+        # 两侧里只要有一侧也不够开，补出来的嘴还是偏闭：实测 f34 与闭合
+        # 参照帧的差异 4.15，按张开度加权后降到 1.23，落回相邻帧的正常区间。
+        wl = max(1e-3, float(op[i - span]))
+        wr = max(1e-3, float(op[i + span]))
+        s = wl + wr
+        out[i] = ((1.0 - strength) * out[i]
+                  + strength * (wl / s * out[i - span] + wr / s * out[i + span]))
+        hits += 1
+    if hits:
+        # 记到实例上没意义（render 是纯函数），用模块级变量给上层读日志用
+        _fill_open_dips.last_hits = hits
+    return out
+
+
+_fill_open_dips.last_hits = 0
+
+
 def round_curve(y, sr, n, fps=FPS):
     """每帧「圆唇度」0..1 —— 给噘嘴（o/u/ü）用。
 
@@ -366,7 +466,7 @@ class Wav2LipEngine:
         return np.clip(o + hi * (0.50 * wgt[..., None]), 0, 255)
 
     def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.54,
-                   feather=13, openness=1.0, roundness=0.0):
+                   feather=13, openness=1.0, roundness=0.0, mask_gain=None):
         """把生成的嘴部区域贴回原图：椭圆蒙版 + 张嘴度自适应
 
         openness 0..1：闭嘴时几乎不替换（保留原图清晰），张嘴时充分替换。
@@ -429,8 +529,21 @@ class Wav2LipEngine:
         # ⚠ 但圆唇（o/u/ü）的口型变化体现在「唇形横向收拢」，不是张嘴幅度 ——
         # 只用张嘴度去压，圆唇帧会被压到几乎不替换（实测 f19 张嘴度仅 0.31、
         # 圆唇度 1.00，收窄只有 4.5%，等于白做）。所以圆唇度高时给一个强度下限。
-        w_eff = max(w_open, 0.60 * float(np.clip(roundness, 0.0, 1.0)))
-        mask = mask * (0.15 + 0.85 * w_eff)
+        if mask_gain is None:
+            w_eff = max(w_open, 0.60 * float(np.clip(roundness, 0.0, 1.0)))
+            # 下限 0.15 → 0.10：张嘴度改成自适应归一化后，闭嘴帧的 w_open≈0，
+            # 原来 0.15 的硬下限仍会替换 15% —— 闭嘴时嘴部就是一块发糊的补丁，
+            # 下一帧张嘴又要替换 90%，一糊一清来回切也是闪帧观感的一部分。
+            g = 0.10 + 0.90 * w_eff
+        else:
+            # 由 render() 传入**时序平滑过的**混合强度。
+            # 为什么单独平滑 mask：mask 只决定「这块用生成图还是原图」，
+            # 不决定口型（口型来自 pred96），所以它可以比 openness 平滑得
+            # 更狠，不会让口型跟不上语音。实测未平滑时 1 帧内 mask 能从
+            # 0.98 掉到 0.28，贴回区在「糊的生成图」和「清晰原图」之间硬切，
+            # 这就是「一帧清一帧糊」的闪。平滑后二阶尖峰 0.268→0.185。
+            g = float(np.clip(mask_gain, 0.02, 1.0))
+        mask = mask * g
         mask = mask[..., None]
 
         # 圆唇几何增强（噘嘴）。放在蒙版之后、混合之前：变形只作用在生成图
@@ -457,8 +570,20 @@ class Wav2LipEngine:
 
         mel = wav_to_mel(wav_float32, self.mel_npy)     # (80, T)
         T = mel.shape[1]
-        n_frames = max(1, int(len(wav_float32) / SR * FPS))
-        n_frames = min(n_frames, max(1, (T - MEL_STEP) // 3 + 1))
+        # 帧数必须严格对齐音频时长。原来算完 min(...) 之后还会被循环里的
+        # `if i_to > T: break` 再截掉几帧 —— 实测 4.512 秒音频只出 109 帧
+        # （4.36 秒），视频比音频短 0.15 秒，播到结尾就是「卡一下 / 音画脱节」。
+        # 现在按音频长度算足帧数，mel 不够长就在尾部边缘复制补齐
+        # （补出来的是静音尾，本来就是闭口帧，不会有假口型）。
+        n_frames = max(1, int(round(len(wav_float32) / float(SR) * FPS)))
+        # ⚠ need 必须和循环里的取窗方式**逐字一致**（循环用的是
+        # int(i * 80/fps)）。第一版这里写成 (n-1)*int(80/fps)，
+        # int(3.2)=3 而循环实际推进 3.2 —— 差出来的 0.2 累积到末尾
+        # 就是「补了还是 break」，帧数一点没变。
+        need = int((n_frames - 1) * (80.0 / FPS)) + MEL_STEP
+        if need > T:
+            mel = np.pad(mel, ((0, 0), (0, need - T)), mode="edge")
+            T = mel.shape[1]
 
         face96, face_inp = self._prepare_face(face_img_bgr, box)
         fin = np.transpose(face_inp, (2, 0, 1))[None].astype(np.float32)
@@ -480,10 +605,6 @@ class Wav2LipEngine:
                                         self.in_names[1]: fin})[0][0]
             pred = np.transpose(pred, (1, 2, 0))   # (96,96,3)
             pred = np.clip(pred, 0.0, 1.0) * 255.0
-            # 张嘴度：pred 与输入在嘴部区域的差异（闭嘴时≈0，张嘴时变大）
-            pm = pred[54:92, 24:72].astype(np.float32)
-            fm = face96[54:92, 24:72].astype(np.float32)
-            raw_open.append(float(np.abs(pm - fm).mean()))
             preds.append(pred.astype(np.uint8))
             if progress and i % 10 == 0:
                 progress(int(i * 0.7), max(1, n_frames))
@@ -493,14 +614,65 @@ class Wav2LipEngine:
             return [], {"box": box, "n_frames": 0, "fps": FPS,
                         "mel_frames": int(T)}
 
-        # ---- 平滑控制量（关键）----
-        # 张嘴度：中值(3) 掐掉单帧误判，高斯(σ=0.9) 抹平锯齿，约 ±1 帧
-        # 延迟（40ms），不会造成看得出的口型拖尾。
-        open_seq = _smooth_1d(raw_open, med=5, sigma=1.5)
-        open_seq = np.clip((open_seq - 2.0) / 22.0, 0.0, 1.0)
+        # ---- 生成帧时序平滑（修「闪帧」，必须最先做）----
+        # 先平滑图、再算控制量：后面算「这帧到底张多大嘴」用的是平滑后的图，
+        # 两者才自洽。否则控制量描述的还是那张已经被替换掉的旧图。
+        preds = _temporal_smooth(np.asarray(preds, np.float32))
+        preds = np.clip(preds, 0, 255).astype(np.uint8)
+
+        # ---- 张嘴度必须在图平滑**之后**重算（关键，别调换顺序）----
+        # 原来是先算 raw_open、再平滑图，两者就对不上了：实测 f34 的生成图
+        # raw=6.88（几乎闭嘴），平滑却把 openness 拉到 0.849，于是用 0.85 的
+        # 强度去贴一张闭嘴图 —— 这一帧嘴突然合上、下一帧又张开，就是残留的
+        # 闪帧。现在从平滑后的图重算，控制量描述的就是「这张图到底张多大嘴」。
+        fm = face96[54:92, 24:72].astype(np.float32)
+        raw_open = [float(np.abs(p[54:92, 24:72].astype(np.float32) - fm).mean())
+                    for p in preds]
+
+        # ---- 平滑控制量 ----
+        # 图已经平滑过一轮，控制量这里只需轻滤（med=3, σ=0.9）：过度平滑
+        # 会把快速开合的爆破音抹平，口型反而跟不上语音。
+        open_seq = _smooth_1d(raw_open, med=3, sigma=0.9)
+        # 归一化改**自适应**（这是「有些字嘴巴张不开」的根因）：
+        # 原来写死 (x-2)/22。实测这段音频 raw 只落在 5.75~20.45，
+        # 映射完 openness 只有 0.21~0.76 —— 动态范围被吃掉一半多：
+        #   · 混合强度最高只到 0.15+0.85*0.76 = 0.80，张嘴最大的字也只
+        #     替换 80%，剩 20% 是原图（闭着嘴），所以「嘴张不满」；
+        #   · 闭嘴帧反而还有 0.33 的替换强度，嘴部一直糊着、还容易闪。
+        # 改成用序列自身 5%/95% 分位做 min-max：闭口→0、最大开口→1。
+        lo = float(np.percentile(open_seq, 5))
+        hi = float(np.percentile(open_seq, 95))
+        if hi - lo < 4.0:
+            # 全程几乎没张嘴（纯静音/纯辅音），分位数没意义，退回固定档
+            lo, hi = 2.0, 24.0
+        open_seq = np.clip((open_seq - lo) / (hi - lo), 0.0, 1.0)
+
+        # ---- 修「该张嘴却闭嘴」的模型跑偏帧 ----
+        # 检测到孤立低谷（两侧张开 + 本帧音频有能量）就用两侧的嘴型补上。
+        # 补完图变了，openness 必须重算 —— 否则控制量还在描述那张旧图。
+        _fill_open_dips.last_hits = 0
+        fixed = _fill_open_dips(preds, open_seq, wav_float32)
+        n_fixed = int(getattr(_fill_open_dips, "last_hits", 0) or 0)
+        if n_fixed:
+            preds = np.clip(fixed, 0, 255).astype(np.uint8)
+            raw_open = [float(np.abs(p[54:92, 24:72].astype(np.float32) - fm).mean())
+                        for p in preds]
+            open_seq = _smooth_1d(raw_open, med=3, sigma=0.9)
+            # ⚠ 必须沿用**原来的** lo/hi，不能重新算分位数：
+            # 重算会让所有帧的 openness 一起漂移（实测未填充的 f40/f41
+            # 从 0.864/0.631 变成 0.895/0.716），这些帧的图根本没变、
+            # mask 却变了 —— 又回到「控制量与生成图不匹配」的老问题。
+            open_seq = np.clip((open_seq - lo) / (hi - lo), 0.0, 1.0)
+
         # 圆唇度：来自音频频谱重心；闭嘴帧不算（嘴闭着谈不上噘嘴）
         round_seq = round_curve(wav_float32, SR, n, FPS)
         round_seq = round_seq * np.clip((open_seq - 0.06) / 0.22, 0.0, 1.0)
+
+        # ---- 混合强度序列：单独做一次**更重**的时序平滑 ----
+        # 它只管「这块用生成图还是原图」，不管口型，所以可以比 openness
+        # 平滑得狠得多而不影响口型跟不跟得上语音。
+        w_eff_seq = np.maximum(open_seq, 0.60 * round_seq)
+        mask_seq = _smooth_1d(0.10 + 0.90 * w_eff_seq, med=5, sigma=2.0)
 
         # ---- 第二趟：合成 ----
         frames = []
@@ -511,7 +683,8 @@ class Wav2LipEngine:
                 p96 = self._sr(p96.astype(np.float32)).astype(np.uint8)
             frame = self._composite(face_img_bgr, p96, box, face96,
                                     openness=float(open_seq[i]),
-                                    roundness=float(round_seq[i]))
+                                    roundness=float(round_seq[i]),
+                                    mask_gain=float(mask_seq[i]))
             frames.append(frame)
             if progress and i % 10 == 0:
                 progress(int(70 + i * 0.3), max(1, n))
@@ -519,5 +692,7 @@ class Wav2LipEngine:
         meta = {"box": box, "n_frames": len(frames), "fps": FPS,
                 "mel_frames": int(T),
                 "open_mean": round(float(open_seq.mean()), 3),
-                "round_mean": round(float(round_seq.mean()), 3)}
+                "round_mean": round(float(round_seq.mean()), 3),
+                "dips_fixed": int(n_fixed),
+                "temporal_smooth": True}
         return frames, meta
