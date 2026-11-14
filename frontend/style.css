@@ -4136,6 +4136,9 @@ html[data-theme="light"] select.pill-select option {
    否则折叠且没内容时会留一条空白胶囊。 */
 .hd-live .think-body:not(.open):empty,
 .hd-think-card .think-body:not(.open):empty { display: none; }
+/* 思考流式光标：独立节点，追加文字时插在它前面（原来是把 ▌ 拼进 textContent，
+   每帧整块重设 —— 长思考时那是界面卡顿的主因）。 */
+.hd-cur { opacity: .55; }
 .hmsg-cancel {
   font-size: 11.5px; color: var(--muted);
   padding: 2px 8px; margin-bottom: 4px;
