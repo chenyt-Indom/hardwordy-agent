@@ -2644,9 +2644,10 @@
       // 渲染模式：2d = 只有嘴动；p25d = 伪3D（深度位移 + 头姿）；3d = 真网格重画
       const modeSel2 = $("#av2Mode");
       const mode = modeSel2 ? modeSel2.value : "2d";
-      const speakUrl = mode === "3d" ? "/api/avatar3d/speak"
-        : mode === "p25d" ? "/api/avatar25d/speak"
-          : "/api/avatar2/speak";
+      const speakUrl = mode === "w2l" ? "/api/avatar_lipsync/speak"
+        : mode === "3d" ? "/api/avatar3d/speak"
+          : mode === "p25d" ? "/api/avatar25d/speak"
+            : "/api/avatar2/speak";
       const base = {
         voice: voiceSel.value,
         mood: moodSel ? moodSel.value : "auto",
