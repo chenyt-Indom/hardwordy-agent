@@ -207,9 +207,11 @@ def _raster_depth(P, z, tri, W, H, DS=512):
 
 
 # ---------------------------------------------------------------- 伪3D 变换
-def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0):
-    """按头姿做反向映射。yaw 正 = 头向一侧转。"""
-    if abs(yaw) < 0.01 and abs(pitch) < 0.01 and abs(roll) < 0.01:
+def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
+          tx=0.0, ty=0.0, scl=1.0):
+    """按头姿做反向映射。正向：源 → 旋转 → 缩放 → 平移 → 目标。"""
+    if (abs(yaw) < 0.01 and abs(pitch) < 0.01 and abs(roll) < 0.01
+            and abs(tx) < 0.05 and abs(ty) < 0.05 and abs(scl - 1.0) < 0.0005):
         return img
     W, H = prep["wh"]
     cx, cy = prep["cx"], prep["cy"]
