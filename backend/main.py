@@ -11698,15 +11698,59 @@ def _hive_chat_messages(instruction: str, hist: list, asker: str,
     return msgs
 
 
+_ART_MIME = {
+    ".md": "text/markdown", ".txt": "text/plain", ".json": "application/json",
+    ".csv": "text/csv", ".html": "text/html", ".css": "text/css",
+    ".js": "text/javascript", ".py": "text/x-python", ".zip": "application/zip",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pdf": "application/pdf",
+}
+
+
+def _art_mime(rel: str) -> str:
+    return _ART_MIME.get(os.path.splitext(str(rel or ""))[1].lower(),
+                         "application/octet-stream")
+
+
 def _hive_save_artifacts(gid: str, ui_events: list) -> list:
-    """把工具产出的图片/文档存成群附件，返回 files 元信息。
+    """把工具产出的所有东西存进**这个群的产物文件夹**，返回 files 元信息。
 
     为什么需要：用户要求「群聊 AI 和单人 AI 具备一样的能力」。
-    单聊里让它画张图，图**直接出现在对话里**；群里如果只把图留在执行者本机，
+    单聊里让它画张图 / 做份 PPT，成品直接出现在对话里；群里如果只留在执行者本机，
     其他成员什么都看不到 —— 那就不叫「一样的能力」。
-    存成群文件后走已有的分片广播链路（`_hive_send_files`），全员各存一份。
+
+    2026-11-15 扩展（用户要求「所有产物统一下发到群产物文件夹」）：
+      原来只收 `image` 和 `library`，**漏了 workspace**（写代码/建项目），
+      也就是"群里做软件开发，代码全留在执行者本机，别人拿不到"。
+      现在三类全收，统一打 tag="ai" 落到 `artifacts/` 目录：
+        · image      —— 画图/改图工具的产出
+        · library    —— 生成文库（Word/PPT/Excel/PDF/Markdown）
+        · workspace  —— 开发工作区的代码文件（项目名记在 source 里）
+    存好后走已有分片广播（`_hive_send_files`），全员各存一份。
     """
     metas: list = []
+    _seen: set = set()          # 同一个文件可能触发多个事件（write+export），只收一次
+
+    def _add(raw: bytes, name: str, mime: str, source: str) -> None:
+        try:
+            if not raw:
+                return
+            if len(raw) > hive.MAX_FILE:
+                # 超过群附件上限就别硬塞：只提示，不中断其他产物
+                logger.warning("[hive-art] 产物过大跳过：%s（%.1f MB）",
+                               name, len(raw) / 1048576.0)
+                return
+            key = (name, len(raw), raw[:64])
+            if key in _seen:
+                return
+            _seen.add(key)
+            metas.append(hive.save_file(gid, name, raw, mime,
+                                        tag="ai", source=source))
+        except Exception:
+            logger.warning("[hive-art] 存产物失败：%s", name, exc_info=True)
+
     for ev in (ui_events or []):
         try:
             if not isinstance(ev, dict):
@@ -11717,11 +11761,10 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
                 raw = _b64.b64decode(ev["b64"])
                 mime = str(ev.get("mime") or "image/png")
                 ext = ".jpg" if "jpeg" in mime else ".png"
-                nm = "AI图片_%s_%s%s" % (time.strftime("%H%M%S"),
-                                         os.urandom(2).hex(), ext)
-                metas.append(hive.save_file(gid, nm, raw, mime))
-            elif kind == "library" and str(ev.get("act") or "") in (
-                    "write", "export", "copy"):
+                _add(raw, "AI图片_%s_%s%s" % (time.strftime("%m%d_%H%M%S"),
+                                              os.urandom(2).hex(), ext),
+                     mime, "画图")
+            elif kind == "library":
                 rel = str(ev.get("rel") or "")
                 if not rel:
                     continue
@@ -11731,18 +11774,29 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
                     if not p or not os.path.isfile(p):
                         continue
                     with open(p, "rb") as fh:
-                        raw = fh.read(20 * 1024 * 1024)
-                    ext = os.path.splitext(rel)[1].lower() or ".bin"
-                    _mime = {".md": "text/markdown", ".txt": "text/plain",
-                             ".docx": "application/vnd.openxmlformats-officedocument"
-                                      ".wordprocessingml.document",
-                             ".pptx": "application/vnd.openxmlformats-officedocument"
-                                      ".presentationml.presentation",
-                             ".xlsx": "application/vnd.openxmlformats-officedocument"
-                                      ".spreadsheetml.sheet",
-                             ".pdf": "application/pdf"}.get(ext, "application/octet-stream")
-                    metas.append(hive.save_file(
-                        gid, "AI产物_" + os.path.basename(rel), raw, _mime))
+                        raw = fh.read(hive.MAX_FILE)
+                    _add(raw, "AI产物_" + os.path.basename(rel),
+                         _art_mime(rel), "文库")
+                except Exception:
+                    continue
+            elif kind == "workspace":
+                # 只收"写了东西"的动作；mkdir/delete/move 没有内容可发
+                if str(ev.get("act") or "") not in ("write", "project"):
+                    continue
+                rel = str(ev.get("rel") or "")
+                if not rel:
+                    continue
+                try:
+                    from . import workspace as _ws
+                    proj = str(ev.get("project") or "") or _ws.active_project()
+                    p = _ws.abs_path(rel, proj)
+                    if not p or not os.path.isfile(p):
+                        continue
+                    with open(p, "rb") as fh:
+                        raw = fh.read(hive.MAX_FILE)
+                    # 名字带上项目前缀：群里可能同时有多个项目的同名文件（app.py）
+                    _add(raw, "AI代码_%s__%s" % (proj, os.path.basename(rel)),
+                         _art_mime(rel), "项目 " + proj)
                 except Exception:
                     continue
         except Exception:
