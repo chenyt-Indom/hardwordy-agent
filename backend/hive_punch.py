@@ -356,6 +356,13 @@ class PunchNode:
             t = self.tunnels.get(peer)
             if t and t.alive:
                 return {"ok": True, "sock": t, "reused": True}
+            # 上一轮留下的「死隧道」和残留的 _punch_ok 标记必须清掉：
+            # 否则这一轮循环第一次就会因为看到旧标记而 break，
+            # 接着查 tunnels 又拿到那条死隧道，直接返回「打洞超时」——
+            # 表现就是「探群成功、紧接着入群立刻失败」，耗时 0.00 秒。
+            if t is not None:
+                self.tunnels.pop(peer, None)
+            self._punch_ok.pop(peer, None)
         token = os.urandom(4)
         hello = PUNCH_MAGIC + b"Q" + token
         deadline = time.time() + max(3.0, float(timeout))
