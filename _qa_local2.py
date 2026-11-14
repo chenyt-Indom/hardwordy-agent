@@ -33,7 +33,7 @@ tool = [{
 }]
 msgs = [{"role": "system", "content": "需要时间时必须调用 get_time 工具，不要猜。"},
         {"role": "user", "content": "现在几点？调工具查。"}]
-model = "deepseek-r1:1.5b"
+model = os.environ.get("QA_MODEL") or "qwen3-vl:8b"
 t0 = time.time()
 calls, text = [], ""
 try:
