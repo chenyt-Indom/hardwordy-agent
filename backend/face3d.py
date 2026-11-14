@@ -105,7 +105,7 @@ def get() -> "Face3D":
 
 
 # ------------------------------------------------------------------ 软渲染
-def render_mesh(tex, uv, pts, tri, size=256, bg=(0, 0, 0), shade=True):
+def render_mesh(tex, uv, pts, tri, size=256, bg=(0, 0, 0), shade=True, min_area=0.35):
     """把纹理 tex 按 uv 贴到 3D 顶点 pts 上并光栅化（画家算法）。"""
     V = pts.T.astype(np.float32)
     xy = V[:, :2]
