@@ -522,6 +522,22 @@ def _pose_curve(n, fps, energy):
                 p = j / float(span - 1)
                 bl[ti + j] = 1.0 - abs(2.0 * p - 1.0)     # 闭-开
         ti += int(fps * rng.uniform(2.6, 4.6))
+
+    # 统一时间低通：不管上游怎么算，送进渲染的曲线必须连续 ——
+    # 25fps 下逐帧 1° 的跳变就是肉眼可见的抽搐（实测 yaw 最大跳 1.09°、
+    # pitch 1.09°、ty 1.65px）。这里做一道 0.20s 汉宁低通，低频（0.2~0.7Hz
+    # 的摆动）几乎不衰减，音节级的突跳被抹平。眨眼曲线不参与。
+    def _lp(v, sec=0.20):
+        if n <= 2:
+            return v
+        k = max(1, int(fps * sec))
+        ker = np.hanning(k * 2 + 1)
+        ker = ker / max(ker.sum(), 1e-6)
+        pad = len(ker) // 2
+        return np.convolve(np.pad(v, pad, mode="edge"), ker, mode="same")[pad:pad + n]
+
+    yaw, pit, rol = _lp(yaw), _lp(pit), _lp(rol)
+    tx, ty, scl = _lp(tx), _lp(ty), _lp(scl)
     return [(float(yaw[i]), float(pit[i]), float(rol[i]),
              float(tx[i]), float(ty[i]), float(scl[i]), float(bl[i]))
             for i in range(n)]
