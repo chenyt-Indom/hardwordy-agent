@@ -147,12 +147,14 @@ def _prep3d(img_path: str, max_side: int = 0) -> dict:
     k_px = fw / 83.9
     scale = zspan * k_px * GAIN
 
-    # 只对脸部 ROI 做 remap，省 80% 的计算
-    pad = int(max(fw, fh) * 0.18) + 40
-    x0 = max(0, int(xs.min()) - pad)
-    x1 = min(W, int(xs.max()) + pad)
-    y0 = max(0, int(ys.min()) - pad)
-    y1 = min(H, int(ys.max()) + pad)
+    # ROI 覆盖整个头部（脸 + 头发）。原来按人脸框外扩，头发一旦超出 ROI
+    # 就完全不参与 remap —— 边界上直接一条硬切线。
+    hy, hx = np.where(head > 0)
+    pad = int(max(fw, fh) * 0.10) + 28
+    x0 = max(0, int(hx.min()) - pad)
+    x1 = min(W, int(hx.max()) + pad)
+    y0 = max(0, int(hy.min()) - pad)
+    y1 = min(H, int(hy.max()) + pad)
 
     return {"img": img, "wh": (W, H), "zn": zn, "wgt": wgt,
             "mask": mk, "scale": scale,
