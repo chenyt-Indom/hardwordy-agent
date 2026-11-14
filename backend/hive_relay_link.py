@@ -700,10 +700,14 @@ class RelayLink:
                     self._cand_fail.pop(url, None)
                     self._cand_until.pop(url, None)
                     break
-                # 这条不通 → 记一笔，立刻换下一条，不等待
+                # 这条不通 → 记一笔，立刻换下一条，不等待。
+                # 冷却分两档：「对面根本不是我们的中继」这种重试也没用的，
+                # 直接冷 1 小时；网络抖动/超时只冷 3 分钟。
                 self._cand_fail[url] = self._cand_fail.get(url, 0) + 1
                 if self._cand_fail[url] >= CAND_FAIL_LIMIT:
-                    self._cand_until[url] = time.time() + CAND_COOLDOWN
+                    cool = (CAND_COOLDOWN_HARD if self._fail_hard
+                            else CAND_COOLDOWN)
+                    self._cand_until[url] = time.time() + cool
             if self._stop:
                 break
 
