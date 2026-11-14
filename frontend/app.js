@@ -10096,13 +10096,18 @@
         c.phase.textContent = "模型 " + (t.model || "") + " 正在思考…（参考了 "
           + (t.hist || 0) + " 条上下文）";
       } else if (ph === "thinking") {
-        c.phase.textContent = "思考中… " + (t.chars || 0) + " 字";
-        // 有思考内容了才展开，避免一开始就是一个空的折叠框
+        // ★ 2026-11-15：和单人模式**完全同一套表现**：
+        //   标题实时显示「🧠 思考中…（N 字）」，正文是纯文本 + 末尾 ▌ 光标。
+        //   原来这里用 innerHTML += 累加（越拼越慢、还会被 HTML 转义干扰），
+        //   标题也一直固定写「思考过程」，看起来和单聊不像同一个功能。
+        c.phase.textContent = "思考中…";
+        if (c.lbl) c.lbl.textContent = "🧠 思考中…（" + (t.chars || 0) + " 字）";
         if (!c.think.classList.contains("open")) {
           c.think.classList.add("open");
           c.details.querySelector(".arrow").textContent = "▾";
         }
-        c.think.innerHTML += hEsc(f.delta || "").replace(/\n/g, "<br>");
+        c.raw = (c.raw || "") + String(f.delta || "");
+        c.think.textContent = c.raw + "▌";
       } else if (ph === "tool") {
         // ★ 2026-11-13：群聊 @hd 自开发时，模型在**真改代码** ——
         //   必须把「正在动哪个工具」显示出来，否则界面上只有思考在滚，
