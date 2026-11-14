@@ -441,6 +441,4 @@ def render_avatar(model, tex, uv, tri, ry=0.0, rx=0.0, rz=0.0,
         a = (cov.astype(np.float32) / 255.0)[..., None]
         bga = np.array(bg, np.float32)
         img = (img.astype(np.float32) * a + bga * (1 - a)).astype(np.uint8)
-    if blink > 0.02:
-        img = blink_2d(img, uv, pts, blink, size=size)
     return img
