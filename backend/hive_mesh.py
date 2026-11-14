@@ -1217,6 +1217,62 @@ class MeshNode:
             except Exception:
                 pass
 
+    def probe_punch(self, host: str, port: int,
+                    timeout: float = 6.0) -> Dict[str, Any]:
+        """对 punch:// 地址探群：先 UDP 打洞，再在隧道里问「你有哪些群」。
+
+        为什么不能复用 probe()：punch 地址是 **UDP** 端口，probe() 走的是
+        socket.SOCK_STREAM，拿 TCP 去连一个 UDP 端口只会超时或被拒 ——
+        跨网入群必须走这条。
+        """
+        if not self.punch:
+            return {"ok": False,
+                    "error": "打洞通道没启动（UDP 端口可能被占用）"}
+        # 拿自己的地址入群没有任何意义，多半是把「我的地址」粘到了自己这里。
+        # 提前拦下，别让用户等 6 秒再看到一句看不懂的超时。
+        try:
+            own = self.punch_addr() if self.punch else {"ok": False}
+            if own.get("ok") and own.get("addr") == "%s:%s" % (host, int(port)):
+                return {"ok": False,
+                        "error": "这是你自己的地址，不能用它入群 —— "
+                                 "让对方把他自己「我的地址」里的跨网地址发给你"}
+        except Exception:
+            pass
+        r = self.punch.connect(host, int(port), timeout=timeout)
+        if not r.get("ok"):
+            return {"ok": False, "error": r.get("error") or "打洞失败"}
+        sock = r["sock"]
+        try:
+            sock.settimeout(timeout)
+            body = json.dumps({"svc": "hive-probe",
+                               "ver": PROTO_VER}).encode("utf-8")
+            sock.sendall(bytes([T_PROBE]) + b"\x00\x00\x00\x00"
+                         + struct.pack(">I", len(body)) + body)
+            fr = _read_frame(sock)
+            if not fr:
+                return {"ok": False,
+                        "error": "打洞通了，但对方没有回应探测"}
+            _typ, _rk, raw = fr
+            try:
+                o = json.loads(raw.decode("utf-8", "ignore"))
+            except Exception:
+                return {"ok": False, "error": "对方返回的内容看不懂"}
+            groups = o.get("groups") if isinstance(o, dict) else None
+            return {"ok": True, "host": host, "port": int(port),
+                    "groups": groups or [], "via": "punch"}
+        except socket.timeout:
+            return {"ok": False,
+                    "error": "打洞通了，但对方 %.0f 秒内没回应探测" % timeout}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": "打洞探测失败：%s" % e}
+        finally:
+            # 对端收到 T_PROBE 后会主动关隧道（_serve 里 sock.close()），
+            # 所以这里也关掉；真正入群时 connect_punch 会重新打一次（约 0.12 秒）。
+            try:
+                sock.close()
+            except Exception:
+                pass
+
     def seen_beacons(self, gid: str = "") -> List[Dict[str, Any]]:
         """局域网里听到的群（不限自己所在的群）—— 密码入群靠它搜。"""
         now = time.time()
