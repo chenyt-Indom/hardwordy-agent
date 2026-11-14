@@ -126,9 +126,23 @@ def _prep3d(img_path: str, max_side: int = 0) -> dict:
     zspan = max(1e-6, float(np.percentile(zin, 98) - np.percentile(zin, 2)))
 
     zn = np.clip((dep - z0) / zspan, -1.0, 1.0).astype(np.float32)
-    # 位移权重：脸内 1，向外渐变到 0，否则脖子/肩膀会被撕开
-    wgt = cv2.GaussianBlur((mk > 0).astype(np.float32), (0, 0), 34.0)
-    wgt = np.clip(wgt / max(float(wgt.max()), 1e-6), 0.0, 1.0)
+
+    # 头部区域 = 脸 + 头发。只用人脸网格做权重时，头发区实测 wgt 只有 0.025
+    # 而脸内是 1.0 —— 头一转就是「脸动了、头发留在原地」地裂开。
+    head = _head_region(img, mk, xs, ys, fw, fh)
+    # 网格外的像素（头发/发际线）深度用「最近的脸边缘深度」填充，让它们跟着
+    # 头做整体刚体位移；直接用 inpaint 的远距离扩散会被拉歪。
+    if (head > 0).any() and (mk > 0).any():
+        try:
+            from scipy import ndimage as _ndi
+            idx = _ndi.distance_transform_edt(
+                mk == 0, return_distances=False, return_indices=True)
+            zn = np.where(mk > 0, zn, zn[tuple(idx)]).astype(np.float32)
+        except Exception:                               # noqa: BLE001
+            pass
+    # 位移权重：头部内饱和到 1（头发与脸同速，不会裂），边界羽化 14px
+    wgt = cv2.GaussianBlur(head.astype(np.float32), (0, 0), 14.0)
+    wgt = np.clip(wgt * 1.45, 0.0, 1.0)
 
     k_px = fw / 83.9
     scale = zspan * k_px * GAIN
