@@ -1251,7 +1251,8 @@ def save_file(gid: str, name: str, data: bytes, mime: str = "",
     me = profile()
     fid = "f_" + secrets.token_hex(8)
     safe = _safe_name(name)
-    d = files_dir(gid)
+    _tag = "ai" if (tag or "") == "ai" else "user"
+    d = _dir_for_tag(gid, _tag)
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, fid + "__" + safe), "wb") as f:
         f.write(data)
@@ -1262,6 +1263,7 @@ def save_file(gid: str, name: str, data: bytes, mime: str = "",
         "mime": mime or "", "kind": kind_of(mime, safe),
         "sha": hashlib.sha256(data).hexdigest()[:16],
         "by": me["user_id"], "by_name": me["name"], "ts": time.time(),
+        "tag": _tag, "source": str(source or "")[:120],
     }
     with _LOCK:
         idx = _read_json(_files_index_path(gid), {}) or {}
