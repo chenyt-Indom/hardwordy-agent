@@ -12032,8 +12032,27 @@
         if (d.type === "members" && d.gid === curGid) { loadStatus(); return; }
         // 有人上线/下线 → 立刻刷在线状态（顺带把积压附件补发的结果反映出来）
         if (d.type === "peers") { loadStatus(); return; }
-        if (d.type === "hd_stream" && d.gid === curGid && d.frame) {
-          hdStream(d.frame);
+        // ★ 2026-11-15：原来条件是 `d.gid === curGid` —— 没打开那个群就把整帧丢掉，
+        //   成员永远不知道群里 AI 在干什么。现在**先记群级状态**（群列表显示 ⚙），
+        //   只有当前打开的那个群才把帧交给 hdStream 去建卡。
+        if (d.type === "hd_stream" && d.frame) {
+          const _f = d.frame, _g = d.gid;
+          if (_f.phase === "done") {
+            if (hdLiveByGid[_g]) { delete hdLiveByGid[_g]; renderGroups(); }
+          } else {
+            const _t = _f.task || {};
+            const _was = !!hdLiveByGid[_g];
+            hdLiveByGid[_g] = {
+              mid: _f.mid || "",
+              phase: _f.phase || "",
+              asker: _t.asker || (hdLiveByGid[_g] || {}).asker || "",
+              chars: _t.chars || 0,
+              ts: Date.now(),
+            };
+            // 只在「从无到有」时刷列表，否则每帧都重排整个群列表
+            if (!_was) renderGroups();
+          }
+          if (_g === curGid) hdStream(_f);
           return;
         }
         if (d.type === "msg" && d.gid === curGid && d.msg) {
