@@ -11987,7 +11987,8 @@ def hive_relay_set(body: dict):
         token = os.urandom(24).hex()
     keep = token is None or str(token).strip() == ""
     out = hive_client.set_relay_config(str(url or ""), "" if keep else str(token),
-                                       bool(b.get("enabled", True)), keep_token=True)
+                                       bool(b.get("enabled", True)), keep_token=True,
+                                       urls=b.get("urls"))
     if b.get("gen_token"):
         out["token"] = token        # 只在生成这一刻回一次，方便填到服务器
     reconnected = None
