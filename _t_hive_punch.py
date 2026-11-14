@@ -26,8 +26,24 @@ pa = ra.get("port")
 pb = rb.get("port")
 
 got_b = []
-b.on_tunnel = lambda t: threading.Thread(
-    target=lambda: got_b.append(t.recv(64)), daemon=True).start()
+
+
+def _on_tun(sock, addr):
+    def _rd():
+        try:
+            got_b.append(sock.recv(64))
+        except Exception as e:                                # noqa: BLE001
+            got_b.append(b"ERR:" + str(e).encode()[:40])
+    threading.Thread(target=_rd, daemon=True).start()
+
+
+b.on_tunnel = _on_tun
+
+
+def _brief(d):
+    if not isinstance(d, dict):
+        return d
+    return {k: v for k, v in d.items() if k not in ("sock", "tunnel")}
 
 t0 = time.time()
 r1 = a.connect("127.0.0.1", pb, timeout=8.0)
