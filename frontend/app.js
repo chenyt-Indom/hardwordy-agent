@@ -10116,6 +10116,13 @@
           + ((t.tools || []).join("、") || "");
       } else if (ph === "content") {
         c.phase.textContent = "正在输出… " + (t.chars || 0) + " 字";
+        // 开始输出正文 → 思考区收尾：去掉 ▌ 光标，标题改成「思考过程（N 字）」。
+        // 这和单人模式跑完时的表现一致（单人也只在思考阶段显示光标）。
+        if (!c.sealed && c.lbl && c.raw) {
+          c.sealed = true;
+          c.lbl.textContent = "🧠 思考过程（" + c.raw.length + " 字）";
+          c.think.textContent = c.raw;
+        }
         // 流式阶段用**轻量渲染**（转义 + 换行），不走 renderFinal：
         // 每次增量都全量重渲染会让代码块反复重建、滚动位置乱跳。
         // 跑完后正式消息会由 msg 事件补上，那条走完整的 renderFinal。
