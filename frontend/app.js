@@ -10173,15 +10173,19 @@
         //   思考节点因为已经 dock 到 body 上而幸存 → 出现「思考还在、工具条和正文没了」
         //   （实测：浮层里思考完整，而 #hiveMsgs 里 .hd-live 数量为 0）。
         //   这里**不重建**卡片（重建会丢掉已经收到的思考和正文），只把丢的那个挂回去。
-        if (!document.body.contains(c.thinkNode)) {
-          c.thinkNode._home = c.node;
-          if (document.body.contains(c.node)) box.insertBefore(c.thinkNode, c.node);
-          else box.appendChild(c.thinkNode);
-          if (typeof hvThinkFollow !== "undefined" && hvThinkFollow && !c.thinkNode._noFollow) {
-            hvDock(c.thinkNode);
+        // ⚠️ 只在 renderMsgs 打过标记时才做 contains 检查（原来每帧两次全树查询）。
+        if (c._lost) {
+          c._lost = false;
+          if (!document.body.contains(c.thinkNode)) {
+            c.thinkNode._home = c.node;
+            if (document.body.contains(c.node)) box.insertBefore(c.thinkNode, c.node);
+            else box.appendChild(c.thinkNode);
+            if (typeof hvThinkFollow !== "undefined" && hvThinkFollow && !c.thinkNode._noFollow) {
+              hvDock(c.thinkNode);
+            }
           }
+          if (!document.body.contains(c.node)) box.appendChild(c.node);
         }
-        if (!document.body.contains(c.node)) box.appendChild(c.node);
         return c;
       }
       const empty = box.querySelector(".hive-empty");
