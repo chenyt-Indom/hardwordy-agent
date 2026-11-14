@@ -28,6 +28,8 @@ class _DummyNode:
 
 
 class _DummyMesh:
+    PROTO_VER = 1
+
     def __init__(self):
         self._LOCK = threading.Lock()
         self._n = _DummyNode()
