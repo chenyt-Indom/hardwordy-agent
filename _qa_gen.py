@@ -12,6 +12,8 @@ sr, y = A2._read_wav(wav)
 print("音频 %.2fs" % (len(y)/sr), flush=True)
 
 img = cv2.imread("data/avatar2/avatar.png")
+H0, W0 = img.shape[:2]
+print("原图 %dx%d" % (W0, H0), flush=True)
 t = time.time()
 eng = AL._engine()
 print("引擎 %.1fs" % (time.time()-t), flush=True)
