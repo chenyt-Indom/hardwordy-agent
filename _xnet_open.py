@@ -19,7 +19,7 @@ print("ufw allow:", o or e)
 
 # 2) 起监听端（后台，60 秒后自动退出）
 run("pkill -f _punch_listen.py 2>/dev/null; sleep 0.3")
-o, e = run("cd /opt/hive && nohup python3 _punch_listen.py > /tmp/punch.log 2>&1 & echo started pid=$!")
+o, e = run("cd /opt/hive && (setsid nohup python3 _punch_listen.py > /tmp/punch.log 2>&1 < /dev/null &) ; echo started")
 print("start:", o or e)
 time.sleep(1.5)
 
