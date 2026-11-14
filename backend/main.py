@@ -10215,6 +10215,69 @@ def avatar3d_speak(body: dict):
 
 
 @app.post("/api/avatar2/concat")
+@app.get("/api/avatar25d/info")
+def avatar25d_info():
+    """伪3D 数字人能力自检。"""
+    try:
+        from . import avatar25d as _a25                          # noqa: F401
+    except Exception as e:                                       # noqa: BLE001
+        return {"ok": False, "available": False,
+                "error": "%s: %s" % (type(e).__name__, e)}
+    return _a25.info()
+
+
+@app.post("/api/avatar25d/speak")
+def avatar25d_speak(body: dict):
+    """文本 → TTS → 伪3D（深度位移 + 音频驱动头姿）→ mp4。
+
+    body: {text, voice, rate, style, engine, amp, motion, blink}
+    """
+    body = body or {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 不能为空")
+    if len(text) > 2000:
+        raise HTTPException(status_code=400,
+                            detail="单次最多 2000 字（渲染较慢，建议分段）")
+    try:
+        from . import avatar25d
+    except Exception as e:                                       # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="伪3D 模块加载失败：%s: %s" % (type(e).__name__, e))
+    if not avatar25d.available():
+        raise HTTPException(status_code=400,
+                            detail="3D 模型没就绪（data/models/face3d 缺少文件）")
+
+    _r = body.get("rate")
+    rate = None
+    if _r not in (None, ""):
+        try:
+            rate = int(_r)
+        except Exception:                                        # noqa: BLE001
+            rate = None
+    try:
+        amp = min(2.0, max(0.6, float(body.get("amp") or 1.2)))
+    except Exception:                                            # noqa: BLE001
+        amp = 1.2
+    try:
+        motion = min(2.0, max(0.0, float(body.get("motion", 1.0))))
+    except Exception:                                            # noqa: BLE001
+        motion = 1.0
+    blink = bool(body.get("blink", True))
+
+    try:
+        r = avatar25d.speak(text, voice=str(body.get("voice") or ""),
+                            rate=rate, style=str(body.get("style") or ""),
+                            engine=str(body.get("engine") or "auto"),
+                            amp=amp, motion=motion, blink=blink)
+    except Exception as e:                                       # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="伪3D 渲染失败：%s: %s" % (type(e).__name__, e))
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "渲染失败")
+    return r
+
+
 def avatar2_concat(body: dict):
     """把多段数字人视频拼成一个。body: {names: [...], out_name?}
 
