@@ -10554,7 +10554,7 @@
           // 主动打开跟随 → 之前点过「归位」的卡片重新纳入跟随
           if (hvThinkFollow) {
             Object.keys(hdCards).forEach((k) => {
-              const n = hdCards[k] && hdCards[k].node;
+              const n = hdCards[k] && hdCards[k].thinkNode;
               if (n) n._noFollow = false;
             });
           }
