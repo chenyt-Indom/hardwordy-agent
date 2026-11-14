@@ -5082,3 +5082,16 @@ html[data-theme="light"] select.pill-select option {
 .dp-log .dp-ok { color: #57c98a; }
 .dp-log .dp-err { color: #ff8a7a; }
 .dp-hint { font-size: 11.5px; color: var(--muted); line-height: 1.6; margin-top: 6px; }
+
+/* 3D 网格开关（数字人面板）。前缀 .av2panel 是为了压过 .panel label{display:block} */
+.av2panel .av2-3d {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--txt2, #9aa3ad);
+  cursor: pointer;
+  user-select: none;
+}
+.av2panel .av2-3d input { margin: 0; cursor: pointer; accent-color: #4a90d9; }
+.av2panel .av2-row-3d { margin: 2px 0 6px; }
