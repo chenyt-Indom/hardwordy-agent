@@ -212,12 +212,14 @@ class HiveClient:
             st = self._files.get(fid)
             if st is None:
                 st = {"parts": {}, "total": total, "meta": obj.get("meta") or {},
-                      "ts": time.time(), "gid": gid}
+                      "ts": time.time(), "gid": gid, "last": time.time(), "tries": 0}
                 self._files[fid] = st
             try:
                 st["parts"][idx] = base64.b64decode(obj.get("data") or "")
             except Exception:
                 return
+            # 每收到一片就刷新活跃时间：sweep_partial() 靠它判断"是不是卡住了"
+            st["last"] = time.time()
             ready = len(st["parts"]) >= st["total"]
             if ready:
                 self._files.pop(fid, None)
@@ -571,6 +573,38 @@ class HiveClient:
         n = m.broadcast(gid, MESH.T_FREQ,
                         {"fid": fid, "ttl": MESH.TTL_DEFAULT})
         return {"ok": n > 0, "peers": n, "fid": fid}
+
+    def sweep_partial(self, timeout: float = 15.0, max_tries: int = 3) -> int:
+        """收了一半就停住的附件 → 重新求一次（最多 max_tries 次）。
+
+        为什么需要（2026-11-15）：附件是 512KB 一片泛洪，**不保证每一片都到**。
+        缺任何一片，`_on_file` 就永远攒不齐 —— 表现是"传到 80% 卡住，再也不动"，
+        而且那条攒片状态会一直占着内存。这里按"多久没新片"判断卡住，
+        重新发 T_FREQ 让持有者补发；超过次数就放弃（避免死循环刷网）。
+
+        返回：本次重求了几个。
+        """
+        now = time.time()
+        retry: List[Any] = []
+        with self._flock:
+            for fid, st in list(self._files.items()):
+                if not isinstance(st, dict):
+                    continue
+                if now - float(st.get("last") or st.get("ts") or 0) < timeout:
+                    continue            # 还在正常收，别打扰
+                n = int(st.get("tries") or 0)
+                if n >= max_tries:
+                    self._files.pop(fid, None)      # 放弃，别一直占内存
+                    continue
+                st["tries"] = n + 1
+                st["last"] = now        # 重求之后重新计时，避免每次扫描都重发
+                retry.append((str(st.get("gid") or ""), fid))
+        for gid, fid in retry:
+            try:
+                self.request_file(gid, fid)
+            except Exception:
+                pass
+        return len(retry)
 
     def sync_artifacts(self, gid: str, items: List[Dict[str, Any]],
                        reason: str = "") -> Dict[str, Any]:

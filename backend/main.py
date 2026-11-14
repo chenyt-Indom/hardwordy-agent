@@ -10825,6 +10825,24 @@ def _hive_on_file(gid: str, meta: dict) -> None:
                 break
     except Exception:
         pass
+    # ★ 保障 5 的收尾：这份文件已经落地，清掉它的补发请求记录
+    try:
+        _fid = str((meta or {}).get("fid") or "")
+        if _fid:
+            with _fsync_lock:
+                _fsync_req.pop(gid + "/" + _fid, None)
+    except Exception:
+        pass
+    # ★ 保障 3：收到 AI 产物并落盘 → 回执一次清单。
+    #   为什么需要：A 发给 B，B 收到了，但 C 可能没收到（泛洪丢帧）。
+    #   B 回执一次清单，C 就能从 B 这里补齐 —— 扩散不再只依赖发送者一个人。
+    try:
+        if str((meta or {}).get("tag") or "") == "ai":
+            threading.Thread(
+                target=lambda: _hive_sync_now(gid, reason="ack", min_gap=5.0),
+                daemon=True).start()
+    except Exception:
+        pass
     _broadcast_hive({"type": "file", "gid": gid, "file": meta})
 
 
@@ -10918,6 +10936,73 @@ def _hive_sync_now(gid: str, reason: str = "", force: bool = False,
         return {"ok": False, "error": str(e)}
 
 
+_fsync_beat_ts: dict = {}       # gid -> 上次心跳广播时间
+
+
+def _fsync_announce_all(reason: str = "peer", min_gap: float = 8.0) -> int:
+    """把**本机每个群**的清单都广播一遍（有人上线 / 定时心跳时调）。
+
+    ★ 2026-11-15 实测出来的缺口：A、C 先在线把文件同步完了，B 后加入时
+      **一帧都收不到**（`B_files []`）—— 清单只在"放文件那一刻"广播一次，
+      迟到的人永远不知道群里有什么。这条补上"迟到成员自动补齐"。
+
+    节流按**群**算：`on_peer` 在每次连接/断开都会被触发，不节流的话
+    多成员互相连接时会互相刷清单。min_gap 秒内同一个群只推一次。
+    """
+    sent = 0
+    now = time.time()
+    try:
+        groups = hive.list_groups() or []
+    except Exception:
+        return 0
+    for g in groups:
+        gid = str((g or {}).get("gid") or "")
+        if not gid:
+            continue
+        with _fsync_lock:
+            if now - float(_fsync_beat_ts.get(gid) or 0) < min_gap:
+                continue
+            _fsync_beat_ts[gid] = now
+        try:
+            # 空清单不推：推过去对方白扫一遍，还多一轮泛洪
+            items, _fp = _hive_artifact_fingerprint(gid)
+            if not items:
+                continue
+            r = hive_client.client().sync_artifacts(gid, items, reason=reason)
+            if r.get("ok"):
+                sent += 1
+        except Exception:
+            continue
+    return sent
+
+
+def _fsync_heartbeat_loop() -> None:
+    """每 30 秒对齐一次（内容没变就跳过）。
+
+    为什么需要：清单广播走泛洪，**不保证送达、也不会重发**。只要丢一帧，
+    两边就永久不一致，而且没有任何机制会去纠正它。心跳让任何一次丢失
+    在 30 秒内自愈 —— 这是"多重保障"里兜底的那一层。
+    """
+    time.sleep(20)              # 启动后先等网络/群列表就绪
+    while True:
+        try:
+            _fsync_announce_all(reason="beat", min_gap=25)
+        except Exception:
+            logger.warning("[hive-fsync] 心跳对齐失败（不影响其他功能）", exc_info=True)
+        # ★ 保障 4：收了一半就卡住的附件 → 重新求一次（分片泛洪会丢片）
+        try:
+            n = hive_client.client().sweep_partial(timeout=15.0, max_tries=3)
+            if n:
+                logger.info("[hive-fsync] 重求卡住的附件 %d 个", n)
+        except Exception:
+            pass
+        time.sleep(30)
+
+
+threading.Thread(target=_fsync_heartbeat_loop, daemon=True,
+                 name="hive-fsync-beat").start()
+
+
 def _hive_on_fsync(gid: str, body: dict) -> None:
     """收到别人的群文件夹清单 → 对齐本机内容。
 
@@ -10957,9 +11042,18 @@ def _hive_on_fsync(gid: str, body: dict) -> None:
             for fid, _name in want[:40]:
                 key = gid + "/" + fid
                 with _fsync_lock:
-                    if now - float(_fsync_req.get(key) or 0) < 60:
+                    # ★ 保障 5：退避重试。原来「60 秒内只求一次」等于求过一次就
+                    #   永久沉默 —— 对方那一刻不在线 / 补发时又丢片，这份文件就
+                    #   再也拿不到了。改成 60→120→240→480 秒递增，最多 5 次；
+                    #   落地成功时会把记录清掉（见 _hive_on_file）。
+                    rec = _fsync_req.get(key)
+                    ts = float(rec.get("ts") or 0) if isinstance(rec, dict) else float(rec or 0)
+                    n = int(rec.get("n") or 0) if isinstance(rec, dict) else 0
+                    if n >= 5:
                         continue
-                    _fsync_req[key] = now
+                    if now - ts < 60.0 * (2 ** n):
+                        continue
+                    _fsync_req[key] = {"ts": now, "n": n + 1}
                     if len(_fsync_req) > 500:
                         for k in list(_fsync_req)[:200]:
                             _fsync_req.pop(k, None)
@@ -11450,10 +11544,24 @@ _flushing = False
 
 
 def _hive_on_peer() -> None:
-    """有人连上/断开：刷新在线人数，并把积压的附件补发出去。"""
+    """有人连上/断开：刷新在线人数、推清单、把积压的附件补发出去。"""
     global _flushing
     try:
         _broadcast_hive({"type": "peers", "client": hive_client.client().status()})
+    except Exception:
+        pass
+    # ★ 保障 1：有人上线 → 广播本机清单，让**迟到成员**知道群里有什么。
+    #   放到后台线程并延迟 2 秒：on_peer 在 mesh 收包线程里同步调用，
+    #   这里直接广播会把那条连接的读循环卡住（和下面补发附件同理）。
+    def _announce_later() -> None:
+        try:
+            time.sleep(2.0)
+            _fsync_announce_all(reason="peer", min_gap=8.0)
+        except Exception:
+            pass
+
+    try:
+        threading.Thread(target=_announce_later, daemon=True).start()
     except Exception:
         pass
     if not _pending_files:
