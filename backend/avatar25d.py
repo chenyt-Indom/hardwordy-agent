@@ -503,7 +503,7 @@ def _pose_curve(n, fps, energy):
           + TX_SPEECH * (e - 0.40) * np.sin(2 * math.pi * 0.37 * t + 1.7))
     ty = (TY_IDLE * np.sin(2 * math.pi * 0.27 * t + 1.1)
           + TY_IDLE * 0.35 * np.sin(2 * math.pi * 0.67 * t + 2.3)
-          + TY_SPEECH * (e - 0.40))          # 说话时整体略微下沉（点头感）
+          + TY_SPEECH * (e - 0.40) * np.sin(2 * math.pi * 0.29 * t + 0.3))
     # 极轻微缩放：产生「前后」的空间感，0.8% 就够，再多会像镜头推拉
     scl = 1.0 + TZ_IDLE * np.sin(2 * math.pi * 0.19 * t + 0.5) \
         + 0.005 * (e - 0.30)
