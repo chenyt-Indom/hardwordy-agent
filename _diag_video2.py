@@ -47,9 +47,9 @@ cap.release()
 print("视频帧数", len(frames))
 
 # 取第一次眨眼的连续 7 帧 + 一次睁眼帧做对照
-groups = [("眨眼1", list(range(max(0, idx[0] - 1), min(len(frames), idx[0] + 8))))]
+groups = [("b1", list(range(max(0, idx[0] - 1), min(len(frames), idx[0] + 7))))]
 if len(idx) > 10:
-    groups.append(("眨眼2", list(range(max(0, idx[-1] - 1), min(len(frames), idx[-1] + 8)))))
+    groups.append(("b2", list(range(max(0, idx[-1] - 1), min(len(frames), idx[-1] + 7)))))
 
 for name, ids in groups:
     tiles = []

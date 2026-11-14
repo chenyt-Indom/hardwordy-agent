@@ -12,24 +12,17 @@ os.makedirs(OUT, exist_ok=True)
 
 text = "大家好，这是修复之后的数字人效果。头部转动的时候，头发应该跟着一起动，不能留在原地。"
 
-# 1) TTS
-wav = os.path.join(OUT, "t.wav")
-try:
-    from backend import tts as T
-    r = T.speak(text, voice="zh-CN-XiaoxiaoNeural", rate=0, fmt="wav")
-    src = r.get("path") if isinstance(r, dict) else None
-    if src and os.path.isfile(src):
-        import shutil; shutil.copyfile(src, wav)
-except Exception as e:
-    print("TTS 失败:", e)
-if not os.path.isfile(wav):
-    print("没有音频，退出"); sys.exit(1)
-print("音频:", wav, os.path.getsize(wav), "bytes")
-
-# 2) 出片（眨眼关）
-mp4 = os.path.join(OUT, "fix.mp4")
-res = AL.speak(text, out_mp4=mp4, blink=False, head=True, max_side=1024, motion=1.0)
-print("出片:", {k: res.get(k) for k in ("ok", "frames", "seconds", "motion", "size") if k in res})
+# 1) 出片（眨眼关；speak 内部自己做 TTS）
+res = AL.speak(text, blink=False, head=True, max_side=1024, motion=1.0)
+print("出片返回:", {k: res.get(k) for k in
+                   ("ok", "error", "path", "frames", "seconds", "motion", "size") if k in res})
+if not res.get("ok"):
+    print("出片失败"); sys.exit(1)
+mp4 = res.get("path") or ""
+if not os.path.isfile(mp4):
+    print("找不到视频:", mp4); sys.exit(1)
+import shutil
+shutil.copyfile(mp4, os.path.join(OUT, "fix.mp4"))
 
 # 3) 抽帧
 cap = cv2.VideoCapture(mp4)
