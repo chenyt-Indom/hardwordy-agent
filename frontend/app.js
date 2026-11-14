@@ -10910,15 +10910,16 @@
       openModal({
         title: "密码入群",
         hint: o.showAddr
-          ? "还是没找到群。让群主点群名旁边的「📡 我的地址」，"
-            + "把那串复制给你，填在下面的地址框里。\n（在同一个 WiFi 下就不用填，留空即可）"
+          ? "还是没找到群。让对方点群名旁边的「📡 我的地址」，"
+            + "把「跨网」（punch:// 开头）那串整段复制给你，粘到下面的地址框里。\n"
+            + "（如果你们连的是同一个 WiFi，应该不用填地址 —— 留空再试一次）"
           : "输入群主给你的 12 位密码，大小写都行。\n"
             + "不用管地址 —— 同一个 WiFi、不同网络都能直接进。",
         input: o.pw || "",
         inputMode: "password",
         placeholder: "XXXX-XXXX-XXXX",
         extra: o.showAddr ? (o.addr || "") : null,
-        extraPlaceholder: "对方地址，如 192.168.1.5:8899",
+        extraPlaceholder: "整段粘贴对方给的地址，如 punch://1.2.3.4:12510",
         okText: "进群",
         onOk: async (v, ex) => {
           const pw = (v || "").trim();
