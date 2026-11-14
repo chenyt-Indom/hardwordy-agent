@@ -3369,6 +3369,11 @@ html[data-theme="light"] select.pill-select option {
   background: rgba(30, 34, 42, 0.72);
   margin: 6px 0;
   overflow: hidden;
+  /* ★ 2026-11-15 真 bug：它是 flex column 的子项，而 overflow:hidden 会让
+     `min-height: auto` 失效（规范如此），于是被压成 **2px** 高 ——
+     群聊实时卡片里「🛠 本轮代码改动」整块看不见，实测 sd 高度 2px、
+     加 flex:none 后恢复 141px。单人模式因为容器高度自适应没暴露这个问题。 */
+  flex: none;
 }
 .sd-list-head {
   display: flex;
