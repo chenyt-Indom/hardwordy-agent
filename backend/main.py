@@ -11698,6 +11698,28 @@ def _hive_chat_messages(instruction: str, hist: list, asker: str,
     return msgs
 
 
+def _hive_workspace_project(gid: str) -> str:
+    """每个群一个独立的开发工作区项目（名字里带群名，开发台里一眼能认出来）。
+
+    为什么要独立：群里让 AI 做"一个网站"，它会在工作区建项目、写多文件、反复跑。
+    如果所有群共用一个 active_project，A 群的 index.html 会被 B 群的覆盖掉，
+    而且用户在单聊/开发台里正在做的事也会被群任务搅乱。
+    """
+    nm = ""
+    try:
+        g = hive.load_group(gid) or {}
+        nm = str(g.get("name") or "").strip()
+    except Exception:
+        nm = ""
+    nm = re.sub(r'[\\/:*?"<>|\r\n\t]', "", nm)[:20].strip() or "群"
+    try:
+        import hashlib as _hl
+        h = _hl.sha1(str(gid).encode("utf-8")).hexdigest()[:6]
+    except Exception:
+        h = "000000"
+    return "群-%s-%s" % (nm, h)
+
+
 _ART_MIME = {
     ".md": "text/markdown", ".txt": "text/plain", ".json": "application/json",
     ".csv": "text/csv", ".html": "text/html", ".css": "text/css",
