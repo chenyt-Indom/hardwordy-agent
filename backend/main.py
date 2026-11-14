@@ -12178,7 +12178,9 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             _work = [{"role": "system", "content": sys_prompt}] + list(msgs)
             if images:
                 _work[-1]["images"] = images      # Ollama 的多模态字段
-            _round_cap = max(1, min(12, int(cfg.get("max_tool_rounds") or 6)))
+            # 本地模型原来只给 6 轮（写两三个文件就到顶了），和单人对齐
+            _round_cap = max(1, min(500, int(cfg.get("max_tool_rounds")
+                                            or MAX_TOOL_ROUNDS)))
             for _rnd in range(_round_cap):
                 if ev.is_set():
                     cancelled = True
