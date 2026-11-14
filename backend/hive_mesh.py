@@ -1265,6 +1265,7 @@ class MeshNode:
         if not r.get("ok"):
             return {"ok": False, "error": r.get("error") or "打洞失败"}
         sock = r["sock"]
+        keep = False
         try:
             sock.settimeout(timeout)
             body = json.dumps({"svc": "hive-probe",
