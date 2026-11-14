@@ -1312,7 +1312,8 @@ def store_incoming(gid: str, meta: Dict[str, Any], data: bytes) -> Dict[str, Any
     fid = str(meta.get("fid") or "")
     if not fid:
         raise ValueError("缺少 fid")
-    d = files_dir(gid)
+    _tag = "ai" if str(meta.get("tag") or "") == "ai" else "user"
+    d = _dir_for_tag(gid, _tag)
     os.makedirs(d, exist_ok=True)
     name = _safe_name(meta.get("name") or "file")
     path = os.path.join(d, fid + "__" + name)
