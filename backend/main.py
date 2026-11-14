@@ -12290,13 +12290,16 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             base = {"asker": asker, "model": model}
             if pend_t:
                 seq_in += 1
+                # full=thinking：成员那边用全文覆盖，丢帧不会留下残缺思考
                 _hd_emit(gid, mid, "thinking", pend_t,
-                         {**base, "chars": len(thinking)}, seq_in)
+                         {**base, "chars": len(thinking)}, seq_in,
+                         full=thinking)
                 pend_t = ""
             if pend_c:
                 seq_in += 1
                 _hd_emit(gid, mid, "content", pend_c,
-                         {**base, "chars": len(text)}, seq_in)
+                         {**base, "chars": len(text)}, seq_in,
+                         full=text)
                 pend_c = ""
             last_push = now
 
