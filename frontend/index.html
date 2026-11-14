@@ -237,6 +237,13 @@
             <b class="av2-amp-v" id="av2AmpVal">1.2×</b>
           </label>
         </div>
+        <!-- 3D 模式：真 3D 人脸网格重建，能转头/侧脸，但比 2D 慢 3~5 倍 -->
+        <div class="av2-row av2-row-3d">
+          <label class="av2-3d" title="用真 3D 网格重建头部：能转头、能侧脸。代价是渲染慢（5 秒片子约 30 秒），且侧面没有纹理">
+            <input type="checkbox" id="av2Mode3D" />
+            <span>3D 网格（可转头 · 较慢）</span>
+          </label>
+        </div>
         <div class="av2-acts av2-acts-doc">
           <button class="btn sm ghost" id="av2DocBtn"
                   title="导入 Word / PDF / txt / md，先预览再删减">📄 导入文档朗读</button>
