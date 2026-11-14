@@ -35,7 +35,13 @@ print("=" * 60)
 print("2) 源码检查：max_tokens 是否还有硬编码")
 src = open(os.path.join(ROOT, "backend/main.py"), encoding="utf-8").read()
 import re
-hard = re.findall(r'"max_tokens":\s*2400|max_tokens=2400', src)
+hard = []
+for ln in src.splitlines():
+    s = ln.strip()
+    if s.startswith("#"):
+        continue                      # 注释里提到旧值不算硬编码
+    if re.search(r'"max_tokens":\s*2400|max_tokens=2400', ln):
+        hard.append(ln)
 chk("无 max_tokens=2400 硬编码", len(hard) == 0, "残留 %d 处" % len(hard))
 chk("_hive_mt 可配置读取", "hive_max_tokens" in src)
 chk("_hive_mt 夹紧 512~16000", "max(512, min(16000, _hive_mt))" in src)
