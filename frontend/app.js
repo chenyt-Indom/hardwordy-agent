@@ -2620,6 +2620,24 @@
       };
     }
 
+    // —— 人物动作强度（Wav2Lip / 伪3D 生效） ——
+    const moSel0 = $("#av2Motion");
+    const MOTION_KEY = "avatar2_motion";
+    if (moSel0) {
+      try {
+        const saved = localStorage.getItem(MOTION_KEY);
+        if (saved !== null && saved !== "") moSel0.value = saved;
+      } catch (e) {}
+      moSel0.onchange = () => {
+        try { localStorage.setItem(MOTION_KEY, moSel0.value); } catch (e) {}
+        const v = parseFloat(moSel0.value) || 0;
+        say(v === 0 ? "动作：静止，只有嘴在动（适合固定机位播报）"
+          : v < 0.9 ? "动作：轻微，头部小幅摆动"
+            : v <= 1.1 ? "动作：自然，头部转动 + 点头 + 眨眼跟着语气走"
+              : "动作：活跃，幅度更大，像主持人在讲");
+      };
+    }
+
     // —— 嘴部调节条的适用范围 ——
     // 说清楚它到底管不管用，比让人瞎拖强。
     (function initCalTip() {
