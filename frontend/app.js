@@ -2673,7 +2673,7 @@
             btn.textContent = "生成中 " + (i + 1) + "/" + parts.length;
             say("长文本已切成 " + parts.length + " 段，正在生成第 " + (i + 1) +
                 "/" + parts.length + " 段（" + parts[i].length + " 字）…");
-            const seg = await api("/api/avatar2/speak", {
+            const seg = await api(speakUrl, {
               method: "POST",
               body: JSON.stringify(Object.assign({}, base, { text: parts[i] })),
             });
