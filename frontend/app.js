@@ -10275,13 +10275,17 @@
       c = {
         node: node, think: node.querySelector(".think-body"),
         out: node.querySelector(".hd-out"),
-        phase: node.querySelector(".hd-phase"),
         who: node.querySelector(".hmsg-who"),
         details: node.querySelector(".hd-think"),
         // ★ 2026-11-15：标题要像单人模式那样实时显示字数（用户要求「思考卡片
         //   的内容与单人模式一模一样」）。原来固定写「思考过程」，字数只在一个
         //   进度条里，和单聊的「🧠 思考中…（N 字）」不是一回事。
         lbl: node.querySelector(".hd-think-lbl"),
+        tools: node.querySelector(".hd-tools"),     // 工具小条（和单人 .tool-strip 同一套）
+        sd: node.querySelector(".hd-sd"),           // 🛠 本轮代码改动（和单人 .sd-list 同一套）
+        sdBody: node.querySelector(".hd-sd .sd-list-body"),
+        sdSum: node.querySelector(".hd-sd .sd-list-sum"),
+        ncode: 0,
         raw: "",
       };
       // 实时卡片的思考框：点标题也能折叠（和正式消息一致）
@@ -10290,7 +10294,23 @@
         c.think.classList.toggle("open", !open);
         c.details.querySelector(".arrow").textContent = open ? "▸" : "▾";
       });
-      node.querySelector(".hd-cancel").addEventListener("click", () => hdCancel(mid));
+      // 代码改动列表头：点一下收起整列（和单人模式 sd-list 行为一致）
+      const sdHead = node.querySelector(".hd-sd .sd-list-head");
+      if (sdHead) {
+        sdHead.addEventListener("click", () => {
+          const body = node.querySelector(".hd-sd .sd-list-body");
+          body.hidden = !body.hidden;
+          sdHead.querySelector(".sd-list-arrow").textContent = body.hidden ? "▸" : "▾";
+        });
+      }
+      // 取消按钮：原来挂在被删掉的 .hd-live-head 上，现在放进工具小条末尾 ——
+      // 位置和单人模式「■ 终止」同义（单人那个在输入区，群里输入区也有，这里多给一处）。
+      const cbtn = document.createElement("button");
+      cbtn.type = "button";
+      cbtn.className = "tool-chip hd-cancel-chip";
+      cbtn.textContent = "取消";
+      cbtn.onclick = () => hdCancel(mid);
+      c.tools.appendChild(cbtn);
       hdCards[mid] = c;
       hvDock(node);          // 「跟随视角」开着就浮到左上角（和单人模式一致）
       return c;
