@@ -10132,8 +10132,24 @@
     function hdEnsure(f) {
       const mid = f.mid || "?";
       let c = hdCards[mid];
-      if (c && document.body.contains(c.node)) return c;
       const box = el("hiveMsgs");
+      if (c) {
+        // ★ 2026-11-15 真 bug（实测抓到）：进群/刷新消息时 renderMsgs() 会
+        //   `box.innerHTML = ""`，把**还在跑**的实时卡片一起冲掉。
+        //   思考节点因为已经 dock 到 body 上而幸存 → 出现「思考还在、工具条和正文没了」
+        //   （实测：浮层里思考完整，而 #hiveMsgs 里 .hd-live 数量为 0）。
+        //   这里**不重建**卡片（重建会丢掉已经收到的思考和正文），只把丢的那个挂回去。
+        if (!document.body.contains(c.thinkNode)) {
+          c.thinkNode._home = c.node;
+          if (document.body.contains(c.node)) box.insertBefore(c.thinkNode, c.node);
+          else box.appendChild(c.thinkNode);
+          if (typeof hvThinkFollow !== "undefined" && hvThinkFollow && !c.thinkNode._noFollow) {
+            hvDock(c.thinkNode);
+          }
+        }
+        if (!document.body.contains(c.node)) box.appendChild(c.node);
+        return c;
+      }
       const empty = box.querySelector(".hive-empty");
       if (empty) empty.remove();
       const node = document.createElement("div");
