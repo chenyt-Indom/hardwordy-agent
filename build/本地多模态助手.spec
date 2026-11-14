@@ -124,6 +124,20 @@ if os.path.isdir(_FACE_ROOT):
 else:
     print("[spec] 提示：没找到人脸检测模型 %s —— 数字人功能将不可用" % _FACE_ROOT)
 
+# —— 3D / 2.5D 数字人的 3DMM 模型（2026-11-14 / 11.14b）——
+#   backend/face3d.py 会去 <程序根>/data/models/face3d/ 找这四个文件：
+#     mb1_120x120.onnx (13MB) / bfm_decoder.onnx (23MB) / tri.pkl (892KB)
+#     / param_mean_std_62d_120x120.pkl
+#   不收集的后果：打包版「2.5D / 3D 数字人」直接报"3D 模型文件不全"，源码版却正常
+#   —— 和上一版漏掉 yunet 人脸模型是同一类坑。bfm_noneck_v3.pkl(24MB) 只有离线
+#   转换脚本用，但按「宁可多不能少」一并带上。
+_F3D_ROOT = os.path.join(root, "data", "models", "face3d")
+if os.path.isdir(_F3D_ROOT):
+    all_datas += _dir_datas(_F3D_ROOT, "data/models/face3d")
+    print("[spec] 已收集 face3d 3DMM 模型")
+else:
+    print("[spec] 提示：没找到 %s —— 2.5D/3D 数字人将不可用" % _F3D_ROOT)
+
 # Wav2Lip 权重（>100MB 的 onnx）本机没有，avatar2/wav2lip_onnx 会走降级分支，
 # 不收集；将来放进 data/models/wav2lip/ 再在这里补 _dir_datas。
 _W2L_ROOT = os.path.join(root, "data", "models", "wav2lip")
