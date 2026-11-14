@@ -102,6 +102,13 @@ class HiveClient:
         self.on_peer = None         # Callable[[], None]        有人连上/断开
         self.on_members = None      # Callable[[str], None]     成员表变了
         self.on_gone = None         # Callable[[str, str], None] 群被群主删了
+        # ★ 2026-11-15 修：这两个原来**从没被桥接**到 mesh。
+        #   main.py 里写了 `client().on_freq = _hive_on_freq`，但那只是给 client
+        #   对象挂了个属性，_hook() 没有把它转给 MeshNode.on_freq —— 于是
+        #   T_FREQ 到达时 mesh 那边回调是 None，补发链路实际是死的
+        #   （之前"验证通过"是测试脚本直接调了函数，没走真实帧）。
+        self.on_freq = None         # Callable[[str, dict], None] 附件补发请求
+        self.on_fsync = None        # Callable[[str, dict], None] 群文件夹清单
 
         self._state = "offline"
         self._gid = ""
