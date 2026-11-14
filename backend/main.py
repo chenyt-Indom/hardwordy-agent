@@ -11837,7 +11837,7 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                         else:
                             _r2 = client.chat(_msgs, model=model, stream=False,
                                               params={"temperature": 0.3,
-                                                      "max_tokens": 2400})
+                                                      "max_tokens": _hive_mt})
                             _nxt = (((_r2.json() or {}).get("message") or {})
                                     .get("content") or "")
                     except Exception as _e:          # noqa: BLE001
