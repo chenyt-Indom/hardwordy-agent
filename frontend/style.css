@@ -4132,7 +4132,10 @@ html[data-theme="light"] select.pill-select option {
    同一段文字在「跑的过程中」和「跑完之后」高度不一样。现在保持一致。 */
 .hd-live .hmsg-body:empty { display: none; }
 /* 还没有思考内容时，把空壳藏起来（折叠态本来就是 0 高，这里只是不给边框留缝） */
-.hd-live .think-body:not(.open):empty { display: none; }
+/* ★ 2026-11-15：思考框已拆成独立节点（.hd-think-card），空思考框的隐藏规则要跟着搬，
+   否则折叠且没内容时会留一条空白胶囊。 */
+.hd-live .think-body:not(.open):empty,
+.hd-think-card .think-body:not(.open):empty { display: none; }
 .hmsg-cancel {
   font-size: 11.5px; color: var(--muted);
   padding: 2px 8px; margin-bottom: 4px;
