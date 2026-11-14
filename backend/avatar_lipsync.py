@@ -100,10 +100,10 @@ def _blink_frame(frame, face_box, t, period=3.7, dur=0.16):
     return out
 
 
-def _head_move(frame, box, t, amp_x=5.0, amp_y=3.5):
+def _head_move(frame, box, t, amp_x=9.0, amp_y=6.0):
     """整体亚像素级平移，让头部有呼吸感（边缘镜像填充，不留黑边）"""
-    dx = amp_x * np.sin(2 * np.pi * t / 5.3) + 1.2 * np.sin(2 * np.pi * t / 2.1)
-    dy = amp_y * np.sin(2 * np.pi * t / 6.7 + 1.1)
+    dx = amp_x * np.sin(2 * np.pi * t / 5.3) + 2.2 * np.sin(2 * np.pi * t / 2.1)
+    dy = amp_y * np.sin(2 * np.pi * t / 6.7 + 1.1) + 1.4 * np.sin(2 * np.pi * t / 3.3)
     M = np.float32([[1, 0, dx], [0, 1, dy]])
     return cv2.warpAffine(frame, M, (frame.shape[1], frame.shape[0]),
                           flags=cv2.INTER_LINEAR,
