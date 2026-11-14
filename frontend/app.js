@@ -2313,10 +2313,17 @@
     // object-fit: contain 会留白，所以不能直接按容器百分比算。
     const mbox = $("#av2MouthBox");
     const mouthState = { x: 0.5, y: 0.5, w: 0.2, h: 0.05 };
+    // Wav2Lip 用 SCRFD 检测出的人脸框，根本不读 mouth.json ——
+    // 这时把红框画出来会让人以为拖滑块能改它的嘴，所以直接不显示。
+    function mouthBoxApplies() {
+      const ms = $("#av2Mode");
+      return !ms || ms.value !== "w2l";
+    }
     function paintMouthBox() {
       if (!mbox) return;
       const stage = $("#av2Stage");
-      if (!stage || img.hidden || !img.naturalWidth || !img.naturalHeight) {
+      if (!mouthBoxApplies() || !stage || img.hidden ||
+          !img.naturalWidth || !img.naturalHeight) {
         mbox.hidden = true;
         return;
       }
