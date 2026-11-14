@@ -230,8 +230,12 @@ class Wav2LipEngine:
         roi = np.ones((h, w), bool)
         roi[int(h * 0.55):int(h * 0.95), int(w * 0.18):int(w * 0.82)] = False
         gen_big = self._match_color(gen_big, orig_big, roi=roi)
-        # 张嘴时大幅降低细节回注（否则会把原图闭合的唇线注回去，把口型洗掉）
-        gen_big = self._detail_inject(gen_big, orig_big, strength=0.85 - 0.70 * w_open)
+        # 超分过的图（>96）自带真实纹理，只做很轻的细节回注；
+        # 未超分的 96x96 才需要强回注补纹理
+        was_sr = pred96.shape[0] > 96
+        base_strength = 0.30 if was_sr else 0.85
+        gen_big = self._detail_inject(gen_big, orig_big,
+                                      strength=max(0.0, base_strength - 0.70 * w_open))
 
         # 椭圆蒙版：中心在嘴部，且必须完整落在 bbox 内部（否则下巴处会有横向接缝）
         cx = int(w * 0.50)
