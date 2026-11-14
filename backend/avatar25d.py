@@ -504,19 +504,22 @@ def _shift_of(prep, x, y, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0,
     yi = int(np.clip(y, 0, prep["wh"][1] - 1))
     z = float(prep["zn"][yi, xi])
     w = float(prep["wgt"][yi, xi])
-    # 1) 正向视差（_warp 反向映射的逆过程）
-    u = cx + (x - cx) * cyw + prep["scale"] * z * math.sin(ry) * w
-    v = cy + (y - cy) * cxp + prep["scale"] * z * math.sin(rx) * w
-    # 2) roll（与 _warp 的 roll 同向）
+    # 1) 正向视差（_warp 反向映射的逆过程）。透视压缩项同样要按权重加权，
+    #    否则背景（w=0）也会被缩放，与 _warp 不一致 → 眨眼/眼睛定位又偏。
+    kx = 1.0 + (cyw - 1.0) * w
+    ky = 1.0 + (cxp - 1.0) * w
+    u = cx + (x - cx) * kx + prep["scale"] * z * math.sin(ry) * w
+    v = cy + (y - cy) * ky + prep["scale"] * z * math.sin(rx) * w
+    # 2) roll（角度按权重缩放，与 _warp 的 -rz*w 互为逆）
     if abs(roll) > 1e-6:
-        rz = math.radians(roll)
+        rz = math.radians(roll) * w
         cr, sr = math.cos(rz), math.sin(rz)
         du, dv = u - cx, v - cy
         u, v = cx + du * cr - dv * sr, cy + du * sr + dv * cr
-    # 3) 缩放 + 平移
+    # 3) 缩放 + 平移（同样按权重）
     _s = max(0.90, min(1.10, float(scl)))
-    u = cx + (u - cx) * _s + tx
-    v = cy + (v - cy) * _s + ty
+    u = cx + (u - cx) * (1.0 + (_s - 1.0) * w) + tx * w
+    v = cy + (v - cy) * (1.0 + (_s - 1.0) * w) + ty * w
     return u - x, v - y
 
 
