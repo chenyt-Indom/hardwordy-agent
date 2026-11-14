@@ -177,6 +177,15 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
             out_frames.append(fr)
         frames = out_frames
 
+    # 输出放大：处理尺寸之上只做插值放大（libx264 要求宽高偶数）
+    scale = max_side / float(max(W, H))
+    if scale > 1.001:
+        oW = max(2, int(round(W * scale / 2.0)) * 2)
+        oH = max(2, int(round(H * scale / 2.0)) * 2)
+        frames = [cv2.resize(f, (oW, oH), interpolation=cv2.INTER_CUBIC)
+                  for f in frames]
+        W, H = oW, oH
+
     n = len(frames)
     cmd = [exe, "-y", "-loglevel", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (W, H),
