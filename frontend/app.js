@@ -9774,7 +9774,9 @@
         const when = ts ? new Date(ts).toLocaleString("zh-CN", {
           month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
         }) : "";
-        const sub = [fmtSize(m.size), when, m.source || "", m.by_name || ""]
+        // local=false：本机没有本体（后入群 / 换机器），点开会自动向群里要
+        const sub = [fmtSize(m.size), when, m.source || "", m.by_name || "",
+          m.local === false ? "本机暂无 · 点开自动补发" : ""]
           .filter(Boolean).join(" · ");
         return '<div class="hive-art-item">'
           + '<span class="hive-art-ico">' + ico + "</span>"
