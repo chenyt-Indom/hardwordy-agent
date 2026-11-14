@@ -359,7 +359,7 @@ def _draw_cavity(img, uv, pts, openness, size=256, src_size=120.0):
     y_up = float(V[up, 1].mean())
     y_lo = float(V[lo, 1].mean())
     cy = (y_up + y_lo) * 0.5
-    half_w = float(V[m, 0].ptp()) * 0.40
+    half_w = float(np.ptp(V[m, 0])) * 0.40
     gap = max(0.0, y_lo - y_up)
     half_h = gap * 0.42
     if half_w < 2 or half_h < 0.8:
