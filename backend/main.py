@@ -12467,6 +12467,14 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 _artifacts = _hive_save_artifacts(gid, _ui_all)
             except Exception:
                 logger.warning("@hd 收集工具产物失败（正文照常落盘）", exc_info=True)
+            # 产物进文件夹之后，把清单广播出去，让所有人的文件夹对齐到同一份
+            if _artifacts:
+                try:
+                    threading.Thread(
+                        target=lambda: _hive_sync_now(gid, reason="ai", force=True),
+                        daemon=True).start()
+                except Exception:
+                    pass
     except Exception as e:
         err = f"{type(e).__name__}: {e}" if not str(e) else str(e)
     finally:
