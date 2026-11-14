@@ -58,6 +58,17 @@ await send("Page.enable");
 await send("Runtime.enable");
 await sleep(3500);
 
+// 0) 先切到「群聊」面板 —— 不切过去群列表根本不会渲染
+const tabInfo = await evaluate(`(() => {
+  const nodes = Array.from(document.querySelectorAll('button,a,div,span'));
+  const t = nodes.find(n => (n.textContent||'').trim() === '👥 群聊');
+  if (!t) return 'no-tab';
+  t.click();
+  return 'clicked:' + t.tagName + '.' + (t.className||'');
+})()`);
+console.log("切换群聊面板:", tabInfo);
+await sleep(1500);
+
 // 1) 找到群（轮询等前端把列表渲染出来）
 let groups = null, gids = [];
 for (let i = 0; i < 40; i++) {
