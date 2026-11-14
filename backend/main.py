@@ -11271,6 +11271,64 @@ def hive_file_list(gid: str):
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/hive/{gid}/artifacts")
+def hive_artifact_list(gid: str):
+    """这个群的 AI 产物文件夹（新的在前）。
+
+    用户要求：每个群旁边有一个产物文件夹，所有产物统一放进去，
+    任何成员都能打开或下载。返回里带 dir（真实磁盘路径），
+    方便"我想直接在资源管理器里看"的场景。
+    """
+    try:
+        items = hive.list_artifacts(gid)
+        try:
+            proj = _hive_workspace_project(gid)
+        except Exception:
+            proj = ""
+        return {"ok": True, "artifacts": items, "max": hive.MAX_FILE,
+                "dir": hive.artifacts_dir(gid), "project": proj,
+                "total": len(items),
+                "bytes": sum(int(m.get("size") or 0) for m in items)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hive/{gid}/artifacts/open")
+def hive_artifact_open(gid: str, body: dict = None):
+    """在资源管理器里打开这个群的产物文件夹（本机操作，仅本机有效）。"""
+    b = body or {}
+    try:
+        d = hive.artifacts_dir(gid)
+        os.makedirs(d, exist_ok=True)
+        fid = str(b.get("fid") or "")
+        target = d
+        if fid:
+            # 打开某个具体文件所在的目录，并尽量选中它
+            try:
+                target = os.path.dirname(hive.file_path(gid, fid)) or d
+            except Exception:
+                target = d
+        if sys.platform.startswith("win"):
+            if fid:
+                try:
+                    import subprocess
+                    subprocess.Popen(["explorer", "/select,",
+                                      hive.file_path(gid, fid)])
+                    return {"ok": True, "dir": target}
+                except Exception:
+                    pass
+            os.startfile(target)          # noqa: S606  (Windows only)
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.Popen(["open", target])
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", target])
+        return {"ok": True, "dir": target}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ---------------------------------------------------------------- P2P 直传
 #
 # 用户要求：G 级文件必须**直连互联网**，不经服务器。
