@@ -1304,6 +1304,19 @@ def read_file_bytes(gid: str, fid: str) -> bytes:
         return f.read()
 
 
+def list_artifacts(gid: str, limit: int = 500) -> List[Dict[str, Any]]:
+    """列出这个群的 AI 产物（新的在前）。
+
+    只读 `files.json` 索引，不扫目录 —— 索引里就有 name/size/kind/ts/source，
+    面板要显示的字段全在；扫目录在附件多时会从几十毫秒涨到几百毫秒。
+    """
+    idx = _read_json(_files_index_path(gid), {}) or {}
+    out = [m for m in idx.values()
+           if isinstance(m, dict) and str(m.get("tag") or "") == "ai"]
+    out.sort(key=lambda m: float(m.get("ts") or 0), reverse=True)
+    return out[:max(1, int(limit))]
+
+
 def store_incoming(gid: str, meta: Dict[str, Any], data: bytes) -> Dict[str, Any]:
     """收到别人通过中继发来的附件，在本机也存一份（fid 保持不变）。
 
