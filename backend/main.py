@@ -12551,6 +12551,26 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
              "dur_ms": dur, "task_id": mid, "cancelled": cancelled,
              "think_chars": len(thinking), "out_chars": len(text),
              "error": err}
+    # ★ 2026-11-15：代码改动跟着消息落盘 —— 后来进群的人点开这条消息
+    #   也能看到「当时改了哪些文件、diff 是什么」，而不是只剩一段结论。
+    #   ⚠️ 消息会整条广播给所有成员，所以这里要**瘦身**：
+    #      最多留 24 处、每处 diff 截到 2500 字（原始 diff 最长 20000 字）。
+    if _codes:
+        try:
+            _slim = []
+            for _c in _codes[-24:]:
+                _d = str(_c.get("diff") or "")
+                if len(_d) > 2500:
+                    _d = _d[:2500] + "\n…（diff 太长，完整内容看群产物文件夹）"
+                _slim.append({"type": _c.get("type"), "act": _c.get("act"),
+                              "rel": _c.get("rel"), "project": _c.get("project"),
+                              "added": _c.get("added") or 0,
+                              "removed": _c.get("removed") or 0,
+                              "diff": _d, "who": _c.get("who"),
+                              "is_new": bool(_c.get("is_new"))})
+            extra["codes"] = _slim
+        except Exception:
+            logger.warning("代码改动瘦身失败（不影响正文）", exc_info=True)
     # ★ 2026-11-15：工具产出的图片/文档先挂上去（群里其他人也能收到本体）。
     if _artifacts:
         extra["files"] = list(extra.get("files") or []) + list(_artifacts)
