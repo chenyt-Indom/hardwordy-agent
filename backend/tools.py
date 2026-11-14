@@ -2687,7 +2687,7 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
     if name == "workspace_move":
         return _do_workspace_move(arguments, ui_events)
     if name == "workspace_pack":
-        return _do_workspace_pack(arguments)
+        return _do_workspace_pack(arguments, ui_events)
     if name == "make_pptx":
         return _do_make_pptx(arguments, ui_events)
     if name == "make_docx":
