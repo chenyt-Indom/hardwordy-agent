@@ -17,8 +17,10 @@ for i in range(40):
     t = i / 40.0
     yaw = 6.0 * np.sin(2 * np.pi * t)
     pitch = 3.0 * np.sin(4 * np.pi * t)
-    o = A25._warp(img, prep, yaw=yaw, pitch=pitch, roll=1.5 * np.sin(2 * np.pi * t),
-                  tx=6 * np.sin(2 * np.pi * t), ty=2 * np.sin(4 * np.pi * t), scl=1.0)
+    o = A25._warp(img, prep, yaw=float(yaw), pitch=float(pitch),
+                  roll=float(1.5 * np.sin(2 * np.pi * t)),
+                  tx=float(6 * np.sin(2 * np.pi * t)),
+                  ty=float(2 * np.sin(4 * np.pi * t)), scl=1.0)
     frames.append(o)
 
 exe = None
