@@ -29,8 +29,10 @@ def chk(name, cond, extra=""):
 
 
 g = H.create_group("打洞测试群", "A")
-gid, pw = g["gid"], g["pw"]
-print("测试群 %s 密码 %s" % (gid, H.format_password(pw)))
+gid = g["gid"]
+pw = g["password"]
+_g = H.load_group(gid) or {}
+print("测试群 %s 密码 %s" % (gid, pw))
 
 a = None
 try:
