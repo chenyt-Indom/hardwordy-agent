@@ -10116,6 +10116,9 @@ def avatar3d_info():
     try:
         from . import face3d
         ok = face3d.available()
+        # 只查 face3d 不够：avatar3d 里一旦有导入错误，info 仍会显示可用，
+        # 用户点生成才报错（上一版就是这样，表现为「3D 模块加载失败」）。
+        from . import avatar3d as _a3d                          # noqa: F401
     except Exception as e:                                  # noqa: BLE001
         return {"ok": False, "available": False,
                 "error": "%s: %s" % (type(e).__name__, e)}
