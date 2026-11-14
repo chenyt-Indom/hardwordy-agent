@@ -10958,6 +10958,12 @@
           }
           await loadGroups();
           openGroup(d.group.gid);
+          // 已经进群了，只是没和对方建立直连 —— 必须说出来，
+          // 否则用户会以为「进群了却收不到消息」是 bug。
+          if (d.warn) {
+            setTimeout(() => alert("已经进群了，但没能和对方建立直连：\n"
+              + d.warn + "\n\n消息仍可通过服务器兜底收发。"), 300);
+          }
           return true;
         },
       });
