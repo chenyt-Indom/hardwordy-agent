@@ -70,9 +70,10 @@ def warp(yaw=0.0, pitch=0.0, roll=0.0):
     return out
 
 
-cases = [("yaw-12", warp(yaw=-12)), ("yaw+12", warp(yaw=12)),
-         ("pitch-8", warp(pitch=-8)), ("roll+8", warp(roll=8)),
-         ("all", warp(yaw=10, pitch=-6, roll=5))]
+cases = [("yaw-14", warp(yaw=-14)), ("yaw+14", warp(yaw=14)),
+         ("pitch-10", warp(pitch=-10)), ("pitch+10", warp(pitch=10)),
+         ("roll+8", warp(roll=8)),
+         ("all", warp(yaw=12, pitch=-8, roll=6))]
 for name, im in cases:
     cv2.imwrite("_p25d_%s.png" % name, cv2.cvtColor(im, cv2.COLOR_RGB2BGR))
     diff = np.abs(im.astype(np.int16) - img.astype(np.int16)).mean()
