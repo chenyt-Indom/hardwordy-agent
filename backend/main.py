@@ -12148,7 +12148,10 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                     ds_msgs, model=model, api_key=dkey,
                     tools=tool_schemas or [],
                     tool_executor=_exec_tool,
-                    max_rounds=max(1, min(40, int(cfg.get("max_tool_rounds") or 12))),
+                    # ★ 2026-11-15：原来写死 12 轮，做大型项目必然半路被掐断
+                    #   （实测一个 4 文件小项目就用了 10 轮）。和单人模式对齐。
+                    max_rounds=max(1, min(500, int(cfg.get("max_tool_rounds")
+                                                 or MAX_TOOL_ROUNDS))),
                     temperature=0.3, max_tokens=_hive_mt,
                     thinking=True, system_prompt=sys_prompt):
                 if ev.is_set():
