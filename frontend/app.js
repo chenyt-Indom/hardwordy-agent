@@ -5388,42 +5388,21 @@
     //      把正文和思考都挤到屏幕外。现在：本轮所有改动收进**一个**折叠列表 ——
     //      列表头「🛠 本轮代码改动 · N 处 · +X −Y」可整体收起；
     //      列表里每个文件只占一行（类型 + 路径 + 增删数），点这一行才展开 diff。
-    let selfdevList = null;
+    // ★ 2026-11-15：整个列表的构建搬到 livecard.js 的 makeCodeList()。
+    //   原来群聊的 hdAddCode 里又抄了一份一模一样的 .sd-row 结构 ——
+    //   两份实现改一处另一处就走样，这是「两边风格总有一边不对」的根源。
+    //   现在只有 livecard.js 那一份，单聊和群聊调的是同一个函数。
+    let selfdevList = null;       // 兼容保留：外部只关心「这张列表在不在」
+    let _sdList = null;           // LiveCard 的列表控制器
     const ensureSelfdevList = () => {
       if (selfdevList && selfdevList.parentNode) return selfdevList;
-      const box = document.createElement("div");
-      box.className = "sd-list";
-      const head = document.createElement("button");
-      head.type = "button";
-      head.className = "sd-list-head";
-      head.innerHTML = '<span class="sd-list-arrow">▾</span>' +
-        '<span class="sd-list-title">🛠 本轮代码改动</span>' +
-        '<span class="sd-list-sum">0 处</span>';
-      const body = document.createElement("div");
-      body.className = "sd-list-body";
-      box.appendChild(head);
-      box.appendChild(body);
-      box.__body = body;
-      box.__head = head;
-      head.onclick = () => animHeight(box, () => {
-        const closed = box.classList.toggle("collapsed");
-        body.hidden = closed;
-        head.querySelector(".sd-list-arrow").textContent = closed ? "▸" : "▾";
-      });
-      answerWrap.appendChild(box);
-      selfdevList = box;
-      return box;
+      _sdList = window.LiveCard.makeCodeList();
+      answerWrap.appendChild(_sdList.box);
+      selfdevList = _sdList.box;
+      return selfdevList;
     };
     const refreshSelfdevSum = (box) => {
-      const rows = box.__body.querySelectorAll(".sd-row");
-      let add = 0, del = 0;
-      rows.forEach((r) => {
-        add += Number(r.dataset.add || 0);
-        del += Number(r.dataset.del || 0);
-      });
-      const sum = box.__head.querySelector(".sd-list-sum");
-      sum.innerHTML = rows.length + ' 处 · <span class="sd-add">+' + add +
-        '</span> <span class="sd-del">−' + del + "</span>";
+      if (_sdList && _sdList.box === box) _sdList.refreshSum();
     };
 
     // 单个文件一行：点这一行才展开它的 diff（原 sd-card 的详情逻辑原样保留）
@@ -9687,6 +9666,12 @@
     // 统一下发到那里，任何群成员都能打开或下载。
     // 存储在后端 data/hive/groups/<gid>/artifacts/，与用户自己上传的 files/ 分开。
     let artGid = "";
+
+    // ★ 2026-11-15：每个群「AI 正在工作」的实时状态 —— gid -> {mid, phase, asker, chars, ts}
+    //   为什么需要：hd_stream 原来只在 `d.gid === curGid` 时才处理，没打开那个群
+    //   就整帧丢掉 —— 成员在别的群 / 单聊界面时，完全不知道「群里 AI 正在跑」。
+    //   现在无论看哪个群都先记状态，群列表上直接显示「⚙ AI 工作中」。
+    const hdLiveByGid = {};
 
     function openArtifacts(gid) {
       if (!gid) { showToast("先选一个群", "warn"); return; }
