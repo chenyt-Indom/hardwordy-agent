@@ -44,7 +44,13 @@ for ln in src.splitlines():
         hard.append(ln)
 chk("无 max_tokens=2400 硬编码", len(hard) == 0, "残留 %d 处" % len(hard))
 chk("_hive_mt 可配置读取", "hive_max_tokens" in src)
-chk("_hive_mt 夹紧 512~16000", "max(512, min(16000, _hive_mt))" in src)
+chk("_hive_mt 夹紧 512~32000", "max(512, min(32000, _hive_mt))" in src)
+chk("_hive_mt 缺省跟随单人 max_tokens", 'cfg.get("max_tokens") or 8192' in src)
+csrc = open(os.path.join(ROOT, "backend/config.py"), encoding="utf-8").read()
+chk("config 有 hive_max_tokens 键", '"hive_max_tokens"' in csrc)
+chk("config 默认 0=跟随单人", '"hive_max_tokens": 0' in csrc)
+chk("config 单人 max_tokens 足够大",
+    '"max_tokens": 8192' in csrc)
 
 print("=" * 60)
 print("3) 提示词：长文不再自我压缩")

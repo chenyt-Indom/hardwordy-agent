@@ -12043,6 +12043,9 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
              "dur_ms": dur, "task_id": mid, "cancelled": cancelled,
              "think_chars": len(thinking), "out_chars": len(text),
              "error": err}
+    # ★ 2026-11-15：工具产出的图片/文档先挂上去（群里其他人也能收到本体）。
+    if _artifacts:
+        extra["files"] = list(extra.get("files") or []) + list(_artifacts)
     # 长文（>3000 字）另存一份 .md 跟着消息发出去，成员能直接下载
     extra = _hive_attach_long_text(gid, final, extra)
     try:
