@@ -1375,6 +1375,78 @@ def list_artifacts(gid: str, limit: int = 500) -> List[Dict[str, Any]]:
     return out[:max(1, int(limit))]
 
 
+def artifact_manifest(gid: str) -> List[Dict[str, Any]]:
+    """本机群文件夹的「清单」：每个文件名只保留**最新那一版**。
+
+    这是让所有成员内容一致的基础 —— 清单回答"我这边 index.html 是哪个 sha"。
+    同名多版本在磁盘上可能都在（AI 改过几遍），但对外只报最新那份：
+    比较一致性时，比较的是"这个文件名的当前内容"，不是历史。
+
+    只统计本机真的有本体的（local 文件存在），否则清单会报出一堆
+    "我名义上有、实际打不开"的条目，对方反而不来补发。
+    """
+    ad = artifacts_dir(gid)
+    idx = _read_json(_files_index_path(gid), {}) or {}
+    best: Dict[str, Dict[str, Any]] = {}
+    for fid, m in idx.items():
+        if not isinstance(m, dict) or str(m.get("tag") or "") != "ai":
+            continue
+        name = _safe_name(m.get("name") or "file")
+        try:
+            if not os.path.exists(os.path.join(ad, str(fid) + "__" + name)):
+                continue
+        except Exception:
+            continue
+        cur = dict(m)
+        cur["fid"] = str(fid)
+        cur["name"] = name
+        old = best.get(name)
+        if (old is None) or (float(cur.get("ts") or 0) > float(old.get("ts") or 0)):
+            best[name] = cur
+    out = []
+    for name, m in best.items():
+        out.append({
+            "fid": m.get("fid"), "name": name,
+            "sha": str(m.get("sha") or ""),
+            "size": int(m.get("size") or 0),
+            "ts": float(m.get("ts") or 0),
+            "mime": str(m.get("mime") or ""),
+        })
+    out.sort(key=lambda m: float(m.get("ts") or 0), reverse=True)
+    return out
+
+
+def prune_artifact_name(gid: str, name: str, keep_fid: str = "") -> int:
+    """删掉某个文件名的**其它版本**（只留 keep_fid 那一份），返回删了几个。
+
+    用于"对齐到最新版"：收到别人更新的一版之后，本地同名旧版必须清掉，
+    否则文件夹里躺着两份同名文件，用户打开的还是旧的那份（列表按时间排，
+    但资源管理器里看到的是两个）。
+    """
+    nm = _safe_name(name)
+    keep = str(keep_fid or "")
+    ad = artifacts_dir(gid)
+    gone = 0
+    with _LOCK:
+        idx = _read_json(_files_index_path(gid), {}) or {}
+        victims = [fid for fid, m in idx.items()
+                   if isinstance(m, dict) and str(m.get("tag") or "") == "ai"
+                   and _safe_name(m.get("name") or "") == nm
+                   and str(fid) != keep]
+        for fid in victims:
+            try:
+                p = os.path.join(ad, str(fid) + "__" + nm)
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+            idx.pop(fid, None)
+            gone += 1
+        if gone:
+            _write_json(_files_index_path(gid), idx)
+    return gone
+
+
 def store_incoming(gid: str, meta: Dict[str, Any], data: bytes) -> Dict[str, Any]:
     """收到别人通过中继发来的附件，在本机也存一份（fid 保持不变）。
 
