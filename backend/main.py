@@ -10667,6 +10667,23 @@ def _hive_on_file(gid: str, meta: dict) -> None:
 
     前端收到后刷新对应消息里的附件卡片（原来显示"传输中"的，现在能点开了）。
     """
+    # ★ 2026-11-15：产物文件夹要"内容统一"，所以收到 AI 产物后，
+    #   把本机同名旧版清掉 —— 否则文件夹里躺着两份同名文件，用户打开
+    #   的还是旧的那份。只在**收到的这版确实更新**时才清，避免把更新的删了。
+    try:
+        m = dict(meta or {})
+        if str(m.get("tag") or "") == "ai" and m.get("name"):
+            nm = str(m.get("name"))
+            new_ts = float(m.get("ts") or 0)
+            keep = str(m.get("fid") or "")
+            for old in (hive.artifact_manifest(gid) or []):
+                if str(old.get("name") or "") != nm:
+                    continue
+                if float(old.get("ts") or 0) < new_ts and str(old.get("fid") or "") != keep:
+                    hive.prune_artifact_name(gid, nm, keep_fid=keep)
+                break
+    except Exception:
+        pass
     _broadcast_hive({"type": "file", "gid": gid, "file": meta})
 
 
