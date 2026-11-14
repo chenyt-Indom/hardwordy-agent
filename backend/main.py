@@ -10278,6 +10278,63 @@ def avatar25d_speak(body: dict):
     return r
 
 
+@app.get("/api/avatar_lipsync/info")
+def avatar_lipsync_info():
+    """Wav2Lip 生成式口型能力自检。"""
+    try:
+        from . import avatar_lipsync as _al                     # noqa: F401
+        from . import wav2lip_engine as _we                     # noqa: F401
+        from . import face_detect_scrfd as _fd                  # noqa: F401
+    except Exception as e:                                      # noqa: BLE001
+        return {"ok": False, "available": False,
+                "error": "%s: %s" % (type(e).__name__, e)}
+    return _al.info()
+
+
+@app.post("/api/avatar_lipsync/speak")
+def avatar_lipsync_speak(body: dict):
+    """文本 → TTS → Wav2Lip 生成式口型 → mp4。
+
+    body: {text, voice, rate, style, engine, blink, head}
+    """
+    body = body or {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 不能为空")
+    if len(text) > 2000:
+        raise HTTPException(status_code=400,
+                            detail="单次最多 2000 字（渲染较慢，建议分段）")
+    try:
+        from . import avatar_lipsync
+    except Exception as e:                                      # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="Wav2Lip 模块加载失败：%s: %s" % (type(e).__name__, e))
+    if not avatar_lipsync.available():
+        raise HTTPException(status_code=400,
+                            detail="Wav2Lip 模型没就绪（data/models/wav2lip 缺少文件）")
+    _r = body.get("rate")
+    rate = None
+    if _r not in (None, ""):
+        try:
+            rate = int(_r)
+        except Exception:                                       # noqa: BLE001
+            rate = None
+    try:
+        r = avatar_lipsync.speak(
+            text, voice=str(body.get("voice") or ""), rate=rate,
+            style=str(body.get("style") or ""),
+            engine=str(body.get("engine") or "auto"),
+            blink=bool(body.get("blink", True)),
+            head=bool(body.get("head", True)),
+        )
+    except Exception as e:                                      # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="Wav2Lip 渲染失败：%s: %s" % (type(e).__name__, e))
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "渲染失败")
+    return r
+
+
 def avatar2_concat(body: dict):
     """把多段数字人视频拼成一个。body: {names: [...], out_name?}
 
