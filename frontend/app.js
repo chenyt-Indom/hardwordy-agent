@@ -6370,7 +6370,9 @@
               // 后端因"思考吃满了输出空间"而加长上限重试：上一轮的思考已经作废。
               // 必须把面板和缓冲都清空 —— 否则新一轮的思考会直接接在旧的后面，
               // 界面上看起来就是"同一个思路说了两遍"（2026-09-19 用户反馈）。
-              thinking = ""; thinkPending = "";
+              // ★ 2026-11-15：thinkPending 已并入 player，这里改成重置 player 的基准文本。
+              thinking = "";
+              _thinkPlayer.set("");
               thinkBody.textContent = "";
               updateThinkStatus();
             }
