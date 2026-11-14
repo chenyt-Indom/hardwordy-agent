@@ -8932,6 +8932,10 @@
   // 和 __showSampling / __restartAppNow 同一套做法（箭头函数读的是最新值）。
   window.__ctxState = () => ({ messages: history, session: sessionId });
   window.__ctxToast = showToast;
+  // ★ 2026-11-15：群聊是**平级的另一个 IIFE**，拿不到这里的 const ——
+  //   群里渲染工具小条要用同一份「工具名 → 中文」映射。照 __ctxState 的做法
+  //   挂到 window 上，而不是在群聊那边再抄一份（抄两份迟早走样）。
+  window.__TOOL_LABELS = TOOL_LABELS;
 })();
 
 /* =====================================================================
