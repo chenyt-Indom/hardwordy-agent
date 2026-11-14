@@ -2656,11 +2656,12 @@
         // 之前一次性发整篇，字数一多就渲染超时（用户反馈的那个问题）。
         // 120 字约 25 秒语音、渲染约 25 秒；实测 260 字要渲染 55 秒，
         // 太长仍可能被中间层掐断，所以取 120 更稳（段多但每段都快）。
-        const parts = splitSpeech(text, 120);
+        const parts = splitSpeech(text, segLen);
         let r;
         if (parts.length <= 1) {
-          say("正在配音 → 口型对齐 → 合成，约 10 秒…");
-          r = await api("/api/avatar2/speak", {
+          say(mode3d ? "正在 3D 重建 → 网格渲染 → 合成，约 30 秒…"
+                     : "正在配音 → 口型对齐 → 合成，约 10 秒…");
+          r = await api(speakUrl, {
             method: "POST",
             body: JSON.stringify(Object.assign({}, base, { text: parts[0] || text })),
           });
