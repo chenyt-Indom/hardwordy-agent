@@ -10145,11 +10145,25 @@
       //     · 群里根本没有工具小条，只有一行「正在执行工具（第 N 轮）」
       //     · 群里根本没有代码卡片 —— 造软件时一行代码都看不到
       //   现在四段结构、class、文案全部照单人那份来，两边看起来就是同一个功能。
+      // ★ 2026-11-15（用户要求）：「跟随视角」里**只浮思考框**，工具条和正文不许跟进去。
+      //   原来整张卡（思考 + 工具条 + 正文 + 🛠 代码改动）是一个节点，dock 的是整张 ——
+      //   于是左上角那个小窗里塞满一排工具 chip 和大段正文（用户截图里连 1899 字的
+      //   正文都躺在浮层里，还叠着「取消」按钮）。
+      //   单人模式浮的是 thinkWrap：一个只装 .think-hdr + .think-body 的独立节点。
+      //   所以这里改成**和单人模式一样的两个平级节点**（都在 .hive-msgs 下）：
+      //     thinkNode  只装思考标题 + 思考正文      ← 跟随视角只浮这一个
+      //     node       装昵称 / 工具条 / 正文 / 代码改动 ← 永远留在消息流里
+      //   做成平级（而不是外面再套一层）是为了让两个都直接吃到 .hive-msgs .msg
+      //   那套 CSS —— 不新增第二套样式，和单人模式的 thinkWrap / answerWrap 同构。
+      const thinkNode = document.createElement("div");
+      thinkNode.className = "msg bot hd-think-card";
+      thinkNode.innerHTML = '<div class="bubble think-hdr hd-think">'
+        + '<span class="hd-think-lbl">🧠 思考中…</span>'
+        + '<span class="arrow">▾</span></div>'
+        + '<div class="think-body open"></div>';
+
       node.className = "msg bot hd-live";
       node.innerHTML = '<span class="hmsg-who"></span>'
-        + '<div class="bubble think-hdr hd-think"><span class="hd-think-lbl">🧠 思考中…</span>'
-        + '<span class="arrow">▾</span></div>'
-        + '<div class="think-body open"></div>'
         + '<div class="tool-strip hd-tools"></div>'
         + '<div class="bubble hmsg-body hd-out"></div>'
         + '<div class="sd-list hd-sd" hidden>'
@@ -10159,6 +10173,7 @@
         + '<span class="sd-list-sum">0 处</span>'
         + "</button>"
         + '<div class="sd-list-body"></div></div>';
+      box.appendChild(thinkNode);
       box.appendChild(node);
       box.scrollTop = box.scrollHeight;
       c = {
