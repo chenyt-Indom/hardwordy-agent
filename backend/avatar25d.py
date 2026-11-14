@@ -206,6 +206,95 @@ def _raster_depth(P, z, tri, W, H, DS=512):
     return depth, mask
 
 
+# ---------------------------------------------------------------- 嘴部形变
+def _mouth_frame(prep, op, wd, amp=1.0):
+    """张口：让上下唇**真的分开**。
+
+    ⚠ 为什么不用 avatar2._frame：
+      它的形变场是 src = 唇缝行 + d*k（k<1），只有**纵向拉伸**、唇缝行固定不动，
+      所以效果是「唇缝被拉宽变暗」，上下唇并没有分离。
+      实测三档 op=0/0.5/1.0 的唇缝暗带行数 32/33/32（几乎不变），
+      视觉复核也判定「三张几乎一模一样，像在抿嘴」——这就是 2D 版「僵硬」的根因。
+
+    这里改成**分区位移**：
+      上唇整体上移 up、下唇整体下移 dn，中间空出的区域用原图唇缝那一行拉伸填充
+      并压暗（颜色来自原图，不是凭空画的色块，所以不会有贴纸感）。
+      嘴角用横向高斯权重固定住，不会把两颊一起拉扯。
+    """
+    from PIL import Image
+    from PIL import ImageFilter
+    base = prep["base"]
+    patch = prep["patch"]
+    mask = prep["mask"]
+    cx, cy, mw, mh = prep["geom"]
+    x0, ytop, x1, ybot = prep["box"]
+
+    op = float(np.clip(op, 0.0, 1.0))
+    wd = float(np.clip(wd, 0.70, 1.35))
+    if op < 0.03 and abs(wd - 1.0) < 0.03:
+        return base
+
+    pw, ph = patch.size
+    parr = np.asarray(patch, np.float32)
+    cyi = int(np.clip(round(cy - ytop), 8, ph - 9))
+
+    yy, xx = np.mgrid[0:ph, 0:pw].astype(np.float32)
+    # 横向权重：嘴角固定（高斯，覆盖唇宽）
+    wx = np.exp(-((xx - (cx - x0)) / max(0.52 * mw, 1.0)) ** 2)
+    # 纵向权重：靠近唇缝位移大，向上下衰减（避免牵动鼻子/下巴）
+    wy = np.exp(-(np.abs(yy - cyi) / max(0.78 * mh, 1.0)) ** 2)
+    w = wx * wy
+
+    a = float(np.clip(amp, 0.60, 2.00))
+    # 张口总位移：mh 是唇高（上下唇总厚度），大张口约 1.05 倍唇高
+    total = op * mh * 1.05 * (1.0 + 0.25 * (a - 1.0))
+    up = total * 0.40        # 上唇上抬（少）
+    dn = total * 0.60        # 下唇下压（多，符合真人）
+
+    d = yy - cyi
+    up_w = up * w
+    dn_w = dn * w
+    # 分区反向映射：上唇区、下唇区、中间缝隙区
+    in_gap = (d >= -up_w) & (d <= dn_w)
+    src = np.where(d < -up_w, yy + up_w,
+                   np.where(d > dn_w, yy - dn_w,
+                            cyi + d * 0.18))     # 缝隙：唇缝那一行轻微渐变
+    src = np.clip(src, 0, ph - 1)
+
+    i0 = np.floor(src).astype(np.int32)
+    i1 = np.minimum(i0 + 1, ph - 1)
+    frac = (src - i0)[..., None]
+    cols = np.arange(pw)[None, :]
+    outp = parr[i0, cols] * (1.0 - frac) + parr[i1, cols] * frac
+
+    # 横向形变：圆唇 / 扁唇（方向已实测校正）
+    if abs(wd - 1.0) > 0.02:
+        kx = 1.0 - 1.40 * (wd - 1.0)
+        f = (kx - 1.0) * wx * wy * op
+        sx = np.clip((cx - x0) + (xx - (cx - x0)) * (1.0 + f), 0, pw - 1)
+        j0 = np.floor(sx).astype(np.int32)
+        j1 = np.minimum(j0 + 1, pw - 1)
+        f2 = (sx - j0)[..., None]
+        rows = np.arange(ph)[:, None]
+        outp = outp[rows, j0] * (1.0 - f2) + outp[rows, j1] * f2
+
+    # 口腔压暗：只在缝隙区，越靠中间越暗（模拟口腔深度）
+    gap_w = max(total, 1.0)
+    dark = 1.0 - (0.46 * op) * np.exp(-((d) / (0.42 * gap_w + 1.5)) ** 2) * wx
+    outp = outp * dark[..., None]
+
+    img = Image.fromarray(np.clip(outp, 0, 255).astype(np.uint8), mode="RGB")
+    # 拉伸会损失锐度，按 op 连续加权做 USM（阈值开关会造成闪烁）
+    amt = 70.0 * float(A2._smoothstep(min(max(op / 0.25, 0.0), 1.0)))
+    if amt >= 1.0:
+        img = img.filter(ImageFilter.UnsharpMask(radius=1.0,
+                                                 percent=int(round(amt)),
+                                                 threshold=2))
+    out = base.copy()
+    out.paste(img, (x0, ytop), mask)
+    return out
+
+
 # ---------------------------------------------------------------- 伪3D 变换
 def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
           tx=0.0, ty=0.0, scl=1.0):
