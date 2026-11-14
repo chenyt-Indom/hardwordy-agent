@@ -11291,9 +11291,26 @@ def hive_file_get(gid: str, fid: str, download: int = 0):
     """取回附件本体。图片/视频直接内联显示，其它默认当附件下载。"""
     try:
         meta = hive.get_file_meta(gid, fid)
-        data = hive.read_file_bytes(gid, fid)
     except Exception as e:
         return PlainTextResponse(str(e), status_code=404)
+    try:
+        data = hive.read_file_bytes(gid, fid)
+    except Exception:
+        # ★ 2026-11-15：本机没有这份文件的本体（典型场景：**后入群**的人打开
+        #   早期产物，或者换了台机器）。向群里发一个补发请求，持有者会回传。
+        #   返回 425（Too Early）而不是 404 —— 404 会让用户以为文件没了。
+        _req = {}
+        try:
+            _req = hive_client.client().request_file(gid, fid) or {}
+        except Exception:
+            _req = {}
+        if _req.get("ok"):
+            return PlainTextResponse(
+                "本机还没有这份文件（它由群里其他成员持有）。"
+                "已向群里请求补发，等几秒再点一次即可。", status_code=425)
+        return PlainTextResponse(
+            "本机没有这份文件，当前也没有其他群成员在线可以补发。"
+            "等发送者上线后再试一次。", status_code=404)
     mime = meta.get("mime") or "application/octet-stream"
     headers = {}
     # 中文文件名要走 RFC 5987 编码，否则浏览器拿到乱码文件名
