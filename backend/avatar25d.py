@@ -59,17 +59,26 @@ def available() -> bool:
 
 
 # ---------------------------------------------------------------- 预处理
-def _prep3d(img_path: str) -> dict:
-    """一次性算好深度图 / 权重 / 人脸几何（每段视频只做一次）。"""
+def _prep3d(img_path: str, max_side: int = 0) -> dict:
+    """一次性算好深度图 / 权重 / 人脸几何（每段视频只做一次）。
+
+    max_side: 尺寸基准。0 = 沿用 A2.MAX_SIDE（伪3D 用）；Wav2Lip 链路会传
+    proc_side，因为它的帧尺寸由自己决定，两边必须一致，否则 ROI 对不上会
+    直接广播报错（踩过）。
+    """
     from PIL import Image
     if not F3.available():
         raise RuntimeError("3D 模型文件不全（data/models/face3d/）")
 
-    # ⚠ 必须和 A2._prep 用同一个尺寸基准（MAX_SIDE=720），否则 _frame 输出的
-    #   720×720 和这里按原图 1024 算的 ROI 对不上，warp 会直接广播报错。
     im = Image.open(img_path)
     im = im.convert("RGBA") if im.mode in ("RGBA", "LA", "P") else im.convert("RGB")
-    W0, H0 = A2._fit_size(im.width, im.height)
+    if max_side:
+        _ms = max(2, int(max_side))
+        _sc = min(1.0, _ms / float(max(im.width, im.height)))
+        W0 = max(2, int(round(im.width * _sc / 2.0)) * 2)
+        H0 = max(2, int(round(im.height * _sc / 2.0)) * 2)
+    else:
+        W0, H0 = A2._fit_size(im.width, im.height)
     if (W0, H0) != im.size:
         im = im.resize((W0, H0), Image.LANCZOS)
     img = np.asarray(im.convert("RGB"))
