@@ -12297,6 +12297,11 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 "session": "hive:" + gid, "user_text": instruction,
                 "image_key": "", "image_model": "", "ds_key": ""}
         _ui_all: list = []          # 工具副作用（图片 / 文库文件）→ 存成群附件
+        # ★ 2026-11-15：代码改动清单（谁改了哪个文件、+几行 −几行、diff 是什么）。
+        #   单人模式收到 selfdev 事件会渲染可折叠的 diff 卡片；群里原来只拿它
+        #   去存产物、**一个字都不给前端看** —— 于是「群里造软件看不到任何代码」
+        #   （用户截图反馈）。这里边跑边推给前端，跑完再挂到消息上给后来的人回看。
+        _codes: list = []
         _t_round = [0]
         # 时间预算（2026-11-15）：只放宽轮次不够 —— 一轮可能几秒也可能几分钟。
         # 和单人模式用同一个配置项，默认 20 分钟，到点就收尾而不是无限跑。
