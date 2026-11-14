@@ -152,7 +152,7 @@ class Wav2LipEngine:
         face = img_bgr[y1:y2, x1:x2]
         face = cv2.resize(face, (96, 96), interpolation=cv2.INTER_LINEAR)
         masked = face.copy()
-        masked[:, 48:] = 0          # 遮住右半（官方语义：遮下半脸）
+        masked[48:, :] = 0          # 遮住下半脸（实测该权重必须这样，遮右半会半脸发黑）
         inp = np.concatenate([masked, face], axis=2) / 255.0   # (96,96,6)
         return face, inp.astype(np.float32)
 
