@@ -715,11 +715,25 @@ class RelayLink:
             except Exception:
                 pass
 
-    def _connect_once(self) -> bool:
+    def _connect_once(self, p: Optional[Dict[str, Any]] = None,
+                      last: bool = False) -> bool:
+        if p is None:
+            p = {"host": self.host, "port": self.port, "ws": self.ws,
+                 "tls": self.tls, "path": self.ws_path}
+        self.host = p["host"]
+        self.port = int(p["port"])
+        self.ws = bool(p.get("ws"))
+        self.tls = bool(p.get("tls"))
+        self.ws_path = str(p.get("path") or "/hive-relay")
+        # 最后一条（裸端口）常被安全组丢包，给短一点的超时，别拖慢换线
+        timeout = CONNECT_TIMEOUT_LAST if last else CONNECT_TIMEOUT
         try:
-            sock = socket.create_connection((self.host, self.port), timeout=8.0)
+            sock = socket.create_connection((self.host, self.port),
+                                            timeout=timeout)
         except Exception as e:
-            self.state = "error"
+            # ⚠️ 单条线路失败**不能**置成 error —— 那样 start() 会以为
+            #    整条链路废了，后面几条备用的根本来不及试。
+            self.state = "connecting"
             self.error = "连不上 %s:%s（%s）" % (self.host, self.port,
                                               type(e).__name__)
             return False
@@ -728,6 +742,7 @@ class RelayLink:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except Exception:
             pass
+        _set_keepalive(sock)
 
         # ws:// / wss:// 先升级成 WebSocket，再把 sock 包成 WSSock ——
         # 之后的 _recv_pkt / _send_pkt 完全不用改（接口和普通 socket 一致）。
