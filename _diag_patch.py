@@ -30,8 +30,9 @@ H, W = img0.shape[:2]
 print("原图 %dx%d" % (W, H))
 
 # 人脸框（用于定位椭圆）
-from backend import face_detect_scrfd as FD
-det = FD.SCRFD()
+from backend import avatar_lipsync as AL
+from backend.face_detect_scrfd import SCRFD
+det = SCRFD(AL._paths()["det"])
 dets, _ = det.detect(img0, thresh=0.5)
 d = max(dets, key=lambda t: (t[2]-t[0])*(t[3]-t[1]))
 bx = [max(0, int(d[0])), max(0, int(d[1])), min(W, int(d[2])), min(H, int(d[3]))]
