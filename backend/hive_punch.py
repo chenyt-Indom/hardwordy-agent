@@ -109,6 +109,7 @@ class ReliableUDPSock:
         self._timeout = 60.0
         self._send_lock = threading.Lock()
         self._closed_at = 0.0
+        self.created = time.time()
         self.stats = {"sent": 0, "recv": 0, "retx": 0, "drop": 0}
         threading.Thread(target=self._retx_loop, daemon=True).start()
 
