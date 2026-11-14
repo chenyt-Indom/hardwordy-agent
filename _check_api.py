@@ -30,9 +30,17 @@ rec("配置含 url", bool(cfg.get("url")), cfg.get("url"))
 rec("配置含 urls 字段", "urls" in cfg, str(cfg.get("urls")))
 rec("密钥只回显掩码", "token" not in cfg and cfg.get("token_set") is True,
     cfg.get("token_hint"))
-for f in ("active_url", "candidates", "cand_count", "heartbeat_fail",
-          "tls_unverified", "last_rx_ago"):
-    rec("状态字段 %s 存在" % f, f in live, str(live.get(f))[:60])
+if live:
+    for f in ("active_url", "candidates", "cand_count", "heartbeat_fail",
+              "tls_unverified", "last_rx_ago"):
+        rec("状态字段 %s 存在" % f, f in live, str(live.get(f))[:60])
+else:
+    print("  [SKIP] 当前没有群在线，live 为空（正常）—— 改为直接查 status()")
+    import backend.hive_relay_link as R
+    st = R.RelayLink("").status()
+    for f in ("active_url", "candidates", "cand_count", "heartbeat_fail",
+              "tls_unverified", "last_rx_ago", "fail_streak", "short_lived"):
+        rec("status() 字段 %s" % f, f in st, str(st.get(f))[:50])
 
 print()
 print("=" * 66)
