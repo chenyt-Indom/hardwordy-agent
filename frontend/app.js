@@ -753,6 +753,11 @@
     return out.join("");
   }
 
+  // ★ 2026-11-15 用户要求「流式正文也按 markdown 输出」。
+  //   livecard.js 先于本文件加载（index.html 有注释说明），所以它只能在**运行时**
+  //   通过 window 取到这里的 mdToHtml。这里只做只读暴露，不改变任何既有行为。
+  window.__mdToHtml = mdToHtml;
+
   function renderAnswerLinks(bubble, text) {
   // 产物卡片：先开启收集，正文里的文件链接变成胶囊，最后 flush 出卡片
   if (window.__Artifacts) window.__Artifacts.begin();

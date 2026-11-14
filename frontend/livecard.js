@@ -529,6 +529,12 @@ window.LiveCard = (function () {
 
     let codeList = null;
     let raw = "", painted = "", sealed = false, lblT = 0, answerStarted = false;
+    // ★ 2026-11-15 用户要求「流式正文也按 markdown 输出」。
+    //   但每帧都整块解析 markdown 会很贵（上次「响应太慢」的同类问题），所以：
+    //   · 正文先在 outRaw 里累积，paintAnswer() 按 300ms 节流渲染；
+    //   · 收尾（done / seal）时强制立刻渲染一次，保证最终观感；
+    //   · 内容没变化（outRaw === outPainted）直接跳过，不白跑一次解析。
+    let outRaw = "", outPainted = "", outTimer = 0;
 
     // 标题文案。★ 「（N 字）」每帧都变，而改标题会让**整条消息列表重排** ——
     //   长列表时那是 6.7 次/秒的整页重排（用户报「响应太慢」的直接原因之一）。
@@ -653,8 +659,37 @@ window.LiveCard = (function () {
       appendAnswerHtml(html) { answerBubble.insertAdjacentHTML("beforeend", html); },
       overwriteAnswerHtml(html) { answerBubble.innerHTML = html; },
 
+      // 正文按 markdown 渲染（节流）。force=true 时立刻渲染并清掉待办。
+      // mdToHtml 在 app.js 的 IIFE 里，靠 window.__mdToHtml 拿到；
+      // 拿不到时退回纯文本 + <br>，和改动前的行为一致，不会白屏。
+      answerText() { return outRaw; },
+      paintAnswer(force) {
+        if (outTimer) { clearTimeout(outTimer); outTimer = 0; }
+        if (!force && outRaw === outPainted) return;
+        outPainted = outRaw;
+        const md = window.__mdToHtml;
+        if (typeof md === "function") {
+          try {
+            // markdown 产出的是 <p>/<ul> 这类块级元素，父容器的 pre-wrap 会把
+            // 每行缩进和空行一起保留下来，排版会散架 —— 这里显式清掉。
+            answerBubble.style.whiteSpace = "";
+            api.overwriteAnswerHtml(md(outRaw));
+            return;
+          } catch (e) { /* 解析失败就退回纯文本 */ }
+        }
+        answerBubble.style.whiteSpace = "pre-wrap";
+        api.overwriteAnswerHtml(esc(outRaw).replace(/\r?\n/g, "<br>"));
+      },
+      // 流式追加：只累积，渲染交给节流
+      pushAnswer(text, full) {
+        outRaw = (typeof full === "string" && full) ? full : (outRaw + String(text == null ? "" : text));
+        if (!answerStarted) { answerStarted = true; answerBubble.textContent = ""; }
+        if (!outTimer) outTimer = setTimeout(() => { outTimer = 0; api.paintAnswer(false); }, 300);
+      },
+
       destroy() {
         try { player.stop(); } catch (e) { /* ignore */ }
+        if (outTimer) { clearTimeout(outTimer); outTimer = 0; }
         [who, think.wrap, tools.wrap, mediaWrap, answerWrap].forEach((n) => {
           try { if (n) n.remove(); } catch (e) { /* ignore */ }
         });
@@ -698,13 +733,8 @@ window.LiveCard = (function () {
         }
         if (ph === "content") {
           if (!sealed && raw) api.sealThinking();
-          // 气泡初始是「…」占位，第一帧正文到达时先清掉，否则正文会以「…」开头
-          if (!answerStarted) { answerStarted = true; answerBubble.textContent = ""; }
-          if (typeof f.full === "string" && f.full) {
-            api.overwriteAnswerHtml(esc(f.full).replace(/\n/g, "<br>"));
-          } else {
-            api.appendAnswerHtml(esc(f.delta || "").replace(/\n/g, "<br>"));
-          }
+          // 累积 + 节流渲染 markdown（不再每帧整块重建纯文本）
+          api.pushAnswer(f.delta || "", f.full);
           return ph;
         }
         if (ph === "note") {
@@ -714,6 +744,8 @@ window.LiveCard = (function () {
         }
         if (ph === "done") {
           if (!sealed && raw) api.sealThinking();
+          // 收尾必须立刻渲染，否则节流窗口里最后一截正文不会出现
+          if (outRaw) api.paintAnswer(true);
           return ph;
         }
         return ph;
