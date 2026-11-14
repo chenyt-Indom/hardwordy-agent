@@ -28,6 +28,11 @@ import json
 import urllib.parse
 import urllib.request
 import math
+# ⚠️ 必须模块级导入：`_hive_artifact_fingerprint()` 用 hashlib.sha256 算清单指纹。
+#    漏了这行 → 群文件夹清单同步抛 NameError 被 except 吞掉 →
+#    **群 AI 的产物永远广播不到别的成员**（实测：sync 返回
+#    "name 'hashlib' is not defined"，对方文件夹一直是空的）。
+import hashlib
 import time
 import asyncio
 import datetime
