@@ -479,13 +479,16 @@ def _shift_of(prep, x, y, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
 
 
 def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
-    """眨眼：只压眼裂那一小块，椭圆羽化居中融合（不填色块、不留色带）。
+    """眨眼：上眼皮**弧形下落**覆盖眼球（不是把眼睛压扁）。
 
-    原来 ROI 取 eye_gap*0.42 当半宽，实测单眼 ROI 宽 147px = 眼距的 84%、
-    脸宽的 36% —— 眉毛、鼻梁、甚至部分脸颊都被框进去；压缩后底部还用
-    「最后一行」填充，于是每次眨眼整片脸都在扭（用户反馈的「位置偏移 /
-    抽搐」）。现在按真实眼裂尺寸取（半宽 0.17 眼距、半高 0.085 眼距），
-    压缩结果**居中**放回，并用椭圆蒙版融合，眼外像素一个都不动。
+    迭代记录：
+      · 第一版 ROI 取 eye_gap*0.42 当半宽 → 单眼 ROI 147px = 眼距 84%、
+        脸宽 36%，眉毛鼻梁全被框进去，压缩后底部填「最后一行」→ 整片脸扭。
+      · 第二版收窄到真实眼裂（0.17/0.085 眼距）→ 框外像素 0，但视觉复核
+        判定「水平硬边切割、像贴了遮罩」——因为纵向压缩出来的边缘是直线。
+      · 现在：对每一列，把该列**上方**的皮肤按弧形下拉量搬到当前位置，
+        中间拉得多、眼角拉得少 → 形成真实的上眼睑弧线，且采样源是皮肤
+        本身，颜色连续，不会出现色带或拉伸。
     """
     if amount <= 0.02:
         return img
@@ -495,31 +498,40 @@ def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0):
         return img
     out = img.copy()
     H, W = prep["wh"]
-    ew = max(6.0, gap * 0.17)          # 半宽
-    eh = max(5.0, gap * 0.085)         # 半高
+    ew = max(6.0, gap * 0.17)          # 眼裂半宽
+    eh = max(5.0, gap * 0.085)         # 眼裂半高
     for (ex, ey) in prep["eyes"]:
         dx, dy = _shift_of(prep, ex, ey, yaw, pitch, tx, ty)
         ex, ey = ex + dx, ey + dy
-        x0 = int(max(0, ex - ew)); x1 = int(min(W, ex + ew))
-        y0 = int(max(0, ey - eh)); y1 = int(min(H, ey + eh))
-        if x1 - x0 < 8 or y1 - y0 < 6:
+        # ROI 上方要多留皮肤当「上眼皮料」：最多下拉 2.2*eh，再留 1 个 eh 余量
+        rx0 = int(max(0, ex - ew * 1.18)); rx1 = int(min(W, ex + ew * 1.18))
+        ry0 = int(max(0, ey - eh * 3.4));  ry1 = int(min(H, ey + eh * 1.45))
+        if rx1 - rx0 < 10 or ry1 - ry0 < 10:
             continue
-        roi = out[y0:y1, x0:x1].astype(np.float32)
+        roi = out[ry0:ry1, rx0:rx1].astype(np.float32)
         h, w = roi.shape[:2]
-        nh = max(2, int(round(h * (1.0 - 0.55 * a))))
-        if nh >= h:
-            continue
-        small = cv2.resize(roi, (w, nh), interpolation=cv2.INTER_AREA)
-        canvas = roi.copy()
-        top = (h - nh) // 2
-        canvas[top:top + nh] = small               # 眼裂变窄，上下各留一点原样
-        # 椭圆羽化：中心 1、边缘 0，保证眼外像素完全不动
-        yy = np.linspace(-1.0, 1.0, h, dtype=np.float32)[:, None]
-        xx = np.linspace(-1.0, 1.0, w, dtype=np.float32)[None, :]
-        rr = np.sqrt(xx * xx + yy * yy)
-        m = np.clip((1.0 - rr) / 0.45, 0.0, 1.0)[:, :, None]
-        out[y0:y1, x0:x1] = np.clip(canvas * m + roi * (1.0 - m),
-                                    0, 255).astype(np.uint8)
+        cy, cx = ey - ry0, ex - rx0
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+
+        # 每列的下拉量：中间最多 2.2*eh，眼角按 cos 衰减到 0 → 弧形眼皮
+        u = np.clip((xx - cx) / ew, -1.0, 1.0)
+        fall = np.cos(u * np.pi / 2.0) ** 0.75
+        pull = (2.2 * eh * a) * fall
+
+        # 采样：当前像素取它上方 pull 处的颜色（把上眼皮往下拉）
+        map_x = xx.astype(np.float32)
+        map_y = (yy - pull).astype(np.float32)
+        moved = cv2.remap(roi, map_x, map_y, cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_REPLICATE)
+
+        # 蒙版：只在「眼裂 + 上眼皮」范围生效，上下边界都羽化，眼角椭圆收口
+        top_soft = np.clip((yy - (cy - 3.1 * eh)) / (eh * 0.9), 0.0, 1.0)
+        bot_soft = np.clip(((cy + eh * 1.35) - yy) / (eh * 0.9), 0.0, 1.0)
+        side = np.clip((ew * 1.12 - np.abs(xx - cx)) / (ew * 0.40), 0.0, 1.0)
+        m = (top_soft * bot_soft * side)[:, :, None]
+
+        out[ry0:ry1, rx0:rx1] = np.clip(moved * m + roi * (1.0 - m),
+                                        0, 255).astype(np.uint8)
     return out
 
 
