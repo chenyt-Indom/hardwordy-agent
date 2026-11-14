@@ -311,8 +311,11 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
 
 
 def speak(text, voice="", rate=None, style="", engine="auto",
-          blink=True, head=True, max_side=1024):
-    """文本 → TTS → Wav2Lip → mp4"""
+          blink=True, head=True, max_side=1024, motion=1.0):
+    """文本 → TTS → Wav2Lip → mp4
+
+    motion: 头部动作强度 0（完全不动）~ 1（标准）~ 1.6（活跃）
+    """
     t = (text or "").strip()
     if not t:
         return {"ok": False, "error": "文本是空的"}
