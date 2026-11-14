@@ -569,8 +569,11 @@ class RelayLink:
         # 心跳：每 5 秒查一次，45 秒没有任何入站包就判定死链、主动断开重连
         self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self._hb_thread.start()
-        # 给第一次连接一点时间，让调用方拿到真实状态
-        for _ in range(40):
+        # 给第一次连接一点时间，让调用方拿到真实状态。
+        # 7 秒 = 够把主线路 + 至少一条备线试完（单条超时 4 秒）。
+        # 还没通就返回 connecting，后台会继续试，不会就此放弃。
+        deadline = time.time() + 7.0
+        while time.time() < deadline:
             if self.state in ("online", "error"):
                 break
             time.sleep(0.05)
