@@ -44,7 +44,7 @@ def measure(p, tag):
     print(f"\n--- {tag} ---")
     print(" pose      脸dx    脖dx   同向?  脖pixdiff  >8占比")
     for name, fx, nx, dm, dp in rows:
-        same = "是" if (fx == 0 or nx == 0 or (fx > 0) == (nx > 0)) else "否⚠"
+        same = "OK" if (fx == 0 or nx == 0 or (fx > 0) == (nx > 0)) else "REV!"
         print(f" {name:8s} {fx:+6.2f} {nx:+6.2f}  {same:4s}  {dm:7.3f}  {dp:6.2f}%")
 
 measure(base, "原版")
