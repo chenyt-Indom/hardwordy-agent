@@ -11826,6 +11826,12 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
             if key in _seen:
                 return
             _seen.add(key)
+            # 同名只留最新版：模型把 index.html 改三遍，产物文件夹里只该有最终版
+            # （不这么做的话一次任务能堆出十几个同名文件，用户分不清）
+            try:
+                hive.drop_artifact_by_name(gid, name)
+            except Exception:
+                pass
             metas.append(hive.save_file(gid, name, raw, mime,
                                         tag="ai", source=source))
         except Exception:
