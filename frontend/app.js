@@ -10569,7 +10569,8 @@
       hvSyncThink();
     })();
     window.addEventListener("resize", () => {
-      document.querySelectorAll("body > .hd-live.think-dock").forEach((n) => {
+      // ★ 2026-11-15：浮起来的是思考节点（.hd-think-card），不再是整张卡（.hd-live）
+      document.querySelectorAll("body > .hd-think-card.think-dock, body > .hd-live.think-dock").forEach((n) => {
         try { placeThinkDock(n); } catch (e) { /* 忽略 */ }
       });
     });
