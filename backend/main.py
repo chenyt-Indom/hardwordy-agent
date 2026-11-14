@@ -11943,7 +11943,9 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                     _hd_emit(gid, mid, "tool",
                              task={"round": _t_round[0] + 1, "tools": [str(val)]})
                 elif kind == "note":
-                    _hd_emit(gid, mid, "note", {"text": str(val)})
+                    # ⚠️ _hd_emit 的第 4 个参数是 delta（文本），不是 dict ——
+                    #    传错类型前端拿到的是对象，提示文字会显示成 [object Object]。
+                    _hd_emit(gid, mid, "note", str(val))
                 _flush()
         else:
             # 本地 Ollama：**原生 tools 通道** + 自己跑工具循环（协议和单人一致）。
