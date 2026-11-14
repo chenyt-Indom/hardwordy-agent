@@ -149,6 +149,19 @@ def _prep3d(img_path: str, max_side: int = 0) -> dict:
     wgt = cv2.GaussianBlur(head.astype(np.float32), (0, 0), 14.0)
     wgt = np.clip(wgt * 1.45, 0.0, 1.0)
 
+    # 脖子：人脸网格底部（下颌线）以下是脖子/锁骨，真人转头时只跟着动一点点。
+    # 实测两个问题（形象图 1024²：网格底 y=699、脸中心 y=469、脸高 493）：
+    #   ① 脖子处的 zn 是从下巴边缘最近邻填充来的（实测 -0.45），而脸部正面
+    #      zn≈+0.5 —— **符号相反**。yaw=7.5° 时脸往左 3.5px、脖子往右 3.5px，
+    #      两边反向对拉，视觉上就是「脖子在扭」。脖子是中轴，深度应居中于脸。
+    #   ② 权重用 sigma=14 的各向同性高斯，从下颌线往下 100px 还有 0.6~0.78，
+    #      整块脖子跟着头平移。
+    # 修法：下颌线以下 14% 脸高（约 69px）内，zn 线性归零、权重按 1.5 次方衰减。
+    _yy = np.arange(H, dtype=np.float32)[:, None] * np.ones((1, W), np.float32)
+    _below = np.clip((_yy - float(ys.max())) / max(1.0, fh * 0.14), 0.0, 1.0)
+    zn = (zn * (1.0 - _below)).astype(np.float32)
+    wgt = (wgt * (1.0 - _below) ** 1.5).astype(np.float32)
+
     k_px = fw / 83.9
     scale = zspan * k_px * GAIN
 
