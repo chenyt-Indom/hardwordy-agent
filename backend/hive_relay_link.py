@@ -769,9 +769,19 @@ class RelayLink:
                         pass
                 continue
             try:
-                self.ping()
+                sent = self.ping()
             except Exception:
-                pass
+                sent = False
+            if not sent:
+                # 连 ping 都发不出去 → 连接已经死了，不用等空闲超时
+                self.heartbeat_fail += 1
+                self.error = "心跳发送失败，连接已断，主动重连"
+                sock = self.sock
+                if sock is not None:
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
 
     def _connect_once(self, p: Optional[Dict[str, Any]] = None,
                       last: bool = False) -> bool:
