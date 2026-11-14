@@ -10709,6 +10709,12 @@
     function renderMsgs(list) {
       const box = el("hiveMsgs");
       box.innerHTML = "";
+      // ★ 2026-11-15 修「响应太慢」：这里会把正在跑的实时卡片一起清掉。
+      //   原来靠 hdEnsure 每帧 `document.body.contains()` 去发现（6.7 帧/秒 × 2 次
+      //   全树查询），现在改成**这里打一个标记**，hdEnsure 只在标记为真时才检查/挂回。
+      try {
+        Object.keys(hdCards).forEach((k) => { hdCards[k]._lost = true; });
+      } catch (e) { /* 还没初始化时忽略 */ }
       hvLastMsgs = Array.isArray(list) ? list : [];   // 上下文环要用
       // ⚠️ 索引必须**先**建好再渲染：引用块要靠它找回被引用的原文，
       //    边渲染边建的话，前面那条引用后面才渲染的消息就查不到了。
