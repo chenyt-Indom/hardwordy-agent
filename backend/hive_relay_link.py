@@ -812,6 +812,7 @@ class RelayLink:
                     sock, "%s:%s" % (self.host, self.port), self.ws_path)
             except Exception as e:
                 self.error = "WebSocket 握手异常（%s）" % type(e).__name__
+                self._fail_hard = True
                 try:
                     sock.close()
                 except Exception:
@@ -820,6 +821,7 @@ class RelayLink:
             if rest is None:
                 self.error = ("WebSocket 握手失败 —— 检查 nginx 里 %s 这条 "
                               "location 有没有配好" % self.ws_path)
+                self._fail_hard = True
                 try:
                     sock.close()
                 except Exception:
