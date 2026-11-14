@@ -5406,61 +5406,18 @@
     };
 
     // 单个文件一行：点这一行才展开它的 diff（原 sd-card 的详情逻辑原样保留）
+    // 单个文件一行：结构、class、展开/收起交互全部由 livecard.js 提供，
+    // 单聊和群聊产出的是**同一种** .sd-row（群聊原来那份 hdAddCode 已删掉）。
+    // 回撤按钮的动作留在 app.js —— 模块不该知道 /api/selfdev/rollback 和 toast。
     const makeSelfdevCard = (ui) => {
-      const box = ensureSelfdevList();
-      const wrap = document.createElement("div");
-      wrap.className = "sd-row";
-      wrap.dataset.add = ui.added || 0;
-      wrap.dataset.del = ui.removed || 0;
-      const actName = ui.act === "apply" ? "代码模型重写"
-        : (ui.act === "patch" ? "局部替换" : "写入");
-      const rel = String(ui.rel || "");
-      const add = ui.added || 0;
-      const del = ui.removed || 0;
-
-      const head = document.createElement("div");
-      head.className = "sd-head";
-      head.innerHTML =
-        '<span class="sd-badge">🛠 ' + actName + '</span>' +
-        '<span class="sd-rel" title="' + rel.replace(/"/g, "&quot;") + '">' + rel + '</span>' +
-        '<span class="sd-stat"><span class="sd-add">+' + add +
-        '</span> <span class="sd-del">−' + del + '</span></span>' +
-        '<button class="sd-toggle" type="button">详情 ▾</button>';
-      wrap.appendChild(head);
-
-      const body = document.createElement("div");
-      body.className = "sd-body";
-      body.hidden = true;
-      const pre = document.createElement("pre");
-      pre.className = "sd-pre";
-      // 给 diff 上色（只做行首判断，不解析内容）
-      const diffText = String(ui.diff || "（没有差异内容）");
-      pre.innerHTML = diffText.split("\n").map((ln) => {
-        const esc = ln.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-        if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("@@"))
-          return '<span class="l-hdr">' + esc + "</span>";
-        if (ln.startsWith("+")) return '<span class="l-add">' + esc + "</span>";
-        if (ln.startsWith("-")) return '<span class="l-del">' + esc + "</span>";
-        return esc;
-      }).join("\n");
-      body.appendChild(pre);
-
-      const foot = document.createElement("div");
-      foot.className = "sd-foot";
-      foot.innerHTML =
-        (ui.who ? '<span>模型：' + ui.who + '</span>' : "") +
-        (ui.backup ? '<span>备份：' + ui.backup + '</span>' : "") +
-        (ui.is_new ? '<span>（新文件，无改前版本）</span>' : "");
-      if (ui.backup) {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.textContent = "↩ 回撤这个文件";
-        btn.onclick = async () => {
+      ensureSelfdevList();
+      const hooks = {
+        onRollback: async (rel, backup, btn) => {
           btn.disabled = true;
           try {
             const r = await (await fetch("/api/selfdev/rollback", {
               method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ rel: rel, backup: ui.backup }) })).json();
+              body: JSON.stringify({ rel: rel, backup: backup }) })).json();
             if (r.ok) {
               btn.textContent = "✅ 已回撤";
               showToast("已回撤 " + rel + "（刷新后生效）", "ok");
@@ -5473,31 +5430,10 @@
             btn.disabled = false;
             showToast("回撤失败：" + e.message, "err");
           }
-        };
-        foot.appendChild(btn);
-      }
-      body.appendChild(foot);
-      wrap.appendChild(body);
-
-      const tg = head.querySelector(".sd-toggle");
-      // 抽成一个函数：小按钮和整行都调它。
-      // ⚠️ 不要用 tg.click() —— 某些嵌入环境里元素没有 click()，会直接抛异常
-      const toggleBody = () => {
-        body.hidden = !body.hidden;
-        tg.textContent = body.hidden ? "详情 ▾" : "收起 ▴";
+        },
       };
-      tg.onclick = toggleBody;
-      head.onclick = (ev) => { if (ev.target !== tg) toggleBody(); };
-
-      box.__body.appendChild(wrap);
-      refreshSelfdevSum(box);
-      // 整列被收起时来了新改动 → 自动展开，免得用户以为"没动静"
-      if (box.classList.contains("collapsed")) {
-        box.classList.remove("collapsed");
-        box.__body.hidden = false;
-        box.__head.querySelector(".sd-list-arrow").textContent = "▾";
-      }
-      return wrap;
+      // add() 内部已包含：追加到列表、刷新汇总、整列被收起时自动展开
+      return _sdList.add(ui, hooks);
     };
 
     // ---- 代码卡片分组：一次跑很多段代码时，不让卡片一张张往下堆 ----
