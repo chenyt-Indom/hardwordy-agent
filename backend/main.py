@@ -11392,7 +11392,12 @@ except Exception:
 
 @app.post("/api/hive/{gid}/upload")
 def hive_upload(gid: str, body: dict):
-    """上传一个附件到群目录。body: {name, mime, data(base64)}"""
+    """上传一个附件到群目录。body: {name, mime, data(base64), tag?}
+
+    tag="ai" → 存进这个群的**产物文件夹**（`artifacts/`），和 AI 的产出放在一起。
+    这是 2026-11-15 新增的：用户要把**本机文件**也放进群文件夹，
+    并且这个文件夹要"内容统一"——所以上传成功后立刻广播一次清单。
+    """
     b = body or {}
     try:
         raw = b.get("data") or ""
@@ -11400,8 +11405,17 @@ def hive_upload(gid: str, body: dict):
             # 允许直接传 dataURL（前端 FileReader 的默认产物）
             raw = raw.split(",", 1)[-1]
         data = base64.b64decode(raw)
-        meta = hive.save_file(gid, b.get("name") or "file", data, b.get("mime") or "")
-        return {"ok": True, "file": meta, "max": hive.MAX_FILE}
+        tag = "ai" if str(b.get("tag") or "") == "ai" else "user"
+        meta = hive.save_file(gid, b.get("name") or "file", data,
+                              b.get("mime") or "", tag=tag,
+                              source=str(b.get("source") or "")[:120])
+        # 产物文件夹：同名只留最新一版（用户手动放进来的也照这个规则）
+        if tag == "ai":
+            try:
+                hive.prune_artifact_name(gid, meta.get("name") or "", keep_fid=meta.get("fid"))
+            except Exception:
+                pass
+        return {"ok": True, "file": meta, "max": hive.MAX_FILE, "tag": tag}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
