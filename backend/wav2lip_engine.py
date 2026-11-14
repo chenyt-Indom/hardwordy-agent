@@ -157,15 +157,24 @@ class Wav2LipEngine:
         return face, inp.astype(np.float32)
 
     @staticmethod
-    def _match_color(src, ref):
-        """把 src 的均值/方差对齐到 ref（逐通道）"""
+    def _match_color(src, ref, roi=None):
+        """把 src 的均值/方差对齐到 ref（逐通道）
+
+        roi=True 的区域才参与统计。默认排除嘴部中心，
+        否则生成的「张口暗部」会被整体均值提亮，口型就被洗掉了。
+        """
         out = src.astype(np.float32)
+        r = ref.astype(np.float32)
+        if roi is None:
+            roi = np.ones(out.shape[:2], bool)
         for c in range(3):
-            s = out[..., c]
-            r = ref[..., c].astype(np.float32)
+            s = out[..., c][roi]
+            rr = r[..., c][roi]
+            if s.size < 16:
+                continue
             sm, ss = s.mean(), s.std() + 1e-6
-            rm, rs = r.mean(), r.std() + 1e-6
-            out[..., c] = (s - sm) / ss * rs + rm
+            rm, rs = rr.mean(), rr.std() + 1e-6
+            out[..., c] = (out[..., c] - sm) / ss * rs + rm
         return np.clip(out, 0, 255)
 
     @staticmethod
