@@ -10325,6 +10325,13 @@ def avatar_lipsync_speak(body: dict):
     except Exception:                                           # noqa: BLE001
         _ms = 1024
     _ms = max(480, min(1920, _ms))
+    # 头部动作强度：0 = 完全不动，1 = 标准，1.6 = 活跃（夹在 0~2）
+    _mo = body.get("motion", 1.0)
+    try:
+        _mo = float(_mo) if _mo not in (None, "") else 1.0
+    except Exception:                                           # noqa: BLE001
+        _mo = 1.0
+    _mo = max(0.0, min(2.0, _mo))
     try:
         r = avatar_lipsync.speak(
             text, voice=str(body.get("voice") or ""), rate=rate,
@@ -10332,7 +10339,7 @@ def avatar_lipsync_speak(body: dict):
             engine=str(body.get("engine") or "auto"),
             blink=bool(body.get("blink", True)),
             head=bool(body.get("head", True)),
-            max_side=_ms,
+            max_side=_ms, motion=_mo,
         )
     except Exception as e:                                      # noqa: BLE001
         raise HTTPException(status_code=500,
