@@ -92,7 +92,7 @@ class SCRFD:
         if not scores_list:
             return np.zeros((0, 5), np.float32), np.zeros((0, 5, 2), np.float32)
 
-        scores = np.vstack(scores_list)
+        scores = np.concatenate(scores_list).ravel()
         bboxes = np.vstack(bboxes_list) / scale
         kpss = np.vstack(kpss_list) / scale
         dets = np.hstack([bboxes, scores[:, None]]).astype(np.float32)
