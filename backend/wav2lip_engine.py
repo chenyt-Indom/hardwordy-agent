@@ -232,8 +232,15 @@ class Wav2LipEngine:
         return np.clip(g + corr, 0, 255)
 
     @staticmethod
-    def _detail_inject(gen, orig, strength=0.6):
-        """多尺度高频回注：把原图纹理注回生成图，缓解 96->大图放大的糊感"""
+    def _detail_inject(gen, orig, strength=0.6, mask_skip=None):
+        """多尺度高频回注：把原图纹理注回生成图，缓解 96->大图放大的糊感
+
+        mask_skip: 1=完全不回注的区域（嘴核心）。那里必须用生成图自己的像素，
+        否则原图闭合的唇线会被注回来，口型被洗掉；但嘴**周围**（下巴、人中、
+        唇周皮肤）要注满，否则 96x96 放大后皮肤纹理被抹平，视觉上就是
+        「贴了一块半透明补丁」。旧版一刀切按张嘴度降 strength，两个目标
+        互相打架，所以改成按区域分开处理。
+        """
         g = gen.astype(np.float32)
         o = orig.astype(np.float32)
         # 生成图去掉自己的高频（它的高频是放大噪声）
@@ -241,7 +248,12 @@ class Wav2LipEngine:
         # 原图两个尺度的高频
         h1 = o - cv2.GaussianBlur(o, (0, 0), 1.0)
         h2 = o - cv2.GaussianBlur(o, (0, 0), 2.6)
-        out = base + h1 * (0.55 * strength) + h2 * (0.45 * strength)
+        hi = h1 * (0.55 * strength) + h2 * (0.45 * strength)
+        if mask_skip is not None:
+            k = np.clip(mask_skip.astype(np.float32), 0.0, 1.0)
+            k = cv2.GaussianBlur(k, (0, 0), 4.0)[..., None]
+            hi = hi * (1.0 - k)
+        out = base + hi
         # 轻度锐化，抵消放大软化。
         # ⚠️ 原为 0.35，实测椭圆内拉普拉斯方差是椭圆外的 1.22 倍 —— 补丁区
         # 比周围更「锐」，边缘一眼就能看出是贴上去的。降到 0.20 抹平这个断层。
