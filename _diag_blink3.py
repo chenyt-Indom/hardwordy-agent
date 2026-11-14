@@ -29,7 +29,7 @@ y1 = int(max(e[1] for e in prep["eyes"]) + eh * 3)
 print("眼部裁剪区 x[%d,%d] y[%d,%d]  (%dx%d)" % (x0, x1, y0, y1, x1 - x0, y1 - y0))
 
 frames = []
-for amt, tag in [(0.0, "原图"), (0.5, "半闭"), (1.0, "全闭")]:
+for amt, tag in [(0.0, "原图"), (0.45, "半闭"), (0.85, "峰值")]:
     out = A25._blink(img, prep, amt) if amt > 0 else img
     d = np.abs(out.astype(np.int16) - img.astype(np.int16)).max(axis=2)
     ys, xs = np.where(d > 6)
