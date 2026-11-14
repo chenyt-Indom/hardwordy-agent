@@ -170,13 +170,17 @@ class Wav2LipEngine:
 
     @staticmethod
     def _detail_inject(gen, orig, strength=0.6):
-        """把原图高频细节注回生成图，缓解 96->大图放大的模糊"""
+        """多尺度高频回注：把原图纹理注回生成图，缓解 96->大图放大的糊感"""
         g = gen.astype(np.float32)
         o = orig.astype(np.float32)
-        blur_o = cv2.GaussianBlur(o, (0, 0), 1.2)
-        high = o - blur_o
-        blur_g = cv2.GaussianBlur(g, (0, 0), 1.2)
-        out = blur_g + high * strength
+        # 生成图去掉自己的高频（它的高频是放大噪声）
+        base = cv2.GaussianBlur(g, (0, 0), 1.6)
+        # 原图两个尺度的高频
+        h1 = o - cv2.GaussianBlur(o, (0, 0), 1.0)
+        h2 = o - cv2.GaussianBlur(o, (0, 0), 2.6)
+        out = base + h1 * (0.55 * strength) + h2 * (0.45 * strength)
+        # 轻度锐化，抵消放大软化
+        out = out + 0.35 * (out - cv2.GaussianBlur(out, (0, 0), 1.0))
         return np.clip(out, 0, 255)
 
     def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.50,
