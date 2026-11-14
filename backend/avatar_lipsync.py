@@ -213,7 +213,7 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
 
 
 def speak(text, voice="", rate=None, style="", engine="auto",
-          blink=True, head=True):
+          blink=True, head=True, max_side=1024):
     """文本 → TTS → Wav2Lip → mp4"""
     t = (text or "").strip()
     if not t:
