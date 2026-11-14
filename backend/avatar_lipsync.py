@@ -250,16 +250,14 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
     box = meta["box"]
 
     # 动作层
-    if blink or head:
-        out_frames = []
-        for i, fr in enumerate(frames):
-            t = i / float(fps)
-            if head:
-                fr = _head_move(fr, box, t)
-            if blink:
-                fr = _blink_frame(fr, box, t)
-            out_frames.append(fr)
-        frames = out_frames
+    motion_mode = "none"
+    t_motion = 0.0
+    if head or blink or motion > 0.01:
+        t1 = time.time()
+        frames, motion_mode = _apply_motion(
+            frames, img_path, proc_side, y, sr, fps, blink,
+            motion if head else 0.0)
+        t_motion = time.time() - t1
 
     # 输出放大：处理尺寸之上只做插值放大（libx264 要求宽高偶数）
     scale = max_side / float(max(W, H))
