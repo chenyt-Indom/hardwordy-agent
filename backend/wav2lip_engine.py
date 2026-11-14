@@ -284,14 +284,15 @@ class Wav2LipEngine:
         # 不修就是一块色偏的补丁（实测椭圆内色差是外面的 2.2 倍）
         gen_big = self._match_light(gen_big, orig_big,
                                     mask_keep=roi.astype(np.float32))
-        # 超分过的图（>96）自带真实纹理，只做很轻的细节回注；
-        # 未超分的 96x96 才需要强回注补纹理
-        was_sr = pred96.shape[0] > 96
-        if was_sr:
-            st = 0.42 - 0.22 * w_open      # 超分帧：0.42 -> 0.20
-        else:
-            st = 0.85 - 0.60 * w_open      # 未超分：0.85 -> 0.25
-        gen_big = self._detail_inject(gen_big, orig_big, strength=max(0.18, st))
+        # 细节回注按区域分开：
+        #   · 嘴核心（含唇）→ 完全不注，保住生成的口型
+        #   · 唇周/下巴/人中 → 注满，保住原图皮肤纹理（不注就是一块被抹平的补丁）
+        mouth_core = np.zeros((h, w), np.float32)
+        cv2.ellipse(mouth_core, (int(w * 0.50), int(h * 0.76)),
+                    (max(4, int(w * 0.26)), max(4, int(h * 0.15))),
+                    0, 0, 360, 1.0, -1)
+        gen_big = self._detail_inject(gen_big, orig_big, strength=0.75,
+                                      mask_skip=mouth_core)
 
         # 口腔加深：Wav2Lip 在这类闭口原图上张口偏小，
         # 只把「真正的口腔暗部」（灰度 < 92）再压暗一点，
