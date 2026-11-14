@@ -434,15 +434,25 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
     u, v = np.meshgrid(np.arange(x0, x1, dtype=np.float32),
                        np.arange(y0, y1, dtype=np.float32))
 
-    # 0) 撤销平移 + 缩放（绕脸中心）
+    # 位移权重（ROI 网格直接索引，省一次 remap）
+    # ⚠️ 平移/缩放/roll 原本是**全局**变换，与权重无关 —— 实测纯背景角落的
+    # 帧间差 0.436、背景/头部变化比 0.506，背景在跟着头一起晃；而 ROI 外又
+    # 完全不参与 remap，于是 x=x1、y=y1 处出现横贯画面的硬切线。
+    # 真实拍摄里相机不动、只有头动，所以这些变换也必须按权重加权：
+    # w0=0 → 完全不动；w0=1 → 与原式等价。
+    w0 = wg[y0:y1, x0:x1]
+
+    # 0) 撤销平移 + 缩放（绕脸中心，按权重加权）
     _s = max(0.90, min(1.10, float(scl)))
     if abs(tx) > 1e-4 or abs(ty) > 1e-4 or abs(_s - 1.0) > 1e-6:
-        u = cx + (u - tx - cx) / _s
-        v = cy + (v - ty - cy) / _s
+        sw = 1.0 + (1.0 / _s - 1.0) * w0
+        u = cx + (u - tx * w0 - cx) * sw
+        v = cy + (v - ty * w0 - cy) * sw
 
-    # 1) 撤销 roll（绕脸中心反向旋转）
+    # 1) 撤销 roll（绕脸中心反向旋转，角度按权重缩放）
     if abs(rz) > 1e-6:
-        cr, sr = math.cos(-rz), math.sin(-rz)
+        rz_w = -rz * w0
+        cr, sr = np.cos(rz_w), np.sin(rz_w)
         du, dv = u - cx, v - cy
         u, v = cx + du * cr - dv * sr, cy + du * sr + dv * cr
 
