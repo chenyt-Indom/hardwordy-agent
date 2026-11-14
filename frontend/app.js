@@ -5226,45 +5226,29 @@
     let _prov = "auto";
 
     // ---------- 思考过程：默认折叠，但实时刷新状态；展开可见实时全文 ----------
-    const thinkWrap = document.createElement("div");
-    thinkWrap.className = "msg bot";
-    const thinkHdr = document.createElement("div");
-    thinkHdr.className = "bubble think-hdr";
-    const thinkStatus = document.createElement("span");
-    thinkStatus.textContent = "🧠 思考中…";
+    // ★ 2026-11-15：这一整块 DOM 构建搬到 livecard.js，单聊和群聊调**同一个函数**。
+    //   生成的节点、class 名、点击折叠行为与原来的内联版本逐字节一致，
+    //   所以 CSS 不用动、单人模式的行为一点没变。
+    //   手机上屏幕窄、可点的地方少 —— 思考过程**默认展开**，让用户真能看到它在想什么。
+    const _autoThink = window.innerWidth <= 768;
+    const _think = window.LiveCard.buildThink({
+      autoOpen: _autoThink,
+      // 点击展开时补上全文。延迟求值：此刻 thinking 还在 TDZ，等点击时已声明。
+      getText: () => thinking,
+    });
+    const thinkWrap = _think.wrap;
+    const thinkHdr = _think.hdr;
+    const thinkStatus = _think.status;
+    const thinkArrow = _think.arrow;
+    const thinkBody = _think.body;
     // 本地 qwen3-vl 不是推理模型，永远不会有思考 → 别让「思考中…」一直挂着误导人
     setTimeout(() => {
       if (thinking.length === 0 && String(_prov || "").indexOf("deepseek") !== 0) {
         thinkStatus.textContent = "🧠 本地模型不输出思考链";
       }
     }, 1800);
-    const thinkArrow = document.createElement("span");
-    thinkArrow.className = "arrow";
-    thinkArrow.textContent = "▸";
-    thinkHdr.appendChild(thinkStatus);
-    thinkHdr.appendChild(thinkArrow);
-    const thinkBody = document.createElement("div");
-    thinkBody.className = "think-body";     // 默认 display:none（折叠）
-    // 手机上屏幕窄、可点的地方少 —— 思考过程**默认展开**，让用户真能看到它在想什么
-    // 2026-11-12 用户要求「展开/收起要有动画」：不再用 style.display 硬切，
-    //   改用 .open 类，高度/透明度由 CSS 过渡（见 style.css 的 .think-body）。
-    const _autoThink = window.innerWidth <= 768;
-    if (_autoThink) { thinkBody.classList.add("open"); thinkArrow.textContent = "▾"; }
-    thinkBody.textContent = "本地模型思考中…";
-    thinkWrap.appendChild(thinkHdr);
-    thinkWrap.appendChild(thinkBody);
     messagesEl.appendChild(thinkWrap);
-    const updateThinkStatus = () => {
-      thinkStatus.textContent = thinking
-        ? "🧠 思考中…（" + thinking.length + " 字）"
-        : "🧠 思考中…";
-    };
-    thinkHdr.onclick = () => {
-      const open = thinkBody.classList.contains("open");
-      thinkBody.classList.toggle("open", !open);
-      thinkArrow.textContent = open ? "▸" : "▾";
-      if (!open) thinkBody.textContent = thinking + "▌";
-    };
+    const updateThinkStatus = () => _think.setThinkingLen(thinking.length);
 
     // ---------- 工具调用过程（横向小条）----------
     const toolWrap = document.createElement("div");
