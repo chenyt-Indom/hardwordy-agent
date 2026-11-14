@@ -11059,6 +11059,32 @@
       if (!side.hidden) renderMembers();
     });
 
+    // 产物文件夹（2026-11-15）
+    if (el("hiveArtBtn")) {
+      el("hiveArtBtn").addEventListener("click", () => openArtifacts(curGid));
+    }
+    if (el("hiveArtClose")) {
+      el("hiveArtClose").addEventListener("click", () => { el("hiveArt").hidden = true; });
+    }
+    if (el("hiveArtRefresh")) {
+      el("hiveArtRefresh").addEventListener("click", () => loadArtifacts());
+    }
+    if (el("hiveArtDir")) {
+      el("hiveArtDir").addEventListener("click", async () => {
+        if (!artGid) return;
+        try {
+          const r = await api("/api/hive/" + encodeURIComponent(artGid) + "/artifacts/open", {});
+          if (!r || !r.ok) showToast("打不开：" + ((r && r.error) || "未知错误"), "warn");
+        } catch (e) { showToast("打不开：" + e.message, "warn"); }
+      });
+    }
+    // 点浮层外的空白处关闭（和建群向导一致的手感）
+    if (el("hiveArt")) {
+      el("hiveArt").addEventListener("click", (ev) => {
+        if (ev.target === el("hiveArt")) el("hiveArt").hidden = true;
+      });
+    }
+
     // ---------------------------------------------------------- 入群密码（取代二维码）
     // 电脑没有摄像头，扫码这条路从来走不通；真正能用的一直是那串文本。
     // 现在换成 12 位密码：群主看得到、成员输得进，不用再传长串口令。
