@@ -293,9 +293,10 @@ def _mouth_frame(prep, op, wd, amp=1.0):
         rows = np.arange(ph)[:, None]
         outp = outp[rows, j0] * (1.0 - f2) + outp[rows, j1] * f2
 
-    # 口腔压暗：只在缝隙区，越靠中间越暗（模拟口腔深度）
+    # 口腔压暗：只在缝隙区，越靠中间越暗（模拟口腔深度）。
+    # 0.46 太重会变成黑带，0.26 是「有纵深但不脏」的平衡点。
     gap_w = max(total, 1.0)
-    dark = 1.0 - (0.46 * op) * np.exp(-((d) / (0.42 * gap_w + 1.5)) ** 2) * wx
+    dark = 1.0 - (0.26 * op) * np.exp(-((d) / (0.55 * gap_w + 1.5)) ** 2) * wx
     outp = outp * dark[..., None]
 
     img = Image.fromarray(np.clip(outp, 0, 255).astype(np.uint8), mode="RGB")
