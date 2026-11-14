@@ -981,6 +981,7 @@ class RelayLink:
             got = _recv_pkt(sock)
             if not got:
                 break
+            self.last_rx = time.time()
             kind, payload = got
             if kind == K_CTRL:
                 try:
