@@ -673,23 +673,36 @@ class RelayLink:
             ok = False
             n = len(cands)
             start = self.cand_idx % n
-            for k in range(n):
+            order = [(start + k) % n for k in range(n)]
+            # 冷却中的线路排到最后 —— 既不会每次白等一个超时，
+            # 也不会因为一次抖动就永久放弃一条路（服务器哪天又开了呢）。
+            now = time.time()
+            fresh = [i for i in order
+                     if self._cand_until.get(str(cands[i].get("url")), 0) <= now]
+            cold = [i for i in order if i not in fresh]
+            order = fresh + cold
+            for k, idx in enumerate(order):
                 if self._stop:
                     break
-                idx = (start + k) % n
                 p = cands[idx]
+                url = str(p.get("url") or "")
                 self.cand_idx = idx
                 self.cand_tries += 1
                 try:
-                    ok = self._connect_once(p, last=(k == n - 1))
+                    ok = self._connect_once(p, last=(k == len(order) - 1))
                 except Exception as e:
                     self.error = "%s: %s" % (type(e).__name__, e)
                     ok = False
                 if ok:
-                    self.active_url = str(p.get("url") or "")
-                    self.last_ok_url = self.active_url
+                    self.active_url = url
+                    self.last_ok_url = url
+                    self._cand_fail.pop(url, None)
+                    self._cand_until.pop(url, None)
                     break
-                # 这条不通 → 立刻换下一条，不等待
+                # 这条不通 → 记一笔，立刻换下一条，不等待
+                self._cand_fail[url] = self._cand_fail.get(url, 0) + 1
+                if self._cand_fail[url] >= CAND_FAIL_LIMIT:
+                    self._cand_until[url] = time.time() + CAND_COOLDOWN
             if self._stop:
                 break
 
