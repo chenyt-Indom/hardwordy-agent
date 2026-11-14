@@ -9752,10 +9752,23 @@
           + '<span class="hi-dot' + dot + '"></span>'
           + '<span class="hi-name">' + hEsc(g.name) + "</span>"
           + '<span class="hi-meta">' + hEsc(owner) + " · " + (g.members || 0) + "人</span>"
+          // 产物文件夹入口（2026-11-15）：就挂在群名这一行右端，
+          // 用户说的「群聊旁边」就是这个位置 —— 不用先点进群才能看产物。
+          + '<button type="button" class="hi-art" data-art="' + hEsc(g.gid) + '"'
+          + ' title="「' + hEsc(g.name) + '」的产物文件夹">📁</button>'
           + "</div>";
       }).join("");
       Array.prototype.forEach.call(box.querySelectorAll(".hive-item"), (it) => {
         it.addEventListener("click", () => openGroup(it.getAttribute("data-gid")));
+      });
+      // 产物按钮必须 stopPropagation：不拦的话点它等于点整个条目，
+      // 会顺手把群切过去（用户只是想看产物，不想换群）。
+      Array.prototype.forEach.call(box.querySelectorAll(".hi-art"), (b) => {
+        b.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          openArtifacts(b.getAttribute("data-art"));
+        });
       });
     }
 
