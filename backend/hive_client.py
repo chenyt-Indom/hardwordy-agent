@@ -46,6 +46,9 @@ def relay_config() -> Dict[str, Any]:
         "url": str(d.get("url") or "").strip(),
         "token": str(d.get("token") or "").strip(),
         "enabled": bool(d.get("enabled", True)),
+        # 额外候选地址：不填也行，客户端会从主地址自动派生备用线路。
+        # 填了就排在最前面优先试（比如你自己搭了第二台服务器）。
+        "urls": [str(x).strip() for x in (d.get("urls") or []) if str(x).strip()],
     }
 
 
