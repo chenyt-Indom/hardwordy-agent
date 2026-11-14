@@ -37,6 +37,29 @@
     search_memory: "💭 检索记忆",
     get_time: "🕐 获取时间",
     web_search: "🌐 联网搜索",
+    // ★ 2026-11-15：自开发 / 工作区系列原来没有中文名，工具小条里直接显示
+    //   `selfdev_grep` 这种英文 —— 群聊造软件时一排英文看着像日志。
+    //   单人和群聊共用这一份映射，补在这里两边同时生效。
+    selfdev_tree: "📂 项目结构",
+    selfdev_grep: "🔍 搜代码",
+    selfdev_read: "📄 读源码",
+    selfdev_write: "✍️ 写源码",
+    selfdev_insert_after: "➕ 插入代码",
+    selfdev_patch: "🩹 改源码",
+    selfdev_apply: "🛠 代码模型重写",
+    selfdev_run: "▶ 跑脚本",
+    selfdev_restart: "🔄 重启应用",
+    workspace_list: "📁 列项目文件",
+    workspace_read: "📄 读项目文件",
+    workspace_write: "✍️ 写项目文件",
+    workspace_new_project: "➕ 新建项目",
+    workspace_use_project: "🔀 切项目",
+    workspace_run: "▶ 运行项目",
+    workspace_pack: "📦 打包项目",
+    workspace_mkdir: "📁 新建目录",
+    workspace_move: "🔀 移动文件",
+    workspace_delete: "🗑 删除文件",
+    ask_user: "❓ 问用户",
   };
 
   const messagesEl = $("#messages");
