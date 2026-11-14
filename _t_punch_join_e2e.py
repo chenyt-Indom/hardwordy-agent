@@ -46,7 +46,7 @@ try:
 
     # B：用全局单例，走真实 join_by_password
     b = HC.client()
-    bnode = HM.MESH.node()
+    bnode = HC.MESH.node()
     bnode.start(0, [])
     time.sleep(0.4)
 
