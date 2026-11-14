@@ -1228,14 +1228,26 @@ class MeshNode:
         if not self.punch:
             return {"ok": False,
                     "error": "打洞通道没启动（UDP 端口可能被占用）"}
-        # 拿自己的地址入群没有任何意义，多半是把「我的地址」粘到了自己这里。
-        # 提前拦下，别让用户等 6 秒再看到一句看不懂的超时。
+        # 两种「必然打不通」的情况要提前拦，别让用户白等 6 秒：
+        #  ① 拿自己的地址入群（多半是把「我的地址」粘到了自己这里）；
+        #  ② 对方和自己共用一个公网 IP —— 同一个路由器下，
+        #     家用路由器普遍不支持 hairpin（从内网访问自己的公网 IP），
+        #     打洞一定超时，得改用局域网地址。
         try:
             own = self.punch_addr() if self.punch else {"ok": False}
-            if own.get("ok") and own.get("addr") == "%s:%s" % (host, int(port)):
-                return {"ok": False,
-                        "error": "这是你自己的地址，不能用它入群 —— "
-                                 "让对方把他自己「我的地址」里的跨网地址发给你"}
+            if own.get("ok"):
+                own_ip, _, own_port = own["addr"].rpartition(":")
+                if own_ip == str(host) and int(own_port) == int(port):
+                    return {"ok": False,
+                            "error": "这是你自己的地址，不能用它入群 —— "
+                                     "让对方把他自己「我的地址」里的跨网地址发给你"}
+                if own_ip == str(host):
+                    return {"ok": False,
+                            "error": "对方和你共用同一个公网 IP，说明你们在同一个"
+                                     "路由器下 —— 这种地址打不通（家用路由器不支持"
+                                     "从内网访问自己的公网 IP）。让对方点「📡 我的地址」，"
+                                     "复制「局域网」那一串（192.168.x.x:端口）给你；"
+                                     "或者两边连同一个 WiFi，直接输密码就能进，不用地址"}
         except Exception:
             pass
         r = self.punch.connect(host, int(port), timeout=timeout)
