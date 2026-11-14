@@ -215,13 +215,13 @@ class Wav2LipEngine:
         # 张嘴时大幅降低细节回注（否则会把原图闭合的唇线注回去，把口型洗掉）
         gen_big = self._detail_inject(gen_big, orig_big, strength=0.85 - 0.70 * w_open)
 
-        # 椭圆蒙版：中心在嘴部，轴长收在 bbox 内部，绝不触及边界
+        # 椭圆蒙版：中心在嘴部，且必须完整落在 bbox 内部（否则下巴处会有横向接缝）
         cx = int(w * 0.50)
-        cy = int(h * (1.0 - mouth_ratio * 0.55))
-        ax = int(w * 0.38)
-        ay = int(h * mouth_ratio * 0.62)
-        ax = max(4, min(ax, w // 2 - 3))
-        ay = max(4, min(ay, h // 2 - 3))
+        cy = int(h * 0.76)
+        ax = int(w * 0.31)
+        ay = int(h * 0.22)
+        ax = max(4, min(ax, w // 2 - 4))
+        ay = max(4, min(ay, cy - 6, h - cy - 6))
         mask = np.zeros((h, w), np.float32)
         cv2.ellipse(mask, (cx, cy), (ax, ay), 0, 0, 360, 1.0, -1)
         k = max(3, (min(ax, ay) // 3) * 2 + 1)
