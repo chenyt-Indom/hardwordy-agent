@@ -138,12 +138,19 @@ if os.path.isdir(_F3D_ROOT):
 else:
     print("[spec] 提示：没找到 %s —— 2.5D/3D 数字人将不可用" % _F3D_ROOT)
 
-# Wav2Lip 权重（>100MB 的 onnx）本机没有，avatar2/wav2lip_onnx 会走降级分支，
-# 不收集；将来放进 data/models/wav2lip/ 再在这里补 _dir_datas。
+# Wav2Lip 生成式口型权重（2026-11-14 / 11.14c 起本机已有）
+#   运行时只要这几个：
+#     wav2lip_gan.onnx + wav2lip_gan.onnx.data（139MB，外部权重，必须同目录）
+#     scrfd_2.5g_bnkps.onnx（人脸+5点）/ _mel_basis.npy（mel 基）
+#     bigface_x4.onnx(.data) —— 代码里注明"合成阶段负收益不启用"，但 _paths() 会引用，
+#     留着以免将来启用时缺文件（66MB）
+#   ⚠️ 不收集 .pth/.pt/.ckpt：wav2lip_gan.pth 有 416MB，只在离线导出 ONNX 时用，
+#      运行时代码一次都不读（已 grep 确认）。不打进去能省 416MB。
 _W2L_ROOT = os.path.join(root, "data", "models", "wav2lip")
 if os.path.isdir(_W2L_ROOT) and any(f.endswith(".onnx") for f in os.listdir(_W2L_ROOT)):
-    all_datas += _dir_datas(_W2L_ROOT, "data/models/wav2lip")
-    print("[spec] 已收集 Wav2Lip 权重")
+    all_datas += _dir_datas(_W2L_ROOT, "data/models/wav2lip",
+                            skip_suffixes=(".pth", ".pt", ".ckpt"))
+    print("[spec] 已收集 Wav2Lip 权重（跳过 .pth 导出权重）")
 else:
     print("[spec] 提示：本机无 Wav2Lip 权重（正常）—— 唇形同步走 avatar2 形变方案")
 
