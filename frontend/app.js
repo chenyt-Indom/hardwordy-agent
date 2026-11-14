@@ -10058,6 +10058,18 @@
       list.forEach((x) => {
         add += Number(x.added || 0); del += Number(x.removed || 0);
       });
+      return '<div class="sd-list"><div class="sd-list-head">'
+        + '<span class="sd-list-arrow">▾</span>'
+        + '<span class="sd-list-title">🛠 本轮代码改动</span>'
+        + '<span class="sd-list-sum">' + list.length + " 处 · "
+        + '<span class="sd-add">+' + add + '</span> <span class="sd-del">−' + del
+        + "</span></span></div>"
+        + '<div class="sd-list-body">' + codeRowsHtml(list) + "</div></div>";
+    }
+
+    // 只生成「每个文件一行」那部分：实时卡片要往已有列表里追加，复用它。
+    function codeRowsHtml(items) {
+      const list = items || [];
       let rows = "";
       list.forEach((x, i) => {
         const actName = (x.type === "selfdev")
