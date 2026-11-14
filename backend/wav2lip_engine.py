@@ -231,8 +231,10 @@ class Wav2LipEngine:
         h1 = o - cv2.GaussianBlur(o, (0, 0), 1.0)
         h2 = o - cv2.GaussianBlur(o, (0, 0), 2.6)
         out = base + h1 * (0.55 * strength) + h2 * (0.45 * strength)
-        # 轻度锐化，抵消放大软化
-        out = out + 0.35 * (out - cv2.GaussianBlur(out, (0, 0), 1.0))
+        # 轻度锐化，抵消放大软化。
+        # ⚠️ 原为 0.35，实测椭圆内拉普拉斯方差是椭圆外的 1.22 倍 —— 补丁区
+        # 比周围更「锐」，边缘一眼就能看出是贴上去的。降到 0.20 抹平这个断层。
+        out = out + 0.20 * (out - cv2.GaussianBlur(out, (0, 0), 1.0))
         return np.clip(out, 0, 255)
 
     def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.54,
