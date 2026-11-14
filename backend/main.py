@@ -12000,8 +12000,8 @@ def _hive_history_turns(hist: list, max_ctx: int = 14) -> list:
             body = "[代码]\n" + body
         elif t == "system":
             body = "（系统）" + body
-        if len(body) > 800:
-            body = body[:800] + "…（已截断）"
+        if len(body) > 500:
+            body = body[:500] + "…（已截断）"
         if flist:
             names = []
             for f in flist:
