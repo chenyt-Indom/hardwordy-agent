@@ -532,31 +532,30 @@ def _blink(img, prep, amount, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0,
         cy, cx = ey - ry0, ex - rx0
         yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
 
-        # 采样源：眼睛**上方**的一条窄皮肤带（cy-2.35eh → cy-1.1eh）。
+        # 采样源：眼睛**上方**的一条皮肤带（cy-2.15eh → cy-1.0eh）。
         # 这一条永远不落在眼球上 —— 否则瞳孔/睫毛的暗色会被拉下来，
-        # 就是视觉复核看到的「眼尾下方深色阴影」和「肉色补丁」。
+        # 就是视觉复核看到的「眼尾下方深色阴影」。
         t = np.clip((yy - (cy - eh)) / (2.0 * eh), 0.0, 1.0)
-        src_y = (cy - 2.35 * eh) + t * (1.25 * eh)
+        src_y = (cy - 2.15 * eh) + t * (1.15 * eh)
 
-        # 每列的下拉量：中间最大、眼角按 cos 衰减到 0 → 弧形眼皮
-        u = np.clip((xx - cx) / ew, -1.0, 1.0)
-        fall = np.maximum(np.cos(u * np.pi / 2.0), 0.0) ** 0.75
-        pull = (yy - src_y) * a * fall
-
-        map_y = (yy - pull).astype(np.float32)
+        # 覆盖量：a=1 时眼裂整块被上方皮肤替代（不会露眼白），
+        # a 小时按比例混合回原图 → 半闭。注意这里**不按 cos 衰减**，
+        # 否则眼角完全不闭，视觉复核会看到「露出白色巩膜」。
+        map_y = (yy + (src_y - yy) * a).astype(np.float32)
         moved = cv2.remap(roi, xx.astype(np.float32), map_y, cv2.INTER_LINEAR,
                           borderMode=cv2.BORDER_REPLICATE)
 
-        # 闭合线的眼睑厚度阴影：沿闭合位置压暗一点点，避免「一块平铺的肉色」
-        lid = np.clip(1.0 - np.abs(yy - (cy + eh * 0.15)) / (eh * 0.55), 0.0, 1.0)
-        shade = 1.0 - 0.14 * a * lid * fall
+        # 闭合线的眼睑厚度阴影：沿闭合位置压暗，避免「一块平铺的肉色」
+        lid = np.clip(1.0 - np.abs(yy - (cy + eh * 0.10)) / (eh * 0.62), 0.0, 1.0)
+        shade = 1.0 - 0.16 * a * lid
         moved = moved * shade[:, :, None]
 
-        # 蒙版：只在「眼裂 + 上眼皮」范围生效，上下边界都羽化，眼角椭圆收口
-        top_soft = np.clip((yy - (cy - 2.15 * eh)) / (eh * 0.55), 0.0, 1.0)
-        bot_soft = np.clip(((cy + eh * 1.30) - yy) / (eh * 0.75), 0.0, 1.0)
-        side = np.clip((ew * 1.10 - np.abs(xx - cx)) / (ew * 0.42), 0.0, 1.0)
-        m = (top_soft * bot_soft * side)[:, :, None]
+        # 椭圆蒙版收口：覆盖眼裂 + 上眼皮，边缘 0.35 羽化，
+        # 保证眼框外一个像素都不动（实测框外改动必须为 0）
+        ry = (yy - (cy - eh * 0.30)) / (eh * 1.52)
+        rx = (xx - cx) / (ew * 1.06)
+        rr = np.sqrt(np.maximum(rx * rx + ry * ry, 0.0))
+        m = np.clip((1.0 - rr) / 0.35, 0.0, 1.0)[:, :, None]
 
         out[ry0:ry1, rx0:rx1] = np.clip(moved * m + roi * (1.0 - m),
                                         0, 255).astype(np.uint8)
