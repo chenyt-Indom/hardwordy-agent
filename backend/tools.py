@@ -5184,7 +5184,7 @@ def _do_workspace_move(arguments, ui_events=None) -> str:
     return "已把 %s 移到 %s" % (rel, r.get("rel"))
 
 
-def _do_workspace_pack(arguments=None) -> str:
+def _do_workspace_pack(arguments=None, ui_events=None) -> str:
     """把当前项目打包成 zip，给用户一个能直接点的下载链接。
 
     用户要求「通过 AI 打包」—— 所以做成工具，而不是界面按钮：
