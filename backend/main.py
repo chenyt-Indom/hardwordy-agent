@@ -11907,10 +11907,20 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
              "dur_ms": dur, "task_id": mid, "cancelled": cancelled,
              "think_chars": len(thinking), "out_chars": len(text),
              "error": err}
+    # 长文（>3000 字）另存一份 .md 跟着消息发出去，成员能直接下载
+    extra = _hive_attach_long_text(gid, final, extra)
     try:
         _hive_post(gid, final, "ai", extra)
     except Exception:
         logger.warning("@hd 结果落盘失败", exc_info=True)
+    # 附件本体走分片广播（和普通附件同一条链路，失败会进补发队列）
+    _long_files = list((extra or {}).get("files") or [])
+    if _long_files:
+        try:
+            threading.Thread(target=_hive_send_files,
+                             args=(gid, _long_files), daemon=True).start()
+        except Exception:
+            logger.warning("长文附件广播启动失败", exc_info=True)
     # 结束帧：前端据此把「进度卡片」替换成正式消息
     _hd_emit(gid, mid, "done",
              task={"dur_ms": dur, "cancelled": cancelled, "error": err,
