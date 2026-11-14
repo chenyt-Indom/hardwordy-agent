@@ -12096,6 +12096,12 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 "image_key": "", "image_model": "", "ds_key": ""}
         _ui_all: list = []          # 工具副作用（图片 / 文库文件）→ 存成群附件
         _t_round = [0]
+        # 时间预算（2026-11-15）：只放宽轮次不够 —— 一轮可能几秒也可能几分钟。
+        # 和单人模式用同一个配置项，默认 20 分钟，到点就收尾而不是无限跑。
+        try:
+            _budget_s = float(cfg.get("max_tool_seconds") or 1200)
+        except Exception:
+            _budget_s = 1200.0
 
         def _exec_tool(name: str, args: dict) -> str:
             """原生工具调用的统一执行入口（云端 / 本地共用）。
