@@ -18,7 +18,7 @@ if not os.path.isfile(mp3):
         await c.save(mp3)
     asyncio.run(gen())
 print("语音 %.1fKB" % (os.path.getsize(mp3)/1024))
-wav16 = os.path.join(OUT, "t.wav")
+wav16 = os.path.join(OUT, "t2.wav")
 subprocess.run([A2.ffmpeg(), "-y", "-loglevel", "error", "-i", mp3,
                 "-ar", "16000", "-ac", "1", wav16], check=False)
 print("wav %.1fKB" % (os.path.getsize(wav16)/1024))
