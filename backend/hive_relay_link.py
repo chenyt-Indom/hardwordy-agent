@@ -859,6 +859,10 @@ class RelayLink:
         self.rtt_ms = round((time.time() - t0) * 1000, 1)
         self.server_seq = int(r.get("seq") or 0)
         self.peers = int(r.get("peers") or 0)
+        try:
+            sock.settimeout(None)      # 握手完成，恢复正常阻塞收包
+        except Exception:
+            pass
         self.sock = sock
 
         # 把中继挂成一个 peer —— 从此 mesh 的所有发送都会经过它
