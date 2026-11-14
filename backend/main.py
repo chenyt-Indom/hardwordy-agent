@@ -12012,6 +12012,34 @@ def hive_relay_test(body: dict):
     return hive_relay_link.probe(url, cfg.get("token") or "")
 
 
+@app.post("/api/hive/relay/probe_all")
+def hive_relay_probe_all(body: dict):
+    """把所有候选线路（主 + 自动派生备用）逐条探一遍。
+
+    用来回答「现在到底有几条路是通的」。任何一条通就能收发消息，
+    所以这里报的是「冗余度」，不是「能不能用」。
+    """
+    b = body or {}
+    cfg = hive_client.relay_config()
+    url = str(b.get("url") or cfg.get("url") or "").strip()
+    if not url:
+        return {"ok": False, "error": "先填服务器地址"}
+    cands = hive_relay_link.candidates_for(url, cfg.get("urls"))
+    items = []
+    for p in cands:
+        u = str(p.get("url") or "")
+        try:
+            r = hive_relay_link.probe(u, cfg.get("token") or "", timeout=3.0)
+        except Exception as e:
+            r = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        items.append({"url": u, "ok": bool(r.get("ok")),
+                      "ms": r.get("ms") or 0,
+                      "error": r.get("error") or ""})
+    alive = [x for x in items if x["ok"]]
+    return {"ok": True, "url": url, "total": len(items),
+            "alive": len(alive), "items": items}
+
+
 # ---------------------------------------------------------------- 部署凭据（2026-11-14）
 # 两样密钥都在本机：SSH 私钥（data/deploy/id_rsa）+ 中继密钥（data/hive/relay.json）。
 # 私钥默认只回掩码/指纹，前端点「眼睛」才用 reveal=1 取全文。
