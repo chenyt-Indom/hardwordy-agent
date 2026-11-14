@@ -12007,7 +12007,11 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                         except Exception:
                             _ag = {}
                     _out = _exec_tool(_nm, _ag if isinstance(_ag, dict) else {})
-                    _work.append({"role": "tool", "name": _nm, "content": _out})
+                    # ⚠️ Ollama 的字段名是 **tool_name**，不是 name ——
+                    #    写错时它不报错，只是把结果当成一条无主消息，模型看不到
+                    #    工具输出，接着就会重复调同一个工具（和单人版对齐，见 6221 行）。
+                    _work.append({"role": "tool", "content": _out,
+                                  "tool_name": _nm})
         # 收尾：把最后没推完的一小段推掉，别让界面卡在倒数第二句
         if not cancelled:
             _flush(force=True)
