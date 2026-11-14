@@ -5037,6 +5037,19 @@ html[data-theme="light"] select.pill-select option {
 .av2-blink-hint { opacity: 0.72; }
 .av2-acts-doc { margin-top: 2px; }
 .av2-acts-doc .btn { flex: 1 1 auto; }
+/* 闭嘴基准 / 打开文件夹 / 复制路径：三个按钮挤一行，字小一号 */
+.av2-acts-mouth { margin-top: 2px; gap: 5px; }
+.av2-acts-mouth .btn { flex: 1 1 auto; font-size: 11.5px; padding: 4px 6px; }
+/* 路径显示：等宽、可换行、可选文本（方便手动复制） */
+.av2-path {
+  font: 11px/1.5 ui-monospace, Consolas, monospace;
+  color: #9aa4b2;
+  word-break: break-all;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.10);
+  user-select: text;
+}
 
 /* 文档导入预览：先看清楚再朗读，不直接覆盖用户写的内容 */
 .av2-doc {

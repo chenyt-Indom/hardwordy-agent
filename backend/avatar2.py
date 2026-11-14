@@ -240,6 +240,11 @@ def info() -> dict:
         "source": meta.get("source") or "",
         "updated": meta.get("updated") or "",
         "dir": _dir(),
+        # 闭嘴基准：源图本来张着嘴时用它，否则 Wav2Lip 的闭嘴帧会带着口型
+        "closed": has_closed(),
+        "closed_url": ("/api/avatar2/closed?v=%d" % int(os.path.getmtime(_img_closed_path())))
+        if has_closed() else "",
+        "videos_dir": _vdir(),
     }
 
 
@@ -265,6 +270,12 @@ def save_bytes(raw: bytes, source: str = "") -> dict:
         im.save(_img_path(), "PNG")
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "保存形象失败：%s: %s" % (type(e).__name__, e)}
+    # 闭嘴基准是按**旧图**合成的，换了形象必须清掉，否则新形象会用旧图的嘴
+    try:
+        if os.path.isfile(_img_closed_path()):
+            os.remove(_img_closed_path())
+    except OSError:
+        pass
     # 存完立刻自动定位嘴：上传照片和 AI 头像的构图差别极大，靠默认值一定偏，
     # 检测到就覆盖 mouth.json；检测不到保留默认值，前端可手动拖动校准。
     auto = detect_mouth(_img_path())
@@ -304,13 +315,185 @@ def save_from_b64(b64: str, source: str = "") -> dict:
 
 
 def reset() -> dict:
+    for p in (_img_path(), _img_closed_path()):
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    return info()
+
+
+# ------------------------------------------------------- 卡通形象 / 闭嘴基准
+def _img_closed_path() -> str:
+    return os.path.join(_dir(), "avatar_closed.png")
+
+
+def has_closed() -> bool:
+    return os.path.isfile(_img_closed_path())
+
+
+def render_source() -> str:
+    """渲染时真正要用的形象图：有闭嘴基准就用它，否则用原图。"""
+    p = _img_closed_path()
+    return p if os.path.isfile(p) else _img_path()
+
+
+def face_box_from_mouth(size=None):
+    """用嘴部标定反推 Wav2Lip 的人脸裁剪框。
+
+    卡通 / 非人类形象没有 SCRFD 能识别的人脸（实测直接返回 0 个框，
+    报「未检测到人脸」），只能靠用户框出来的嘴部反推一个裁剪框。
+    两个比例来自 Wav2Lip 训练数据的对齐方式：嘴中心约在裁剪框 76% 高度，
+    嘴高约等于脸高的 1/4.6。裁剪框取正方形（模型输入是 96x96）。
+    """
     p = _img_path()
-    if os.path.isfile(p):
+    if not os.path.isfile(p):
+        return None
+    if size is None:
         try:
-            os.remove(p)
+            from PIL import Image
+            with Image.open(p) as im:
+                size = im.size
+        except Exception:                               # noqa: BLE001
+            return None
+    W, H = size
+    cx, cy, mw, mh = _mouth_geom((W, H), mouth())
+    fh = max(24.0, mh * 4.6)
+    x1 = cx - fh / 2.0
+    y1 = cy - 0.76 * fh
+    x2 = x1 + fh
+    y2 = y1 + fh
+    x1 = max(0, min(W - 8, x1))
+    y1 = max(0, min(H - 8, y1))
+    x2 = max(x1 + 8, min(W, x2))
+    y2 = max(y1 + 8, min(H, y2))
+    return int(x1), int(y1), int(x2), int(y2)
+
+
+def close_mouth(force: bool = False) -> dict:
+    """把「张嘴」的源图合成一张闭嘴基准图（avatar_closed.png）。
+
+    为什么需要：Wav2Lip 是拿参考脸当条件的生成模型。源图嘴张着，生成的
+    闭嘴帧也带着张开的口型 —— 念「一、二、三」时嘴合不拢，看着像一直在笑。
+
+    做法是**确定性合成**（不是 GAN 也不是扩散）：把嘴部开孔（暗腔 + 牙齿）
+    用唇色重建 —— 上下唇各取自己一侧的唇色做纵向渐变，中间留一道唇缝暗线，
+    再把补丁的颜色/光照匹配到周围、用羽化蒙版混合。所以边缘不会出现
+    「贴了一块颜色不一样的补丁」。
+    """
+    import cv2
+
+    p = _img_path()
+    if not os.path.isfile(p):
+        return {"ok": False, "error": "还没有形象图"}
+    img = cv2.imread(p, cv2.IMREAD_COLOR)
+    if img is None:
+        return {"ok": False, "error": "形象图读取失败"}
+    H, W = img.shape[:2]
+    cx, cy, mw, mh = _mouth_geom((W, H), mouth())
+    # 开孔椭圆（要填掉的区域）与融合椭圆（羽化范围）
+    rx, ry = max(6.0, mw * 0.60), max(5.0, mh * 0.60)
+    ox, oy = max(8.0, mw * 0.78), max(7.0, mh * 0.78)
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+    m_open = np.zeros((H, W), np.uint8)
+    cv2.ellipse(m_open, (int(cx), int(cy)), (int(rx), int(ry)), 0, 0, 360, 255, -1)
+    m_outer = np.zeros((H, W), np.uint8)
+    cv2.ellipse(m_outer, (int(cx), int(cy)), (int(ox), int(oy)), 0, 0, 360, 255, -1)
+
+    # 唇色参考：外椭圆内、开孔椭圆外的那一圈就是嘴唇
+    ring = (m_outer > 0) & (m_open == 0)
+    if ring.sum() < 30:
+        return {"ok": False, "error": "嘴部标定太小，先在图上把嘴框准"}
+    ring_med = float(np.median(gray[ring]))
+
+    # 开孔判据：明显比唇色暗（口腔）或又亮又淡（牙齿）
+    dark = gray < max(28.0, ring_med * 0.62)
+    teeth = (hsv[:, :, 1] < 70) & (hsv[:, :, 2] > max(150.0, ring_med * 1.18))
+    cand = ((dark | teeth) & (m_open > 0)).astype(np.uint8)
+    ellipse_px = max(1, int((m_open > 0).sum()))
+    # ⚠ 只看「暗像素占比」会误判：闭嘴的唇缝本身也是一条暗线（实测占椭圆
+    #   面积 34%），照那样填会把原本好好的嘴唇涂掉。真开孔是一个**紧凑、
+    #   有纵向高度的块**，唇缝是**又细又长的一条** —— 用连通域形状区分。
+    n_lab, lab, stats, _cent = cv2.connectedComponentsWithStats(cand, 8)
+    best_lab, best_a = -1, 0
+    for li in range(1, n_lab):
+        a = int(stats[li, cv2.CC_STAT_AREA])
+        if a > best_a:
+            best_a, best_lab = a, li
+    cavity = np.zeros((H, W), bool)
+    if best_lab > 0:
+        bw_ = int(stats[best_lab, cv2.CC_STAT_WIDTH])
+        bh_ = int(stats[best_lab, cv2.CC_STAT_HEIGHT])
+        fill = best_a / max(1, bw_ * bh_)
+        # 够大 + 有纵向高度（>= 椭圆高度的 42%）+ 是个块（填充率 >= 0.45）
+        if best_a >= 0.12 * ellipse_px and bh_ >= 0.42 * 2 * ry and fill >= 0.45:
+            cavity = (lab == best_lab)
+    cav_px = int(cavity.sum())
+    if cav_px == 0:
+        # 已经是闭嘴：把可能存在的旧基准删掉，别拿它污染渲染
+        try:
+            if os.path.isfile(_img_closed_path()):
+                os.remove(_img_closed_path())
         except OSError:
             pass
-    return info()
+        if not force:
+            return {"ok": True, "closed": False,
+                    "reason": "看起来已经是闭嘴（没有找到成块的口腔区域），不用处理"}
+
+    # 结构来源：闭嘴的物理过程就是「下唇抬起来贴住上唇」，所以直接拿开口
+    # **下方**的真实像素往上搬 —— 纹理、唇纹、明暗渐变全都是真的，
+    # 不会出现「一块纯色补丁」。纯色渐变试过，视觉复核直接判定「方块状补丁、
+    # 硬切边、色差」，所以改成搬像素。
+    cav_u8 = cv2.dilate(cavity.astype(np.uint8) * 255,
+                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    m_fill = (cav_u8 > 0) & (m_outer > 0)
+
+    # 镜像填充：上半腔从**上唇**镜像下来、下半腔从**下唇**镜像上去。
+    # 为什么不用整体平移：平移量小于腔体高度时，顶部会残留一条黑色腔体
+    # （实测就是这样，视觉复核判「巨大黑色不规则色块」）；平移量再大就会
+    # 把下巴的像素拉进嘴里。镜像填充在边界处天然连续，且不会越界取到别处。
+    ys_f, xs_f = np.nonzero(m_fill)
+    v = (ys_f.astype(np.float32) - cy) / max(1.0, ry)
+    src_y = np.where(v < 0, 2.0 * (cy - ry) - ys_f, 2.0 * (cy + ry) - ys_f)
+    src_y = np.clip(src_y, 0, H - 1).astype(np.int32)
+    filled = img.copy()
+    filled[ys_f, xs_f] = img[src_y, xs_f]
+
+    # 唇缝：闭上的嘴唇中间有一道暗线，补一道（否则上下唇连成一片像香肠）
+    seam = np.zeros((H, W), np.float32)
+    cv2.ellipse(seam, (int(cx), int(cy)), (int(mw * 0.46), max(1, int(mh * 0.05))),
+                0, 0, 360, 1.0, -1)
+    seam = cv2.GaussianBlur(seam, (0, 0), max(0.8, mh * 0.03))[..., None]
+    filled = np.clip(filled.astype(np.float32) * (1.0 - 0.30 * seam), 0, 255).astype(np.uint8)
+
+    # 无缝融合：泊松把补丁的光照/色温对齐到周围，边缘不留硬切线
+    mask_u8 = np.zeros((H, W), np.uint8)
+    cv2.ellipse(mask_u8, (int(cx), int(cy)), (int(ox), int(oy)), 0, 0, 360, 255, -1)
+    blended = filled
+    try:
+        blended = cv2.seamlessClone(filled, img, mask_u8,
+                                    (int(cx), int(cy)), cv2.NORMAL_CLONE)
+    except Exception:                                    # noqa: BLE001
+        # 泊松失败（掩膜贴边等）：退回羽化混合
+        alpha = cv2.GaussianBlur((mask_u8 > 0).astype(np.float32), (0, 0),
+                                 max(1.2, ry * 0.25))[..., None]
+        blended = np.clip(filled.astype(np.float32) * alpha
+                          + img.astype(np.float32) * (1 - alpha), 0, 255).astype(np.uint8)
+    blended = np.clip(blended, 0, 255).astype(np.uint8)
+
+    # 颜色匹配：把补丁区的均值拉到周围皮肤/唇色，避免「一块偏色」
+    dst = _img_closed_path()
+    cv2.imwrite(dst, blended)
+    meta = _read_json(_META, {})
+    meta["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    meta["closed_from"] = os.path.basename(p)
+    _write_json(_META, meta)
+    return {"ok": True, "closed": True, "path": dst,
+            "cavity_px": cav_px, "url": "/api/avatar2/closed?v=%d" % int(os.path.getmtime(dst))}
 
 
 # ---------------------------------------------------------------- 音频处理

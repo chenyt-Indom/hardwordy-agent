@@ -2301,11 +2301,12 @@
     // object-fit: contain 会留白，所以不能直接按容器百分比算。
     const mbox = $("#av2MouthBox");
     const mouthState = { x: 0.5, y: 0.5, w: 0.2, h: 0.05 };
-    // Wav2Lip 用 SCRFD 检测出的人脸框，根本不读 mouth.json ——
-    // 这时把红框画出来会让人以为拖滑块能改它的嘴，所以直接不显示。
+    let dirPath = "";
+    // Wav2Lip 现在**也会用** mouth.json：SCRFD 检测不到人脸（卡通 / 非人类
+    // 形象）时，就是用这里标定的嘴部反推人脸裁剪框。所以任何模式都要显示
+    // 这个框，用户才有地方框嘴 —— 原来 w2l 下隐藏，卡通形象根本没救。
     function mouthBoxApplies() {
-      const ms = $("#av2Mode");
-      return !ms || ms.value !== "w2l";
+      return true;
     }
     function paintMouthBox() {
       if (!mbox) return;
@@ -2330,6 +2331,106 @@
     img.addEventListener("load", paintMouthBox);
     window.addEventListener("resize", paintMouthBox);
 
+    // —— 在预览图上直接拖框标嘴部 ——
+    // 卡通 / 非人类形象 SCRFD 检测不到人脸，只能靠手动框；拖动比拖两个滑块直观。
+    // 归一化坐标必须按「图片在预览区里的实际显示矩形」换算：object-fit: contain
+    // 会留白，直接用容器百分比会整体偏移。
+    function stageToNorm(ev) {
+      const stage = $("#av2Stage");
+      if (!stage || !img.naturalWidth) return { x: 0.5, y: 0.5 };
+      const r = stage.getBoundingClientRect();
+      const k = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
+      const dw = img.naturalWidth * k, dh = img.naturalHeight * k;
+      const ox = (r.width - dw) / 2, oy = (r.height - dh) / 2;
+      return {
+        x: Math.min(1, Math.max(0, (ev.clientX - r.left - ox) / dw)),
+        y: Math.min(1, Math.max(0, (ev.clientY - r.top - oy) / dh)),
+      };
+    }
+    (function bindMouthDrag() {
+      const stage = $("#av2Stage");
+      if (!stage) return;
+      let drag = null;
+      stage.addEventListener("pointerdown", (ev) => {
+        if (img.hidden || !img.naturalWidth) return;
+        drag = stageToNorm(ev);
+        try { stage.setPointerCapture(ev.pointerId); } catch (e) {}
+        ev.preventDefault();
+      });
+      stage.addEventListener("pointermove", (ev) => {
+        if (!drag) return;
+        const p = stageToNorm(ev);
+        const x = Math.min(drag.x, p.x), y = Math.min(drag.y, p.y);
+        const w = Math.abs(p.x - drag.x), h = Math.abs(p.y - drag.y);
+        mouthState.x = x + w / 2;
+        mouthState.y = y + h / 2;
+        mouthState.w = Math.max(0.02, w);
+        mouthState.h = Math.max(0.012, h);
+        paintMouthBox();
+      });
+      stage.addEventListener("pointerup", async () => {
+        if (!drag) return;
+        drag = null;
+        // 只是点一下（没拖出面积）就当没发生，别把嘴位改成 0
+        if (mouthState.w < 0.04 || mouthState.h < 0.02) { paintMouthBox(); return; }
+        try {
+          await api("/api/avatar2/mouth", {
+            method: "POST", body: JSON.stringify(mouthState) });
+          if (my) my.value = mouthState.y;
+          if (mw) mw.value = mouthState.w;
+          say("嘴部已标定 —— 卡通形象现在也能生成了");
+        } catch (e) { say("标定失败：" + e.message, "err"); }
+      });
+    })();
+
+    // —— 打开文件夹 / 复制路径 / 闭嘴基准 ——
+    (function bindDirAndClose() {
+      const fbtn = $("#av2Folder"), cbtn = $("#av2CopyPath");
+      const cpath = $("#av2Path"), clbtn = $("#av2Close");
+      if (fbtn) fbtn.onclick = async () => {
+        try {
+          const d = await api("/api/avatar2/reveal", { method: "POST", body: "{}" });
+          const p = d.path || d.dir || "";
+          if (cpath && p) { cpath.hidden = false; cpath.textContent = p; }
+          if (p) dirPath = d.dir || p;
+          if (String(d.opened || "").indexOf("error") === 0) {
+            say("打不开资源管理器，路径已显示，可以点「复制路径」");
+          } else {
+            say("已在资源管理器打开");
+          }
+        } catch (e) { say("打开失败：" + e.message, "err"); }
+      };
+      if (cbtn) cbtn.onclick = async () => {
+        const p = (cpath && !cpath.hidden && cpath.textContent) || dirPath;
+        if (!p) { say("还没拿到路径，先点一下「打开文件夹」", "err"); return; }
+        try {
+          await navigator.clipboard.writeText(p);
+          say("路径已复制：" + p);
+        } catch (e) {
+          // 浏览器不给剪贴板权限：把文字露出来让用户自己 Ctrl+C
+          if (cpath) { cpath.hidden = false; cpath.textContent = p; }
+          say("浏览器拦了剪贴板，路径已显示，手动选中复制", "err");
+        }
+      };
+      if (clbtn) clbtn.onclick = async () => {
+        clbtn.disabled = true;
+        const old = clbtn.textContent;
+        clbtn.textContent = "合成中…";
+        try {
+          const d = await api("/api/avatar2/close_mouth", {
+            method: "POST", body: "{}" });
+          if (d.closed) {
+            say("已生成闭嘴基准，之后生成就用它驱动（原图不用动）");
+          } else {
+            say(d.reason || "看起来已经是闭嘴，不用处理");
+          }
+          if (d.info) paintInfo(d.info);
+        } catch (e) { say("闭嘴合成失败：" + e.message, "err"); }
+        clbtn.disabled = false;
+        clbtn.textContent = old;
+      };
+    })();
+
     function paintInfo(info) {
       const has = !!(info && info.has_image);
       img.hidden = !has;
@@ -2348,6 +2449,11 @@
         mouthState.y = +info.mouth.y || 0.5;
         mouthState.w = +info.mouth.w || 0.2;
         mouthState.h = +info.mouth.h || 0.05;
+      }
+      if (info && (info.videos_dir || info.dir)) {
+        dirPath = info.videos_dir || info.dir;
+        const pv = $("#av2Path");
+        if (pv) { pv.hidden = false; pv.textContent = dirPath; }
       }
       paintMouthBox();
     }

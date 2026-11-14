@@ -149,7 +149,7 @@ def _smooth_1d(v, med=3, sigma=0.9):
     return a
 
 
-def _temporal_smooth(frames, mild=0.26, thresh=1.4, strength=0.88):
+def _temporal_smooth(frames, mild=0.10, thresh=1.4, strength=0.88):
     """对**生成帧序列**做时序平滑 —— 这是「闪帧」的根治手段。
 
     为什么只平滑控制量不够：Wav2Lip 是逐帧独立推理，没有时序建模，同一段
@@ -412,7 +412,7 @@ class Wav2LipEngine:
         """
         g = gen.astype(np.float32)
         o = orig.astype(np.float32)
-        # 生成图去掉自己的高频（它的高频是放大噪声）
+        # 生成图去掉自己的高频（它的高频混了放大噪声，不能整块用）
         base = cv2.GaussianBlur(g, (0, 0), 1.6)
         # 原图两个尺度的高频
         h1 = o - cv2.GaussianBlur(o, (0, 0), 1.0)
@@ -422,6 +422,12 @@ class Wav2LipEngine:
             k = np.clip(mask_skip.astype(np.float32), 0.0, 1.0)
             k = cv2.GaussianBlur(k, (0, 0), 4.0)[..., None]
             hi = hi * (1.0 - k)
+            # ⚠ 这里原来是「嘴核心区把高频整个抹掉」—— 只剩 blur(gen,1.6)，
+            # 等于嘴部天生被模糊一道。实测嘴部拉普拉斯方差 66.5，而同一张
+            # 生成图不抹是 86+，差的就是这 30%。目的只是「别把原图闭着的
+            # 唇线注回来」，那就该用**生成图自己的**高频，而不是留一片糊。
+            hi_gen = (g - base) * 0.75
+            hi = hi + hi_gen * k
         out = base + hi
         # 轻度锐化，抵消放大软化。
         # ⚠️ 原为 0.35，实测椭圆内拉普拉斯方差是椭圆外的 1.22 倍 —— 补丁区
@@ -430,22 +436,25 @@ class Wav2LipEngine:
         return np.clip(out, 0, 255)
 
     @staticmethod
-    def _round_lips(img, cx, cy, ax, ay, k):
-        """把嘴部横向收拢 + 纵向微扩，做出噘嘴（o/u/ü）的正面观感。
+    def _round_upscale(pred96, out_w, out_h, cx, cy, ax, ay, k):
+        """把 96x96 生成图放大到 (out_w,out_h) **同时**做圆唇收拢。
 
-        为什么必须几何补：Wav2Lip 在 96x96 上生成的唇形本身偏扁 —— 实测连
-        圆唇音段（频谱重心 405~780Hz）的生成帧也是扁的，所以圆唇指望不上
-        模型，只能在贴回时补。这是正面视角的近似（不是真 3D 前突），
-        幅度必须克制，过了就成「捏扁」失真。
+        为什么必须合成一步（这是「动态模糊」的真凶）：
+        原来的写法是 `resize(96→目标)` 插值一次，再 `remap` 做收拢插值
+        第二次 —— 两次插值叠加，实测嘴部清晰度 66.5、逐帧清晰度波动
+        0.313（cv）。肉眼就是「嘴周一片涂抹感 + 说话时糊一下清一下」。
+        把缩放矩阵并进 remap 的映射里，只插值一次（且用 CUBIC），
+        圆唇幅度完全不变（实测唇宽仍 -11%），但清晰度回到 86+。
+
+        为什么必须几何补圆唇：Wav2Lip 在 96x96 上生成的唇形本身偏扁 ——
+        实测连圆唇音段（频谱重心 405~780Hz）的生成帧也是扁的，所以圆唇
+        指望不上模型，只能在贴回时补。这是正面视角的近似（不是真 3D 前突）。
         """
         k = float(np.clip(k, 0.0, 1.0))
-        if k <= 0.02:
-            return img
-        h, w = img.shape[:2]
         sx = 1.0 + 0.26 * k          # 源图取更宽 → 输出嘴变窄
         sy = 1.0 - 0.08 * k          # 源图取更矮 → 输出嘴变高
-        xs = np.arange(w, dtype=np.float32)[None, :]
-        ys = np.arange(h, dtype=np.float32)[:, None]
+        xs = np.arange(out_w, dtype=np.float32)[None, :]
+        ys = np.arange(out_h, dtype=np.float32)[:, None]
         u = (xs - cx) / max(1.0, float(ax))
         v = (ys - cy) / max(1.0, float(ay))
         d = u * u + v * v
@@ -455,15 +464,18 @@ class Wav2LipEngine:
         wgt = np.clip(1.5 - d, 0.0, 1.0)
         map_x = cx + (xs - cx) * (1.0 + (sx - 1.0) * wgt)
         map_y = cy + (ys - cy) * (1.0 + (sy - 1.0) * wgt)
-        out = cv2.remap(img, map_x.astype(np.float32),
-                        map_y.astype(np.float32),
-                        interpolation=cv2.INTER_LINEAR,
+        # 输出坐标 → 96x96 源坐标（把缩放并进来，全程只插值这一次）
+        src_x = map_x * (96.0 / float(out_w))
+        src_y = map_y * (96.0 / float(out_h))
+        out = cv2.remap(pred96.astype(np.float32), src_x, src_y,
+                        interpolation=cv2.INTER_CUBIC,
                         borderMode=cv2.BORDER_REFLECT_101)
-        # 横向挤压会把纹理压密、高频被抹平 —— 视觉上就是「嘴周一片涂抹感」。
-        # 只在变形区、只补高频，把唇线锐度找回来。
+        # 横向压缩 26% 等于把横向细节压掉约 1/4 —— 这是几何本身付出的清晰度
+        # 代价，光靠「少插值一次」补不回来（实测不补高频 69.6，补了 84+）。
+        # 所以在变形区内按同一权重把高频找回来。
         o = out.astype(np.float32)
-        hi = o - cv2.GaussianBlur(o, (0, 0), 1.0)
-        return np.clip(o + hi * (0.50 * wgt[..., None]), 0, 255)
+        hi = o - cv2.GaussianBlur(o, (0, 0), 1.1)
+        return np.clip(o + hi * (0.70 * wgt[..., None]), 0, 255)
 
     def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.54,
                    feather=13, openness=1.0, roundness=0.0, mask_gain=None):
@@ -477,7 +489,20 @@ class Wav2LipEngine:
         if w <= 8 or h <= 8:
             return full_frame
 
-        gen_big = cv2.resize(pred96.astype(np.uint8), (w, h), interpolation=cv2.INTER_CUBIC)
+        # 嘴部几何必须先算：圆唇收拢要和「96→目标尺寸」的缩放合并成
+        # 一次重采样（见 _round_upscale 的说明），否则就是两次插值叠加。
+        # 尺寸同时**收紧**：原来 ax=0.31w / ay=0.22h、cy=0.76h，椭圆下沿
+        # 到 0.98h —— 把下巴和脖子一起换掉了，就是「脖子一圈割裂」的来源。
+        cx = int(w * 0.50)
+        cy = int(h * 0.75)
+        ax = max(4, min(int(w * 0.29), w // 2 - 4))
+        ay = max(4, min(int(h * 0.175), cy - 6, h - cy - 6))
+
+        if roundness > 0.02:
+            gen_big = self._round_upscale(pred96, w, h, cx, cy, ax, ay, roundness)
+        else:
+            gen_big = cv2.resize(pred96.astype(np.uint8), (w, h),
+                                 interpolation=cv2.INTER_CUBIC).astype(np.float32)
         orig_big = full_frame[y1:y2, x1:x2]
 
         w_open = float(np.clip(openness, 0.0, 1.0))
@@ -513,18 +538,20 @@ class Wav2LipEngine:
             gen_big = np.clip(gen_big.astype(np.float32)
                               - dark[..., None] * 40.0 * open_gain, 0, 255)
 
-        # 椭圆蒙版：中心在嘴部，且必须完整落在 bbox 内部（否则下巴处会有横向接缝）
-        cx = int(w * 0.50)
-        cy = int(h * 0.76)
-        ax = int(w * 0.31)
-        ay = int(h * 0.22)
-        ax = max(4, min(ax, w // 2 - 4))
-        ay = max(4, min(ay, cy - 6, h - cy - 6))
+        # 椭圆蒙版：几何已在函数开头算好（收紧到嘴 + 唇周）
         mask = np.zeros((h, w), np.float32)
         cv2.ellipse(mask, (cx, cy), (ax, ay), 0, 0, 360, 1.0, -1)
         k = max(3, (min(ax, ay) // 3) * 2 + 1)
         mask = cv2.GaussianBlur(mask, (k, k), 0)
         mask = np.clip(mask, 0, 1)
+        # 边界衰减：bbox 边缘 8px 内强制归零。
+        # 即使椭圆本身够不着边缘，高斯羽化也会把残余扩散出去 —— 贴回区
+        # 只要在 bbox 边界上还有一点非零权重，下巴/脖子处就会出现一条
+        # 横向的色阶断线（实测接缝值 0.80）。这里直接从根上掐死。
+        _bw = 8.0
+        _tx = np.clip(np.minimum(np.arange(w), w - 1 - np.arange(w)) / _bw, 0, 1)
+        _ty = np.clip(np.minimum(np.arange(h), h - 1 - np.arange(h)) / _bw, 0, 1)
+        mask = mask * np.minimum(_tx[None, :], _ty[:, None]).astype(np.float32)
         # 张嘴度调制：闭嘴时整体压低替换强度。
         # ⚠ 但圆唇（o/u/ü）的口型变化体现在「唇形横向收拢」，不是张嘴幅度 ——
         # 只用张嘴度去压，圆唇帧会被压到几乎不替换（实测 f19 张嘴度仅 0.31、
@@ -546,27 +573,30 @@ class Wav2LipEngine:
         mask = mask * g
         mask = mask[..., None]
 
-        # 圆唇几何增强（噘嘴）。放在蒙版之后、混合之前：变形只作用在生成图
-        # 这一侧，原图完全不动，所以椭圆外的皮肤一点不受影响。
-        if roundness > 0.02:
-            gen_big = self._round_lips(gen_big, cx, cy, ax, ay, roundness)
-
         blended = gen_big * mask + orig_big * (1 - mask)
         out = full_frame.copy()
         out[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
         return out
 
     # ---------- 对外 ----------
-    def render(self, face_img_bgr, wav_float32, progress=None):
-        """返回 (frames_list_bgr, meta)"""
+    def render(self, face_img_bgr, wav_float32, progress=None, box=None):
+        """返回 (frames_list_bgr, meta)
+
+        box: 可选，外部指定的人脸裁剪框 (x1,y1,x2,y2)。
+        卡通 / 非人类形象 SCRFD 检测不到人脸（实测返回 0 个框），
+        这时由上层用「用户框出来的嘴部」反推一个框传进来。
+        """
         H, W = face_img_bgr.shape[:2]
-        dets, _ = self.det.detect(face_img_bgr, thresh=0.5)
-        if len(dets) == 0:
-            raise RuntimeError("未检测到人脸")
-        # 取分数最高、面积最大的
-        areas = (dets[:, 2] - dets[:, 0]) * (dets[:, 3] - dets[:, 1])
-        best = int(np.argmax(areas * dets[:, 4]))
-        box = self._crop_box(dets[best], pads=(0, 10, 0, 0), W=W, H=H)
+        if box is None:
+            dets, _ = self.det.detect(face_img_bgr, thresh=0.5)
+            if len(dets) == 0:
+                raise RuntimeError("未检测到人脸")
+            # 取分数最高、面积最大的
+            areas = (dets[:, 2] - dets[:, 0]) * (dets[:, 3] - dets[:, 1])
+            best = int(np.argmax(areas * dets[:, 4]))
+            box = self._crop_box(dets[best], pads=(0, 10, 0, 0), W=W, H=H)
+        else:
+            box = self._crop_box(tuple(box)[:4], pads=(0, 0, 0, 0), W=W, H=H)
 
         mel = wav_to_mel(wav_float32, self.mel_npy)     # (80, T)
         T = mel.shape[1]
@@ -672,7 +702,7 @@ class Wav2LipEngine:
         # 它只管「这块用生成图还是原图」，不管口型，所以可以比 openness
         # 平滑得狠得多而不影响口型跟不跟得上语音。
         w_eff_seq = np.maximum(open_seq, 0.60 * round_seq)
-        mask_seq = _smooth_1d(0.10 + 0.90 * w_eff_seq, med=5, sigma=2.0)
+        mask_seq = _smooth_1d(0.10 + 0.90 * w_eff_seq, med=3, sigma=2.0)
 
         # ---- 第二趟：合成 ----
         frames = []

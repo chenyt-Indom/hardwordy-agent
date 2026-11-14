@@ -34,6 +34,7 @@ import math
 #    "name 'hashlib' is not defined"，对方文件夹一直是空的）。
 import hashlib
 import shutil
+import subprocess
 import secrets
 import time
 import asyncio
@@ -10107,6 +10108,70 @@ def avatar2_detect_mouth():
 @app.post("/api/avatar2/reset")
 def avatar2_reset():
     return avatar2.reset()
+
+
+@app.get("/api/avatar2/closed")
+def avatar2_closed():
+    """闭嘴基准图的预览。"""
+    p = avatar2._img_closed_path()
+    if not os.path.isfile(p):
+        raise HTTPException(status_code=404, detail="还没有闭嘴基准")
+    return FileResponse(p, media_type="image/png",
+                        headers={"Content-Disposition": "inline",
+                                 "Cache-Control": "no-store"})
+
+
+@app.post("/api/avatar2/close_mouth")
+def avatar2_close_mouth(body: dict = None):
+    """把「张嘴」的源图合成一张闭嘴基准，之后生成就用它驱动。
+
+    body: {force?: true} —— 开孔占比太小时会跳过，force 强制处理。
+    """
+    body = body or {}
+    try:
+        r = avatar2.close_mouth(force=bool(body.get("force")))
+    except Exception as e:                                       # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="闭嘴合成失败：%s: %s" % (type(e).__name__, e))
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "处理失败")
+    r["info"] = avatar2.info()
+    return r
+
+
+@app.post("/api/avatar2/reveal")
+def avatar2_reveal(body: dict = None):
+    """在系统资源管理器里打开数字人目录 / 定位某个视频文件。
+
+    body: {name?: 视频文件名}。同时把路径回给前端（可复制）。
+    """
+    body = body or {}
+    name = str(body.get("name") or "").strip()
+    vdir = avatar2._vdir()
+    target = os.path.join(vdir, os.path.basename(name)) if name else vdir
+    if name and not os.path.isfile(target):
+        target = vdir
+    shown = ""
+    try:
+        if sys.platform.startswith("win"):
+            if os.path.isfile(target):
+                # /select, 让资源管理器直接高亮这个文件
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(target)])
+            else:
+                os.startfile(os.path.normpath(target))         # noqa: S606
+            shown = "explorer"
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R" if os.path.isfile(target) else "",
+                              target])
+            shown = "open"
+        else:
+            subprocess.Popen(["xdg-open", target])
+            shown = "xdg-open"
+    except Exception as e:                                       # noqa: BLE001
+        # 打不开不算失败：路径照样给用户，让他自己复制
+        shown = "error: %s: %s" % (type(e).__name__, e)
+    return {"ok": True, "opened": shown, "path": target, "dir": vdir,
+            "exists": os.path.exists(target)}
 
 
 @app.post("/api/avatar2/speak")

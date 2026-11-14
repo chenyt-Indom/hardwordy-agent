@@ -255,8 +255,17 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
         return {"ok": False, "error": "音频 %.1f 秒，超过 %d 秒上限" % (dur, A2.MAX_SECONDS)}
 
     eng = _engine()
+    # 卡通 / 非人类形象（实测 SCRFD 返回 0 个框）：退回用「用户框出来的
+    # 嘴部」反推一个裁剪框。这样任何形象都能生成，不再直接报「未检测到人脸」。
+    box_override = None
+    dets, _ = eng.det.detect(img, thresh=0.5)
+    if len(dets) == 0:
+        box_override = A2.face_box_from_mouth((W, H))
+        if box_override is None:
+            return {"ok": False,
+                    "error": "没检测到人脸，也没标定嘴部位置 —— 先在形象图上框一下嘴"}
     t0 = time.time()
-    frames, meta = eng.render(img, y.astype(np.float32))
+    frames, meta = eng.render(img, y.astype(np.float32), box=box_override)
     t_infer = time.time() - t0
     if not frames:
         return {"ok": False, "error": "没有生成任何帧"}
@@ -338,7 +347,7 @@ def speak(text, voice="", rate=None, style="", engine="auto",
     t = (text or "").strip()
     if not t:
         return {"ok": False, "error": "文本是空的"}
-    if not os.path.isfile(A2._img_path()):
+    if not os.path.isfile(A2.render_source()):
         return {"ok": False, "error": "还没有数字人形象，请先上传一张图"}
     if not available():
         return {"ok": False, "error": "Wav2Lip 模型未就绪"}
@@ -356,7 +365,7 @@ def speak(text, voice="", rate=None, style="", engine="auto",
 
     name = "lipsync_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
     out = os.path.join(A2._vdir(), name)
-    r = render(A2._img_path(), wav, out, blink=blink, head=head,
+    r = render(A2.render_source(), wav, out, blink=blink, head=head,
                max_side=max_side, motion=motion)
     if not r.get("ok"):
         return r
