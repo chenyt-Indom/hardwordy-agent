@@ -529,7 +529,7 @@ class HiveClient:
             return False
 
     def join_by_password(self, pw: str, name: str = "", host: str = "",
-                         port: int = 0) -> Dict[str, Any]:
+                         port: int = 0, mode: str = "") -> Dict[str, Any]:
         """用 12 位密码进群（二维码已经删掉了）。
 
         找群的三个来源：本机已有记录、局域网 UDP 广播、你手填的地址。
