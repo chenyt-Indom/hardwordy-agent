@@ -212,9 +212,17 @@ class Wav2LipEngine:
         h, w = g.shape[:2]
         if sigma is None:
             sigma = max(4.0, min(h, w) * 0.18)
-        gl = cv2.GaussianBlur(g, (0, 0), sigma)
-        rl = cv2.GaussianBlur(r, (0, 0), sigma)
-        corr = rl - gl
+        # ⚠️ 直接在原分辨率上跑 sigma≈67 的高斯极慢（每帧两次，出片会超时）。
+        # 低频场本来就不需要全分辨率：降到 1/8 上算完再双线性放大，
+        # 结果等价（低频本身就平滑），速度快 50 倍以上。
+        ds = 8
+        sw, sh = max(2, w // ds), max(2, h // ds)
+        sg = cv2.resize(g, (sw, sh), interpolation=cv2.INTER_AREA)
+        sr_ = cv2.resize(r, (sw, sh), interpolation=cv2.INTER_AREA)
+        sig_s = max(1.0, sigma / ds)
+        gl = cv2.GaussianBlur(sg, (0, 0), sig_s)
+        rl = cv2.GaussianBlur(sr_, (0, 0), sig_s)
+        corr = cv2.resize(rl - gl, (w, h), interpolation=cv2.INTER_LINEAR)
         if mask_keep is not None:
             k = cv2.GaussianBlur(mask_keep.astype(np.float32), (0, 0), sigma * 0.5)
             corr = corr * k[..., None]
