@@ -233,9 +233,11 @@ class Wav2LipEngine:
         # 超分过的图（>96）自带真实纹理，只做很轻的细节回注；
         # 未超分的 96x96 才需要强回注补纹理
         was_sr = pred96.shape[0] > 96
-        base_strength = 0.30 if was_sr else 0.85
-        gen_big = self._detail_inject(gen_big, orig_big,
-                                      strength=max(0.0, base_strength - 0.70 * w_open))
+        if was_sr:
+            st = 0.42 - 0.22 * w_open      # 超分帧：0.42 -> 0.20
+        else:
+            st = 0.85 - 0.60 * w_open      # 未超分：0.85 -> 0.25
+        gen_big = self._detail_inject(gen_big, orig_big, strength=max(0.18, st))
 
         # 椭圆蒙版：中心在嘴部，且必须完整落在 bbox 内部（否则下巴处会有横向接缝）
         cx = int(w * 0.50)
