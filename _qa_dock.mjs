@@ -117,8 +117,20 @@ const seq = [
       diff: "@@ -10,3 +10,4 @@\n- old line\n+ new line\n+ another" } },
   { phase: "content", delta: ans, full: ans },
 ];
+const before = await evaluate(`(() => {
+  const b = document.getElementById('hiveMsgs');
+  return JSON.stringify({ n: b.children.length, cls: Array.from(b.children).map(x=>x.className).slice(0,6) });
+})()`);
+console.log("发帧前 hiveMsgs:", before);
+
 for (const s of seq) { appWs.send(frame(s)); await sleep(180); }
 await sleep(1200);
+
+const after = await evaluate(`(() => {
+  const b = document.getElementById('hiveMsgs');
+  return JSON.stringify({ n: b.children.length, cls: Array.from(b.children).map(x=>x.className) });
+})()`);
+console.log("发帧后 hiveMsgs:", after);
 
 // 4) 检查浮层内容
 const report = await evaluate(`(() => {
