@@ -48,7 +48,7 @@ def _brief(d):
 t0 = time.time()
 r1 = a.connect("127.0.0.1", pb, timeout=8.0)
 dt1 = (time.time() - t0) * 1000
-print("第一次打洞:", json.dumps(r1, ensure_ascii=False)[:300])
+print("第一次打洞:", json.dumps(_brief(r1), ensure_ascii=False)[:300])
 chk("第一次打洞", r1.get("ok"), "%.0f ms" % dt1)
 
 tun = a.tunnel_for(("127.0.0.1", pb))
@@ -63,13 +63,13 @@ time.sleep(0.3)
 t0 = time.time()
 r2 = a.connect("127.0.0.1", pb, timeout=8.0)
 dt2 = (time.time() - t0) * 1000
-print("第二次打洞:", json.dumps(r2, ensure_ascii=False)[:300])
+print("第二次打洞:", json.dumps(_brief(r2), ensure_ascii=False)[:300])
 chk("第二次打洞（回归项）", r2.get("ok"), "%.0f ms" % dt2)
 
 # STUN 映射（真实跨网必需）
 m = a.mapped(timeout=3.0)
 print("A 的 STUN 映射:", m)
-chk("STUN 拿到公网映射", bool(m and m.get("host")), m)
+chk("STUN 拿到公网映射", bool(m and (m.get("ip") or m.get("host"))), m)
 
 st = a.status()
 print("A status:", json.dumps(st, ensure_ascii=False)[:400])
