@@ -10132,8 +10132,24 @@
     function hdEnsure(f) {
       const mid = f.mid || "?";
       let c = hdCards[mid];
-      if (c && document.body.contains(c.node)) return c;
       const box = el("hiveMsgs");
+      if (c) {
+        // ★ 2026-11-15 真 bug（实测抓到）：进群/刷新消息时 renderMsgs() 会
+        //   `box.innerHTML = ""`，把**还在跑**的实时卡片一起冲掉。
+        //   思考节点因为已经 dock 到 body 上而幸存 → 出现「思考还在、工具条和正文没了」
+        //   （实测：浮层里思考完整，而 #hiveMsgs 里 .hd-live 数量为 0）。
+        //   这里**不重建**卡片（重建会丢掉已经收到的思考和正文），只把丢的那个挂回去。
+        if (!document.body.contains(c.thinkNode)) {
+          c.thinkNode._home = c.node;
+          if (document.body.contains(c.node)) box.insertBefore(c.thinkNode, c.node);
+          else box.appendChild(c.thinkNode);
+          if (typeof hvThinkFollow !== "undefined" && hvThinkFollow && !c.thinkNode._noFollow) {
+            hvDock(c.thinkNode);
+          }
+        }
+        if (!document.body.contains(c.node)) box.appendChild(c.node);
+        return c;
+      }
       const empty = box.querySelector(".hive-empty");
       if (empty) empty.remove();
       const node = document.createElement("div");
@@ -10145,11 +10161,25 @@
       //     · 群里根本没有工具小条，只有一行「正在执行工具（第 N 轮）」
       //     · 群里根本没有代码卡片 —— 造软件时一行代码都看不到
       //   现在四段结构、class、文案全部照单人那份来，两边看起来就是同一个功能。
+      // ★ 2026-11-15（用户要求）：「跟随视角」里**只浮思考框**，工具条和正文不许跟进去。
+      //   原来整张卡（思考 + 工具条 + 正文 + 🛠 代码改动）是一个节点，dock 的是整张 ——
+      //   于是左上角那个小窗里塞满一排工具 chip 和大段正文（用户截图里连 1899 字的
+      //   正文都躺在浮层里，还叠着「取消」按钮）。
+      //   单人模式浮的是 thinkWrap：一个只装 .think-hdr + .think-body 的独立节点。
+      //   所以这里改成**和单人模式一样的两个平级节点**（都在 .hive-msgs 下）：
+      //     thinkNode  只装思考标题 + 思考正文      ← 跟随视角只浮这一个
+      //     node       装昵称 / 工具条 / 正文 / 代码改动 ← 永远留在消息流里
+      //   做成平级（而不是外面再套一层）是为了让两个都直接吃到 .hive-msgs .msg
+      //   那套 CSS —— 不新增第二套样式，和单人模式的 thinkWrap / answerWrap 同构。
+      const thinkNode = document.createElement("div");
+      thinkNode.className = "msg bot hd-think-card";
+      thinkNode.innerHTML = '<div class="bubble think-hdr hd-think">'
+        + '<span class="hd-think-lbl">🧠 思考中…</span>'
+        + '<span class="arrow">▾</span></div>'
+        + '<div class="think-body open"></div>';
+
       node.className = "msg bot hd-live";
       node.innerHTML = '<span class="hmsg-who"></span>'
-        + '<div class="bubble think-hdr hd-think"><span class="hd-think-lbl">🧠 思考中…</span>'
-        + '<span class="arrow">▾</span></div>'
-        + '<div class="think-body open"></div>'
         + '<div class="tool-strip hd-tools"></div>'
         + '<div class="bubble hmsg-body hd-out"></div>'
         + '<div class="sd-list hd-sd" hidden>'
@@ -10159,17 +10189,19 @@
         + '<span class="sd-list-sum">0 处</span>'
         + "</button>"
         + '<div class="sd-list-body"></div></div>';
+      box.appendChild(thinkNode);
       box.appendChild(node);
       box.scrollTop = box.scrollHeight;
       c = {
-        node: node, think: node.querySelector(".think-body"),
+        node: node, thinkNode: thinkNode,
+        think: thinkNode.querySelector(".think-body"),
         out: node.querySelector(".hd-out"),
         who: node.querySelector(".hmsg-who"),
-        details: node.querySelector(".hd-think"),
+        details: thinkNode.querySelector(".hd-think"),
         // ★ 2026-11-15：标题要像单人模式那样实时显示字数（用户要求「思考卡片
         //   的内容与单人模式一模一样」）。原来固定写「思考过程」，字数只在一个
         //   进度条里，和单聊的「🧠 思考中…（N 字）」不是一回事。
-        lbl: node.querySelector(".hd-think-lbl"),
+        lbl: thinkNode.querySelector(".hd-think-lbl"),
         tools: node.querySelector(".hd-tools"),     // 工具小条（和单人 .tool-strip 同一套）
         sd: node.querySelector(".hd-sd"),           // 🛠 本轮代码改动（和单人 .sd-list 同一套）
         sdBody: node.querySelector(".hd-sd .sd-list-body"),
@@ -10201,7 +10233,10 @@
       cbtn.onclick = () => hdCancel(mid);
       c.tools.appendChild(cbtn);
       hdCards[mid] = c;
-      hvDock(node);          // 「跟随视角」开着就浮到左上角（和单人模式一致）
+      // ★ 2026-11-15：跟随视角**只浮思考节点**（工具条和正文留在消息流里，和单人模式一致）。
+      //   _home 记下正文节点：用户点「归位」时插回它前面，而不是丢到消息流最末尾。
+      thinkNode._home = node;
+      hvDock(thinkNode);
       return c;
     }
 
@@ -10375,6 +10410,10 @@
         // 正式消息马上会由 msg 事件补上（它带完整思考和耗时），
         // 这里延时移除卡片，别抢在正式消息前面闪一下。
         setTimeout(() => {
+          // ★ 2026-11-15：思考节点和正文节点是**平级**的，而且跟随视角时思考节点
+          //   被挪到了 body 上 —— 只 remove(c.node) 会留下一个浮在左上角、再也
+          //   收不回去的思考框。两个都清掉。
+          try { if (c.thinkNode) c.thinkNode.remove(); } catch (e) { /* 忽略 */ }
           try { c.node.remove(); } catch (e) { /* 忽略 */ }
           delete hdCards[f.mid || "?"];
         }, 1200);
@@ -10477,13 +10516,21 @@
       node._noFollow = true;
       node.classList.remove("think-dock");
       node.style.left = node.style.top = node.style.width = node.style.bottom = "";
-      const box = el("hiveMsgs");
-      if (box) box.appendChild(node);
+      // ★ 2026-11-15：归位要回到「正文节点之前」= 它原来的位置。
+      //   原来无条件 appendChild(box) 是错的 —— 那样思考框会被丢到所有消息最下面，
+      //   和这轮的工具条/正文彻底分家。_home 是 hdEnsure 里记下的正文节点。
+      const home = node._home;
+      if (home && home.isConnected && home.parentNode) {
+        home.parentNode.insertBefore(node, home);
+      } else {
+        const box = el("hiveMsgs");
+        if (box) box.appendChild(node);
+      }
       // ★ 2026-11-13 同上：没有别的实时卡片在跟随时，把群聊的「跟随视角」开关一并关掉，
       //   否则开关仍显示「跟随视角」，用户点一次只是关掉它，得连点两次才恢复。
       if (hvThinkFollow) {
         const anyFloat = Object.keys(hdCards).some((k) => {
-          const n = hdCards[k] && hdCards[k].node;
+          const n = hdCards[k] && hdCards[k].thinkNode;
           return n && n.isConnected && n.classList.contains("think-dock") && !n._noFollow;
         });
         if (!anyFloat) {
@@ -10523,13 +10570,13 @@
           // 主动打开跟随 → 之前点过「归位」的卡片重新纳入跟随
           if (hvThinkFollow) {
             Object.keys(hdCards).forEach((k) => {
-              const n = hdCards[k] && hdCards[k].node;
+              const n = hdCards[k] && hdCards[k].thinkNode;
               if (n) n._noFollow = false;
             });
           }
           hvSyncThink();
           // 已存在的实时卡片立刻跟着动
-          Object.keys(hdCards).forEach((k) => hvDock(hdCards[k] && hdCards[k].node));
+          Object.keys(hdCards).forEach((k) => hvDock(hdCards[k] && hdCards[k].thinkNode));
           if (typeof showToast === "function") {
             showToast(hvThinkFollow ? "跟随视角：思考框固定在视口左上角" : "回到原位：思考框已放回消息流", "");
           }
@@ -10538,7 +10585,8 @@
       hvSyncThink();
     })();
     window.addEventListener("resize", () => {
-      document.querySelectorAll("body > .hd-live.think-dock").forEach((n) => {
+      // ★ 2026-11-15：浮起来的是思考节点（.hd-think-card），不再是整张卡（.hd-live）
+      document.querySelectorAll("body > .hd-think-card.think-dock, body > .hd-live.think-dock").forEach((n) => {
         try { placeThinkDock(n); } catch (e) { /* 忽略 */ }
       });
     });
