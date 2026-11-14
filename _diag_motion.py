@@ -38,7 +38,7 @@ ew = gap * 0.42
 eh = ew * 0.62
 print(f"    当前眨眼半宽={ew:.1f} 半高={eh:.1f} → ROI {2*ew:.0f}x{2*eh:.0f}px")
 print(f"    单眼实际宽约 {gap*0.36:.1f}px、眼裂高约 {gap*0.12:.1f}px")
-print(f"    ⚠ ROI 宽是单眼宽的 {2*ew/(gap*0.36):.2f} 倍、高是眼裂的 {2*eh/(gap*0.12):.2f} 倍")
+print(f"    !! ROI 宽是单眼宽的 {2*ew/(gap*0.36):.2f} 倍、高是眼裂的 {2*eh/(gap*0.12):.2f} 倍")
 for i, (ex, ey) in enumerate(eyes):
     print(f"    眼{i} ROI: x[{int(ex-ew)},{int(ex+ew)}] y[{int(ey-eh)},{int(ey+eh)}]")
 
