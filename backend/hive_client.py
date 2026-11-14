@@ -564,6 +564,47 @@ class HiveClient:
                         {"fid": fid, "ttl": MESH.TTL_DEFAULT})
         return {"ok": n > 0, "peers": n, "fid": fid}
 
+    def sync_artifacts(self, gid: str, items: List[Dict[str, Any]],
+                       reason: str = "") -> Dict[str, Any]:
+        """把本机群文件夹的清单广播出去，让所有成员对齐到同一份内容。
+
+        清单只带「名字 + sha + 大小 + 时间 + fid」，几十条也就几 KB ——
+        文件本体不走这里（走 T_FILE 分片）。
+
+        为什么需要：光靠 T_FILE 只是"各存一份副本"，同一个文件改三版就有
+        三个不同 fid 的同名文件散落在各人手里。清单同步之后，大家按 sha
+        判断"是不是同一版"，旧的换掉、缺的补回来。
+        """
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return {"ok": False, "error": "网络未启动"}
+        gid = str(gid or "")
+        if not gid:
+            return {"ok": False, "error": "缺少群 id"}
+        # 清单本身也限个长度：产物文件夹理论上可能上千个文件，
+        # 一帧塞满会把 mesh 的 8MB 帧上限顶爆。
+        rows = []
+        for it in (items or [])[:400]:
+            if not isinstance(it, dict):
+                continue
+            rows.append({
+                "fid": str(it.get("fid") or ""),
+                "name": str(it.get("name") or ""),
+                "sha": str(it.get("sha") or ""),
+                "size": int(it.get("size") or 0),
+                "ts": float(it.get("ts") or 0),
+                "mime": str(it.get("mime") or ""),
+            })
+        me = H.profile()
+        obj = {
+            "items": rows, "reason": str(reason or "")[:40],
+            "from": me.get("user_id", ""), "name": me.get("name", ""),
+            "ts": time.time(), "ttl": MESH.TTL_DEFAULT,
+        }
+        n = m.broadcast(gid, MESH.T_FSYNC, obj)
+        return {"ok": True, "peers": n, "count": len(rows)}
+
     # ------------------------------------------------------------ 附加能力
 
     # ---------------------------------------------------------- 密码进群
