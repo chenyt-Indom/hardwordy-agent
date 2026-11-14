@@ -468,10 +468,15 @@ def _pose_curve(n, fps, energy):
     # 说话能量：平滑后的张口度，再做一点滞后（头比嘴慢半拍，像真人）
     e = np.asarray(energy, np.float32) if len(energy) == n else np.zeros(n, np.float32)
     if n > 1:
-        k = max(1, int(fps * 0.12))
-        ker = np.hanning(k * 2 + 1)
-        ker = ker / max(ker.sum(), 1e-6)
-        e = np.convolve(e, ker, mode="same")
+        # 能量平滑：语音能量在音节边界能从 0 跳到 0.9，原来 0.12s（3 帧）压不住
+        # —— 实测 p95 帧间跳 0.60、228 帧里 116 帧跳超 0.15，头就跟着抖。
+        # 放宽到 0.15s 并做两次（近似高斯），把音节级突跳磨成「语气起伏」。
+        for _ in range(2):
+            k = max(1, int(fps * 0.15))
+            ker = np.hanning(k * 2 + 1)
+            ker = ker / max(ker.sum(), 1e-6)
+            pad = len(ker) // 2
+            e = np.convolve(np.pad(e, pad, mode="edge"), ker, mode="same")[pad:pad + n]
     e = np.clip(e, 0.0, 1.0)
 
     # 常态微摆：两个不同频率叠加，避免机械的单一正弦
