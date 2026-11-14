@@ -8,6 +8,7 @@
 
 模型资产在 data/models/face3d/（由 _convert_bfm.py 离线导出 BFM decoder）。
 """
+import math
 import os
 import pickle
 
