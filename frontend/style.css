@@ -4913,6 +4913,19 @@ html[data-theme="light"] select.pill-select option {
   flex: 0 0 auto; min-width: 34px; text-align: right;
   font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600;
 }
+.av2-row-blink { margin-top: 6px; }
+/* 同上：必须带 .av2panel 前缀，否则被 `.panel label{display:block}` 盖掉 */
+.av2panel .av2-blink {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  font-size: 12px; color: var(--muted); cursor: pointer;
+}
+.av2-blink input[type="checkbox"] {
+  flex: 0 0 auto; width: 14px; height: 14px; margin: 0;
+  accent-color: var(--accent); cursor: pointer;
+}
+.av2-blink span { flex: 1 1 auto; min-width: 0; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.av2-blink-hint { opacity: 0.72; }
 .av2-acts-doc { margin-top: 2px; }
 .av2-acts-doc .btn { flex: 1 1 auto; }
 
