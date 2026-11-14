@@ -34,7 +34,7 @@ import socket
 import struct
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import backend.hive as H
 import backend.hive_mesh as MESH
