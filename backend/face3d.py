@@ -194,3 +194,97 @@ def pose_pts(pts, ry=0.0, rx=0.0, rz=0.0):
     c = pts.mean(axis=1, keepdims=True)
     R = rot_y(ry) @ rot_x(rx) @ rot_z(rz)
     return R @ (pts - c) + c
+
+
+# ------------------------------------------------------- 表情 / 口型 / 眨眼
+def mouth_region(uv, y0=0.60, y1=0.80, x0=0.32, x1=0.68):
+    """用 UV 圈出嘴部顶点（UV 是正视图归一化坐标，嘴在中间偏下）。"""
+    uy, ux = uv[:, 1], uv[:, 0]
+    return (uy > y0) & (uy < y1) & (ux > x0) & (ux < x1)
+
+
+def deform_mouth(pts, uv, openness, jaw=1.0):
+    """按张口量变形：唇部分离 + 下颌下移。
+
+    BFM 的 expression 只分离嘴唇、不动下颌，所以这里补一段程序化下颌下沉，
+    否则张嘴看起来像"嘴唇被撕开"。
+    """
+    if openness <= 0.001:
+        return pts
+    o = float(np.clip(openness, 0.0, 1.0))
+    out = pts.copy()
+    m = mouth_region(uv)
+    uy = uv[:, 1]
+    upper = m & (uy < 0.70)
+    lower = m & (uy >= 0.70)
+    out[1][upper] -= o * 2.2          # 上唇上抬（120 坐标系）
+    out[1][lower] += o * 3.4          # 下唇下压
+    if jaw > 0:
+        lo, hi = 0.70, 0.97
+        w = np.clip((uy - lo) / (hi - lo), 0.0, 1.0)
+        w = w * w * (3 - 2 * w)       # smoothstep，避免下巴断层
+        w[uy <= lo] = 0.0
+        out[1] += o * jaw * 7.0 * w
+        out[2] += o * jaw * 1.5 * w   # 下颌略前移，侧面不显纸片
+    return out
+
+
+def eye_region(uv, side="both"):
+    uy, ux = uv[:, 1], uv[:, 0]
+    band = (uy > 0.34) & (uy < 0.50)
+    if side == "left":
+        return band & (ux > 0.55) & (ux < 0.78)
+    if side == "right":
+        return band & (ux > 0.22) & (ux < 0.45)
+    return band & (((ux > 0.55) & (ux < 0.78)) | ((ux > 0.22) & (ux < 0.45)))
+
+
+def blink_2d(img, uv, pts, amount, size=256, src_size=120.0):
+    """眨眼后处理：眼部区域垂直压缩 + 压一条眼睑线。
+
+    3DMM 网格没有眼睑自由度，用 2D 压缩模拟闭眼。amount: 0 睁 ~ 1 闭。
+    """
+    if amount <= 0.02:
+        return img
+    a = float(np.clip(amount, 0.0, 1.0))
+    k = size / float(src_size)
+    xy = pts.T[:, :2] * k
+    out = img.copy()
+    for side in ("left", "right"):
+        sel = eye_region(uv, side)
+        if not sel.any():
+            continue
+        ex, ey = xy[sel, 0], xy[sel, 1]
+        x0, x1 = int(max(0, ex.min() - 2)), int(min(size, ex.max() + 3))
+        y0, y1 = int(max(0, ey.min() - 2)), int(min(size, ey.max() + 3))
+        if x1 - x0 < 3 or y1 - y0 < 3:
+            continue
+        patch = out[y0:y1, x0:x1].copy()
+        h = patch.shape[0]
+        nh = max(2, int(round(h * (1.0 - 0.55 * a))))
+        squeezed = cv2.resize(patch, (patch.shape[1], nh), interpolation=cv2.INTER_LINEAR)
+        skin = np.median(patch.reshape(-1, 3), axis=0)
+        canvas = np.empty_like(patch)
+        canvas[:, :] = skin
+        canvas[:nh] = squeezed
+        out[y0:y1, x0:x1] = canvas
+        ly = y0 + nh - 1
+        if 0 <= ly < size:
+            cv2.line(out, (x0 + 1, ly), (x1 - 2, ly),
+                     tuple(int(c) for c in (skin * 0.45)), max(1, int(round(1 + a))))
+    return out
+
+
+def render_avatar(model, tex, uv, tri, ry=0.0, rx=0.0, rz=0.0,
+                  openness=0.0, blink=0.0, size=256, pts_base=None,
+                  min_area=0.0, bg=(0, 0, 0)):
+    """渲染一帧：头姿 + 张嘴 + 眨眼。"""
+    pts = pts_base if pts_base is not None else model["pts_front"]
+    if openness > 0.001:
+        pts = deform_mouth(pts, uv, openness)
+    if ry or rx or rz:
+        pts = pose_pts(pts, ry=ry, rx=rx, rz=rz)
+    img = render_mesh(tex, uv, pts, tri, size=size, bg=bg, min_area=min_area)
+    if blink > 0.02:
+        img = blink_2d(img, uv, pts, blink, size=size)
+    return img
