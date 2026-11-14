@@ -4060,6 +4060,9 @@ html[data-theme="light"] select.pill-select option {
 /* 跨版本看不懂的消息：虚线 + 略淡（保留原来的可辨识度） */
 .hive-msgs .msg.bot.unknown > .bubble { border-style: dashed; opacity: .82; }
 .hive-msgs .msg .hmsg-who { font-size: 11px; color: var(--muted); }
+/* ★ 2026-11-15：群聊的「谁唤醒了模型」现在是**独立一行**（不再是 .msg 的子节点）——
+   整张实时卡已改由 LiveCard.makeSession() 生成，结构和单人模式同一份。 */
+.hive-msgs > .hmsg-who { font-size: 11px; color: var(--muted); padding: 2px 0 0 2px; flex: none; }
 .hive-msgs .msg .hmsg-ts { font-size: 10.5px; color: var(--meta-fg); }
 /* 自己的气泡是深色底：引用块/强调色改白色系，否则看不清 */
 .hive-msgs .msg.user .hive-ref {

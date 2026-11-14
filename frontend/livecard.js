@@ -491,6 +491,238 @@ window.LiveCard = (function () {
     };
   }
 
+  // --------------------------------------------- 6. 会话卡（整轮，唯一一份）
+  // 单聊与群聊【唯一】的一轮卡片：思考卡 → 工具小条 → 媒体 → 正文 → 🛠 代码改动。
+  //
+  // 为什么要有它：上面 5 个只是零件。「按什么顺序拼、什么时候展开、标题怎么写、
+  // 丢帧怎么纠正」这套**编排**原来两边各写一遍（单聊 doSend 里 200 行、
+  // 群聊 hdEnsure + hdStream + hdAddCode 320 行），于是同一个 bug 修两遍、
+  // 风格总有一边不对 —— 用户原话「不就是换了个多人环境吗」。
+  //
+  // opts:
+  //   autoOpen  思考框默认展开（手机端 true）
+  //   getText   点击展开时补全文的回调
+  //   onTick    思考逐字播放时回调（单聊用它同步 thinking 变量）
+  //   onStatus  标题文案变化回调
+  //   withWho   是否带「谁唤醒了模型」那一行（只有群聊 true）
+  function makeSession(opts) {
+    opts = opts || {};
+
+    const think = buildThink({ autoOpen: !!opts.autoOpen, getText: opts.getText });
+    const tools = makeToolStrip();
+
+    const mediaWrap = document.createElement("div");
+    mediaWrap.className = "media-strip";
+
+    const answerWrap = document.createElement("div");
+    answerWrap.className = "msg bot";
+    const answerBubble = document.createElement("div");
+    answerBubble.className = "bubble";
+    answerBubble.textContent = "…";
+    answerWrap.appendChild(answerBubble);
+
+    let who = null;
+    if (opts.withWho) {
+      who = document.createElement("div");
+      who.className = "hmsg-who";
+    }
+
+    let codeList = null;
+    let raw = "", painted = "", sealed = false, lblT = 0, answerStarted = false;
+
+    // 标题文案。★ 「（N 字）」每帧都变，而改标题会让**整条消息列表重排** ——
+    //   长列表时那是 6.7 次/秒的整页重排（用户报「响应太慢」的直接原因之一）。
+    //   字数类 400ms 节流，状态类（正在调用工具…）立即显示。
+    const setLabel = (tx, force) => {
+      const el = think.status;
+      if (!el || el.textContent === tx) return;
+      if (!force && /字）/.test(tx)) {
+        const now = (window.performance || Date).now();
+        if (now - lblT < 400) return;
+        lblT = now;
+      }
+      el.textContent = tx;
+      if (typeof opts.onStatus === "function") opts.onStatus(tx);
+    };
+
+    const openThink = () => {
+      if (!think.body.classList.contains("open")) {
+        think.body.classList.add("open");
+        think.arrow.textContent = "▾";
+      }
+    };
+
+    // 思考正文：**增量追加**（O(1)）；和已有内容对不上才整块重设。
+    // 原来每帧 `textContent = 全文 + "▌"`，思考到 5000 字时每秒重排 3 万字。
+    // 光标做成独立 span，追加时插到它前面 —— 空卡片仍能靠 :empty 规则隐藏。
+    const paintThink = (text, withCursor) => {
+      const body = think.body;
+      if (!body.classList.contains("open")) return;
+      let cur = body.querySelector(".lc-cur");
+      if (!cur) {
+        cur = document.createElement("span");
+        cur.className = "stream-cursor lc-cur";
+        body.appendChild(cur);
+      }
+      cur.textContent = withCursor === false ? "" : "▌";
+      // ★ 2026-11-15 真 bug（真实浏览器实测抓到）：buildThink 会给思考体放一句
+      //   占位文案「本地模型思考中…」。单聊原来每帧 `textContent = 全文` 会把它
+      //   整个盖掉；改成增量追加后，占位会**永久留在最前面**，实际显示成
+      //   「本地模型思考中…真正的思考内容」。首次绘制时先清掉它。
+      if (!painted) {
+        Array.from(body.childNodes).forEach((n) => { if (n !== cur) body.removeChild(n); });
+      }
+      if (text.length >= painted.length && text.indexOf(painted) === 0) {
+        const add = text.slice(painted.length);
+        if (add) cur.insertAdjacentText("beforebegin", add);
+      } else {
+        Array.from(body.childNodes).forEach((n) => { if (n !== cur) body.removeChild(n); });
+        if (text) cur.insertAdjacentText("beforebegin", text);
+      }
+      painted = text;
+    };
+
+    const player = makeThinkPlayer({
+      onTick: (text) => {
+        raw = text;
+        paintThink(text, true);
+        if (typeof opts.onTick === "function") opts.onTick(text);
+      },
+    });
+
+    const api = {
+      thinkWrap: think.wrap, think: think,
+      toolWrap: tools.wrap, tools: tools,
+      mediaWrap: mediaWrap,
+      answerWrap: answerWrap, answerBubble: answerBubble,
+      who: who, player: player,
+
+      // 按单聊的顺序挂进消息流（群聊也用同一份，所以两边结构完全一致）
+      mount(box) {
+        if (who && who.parentNode !== box) box.appendChild(who);
+        if (think.wrap.parentNode !== box) box.appendChild(think.wrap);
+        if (tools.wrap.parentNode !== box) box.appendChild(tools.wrap);
+        if (mediaWrap.parentNode !== box) box.appendChild(mediaWrap);
+        if (answerWrap.parentNode !== box) box.appendChild(answerWrap);
+      },
+      isMounted(box) {
+        return think.wrap.parentNode === box && answerWrap.parentNode === box;
+      },
+
+      setWho(t) { if (who) who.textContent = t; },
+      setLabel: setLabel,
+      openThink: openThink,
+
+      addTool(name) { tools.add(name, (t) => setLabel(t, true)); },
+      addToolButton(text, onclick, cls) { return tools.addButton(text, onclick, cls); },
+
+      pushThinking(delta) { player.push(delta); },
+      setThinking(text) { player.set(text); raw = String(text || ""); },
+      thinkingText() { return raw; },
+      isSealed() { return sealed; },
+
+      // 收尾：停播 + 去掉光标 + 标题带字数（正文一开始输出就该调）
+      sealThinking() {
+        player.stop();
+        raw = player.text();
+        sealed = true;
+        openThink();
+        paintThink(raw, false);
+        const cur = think.body.querySelector(".lc-cur");
+        if (cur) cur.remove();
+        if (raw) setLabel("🧠 思考过程（" + raw.length + " 字）", true);
+      },
+
+      // 代码改动列表按需创建（第一次有改动才挂进卡片）
+      ensureCodeList() {
+        if (!codeList) {
+          codeList = makeCodeList();
+          answerWrap.appendChild(codeList.box);
+        }
+        return codeList;
+      },
+      addCode(ui, hooks) {
+        return api.ensureCodeList().add(ui || {}, hooks);
+      },
+      codeCount() { return codeList ? codeList.count() : 0; },
+
+      setAnswer(text) {
+        answerBubble.textContent = text == null ? "" : text;
+        answerBubble.style.whiteSpace = "pre-wrap";
+      },
+      appendAnswerHtml(html) { answerBubble.insertAdjacentHTML("beforeend", html); },
+      overwriteAnswerHtml(html) { answerBubble.innerHTML = html; },
+
+      destroy() {
+        try { player.stop(); } catch (e) { /* ignore */ }
+        [who, think.wrap, tools.wrap, mediaWrap, answerWrap].forEach((n) => {
+          try { if (n) n.remove(); } catch (e) { /* ignore */ }
+        });
+      },
+
+      // 流式帧 → 卡片。群聊的「多一个广播」只体现在：帧从网上来、而发起人不是自己。
+      // 其余表现（标题、光标、工具 chip、代码列表、收尾）与单聊完全同一份代码。
+      applyFrame(f) {
+        const t = f.task || {};
+        const ph = f.phase;
+
+        if (ph === "queued" || ph === "start") {
+          setLabel("🧠 思考中…", true);
+          if (typeof opts.whoText === "function") api.setWho(opts.whoText(t, ph));
+          return ph;
+        }
+        if (ph === "thinking") {
+          setLabel("🧠 思考中…（" + (t.chars || 0) + " 字）");
+          openThink();
+          const full = (typeof f.full === "string" && f.full) ? f.full : "";
+          const dlt = String(f.delta || "");
+          if (full) {
+            if (full === raw) { /* 没变化 */ }
+            else if (full.indexOf(raw) === 0) { api.pushThinking(full.slice(raw.length)); }
+            else { api.setThinking(full); raw = full; paintThink(full, true); }
+          } else if (dlt) {
+            api.pushThinking(dlt);
+          }
+          return ph;
+        }
+        if (ph === "tool") {
+          const names = (t.tools || []).map(String).filter(Boolean);
+          names.forEach((nm) => api.addTool(nm));
+          return ph;
+        }
+        if (ph === "code") {
+          const code = t.code || {};
+          const rel = String(code.rel || code.project || "").trim();
+          if (rel) api.addCode(code);
+          return ph;
+        }
+        if (ph === "content") {
+          if (!sealed && raw) api.sealThinking();
+          // 气泡初始是「…」占位，第一帧正文到达时先清掉，否则正文会以「…」开头
+          if (!answerStarted) { answerStarted = true; answerBubble.textContent = ""; }
+          if (typeof f.full === "string" && f.full) {
+            api.overwriteAnswerHtml(esc(f.full).replace(/\n/g, "<br>"));
+          } else {
+            api.appendAnswerHtml(esc(f.delta || "").replace(/\n/g, "<br>"));
+          }
+          return ph;
+        }
+        if (ph === "note") {
+          const tx = String(f.delta || "").trim();
+          if (tx) setLabel(tx.slice(0, 120), true);
+          return ph;
+        }
+        if (ph === "done") {
+          if (!sealed && raw) api.sealThinking();
+          return ph;
+        }
+        return ph;
+      },
+    };
+
+    return api;
+  }
+
   return {
     esc: esc,
     escAttr: escAttr,
@@ -504,5 +736,6 @@ window.LiveCard = (function () {
     buildCodeRow: buildCodeRow,
     makeThinkPlayer: makeThinkPlayer,
     makeWatchdog: makeWatchdog,
+    makeSession: makeSession,
   };
 })();

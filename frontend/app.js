@@ -5225,52 +5225,43 @@
     //   不触碰任何 🔒 区块）。同时这也让 finishThinking 能显示真实的模型名。
     let _prov = "auto";
 
-    // ---------- 思考过程：默认折叠，但实时刷新状态；展开可见实时全文 ----------
-    // ★ 2026-11-15：这一整块 DOM 构建搬到 livecard.js，单聊和群聊调**同一个函数**。
-    //   生成的节点、class 名、点击折叠行为与原来的内联版本逐字节一致，
-    //   所以 CSS 不用动、单人模式的行为一点没变。
+    // ---------- 思考过程 / 工具条 / 媒体 / 正文：和群聊**同一份**构建代码 ----------
+    // ★★ 2026-11-15（用户要求）：「群功能彻底与单人模式统一，前端用完全一样的代码」。
+    //   这一整张卡现在由 LiveCard.makeSession() 建（思考卡 → 工具条 → 媒体 → 正文），
+    //   群聊的 hdEnsure 调的是**同一个函数** —— 两边的 DOM 结构、class、思考渲染、
+    //   工具 chip、代码改动列表、标题文案全部同源，不可能再出现「一边对一边不对」。
     //   手机上屏幕窄、可点的地方少 —— 思考过程**默认展开**，让用户真能看到它在想什么。
     const _autoThink = window.innerWidth <= 768;
-    const _think = window.LiveCard.buildThink({
+    const _sess = window.LiveCard.makeSession({
       autoOpen: _autoThink,
       // 点击展开时补上全文。延迟求值：此刻 thinking 还在 TDZ，等点击时已声明。
       getText: () => thinking,
+      // 逐字播放每吐一次字：同步 thinking（唯一真实来源）+ 刷新标题字数。
+      // 思考正文的绘制由 makeSession 内部做（增量追加，不再每帧整块重设）。
+      onTick: (text) => {
+        thinking = text;
+        _sess.think.setThinkingLen(thinking.length);
+      },
     });
-    const thinkWrap = _think.wrap;
+    const _think = _sess.think;
+    const thinkWrap = _sess.thinkWrap;
     const thinkHdr = _think.hdr;
     const thinkStatus = _think.status;
     const thinkArrow = _think.arrow;
     const thinkBody = _think.body;
+    const _tools = _sess.tools;
+    const toolWrap = _sess.toolWrap;
+    const mediaWrap = _sess.mediaWrap;
+    const answerWrap = _sess.answerWrap;
+    const answerBubble = _sess.answerBubble;
+    _sess.mount(messagesEl);
     // 本地 qwen3-vl 不是推理模型，永远不会有思考 → 别让「思考中…」一直挂着误导人
     setTimeout(() => {
       if (thinking.length === 0 && String(_prov || "").indexOf("deepseek") !== 0) {
         thinkStatus.textContent = "🧠 本地模型不输出思考链";
       }
     }, 1800);
-    messagesEl.appendChild(thinkWrap);
     const updateThinkStatus = () => _think.setThinkingLen(thinking.length);
-
-    // ---------- 工具调用过程（横向小条）----------
-    // ★ 2026-11-15：改用 livecard.js 的同一份实现。原来单聊和群聊各写一套
-    //   （这里是内联的 createElement + appendChild，群聊是 hdStream 里再写一遍），
-    //   现在两边调同一个 makeToolStrip()。
-    const _tools = window.LiveCard.makeToolStrip();
-    const toolWrap = _tools.wrap;
-    messagesEl.appendChild(toolWrap);
-
-    // ---------- 生成/读取的媒体 ----------
-    const mediaWrap = document.createElement("div");
-    mediaWrap.className = "media-strip";
-    messagesEl.appendChild(mediaWrap);
-
-    // ---------- 最终回答气泡 ----------
-    const answerWrap = document.createElement("div");
-    answerWrap.className = "msg bot";
-    const answerBubble = document.createElement("div");
-    answerBubble.className = "bubble";
-    answerBubble.textContent = "…";
-    answerWrap.appendChild(answerBubble);
-    messagesEl.appendChild(answerWrap);
     // ★ 2026-11-11 用户要求：「思考时，模型的思考框永远要居于最下方，以便我监控思考过程」。
     //   做法：思考期间把思考框挪到消息流末尾，并用 .think-dock 粘住视口底部；
     //   正文一开始输出就挪回原位（工具条之前），免得挡住答案。
@@ -5358,13 +5349,10 @@
     //   表现是「思考半天不动、结束前突然刷一大段」。
     //   thinking 仍是**唯一真实来源**（收尾、兜底、重试分支都直接读写它），
     //   player 每吐一次字就把它同步回来，所以那些读取点一行都不用改。
-    const _thinkPlayer = window.LiveCard.makeThinkPlayer({
-      onTick: (text) => {
-        thinking = text;
-        updateThinkStatus();
-        if (thinkBody.classList.contains("open")) thinkBody.textContent = thinking + "▌";
-      },
-    });
+    // ★ 2026-11-15：播放器就是 makeSession 内部那一个（onTick 已在上面接好）。
+    //   原来这里另建一个、并且用 `thinkBody.textContent = thinking + "▌"` 每帧
+    //   整块重设 —— 思考到 5000 字时每秒重排 3 万字。现在两边的绘制逻辑同一份。
+    const _thinkPlayer = _sess.player;
     const pushThinking = (delta) => _thinkPlayer.push(delta);
     const stopThinking = () => {
       _thinkPlayer.stop();
@@ -5393,16 +5381,11 @@
     //   两份实现改一处另一处就走样，这是「两边风格总有一边不对」的根源。
     //   现在只有 livecard.js 那一份，单聊和群聊调的是同一个函数。
     let selfdevList = null;       // 兼容保留：外部只关心「这张列表在不在」
-    let _sdList = null;           // LiveCard 的列表控制器
+    // ★ 2026-11-15：列表控制器来自 makeSession（和群聊同一份），不再单独建一个。
+    //   原来的 refreshSelfdevSum 没有任何调用点（汇总由 makeCodeList.add 内部刷新），已删。
     const ensureSelfdevList = () => {
-      if (selfdevList && selfdevList.parentNode) return selfdevList;
-      _sdList = window.LiveCard.makeCodeList();
-      answerWrap.appendChild(_sdList.box);
-      selfdevList = _sdList.box;
+      selfdevList = _sess.ensureCodeList().box;
       return selfdevList;
-    };
-    const refreshSelfdevSum = (box) => {
-      if (_sdList && _sdList.box === box) _sdList.refreshSum();
     };
 
     // 单个文件一行：点这一行才展开它的 diff（原 sd-card 的详情逻辑原样保留）
@@ -5433,7 +5416,7 @@
         },
       };
       // add() 内部已包含：追加到列表、刷新汇总、整列被收起时自动展开
-      return _sdList.add(ui, hooks);
+      return _sess.ensureCodeList().add(ui, hooks);
     };
 
     // ---- 代码卡片分组：一次跑很多段代码时，不让卡片一张张往下堆 ----
@@ -10191,39 +10174,9 @@
     // 用 mid 做 key —— 多人同时 @ 时各看各的（执行端是串行的，但卡片要分开）。
     const hdCards = {};
 
-    // ★ 2026-11-15 修「响应太慢」：思考框原来是每帧
-    //   `c.think.textContent = c.raw + "▌"` —— 6.7 帧/秒 × 累计全文，
-    //   思考写到 5000 字时主线程每秒要重排 3 万字，界面直接卡住，
-    //   用户看到的现象就是「模型响应太慢」（其实模型 0.8 秒就出首字）。
-    //   改成**增量追加**：正常帧只往末尾插几个字（DOM 开销几乎为 0），
-    //   每 3 帧来一次全量快照时校验前缀，丢帧才整块重设。
-    function hdCur(c) {
-      if (!c.cur) {
-        c.cur = document.createElement("span");
-        c.cur.className = "hd-cur";
-        c.cur.textContent = "▌";
-      }
-      return c.cur;
-    }
-    function hdThinkAppend(c, txt) {
-      if (!txt) return;
-      const cur = hdCur(c);
-      const t = document.createTextNode(txt);
-      if (cur.parentNode === c.think) {
-        c.think.insertBefore(t, cur);
-      } else {
-        // 首次：文字在前，光标在后（光标要一直留在末尾）
-        c.think.appendChild(t);
-        c.think.appendChild(cur);
-      }
-    }
-    function hdThinkSet(c, full) {
-      c.think.textContent = full;
-      c.think.appendChild(hdCur(c));   // 光标永远在最后
-    }
-    function hdThinkSeal(c) {
-      if (c.cur && c.cur.parentNode) c.cur.remove();
-    }
+    // ★ 2026-11-15：思考框的增量渲染（hdCur / hdThinkAppend / hdThinkSet /
+    //   hdThinkSeal 四个函数）已删除 —— 这套逻辑现在只有 livecard.js 的
+    //   makeSession() 里一份，单聊和群聊共用。
 
     function hdEnsure(f) {
       const mid = f.mid || "?";
@@ -10232,117 +10185,53 @@
       if (c) {
         // ★ 2026-11-15 真 bug（实测抓到）：进群/刷新消息时 renderMsgs() 会
         //   `box.innerHTML = ""`，把**还在跑**的实时卡片一起冲掉。
-        //   思考节点因为已经 dock 到 body 上而幸存 → 出现「思考还在、工具条和正文没了」
-        //   （实测：浮层里思考完整，而 #hiveMsgs 里 .hd-live 数量为 0）。
-        //   这里**不重建**卡片（重建会丢掉已经收到的思考和正文），只把丢的那个挂回去。
-        // ⚠️ 只在 renderMsgs 打过标记时才做 contains 检查（原来每帧两次全树查询）。
+        //   思考框因为已经 dock 到 body 上而幸存 → 出现「思考还在、工具条和正文没了」。
+        //   这里**不重建**（重建会丢掉已收到的内容），把丢的那几块挂回去。
+        // ⚠️ 只在 renderMsgs 打过标记时才检查（原来每帧两次全树查询）。
         if (c._lost) {
           c._lost = false;
-          if (!document.body.contains(c.thinkNode)) {
-            c.thinkNode._home = c.node;
-            if (document.body.contains(c.node)) box.insertBefore(c.thinkNode, c.node);
-            else box.appendChild(c.thinkNode);
-            if (typeof hvThinkFollow !== "undefined" && hvThinkFollow && !c.thinkNode._noFollow) {
-              hvDock(c.thinkNode);
-            }
+          const docked = c.thinkNode && c.thinkNode.parentNode === document.body;
+          if (docked) {
+            // 思考框浮着（幸存）→ 其余几块按原顺序补回消息流
+            [c.who, c.toolWrap, c.mediaWrap, c.answerWrap].forEach((n) => {
+              if (n && n.parentNode !== box) box.appendChild(n);
+            });
+          } else {
+            c.mount(box);        // 全部丢了 → 按单聊顺序整体重挂
+            if (typeof hvThinkFollow !== "undefined" && hvThinkFollow) hvDock(c.thinkNode);
           }
-          if (!document.body.contains(c.node)) box.appendChild(c.node);
         }
         return c;
       }
       const empty = box.querySelector(".hive-empty");
       if (empty) empty.remove();
-      const node = document.createElement("div");
-      // ★ 2026-11-15：**和单人模式完全同一套 DOM 结构**（用户要求「把群模式和
-      //   单人模式统一成单人模式的风格」）。
-      //   原来这里是「.hd-live-head（呼吸圆点 + 阶段文字 + 取消按钮）+ 思考卡 + 正文」，
-      //   而单人模式是「思考卡 → 工具小条 → 正文 → 🛠 本轮代码改动」：
-      //     · 标题文案不同（群里固定写「思考过程」，单人是「🧠 思考中…（N 字）」）
-      //     · 群里根本没有工具小条，只有一行「正在执行工具（第 N 轮）」
-      //     · 群里根本没有代码卡片 —— 造软件时一行代码都看不到
-      //   现在四段结构、class、文案全部照单人那份来，两边看起来就是同一个功能。
-      // ★ 2026-11-15（用户要求）：「跟随视角」里**只浮思考框**，工具条和正文不许跟进去。
-      //   原来整张卡（思考 + 工具条 + 正文 + 🛠 代码改动）是一个节点，dock 的是整张 ——
-      //   于是左上角那个小窗里塞满一排工具 chip 和大段正文（用户截图里连 1899 字的
-      //   正文都躺在浮层里，还叠着「取消」按钮）。
-      //   单人模式浮的是 thinkWrap：一个只装 .think-hdr + .think-body 的独立节点。
-      //   所以这里改成**和单人模式一样的两个平级节点**（都在 .hive-msgs 下）：
-      //     thinkNode  只装思考标题 + 思考正文      ← 跟随视角只浮这一个
-      //     node       装昵称 / 工具条 / 正文 / 代码改动 ← 永远留在消息流里
-      //   做成平级（而不是外面再套一层）是为了让两个都直接吃到 .hive-msgs .msg
-      //   那套 CSS —— 不新增第二套样式，和单人模式的 thinkWrap / answerWrap 同构。
-      const thinkNode = document.createElement("div");
-      thinkNode.className = "msg bot hd-think-card";
-      thinkNode.innerHTML = '<div class="bubble think-hdr hd-think">'
-        + '<span class="hd-think-lbl">🧠 思考中…</span>'
-        + '<span class="arrow">▾</span></div>'
-        + '<div class="think-body open"></div>';
 
-      node.className = "msg bot hd-live";
-      node.innerHTML = '<span class="hmsg-who"></span>'
-        + '<div class="tool-strip hd-tools"></div>'
-        + '<div class="bubble hmsg-body hd-out"></div>'
-        + '<div class="sd-list hd-sd" hidden>'
-        + '<button class="sd-list-head" type="button">'
-        + '<span class="sd-list-arrow">▾</span>'
-        + '<span class="sd-list-title">🛠 本轮代码改动</span>'
-        + '<span class="sd-list-sum">0 处</span>'
-        + "</button>"
-        + '<div class="sd-list-body"></div></div>';
-      box.appendChild(thinkNode);
-      box.appendChild(node);
-      box.scrollTop = box.scrollHeight;
-      c = {
-        node: node, thinkNode: thinkNode,
-        think: thinkNode.querySelector(".think-body"),
-        out: node.querySelector(".hd-out"),
-        who: node.querySelector(".hmsg-who"),
-        details: thinkNode.querySelector(".hd-think"),
-        // ★ 2026-11-15：标题要像单人模式那样实时显示字数（用户要求「思考卡片
-        //   的内容与单人模式一模一样」）。原来固定写「思考过程」，字数只在一个
-        //   进度条里，和单聊的「🧠 思考中…（N 字）」不是一回事。
-        lbl: thinkNode.querySelector(".hd-think-lbl"),
-        tools: node.querySelector(".hd-tools"),     // 工具小条（和单人 .tool-strip 同一套）
-        sd: node.querySelector(".hd-sd"),           // 🛠 本轮代码改动（和单人 .sd-list 同一套）
-        sdBody: node.querySelector(".hd-sd .sd-list-body"),
-        sdSum: node.querySelector(".hd-sd .sd-list-sum"),
-        ncode: 0,
-        raw: "",
-      };
-      // 光标做成独立节点：原来把 "▌" 拼进 textContent，导致每帧都得整块重设；
-      // 现在它挂在末尾，追加文字时插到它前面即可（DOM 开销几乎为 0）。
-      // ⚠️ 这里**不立刻挂**：`.think-body:not(.open):empty` 靠 :empty 隐藏空壳，
-      //    一挂 span 就不再 empty 了。所以等第一次真有思考文字时再懒加载（见 hdThinkAppend）。
-      c.cur = null;
-      // 实时卡片的思考框：点标题也能折叠（和正式消息一致）
-      c.details.addEventListener("click", () => {
-        const open = c.think.classList.contains("open");
-        c.think.classList.toggle("open", !open);
-        c.details.querySelector(".arrow").textContent = open ? "▸" : "▾";
+      // ★★ 2026-11-15（用户要求）：「群功能彻底与单人模式统一，前端用完全一样的代码」。
+      //   这里**不再手写 DOM** —— 卡片结构、思考卡、工具小条、代码改动列表、
+      //   标题文案、光标、增量渲染，全部来自 livecard.js 的 makeSession()。
+      //   单聊的 doSend 调的是**同一个函数**，所以两边不可能再走样。
+      //   群聊唯一多出来的东西是「谁唤醒了模型」那一行（withWho）和「取消」按钮。
+      const sess = window.LiveCard.makeSession({
+        autoOpen: true,                       // 群里默认展开思考，和手机端单聊一致
+        withWho: true,
+        getText: () => sess.thinkingText(),
+        whoText: (t, ph) => (t.asker || "成员") + " 唤醒了模型"
+          + (ph === "queued" && t.ahead > 0 ? "（前面还有 " + t.ahead + " 个任务）" : ""),
       });
-      // 代码改动列表头：点一下收起整列（和单人模式 sd-list 行为一致）
-      const sdHead = node.querySelector(".hd-sd .sd-list-head");
-      if (sdHead) {
-        sdHead.addEventListener("click", () => {
-          const body = node.querySelector(".hd-sd .sd-list-body");
-          body.hidden = !body.hidden;
-          sdHead.querySelector(".sd-list-arrow").textContent = body.hidden ? "▸" : "▾";
-        });
-      }
-      // 取消按钮：原来挂在被删掉的 .hd-live-head 上，现在放进工具小条末尾 ——
-      // 位置和单人模式「■ 终止」同义（单人那个在输入区，群里输入区也有，这里多给一处）。
-      const cbtn = document.createElement("button");
-      cbtn.type = "button";
-      cbtn.className = "tool-chip hd-cancel-chip";
-      cbtn.textContent = "取消";
-      cbtn.onclick = () => hdCancel(mid);
-      c.tools.appendChild(cbtn);
-      hdCards[mid] = c;
-      // ★ 2026-11-15：跟随视角**只浮思考节点**（工具条和正文留在消息流里，和单人模式一致）。
-      //   _home 记下正文节点：用户点「归位」时插回它前面，而不是丢到消息流最末尾。
-      thinkNode._home = node;
-      hvDock(thinkNode);
-      return c;
+      sess.mount(box);                        // 顺序：昵称 → 思考卡 → 工具条 → 媒体 → 正文
+      // 取消按钮放在工具小条末尾，位置和单聊「■ 终止」同义
+      sess.addToolButton("取消", () => hdCancel(mid), "hd-cancel-chip");
+      box.scrollTop = box.scrollHeight;
+
+      // 兼容既有调用点（跟随视角 / 重绘兜底）：沿用旧字段名
+      sess.node = sess.answerWrap;
+      sess.thinkNode = sess.thinkWrap;
+      // 跟随视角**只浮思考框**（和单聊一致）：_home 指工具条，归位时插回它前面
+      sess.thinkNode._home = sess.toolWrap;
+      hvDock(sess.thinkNode);
+
+      hdCards[mid] = sess;
+      return sess;
     }
 
     async function hdCancel(mid) {
@@ -10354,209 +10243,31 @@
       } catch (e) { alert("取消失败：" + e.message); }
     }
 
-    // ★ 2026-11-15：群聊实时卡里的「🛠 本轮代码改动」。
-    //   结构和单人模式 makeSelfdevCard 产出的 .sd-row **完全一致**（同样的 class、
-    //   同样一行摘要 + 点开看 diff），所以两边的 CSS 直接复用、不会走样。
-    //   为什么要在这里单独写一份、而不直接调 makeSelfdevCard：那个函数往
-    //   `answerWrap` 里挂（单人会话的作用域），群聊这张卡是另一个 DOM 节点。
-    function hdAddCode(c, code) {
-      if (!c || !c.sd || !c.sdBody || !code) return;
-      const rel = String(code.rel || code.project || "").trim();
-      if (!rel) return;
-      const act = String(code.act || "");
-      const actName = act === "apply" ? "代码模型重写"
-        : act === "patch" ? "局部替换"
-          : act === "project" ? "项目"
-            : "写入";
-      const add = Number(code.added || 0);
-      const del = Number(code.removed || 0);
+    // ★ 2026-11-15：原来的 hdAddCode（70 行手写 .sd-row）已删除。
+    //   代码改动列表现在只有 livecard.js 的 makeCodeList() 一份，
+    //   单聊和群聊调的是同一个函数 —— 不会再出现「一边有加粗一边没有」这种走样。
 
-      const row = document.createElement("div");
-      row.className = "sd-row";
-      row.dataset.add = add;
-      row.dataset.del = del;
-
-      const head = document.createElement("div");
-      head.className = "sd-head";
-      head.innerHTML = '<span class="sd-badge">🛠 ' + hEsc(actName) + "</span>"
-        + '<span class="sd-rel" title="' + hEsc(rel) + '">' + hEsc(rel) + "</span>"
-        + '<span class="sd-stat"><span class="sd-add">+' + add
-        + '</span> <span class="sd-del">−' + del + "</span></span>"
-        + '<button class="sd-toggle" type="button">详情 ▾</button>';
-      row.appendChild(head);
-
-      const body = document.createElement("div");
-      body.className = "sd-body";
-      body.hidden = true;
-      const pre = document.createElement("pre");
-      pre.className = "sd-pre";
-      const diffText = String(code.diff || "").trim()
-        || "（这个操作没有 diff 内容 —— 比如新建文件、或整份内容重写）";
-      // 只按行首上色，不解析内容（和单人 makeSelfdevCard 的做法一致）
-      pre.innerHTML = diffText.split("\n").map((ln) => {
-        const esc = hEsc(ln);
-        if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("@@"))
-          return '<span class="l-hdr">' + esc + "</span>";
-        if (ln.startsWith("+")) return '<span class="l-add">' + esc + "</span>";
-        if (ln.startsWith("-")) return '<span class="l-del">' + esc + "</span>";
-        return esc;
-      }).join("\n");
-      body.appendChild(pre);
-      row.appendChild(body);
-
-      const tg = head.querySelector(".sd-toggle");
-      const toggle = () => {
-        body.hidden = !body.hidden;
-        tg.textContent = body.hidden ? "详情 ▾" : "收起 ▴";
-      };
-      tg.onclick = (e) => { e.stopPropagation(); toggle(); };
-      head.onclick = (e) => { if (e.target !== tg) toggle(); };
-
-      c.sd.hidden = false;
-      c.sdBody.appendChild(row);
-      // 汇总行：N 处 · +X −Y（和单人 refreshSelfdevSum 同一个格式）
-      let sumAdd = 0, sumDel = 0, n = 0;
-      c.sdBody.querySelectorAll(".sd-row").forEach((r) => {
-        n += 1;
-        sumAdd += Number(r.dataset.add || 0);
-        sumDel += Number(r.dataset.del || 0);
-      });
-      if (c.sdSum) {
-        c.sdSum.innerHTML = n + ' 处 · <span class="sd-add">+' + sumAdd
-          + '</span> <span class="sd-del">−' + sumDel + "</span>";
-      }
-    }
-
+    // ★★ 2026-11-15（用户要求）：「群功能彻底与单人模式统一」。
+    //   原来这里有 130 行，按 phase 手写思考/工具/代码/正文的渲染 —— 和单聊
+    //   doSend 里那一大段是**两套实现**，同一个 bug 修两遍（丢帧残缺、O(n²)
+    //   正文拼接、标题每帧重排…）。现在全部收进 LiveCard.makeSession().applyFrame，
+    //   单聊和群聊的卡片表现来自**同一份代码**，群聊这边只剩「广播帧进来」这件事。
     function hdStream(f) {
       const c = hdEnsure(f);
-      const t = f.task || {};
-      const ph = f.phase;
-      const box = el("hiveMsgs");
-      // 状态文案统一写进**思考卡标题**（单人模式就是这么做的：thinkStatus），
-      // 不再有独立的「阶段条」—— 那是群聊独有的东西，用户截图对比后要求去掉。
-      // ★ 2026-11-15 修「响应太慢」：标题里「🧠 思考中…（N 字）」每帧都在变，
-      //   而改标题会让整条消息列表重新布局 —— 长列表时这是 6.7 次/秒的整页重排。
-      //   字数类文案做 400ms 节流（状态类文案照旧立即显示）。
-      const setLbl = (tx) => {
-        if (!c.lbl) return;
-        if (c.lbl.textContent === tx) return;
-        if (/字）/.test(tx)) {
-          const now = (window.performance || Date).now();
-          if (now - (c._lblT || 0) < 400) return;
-          c._lblT = now;
-        }
-        c.lbl.textContent = tx;
-      };
-      if (ph === "queued") {
-        setLbl("🧠 思考中…");
-        c.who.textContent = (t.asker || "成员") + " 唤醒了模型"
-          + (t.ahead > 0 ? "（前面还有 " + t.ahead + " 个任务）" : "");
-      } else if (ph === "start") {
-        c.who.textContent = (t.asker || "成员") + " 唤醒了模型";
-        setLbl("🧠 思考中…");
-      } else if (ph === "thinking") {
-        // ★ 2026-11-15：和单人模式**完全同一套表现**：
-        //   标题实时显示「🧠 思考中…（N 字）」，正文是纯文本 + 末尾 ▌ 光标。
-        setLbl("🧠 思考中…（" + (t.chars || 0) + " 字）");
-        if (!c.think.classList.contains("open")) {
-          c.think.classList.add("open");
-          c.details.querySelector(".arrow").textContent = "▾";
-        }
-        // ★ 2026-11-15：优先用 full（累计全文）覆盖 —— 流式帧走泛洪、不重发，
-        //   只靠增量累加的话，成员那边丢一帧就永久少一段，两人看到的思考不一样长。
-        // 优先用 full（累计全文）纠错：流式帧走泛洪、不重发，只靠增量累加的话，
-        // 成员那边丢一帧就永久少一段。但**不能每帧都整块重设**（那是卡顿的根源）——
-        // 全量快照和已有内容对得上就只追加差量，对不上才整块重设。
-        const _prev = c.raw || "";
-        const _full = (typeof f.full === "string" && f.full) ? f.full : "";
-        const _dlt = String(f.delta || "");
-        if (_full) {
-          if (_full === _prev) {
-            /* 没变化，什么都不做 */
-          } else if (_full.startsWith(_prev)) {
-            hdThinkAppend(c, _full.slice(_prev.length));
-            c.raw = _full;
-          } else {
-            hdThinkSet(c, _full);
-            c.raw = _full;
-          }
-        } else if (_dlt) {
-          hdThinkAppend(c, _dlt);
-          c.raw = _prev + _dlt;
-        }
-      } else if (ph === "tool") {
-        // ★ 2026-11-15：改成单人模式那一套 —— 每调一个工具就往 .tool-strip
-        //   加一个 .tool-chip，标题按工具类型换文案（🎨 正在生成图片… / 🔧 正在调用工具：xxx）。
-        //   原来群聊只有一行「正在执行工具（第 N 轮）：a、b」，和单聊的横向小条完全两样。
-        const names = (t.tools || []).map(String).filter(Boolean);
-        // ⚠️ 群聊和单人是**两个平级 IIFE**，这里的 TOOL_LABELS 拿不到 ——
-        //    用主模块挂在 window 上的那一份（同源，不会走样）。
-        const _TL = window.__TOOL_LABELS || {};
-        names.forEach((nm) => {
-          const chip = document.createElement("span");
-          chip.className = "tool-chip";
-          chip.textContent = _TL[nm] || ("🔧 " + nm);
-          // 取消按钮要永远留在最后
-          const cb = c.tools.querySelector(".hd-cancel-chip");
-          if (cb) c.tools.insertBefore(chip, cb); else c.tools.appendChild(chip);
-          if (nm === "generate_image") setLbl("🎨 正在生成图片…");
-          else if (nm === "edit_image") setLbl("🖼 正在微改图片…");
-          else if (nm === "remember" || nm === "search_memory") setLbl("🧠 正在读写记忆…");
-          else if (nm === "web_search") setLbl("🌐 正在联网检索…");
-          else setLbl("🔧 正在调用工具：" + (_TL[nm] || nm));
-        });
-      } else if (ph === "code") {
-        // ★ 2026-11-15：**这就是「造软件看不到代码」的修复**。
-        //   后端在工具执行完把 selfdev / workspace 的改动推成 code 帧，
-        //   这里渲染成和单人模式一模一样的「🛠 本轮代码改动」折叠列表：
-        //   一行一个文件（类型 + 路径 + 增删数），点开才看 diff。
-        hdAddCode(c, t.code || {});
-      } else if (ph === "content") {
-        // 开始输出正文 → 思考区收尾：去掉 ▌ 光标，标题改成「思考过程（N 字）」。
-        if (!c.sealed && c.lbl && c.raw) {
-          c.sealed = true;
-          setLbl("🧠 思考过程（" + c.raw.length + " 字）");
-          hdThinkSeal(c);
-        }
-        // 流式阶段用**轻量渲染**（转义 + 换行），不走 renderFinal：
-        // 每次增量都全量重渲染会让代码块反复重建、滚动位置乱跳。
-        // 跑完后正式消息会由 msg 事件补上，那条走完整的 renderFinal。
-        // ⚠️ 追加必须用 insertAdjacentHTML('beforeend')：原来写 `innerHTML +=`，
-        //    每帧都会把**已有正文**重新解析一遍（O(n²)），长回答越写越卡。
-        if (typeof f.full === "string" && f.full) {
-          // 全量覆盖：成员那边丢帧也不会缺字（每 8 帧才一次，可接受）
-          c.out.innerHTML = hEsc(f.full).replace(/\n/g, "<br>");
-        } else {
-          c.out.insertAdjacentHTML("beforeend",
-            hEsc(f.delta || "").replace(/\n/g, "<br>"));
-        }
-      } else if (ph === "note") {
-        // 过程提示（模型把调用格式写错正在重试 / 上下文超限已精简 等）。
-        // 单人模式也是显示在思考卡标题上，这里保持一致。
-        const tx = String(f.delta || "").trim();
-        if (tx) setLbl(tx.slice(0, 120));
-      } else if (ph === "done") {
-        if (c.lbl && !c.sealed && c.raw) setLbl("🧠 思考过程（" + c.raw.length + " 字）");
-        // 没有正文、只有思考的任务（纯分析类）也要收尾：去掉光标、标题带字数。
-        if (!c.sealed && c.lbl && c.raw) {
-          c.sealed = true;
-          c.lbl.textContent = "🧠 思考过程（" + c.raw.length + " 字）";
-          hdThinkSeal(c);
-        }
+      const ph = c.applyFrame(f);
+
+      if (ph === "done") {
         setStopBtn(false);
-        // 正式消息马上会由 msg 事件补上（它带完整思考和耗时），
-        // 这里延时移除卡片，别抢在正式消息前面闪一下。
+        // 正式消息马上由 msg 事件补上（带完整思考和耗时），
+        // 延时移除实时卡，别抢在正式消息前面闪一下。
         setTimeout(() => {
-          // ★ 2026-11-15：思考节点和正文节点是**平级**的，而且跟随视角时思考节点
-          //   被挪到了 body 上 —— 只 remove(c.node) 会留下一个浮在左上角、再也
-          //   收不回去的思考框。两个都清掉。
-          try { if (c.thinkNode) c.thinkNode.remove(); } catch (e) { /* 忽略 */ }
-          try { c.node.remove(); } catch (e) { /* 忽略 */ }
+          try { c.destroy(); } catch (e) { /* 忽略 */ }
           delete hdCards[f.mid || "?"];
         }, 1200);
         return;
       }
       setStopBtn(true, f.mid);
+      const box = el("hiveMsgs");
       box.scrollTop = box.scrollHeight;
     }
 
@@ -10722,8 +10433,9 @@
       hvSyncThink();
     })();
     window.addEventListener("resize", () => {
-      // ★ 2026-11-15：浮起来的是思考节点（.hd-think-card），不再是整张卡（.hd-live）
-      document.querySelectorAll("body > .hd-think-card.think-dock, body > .hd-live.think-dock").forEach((n) => {
+      // ★ 2026-11-15：群聊的思考节点已和单人模式同构（.msg.bot），不再有 .hd-think-card。
+      //   浮在 body 上的思考框统一带 .think-dock，直接用这个类重定位。
+      document.querySelectorAll("body > .think-dock").forEach((n) => {
         try { placeThinkDock(n); } catch (e) { /* 忽略 */ }
       });
     });
