@@ -11227,6 +11227,18 @@
           ? "🟢 已连接 " + (live.rtt_ms || 0) + "ms"
           : "⚪ 未连接" + (live.error ? "：" + live.error : "（进群时会自动连）");
         if (live.online) {
+          // 2026-11-14：多线路保障 —— 让用户看到「现在走哪条、还有几条备用」
+          const cc = live.cand_count || 1;
+          now += "\n   · 线路：" + (live.active_url || cfg.url || "");
+          now += cc > 1
+            ? "（共 " + cc + " 条候选，断一条自动换下一条）"
+            : "（只有 1 条）";
+          if (live.tls_unverified) {
+            now += "\n   · 这条走 TLS 但证书未校验（用 IP 访问时的正常现象，内容仍是密文）";
+          }
+          if (live.heartbeat_fail) {
+            now += "\n   · 心跳已救回 " + live.heartbeat_fail + " 次假死连接";
+          }
           const ok = live.direct_ok || 0, bad = live.direct_fail || 0;
           now += "\n   · P2P 直连：" + ok + " 人";
           if (bad) now += "；" + bad + " 人打洞失败，暂时走服务器兜底";
