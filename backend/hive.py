@@ -33,7 +33,13 @@ from typing import Any, Dict, List, Optional
 # ---------------------------------------------------------------- 路径
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DATA = os.path.join(_ROOT, "data", "hive")
+# ⚠️ 2026-11-14：原来写死 <项目根>/data/hive，**完全不看 MM_DATA_DIR**。
+#    config.py 早就支持 MM_DATA_DIR（Docker/多实例都靠它），但群数据不跟随，
+#    结果同一台机器起两个实例时会共用同一份群目录 ——
+#    profile.json 互相覆盖、群列表串味，跨实例测试根本没法做。
+#    没设置 MM_DATA_DIR 时路径与原来完全一致，不影响已有数据。
+_DATA = os.path.join(os.environ.get("MM_DATA_DIR") or os.path.join(_ROOT, "data"),
+                     "hive")
 _GROUPS = os.path.join(_DATA, "groups")
 _PROFILE = os.path.join(_DATA, "profile.json")
 
