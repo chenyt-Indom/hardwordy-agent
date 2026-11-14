@@ -487,8 +487,10 @@ def _pose_curve(n, fps, energy):
     rol_i = ROLL_IDLE * np.sin(2 * math.pi * 0.17 * t + 2.1)
 
     # 说话时的律动：能量大 → 左右小幅摆动 + 轻微点头
+    # 注意：pitch 原来直接吃 (e-0.30)，能量逐帧跳 → 点头逐帧跳 → 整脸纵向抽搐。
+    # 现在也乘一条慢正弦，即使能量有残留抖动，输出也保持连续。
     yaw_s = YAW_SPEECH * (e - 0.35) * np.sin(2 * math.pi * 0.42 * t + 0.4)
-    pit_s = -PITCH_SPEECH * (e - 0.30)          # 说话时略低头（真人常态）
+    pit_s = -PITCH_SPEECH * (e - 0.30) * np.sin(2 * math.pi * 0.33 * t + 0.9)
     rol_s = ROLL_SPEECH * (e - 0.4) * np.sin(2 * math.pi * 0.29 * t + 1.9)
 
     yaw = np.clip(yaw_i + yaw_s, -7.0, 7.0)
