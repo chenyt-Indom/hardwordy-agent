@@ -10734,6 +10734,109 @@ def _hive_on_freq(gid: str, body: dict) -> None:
 hive_client.client().on_freq = _hive_on_freq
 
 
+# ------------------------------------------------------------ 群文件夹内容统一
+#
+# 需求（2026-11-15）：每个群旁边的文件夹要"实时统一"—— 谁往里放了文件、
+# 改了哪一版，所有人的文件夹里看到的应该是同一份内容。
+#
+# 做法：广播「清单」（每个文件名对应哪个 sha），收到的人按 sha 对比本地，
+# 缺的补、旧的换。比较的粒度是**文件名**，不是 fid —— fid 每次保存都是新的，
+# 同一个 index.html 改三版就有三个 fid，靠 fid 永远对不齐。
+
+_fsync_last: dict = {}      # gid -> {"fp": 清单指纹, "ts": 上次广播时间}
+_fsync_lock = threading.Lock()
+_fsync_req: dict = {}       # gid/fid -> 上次请求补发的时间（节流）
+
+
+def _hive_artifact_fingerprint(gid: str):
+    """取本机清单 + 它的指纹（用来判断"和上次广播的一样吗"）。"""
+    items = hive.artifact_manifest(gid) or []
+    raw = "|".join("%s:%s" % (str(i.get("name") or ""), str(i.get("sha") or ""))
+                   for i in sorted(items, key=lambda x: str(x.get("name") or "")))
+    return items, hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _hive_sync_now(gid: str, reason: str = "", force: bool = False,
+                   min_gap: float = 3.0) -> dict:
+    """把本机群文件夹清单广播出去（节流）。
+
+    节流很重要：一次任务可能连着产出 5 个文件，每个都触发一次同步的话，
+    群里就是 5 轮泛洪 × 3 跳。同一指纹在 min_gap 秒内只发一次。
+    """
+    try:
+        items, fp = _hive_artifact_fingerprint(gid)
+        now = time.time()
+        with _fsync_lock:
+            last = _fsync_last.get(gid) or {}
+            if (not force and last.get("fp") == fp
+                    and now - float(last.get("ts") or 0) < min_gap):
+                return {"ok": True, "skipped": True, "count": len(items)}
+            _fsync_last[gid] = {"fp": fp, "ts": now}
+        return hive_client.client().sync_artifacts(gid, items, reason=reason)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _hive_on_fsync(gid: str, body: dict) -> None:
+    """收到别人的群文件夹清单 → 对齐本机内容。
+
+    按文件名比较 sha，四种情况：
+      · 本机没有这个文件           → 请求补发
+      · sha 相同                   → 已一致，什么都不做
+      · sha 不同、对方更新         → 请求对方那一版（落地时清掉本地旧版）
+      · sha 不同、我方更新         → 把本地清单广播回去，让对方来拿我的
+    """
+    try:
+        rows = (body or {}).get("items") or []
+        if not isinstance(rows, list):
+            return
+        mine = {str(i.get("name") or ""): i for i in (hive.artifact_manifest(gid) or [])}
+        want = []          # [(fid, name)] 需要补发的
+        i_am_newer = False
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            name = str(r.get("name") or "")
+            fid = str(r.get("fid") or "")
+            if not name or not fid:
+                continue
+            cur = mine.get(name)
+            if cur is None:
+                want.append((fid, name))
+                continue
+            if str(cur.get("sha") or "") == str(r.get("sha") or ""):
+                continue                      # 同一版，已一致
+            if float(r.get("ts") or 0) > float(cur.get("ts") or 0):
+                want.append((fid, name))       # 对方更新，去拿
+            else:
+                i_am_newer = True              # 我这边更新，让他来拿
+        # 请求补发（逐个，带节流；同一个 fid 60 秒内只求一次）
+        if want:
+            now = time.time()
+            for fid, _name in want[:40]:
+                key = gid + "/" + fid
+                with _fsync_lock:
+                    if now - float(_fsync_req.get(key) or 0) < 60:
+                        continue
+                    _fsync_req[key] = now
+                    if len(_fsync_req) > 500:
+                        for k in list(_fsync_req)[:200]:
+                            _fsync_req.pop(k, None)
+                try:
+                    hive_client.client().request_file(gid, fid)
+                except Exception:
+                    pass
+        # 我这边更新 → 回敬一份清单（让对方向我靠拢）
+        if i_am_newer:
+            threading.Thread(target=lambda: _hive_sync_now(gid, reason="reply"),
+                             daemon=True).start()
+    except Exception:
+        pass
+
+
+hive_client.client().on_fsync = _hive_on_fsync
+
+
 def _hive_on_gone(gid: str, name: str) -> None:
     """群主删了群：推一帧，前端立刻把这个群从列表里去掉。"""
     _broadcast_hive({"type": "group_gone", "gid": gid, "name": name or ""})
