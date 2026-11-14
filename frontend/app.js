@@ -2620,6 +2620,23 @@
       };
     }
 
+    // —— 嘴部调节条的适用范围 ——
+    // 说清楚它到底管不管用，比让人瞎拖强。
+    (function initCalTip() {
+      const ms = $("#av2Mode");
+      const tip = $("#av2CalTip");
+      if (!ms || !tip) return;
+      const upd = () => {
+        const w2l = ms.value === "w2l";
+        tip.textContent = w2l
+          ? "当前是 Wav2Lip：嘴位由人脸检测自动决定，这两个滑块不生效。切到「2D」或「伪 3D」才用得上。"
+          : "拖动滑块可校准嘴部，预览里的红框就是实际作用范围。";
+        paintMouthBox();
+      };
+      ms.addEventListener("change", upd);
+      upd();
+    })();
+
     // —— 口型幅度 ——
     // 增益作用在张口曲线上（不是硬拉伸）：同一段语音实测 1.0→1.6 时
     // 最大开口 31px→56px、明显张开的帧从 0% 升到 40%。
