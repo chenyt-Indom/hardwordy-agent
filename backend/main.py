@@ -12096,6 +12096,12 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 resp.close()      # 关连接 = 告诉 Ollama 别再算了
         except Exception:
             pass
+        # 解除线程级项目覆盖（线程会被复用，不清掉会带到下一个任务）
+        try:
+            from . import workspace as _ws_mod2
+            _ws_mod2.set_thread_project("")
+        except Exception:
+            pass
 
     dur = int((time.time() - t0) * 1000)
     # 落盘一条完整消息：**思考过程也要存**，这样后来进群 / 重开应用的人
