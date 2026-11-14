@@ -94,7 +94,7 @@ class SCRFD:
 
         scores = np.concatenate(scores_list).ravel()
         bboxes = np.vstack(bboxes_list) / scale
-        kpss = np.vstack(kpss_list) / scale
+        kpss = np.vstack(kpss_list).reshape(-1, 5, 2) / scale
         dets = np.hstack([bboxes, scores[:, None]]).astype(np.float32)
         keep = _nms(dets, nms_thresh)
         dets = dets[keep]
