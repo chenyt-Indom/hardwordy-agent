@@ -10425,16 +10425,19 @@
         if (!c.sealed && c.lbl && c.raw) {
           c.sealed = true;
           setLbl("🧠 思考过程（" + c.raw.length + " 字）");
-          c.think.textContent = c.raw;
+          hdThinkSeal(c);
         }
         // 流式阶段用**轻量渲染**（转义 + 换行），不走 renderFinal：
         // 每次增量都全量重渲染会让代码块反复重建、滚动位置乱跳。
         // 跑完后正式消息会由 msg 事件补上，那条走完整的 renderFinal。
+        // ⚠️ 追加必须用 insertAdjacentHTML('beforeend')：原来写 `innerHTML +=`，
+        //    每帧都会把**已有正文**重新解析一遍（O(n²)），长回答越写越卡。
         if (typeof f.full === "string" && f.full) {
-          // 全量覆盖：成员那边丢帧也不会缺字（代价是每次重排，长文可接受）
+          // 全量覆盖：成员那边丢帧也不会缺字（每 8 帧才一次，可接受）
           c.out.innerHTML = hEsc(f.full).replace(/\n/g, "<br>");
         } else {
-          c.out.innerHTML += hEsc(f.delta || "").replace(/\n/g, "<br>");
+          c.out.insertAdjacentHTML("beforeend",
+            hEsc(f.delta || "").replace(/\n/g, "<br>"));
         }
       } else if (ph === "note") {
         // 过程提示（模型把调用格式写错正在重试 / 上下文超限已精简 等）。
