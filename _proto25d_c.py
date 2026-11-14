@@ -28,9 +28,16 @@ z_span = float(np.percentile(z_in, 98) - np.percentile(z_in, 2))
 print("脸中心 (%.0f,%.0f) 宽 %.0f 高 %.0f  深度中位 %.1f 跨度 %.1f"
       % (cx, cy, face_w, face_h, z0, z_span))
 
-# 深度 -> 像素的换算：深度跨度对应脸宽的一半（鼻尖到耳后 ≈ 半脸宽）
+# 深度(模型单位) -> 像素 的换算。
+# BFM 正视图 UV 的 x 跨度实测 0.699，×120 = 83.9 个模型单位，正好铺满 face_w 像素，
+# 所以 k_px = face_w / 83.9。位移(px) = Δz * k_px * sin(角度)。
+# ⚠ 第一版写成 face_w*0.5/z_span（≈4.6），漏了 k_px 这一步，位移不到 1px，
+#   导致 gain 从 0.38 调到 0.85 像素差纹丝不动（3.76 → 3.76）。
 GAIN = float(sys.argv[1]) if len(sys.argv) > 1 else 0.38
-SCALE = (face_w * 0.5) / max(z_span, 1e-6) * GAIN
+K_PX = face_w / 83.9
+SCALE = z_span * K_PX * GAIN
+print("K_PX=%.2f SCALE=%.1f  最大位移≈%.1f px"
+      % (K_PX, SCALE, SCALE * np.sin(np.deg2rad(14))))
 zn = np.clip((depth - z0) / max(z_span, 1e-6), -1.0, 1.0)
 
 # 位移权重：脸内为 1，向外 30px 渐变到 0（避免脖子/肩膀撕裂）
