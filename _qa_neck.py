@@ -1,70 +1,59 @@
-"""端到端：出片 + 逐帧分析脖子区域动态。"""
+"""确认：动作幅度是否够活 + 残留割裂定位。"""
 import sys, os, math
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np, cv2
-from backend import avatar_lipsync as AL
 from backend import avatar25d as A25
+from backend import avatar_lipsync as AL
 
-r = AL.speak("大家好，今天我们来聊一下这个方案的具体做法。",
-             blink=False, motion=1.0, max_side=1024)
-print("render:", r.get("ok"), r.get("duration"), "s", r.get("frames"), "帧",
-      r.get("infer_sec"), "s", r.get("motion_sec"), "s")
-if not r.get("ok"):
-    print("ERR", r); sys.exit(1)
+n, fps = 110, 25
+e = np.abs(np.sin(np.arange(n) / 7.0)) * 0.8 + 0.1
+poses = A25._pose_curve(n, fps, e)
+arr = np.array(poses)
+names = ["yaw", "pit", "rol", "tx", "ty", "scl", "blink"]
+m = 1.0
+print("原始曲线（乘 MOTION_GAIN/ROLL_DAMP 后，与 lipsync 一致）")
+for i, nm in enumerate(names):
+    v = arr[:, i].copy()
+    if nm == "yaw": v *= m * AL.MOTION_GAIN
+    elif nm == "pit": v *= m * AL.PITCH_BOOST
+    elif nm == "rol": v *= m * AL.MOTION_GAIN * AL.ROLL_DAMP
+    elif nm in ("tx", "ty"): v *= m * AL.MOTION_GAIN
+    print(f"  {nm:5s} 范围 [{v.min():+7.2f}, {v.max():+7.2f}]  峰峰值 {v.max()-v.min():6.2f}  "
+          f"帧间最大跳 {np.abs(np.diff(v)).max():.3f}")
 
-path = r["path"]
-cap = cv2.VideoCapture(path)
+# 割裂定位：用真实视频，逐帧测「背景/脖子/脸」三带的帧间差
+import glob
+vs = sorted(glob.glob(r"D:\local-multimodal-src\data\avatar2\videos\lipsync_20261114_185444*.mp4"))
+if not vs:
+    print("no video"); sys.exit(0)
+cap = cv2.VideoCapture(vs[0])
 frames = []
 while True:
     ok, f = cap.read()
     if not ok: break
-    frames.append(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32))
+    frames.append(f)
 cap.release()
-print("读回", len(frames), "帧", frames[0].shape)
-
-H, W = frames[0].shape
 prep = A25._prep3d(r"D:\local-multimodal-src\data\avatar2\avatar.png", max_side=1024)
 mk = prep["mask"]; ys, xs = np.where(mk > 0); ymax = int(ys.max())
-sc = W / 1024.0
-ny0, ny1 = int(ymax * sc), int(min(H, ymax + 90) * sc)
-fy0, fy1 = int((ys.min() + 120) * sc), int((ymax - 60) * sc)
-print(f"脖子带 y=[{ny0},{ny1}]  脸部带 y=[{fy0},{fy1}]")
+H, W = frames[0].shape[:2]; sc = W / 1024.0
+bands = {
+    "背景左上": (int(20*sc), int(200*sc), int(20*sc), int(200*sc)),
+    "脸部": (int((ys.min()+120)*sc), int((ymax-60)*sc), int(400*sc), int(620*sc)),
+    "脖子": (int(ymax*sc), int((ymax+90)*sc), int(430*sc), int(600*sc)),
+    "衣领": (int((ymax+120)*sc), int((ymax+200)*sc), int(380*sc), int(650*sc)),
+}
+print("\n各区域帧间差（成片 110 帧）")
+for nm, (y0, y1, x0, x1) in bands.items():
+    v = [np.abs(frames[i][y0:y1, x0:x1].astype(np.float32)
+                - frames[i-1][y0:y1, x0:x1].astype(np.float32)).mean()
+         for i in range(1, len(frames))]
+    v = np.array(v)
+    print(f"  {nm:8s} mean={v.mean():6.3f} max={v.max():6.3f} p99={np.percentile(v,99):6.3f}")
 
-diffs, ndx, fdx = [], [], []
-for i in range(1, len(frames)):
-    d = np.abs(frames[i] - frames[i-1])
-    diffs.append(d.mean())
-    (a, _), _ = cv2.phaseCorrelate(frames[i-1][fy0:fy1], frames[i][fy0:fy1])
-    (b, _), _ = cv2.phaseCorrelate(frames[i-1][ny0:ny1], frames[i][ny0:ny1])
-    fdx.append(a); ndx.append(b)
-
-diffs = np.array(diffs); fdx = np.array(fdx); ndx = np.array(ndx)
-print(f"\n全图帧间差   mean={diffs.mean():.3f} max={diffs.max():.3f} p99={np.percentile(diffs,99):.3f}")
-# 突变检测：> 1.2x 均值
-spike = np.sum(diffs > diffs.mean() * 1.2)
-print(f"突变帧（>1.2x均值）: {spike} / {len(diffs)}")
-print(f"脸 dx 范围 [{fdx.min():+.2f},{fdx.max():+.2f}]  幅度 {fdx.max()-fdx.min():.2f}px")
-print(f"脖 dx 范围 [{ndx.min():+.2f},{ndx.max():+.2f}]  幅度 {ndx.max()-ndx.min():.2f}px")
-print(f"脖子/脸 位移幅度比 = {(ndx.max()-ndx.min())/max(1e-6, fdx.max()-fdx.min()):.2f}")
-print(f"脖子/脸 同向帧占比 = {np.mean(np.sign(fdx)==np.sign(ndx))*100:.0f}%")
-
-# 脖子带的帧间变化（只看脖子，排除脸）
-nd = []
-for i in range(1, len(frames)):
-    nd.append(np.abs(frames[i][ny0:ny1] - frames[i-1][ny0:ny1]).mean())
-nd = np.array(nd)
-print(f"脖子带帧间差 mean={nd.mean():.3f} max={nd.max():.3f} p99={np.percentile(nd,99):.3f}")
-
-# 存几张关键帧
-out = r"D:\local-multimodal-src\_qa_out"
-os.makedirs(out, exist_ok=True)
-cap = cv2.VideoCapture(path)
-idx = [0, len(frames)//4, len(frames)//2, 3*len(frames)//4]
-for j, i in enumerate(idx):
-    cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-    ok, f = cap.read()
-    if ok:
-        cv2.imwrite(os.path.join(out, f"neck_{j}.png"), f)
-cap.release()
-print("帧已存", out)
-print("VIDEO", path)
+# 找全图变化最大的那一帧，存下来看割裂
+d = [np.abs(frames[i].astype(np.float32) - frames[i-1].astype(np.float32)).mean()
+     for i in range(1, len(frames))]
+k = int(np.argmax(d)) + 1
+cv2.imwrite(r"D:\local-multimodal-src\_qa_out\worst.png", frames[k])
+cv2.imwrite(r"D:\local-multimodal-src\_qa_out\worst_prev.png", frames[k-1])
+print(f"\n最大变化帧 #{k} diff={d[k-1]:.3f}，已存 worst.png / worst_prev.png")
