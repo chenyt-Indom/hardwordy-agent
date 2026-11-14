@@ -113,9 +113,16 @@ def render(img_path, wav_path, out_mp4, fps=FPS, size=DEFAULT_SIZE,
         frame = face3d.render_avatar(model, tex, uv, tri,
                                      ry=ry, rx=rx, rz=rz,
                                      openness=op, blink=float(blinks[i]),
-                                     size=256, pts_base=base)
+                                     size=256, pts_base=base, feather=0.0)
+        # 用覆盖蒙版把脸合成到柔和背景上（边缘羽化，避免硬切）
+        cov = (frame.sum(axis=2) > 6).astype(np.uint8) * 255
+        cov = cv2.GaussianBlur(cov, (0, 0), 2.2)
         if scale != 1.0:
             frame = cv2.resize(frame, (W, H), interpolation=cv2.INTER_CUBIC)
+            cov = cv2.resize(cov, (W, H), interpolation=cv2.INTER_LINEAR)
+        a = (cov.astype(np.float32) / 255.0)[..., None]
+        frame = (frame.astype(np.float32) * a + bg.astype(np.float32) * (1 - a))
+        frame = np.clip(frame, 0, 255).astype(np.uint8)
         cv2.imencode(".png", frame)[1].tofile(frames % i)
         if on_progress and (i % 10 == 0 or i == n - 1):
             on_progress(i + 1, n)
