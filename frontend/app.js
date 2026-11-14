@@ -10514,7 +10514,7 @@
       //   否则开关仍显示「跟随视角」，用户点一次只是关掉它，得连点两次才恢复。
       if (hvThinkFollow) {
         const anyFloat = Object.keys(hdCards).some((k) => {
-          const n = hdCards[k] && hdCards[k].node;
+          const n = hdCards[k] && hdCards[k].thinkNode;
           return n && n.isConnected && n.classList.contains("think-dock") && !n._noFollow;
         });
         if (!anyFloat) {
