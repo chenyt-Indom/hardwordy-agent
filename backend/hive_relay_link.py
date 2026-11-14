@@ -473,6 +473,17 @@ class RelayLink:
         self.bypassed = 0                # 有多少帧完全没经过服务器
         self.signal_pub_at = 0.0
         self.signal_error = ""
+        # ---------------- 多线路 + 心跳 ----------------
+        self.cands: List[Dict[str, Any]] = []   # 候选线路（已解析）
+        self.cand_idx = 0                        # 下次优先试哪条
+        self.active_url = ""                     # 当前真正在用的那条
+        self.last_ok_url = ""                    # 上次成功过的（优先复用）
+        self.cand_tries = 0                      # 累计尝试次数
+        self.fail_streak = 0                     # 连续「全部候选都不通」次数
+        self.short_lived = 0                     # 连上就掉（<5 秒）的次数
+        self.last_rx = 0.0                       # 最后一次收到任何包的时刻
+        self.heartbeat_fail = 0                  # 心跳超时次数
+        self._hb_thread: Optional[threading.Thread] = None
         self._load_state()
 
     # -------------------------------------------------- 水位持久化
