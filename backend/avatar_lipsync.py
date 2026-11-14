@@ -132,13 +132,13 @@ def _apply_motion(frames, img_path, proc_side, y, sr, fps, blink, motion):
         yaw, pit, rol, tx, ty, scl, bl = poses[i]
         yaw *= m * MOTION_GAIN
         pit *= m * PITCH_BOOST
-        rol *= m * MOTION_GAIN
+        rol *= m * MOTION_GAIN * ROLL_DAMP
         tx *= m * MOTION_GAIN
         ty *= m * MOTION_GAIN
         scl = 1.0 + (scl - 1.0) * m
         # 单图侧面没有纹理，旋转超过 ~7.5° 就开始露馅，这里兜一道
         yaw = max(-7.5, min(7.5, yaw))
-        rol = max(-5.0, min(5.0, rol))
+        rol = max(-3.2, min(3.2, rol))
         if m <= 0.01:
             out.append(fr)
             continue
