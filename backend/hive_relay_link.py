@@ -518,6 +518,7 @@ class RelayLink:
         self.tls_unverified = False              # 是否用了不校验证书的 TLS
         self._cand_fail: Dict[str, int] = {}     # 候选线路连续失败次数
         self._cand_until: Dict[str, float] = {}  # 候选线路冷却到期时刻
+        self._fail_hard = False                  # 本次失败是否「对面不是中继」
         self._load_state()
 
     # -------------------------------------------------- 水位持久化
