@@ -330,6 +330,20 @@ def _pose_curve(n, fps, energy):
     pit = np.clip(pit_i + pit_s, -6.0, 5.0)
     rol = np.clip(rol_i + rol_s, -4.0, 4.0)
 
+    # 整体位移：这才是「在动」的主要来源（旋转超过 5° 会露馅，平移不会）
+    tx = (TX_IDLE * np.sin(2 * math.pi * 0.21 * t)
+          + TX_IDLE * 0.40 * np.sin(2 * math.pi * 0.53 * t + 0.9)
+          + TX_SPEECH * (e - 0.40) * np.sin(2 * math.pi * 0.37 * t + 1.7))
+    ty = (TY_IDLE * np.sin(2 * math.pi * 0.27 * t + 1.1)
+          + TY_IDLE * 0.35 * np.sin(2 * math.pi * 0.67 * t + 2.3)
+          + TY_SPEECH * (e - 0.40))          # 说话时整体略微下沉（点头感）
+    # 极轻微缩放：产生「前后」的空间感，0.8% 就够，再多会像镜头推拉
+    scl = 1.0 + TZ_IDLE * np.sin(2 * math.pi * 0.19 * t + 0.5) \
+        + 0.005 * (e - 0.30)
+    tx = np.clip(tx, -8.0, 8.0)
+    ty = np.clip(ty, -7.0, 7.0)
+    scl = np.clip(scl, 0.985, 1.018)
+
     # 眨眼：2.6~4.6 秒一次，单次 0.13 秒
     rng = np.random.RandomState(int(n * 7919 + 13) & 0xFFFF)
     bl = np.zeros(n, np.float32)
