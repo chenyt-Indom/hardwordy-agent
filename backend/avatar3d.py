@@ -100,7 +100,9 @@ def render(img_path, wav_path, out_mp4, fps=FPS, size=DEFAULT_SIZE,
 
     for i in range(n):
         t = i / float(fps)
-        op = params[i][0]
+        # 单图 3D 的唇部变形在 >0.5 后开始失真（嘴角拉扯、唇缝拉糊），
+        # 所以把音频曲线压到「微张」区间 —— 幅度小但不出戏。
+        op = min(1.0, params[i][0] * 0.5)
         ry, rx, rz = _head_pose(t, dur, head_move)
         frame = face3d.render_avatar(model, tex, uv, tri,
                                      ry=ry, rx=rx, rz=rz,
