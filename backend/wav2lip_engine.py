@@ -216,7 +216,6 @@ class Wav2LipEngine:
         mask = cv2.GaussianBlur(mask, (k, k), 0)
         mask = np.clip(mask, 0, 1)
         # 张嘴度调制：闭嘴时整体压低替换强度
-        w_open = float(np.clip(openness, 0.0, 1.0))
         mask = mask * (0.15 + 0.85 * w_open)
         mask = mask[..., None]
 
