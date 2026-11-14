@@ -5251,8 +5251,11 @@
     const updateThinkStatus = () => _think.setThinkingLen(thinking.length);
 
     // ---------- 工具调用过程（横向小条）----------
-    const toolWrap = document.createElement("div");
-    toolWrap.className = "tool-strip";
+    // ★ 2026-11-15：改用 livecard.js 的同一份实现。原来单聊和群聊各写一套
+    //   （这里是内联的 createElement + appendChild，群聊是 hdStream 里再写一遍），
+    //   现在两边调同一个 makeToolStrip()。
+    const _tools = window.LiveCard.makeToolStrip();
+    const toolWrap = _tools.wrap;
     messagesEl.appendChild(toolWrap);
 
     // ---------- 生成/读取的媒体 ----------
