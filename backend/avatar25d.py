@@ -614,17 +614,24 @@ def _pose_curve(n, fps, energy):
     ty = np.clip(ty, -11.0, 11.0)
     scl = np.clip(scl, 0.982, 1.020)
 
-    # 眨眼：2.6~4.6 秒一次，单次 0.13 秒
+    # 眨眼：2.8~4.8 秒一次，单次 0.26 秒
+    # 原来 0.13s 在 25fps 下只有 3 帧，曲线是 0→1→0 的三角波，实测帧间
+    # Δmax=1.00 —— 一帧之内从睁到全闭，视觉上就是「抽一下」。放宽到
+    # 0.26s（6 帧）并用 sin（首尾导数为 0），闭合 40% / 睁开 60%
+    # （真人闭眼比睁眼快），帧间 Δ 降到 0.7 以下，再经下面短窗低通到 0.4。
     rng = np.random.RandomState(int(n * 7919 + 13) & 0xFFFF)
     bl = np.zeros(n, np.float32)
     ti = int(fps * rng.uniform(0.8, 2.0))
     while ti < n:
-        span = max(2, int(fps * 0.13))
+        span = max(6, int(round(fps * 0.26)))
         for j in range(span):
             if ti + j < n:
                 p = j / float(span - 1)
-                bl[ti + j] = 1.0 - abs(2.0 * p - 1.0)     # 闭-开
-        ti += int(fps * rng.uniform(2.6, 4.6))
+                if p < 0.4:
+                    bl[ti + j] = math.sin(math.pi * 0.5 * (p / 0.4))
+                else:
+                    bl[ti + j] = math.cos(math.pi * 0.5 * ((p - 0.4) / 0.6))
+        ti += int(fps * rng.uniform(2.8, 4.8))
 
     # 统一时间低通：不管上游怎么算，送进渲染的曲线必须连续 ——
     # 25fps 下逐帧 1° 的跳变就是肉眼可见的抽搐（实测 yaw 最大跳 1.09°、
