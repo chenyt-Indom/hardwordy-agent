@@ -57,6 +57,7 @@ def mask_relay(d: Dict[str, Any]) -> Dict[str, Any]:
     tok = str(d.get("token") or "")
     return {
         "url": d.get("url") or "",
+        "urls": list(d.get("urls") or []),
         "enabled": bool(d.get("enabled", True)),
         "token_set": bool(tok),
         "token_hint": (tok[:3] + "***") if tok else "",
