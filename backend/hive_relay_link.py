@@ -522,6 +522,8 @@ class RelayLink:
         self._cand_fail: Dict[str, int] = {}     # 候选线路连续失败次数
         self._cand_until: Dict[str, float] = {}  # 候选线路冷却到期时刻
         self._fail_hard = False                  # 本次失败是否「对面不是中继」
+        self._degraded = False                   # 全灭过 → 下轮只探一条
+        self._sweep_skip = 0                     # 降级模式下已跳过几次全扫
         self._load_state()
 
     # -------------------------------------------------- 水位持久化
