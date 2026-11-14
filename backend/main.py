@@ -12366,8 +12366,22 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                     #   （实测一个 4 文件小项目就用了 10 轮）。和单人模式对齐。
                     max_rounds=max(1, min(500, int(cfg.get("max_tool_rounds")
                                                  or MAX_TOOL_ROUNDS))),
-                    temperature=0.3, max_tokens=_hive_mt,
-                    thinking=True, system_prompt=sys_prompt):
+                    # ★ 2026-11-15：采样参数改成**和单人 /api/chat 完全同一套**。
+                    #   原来这里写死 temperature=0.3 + thinking=True：
+                    #     · 0.3 让模型的思考变得干巴、像在念清单 ——
+                    #       用户反馈「模型的思考风格和单人不一样」，根子就在这；
+                    #     · thinking=True 又强行打开了模型配置里本来是关的思考，
+                    #       单人是 `thinking=None`（跟随模型配置），两边行为自然对不上。
+                    #   现在温度跟随设置里的采样滑杆，thinking 不传 = 跟随模型配置。
+                    temperature=min(1.3, max(0.0, float(
+                        cfg.get("temperature", 0.7) or 0.7))),
+                    top_p=min(1.0, max(0.01, float(cfg.get("top_p") or 0.95))),
+                    max_tokens=_hive_mt,
+                    system_prompt=sys_prompt,
+                    # 「光嘴上说说」兜底：单人通道早就有，群里原来没有 ——
+                    # 于是群里让它做软件，它把过程写在正文里就算完事（截图里那段
+                    # 「我先把工作区情况看一下…」就是没有兜底时的产物）。
+                    guard=_ds_guard_factory(instruction)):
                 if ev.is_set():
                     cancelled = True
                     break
