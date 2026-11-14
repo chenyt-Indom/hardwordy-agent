@@ -297,8 +297,10 @@ def _mouth_frame(prep, op, wd, amp=1.0):
 
     # 口腔压暗：只在缝隙区，越靠中间越暗（模拟口腔深度）。
     # 0.46 太重会变成黑带，0.26 是「有纵深但不脏」的平衡点。
+    # ⚠ 压暗范围必须收在缝隙里。sigma 给到 0.62*total（±17px）时，
+    #   暗区会盖到上唇和人中，视觉上像「嘴唇上方长了一块假胡子」。
     gap_w = max(total, 1.0)
-    dark = 1.0 - (0.38 * op) * np.exp(-((d) / (0.62 * gap_w + 1.5)) ** 2) * wx
+    dark = 1.0 - (0.34 * op) * np.exp(-((d) / (0.40 * gap_w + 1.0)) ** 2) * wx
     outp = outp * dark[..., None]
 
     img = Image.fromarray(np.clip(outp, 0, 255).astype(np.uint8), mode="RGB")
