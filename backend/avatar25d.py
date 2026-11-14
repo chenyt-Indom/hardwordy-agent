@@ -547,11 +547,14 @@ def _shift_of(prep, x, y, yaw=0.0, pitch=0.0, tx=0.0, ty=0.0,
     u = cx + (x - cx) * kx + prep["scale"] * z * math.sin(ry) * w
     v = cy + (y - cy) * ky + prep["scale"] * z * math.sin(rx) * w
     # 2) roll（角度按权重缩放，与 _warp 的 -rz*w 互为逆）
+    # ⚠️ 支点必须与 _warp 完全一致。漏改这里，roll=3° 时眼睛位置能差 12px，
+    # 眨眼就画在错的地方 —— 这是上一轮「眨眼偏位」踩过的同一个坑。
     if abs(roll) > 1e-6:
+        py = float(prep.get("roll_pivot_y", cy))
         rz = math.radians(roll) * w
         cr, sr = math.cos(rz), math.sin(rz)
-        du, dv = u - cx, v - cy
-        u, v = cx + du * cr - dv * sr, cy + du * sr + dv * cr
+        du, dv = u - cx, v - py
+        u, v = cx + du * cr - dv * sr, py + du * sr + dv * cr
     # 3) 缩放 + 平移（同样按权重）
     _s = max(0.90, min(1.10, float(scl)))
     u = cx + (u - cx) * (1.0 + (_s - 1.0) * w) + tx * w
