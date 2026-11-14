@@ -241,8 +241,9 @@ class Wav2LipEngine:
             if i_to > T:
                 break
             chunk = mel[:, i_from:i_to][None, None, :, :].astype(np.float32)
+            fin = np.transpose(face_inp, (2, 0, 1))[None].astype(np.float32)
             pred = self.sess.run(None, {self.in_names[0]: chunk,
-                                        self.in_names[1]: face_inp[None]})[0][0]
+                                        self.in_names[1]: fin})[0][0]
             pred = np.transpose(pred, (1, 2, 0))   # (96,96,3)
             pred = np.clip(pred, 0.0, 1.0) * 255.0
             frame = self._composite(face_img_bgr, pred, box, face96)
