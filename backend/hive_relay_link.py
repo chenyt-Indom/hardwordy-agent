@@ -719,6 +719,8 @@ class RelayLink:
                     self.last_ok_url = url
                     self._cand_fail.pop(url, None)
                     self._cand_until.pop(url, None)
+                    self._degraded = False
+                    self._sweep_skip = 0
                     break
                 # 这条不通 → 记一笔，立刻换下一条，不等待。
                 # 冷却分两档：「对面根本不是我们的中继」这种重试也没用的，
