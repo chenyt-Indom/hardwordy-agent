@@ -10323,46 +10323,6 @@
     }
 
     async function hdCancel(mid) {
-    // ★ 2026-11-15：把**一处**代码改动追加到实时卡片的「🛠 本轮代码改动」列表。
-    //   单人模式是 makeSelfdevCard() 往 sd-list 里塞一行；这里做同一件事，
-    //   但只 append 一行、不重建整个列表（实时刷新时不闪、不丢展开状态）。
-    //   ⚠️ 之前 hdStream 里已经在调 hdAddCode，但这个函数**从来没被定义** ——
-    //      后端每推一帧 code，前端就抛 ReferenceError，代码卡片永远不出现。
-    //      这正是「造软件时看不到任何代码」的前端一半原因（另一半是后端没推）。
-    function hdAddCode(c, item) {
-      if (!c || !item || !c.sdBody) return;
-      if (!item.rel && !item.project) return;
-      c.codes = (c.codes || []).concat([item]);
-      c.ncode = c.codes.length;
-      const tmp = document.createElement("div");
-      tmp.innerHTML = codeRowsHtml([item]);
-      const row = tmp.firstElementChild;
-      if (!row) return;
-      c.sdBody.appendChild(row);
-      // 单个文件一行：点「详情」或整行才展开它的 diff
-      const tg = row.querySelector(".sd-toggle");
-      const bd = row.querySelector(".sd-body");
-      const hd = row.querySelector(".sd-head");
-      const toggle = () => {
-        if (!bd || !tg) return;
-        bd.hidden = !bd.hidden;
-        tg.textContent = bd.hidden ? "详情 ▾" : "收起 ▴";
-      };
-      if (tg) tg.addEventListener("click", (e) => { e.stopPropagation(); toggle(); });
-      if (hd) hd.addEventListener("click", (e) => { if (e.target !== tg) toggle(); });
-      // 列表头汇总：N 处 · +X −Y（和单人模式的 refreshSelfdevSum 一致）
-      if (c.sdSum) {
-        let a = 0, d = 0;
-        c.codes.forEach((x) => {
-          a += Number(x.added || 0); d += Number(x.removed || 0);
-        });
-        c.sdSum.innerHTML = c.ncode + " 处 · "
-          + '<span class="sd-add">+' + a + '</span> <span class="sd-del">−' + d
-          + "</span>";
-      }
-      if (c.sd) c.sd.hidden = false;     // 第一处改动来了才露出来
-    }
-
       if (!curGid) return;
       try {
         const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/hd/cancel",
