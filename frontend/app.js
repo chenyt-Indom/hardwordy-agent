@@ -10560,7 +10560,7 @@
           }
           hvSyncThink();
           // 已存在的实时卡片立刻跟着动
-          Object.keys(hdCards).forEach((k) => hvDock(hdCards[k] && hdCards[k].node));
+          Object.keys(hdCards).forEach((k) => hvDock(hdCards[k] && hdCards[k].thinkNode));
           if (typeof showToast === "function") {
             showToast(hvThinkFollow ? "跟随视角：思考框固定在视口左上角" : "回到原位：思考框已放回消息流", "");
           }
