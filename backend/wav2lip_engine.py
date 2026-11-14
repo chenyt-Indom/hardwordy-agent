@@ -289,6 +289,9 @@ class Wav2LipEngine:
             fm = face96[54:92, 24:72].astype(np.float32)
             _diff = float(np.abs(pm - fm).mean())
             openness = float(np.clip((_diff - 2.0) / 22.0, 0.0, 1.0))
+            # 只在真正张嘴时超分（96->384），闭嘴帧保留原图，省一半以上时间
+            if openness > 0.18 and self.sr_sess is not None:
+                pred = self._sr(pred)
             frame = self._composite(face_img_bgr, pred, box, face96, openness=openness)
             frames.append(frame)
             if progress and i % 10 == 0:
