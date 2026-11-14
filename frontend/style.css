@@ -4869,6 +4869,10 @@ html[data-theme="light"] select.pill-select option {
   font-size: 11px; color: var(--muted);
 }
 .av2-cal input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.av2-cal-tip {
+  font-size: 10px; line-height: 1.5; color: var(--muted);
+  opacity: 0.85; padding-left: 2px;
+}
 .av2panel textarea#av2Text {
   width: 100%; box-sizing: border-box; resize: vertical;
   min-height: 62px; line-height: 1.55; padding: 8px 10px;
