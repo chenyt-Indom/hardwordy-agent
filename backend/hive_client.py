@@ -547,7 +547,7 @@ class HiveClient:
         cands: List[Dict[str, Any]] = []
         used = set()
 
-        def _add(gid, vt, nm, src, h="", p=0):
+        def _add(gid, vt, nm, src, h="", p=0, md=""):
             if not gid or gid in used:
                 return
             key = H.derive_key(pw_n, gid)
@@ -556,7 +556,8 @@ class HiveClient:
                 return                      # 标签对不上 = 这个群不是这把密码
             used.add(gid)
             cands.append({"gid": gid, "vt": tag, "name": nm or "",
-                          "src": src, "host": h, "port": p, "key": key})
+                          "src": src, "host": h, "port": p, "key": key,
+                          "mode": md})
 
         # (a) 本机已有记录（含之前退出的群）
         for gid in H.all_group_ids():
