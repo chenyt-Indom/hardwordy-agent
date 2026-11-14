@@ -10336,21 +10336,20 @@
       const t = f.task || {};
       const ph = f.phase;
       const box = el("hiveMsgs");
+      // 状态文案统一写进**思考卡标题**（单人模式就是这么做的：thinkStatus），
+      // 不再有独立的「阶段条」—— 那是群聊独有的东西，用户截图对比后要求去掉。
+      const setLbl = (tx) => { if (c.lbl) c.lbl.textContent = tx; };
       if (ph === "queued") {
-        c.phase.textContent = (t.ahead > 0)
-          ? "排队中（前面还有 " + t.ahead + " 个任务）" : "已受理，准备开始…";
-        c.who.textContent = (t.asker || "成员") + " 唤醒了模型";
+        setLbl("🧠 思考中…");
+        c.who.textContent = (t.asker || "成员") + " 唤醒了模型"
+          + (t.ahead > 0 ? "（前面还有 " + t.ahead + " 个任务）" : "");
       } else if (ph === "start") {
         c.who.textContent = (t.asker || "成员") + " 唤醒了模型";
-        c.phase.textContent = "模型 " + (t.model || "") + " 正在思考…（参考了 "
-          + (t.hist || 0) + " 条上下文）";
+        setLbl("🧠 思考中…");
       } else if (ph === "thinking") {
         // ★ 2026-11-15：和单人模式**完全同一套表现**：
         //   标题实时显示「🧠 思考中…（N 字）」，正文是纯文本 + 末尾 ▌ 光标。
-        //   原来这里用 innerHTML += 累加（越拼越慢、还会被 HTML 转义干扰），
-        //   标题也一直固定写「思考过程」，看起来和单聊不像同一个功能。
-        c.phase.textContent = "思考中…";
-        if (c.lbl) c.lbl.textContent = "🧠 思考中…（" + (t.chars || 0) + " 字）";
+        setLbl("🧠 思考中…（" + (t.chars || 0) + " 字）");
         if (!c.think.classList.contains("open")) {
           c.think.classList.add("open");
           c.details.querySelector(".arrow").textContent = "▾";
@@ -10358,18 +10357,34 @@
         c.raw = (c.raw || "") + String(f.delta || "");
         c.think.textContent = c.raw + "▌";
       } else if (ph === "tool") {
-        // ★ 2026-11-13：群聊 @hd 自开发时，模型在**真改代码** ——
-        //   必须把「正在动哪个工具」显示出来，否则界面上只有思考在滚，
-        //   看不出它到底有没有在干活（用户会以为又只是嘴上说说）。
-        c.phase.textContent = "正在执行工具（第 " + (t.round || 1) + " 轮）："
-          + ((t.tools || []).join("、") || "");
+        // ★ 2026-11-15：改成单人模式那一套 —— 每调一个工具就往 .tool-strip
+        //   加一个 .tool-chip，标题按工具类型换文案（🎨 正在生成图片… / 🔧 正在调用工具：xxx）。
+        //   原来群聊只有一行「正在执行工具（第 N 轮）：a、b」，和单聊的横向小条完全两样。
+        const names = (t.tools || []).map(String).filter(Boolean);
+        names.forEach((nm) => {
+          const chip = document.createElement("span");
+          chip.className = "tool-chip";
+          chip.textContent = TOOL_LABELS[nm] || ("🔧 " + nm);
+          // 取消按钮要永远留在最后
+          const cb = c.tools.querySelector(".hd-cancel-chip");
+          if (cb) c.tools.insertBefore(chip, cb); else c.tools.appendChild(chip);
+          if (nm === "generate_image") setLbl("🎨 正在生成图片…");
+          else if (nm === "edit_image") setLbl("🖼 正在微改图片…");
+          else if (nm === "remember" || nm === "search_memory") setLbl("🧠 正在读写记忆…");
+          else if (nm === "web_search") setLbl("🌐 正在联网检索…");
+          else setLbl("🔧 正在调用工具：" + (TOOL_LABELS[nm] || nm));
+        });
+      } else if (ph === "code") {
+        // ★ 2026-11-15：**这就是「造软件看不到代码」的修复**。
+        //   后端在工具执行完把 selfdev / workspace 的改动推成 code 帧，
+        //   这里渲染成和单人模式一模一样的「🛠 本轮代码改动」折叠列表：
+        //   一行一个文件（类型 + 路径 + 增删数），点开才看 diff。
+        hdAddCode(c, t.code || {});
       } else if (ph === "content") {
-        c.phase.textContent = "正在输出… " + (t.chars || 0) + " 字";
         // 开始输出正文 → 思考区收尾：去掉 ▌ 光标，标题改成「思考过程（N 字）」。
-        // 这和单人模式跑完时的表现一致（单人也只在思考阶段显示光标）。
         if (!c.sealed && c.lbl && c.raw) {
           c.sealed = true;
-          c.lbl.textContent = "🧠 思考过程（" + c.raw.length + " 字）";
+          setLbl("🧠 思考过程（" + c.raw.length + " 字）");
           c.think.textContent = c.raw;
         }
         // 流式阶段用**轻量渲染**（转义 + 换行），不走 renderFinal：
@@ -10378,12 +10393,11 @@
         c.out.innerHTML += hEsc(f.delta || "").replace(/\n/g, "<br>");
       } else if (ph === "note") {
         // 过程提示（模型把调用格式写错正在重试 / 上下文超限已精简 等）。
-        // 单人模式也会把这些以提示形式显示出来，群里同样要看得见。
+        // 单人模式也是显示在思考卡标题上，这里保持一致。
         const tx = String(f.delta || "").trim();
-        if (tx) c.phase.textContent = tx.slice(0, 120);
+        if (tx) setLbl(tx.slice(0, 120));
       } else if (ph === "done") {
-        c.phase.textContent = t.cancelled ? "已取消"
-          : (t.error ? "执行失败" : "完成");
+        if (c.lbl && !c.sealed && c.raw) setLbl("🧠 思考过程（" + c.raw.length + " 字）");
         // 没有正文、只有思考的任务（纯分析类）也要收尾：去掉光标、标题带字数。
         if (!c.sealed && c.lbl && c.raw) {
           c.sealed = true;
