@@ -10129,6 +10129,26 @@
     // 用 mid 做 key —— 多人同时 @ 时各看各的（执行端是串行的，但卡片要分开）。
     const hdCards = {};
 
+    // ★ 2026-11-15 修「响应太慢」：思考框原来是每帧
+    //   `c.think.textContent = c.raw + "▌"` —— 6.7 帧/秒 × 累计全文，
+    //   思考写到 5000 字时主线程每秒要重排 3 万字，界面直接卡住，
+    //   用户看到的现象就是「模型响应太慢」（其实模型 0.8 秒就出首字）。
+    //   改成**增量追加**：正常帧只往末尾插几个字（DOM 开销几乎为 0），
+    //   每 3 帧来一次全量快照时校验前缀，丢帧才整块重设。
+    function hdThinkAppend(c, txt) {
+      if (!txt) return;
+      const t = document.createTextNode(txt);
+      if (c.cur && c.cur.parentNode === c.think) c.think.insertBefore(t, c.cur);
+      else c.think.appendChild(t);
+    }
+    function hdThinkSet(c, full) {
+      c.think.textContent = full;
+      if (c.cur) c.think.appendChild(c.cur);   // 光标永远在最后
+    }
+    function hdThinkSeal(c) {
+      if (c.cur && c.cur.parentNode) c.cur.remove();
+    }
+
     function hdEnsure(f) {
       const mid = f.mid || "?";
       let c = hdCards[mid];
