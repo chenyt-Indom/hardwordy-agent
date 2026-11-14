@@ -125,7 +125,7 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
         return {"ok": False, "error": "形象图读取失败"}
     # 限制尺寸（Wav2Lip 只要脸，大图徒增编码开销）
     H, W = img.shape[:2]
-    max_side = 768
+    max_side = 1024
     if max(H, W) > max_side:
         s = max_side / float(max(H, W))
         img = cv2.resize(img, (int(W * s) // 2 * 2, int(H * s) // 2 * 2),
