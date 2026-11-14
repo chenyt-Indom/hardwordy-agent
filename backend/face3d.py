@@ -302,6 +302,23 @@ def eye_region(uv, side="both"):
     return band & (((ux > 0.55) & (ux < 0.78)) | ((ux > 0.22) & (ux < 0.45)))
 
 
+def deform_blink(pts, uv, amount):
+    """眨眼：把上眼睑顶点向下压。比 2D 压缩自然，也不会出现填充方块。"""
+    if amount <= 0.02:
+        return pts
+    a = float(np.clip(amount, 0.0, 1.0))
+    m = eye_region(uv)
+    uy = uv[:, 1]
+    lid = m & (uy < 0.43)
+    if not lid.any():
+        return pts
+    out = pts.copy()
+    # 越靠上的眼睑压得越多，形成自然的闭合曲线
+    w = np.clip((0.43 - uy) / 0.09, 0.0, 1.0)
+    out[1][lid] += a * 3.6 * w[lid]
+    return out
+
+
 def blink_2d(img, uv, pts, amount, size=256, src_size=120.0):
     """眨眼后处理：眼部区域垂直压缩 + 压一条眼睑线。
 
