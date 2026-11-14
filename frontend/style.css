@@ -4041,6 +4041,11 @@ html[data-theme="light"] select.pill-select option {
      子项限宽交给各元素自己的 max-width，和单人模式一模一样。 */
   flex-direction: column; align-items: stretch; gap: 10px;
   max-width: 100%; min-width: 0;
+  /* ★ 2026-11-15 真 bug：.hive-msgs 是 flex column，消息是它的子项，
+     默认 flex-shrink:1 且 min-height 被算成 0 —— 于是**整条消息被压扁**。
+     实测：实时卡片内容总高 ~360px，卡片实际只有 145px，下面的
+     「🛠 本轮代码改动」整块被裁掉。加 flex:none 让它按内容高度撑开。 */
+  flex: none;
 }
 /* 与单人模式 .msg.bot > * { max-width: 100%; min-width: 0 } 保持一致 */
 .hive-msgs .msg > * { max-width: 100%; min-width: 0; }
