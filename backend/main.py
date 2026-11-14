@@ -10182,7 +10182,10 @@ def avatar3d_speak(body: dict):
     wav = avatar2._to_wav16k(a.get("path") or "")
     words = avatar2._asr_words(wav)
 
-    name = "avatar3d_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
+    import time as _time
+    import uuid as _uuid
+    name = ("avatar3d_" + _time.strftime("%Y%m%d_%H%M%S") + "_"
+            + _uuid.uuid4().hex[:4] + ".mp4")
     out = os.path.join(avatar2._vdir(), name)
     try:
         r = avatar3d.render(avatar2._img_path(), wav, out, words=words,
