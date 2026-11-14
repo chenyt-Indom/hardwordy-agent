@@ -772,22 +772,27 @@ class RelayLink:
             self.error = "连不上 %s:%s（%s）" % (self.host, self.port,
                                               type(e).__name__)
             return False
-        sock.settimeout(None)
+        # ⚠️ 握手阶段**必须带超时**：实测 8080/hive 这条能连上、也能完成
+        #    WS 升级，但对面根本不发 challenge。如果这里 settimeout(None)，
+        #    _recv_pkt 会永久阻塞 —— 整条重连循环卡死，后面的备用线路
+        #    一条都没机会试。这是「多线路保障」最致命的坑。
+        sock.settimeout(HS_TIMEOUT)
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except Exception:
             pass
         _set_keepalive(sock)
+        self.tls_unverified = False
 
         # ws:// / wss:// 先升级成 WebSocket，再把 sock 包成 WSSock ——
         # 之后的 _recv_pkt / _send_pkt 完全不用改（接口和普通 socket 一致）。
         if self.ws:
             try:
                 if self.tls:
-                    import ssl
-                    sock = ssl.create_default_context().wrap_socket(
-                        sock, server_hostname=self.host)
-                    sock.settimeout(None)
+                    sock, verified = _wrap_tls(sock, self.host, self.port,
+                                               HS_TIMEOUT)
+                    sock.settimeout(HS_TIMEOUT)
+                    self.tls_unverified = not verified
                 rest = ws_min.handshake_client(
                     sock, "%s:%s" % (self.host, self.port), self.ws_path)
             except Exception as e:
