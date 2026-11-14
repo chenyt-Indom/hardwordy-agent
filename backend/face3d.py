@@ -415,6 +415,13 @@ def render_avatar(model, tex, uv, tri, ry=0.0, rx=0.0, rz=0.0,
     if ry or rx or rz:
         pts = pose_pts(pts, ry=ry, rx=rx, rz=rz)
     img = render_mesh(tex, uv, pts, tri, size=size, bg=bg, min_area=min_area)
+    # 边缘羽化：网格边界是硬切的，直接贴到背景上会有一圈灰白锯齿
+    if feather > 0:
+        cov = (img.sum(axis=2) > 6).astype(np.uint8) * 255
+        cov = cv2.GaussianBlur(cov, (0, 0), feather)
+        a = (cov.astype(np.float32) / 255.0)[..., None]
+        bga = np.array(bg, np.float32)
+        img = (img.astype(np.float32) * a + bga * (1 - a)).astype(np.uint8)
     if blink > 0.02:
         img = blink_2d(img, uv, pts, blink, size=size)
     return img
