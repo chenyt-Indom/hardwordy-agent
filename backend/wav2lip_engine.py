@@ -224,7 +224,10 @@ class Wav2LipEngine:
         rl = cv2.GaussianBlur(sr_, (0, 0), sig_s)
         corr = cv2.resize(rl - gl, (w, h), interpolation=cv2.INTER_LINEAR)
         if mask_keep is not None:
-            k = cv2.GaussianBlur(mask_keep.astype(np.float32), (0, 0), sigma * 0.5)
+            mk = cv2.resize(mask_keep.astype(np.float32), (sw, sh),
+                            interpolation=cv2.INTER_AREA)
+            mk = cv2.GaussianBlur(mk, (0, 0), max(0.6, sig_s * 0.5))
+            k = cv2.resize(mk, (w, h), interpolation=cv2.INTER_LINEAR)
             corr = corr * k[..., None]
         return np.clip(g + corr, 0, 255)
 
