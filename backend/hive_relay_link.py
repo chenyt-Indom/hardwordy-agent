@@ -1065,6 +1065,16 @@ class RelayLink:
             "port": self.port,
             "gid": self.gid,
             "state": self.state,
+            # ---------------- 多线路 + 心跳 ----------------
+            "active_url": self.active_url,
+            "candidates": [str(c.get("url") or "") for c in (self.cands or [])],
+            "cand_count": len(self.cands or []),
+            "cand_tries": self.cand_tries,
+            "fail_streak": self.fail_streak,
+            "short_lived": self.short_lived,
+            "heartbeat_fail": self.heartbeat_fail,
+            "last_rx_ago": (round(time.time() - self.last_rx, 1)
+                            if self.last_rx else -1),
             "online": self.state == "online",
             "error": self.error,
             "rtt_ms": self.rtt_ms,
