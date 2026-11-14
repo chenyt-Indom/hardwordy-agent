@@ -45,12 +45,13 @@ PITCH_SPEECH = 3.6      # 说话时点头幅度
 ROLL_SPEECH = 2.0
 GAIN = 0.35             # 视差增益（1.0 = 物理正确，但单图会拉扯，0.35 最自然）
 
-# 整体位移 / 缩放（720 画面上约 ±5px、±0.8%）
-TX_IDLE = 5.0
-TY_IDLE = 3.6
-TZ_IDLE = 0.008
-TX_SPEECH = 2.6
-TY_SPEECH = 3.0
+# 整体位移 / 缩放。实测 ±6px（0.8% 画面）在成片里几乎看不出，
+# 真人说话时头部摆动的量级是画面的 1.5~3%，所以给到 ±11px 左右。
+TX_IDLE = 8.5
+TY_IDLE = 6.0
+TZ_IDLE = 0.010
+TX_SPEECH = 3.4
+TY_SPEECH = 4.2
 
 
 def available() -> bool:
