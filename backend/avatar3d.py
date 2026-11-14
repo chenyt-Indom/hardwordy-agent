@@ -30,9 +30,9 @@ def _load_img(path):
 def _head_pose(t, dur, strength=1.0):
     """说话时的头部微动：慢速摇头 + 轻微点头，多个不同周期叠加避免机械感。"""
     ph = t * 2.0 * math.pi
-    ry = (5.0 * math.sin(ph * 0.31) + 2.2 * math.sin(ph * 0.73 + 1.1)) * strength
-    rx = (2.6 * math.sin(ph * 0.23 + 0.7) + 1.1 * math.sin(ph * 0.61)) * strength
-    rz = (1.4 * math.sin(ph * 0.17 + 2.0)) * strength
+    ry = (8.0 * math.sin(ph * 0.31) + 4.0 * math.sin(ph * 0.73 + 1.1)) * strength
+    rx = (3.6 * math.sin(ph * 0.23 + 0.7) + 1.6 * math.sin(ph * 0.61)) * strength
+    rz = (2.2 * math.sin(ph * 0.17 + 2.0)) * strength
     return ry, rx, rz
 
 
