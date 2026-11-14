@@ -98,6 +98,12 @@ def render(img_path, wav_path, out_mp4, fps=FPS, size=DEFAULT_SIZE,
     frames = os.path.join(tmpdir, "f%05d.png")
     scale = W / 256.0
 
+    # 背景：原图缩放后强模糊。纯黑背景下羽化边缘会显灰白硬边，
+    # 用柔和的原图色作背景，脸部边缘过渡才自然。
+    bg = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
+    bg = cv2.GaussianBlur(bg, (0, 0), max(6.0, W / 40.0))
+    bg = (bg.astype(np.float32) * 0.55).astype(np.uint8)   # 压暗一点，突出人脸
+
     for i in range(n):
         t = i / float(fps)
         # 单图 3D 的唇部变形在 >0.5 后开始失真（嘴角拉扯、唇缝拉糊），
