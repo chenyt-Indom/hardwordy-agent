@@ -307,7 +307,7 @@ def _mouth_frame(prep, op, wd, amp=1.0):
                                                  percent=int(round(amt)),
                                                  threshold=2))
     out = base.copy()
-    out.paste(img, (x0, ytop), mask)
+    out.paste(img, (x0, paste_y), mask)
     return out
 
 
