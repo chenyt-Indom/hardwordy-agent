@@ -407,7 +407,7 @@ def _draw_cavity(img, uv, pts, openness, size=256, src_size=120.0):
 
 def render_avatar(model, tex, uv, tri, ry=0.0, rx=0.0, rz=0.0,
                   openness=0.0, blink=0.0, size=256, pts_base=None,
-                  min_area=0.0, bg=(0, 0, 0)):
+                  min_area=0.0, bg=(0, 0, 0), feather=1.6):
     """渲染一帧：头姿 + 张嘴（含口腔）+ 眨眼。"""
     pts = pts_base if pts_base is not None else model["pts_front"]
     if openness > 0.001:
