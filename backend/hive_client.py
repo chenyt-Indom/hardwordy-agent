@@ -519,6 +519,24 @@ class HiveClient:
             time.sleep(0.02)   # 片之间留间隔，否则中间几片会被网络缓冲吞掉
         return {"ok": True, "fid": fid, "total": total, "sent": sent}
 
+    def request_file(self, gid: str, fid: str) -> Dict[str, Any]:
+        """向群里问一声「谁有这个附件」，持有者会自动补发（2026-11-15）。
+
+        为什么需要：产物文件夹承诺「任何成员都能打开」，但**后入群**的人
+        从没收到过早期广播的附件本体 —— 他打开历史里的产物只会 404。
+        请求走泛洪，所以只要群里有任何一个人有这份文件就能补回来。
+        """
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return {"ok": False, "error": "网络未启动"}
+        fid = str(fid or "")
+        if not fid:
+            return {"ok": False, "error": "缺少文件 id"}
+        n = m.broadcast(gid, MESH.T_FREQ,
+                        {"fid": fid, "ttl": MESH.TTL_DEFAULT})
+        return {"ok": n > 0, "peers": n, "fid": fid}
+
     # ------------------------------------------------------------ 附加能力
 
     # ---------------------------------------------------------- 密码进群
