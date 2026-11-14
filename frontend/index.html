@@ -1326,9 +1326,7 @@
   <script>
     (function () {
       var v = String(Date.now());
-      // ★ 2026-11-15：livecard.js 必须在 app.js **之前** ——
-      //   app.js 一启动就要读 LiveCard.LABELS，晚了就会拿到空对象。
-      ["/static/livecard.js", "/static/app.js", "/static/artifacts.js"].forEach(function (src) {
+      ["/static/app.js", "/static/artifacts.js"].forEach(function (src) {
         document.write('<script src="' + src + '?v=' + v + '"><\/script>');
       });
     })();
