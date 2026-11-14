@@ -227,6 +227,16 @@
             <option value="20">语速：很快</option>
           </select>
         </div>
+        <!-- 输出分辨率：Wav2Lip 只在 96x96 上生成嘴部，所以 1024 是原生最优；
+             更高只是把画面插值放大（看起来更大，细节不变），已如实写进文案。 -->
+        <div class="av2-row av2-row-res">
+          <select id="av2Res" title="输出分辨率（1024 为原生最佳，更高只是放大画面）">
+            <option value="720">720p · 最快（预览用）</option>
+            <option value="1024" selected>1024 · 原生最佳（推荐）</option>
+            <option value="1536">1536 · 画面更大（插值放大）</option>
+            <option value="1920">1920 · 最大画面（插值放大）</option>
+          </select>
+        </div>
         <!-- 口型幅度：增益作用在「张口曲线」上，不是硬拉伸。
              实测同一段语音：1.0 时最大开口 31px、1.6 时 56px，张开帧比例也翻倍。
              往右更明显但有代价（嘴角张力、唇纹拉伸），交给用户自己权衡。 -->
