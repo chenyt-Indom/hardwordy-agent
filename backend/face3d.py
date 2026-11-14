@@ -337,16 +337,74 @@ def blink_2d(img, uv, pts, amount, size=256, src_size=120.0):
     return out
 
 
+def _draw_cavity(img, uv, pts, openness, size=256, src_size=120.0):
+    """在上下唇之间画出张开的「口腔」。
+
+    单图重建的嘴唇在纹理里是闭合的，无论网格怎么拉，都不会出现口腔内部。
+    这里按张口量在唇缝处叠一个深色椭圆（上暗下亮的梯度 + 一点牙齿），
+    让「张嘴」在视觉上真正成立。
+    """
+    if openness <= 0.02:
+        return img
+    o = float(np.clip(openness, 0.0, 1.0))
+    k = size / float(src_size)
+    m = mouth_region(uv)
+    uy = uv[:, 1]
+    up = m & (uy < 0.70)
+    lo = m & (uy >= 0.70)
+    if not (up.any() and lo.any()):
+        return img
+    V = pts.T[:, :2] * k
+    cx = float(V[m, 0].mean())
+    y_up = float(V[up, 1].mean())
+    y_lo = float(V[lo, 1].mean())
+    cy = (y_up + y_lo) * 0.5
+    half_w = float(V[m, 0].ptp()) * 0.40
+    gap = max(0.0, y_lo - y_up)
+    half_h = gap * 0.42
+    if half_w < 2 or half_h < 0.8:
+        return img
+
+    out = img.copy()
+    ov = out.copy()
+    # 口腔底色：深红黑
+    cv2.ellipse(ov, (int(round(cx)), int(round(cy))),
+                (int(round(half_w)), int(round(half_h))),
+                0, 0, 360, (28, 22, 34), -1, lineType=cv2.LINE_AA)
+    # 上排牙齿：靠上的一条浅色带
+    if half_h > 2.5:
+        ty = int(round(cy - half_h * 0.52))
+        th = max(1, int(round(half_h * 0.42)))
+        cv2.ellipse(ov, (int(round(cx)), ty),
+                    (int(round(half_w * 0.86)), th),
+                    0, 0, 360, (232, 236, 238), -1, lineType=cv2.LINE_AA)
+    # 下唇内侧一点点高光，避免死黑
+    if half_h > 3:
+        cv2.ellipse(ov, (int(round(cx)), int(round(cy + half_h * 0.35))),
+                    (int(round(half_w * 0.7)), max(1, int(round(half_h * 0.22)))),
+                    0, 0, 360, (92, 62, 70), -1, lineType=cv2.LINE_AA)
+    # 软边蒙版：只在椭圆内混合
+    mask = np.zeros((size, size), np.uint8)
+    cv2.ellipse(mask, (int(round(cx)), int(round(cy))),
+                (int(round(half_w)), int(round(half_h))),
+                0, 0, 360, 255, -1, lineType=cv2.LINE_AA)
+    mask = cv2.GaussianBlur(mask, (5, 5), 0).astype(np.float32) / 255.0
+    a = (mask * min(1.0, 0.55 + 0.45 * o))[..., None]
+    return (ov.astype(np.float32) * a + out.astype(np.float32) * (1 - a)).astype(np.uint8)
+
+
 def render_avatar(model, tex, uv, tri, ry=0.0, rx=0.0, rz=0.0,
                   openness=0.0, blink=0.0, size=256, pts_base=None,
                   min_area=0.0, bg=(0, 0, 0)):
-    """渲染一帧：头姿 + 张嘴 + 眨眼。"""
+    """渲染一帧：头姿 + 张嘴（含口腔）+ 眨眼。"""
     pts = pts_base if pts_base is not None else model["pts_front"]
     if openness > 0.001:
         pts = deform_mouth(pts, uv, openness)
     if ry or rx or rz:
         pts = pose_pts(pts, ry=ry, rx=rx, rz=rz)
     img = render_mesh(tex, uv, pts, tri, size=size, bg=bg, min_area=min_area)
+    if openness > 0.02:
+        img = _draw_cavity(img, uv, pts, openness, size=size)
     if blink > 0.02:
         img = blink_2d(img, uv, pts, blink, size=size)
     return img
