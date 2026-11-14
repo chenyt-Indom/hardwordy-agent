@@ -9809,6 +9809,9 @@
           + '<span class="hi-dot' + dot + '"></span>'
           + '<span class="hi-name">' + hEsc(g.name) + "</span>"
           + '<span class="hi-meta">' + hEsc(owner) + " · " + (g.members || 0) + "人</span>"
+          // AI 正在这个群里跑任务 → 即使当前没打开它也要看得见（2026-11-15）
+          + (hdLiveByGid[g.gid]
+            ? '<span class="hi-live" title="AI 正在这个群里工作">⚙</span>' : "")
           // 产物文件夹入口（2026-11-15）：就挂在群名这一行右端，
           // 用户说的「群聊旁边」就是这个位置 —— 不用先点进群才能看产物。
           + '<button type="button" class="hi-art" data-art="' + hEsc(g.gid) + '"'
