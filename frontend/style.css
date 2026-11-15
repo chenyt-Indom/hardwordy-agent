@@ -5300,8 +5300,17 @@ html[data-theme="light"] select.pill-select option {
   font-size: 12px; color: var(--muted, #5b6472);
   background: var(--bg, #fff); border: 1px solid var(--border, #e6e9ee);
   border-radius: 10px; padding: 2px 8px;
+  /* 2026-11-16：不参与收缩 —— 否则 chip 多时会被压扁、文字挤出边界。
+     父容器 .iter-stats 是 flex-wrap，所以这里保持原尺寸就会自动换行。 */
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 .iter-chip b { color: #2b6cb0; }
+/* 活跃度 chip（2026-11-16）：今日思考 / 计划配额 / 已执行 */
+.iter-chip.on { border-color: #9ae6b4; background: #f0fff4; }
+.iter-chip.on b { color: #276749; }
+.iter-chip.off { border-color: #e6e9ee; background: #f7f8fa; color: #9aa3af; }
+.iter-chip.busy { border-color: #90cdf4; background: #ebf8ff; color: #2b6cb0; }
 /* ---- 自我维护区块（2026-11-15 追加） ---- */
 /* 用户要求这四项「彻底成为项目的一项功能，放在迭代想法里面」，
    所以常驻抽屉顶部，每项一行：图标 名称 节律 上次 + 暂停/运行/历史 三个按钮。 */
@@ -5687,6 +5696,16 @@ html[data-theme="light"] select.pill-select option {
   font-size: 12.5px;
 }
 .av2-cloud-fields select { flex: 0 0 auto; font-size: 12.5px; }
+/* 常驻「获取 Key」链接：flex 里不参与伸缩，窄栏下也不折行 */
+.av2-cloud-link {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--acc, #4f46e5);
+  text-decoration: none;
+  padding: 2px 0;
+}
+.av2-cloud-link:hover { text-decoration: underline; }
 .av2-cloud-help {
   margin-top: 7px;
   font-size: 11.5px;

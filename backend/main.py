@@ -2676,7 +2676,62 @@ def selfiter_signal(body: dict):
     from . import self_iterate as _si
     b = body or {}
     try:
-        return _si.add_signal(b.get("user"), b.get("assistant"), b.get("meta"))
+        r = _si.add_signal(b.get("user"), b.get("assistant"), b.get("meta"))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    # ★ 2026-11-16 用户要求：「每次对话或任务结束自动评估并思考」。
+    # 这里只做判断（寒暄/配额/节流都在这层挡掉），真要思考才开后台线程，
+    # 所以接口不会因此变慢。
+    try:
+        from . import selfloop as _sl
+        r["loop"] = _sl.on_turn_end(b.get("user"), b.get("assistant"),
+                                    b.get("meta"))
+    except Exception as e:                              # noqa: BLE001
+        r["loop"] = {"ok": False, "error": str(e)}
+    return r
+
+
+@app.get("/api/selfloop/stats")
+def selfloop_stats():
+    """活跃度：今天思考几次、几个计划、执行几个、配额还剩多少。"""
+    from . import selfloop as _sl
+    try:
+        return _sl.stats()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfloop/think")
+def selfloop_think(body: dict = None):
+    """手动让它现在就想一次（不受节流限制，仍受每日配额约束）。"""
+    from . import selfloop as _sl
+    b = body or {}
+    try:
+        return _sl.think_now(b.get("focus") or "")
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfloop/cfg")
+def selfloop_cfg_get():
+    from . import selfloop as _sl
+    try:
+        return {"ok": True, "cfg": _sl.stats().get("cfg") or {}}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfloop/cfg")
+def selfloop_cfg_set(body: dict):
+    from . import selfloop as _sl
+    b = body or {}
+    try:
+        kw = {}
+        for k in ("enabled", "daily_plans", "min_gap_sec", "task_fail_gap",
+                  "web_every", "slow_ratio"):
+            if k in b:
+                kw[k] = b[k]
+        return _sl.set_cfg(**kw)
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
 

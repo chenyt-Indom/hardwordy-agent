@@ -297,6 +297,14 @@ def _finish(tid, state, ok_n, fail_n, skip_n, changed, err):
         _STATE["history"].insert(0, item)
         _STATE["history"] = _STATE["history"][:_MAX_HISTORY]
     _save()
+    # ★ 2026-11-16：把「任务失败」告诉活跃迭代引擎，让它反思为什么改失败了。
+    #   只在失败时回调（selfloop 内部判断），成功也触发会变成
+    #   「改代码 → 成功 → 再反思 → 再改代码」的自我循环。
+    try:
+        from . import selfloop as _sl
+        _sl.on_task_end(item)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
 
 
 def _next():

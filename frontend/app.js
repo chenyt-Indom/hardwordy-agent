@@ -3248,6 +3248,15 @@
         if (k) k.value = c.has_key ? (c.api_key || "") : "";
         if (c.resolution) applyRes(c.resolution, false);
         applyMode(c.mode || "cheap", false);
+        // 常驻链接：配置前后都保留，配好之后也不会消失
+        const lk = $("#av2CloudLink");
+        if (lk) {
+          lk.href = c.key_url || "https://help.aliyun.com/zh/model-studio/get-api-key";
+          lk.textContent = c.ready ? "🔑 Key 页面" : "🔑 获取 Key";
+          lk.title = c.ready
+            ? "在浏览器打开 API Key 页面，可以换一个 Key"
+            : "在浏览器打开百炼控制台，复制 API Key";
+        }
         const help = $("#av2CloudHelp");
         if (help && !c.ready) {
           help.innerHTML = '只要一个 API Key，不用业务空间 ID。' +
@@ -3260,12 +3269,15 @@
           // 用户原来的困惑就是「不知道贵不贵」，光写上限多少秒没用。
           const pps = Number(c.price_per_sec || 0);
           const free = Number(c.free_seconds || 0);
-          help.textContent = "单次音频上限 " + (c.max_audio_sec || 19) +
+          // 已配置状态下也要能点到控制台（充值 / 看额度），
+          // 所以这里用 innerHTML 拼链接，而不是纯 textContent。
+          help.innerHTML = "单次音频上限 " + (c.max_audio_sec || 19) +
             " 秒，超长自动切段。" +
             (pps > 0 ? " 单价 " + pps + " 元/秒（60 秒约 " +
                        (pps * 60).toFixed(1) + " 元）" : "") +
             (free > 0 ? "，另有 " + Math.round(free / 60) + " 分钟免费额度" : "") +
-            "。";
+            "。<a href=\"" + esc(c.signup_url || "") +
+            "\" target=\"_blank\" rel=\"noopener\">余额与额度</a>";
         }
         return c;
       } catch (e) {
@@ -13087,6 +13099,7 @@
     loadPapers();
     loadActlog();
     loadMaint();
+    loadLoop();
     pushSignals();
     startPoll();
     feedProbe();
@@ -13604,6 +13617,36 @@
     return h;
   }
 
+  // ★ 2026-11-16 用户要求：「要，放在『🌱 迭代想法』顶部」。
+  // 显示今天思考几次、生成几个计划（含上限）、自动执行几个。
+  let loopStats = null;
+
+  function loadLoop() {
+    fetch("/api/selfloop/stats")
+      .then(function (r) { return r.json(); })
+      .then(function (d) { loopStats = d; if (el) render(); })
+      .catch(function () { /* 拿不到就不显示，不影响抽屉其它内容 */ });
+  }
+
+  function loopChips() {
+    const L = loopStats;
+    if (!L || !L.ok) return "";
+    if (!L.enabled) return '<span class="iter-chip off">活跃引擎已关</span>';
+    // ⚠️ 一开始做成 5 个独立 chip，视觉自查指出「窄面板下排布过密、横向挤压」。
+    //   合并成一个 + 一个「正在思考」提示，既够看又不挤。
+    const lt = L.last_trigger || {};
+    const tip = "今天触发了 " + (L.triggers_today || 0) + " 次思考，"
+              + "生成 " + (L.plans_today || 0) + "/" + (L.daily_plans || 0) + " 个计划，"
+              + "自动执行 " + (L.runs_today || 0) + " 个"
+              + (lt.at ? "；上次 " + lt.at + "（" + (lt.reason || "") + "）" : "");
+    let h = '<span class="iter-chip on" title="' + esc(tip) + '">' +
+              '今日 思考 <b>' + (L.triggers_today || 0) + '</b> · 计划 <b>' +
+              (L.plans_today || 0) + '/' + (L.daily_plans || 0) + '</b> · 执行 <b>' +
+              (L.runs_today || 0) + '</b></span>';
+    if (L.busy) h += '<span class="iter-chip busy">正在思考…</span>';
+    return h;
+  }
+
   function render() {
     if (!el) return;
     const d = data || {};
@@ -13615,7 +13658,8 @@
       '<span class="iter-chip">待批准 <b>' + (d.pending || 0) + '</b></span>' +
       '<span class="iter-chip">对话样本 <b>' + (d.signals || 0) + '</b></span>' +
       (d.audit ? '<span class="iter-chip">上次自检 <b>' + (d.audit.total || 0) +
-                 '</b> 处 · ' + esc(String(d.audit.ts || "").slice(11, 16)) + '</span>' : '');
+                 '</b> 处 · ' + esc(String(d.audit.ts || "").slice(11, 16)) + '</span>' : '') +
+      loopChips();
 
     const s = d.settings || {};
     const cb = el.querySelector(".iter-trust-cb");

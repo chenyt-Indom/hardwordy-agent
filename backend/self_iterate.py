@@ -228,6 +228,12 @@ _DEFAULT_SETTINGS = {
     # 用户明确选了「全部自动，包括高风险（改 main.py、一次改多个文件），
     # 但高风险会单独在前端提示一声」。
     "trust_mode": False,
+    # ---- 计划打磨（2026-11-16 用户要求）----
+    # 「不断完善计划，直到计划可以了就可以执行实施了」，
+    # 判定标准：「模型自评 8 分以上，或打磨满 3 轮就执行」。
+    "polish_plan": True,
+    "polish_target": 8,
+    "polish_rounds": 3,
     # 改完代码后：用户选的是「弹提示 + 给一个一键重启按钮」，不自动重启。
     "auto_restart": False,
     # 每次改完代码自动跑一次静态自检（用户要求「每次代码被改完就自动跑」）。
@@ -1663,7 +1669,7 @@ def _file_inventory(limit: int = 90) -> str:
     `avatar_lipsync.py` / `wav2lip_engine.py`）。模型凭印象编文件名，
     执行时要么失败、要么凭空造出一个垃圾文件。给清单是最省的办法。
     """
-    out = []
+    groups = {}
     for sub, exts in (("backend", (".py",)), ("frontend", (".js", ".css", ".html"))):
         d = _ROOT / sub
         if not d.is_dir():
@@ -1677,11 +1683,22 @@ def _file_inventory(limit: int = 90) -> str:
                  if not n.endswith(".bak") and ".bak-" not in n
                  and ".bak_" not in n and not n.endswith("_tmp")
                  and n != "__init__.py"]
-        out.extend("%s/%s" % (sub, n) for n in names)
-    if not out:
+        groups[sub] = names
+    if not groups:
         return ""
-    shown = out[:limit]
-    tail = "" if len(out) <= limit else "（另有 %d 个未列出）" % (len(out) - limit)
+    # ⚠️ 2026-11-16 实测：backend 有 70 个 .py，limit=70 时名额被占满，
+    #   frontend 的 app.js / index.html / style.css **一个都进不了清单** ——
+    #   打磨阶段模型当场指出「frontend/app.js 不在给定清单中，无法直接执行」，
+    #   于是所有前端相关的改进动作都被判为不可执行。
+    #   改成按目录留名额：前端固定留 12 个，剩下的全给后端。
+    front = groups.get("frontend") or []
+    back = groups.get("backend") or []
+    keep_front = front[:12]
+    keep_back = back[:max(0, int(limit) - len(keep_front))]
+    shown = ["backend/%s" % n for n in keep_back] + \
+            ["frontend/%s" % n for n in keep_front]
+    total = len(back) + len(front)
+    tail = "" if total <= len(shown) else "（另有 %d 个未列出）" % (total - len(shown))
     return ("\n\n## 现有文件清单（**只能从这里挑**，不要编造不存在的文件名）\n"
             + "、".join(shown) + tail)
 
@@ -1832,7 +1849,186 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
         ("## 用户这次的额外关注点\n" + focus) if focus else "")
 
 
-def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
+# ---------------------------------------------------------------- 计划打磨
+# 用户 2026-11-16 要求：「不断完善计划，直到计划可以了就可以执行实施了」，
+# 判定标准他自己定了：「模型自评 8 分以上，或打磨满 3 轮就执行」。
+# 所以计划生成后**不直接执行**，先让模型自己挑毛病、重写动作清单，最多 3 轮。
+#
+# 为什么放在这一层而不是重写 _reflect_impl：生成计划那段有两千多行、
+# 牵扯论文/工作召回/功能转换等一堆输入，动它风险太高。这里只消费它的产物。
+
+_POLISH_TARGET = 8.0
+# ★ 2026-11-16 用户指出「打磨要花 3 次 LLM 调用，开销太大」，默认从 3 降到 2。
+#   实测 3 轮的最好成绩也只有 7.0（8 分目标基本达不到），第 3 轮多是白跑甚至更差。
+_POLISH_ROUNDS = 2
+
+
+def _polish_prompt(plan, prev):
+    """构造评审提示。把真实文件清单塞进去，否则模型会编不存在的路径。"""
+    acts = []
+    for a in (plan.get("actions") or []):
+        acts.append("- [%s] %s\n  做法：%s\n  文件：%s"
+                    % (a.get("risk") or "mid", a.get("title") or "",
+                       (a.get("detail") or "")[:400],
+                       "、".join(a.get("files") or []) or "（未指定）"))
+    hist = ""
+    if prev:
+        hist = "\n\n上一轮自评 %.1f 分，当时指出的问题：\n%s" % (
+            float(prev.get("score") or 0),
+            "\n".join("- " + str(x) for x in (prev.get("issues") or [])[:6]))
+    return (
+        "你是这个项目的技术负责人。下面是一份**自我迭代计划**，"
+        "请你严格评审它的成熟度，并给出改进后的版本。\n\n"
+        "计划摘要：%s\n\n"
+        "动作清单：\n%s\n\n"
+        "项目真实文件（只能从这里选）：\n%s%s\n\n"
+        "评分标准（1~10）：\n"
+        "· 8~10：每条动作都具体到改哪个文件、怎么改，风险判断合理，能直接执行；\n"
+        "· 5~7：方向对但太笼统，执行时还得自己猜；\n"
+        "· 1~4：空泛、重复、或根本不可行。\n\n"
+        "只输出 JSON，不要任何解释：\n"
+        '{"score": 分数, "issues": ["具体缺陷1", "缺陷2"],'
+        ' "actions": [{"title": "...", "detail": "具体到文件和做法",'
+        ' "risk": "low|mid|high", "files": ["backend/xxx.py"]}]}\n'
+        "注意：actions 要给**完整清单**（不是只给改动的），最多 6 条。"
+        % (str(plan.get("summary") or "")[:300],
+           "\n".join(acts) or "（空）",
+           _file_inventory(limit=70), hist)
+    )
+
+
+def polish_plan(plan, max_rounds=None, target=None):
+    """自评 + 改进，直到达标或轮次用完。返回 (新计划, 元信息)。
+
+    每轮一次 LLM 调用；轮次上限既是质量兜底，也是花钱兜底。
+    任何一轮失败都**保留已有成果**继续 —— 绝不能让打磨把计划搞没。
+    """
+    s = load_settings()
+    if max_rounds is None:
+        max_rounds = int(s.get("polish_rounds") or _POLISH_ROUNDS)
+    if target is None:
+        target = float(s.get("polish_target") or _POLISH_TARGET)
+    max_rounds = max(1, min(int(max_rounds), 5))
+    meta = {"ok": True, "rounds": 0, "score": None, "target": target,
+            "max_rounds": max_rounds, "log": [], "changed": 0}
+
+    # ★ 2026-11-16 用户指出「打磨要花 3 次 LLM 调用，开销太大」。
+    #   这里加一道**纯本地、不花钱**的预检：如果动作清单每条都已经指了
+    #   真实文件、detail 也够长、条数够多，说明模型这次已经想得很具体，
+    #   再打磨大概率只是复述 → 只给 1 轮。
+    #   这是启发式：判错最多多花一轮，不会让计划变差。
+    _orig_rounds = max_rounds
+    _acts0 = [a for a in (plan.get("actions") or []) if isinstance(a, dict)]
+    if len(_acts0) >= 3:
+        _concrete = sum(
+            1 for a in _acts0
+            if (a.get("files") or []) and len(str(a.get("detail") or "")) >= 60)
+        if _concrete == len(_acts0):
+            max_rounds = 1
+            meta["max_rounds"] = 1
+            meta["skip"] = "already_concrete"
+    prev = None
+    cur = plan
+    # ⚠️ 2026-11-16 实测：打磨分数可能**下降**（真实跑出 6.0 → 6.0 → 5.0）。
+    #   原来无条件用最后一版，等于「越改越差还要执行最差那版」。
+    #   所以这里记住每轮被打分的那一版，最后返回**得分最高**的。
+    best_score = -1.0
+    best_plan = plan
+    prev_score = None
+    # ⚠️ 2026-11-16 实测踩到的坑：原来写 `for i in range(max_rounds)`，
+    #   而 range() 在循环**开始时就把次数定死**了 —— 循环体里再改 max_rounds
+    #   完全无效，导致「够用即停」和「低分补轮」两个机制形同虚设。
+    #   改成 while 才能真的动态调整轮数。
+    i = 0
+    while i < max_rounds:
+        set_stage("polish", "第 %d 轮打磨：自评计划成熟度…" % (i + 1))
+        # ★ 2026-11-16 用户指出「打磨要花 3 次 LLM 调用，开销太大」。
+        #   实测典型序列 2.0 → 7.0 → 6.0：第 3 轮不但没变好，反而更差。
+        #   token 从 3000 降到 2200（actions 最多 6 条，2000 足够），配合下面
+        #   两道早停，典型情况从 3 次调用降到 2 次。
+        txt, err = _llm_text(_polish_prompt(cur, prev), max_tokens=2200,
+                             temperature=0.3)
+        if err:
+            meta["error"] = err
+            break
+        data = _parse_json(txt)
+        if not isinstance(data, dict):
+            meta["error"] = "模型返回的不是合法 JSON"
+            break
+        try:
+            score = float(data.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        issues = [str(x)[:200] for x in (data.get("issues") or [])][:8]
+        meta["rounds"] = i + 1
+        meta["last_score"] = round(score, 1)
+        meta["log"].append({"round": i + 1, "score": round(score, 1),
+                            "issues": issues})
+        # 这一轮评的就是 cur 本身 → cur 的得分就是 score
+        if score > best_score:
+            best_score = score
+            best_plan = cur
+        prev = {"score": score, "issues": issues}
+        # 采纳模型重写的动作清单（只在它真的给了非空清单、且没达标时）
+        new_acts = []
+        for j, a in enumerate(data.get("actions") or []):
+            if not isinstance(a, dict) or not (a.get("title") or "").strip():
+                continue
+            files = [_norm_rel(f) for f in (a.get("files") or [])
+                     if isinstance(f, str)]
+            new_acts.append({
+                "id": "a%d" % (j + 1),
+                "title": str(a.get("title"))[:120],
+                "detail": str(a.get("detail") or "")[:900],
+                "risk": (a.get("risk") or "mid").lower(),
+                "files": [f for f in files if f][:_MAX_FILES_PER_ACTION],
+                "status": "pending", "note": "", "error": "", "backup": "",
+            })
+        if new_acts and score < target:
+            cur = dict(cur)
+            cur["actions"] = new_acts
+            meta["changed"] = int(meta.get("changed") or 0) + 1
+        # ⚠️ 预检跳过有个坑：只评了一次就给 2 分的话，计划会被后面的
+        #   「自评<5 → 只出报告」判死，而它可能只是第一轮没评准。
+        #   所以低分时把轮数恢复回来，补一轮再说 —— 省钱的启发式不能反过来
+        #   把好计划毙掉。
+        if i == 0 and meta.get("skip") == "already_concrete" and score < 5.0:
+            max_rounds = _orig_rounds
+            meta["skip"] = "already_concrete_retry"
+            meta["max_rounds"] = max_rounds
+        if score >= target:
+            meta["stop"] = "reached"
+            break
+        # ★ 2026-11-16 用户要求「打磨别花 3 次调用」。两道早停：
+        #   ① 停滞即停：比上一轮涨不到 0.5 分，说明已经收敛，再跑纯烧钱
+        #      （实测 2.0 → 7.0 → 6.0，第 3 轮就是白花的）；
+        #   ② 够用即停：首轮就到 target-1 且没有 high 级缺陷，只再给 1 轮机会。
+        #   注意：早停只影响「还要不要继续评」，**不影响 best_plan 的选取** ——
+        #   本轮得分和它评的那一版已经记进 best 了，不会丢成果。
+        if prev_score is not None and score < prev_score + 0.5:
+            meta["stop"] = "stalled"
+            break
+        # 首轮就够好的，不必再跑：
+        #   ≥ target-0.5（如 7.5/8）→ 直接停，再打磨基本到不了 8，纯白花；
+        #   ≥ target-1.0（如 7.0）  → 只再给 1 轮机会。
+        # 有 high 级缺陷时不走这条，那种必须继续打磨。
+        if i == 0 and not any("high" in str(x).lower() for x in issues):
+            if score >= (target - 0.5):
+                meta["stop"] = "good_enough"
+                break
+            if score >= (target - 1.0):
+                max_rounds = min(max_rounds, 2)
+                meta["stop"] = "near"
+        prev_score = score
+        i += 1
+    if best_score >= 0:
+        meta["score"] = round(best_score, 1)
+    meta["done"] = bool((meta.get("score") or 0) >= target)
+    return best_plan, meta
+
+
+def reflect(trigger="manual", use_web=True, focus="", auto_execute=None,
+            polish=None):
     """跑一次完整反思（带运行状态包装）。
 
     auto_execute=None → 看设置里的 trust_mode（信任模式开着就自动执行）；
@@ -1844,7 +2040,8 @@ def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
     _run_begin(trigger)
     try:
         out = _reflect_impl(trigger=trigger, use_web=use_web,
-                            focus=focus, auto_execute=auto_execute)
+                            focus=focus, auto_execute=auto_execute,
+                            polish=polish)
     except Exception as e:                              # noqa: BLE001
         _run_end(err="%s: %s" % (type(e).__name__, e))
         raise
@@ -1853,7 +2050,8 @@ def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
     return out
 
 
-def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
+def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
+                  polish=None):
     _ensure()
     tech, tech_total = ({}, 0)
     if use_web:
@@ -2093,7 +2291,92 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
     except Exception:                                     # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
 
+    # ★ 2026-11-16 用户要求「不断完善计划，直到计划可以了再执行」，
+    #   判定标准是他定的：自评 8 分以上，或打磨满 3 轮。
+    #   只有真的有计划动作时才值得打磨（空计划打磨纯属烧钱）。
+    if polish is None:
+        polish = bool(load_settings().get("polish_plan", True))
+    if polish and plan.get("actions"):
+        try:
+            plan2, pol = polish_plan(plan)
+            plan2["polish"] = pol
+            plan2["notice"] = _plan_notice(plan2)
+            # 打磨会重写 actions，磁盘上那份也得同步，
+            # 否则 iter_runner 执行的是打磨**之前**的旧动作。
+            _pd, _pp = _find_plan(plan["id"])
+            if _pp is not None:
+                _pp["actions"] = plan2.get("actions") or []
+                _pp["polish"] = pol
+                _pp["notice"] = plan2["notice"]
+                save_plans(_pd)
+            plan = plan2
+            actions = plan.get("actions") or []
+            set_stage("polish", "打磨完成：自评 %s 分（%s 轮）"
+                      % (pol.get("score"), pol.get("rounds")))
+        except Exception as e:                          # noqa: BLE001
+            # 打磨挂了就用原始计划继续 —— 它是增强，不是必经环节
+            plan["polish"] = {"ok": False,
+                              "error": "%s: %s" % (type(e).__name__, e)}
+            logger.warning("计划打磨失败（用原始计划继续）：%s",
+                           plan["polish"]["error"])
+
     out = {"ok": True, "plan": plan, "notice": plan["notice"]}
+
+    # ★ 2026-11-16 用户要求：「活跃度太低就要看要不要执行，构思不出来实在
+    #   不执行就以报告形式汇报」。也就是**宁可只汇报，也不硬改代码**。
+    #   判定：打磨后自评 < 5 分，或可执行动作不足 2 条 → 这轮没想出值得动手
+    #   的东西。硬执行只会把代码改坏（历史成功率 66% 正是这么来的）。
+    #   这时保留计划、标 report_only，**不提交执行队列**，改成一份可读报告。
+    #   注意：polish 失败（score 为 None）不触发 —— 那说明评不了，不是想不出。
+    _pol = plan.get("polish") or {}
+    try:
+        _score = float(_pol.get("score")) if _pol.get("score") is not None else None
+    except (TypeError, ValueError):
+        _score = None
+    _n_act = len(actions or [])
+    # ⚠️ 2026-11-16 实测踩到的坑：这里原来还带了「动作数 < 2 就只出报告」，
+    #   结果一份**自评 8.5 分、只有 1 条动作**的成熟计划被判成「构思不出来」
+    #   直接不执行。1 条动作完全可以是一次完整改动，不能按条数判死。
+    #   真正的判据只有分数：低于 5 分才算「没想出值得动手的东西」。
+    if _score is not None and actions and _score < 5.0:
+        _wk = []
+        for w in (plan.get("weaknesses") or []):
+            if isinstance(w, dict) and (w.get("title") or "").strip():
+                _wk.append(str(w.get("title"))[:80])
+        plan["report"] = {
+            "why": "自评 %.1f 分（低于 5 分的动手门槛），这轮没想出值得动手的东西"
+                   % (_score,),
+            "summary": str(plan.get("summary") or "")[:200],
+            "weaknesses": _wk[:5],
+            "needs": [str(n.get("pain"))[:80] for n in (plan.get("needs") or [])
+                      if isinstance(n, dict) and n.get("pain")][:5],
+            "next": "等出现更明确的信号再动手；也可以点「立即反思」并给出具体关注点。",
+        }
+        out["report_only"] = True
+        out["report"] = plan["report"]
+        # ★ 用户要求「构思不出来就以报告形式汇报」—— 所以报告要**看得见**，
+        #   不能只写一行原因。这里拼成完整可读文本，前端 pushChat 直接显示。
+        _lines = ["", "", "📋 本轮只出报告，没有改代码", plan["report"]["why"]]
+        if _wk:
+            _lines.append("")
+            _lines.append("发现的问题：")
+            _lines.extend("· " + x for x in _wk[:5])
+        if plan["report"]["needs"]:
+            _lines.append("")
+            _lines.append("你当下卡在：")
+            _lines.extend("· " + x for x in plan["report"]["needs"][:5])
+        _lines.append("")
+        _lines.append("下一步：" + plan["report"]["next"])
+        out["notice"] = (out.get("notice") or "") + "\n".join(_lines)
+        try:
+            _pd, _pp = _find_plan(plan["id"])
+            if _pp is not None:
+                _pp["report"] = plan["report"]
+                _pp["report_only"] = True
+                save_plans(_pd)
+        except Exception:                                 # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+
     # 信任模式：用户要求「不用批准，自动迭代，改完提示重启」。
     # 只在真的有计划动作时才执行，避免空跑。
     if auto_execute is None:
@@ -2104,7 +2387,7 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
         out["paused"] = True
         out["notice"] = (out.get("notice") or "") + (
             "\n\n⏸ 自动化已暂停：本轮计划已生成，但没有自动执行。")
-    if auto_execute and actions:
+    if auto_execute and actions and not out.get("report_only"):
         # 2026-11-15 用户要求：计划一确定就直接开始，但**不阻塞聊天**，
         # 并且要在聊天界面显示「正在迭代中」+ 代码卡片；已有任务在跑就排队。
         # 所以这里只「批准 + 提交队列」，真正的执行在 iter_runner 的后台线程里。
