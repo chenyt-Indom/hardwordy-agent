@@ -207,10 +207,21 @@
         <div class="av2-path" id="av2Path" hidden></div>
         <textarea id="av2Text" rows="3"
                   placeholder="让数字人说什么…（长文会自动按句分段生成再合并）"></textarea>
+        <!-- 分辨率：720P 的帧像素量是 480P 的 3.71 倍（720²@30fps vs 512²@16fps），
+             画质更好但慢约 45%。让用户自己按需切，别替他定死。 -->
+        <div class="av2-res" id="av2Res">
+          <button class="btn sm ghost" data-res="480P"
+                  title="512×512 / 16fps：快、便宜，预览够用">480P 快</button>
+          <button class="btn sm ghost" data-res="720P"
+                  title="720×720 / 30fps：画质最好，慢约 45%">720P 高清</button>
+        </div>
         <div class="av2-row">
           <select id="av2Voice" title="音色"></select>
           <button class="btn sm primary" id="av2Go">生成视频</button>
         </div>
+        <!-- 生成前预告：按字数估「几段 / 等多久」，纯本地算（不调外部接口、不花钱）。
+             长文本尤其需要 —— 60 秒音频 720P 要等 7~8 分钟，先知道再决定要不要跑。 -->
+        <div class="av2-est" id="av2Est" hidden></div>
         <!-- 生成进度：云端只回 PENDING/RUNNING/SUCCEEDED，**没有百分比**。
              所以「第几段/共几段」是真的，段内百分比按已用时估算，
              文案里会带「≈」标明是估算，不假装是服务器给的真实进度。
@@ -246,10 +257,6 @@
           <div class="av2-cloud-fields">
             <input type="password" id="av2CloudKey"
                    placeholder="API Key（sk- 开头）" autocomplete="off" />
-            <select id="av2CloudRes" title="分辨率：480P 更快更省，720P 更清楚">
-              <option value="480P" selected>480P</option>
-              <option value="720P">720P</option>
-            </select>
             <button class="btn sm primary" id="av2CloudSave">保存</button>
           </div>
           <div class="av2-cloud-help" id="av2CloudHelp"></div>

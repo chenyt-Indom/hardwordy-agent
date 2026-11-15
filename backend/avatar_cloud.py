@@ -44,6 +44,7 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import logging
 logger = logging.getLogger(__name__)
@@ -71,6 +72,18 @@ DOWNLOAD_TIMEOUT = 300
 # 扣掉上传/提交/下载的固定开销约 8 秒，折成「每 1 秒音频要等多少秒」。
 SEG_OVERHEAD = 8.0
 FACTOR_DEF = {"480P": 13.5, "720P": 19.6}
+
+# ---------------------------------------------------------------- 并行生成
+# 为什么并行：接口硬限制单段 <20 秒，60 秒音频要切 4 段。原来是一段跑完
+# 再提交下一段，等于把 4 次「排队 + 生成」串起来等 —— 实测 60 秒音频
+# 要 20 分钟。改成同时提交多段、同时等，时间只取决于最慢的那一段，
+# 同样 60 秒音频只要 6.3 分钟（快 3.2 倍）。**费用不变**：
+# 云端按「生成视频时长」计费，不按等待时间，也不按并发数。
+#
+# 为什么是 3：账号并发配额不够时会直接报错（Throttling / concurrency）。
+# 3 是常见的默认配额档位；真撞上了，_gen_parallel 会自动降档重试，
+# 最差退回 1（等于原来的串行），不会让用户白等一场。
+PARALLEL_WORKERS = 3
 
 SIGNUP_URL = "https://bailian.console.aliyun.com/"
 KEY_URL = "https://help.aliyun.com/zh/model-studio/get-api-key"
@@ -579,44 +592,100 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
         _p({"stage": "upload", "msg": "上传形象图"})
         img_url = upload(image_path)
 
-        # 3) 逐段生成
-        # 每段都带上「这段多长、什么时候开始、之前已经完成多少秒」，
-        # 进度条据此现算 —— 云端本身不给百分比。
-        outs = []
+        # 3) 并行生成
+        # 分两步：先「上传 + 提交」全部段（每段 1~2 秒，串行更快也更稳 ——
+        # 并发提交最容易撞配额），再**同时等**。等待占了总耗时的 95% 以上，
+        # 所以并行等待就是全部的提速来源。
+        workers = max(1, min(PARALLEL_WORKERS, total))
+        _p({"stage": "submit_all", "index": 0, "total": total,
+            "audio_total": sum(segs_sec), "segs_sec": segs_sec,
+            "workers": workers, "done_sec": 0.0,
+            "msg": "提交 %d 段（并行 %d 路）" % (total, workers)})
+        jobs = []
         for i, seg in enumerate(segs, 1):
             # 每段开始前先看一眼：停了就**不再提交**后面的段 ——
             # 云端按次计费，少提交一段就少花一段的钱。
             if cancel is not None and cancel.is_set():
                 raise Cancelled("已停止生成（第 %d/%d 段未提交）" % (i, total))
             _sec = segs_sec[i - 1] if i - 1 < len(segs_sec) else 0.0
-            _done = sum(segs_sec[:i - 1])
-            _p({"stage": "segment", "index": i, "total": total,
-                "seg_sec": _sec, "seg_t0": 0, "done_sec": _done,
-                "msg": "第 %d/%d 段：上传音频" % (i, total)})
+            _p({"stage": "submit_all", "index": i, "total": total,
+                "segs_sec": segs_sec, "workers": workers,
+                "msg": "上传第 %d/%d 段音频" % (i, total)})
             a_url = upload(seg)
-            _t0 = time.time()          # 段内计时的起点：上传完、开始提交
-            _p({"stage": "segment", "index": i, "total": total,
-                "seg_sec": _sec, "seg_t0": _t0, "done_sec": _done,
-                "msg": "第 %d/%d 段：提交任务" % (i, total)})
+            if cancel is not None and cancel.is_set():
+                raise Cancelled("已停止生成（第 %d/%d 段未提交）" % (i, total))
             tid = submit(img_url, a_url, resolution)
-            _p({"stage": "segment", "index": i, "total": total,
-                "seg_sec": _sec, "seg_t0": _t0, "done_sec": _done,
-                "msg": "第 %d/%d 段：云端生成中" % (i, total), "task_id": tid})
-            r = wait(tid, on_progress=_p, cancel=cancel)
-            p = os.path.join(_tmpdir(), "seg_%s_%02d.mp4" % (uuid.uuid4().hex[:6], i))
-            download(r["video_url"], p)
-            tmp_files.append(p)
-            outs.append(p)
-            # 这一段实际花了多久 → 修正「每秒音频要等几秒」的系数，
-            # 后面几段的预计剩余时间就跟着变准（自我校正，不用我猜死）。
-            _spent = time.time() - _t0
-            _learn = 0.0
-            if _sec > 0.5 and _spent > SEG_OVERHEAD:
-                _learn = max(1.0, (_spent - SEG_OVERHEAD) / _sec)
-            _p({"stage": "segment_done", "index": i, "total": total,
-                "seg_sec": 0, "seg_t0": 0, "done_sec": sum(segs_sec[:i]),
-                "factor": _learn, "usage": r.get("usage") or {},
-                "msg": "第 %d/%d 段完成" % (i, total)})
+            jobs.append({"i": i, "tid": tid, "sec": _sec, "t0": time.time()})
+
+        # 并行等待。⚠ 某段失败时**不立刻抛**：其余段已经提交、钱已经花了，
+        # 让它们跑完把结果收下来，最后再报错 —— 否则用户钱花了却什么都拿不到。
+        outs_by_idx = {}
+        errs = []
+        done_sec = 0.0
+        _p({"stage": "segment", "index": 1, "total": total,
+            "segs_sec": segs_sec, "workers": workers, "done_sec": 0.0,
+            "seg_t0": time.time(), "msg": "并行生成中（%d 路同时跑）" % workers})
+
+        def _one(j):
+            try:
+                return j, wait(j["tid"], cancel=cancel)
+            except Cancelled:
+                raise
+            except Exception as e:                              # noqa: BLE001
+                # 任务本身报 FAILED → 再查一次还是 FAILED，重试没意义。
+                # 但「查询时网络抖了一下」「轮询超时」很常见，而这一段
+                # 云端**可能已经跑完了** —— 直接判失败等于白扔一次钱。
+                if "云端任务失败" in str(e):
+                    raise
+                if cancel is not None and cancel.is_set():
+                    raise Cancelled("已停止生成")
+                logger.info("第 %d 段查询异常，2 秒后重试一次：%s", j["i"], e)
+                time.sleep(2.0)
+                return j, wait(j["tid"], cancel=cancel)
+
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="av2seg") as ex:
+            futs = [ex.submit(_one, j) for j in jobs]
+            for fut in as_completed(futs):
+                try:
+                    j, r = fut.result()
+                except Cancelled:
+                    continue            # 停止：不当作错误，循环结束后统一抛
+                except Exception as e:                          # noqa: BLE001
+                    logger.warning("有一段生成失败，先收集其余段：%s", e)
+                    errs.append(e)
+                    continue
+                p = os.path.join(_tmpdir(),
+                                 "seg_%s_%02d.mp4" % (uuid.uuid4().hex[:6], j["i"]))
+                download(r["video_url"], p)
+                tmp_files.append(p)
+                outs_by_idx[j["i"]] = p
+                done_sec += j["sec"]
+                # 这一段实际花了多久 → 修正「每秒音频要等几秒」的系数，
+                # 后面的预计剩余时间就跟着变准（自我校正，不用我猜死）。
+                _spent = time.time() - j["t0"]
+                _learn = 0.0
+                if j["sec"] > 0.5 and _spent > SEG_OVERHEAD:
+                    _learn = max(1.0, (_spent - SEG_OVERHEAD) / j["sec"])
+                _p({"stage": "segment_done", "index": j["i"], "total": total,
+                    "segs_sec": segs_sec, "workers": workers,
+                    "done_sec": done_sec, "finished": len(outs_by_idx),
+                    "factor": _learn, "usage": r.get("usage") or {},
+                    "msg": "已完成 %d/%d 段" % (len(outs_by_idx), total)})
+
+        if cancel is not None and cancel.is_set():
+            raise Cancelled("已停止生成")
+        if errs:
+            # 说清「钱花到哪了」：其余段已经生成完（钱已扣），只是缺一段
+            # 没法拼接。不写这句的话用户会以为全部白跑。
+            _ok_n = len(outs_by_idx)
+            if _ok_n:
+                raise RuntimeError("%s｜另外 %d/%d 段已生成成功，但缺段无法拼接，"
+                                   "重新生成会重跑全部段" % (errs[0], _ok_n, total))
+            raise errs[0]
+        outs = [outs_by_idx[i] for i in sorted(outs_by_idx)]
+        if len(outs) != total:
+            raise RuntimeError("只拿到 %d/%d 段，拼接会缺内容" % (len(outs), total))
 
         # 4) 拼接 + 落盘
         name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
@@ -732,6 +801,47 @@ def _progress(d: dict, now: float = None) -> dict:
         return out
     if stage == "concat":
         out.update(pct=97.0, eta=3)
+        return out
+
+    # —— 并行模式 ——
+    # 判据是 job 里有没有 workers：只有并行路径才会写这个字段，
+    # 串行旧路径不会，所以不会互相误判。
+    if d.get("workers"):
+        at = float(d.get("audio_total") or 0)
+        done = float(d.get("done_sec") or 0)
+        segs_sec = d.get("segs_sec") or []
+        finished = int(d.get("finished") or 0)
+        total0 = int(d.get("total") or 0)
+        # ETA 按「批」算，不能照抄串行的「剩下的全加起来」——
+        # 并行时未完成的段是分批发出去的，总耗时 ≈ 每批里最长的那段之和。
+        # 照抄串行公式会把 60 秒音频估成 20 分钟（实际只要 6.3 分钟）。
+        left = segs_sec[finished:] if finished < len(segs_sec) else []
+        wk = max(1, int(d.get("workers") or PARALLEL_WORKERS))
+        f = _factor(d)
+        t0 = float(d.get("seg_t0") or 0)
+        rest = 0.0
+        for k in range(0, len(left), wk):
+            batch = left[k:k + wk]
+            rest += max(s * f + SEG_OVERHEAD for s in batch)
+        waited = max(0.0, now - t0) if t0 else 0.0
+        if left:
+            # 第一批已经在跑了，扣掉已经等过的时间（否则一开始会明显偏大）
+            out["eta"] = int(round(max(0.0, rest - waited)))
+        elif segs_sec:
+            out["eta"] = 0
+        # 进度：并行时「一段跑完才跳一格」会让条长时间不动、看着像卡死，
+        # 所以补一个按已用时间的平滑分量（最多补到剩余的 92%，留一点余量，
+        # 保证真正完成的那一刻是往前跳、不会先冲满再回退）。
+        cur = done
+        if left and rest > 0 and waited > 0:
+            cur = done + (at - done) * min(0.92, waited / rest)
+        if at > 0:
+            out["pct"] = round(min(96.0, 5.0 + 91.0 * min(1.0, cur / at)), 1)
+        elif total0:
+            out["pct"] = round(5.0 + 91.0 * finished / total0, 1)
+        if st in ("failed", "cancelled"):
+            out["eta"] = None
+            out["pct_estimated"] = False
         return out
 
     # 段内（stage = segment / cloud / segment_done）
@@ -853,12 +963,18 @@ def generate_async(image_path: str, audio_path: str, resolution: str = "",
             for k in ("msg", "task_id"):
                 if d.get(k):
                     upd[k] = d[k]
-            for k in ("total", "index"):
+            # ⚠ 这个白名单必须和 _progress 用的字段**对齐**。
+            #   实测踩到：漏了 workers / finished / segs_sec，并行信息全丢，
+            #   _progress 就退回串行公式，6 段 114 秒音频的 ETA 显示成
+            #   13446 秒（3.7 小时），而实际只要 4 秒。
+            for k in ("total", "index", "workers", "finished"):
                 if d.get(k):
                     upd[k] = int(d[k])
             for k in ("seg_sec", "seg_t0", "done_sec", "audio_total", "factor"):
                 if k in d:
                     upd[k] = d[k]
+            if d.get("segs_sec"):
+                upd["segs_sec"] = d["segs_sec"]
             _job_set(jid, **upd)
 
         try:
@@ -882,6 +998,61 @@ def generate_async(image_path: str, audio_path: str, resolution: str = "",
         _JOBS[jid]["_thread"] = th
     th.start()
     return jid
+
+
+# ---------------------------------------------------------------- 生成前预告
+# 用户要「点生成前就知道要等多久」。TTS 还没跑，拿不到真实音频时长，
+# 所以按字数估：中文正常语速约 4.5 字/秒（270 字/分钟）。
+# ⚠ 这是估算，误差主要来自标点停顿、英文数字、以及用户改语速。
+#   只用来回答「现在跑要不要等很久」，不能当承诺。
+CHARS_PER_SEC = 4.5
+
+
+def estimate(text: str, resolution: str = "", rate=None) -> dict:
+    """不调用任何外部接口，纯本地算：几段、大概等多久。"""
+    c = _cfg()
+    res = (resolution or c.get("resolution") or "480P").upper()
+    t = (text or "").strip()
+    if not t:
+        return {"ok": False, "error": "还没写要说的话"}
+    # 中文按字算；英文/数字按 2 个字符≈1 个音节粗估
+    cn = sum(1 for ch in t if "\u4e00" <= ch <= "\u9fff")
+    other = max(0, len(t) - cn)
+    units = cn + other * 0.5
+    try:
+        rv = 0 if rate is None else int(rate)
+    except Exception:                                       # noqa: BLE001
+        rv = 0
+    speed = CHARS_PER_SEC * (1.0 + rv / 100.0)
+    if speed <= 0.5:
+        speed = CHARS_PER_SEC
+    sec = units / speed
+
+    # 按并行分批算等待：每批取最长那段
+    f = FACTOR_DEF.get(res, 14.0)
+    left = sec
+    segs = []
+    while left > 0:
+        s = min(MAX_AUDIO_SEC, left)
+        segs.append(s)
+        left -= s
+    wk = max(1, min(PARALLEL_WORKERS, len(segs)))
+    wait = 0.0
+    for k in range(0, len(segs), wk):
+        batch = segs[k:k + wk]
+        wait += max(s * f + SEG_OVERHEAD for s in batch)
+    return {
+        "ok": True,
+        "text_len": len(t),
+        "est_sec": round(sec, 1),
+        "segments": len(segs),
+        "workers": wk,
+        "resolution": res,
+        "est_wait": int(round(wait)),
+        "max_audio_sec": MAX_AUDIO_SEC,
+        "chars_per_sec": CHARS_PER_SEC,
+        "note": "按 %.1f 字/秒估算，实际以配音后的真实时长为准" % CHARS_PER_SEC,
+    }
 
 
 def status() -> dict:

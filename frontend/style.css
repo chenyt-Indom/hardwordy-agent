@@ -5108,6 +5108,21 @@ html[data-theme="light"] select.pill-select option {
 /* 已停止：中性灰，别用红色 —— 那是用户自己点的，不是出错 */
 .av2-prog.stop .av2-prog-bar > i { background: var(--muted); }
 .av2-prog.stop .av2-prog-txt { color: var(--muted); }
+/* 分辨率切换：两个等宽小按钮。侧栏只有 300px，用 flex:1 + min-width:0
+   保证窄屏也不横向溢出（上一轮配置块就是栽在没写 min-width 上）。 */
+.av2-res { display: flex; gap: 6px; margin: 2px 0 0; }
+.av2-res .btn { flex: 1 1 0; min-width: 0; padding-left: 4px; padding-right: 4px; }
+.av2-res .btn.on {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+  font-weight: 600;
+}
+/* 生成前预估：一行小字，只在输入框有内容时出现，不占高度 */
+.av2-est {
+  font-size: 10.5px; line-height: 1.5; color: var(--muted);
+  word-break: break-word;
+}
+.av2-est b { color: var(--fg); font-weight: 600; }
+.av2-est .warn { color: #d29922; }
 /* 生成中「⏹ 停止」按钮：暖红，和平时的主色按钮区分开，
    避免用户以为点它还是「生成」 */
 .btn.sm.danger {

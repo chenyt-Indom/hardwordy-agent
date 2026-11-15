@@ -11252,6 +11252,20 @@ def avatar2_cloud_set(body: dict):
     return ac.set_config(body or {})
 
 
+@app.post("/api/avatar2/cloud/estimate")
+def avatar2_cloud_estimate(body: dict):
+    """生成前预告：这段文字大概几段、要等多久。
+
+    纯本地按字数估，**不调用任何外部接口**（不花钱、不占配额），
+    所以前端可以边输入边问。
+    """
+    body = body or {}
+    from . import avatar_cloud as ac
+    return ac.estimate(str(body.get("text") or ""),
+                       resolution=str(body.get("resolution") or ""),
+                       rate=body.get("rate"))
+
+
 @app.post("/api/avatar2/cloud/speak")
 def avatar2_cloud_speak(body: dict):
     """提交云端生成，立刻返回 job_id（生成要 1~3 分钟，前端轮询进度）。

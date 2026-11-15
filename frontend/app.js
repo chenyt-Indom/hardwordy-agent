@@ -3128,6 +3128,67 @@
       txt.textContent = bits.join(" · ");
     }
 
+    // —— 分辨率切换 ——
+    // 720P 的帧像素量是 480P 的 3.71 倍（720²@30fps vs 512²@16fps），
+    // 画质好但慢约 45%。默认跟随后端配置，点一下就存回去。
+    let curRes = "480P";
+    const resBox = $("#av2Res");
+    const estBox = $("#av2Est");
+    let estTimer = null;
+
+    function applyRes(res, save) {
+      curRes = String(res || "480P").toUpperCase();
+      if (resBox) {
+        resBox.querySelectorAll("button").forEach((b) => {
+          b.classList.toggle("on", (b.dataset.res || "") === curRes);
+        });
+      }
+      if (save) {
+        api("/api/avatar2/cloud/config", {
+          method: "POST",
+          body: JSON.stringify({ resolution: curRes }),
+        }).catch(() => {});
+      }
+      updEst();
+    }
+    if (resBox) {
+      resBox.querySelectorAll("button").forEach((b) => {
+        b.onclick = () => applyRes(b.dataset.res, true);
+      });
+    }
+
+    // —— 生成前预告 ——
+    // 纯本地按字数估（后端不调外部接口、不花钱），所以边输入边问也没事。
+    // 防抖 600ms：否则每敲一个字都发一次请求。
+    function updEst() {
+      if (!estBox) return;
+      const t = (textIn.value || "").trim();
+      if (!t) { estBox.hidden = true; return; }
+      clearTimeout(estTimer);
+      estTimer = setTimeout(async () => {
+        try {
+          const rv = rateSel && rateSel.value !== "auto"
+            ? parseInt(rateSel.value, 10) : null;
+          const e = await api("/api/avatar2/cloud/estimate", {
+            method: "POST",
+            body: JSON.stringify({ text: t, resolution: curRes, rate: rv }),
+          });
+          if (!e.ok) { estBox.hidden = true; return; }
+          const w = Number(e.est_wait) || 0;
+          const wtxt = w >= 60 ? (w / 60).toFixed(1) + " 分钟" : w + " 秒";
+          let s = "预计 <b>" + e.est_sec + " 秒</b>音频 · <b>" +
+                  e.segments + " 段</b> · 约等 <b>" + wtxt + "</b>";
+          if (w >= 300) s += ' · <span class="warn">较久，可先试短句</span>';
+          estBox.innerHTML = s;
+          estBox.hidden = false;
+        } catch (err) {
+          estBox.hidden = true;      // 估不出来就不显示，不能挡着操作
+        }
+      }, 600);
+    }
+    textIn.addEventListener("input", updEst);
+    if (rateSel) rateSel.addEventListener("change", updEst);
+
     // 云端口型配置块的显示/隐藏 + 读取保存
     function showCloudCfg(on) {
       const box = $("#av2Cloud");
@@ -3147,8 +3208,7 @@
         const k = $("#av2CloudKey");
         // 只回脱敏值：已有 Key 时显示掩码，不把明文塞回输入框
         if (k) k.value = c.has_key ? (c.api_key || "") : "";
-        const rs = $("#av2CloudRes");
-        if (rs && c.resolution) rs.value = c.resolution;
+        if (c.resolution) applyRes(c.resolution, false);
         const help = $("#av2CloudHelp");
         if (help && !c.ready) {
           help.innerHTML = '只要一个 API Key，不用业务空间 ID。' +
@@ -3168,8 +3228,7 @@
 
     async function saveCloudCfg() {
       const k = ($("#av2CloudKey") && $("#av2CloudKey").value || "").trim();
-      const rs = $("#av2CloudRes") ? $("#av2CloudRes").value : "480P";
-      const body = { resolution: rs };
+      const body = { resolution: curRes };
       if (k) body.api_key = k;
       const r = await api("/api/avatar2/cloud/config", {
         method: "POST",
@@ -3228,6 +3287,7 @@
         voice: voiceSel.value,
         mood: moodSel ? moodSel.value : "auto",
         rate: rateVal,
+        resolution: curRes,
       };
       try {
         say("正在配音 → 提交云端生成（Wan2.2-S2V）…一次约 1~3 分钟");
