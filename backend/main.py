@@ -388,11 +388,16 @@ def _recurrence_template_ctx() -> str:
 
 
 def _verification_card(tool_events: list) -> str:
-    """本轮调用过 selfdev_run/run_python/selfdev_patch 时，生成 ≤6 行结论卡片。
+    """⚠️ 未接线占位，**当前不会产生任何输出**。
 
-    直击三个摩擦点：结论埋在长文里、回复被截断、只诊断不修复。
-    从工具结果里抽取 pass/fail 计数与失败项，拼成固定格式置于回复首部。
-    没有相关工具调用时返回空串（不干扰普通对话）。
+    2026-11-15 自检发现：这个函数从来没被调用过，而且它的参数 `tool_events`
+    在整个项目里**不存在**（grep 只在函数体内部出现）—— 也就是说即使接上也
+    没有数据源。原实现还按 pytest 的 `N passed / N failed` 解析，而本项目的
+    回归输出是中文「23 通过 / 0 失败」，本来就匹配不上。
+
+    保留而不是删除，是因为「结论卡片」这个想法本身是对的（直击用户提过的
+    「结论埋在长文里 / 回复被截断 / 只诊断不修复」）。真要启用，需要先给聊天
+    主链路补一个工具事件收集器，再把下面的解析改成中文格式。
     """
     if not tool_events:
         return ""
@@ -2616,6 +2621,32 @@ def selfiter_regress(body: dict):
     try:
         return _rg.run(scope=str(b.get("scope") or "quick"),
                        only=b.get("only") or None)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfevolve/status")
+def selfevolve_status():
+    """自主立项状态：已落盘的「新功能验收断言」+ 从真实日志统计出的能力缺口。
+
+    用户要求「智能体自主构思新功能、且需要验证所有功能是否正常」——
+    这个接口就是让人能看见：它提了什么、断言在哪、缺口是什么。
+    """
+    try:
+        from . import selfevolve as _se
+        return {"ok": True, **(_se.status() or {})}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfevolve/verify")
+def selfevolve_verify(body: dict):
+    """在子进程里真跑所有「新功能验收断言」。body: timeout(秒，默认 40)"""
+    try:
+        from . import selfevolve as _se
+        b = body or {}
+        return {"ok": True, **(_se.verify_all(
+            timeout=int(b.get("timeout") or 40)) or {})}
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
 

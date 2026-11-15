@@ -26,6 +26,7 @@ import re
 import socket
 import threading
 import time
+from pathlib import Path
 from typing import Iterator
 
 import requests
@@ -33,6 +34,45 @@ import requests
 BASE = "https://api.deepseek.com"
 # (连接超时, 读取超时)：推理模型出首字可能要十几秒，读取给足 5 分钟
 TIMEOUT = (10, 300)
+
+# ---------------------------------------------------------------- 断点续跑
+# ⚠️ 2026-11-15 自检抓到：_save_checkpoint 在「超时」和「非 200」两处被调用，
+#    但**从来没有定义过**。因为调用被包在 try/except 里，所以不会崩 ——
+#    可「断点续跑」这个功能等于完全没生效。这类静默失效最难发现：
+#    日志里只有一行 debug，功能上表现为「断了就全丢」。
+_CKPT_DIR = Path(__file__).resolve().parent.parent / "data" / "llm_checkpoints"
+_CKPT_KEEP = 8      # 只留最近 8 份：磁盘被无上限增长吃过一次亏（43.8GB）
+
+
+def _save_checkpoint(messages, model, code, err):
+    """把本轮已收到的消息 + 失败原因落盘，供下一轮读回上下文续跑。
+
+    安全：只写对话内容与错误摘要，**不写 API Key**（Key 只在请求作用域内）。
+    任何异常都吞掉并只记 debug —— 落盘失败绝不该影响主流程。
+    """
+    try:
+        _CKPT_DIR.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "model": str(model or ""),
+            "code": str(code or ""),
+            "error": scrub(err)[:600],
+            "n_messages": len(messages or []),
+            "messages": messages or [],
+        }
+        p = _CKPT_DIR / ("ckpt_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
+        p.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+        # 只保留最近 N 份，避免长期运行把磁盘写满
+        olds = sorted(_CKPT_DIR.glob("ckpt_*.json"))
+        for old in olds[:-_CKPT_KEEP]:
+            try:
+                old.unlink()
+            except Exception:                           # noqa: BLE001
+                logger.debug("checkpoint prune failed", exc_info=True)
+        return True
+    except Exception:                                   # noqa: BLE001
+        logger.debug("checkpoint write failed", exc_info=True)
+        return False
 
 # ⚠️⚠️ 必须彻底绕开系统代理（2026-11-08 实测踩坑，两轮才定位）
 #
@@ -175,7 +215,47 @@ def scrub(text: object) -> str:
 
 
 class DeepSeekError(RuntimeError):
-    """DeepSeek 调用失败。message 已脱敏。"""
+    """DeepSeek 调用失败。message 已脱敏。
+
+    code 是结构化错误码，供调用方决定降级策略：
+      "auth"      → 401，Key 无效（换 Key 或切本地）
+      "balance"   → 402，余额不足（整轮报废，必须切本地/落盘续跑）
+      "rate"      → 429，限流（可稍后重试）
+      "timeout"   → 连接/读取超时（切本地或落盘续跑）
+      "network"   → 其他网络异常
+      "server"    → 5xx
+      "http"      → 其他非 200
+      "empty"     → 模型没返回内容
+      "unknown"   → 兜底
+    """
+
+    def __init__(self, message: str, code: str = "unknown", status: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
+def _code_for_status(status: int) -> str:
+    if status == 401:
+        return "auth"
+    if status == 402:
+        return "balance"
+    if status == 429:
+        return "rate"
+    if status >= 500:
+        return "server"
+    return "http"
+
+
+def _code_for_exc(e: BaseException) -> str:
+    """把 requests 异常归类成结构化错误码（超时单独拎出来）。"""
+    if isinstance(e, requests.Timeout):
+        return "timeout"
+    if isinstance(e, requests.ConnectionError):
+        return "network"
+    if isinstance(e, requests.RequestException):
+        return "network"
+    return "unknown"
 
 
 def _vision_content(prompt: str, image_b64) -> list:
@@ -230,9 +310,12 @@ def vision_chat(prompt: str, image_b64, model: str, api_key: str,
                                      "Content-Type": "application/json"},
                             timeout=timeout, proxies=NO_PROXY_MAP)
     except requests.RequestException as e:
-        raise DeepSeekError("看图请求失败：%s" % scrub(e)) from None
+        raise DeepSeekError("看图请求失败：%s" % scrub(e),
+                            code=_code_for_exc(e)) from None
     if r.status_code != 200:
-        raise DeepSeekError("看图返回 %s：%s" % (r.status_code, scrub((r.text or "")[:200])))
+        raise DeepSeekError("看图返回 %s：%s" % (r.status_code, scrub((r.text or "")[:200])),
+                            code=_code_for_status(r.status_code),
+                            status=r.status_code)
     try:
         d = r.json()
     except Exception:
@@ -307,7 +390,15 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
         )
     except requests.RequestException as e:
         # 注意：异常消息里可能带 URL（不含 Key，但万一有 header 回显也要打码）
-        raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(e)}") from None
+        # 超时单独归类：调用方据此切 ollama 或把中间结果落盘续跑
+        _code = _code_for_exc(e)
+        # 断点续跑：把本轮已收到的消息与失败原因落盘，下一轮可从这里读回上下文
+        try:
+            _save_checkpoint(messages, model, _code, str(e))
+        except Exception:
+            logger.debug("checkpoint save failed", exc_info=True)
+        raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(e)}",
+                            code=_code) from None
 
     # 非 200：把响应体前 300 字符带出去（已脱敏），前端能看懂是余额不足还是 Key 错
     if resp.status_code != 200:
@@ -324,8 +415,17 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
             hint = "（请求太频繁或并发超限，稍后再试）"
         elif resp.status_code >= 500:
             hint = "（DeepSeek 服务端故障，稍后重试）"
+        _code = _code_for_status(resp.status_code)
+        # 402 余额不足 / 5xx 等整轮报废场景：落盘中间结果，下一轮从断点读回
+        if _code in ("balance", "auth", "server"):
+            try:
+                _save_checkpoint(messages, model, _code, detail)
+            except Exception:
+                logger.debug("checkpoint save failed", exc_info=True)
         raise DeepSeekError(
-            f"DeepSeek 返回 {resp.status_code}{hint}：{scrub(detail)}")
+            f"DeepSeek 返回 {resp.status_code}{hint}：{scrub(detail)}",
+            code=_code,
+            status=resp.status_code)
 
     try:
         for raw in resp.iter_lines(decode_unicode=True):

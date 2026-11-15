@@ -47,6 +47,9 @@ _FORBIDDEN_PARTS = ("data/", "models/", "sessions/", "image_library/",
                     "secrets", ".env", ".git/", "__pycache__")
 
 _MAX_FILES_PER_ACTION = 3
+# 功能类动作（origin=feature）的文件数上限。新功能 = 新模块 + 路由 + 前端 + 断言，
+# 4 个起步；限 3 会让「自主加新功能」这件事永远做不成。
+_MAX_FILES_FEATURE = 6
 # ---- 运行状态（2026-11-15 用户要求）----
 # 用户原话：「我能不能看到他的状态，比如说显示『正在自动自迭代』」。
 # 反思是同步阻塞的（20~40 秒：抓网 + 论文评估 + LLM），以前中间只有一条静态
@@ -64,6 +67,24 @@ _RUN = {
 }
 _RUN_LOCK = threading.Lock()
 
+# 反思 prompt 的硬约束（2026-11-15 用户要求）：
+# 对应两个反复出现的问题 ——「只诊断不修复」和「同一诉求反复催」。
+# 直接拼进反思 prompt，让模型每轮都必须产出可落地的代码 patch。
+_REFLECT_HARD_RULES = (
+    "【本轮硬约束】\n"
+    "1. 本轮 actions 至少有一条必须是代码 patch（改 backend/ 或 frontend/ 下的文件），"
+    "只做诊断、只读代码、只写分析都不算完成本轮；诊断/读代码只能作为 patch 的附属步骤。\n"
+    "2. 多点任务强制串行：一次只推进一个点，做完一个点再动下一个；"
+    "每个点必须附上验证命令（如 python -m py_compile <file> 或对应测试命令），"
+    "没有验证命令的动作视为未完成。\n"
+    "3. 同一个诉求不要反复催：如果上一轮已经提过但没落地，本轮要么直接给出 patch，"
+    "要么明确说明卡在哪一步，不允许再重复一遍同样的建议。\n"
+    "4. 每条 patch 动作必须带 verify 字段（可执行的验证命令字符串），"
+    "缺少 verify 的 patch 视为无效动作，不得计入本轮产出。\n"
+    "5. 若任务包含多个点（如脖子/嘴巴/口型三点），本轮只允许生成其中一个点的动作，"
+    "其余点留到后续轮次，禁止在同一轮里并列推进多个点。\n"
+)
+
 _STAGES = {
     "fetch": "抓取技术动态（arXiv / GitHub / HN / 中文媒体）",
     "paper": "论文入库 · 向量召回 · 四维评估",
@@ -76,6 +97,24 @@ _STAGES = {
     "error": "出错",
     "idle": "空闲",
 }
+
+
+# 免确认授权语句（2026-11-15 用户要求）：
+# 用户说「权限给到最高」「想怎么搞就怎么搞」「你看着办」这类话时，
+# 视为已经批准，跳过 ask_user 直接进入执行并输出计划。
+_AUTO_APPROVE_KEYWORDS = (
+    "权限给到最高",
+    "想怎么搞就怎么搞",
+    "你看着办",
+)
+
+
+def is_auto_approve(text):
+    """判断用户这句话是否属于「免确认授权」，命中则跳过 ask_user。"""
+    s = str(text or "")
+    if not s:
+        return False
+    return any(k in s for k in _AUTO_APPROVE_KEYWORDS)
 
 
 def run_status():
@@ -1402,7 +1441,8 @@ _PROJECT_BRIEF = """本项目是一个"本地多模态助手"（Python FastAPI �
 后端文件：backend/*.py（main.py 约1.4万行、tools.py、avatar_*.py、cloud_image.py、keyvault.py 等）"""
 
 
-def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=""):
+def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief="",
+                          gap=""):
     sig_lines = []
     for it in signals[-30:]:
         u = (it.get("user") or "").replace("\n", " ")[:220]
@@ -1434,10 +1474,20 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
 
 ## 论文/新技术的四维评估（另一条通道给出，含可行性/创新性/效益/效率打分与落地计划）
 %s
+⚠️ **theory 字段的硬约束**：只有写「上面这份评估里真实存在的论文/技术」才算数，
+   并且要写出标题或来源（例：`arXiv:2401.xxxxx` 或论文标题）。上面没有相关论文的，
+   theory 就留空 —— **不许凭记忆编造「某论文提出…」**。编出来的理论比没有更糟：
+   用户会据此判断这件事值不值得做，编一个就等于骗他做决定。
 ⚠️ 这里的 verdict=skip 就是**明确不该做**，别把它再包装成 action 提一遍。
    verdict=adopt_now / evaluate 的，它的 plan 已经是分步骤的，你要做的是判断
    「现在值不值得插进本轮动作」——值得就把它转成 actions 里的条目（保留它的
    验证方式），不值得就在 summary 里说一句为什么先不做。
+
+## 能力缺口（从真实执行日志统计，不是猜的）
+%s
+⚠️ 如果这里显示某个文件被反复改、或某类动作反复失败，说明**当前做法行不通**。
+   要么先想清楚真正的根因再动手，要么换一条完全不同的思路 ——
+   绝对不要在同一条路上继续叠加改动（那是"越改越乱"的来源）。
 
 ## 你的任务
 1. **自我反思**：最近哪些地方没做好？要具体到"哪类任务/哪个环节/为什么会这样"，
@@ -1471,6 +1521,21 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
    ⚠️ 不要提议"重写整个模块"这种无法安全回滚的动作。
    ⚠️ 如果确实没有值得改的，actions 就给空数组 —— 不要为了凑数硬提。
 
+8. **features 里的 `assert_code` 必填**（新功能的验收断言）。它会被写成一个
+   独立文件、在回归里**真的执行**，所以必须满足：
+   · 完整可运行的 Python，且**必须定义 `def run():`**；
+   · `run()` 里用 `assert` 判断「这个功能真的可用」，不满足就让它抛 AssertionError；
+   · 只能 import 本项目模块和标准库；**禁止**联网、起子进程、读写/删除文件、
+     出现 os.remove / subprocess / requests / socket / shutil.rmtree 等调用
+     —— 命中会被直接拒绝写入，功能也就落不了地；
+   · 必须**秒级**跑完（不加载模型、不调 LLM、不联网）；
+   · 写法示意（内容按你提的功能写，别照抄）：
+     def run():
+         from backend import selfevolve
+         st = selfevolve.status()
+         assert isinstance(st, dict) and "count" in st, "status() 应返回含 count 的字典"
+   ⚠️ 写不出可执行断言的 feature，宁可不提 —— 没有断言就无法验证新功能是否正常。
+
 ## 输出格式（严格 JSON，不要任何额外文字）
 {
   "summary": "一句话总结这次反思（30字内）",
@@ -1478,7 +1543,7 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
   "user_insights": [{"title":"短标题","detail":"观察+证据","suggestion":"可以怎么改进"}],
   "forecast": [{"biz":"用户未来可能处理的业务","evidence":"依据（原话/重复出现的模式）","confidence":"high|mid|low","prepare":"可以提前准备什么"}],
   "needs": [{"pain":"当下遇到的问题","evidence":"证据","impact":"影响了什么"}],
-  "features": [{"title":"功能名","why":"为什么值得做（必须说清）","pain":"对应哪个痛点或预判","how":"大概怎么做","effort":"S|M|L","files":["backend/xxx.py"],"anchor":"改哪个函数","risk":"low|mid|high","verify":"怎么验证有效","theory":"理论/论文依据，没有就留空"}],
+  "features": [{"title":"功能名","why":"为什么值得做（必须说清）","pain":"对应哪个痛点或预判","how":"大概怎么做","effort":"S|M|L","files":["backend/xxx.py","frontend/xxx.js"],"anchor":"改哪个函数","risk":"low|mid|high","verify":"怎么验证有效","theory":"理论/论文依据，没有就留空","assert_code":"必填，见下方说明"}],
   "questions": [{"q":"想问用户的一句话","why":"为什么这个信息会改变做法","options":["选项1","选项2"]}],
   "tech_takeaways": [{"title":"技术名","source":"来源","url":"链接","takeaway":"一句话要点","applicable":"对本项目有没有用，怎么用"}],
   "actions": [{"title":"短标题","detail":"具体改什么、为什么","risk":"low|mid|high","files":["backend/xxx.py"]}]
@@ -1490,6 +1555,7 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
         exp or experience_brief(),
         "\n".join(tech_lines) or "（本次没抓到，可能没联网）",
         paper_brief or "（本轮没有可用的论文评估）",
+        gap or "（暂无执行记录统计）",
         ("## 用户这次的额外关注点\n" + focus) if focus else "")
 
 
@@ -1572,8 +1638,19 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
         # 论文这条通道挂了不能拖垮整个反思（它只是输入之一）
         paper_meta["error"] = "%s: %s" % (type(e).__name__, e)
 
+    # ★ 能力缺口：从**真实执行日志**统计「反复做不到的事」（成功率 / 反复改同一文件 /
+    #   反复失败的动作）。原来 _build_reflect_prompt 有 gap 参数却从没传过 ——
+    #   等于这条输入一直是空的，模型只能靠对话摘要猜。
+    gap_txt = ""
+    try:
+        from . import selfevolve
+        gap_txt = selfevolve.gap_prompt()
+        paper_meta["gaps"] = (selfevolve.gaps() or {}).get("summary") or ""
+    except Exception as e:                              # noqa: BLE001
+        paper_meta["gap_error"] = "%s: %s" % (type(e).__name__, e)
     prompt = _build_reflect_prompt(sig, tech, journal, focus=focus,
-                                   exp=exp_txt, paper_brief=paper_brief)
+                                   exp=exp_txt, paper_brief=paper_brief,
+                                   gap=gap_txt)
     # 真实文件清单：不给它，模型会编出 `avatar_warp.py` 这种不存在的路径
     try:
         prompt += _file_inventory()
@@ -1733,9 +1810,11 @@ def _norm_rel(rel):
         return ""
     s = rel.replace("\\", "/").strip().lstrip("./")
     low = s.lower()
+    # ⚠️ 这段原来是 `pass`（等于没生效），只靠下面的前缀白名单兜着 ——
+    #    一旦将来放宽 _ALLOWED_PREFIX，禁写目录就彻底失守。改成真的拒绝。
     for bad in _FORBIDDEN_PARTS:
         if low.startswith(bad) or ("/" + bad) in ("/" + low):
-            pass
+            return ""
     if not any(low.startswith(p) for p in _ALLOWED_PREFIX):
         return ""
     if not low.endswith(_ALLOWED_EXT):
@@ -2223,9 +2302,15 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
             _log_act(plan, a, False, bad)
             _ev("code", **_card(a, patches, False, bad))
             continue
-        if len(set(rels)) > _MAX_FILES_PER_ACTION:
+        # ★ 用户要求「即使要下载或重构或构建新模块也可以」—— 真正的新功能是
+        #   「新模块 + 路由 + 前端 + 验收断言」4 个起步，而 _MAX_FILES_PER_ACTION=3
+        #   会让它永远做不了。所以只对**功能类**动作放宽到 _MAX_FILES_FEATURE，
+        #   bug 修复类仍然限 3（改得越少越安全）。
+        _maxf = (_MAX_FILES_FEATURE if a.get("origin") == "feature"
+                 else _MAX_FILES_PER_ACTION)
+        if len(set(rels)) > _maxf:
             a["status"] = "failed"
-            a["error"] = "一次动作涉及文件过多（上限 %d）" % _MAX_FILES_PER_ACTION
+            a["error"] = "一次动作涉及文件过多（上限 %d）" % _maxf
             results.append({"id": a["id"], "ok": False, "error": a["error"]})
             _log_act(plan, a, False, a["error"])
             _ev("code", **_card(a, patches, False, a["error"]))
@@ -2344,6 +2429,36 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
             _ev("step", text="%s 判为占位式修补，已回滚（需人工确认）" % a.get("id"))
             _ev("code", **_card(a, patches, False, a["error"], True))
             continue
+
+        # ★ 新功能类动作：启用它自带的验收断言并**在子进程里真跑一遍**。
+        #   用户要求「需要验证所有功能是否正常」—— 通用回归里没有新功能的用例，
+        #   只有它自己的断言能证明「这次改动真的让功能可用了」。
+        #   断言不过就回滚：宁可保留旧版，也不留一个连自己都证明不了的功能。
+        #   （若断言本身写错导致误回滚，note 里会留下原因，人工可复核。）
+        if a.get("origin") == "feature" and a.get("assert_file"):
+            try:
+                from . import selfevolve
+                selfevolve.unpark_test(a.get("title"))
+                _vr = selfevolve.verify_one(a.get("title"))
+                if not _vr.get("ok"):
+                    _restore(tag2)
+                    selfevolve.park_test(a.get("title"))
+                    a["status"] = "failed"
+                    a["error"] = ("新功能验收断言未通过，已回滚：%s"
+                                  % str(_vr.get("why") or "")[:200])
+                    results.append({"id": a["id"], "ok": False,
+                                    "error": a["error"], "assert": _vr})
+                    _log_act(plan, a, False, a["error"])
+                    _ev("step", text="%s 验收断言未通过，已回滚" % a.get("id"))
+                    _ev("code", **_card(a, patches, False, a["error"], True))
+                    continue
+                a["note"] = ((a.get("note") or "")
+                             + "｜验收断言通过（%ss）" % _vr.get("seconds")).strip("｜")
+            except Exception as e:                      # noqa: BLE001
+                # 断言机制本身出问题不能把已经正确的改动判死，只记录
+                a["note"] = ((a.get("note") or "")
+                             + "｜断言验证异常：%s: %s"
+                             % (type(e).__name__, e)).strip("｜")
 
         a["status"] = "done"
         a["error"] = ""
@@ -2669,13 +2784,35 @@ def _features_to_actions(features, start=0, limit=4, existing=None):
             parts.append("怎么验证：%s" % verify)
         if not files:
             parts.append("⚠️ 没给出可改的真实文件，执行时只能靠模型自己找位置。")
+        # ★ 新功能必须自带**可执行**的验收断言。用户明确要求「需要验证所有功能
+        #   是否正常」—— 没有断言就只能靠肉眼，等于没验证。
+        #   落盘后立刻挂起（_pending_ 前缀，回归跳过）：功能还没实现，它现在必然
+        #   失败，留在回归里会把回归弄成永久红。等动作执行成功后 unpark + verify。
+        tcode = str(f.get("assert_code") or "").strip()
+        tfile = ""
+        if tcode:
+            try:
+                from . import selfevolve
+                _tok, _tp = selfevolve.write_test(title, tcode, note=pain or why)
+                if _tok:
+                    selfevolve.park_test(title)
+                    tfile = str(_tp)
+                    parts.append("验收断言：%s（功能做完后自动启用并执行）" % _tp)
+                else:
+                    parts.append("⚠️ 验收断言被拒绝写入：%s" % _tp)
+            except Exception as e:                      # noqa: BLE001
+                parts.append("⚠️ 验收断言写入失败：%s: %s"
+                             % (type(e).__name__, e))
+        else:
+            parts.append("⚠️ 没给验收断言（assert_code 为空），做完只能人工看效果。")
         out.append({
             "id": "f%d" % (start + len(out) + 1),
             "title": title[:120],
             "detail": "\n".join(parts)[:900],
             "risk": risk,
-            "files": files[:_MAX_FILES_PER_ACTION],
+            "files": files[:_MAX_FILES_FEATURE],
             "origin": "feature",
+            "assert_file": tfile,
             "why": why[:400],
             "status": "pending",
             "note": "",

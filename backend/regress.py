@@ -537,15 +537,69 @@ def _c_imports():
 
 
 # ---------------------------------------------------------------- 运行
+_FEATURE_DIR = _BACKEND / "_feature_tests"
+
+
+def _load_dynamic():
+    """加载「新功能自带的断言」—— backend/_feature_tests/*.py。
+
+    为什么需要这一层
+    ----------------
+    智能体自主加的新功能，通用回归里**没有它的用例**，改坏了根本发现不了。
+    用户明确要求「需要验证所有功能是否正常」，所以每条新功能必须把自己的
+    验收断言写成一个独立文件：模块里提供 run()，断言失败就抛 AssertionError。
+
+    为什么放独立目录而不是往本文件里塞
+    --------------------------------
+    自动生成的内容一旦混进人工维护的用例里，出问题很难分辨是谁的锅、
+    删也删不干净。放独立目录：坏了直接删那个文件，不用动 regress.py。
+
+    约定：文件里**不联网、不调 LLM、不加载模型**，必须秒级可重复。
+    单个文件加载失败只记一条失败用例，绝不让整个回归崩掉。
+    """
+    out = []
+    try:
+        if not _FEATURE_DIR.is_dir():
+            return out
+        files = sorted(_FEATURE_DIR.glob("*.py"))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return out
+    import importlib.util
+    for p in files:
+        if p.name.startswith("_"):
+            continue
+        name = "feature.%s" % p.stem
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "backend._feature_tests.%s" % p.stem, str(p))
+            if spec is None or spec.loader is None:
+                raise ImportError("无法构建模块规格")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            fn = getattr(mod, "run", None)
+            if not callable(fn):
+                raise ImportError("缺少 run() 函数")
+        except Exception as e:                          # noqa: BLE001
+            def _bad(_e=e, _p=p.name):
+                raise AssertionError("断言文件加载失败 %s：%s: %s" % (
+                    _p, type(_e).__name__, _e))
+            out.append({"name": name, "scope": "quick", "fn": _bad})
+            continue
+        out.append({"name": name, "scope": "quick", "fn": fn})
+    return out
+
+
 def run(scope="quick", only=None):
     """跑一遍回归。scope=quick 只跑快用例；full 追加全量自检与导入检查。"""
     t0 = time.time()
+    base = _CASES + _load_dynamic()
     if only:
-        picked = [c for c in _CASES if c["name"] in only]
+        picked = [c for c in base if c["name"] in only]
     elif scope == "full":
-        picked = list(_CASES)
+        picked = list(base)
     else:
-        picked = [c for c in _CASES if c["scope"] == "quick"]
+        picked = [c for c in base if c["scope"] == "quick"]
 
     items, passed, failed, skipped = [], 0, 0, 0
     for c in picked:
