@@ -1087,7 +1087,17 @@ class Wav2LipEngine:
                 p96 = preds[i]
                 # 超分仍按平滑后的张嘴度判断（sr_sess 未启用时是死路径）
                 if self.sr_sess is not None and open_seq_w2l[i] > 0.18:
-                    p96 = self._sr(p96.astype(np.float32)).astype(np.uint8)
+                    _psr = self._sr(p96.astype(np.float32)).astype(np.uint8)
+                    # 纯超分实测「更清晰但过度锐化、塑料感」（视觉复核原话），
+                    # 掺 25% 的原图双三次上采样把锐度拉回自然区间，
+                    # 既保住大部分细节，又不会出现计算摄影那种硬边。
+                    try:
+                        _pup = cv2.resize(p96.astype(np.uint8),
+                                          (_psr.shape[1], _psr.shape[0]),
+                                          interpolation=cv2.INTER_CUBIC)
+                        p96 = cv2.addWeighted(_psr, 0.75, _pup, 0.25, 0)
+                    except Exception:                   # noqa: BLE001
+                        p96 = _psr
                 frame = self._composite(face_img_bgr, p96, box, face96,
                                         openness=float(open_seq_w2l[i]),
                                         roundness=float(round_seq[i]),

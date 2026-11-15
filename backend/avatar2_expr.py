@@ -316,25 +316,74 @@ def _brow_band(frame, face, amt: float, t: float):
     return frame
 
 
-def apply(frame, t: float, cfg: dict, face=None, energy: float = 0.5):
+def _coerce(frame):
+    """把一帧统一成 numpy uint8 数组，并返回「写回原对象」的函数。
+
+    为什么需要：avatar2.render() 里 _frame() 返回的是 **PIL Image**，
+    而本模块所有形变都是 numpy/cv2 操作。原实现直接 `frame[...] = out`，
+    对 PIL 会抛 TypeError 并被外层 except 吞掉 —— 表情层静默失效
+    （实测改动像素数 = 0，等于从来没跑过）。
+    """
+    if isinstance(frame, np.ndarray):
+        return frame, (lambda a: a)
+    try:
+        from PIL import Image
+        if isinstance(frame, Image.Image):
+            arr = np.array(frame.convert("RGB"))        # np.array 复制，可写
+            def _back(a):
+                try:
+                    frame.paste(Image.fromarray(a), (0, 0))
+                except Exception:                       # noqa: BLE001
+                    logger.debug("silent-except", exc_info=True)
+                return frame
+            return arr, _back
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return None, None
+
+
+def apply(frame, t: float, cfg: dict, face=None, energy: float = 0.5,
+          head_motion: bool = False):
     """对一帧应用微表情。frame 是 BGR uint8（会被就地修改并返回）。
 
     energy: 0~1，当前帧的说话强度（可选）。说话时眉眼位移略大一点点，
             静音段几乎不动 —— 避免「不说话还在挤眉弄眼」。
+    head_motion: 是否做整头仿射（默认 False，这是修「脖子一直乱扭」的关键）。
+        整头仿射 = 整帧平移 + 旋转 + **预放大 zoom**。zoom 每帧不同，
+        等于整幅画面（含脖子、肩膀、背景）每帧在缩放脉动 ——
+        静态照片上表现为脖子跟着扭，用户明确反馈过这个问题。
+        关掉后只保留眉眼带的局部形变，脖子一个像素都不动。
     """
     if frame is None or not cfg:
         return frame
+    # 类型适配：调用方可能传 PIL Image（avatar2.render 的 _frame 就是），
+    # 也可能传 numpy。内部一律用 numpy 运算，出口再写回原对象。
+    arr, _back = _coerce(frame)
+    if arr is None:
+        return frame
+    if not head_motion:
+        # 只做眉眼带：位移局限在脸高 0.16~0.44 的横条内，碰不到下巴和脖子。
+        try:
+            amt = float(cfg.get("brow", 0)) * (0.35 + 0.65 * max(0.0, min(1.0, energy)))
+            wave = math.sin(2 * math.pi * float(cfg.get("freq", 0.3)) * 0.8 * t + 0.6)
+            if abs(amt * wave) < 0.05 or not face:
+                return frame
+            out = _brow_band(arr.copy(), face, amt * wave, t)
+            arr[...] = out
+            return _back(arr)
+        except Exception:                               # noqa: BLE001
+            return frame
     if cfg.get("sway", 0) <= 0 and cfg.get("nod", 0) <= 0 and cfg.get("rot", 0) <= 0:
         return frame
     try:
-        out = _affine(frame, t, cfg)
+        out = _affine(arr, t, cfg)
         amt = float(cfg.get("brow", 0)) * (0.35 + 0.65 * max(0.0, min(1.0, energy)))
         # 眉眼位移本身也是缓慢起伏，不是一直往上顶
         wave = math.sin(2 * math.pi * float(cfg.get("freq", 0.3)) * 0.8 * t + 0.6)
         out = _brow_band(out, face, amt * wave, t)
         # cv2.warpAffine / remap 都返回**新数组**，必须写回原 buffer，
         # 否则调用方 `apply(f, ...)` 不接返回值时等于什么都没做（实测踩过）。
-        frame[...] = out
-        return frame
+        arr[...] = out
+        return _back(arr)
     except Exception:                                   # noqa: BLE001
         return frame
