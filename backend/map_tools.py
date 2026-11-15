@@ -41,6 +41,8 @@ import re
 import time
 import urllib.parse
 import urllib.request
+import logging
+logger = logging.getLogger(__name__)
 
 _UA = "local-multimodal-assistant/1.0 (personal use)"
 _TIMEOUT = 15
@@ -447,7 +449,7 @@ def search_place(query: str, limit: int = 5, allow_net=None, city: str = "") -> 
                 if hits:
                     return hits[:limit]
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     # ③ 联网查 ⚠️ 不要带 &lang=zh —— 带了中文查询会全部返回空
     if net:
@@ -473,7 +475,7 @@ def search_place(query: str, limit: int = 5, allow_net=None, city: str = "") -> 
             if out:
                 return out[:limit]
         except Exception:
-            pass      # 网断了 / Photon 挂了 → 继续往下走兜底
+            logger.debug("silent-except", exc_info=True)      # 网断了 / Photon 挂了 → 继续往下走兜底
 
     # ④ 兜底：内置常用地名表（离线时主力）。查不到就返回空，不编坐标。
     return _builtin_search(q, limit)

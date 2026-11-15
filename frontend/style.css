@@ -5502,6 +5502,8 @@ html[data-theme="light"] select.pill-select option {
 .iter-msg {
   padding: 6px 16px 0; font-size: 12.5px;
   color: var(--muted, #5b6472); flex: 0 0 auto;
+  white-space: pre-wrap;          /* 行为回归结果是多行纯文本 */
+  max-height: 40vh; overflow-y: auto;
 }
 /* 没消息时不占位：原来 min-height:18px 会留一条空白带，看着像多余的横条 */
 .iter-msg:empty { display: none; }

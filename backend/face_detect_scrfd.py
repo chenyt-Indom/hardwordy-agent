@@ -5,6 +5,8 @@
 import numpy as np
 import cv2
 import onnxruntime as ort
+import logging
+logger = logging.getLogger(__name__)
 
 
 def _distance2bbox(points, distance):

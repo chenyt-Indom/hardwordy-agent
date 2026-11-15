@@ -26,6 +26,8 @@ import re
 import time
 import urllib.parse
 import urllib.request
+import logging
+logger = logging.getLogger(__name__)
 
 AMAP = "https://restapi.amap.com/v3"
 AMAP_V4 = "https://restapi.amap.com/v4"      # 骑行在这套（v3 没有骑行接口）

@@ -32,6 +32,8 @@ import json
 import os
 import re
 import threading
+import logging
+logger = logging.getLogger(__name__)
 
 # 缓存上限（条）。一段文案通常几十到几百字，200 条足够覆盖常用稿子
 _CACHE_MAX = 200

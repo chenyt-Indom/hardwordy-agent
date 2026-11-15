@@ -39,6 +39,8 @@ import socket
 import struct
 import threading
 from typing import Optional
+import logging
+logger = logging.getLogger(__name__)
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -178,13 +180,13 @@ class WSSock:
         try:
             self._s.settimeout(t)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     def setsockopt(self, *a) -> None:
         try:
             self._s.setsockopt(*a)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     def sendall(self, data: bytes) -> None:
         with self._wlock:
@@ -204,7 +206,7 @@ class WSSock:
         try:
             self._s.shutdown(how)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     def close(self) -> None:
         if self._closed:
@@ -213,7 +215,7 @@ class WSSock:
         try:
             self._s.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     # ---------------------------------------------------------- 内部
     def _recvn(self, n: int):

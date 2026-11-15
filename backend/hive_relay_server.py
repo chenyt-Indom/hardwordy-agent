@@ -47,6 +47,7 @@ import struct
 import sys
 import threading
 import time
+logger = logging.getLogger(__name__)
 
 PROTO = 1
 MAX_PKT = 9 * 1024 * 1024        # 单包上限（mesh 帧 8MB + 9 字节帧头，留余量）
@@ -284,7 +285,7 @@ class Conn:
                 self.q.put_nowait((kind, payload))
                 self.dropped += 1
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             return False
 
     def _writer(self) -> None:
@@ -317,11 +318,11 @@ class Conn:
         try:
             self.q.put_nowait(None)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         try:
             self._w.join(timeout)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         self.close()
 
     def close(self) -> None:
@@ -331,15 +332,15 @@ class Conn:
         try:
             self.q.put_nowait(None)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         try:
             self.sock.shutdown(socket.SHUT_RDWR)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         try:
             self.sock.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         self.srv.leave(self)
 
 
@@ -393,7 +394,7 @@ class RelayServer:
                         o.ctrl({"op": "signal_gone",
                                 "uid": info.get("uid", "")})
                     except Exception:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
         log.info("断开 %s 群=%s", conn.addr, (conn.gid or "")[:8])
 
     # -------------------------------------------------- 主循环
@@ -418,12 +419,12 @@ class RelayServer:
             try:
                 c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             threading.Thread(target=self._handle, args=(c, addr), daemon=True).start()
         try:
             s.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     def shutdown(self) -> None:
         self.stop_flag = True
@@ -460,7 +461,7 @@ class RelayServer:
             try:
                 sock.settimeout(_old_to)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         if first[:1] == b"G":
             rest = ws_min.handshake_server(sock)
             if rest is None:
@@ -468,7 +469,7 @@ class RelayServer:
                 try:
                     sock.close()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 return
             sock = ws_min.WSSock(sock, rest=rest, mask_out=False)
             self.stats["ws"] = self.stats.get("ws", 0) + 1
@@ -619,7 +620,7 @@ class RelayServer:
                                 o.ctrl({"op": "signal_peer", "uid": uid,
                                         "name": name, "paddr": paddr})
                             except Exception:
-                                pass
+                                logger.debug("silent-except", exc_info=True)
                         self.stats["signals"] = self.stats.get("signals", 0) + 1
                 elif c.get("op") == "signal_get":
                     conn.ctrl({"op": "signal_list",
@@ -695,7 +696,7 @@ def main(argv=None) -> int:
         try:
             signal.signal(sig, _stop)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     srv.serve_forever()
     return 0

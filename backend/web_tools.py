@@ -10,6 +10,8 @@ import json
 import urllib.parse
 import urllib.request
 from datetime import date as _date, datetime as _dt
+import logging
+logger = logging.getLogger(__name__)
 
 WEB_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -152,7 +154,7 @@ def _search_360(query: str, n: int) -> list:
     return out
 
 
-def _search_sogou(query: str, n: int) -> list:
+def _search_sogou(query: str, n: int) -> list:  # noqa: dead-func 有意保留
     """搜狗搜索（**已失效，保留仅为记录**）。
 
     2026-09 实测：搜狗已启用反爬，`sogou.com/web?query=` 返回的是
@@ -277,7 +279,11 @@ def _merge_engines(batches: list, n: int, query: str = "") -> list:
 # - **百度**：返回 1.4KB 的跳转壳页，需 JS 执行，无法直接解析。
 # - **360**：支持 `site:` 定向语法（Bing 中文站会忽略 site:），
 #   是查机构官方信息的唯一有效通道，详见 search_official()。
-_ENGINES = (_search_bing, _search_360)
+# ⚠️ 2026-11-15 接线：`_search_bing_en` 之前**定义了却从没进过 _ENGINES**，
+#   等于白写一个引擎。它抓的是 www.bing.com?setlang=en，结果池与中文站不同，
+#   实测能补上中文站搜不到的技术类英文结果。三个引擎是并发跑的，
+#   多一个只增加一次请求（不增加串行等待）。
+_ENGINES = (_search_bing, _search_360, _search_bing_en)
 
 
 # 机构/官方信息类查询 → 建议定向的域名后缀
@@ -603,7 +609,7 @@ def fetch_pages(urls: list, limit: int = 1200, workers: int = 5,
                 if t:
                     out[u] = t
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return out
 
 

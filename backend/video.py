@@ -22,6 +22,8 @@ import os
 import re
 import subprocess
 import tempfile
+import logging
+logger = logging.getLogger(__name__)
 
 _WIN = (os.name == "nt")
 # CREATE_NO_WINDOW：不弹控制台（见上面坑 1）

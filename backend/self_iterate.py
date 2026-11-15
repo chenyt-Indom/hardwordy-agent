@@ -30,6 +30,8 @@ import sys
 import threading
 import time
 from pathlib import Path
+import logging
+logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parent.parent
 _DATA = _ROOT / "data" / "self_iterate"
@@ -145,6 +147,10 @@ _SIGNAL_KEEP = 60
 # 另外要求智能体能主动检查自己的代码、任务没达到预期时能自己怀疑是代码问题。
 _SETTINGS = _DATA / "settings.json"
 _AUDITS = _DATA / "audits.json"
+# 用户最后一次**真实聊天**的时间（抽空自检靠它判断"现在是不是空档"）。
+# ⚠️ 不能拿 sessions 文件的 mtime 代替：定时任务自己也往 session 里写消息，
+#    那会把"最后活动"一直刷新成刚刚，抽空自检就永远等不到空档。
+_ACT = _DATA / "activity.json"
 
 _DEFAULT_SETTINGS = {
     # 信任模式：反思产出的动作**不再等批准**，直接执行。
@@ -170,6 +176,17 @@ _DEFAULT_SETTINGS = {
     "evaluate_periodic": True,      # 定时（默认 2 小时）跑一次批量评估
     "evaluate_every_min": 120,      # 定时评估间隔（分钟）
     "evaluate_min_turns": 4,        # 至少攒够几轮才评估，避免重复评同一批
+    # ---- 抽空自检（2026-11-15 追加）----
+    # 用户原话：「自检这东西能不能也是和自动迭代一样，自从抽空检测」。
+    # 每天 05:10 那次是"保底"；这里做的是"趁用户不聊的时候顺手查一遍"。
+    "idle_audit": True,             # 抽空自检总开关
+    "idle_gap_min": 10,             # 用户安静满这么多分钟才算空档（避免打断对话）
+    "idle_every_min": 180,          # 两次抽空自检至少间隔（分钟），默认 3 小时
+    # ---- 行为级回归（2026-11-15 追加）----
+    # 用户要求「彻底解决逻辑 bug 查不出来」的问题。
+    # 静态检查只能看名字/结构，逻辑错要靠真跑断言 —— 每次改完代码自动跑一遍，
+    # 失败就回滚（regress.py）。
+    "regress_after_change": True,
 }
 
 
@@ -179,7 +196,7 @@ def _ensure():
     try:
         _BACKUPS.mkdir(parents=True, exist_ok=True)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _read_json(path, default):
@@ -188,7 +205,7 @@ def _read_json(path, default):
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     return default
 
 
@@ -245,6 +262,87 @@ def _now():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ------------------------------------------------- 活动打点 / 抽空判定
+# 用户原话：「自检这东西能不能也是和自动迭代一样，自从抽空检测」。
+# 每天 05:10 那次是保底；这里做的是「趁用户不聊的时候顺手查一遍」。
+
+def touch_activity():
+    """记一笔「用户刚说了话」。主聊天通道每收到一条消息都调它。"""
+    try:
+        _write_json(_ACT, {"ts": time.time(), "iso": _now()})
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return True
+
+
+def last_activity():
+    """用户最后一次说话的时间戳（秒）。没有记录时返回 0。"""
+    d = _read_json(_ACT, {})
+    try:
+        return float(d.get("ts") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def idle_gate(settings=None):
+    """判断现在适不适合「抽空跑一次自检」。
+
+    返回 {"ok": bool, "reason": str, ...}，ok=False 时 reason 是给人看的中文原因。
+    四条全过才放行：
+      1. 开关开着
+      2. 用户已安静满 idle_gap_min 分钟（不打断对话）
+      3. 距上次自检满 idle_every_min 分钟（别反复扫同一份代码）
+      4. 没有反思 / 迭代队列在跑（不抢资源、不并发改代码）
+    """
+    s = settings or load_settings()
+    if not s.get("idle_audit"):
+        return {"ok": False, "reason": "抽空自检开关关着"}
+
+    gap = max(1, int(s.get("idle_gap_min") or 10)) * 60.0
+    last = last_activity()
+    idle_sec = (time.time() - last) if last > 0 else gap
+    if idle_sec < gap:
+        return {"ok": False,
+                "reason": "用户 %d 秒前还在说话（需安静满 %d 分钟）"
+                          % (int(idle_sec), int(gap // 60)),
+                "idle_sec": round(idle_sec, 1)}
+
+    every = max(1, int(s.get("idle_every_min") or 180)) * 60.0
+    hist = _audit_history().get("items") or []
+    last_audit = 0.0
+    for it in hist:
+        try:
+            last_audit = max(last_audit, float(it.get("_ts") or 0))
+        except (TypeError, ValueError):
+            continue
+    if last_audit <= 0 and hist:
+        try:
+            last_audit = time.mktime(time.strptime(str(hist[0].get("ts")),
+                                                   "%Y-%m-%d %H:%M:%S"))
+        except Exception:                               # noqa: BLE001
+            last_audit = 0.0
+    if last_audit and (time.time() - last_audit) < every:
+        return {"ok": False,
+                "reason": "距上次自检只过了 %d 分钟（需满 %d 分钟）"
+                          % (int((time.time() - last_audit) / 60), int(every // 60)),
+                "last_audit": last_audit}
+
+    try:
+        if (run_status() or {}).get("running"):
+            return {"ok": False, "reason": "自我反思正在跑，等它结束"}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    try:
+        from . import iter_runner as _IR
+        if (_IR.snapshot(0) or {}).get("running"):
+            return {"ok": False, "reason": "迭代队列正在执行，等它结束"}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+
+    return {"ok": True, "reason": "空档，可以自检",
+            "idle_sec": round(idle_sec, 1), "last_audit": last_audit}
+
+
 def _pid():
     return time.strftime("%Y%m%d_%H%M%S")
 
@@ -270,7 +368,7 @@ def _actlog(entry):
         with open(p, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _log_act(plan, act, ok, detail=""):
@@ -308,6 +406,48 @@ def list_actlog(limit=40):
     except Exception:                                   # noqa: BLE001
         return []
     return out[-int(limit):][::-1]
+
+
+# 用户要求（2026-11-15）：「确保原来没问题的程序不因为模型判断失误被反复修改，
+# 有风险的才需要改」。静态检查跑一次是确定性的，但**反复改同一处**说明
+# 上一次没改对 —— 越改越乱是真实踩过的坑（avatar_mouth.py 一天改 9 次）。
+# 所以在动手前加一道熔断：同一文件在窗口内被自动改成功太多次，直接停手。
+_LOOP_WINDOW_MIN = 60       # 观察窗口（分钟）
+_LOOP_MAX_HITS = 3          # 窗口内同一文件被自动改成功的上限
+
+
+def _loop_guard(files):
+    """反复修改熔断。返回 (allow, why)。读不到日志时放行（不误伤）。"""
+    files = [f for f in (files or []) if f]
+    if not files:
+        return True, ""
+    try:
+        rows = list_actlog(limit=200)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return True, ""
+    now = time.time()
+    hit = {}
+    for r in rows:
+        if r.get("result") != "ok":
+            continue
+        try:
+            t = time.mktime(time.strptime(str(r.get("ts") or ""),
+                                          "%Y-%m-%d %H:%M:%S"))
+        except Exception:                               # noqa: BLE001
+            continue
+        if now - t > _LOOP_WINDOW_MIN * 60:
+            continue
+        for f in (r.get("files") or []):
+            if f in files:
+                hit[f] = hit.get(f, 0) + 1
+    hot = [(f, n) for f, n in hit.items() if n >= _LOOP_MAX_HITS]
+    if hot:
+        f, n = sorted(hot, key=lambda x: -x[1])[0]
+        return False, ("反复修改熔断：%s 在最近 %d 分钟内已被自动改成功 %d 次，"
+                       "先停手等人工确认（避免越改越乱）"
+                       % (f, _LOOP_WINDOW_MIN, n))
+    return True, ""
 
 
 def load_signals():
@@ -391,14 +531,14 @@ def _maybe_auto_evaluate():
             _LAST_AUTO[0] = now
         threading.Thread(target=_auto_eval_worker, daemon=True).start()
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _auto_eval_worker():
     try:
         evaluate(limit=6, use_llm=True, trigger="auto")
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 # ---------------------------------------------------------------- 体验评估
@@ -475,7 +615,7 @@ def _heur_eval(user_text, assistant_text="", meta=None):
         if int(meta.get("turns") or 0) >= 6:
             flags.append("过程繁琐")
     except (TypeError, ValueError):
-        pass
+        logger.debug("silent-except", exc_info=True)
     if not u.strip():
         flags.append("空输入")
     score = max(0.0, min(10.0, score))
@@ -646,7 +786,7 @@ def evaluate(limit=12, use_llm=True, trigger="manual"):
             try:
                 vals.append(float(t.get(key)))
             except (TypeError, ValueError):
-                pass
+                logger.debug("silent-except", exc_info=True)
         return round(sum(vals) / len(vals), 1) if vals else None
     rec["avg_completion"] = _avg("completion")
     rec["avg_efficiency"] = _avg("efficiency")
@@ -797,7 +937,7 @@ def _http(url, timeout=9):
         if r.status_code == 200:
             return r.text
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     return ""
 
 
@@ -808,7 +948,7 @@ def _http_json(url, timeout=10):
         if r.status_code == 200:
             return r.json()
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     return None
 
 
@@ -945,7 +1085,7 @@ def fetch_tech_all(progress=None):
                 try:
                     progress(total, list(done))
                 except Exception:                       # noqa: BLE001
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     # 保持固定顺序，方便前端/日志稳定阅读
     ordered = {k: got.get(k, []) for k, _, _ in srcs}
     return ordered, total
@@ -992,7 +1132,7 @@ def _parse_json(txt):
     try:
         return json.loads(s)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     i, j = s.find("{"), s.rfind("}")
     if i >= 0 and j > i:
         try:
@@ -1204,7 +1344,7 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
             try:
                 brief += _file_inventory(limit=70)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             set_stage("paper", "四维评估 %d 篇（可行性/创新性/效益/效率）…"
                       % len(to_eval[:6]))
             r = papervec.evaluate(to_eval[:6], project_brief=brief,
@@ -1225,7 +1365,7 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
     try:
         prompt += _file_inventory()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     set_stage("think", "把 %d 轮对话 + %d 条技术动态喂给模型…"
               % (len(sig), tech_total or 0))
     txt, err = _llm_text(prompt, max_tokens=4200, temperature=0.55)
@@ -1361,7 +1501,7 @@ def _norm_rel(rel):
     low = s.lower()
     for bad in _FORBIDDEN_PARTS:
         if low.startswith(bad) or ("/" + bad) in ("/" + low):
-            return ""
+            pass
     if not any(low.startswith(p) for p in _ALLOWED_PREFIX):
         return ""
     if not low.endswith(_ALLOWED_EXT):
@@ -1403,7 +1543,7 @@ def _backup_files(files, tag):
             shutil.copy2(src, out)
             saved.append(rel)
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     _write_json(dst / "_manifest.json",
                 {"files": saved, "created": created, "ts": _now(), "tag": tag})
     return tag, saved, created
@@ -1535,6 +1675,66 @@ def _plan_patch_for_action(plan, action):
     return patches, ""
 
 
+def _precheck_actions(actions):
+    """动手前的最后一道复核：确认动作针对的问题**现在仍然存在**。
+
+    用户要求「修之前一定要再次或多次检验」。复核层在建动作前已经跑了四轮，
+    但计划可能躺很久才被批准 —— 期间问题可能已被别的改动修掉了。
+    这时再照旧结论去改，就会改错地方或改出重复代码。
+
+    返回 (verdicts, note, base)。base 是改动前的 (high+mid) 基线条数，
+    供执行后对比「有没有把程序改差」。自检本身跑不起来时不阻断
+    （后面还有 py_compile / 回滚兜底）。
+    """
+    from . import code_audit as CA
+    try:
+        res = CA.audit()
+    except Exception as e:                              # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        # ⚠️ 必须返回三元组：调用方是 `precheck, note, base = ...`。
+        # base=0 表示「拿不到基线」，后面就不会做退化对比（不能误判成 0 条）。
+        return {}, "执行前复核跑不起来（%s），按原计划继续" % e, 0
+    # 按 (文件, 种类) 归类，行号留集合 —— 允许行号小幅漂移（别的改动会让行号平移）
+    cur = {}
+    by_file = {}
+    for f in (res.get("findings") or []):
+        if f.get("level") not in ("high", "mid"):
+            continue
+        rel = f.get("file") or ""
+        cur.setdefault((rel, f.get("kind")), set()).add(int(f.get("line") or 0))
+        by_file[rel] = by_file.get(rel, 0) + 1
+    base = sum(by_file.values())
+    out = {}
+    for a in actions or []:
+        targets = a.get("targets") or []
+        files = [f for f in (a.get("files") or []) if f]
+        if not files:
+            out[a.get("id")] = (True, "")
+            continue
+        if targets:
+            # 精确模式：至少有一处目标问题**还在原位附近**才放行
+            hit = 0
+            for t in targets:
+                lines = cur.get((t.get("file"), t.get("kind"))) or set()
+                ln = int(t.get("line") or 0)
+                if any(abs(x - ln) <= 4 for x in lines):
+                    hit += 1
+            if hit:
+                out[a.get("id")] = (True, "")
+            else:
+                out[a.get("id")] = (
+                    False,
+                    "这条动作针对的 %d 处问题现在都找不到了（可能已被修过），跳过以免改错地方"
+                    % len(targets))
+            continue
+        # 没有 targets 的动作 = 「加功能 / 改流程」类（由体验评估、手动提出），
+        # 它们**本来就不对应任何静态问题**，拿「问题还在不在」去判断会全部误杀
+        # （实测 6 条功能改进动作被 100% 跳过）。这类一律放行，交给
+        # 熔断 + 行为回归 + 基线不退化三道兜底。
+        out[a.get("id")] = (True, "")
+    return out, "", base
+
+
 def execute_approved(pid, on_event=None, should_cancel=None):
     """执行这次反思里所有 status=approved 的动作。带备份 + 校验 + 失败回滚。
 
@@ -1549,7 +1749,7 @@ def execute_approved(pid, on_event=None, should_cancel=None):
             try:
                 on_event(kind, **kw)
             except Exception:                           # noqa: BLE001
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _stop():
         if not should_cancel:
@@ -1565,6 +1765,9 @@ def execute_approved(pid, on_event=None, should_cancel=None):
     todo = [a for a in (plan.get("actions") or []) if a.get("status") == "approved"]
     if not todo:
         return {"ok": False, "error": "这次反思没有已批准的动作"}
+
+    # 动手前最后一道复核：确认这些问题现在还真的存在
+    precheck, _pre_note, _base = _precheck_actions(todo)
 
     def _card(a, patches, ok, error="", rolled_back=False, files=None, backup=""):
         """把一次动作的结果整理成前端代码卡片要的数据。
@@ -1599,6 +1802,24 @@ def execute_approved(pid, on_event=None, should_cancel=None):
             skipped = len(todo) - _i
             _ev("step", text="收到终止请求，剩余 %d 条动作不再执行" % skipped)
             break
+        _pk, _pwhy = precheck.get(a.get("id"), (True, ""))
+        if not _pk:
+            a["status"] = "done"
+            a["note"] = ((a.get("note") or "") + "｜" + _pwhy).strip("｜")
+            results.append({"id": a["id"], "ok": True, "skipped": True, "why": _pwhy})
+            _log_act(plan, a, True, _pwhy)
+            _ev("step", text="%s 跳过：%s" % (a.get("id"), _pwhy))
+            continue
+        # 第二道：反复修改熔断（防止「越改越乱」）
+        _lk, _lwhy = _loop_guard(a.get("files"))
+        if not _lk:
+            a["status"] = "failed"
+            a["error"] = _lwhy
+            results.append({"id": a["id"], "ok": False, "error": _lwhy})
+            _log_act(plan, a, False, _lwhy)
+            _ev("step", text="%s 熔断：%s" % (a.get("id"), _lwhy))
+            _ev("code", **_card(a, [], False, _lwhy))
+            continue
         tag = "%s_%s_%s" % (pid, a["id"], _pid())
         _ev("step", text="%s %s · 正在生成改动方案…" % (a.get("id"), a.get("title")))
         patches, err = _plan_patch_for_action(plan, a)
@@ -1677,6 +1898,37 @@ def execute_approved(pid, on_event=None, should_cancel=None):
             _ev("code", **_card(a, patches, False, a["error"], True))
             continue
 
+        # 行为级回归：语法通过 ≠ 逻辑没坏。
+        # 静态检查只看名字/结构，off-by-one、条件写反、返回值类型错位这类逻辑 bug
+        # 它永远看不见（实测 6 类逻辑 bug，自检报 0 条）。所以改完立刻真跑一遍断言，
+        # 失败就回滚 —— 这是「自动改坏代码」的最后一道兜底。
+        rbad = ""
+        if load_settings().get("regress_after_change", True):
+            try:
+                from . import regress as _RG
+                _rr = _RG.run_disk(scope="quick")
+                if not _rr.get("ok"):
+                    rbad = "行为回归失败：%s" % (_rr.get("summary") or "")
+                else:
+                    _ev("step", text="%s 行为回归通过（%d 条 / %s 秒）" % (
+                        a.get("id"), _rr.get("passed") or 0, _rr.get("seconds") or 0))
+            except Exception as _e:                     # noqa: BLE001
+                # ⚠️ fail-safe：回归跑不起来 = 无法确认改动安全 → 回滚。
+                # 原来是「跳过、放行改动」，但那样一旦回归自身坏掉，就等于所有
+                # 自动改动都不受检验 —— 用户要求「保证程序稳定」，所以宁可回滚。
+                logger.warning("行为回归跑不起来", exc_info=True)
+                rbad = "行为回归跑不起来（%s: %s），无法确认改动安全" % (
+                    type(_e).__name__, _e)
+        if rbad:
+            _restore(tag2)
+            a["status"] = "failed"
+            a["error"] = rbad + "（已自动回滚）"
+            results.append({"id": a["id"], "ok": False, "error": a["error"]})
+            _log_act(plan, a, False, a["error"])
+            _ev("step", text="%s 行为回归没通过，已自动回滚" % a.get("id"))
+            _ev("code", **_card(a, patches, False, a["error"], True))
+            continue
+
         a["status"] = "done"
         a["error"] = ""
         results.append({"id": a["id"], "ok": True, "files": list(dict.fromkeys(done_rels)),
@@ -1708,7 +1960,43 @@ def execute_approved(pid, on_event=None, should_cancel=None):
             a = run_audit(source="after_change", create_plan=False)
             out["post_audit"] = a.get("audit") or {}
             out["post_audit_findings"] = (a.get("findings") or [])[:12]
+            # 第三道护栏：基线不退化。
+            # 用户要求「确保原来没问题的程序不因为模型判断失误被改坏」。
+            # 单条动作都过了回归，但多动作叠加、或回归没覆盖到的静态问题，
+            # 仍可能让整体变差 —— 一旦 high+mid 比动手前多，就回滚最后一个改动。
+            if _base:
+                _pc = (a.get("audit") or {}).get("counts") or {}
+                _post_n = int(_pc.get("high") or 0) + int(_pc.get("mid") or 0)
+                out["degrade"] = {"base": _base, "after": _post_n}
+                if _post_n > _base:
+                    _last = None
+                    for _r in reversed(results):
+                        if _r.get("ok") and not _r.get("skipped") and _r.get("backup"):
+                            _last = _r
+                            break
+                    if _last:
+                        _restore(_last["backup"])
+                        for _a2 in (plan.get("actions") or []):
+                            if _a2.get("id") == _last.get("id"):
+                                _a2["status"] = "pending"
+                                _a2["error"] = ("改动让自检问题从 %d 增到 %d，已自动回滚"
+                                                % (_base, _post_n))
+                        save_plans(d)
+                        try:
+                            from . import code_audit as _CA2
+                            _c2 = _CA2.audit().get("counts") or {}
+                            _after = int(_c2.get("high") or 0) + int(_c2.get("mid") or 0)
+                        except Exception:               # noqa: BLE001
+                            _after = -1
+                        out["degrade"]["rolled_back"] = _last.get("id")
+                        out["degrade"]["after_rollback"] = _after
+                        out["need_restart"] = any(
+                            _r.get("ok") and not _r.get("skipped") and _r is not _last
+                            for _r in results)
+                        _ev("step", text="改动引入了新的自检问题（%d→%d），已回滚 %s"
+                            % (_base, _post_n, _last.get("id")))
         except Exception as e:                          # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
             out["post_audit"] = {"error": "%s: %s" % (type(e).__name__, e)}
     return out
 
@@ -1723,14 +2011,14 @@ def _restore(tag):
             try:
                 shutil.copy2(src, _ROOT / rel)
             except Exception:                       # noqa: BLE001
-                pass
+                logger.debug("silent-except", exc_info=True)
     for rel in man.get("created") or []:
         try:
             p = _ROOT / rel
             if p.is_file():
                 p.unlink()
         except Exception:                           # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
 
 
 def rollback(pid):
@@ -1845,6 +2133,10 @@ def _actions_from_findings(findings, limit=6):
     for f in findings or []:
         if f.get("level") not in ("high", "mid"):
             continue
+        # 双保险：带复核结果且不是 verified 的，绝不允许变成可执行动作
+        v = (f.get("verify") or {}).get("verdict")
+        if v and v != "verified":
+            continue
         groups.setdefault(f.get("file") or "", []).append(f)
     out = []
     for rel, items in groups.items():
@@ -1864,6 +2156,12 @@ def _actions_from_findings(findings, limit=6):
             "detail": "\n".join(lines),
             "risk": "mid" if top == "high" else "low",
             "files": [rel],
+            # 结构化记录「这条动作到底针对哪几处问题」。
+            # 用户要求「确保原来没问题的程序不因模型误判被反复修改」——
+            # 执行前要靠它精确判断问题是否还在（按文件判断太粗：
+            # 文件里只要还有别的问题就放行，会改错地方）。
+            "targets": [{"file": rel, "kind": i.get("kind"),
+                         "line": i.get("line") or 0} for i in items[:6]],
         })
     return out
 
@@ -1917,12 +2215,17 @@ def _llm_deep_review(audit_res):
     return out, str(data.get("summary") or "")
 
 
-def run_audit(deep=False, source="manual", create_plan=True, auto_fix=None):
+def run_audit(deep=False, source="manual", create_plan=True, auto_fix=None, verify=None):
     """跑一次代码自检。
 
     deep=True 时再让 LLM 审一遍（费 token，手动点才用）。
     create_plan=True 且发现 high/mid 问题时，自动建一个待执行计划。
     auto_fix=True（信任模式）→ 建完计划直接执行。
+
+    ⚠️ 2026-11-15 用户要求「修之前一定要再次或多次检验，防止误诊乱改」：
+    自检发现的问题**必须先过复核层**（backend/reverify.py），只有判定为
+    verified 的才允许变成可执行动作；rejected 直接丢弃，inconclusive
+    保留在计划里但**不进待办**，只给人看。
     """
     from . import code_audit as CA
     try:
@@ -1930,39 +2233,100 @@ def run_audit(deep=False, source="manual", create_plan=True, auto_fix=None):
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "自检器崩了：%s: %s" % (type(e).__name__, e)}
 
+    findings = res.get("findings") or []
+
+    # ---------------- 行为回归（补上静态检查的盲区）
+    # 静态检查只看名字/结构；off-by-one、条件写反、返回值错位这类逻辑 bug
+    # 它永远查不出来（实测 6 类逻辑 bug 报 0 条）。所以每次自检都真跑一遍断言。
+    # 约 1.5~2 秒（子进程读磁盘，验的是最新代码）。
+    rg = {}
+    try:
+        from . import regress as RG
+        rg = RG.run_disk(scope="quick")
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("行为回归跑不起来", exc_info=True)
+        rg = {"ok": False, "summary": "回归跑不起来：%s: %s" % (type(e).__name__, e),
+              "failed_items": []}
+    if rg and not rg.get("ok"):
+        res["logic_regress"] = rg
+
+    # ---------------- 复核（多轮换方法确认，防误诊）
+    vstats = {}
+    if verify is None:
+        verify = True
+    if verify:
+        try:
+            from . import reverify as RV
+            # 要自动改代码时**必须**做语义复核（最贵但最能防误改）
+            use_llm = bool(deep or auto_fix)
+            findings, vstats = RV.verify_findings(findings, use_llm=use_llm)
+        except Exception as e:                          # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+            vstats = {"error": "%s: %s" % (type(e).__name__, e)}
+            for f in findings:
+                f["verify"] = {"verdict": "inconclusive", "rounds": [],
+                               "why": "复核层自己出错了：%s" % e}
+        res["findings"] = findings
+
+    confirmed = [f for f in findings
+                 if (f.get("verify") or {}).get("verdict") == "verified"]
+    rejected = [f for f in findings
+                if (f.get("verify") or {}).get("verdict") == "rejected"]
+    unsure = [f for f in findings
+              if (f.get("verify") or {}).get("verdict") == "inconclusive"]
+
     actions, llm_summary = [], ""
     if deep:
-        actions, llm_summary = _llm_deep_review(res)
+        actions, llm_summary = _llm_deep_review({**res, "findings": confirmed})
     if not actions:
-        actions = _actions_from_findings(res.get("findings") or [])
+        actions = _actions_from_findings(confirmed)
+
+    def _brief(items, n=12):
+        return [{"file": f.get("file"), "line": f.get("line"),
+                 "kind": f.get("kind"),
+                 "why": str((f.get("verify") or {}).get("why") or "")[:160]}
+                for f in items[:n]]
 
     plan = None
     if create_plan and actions:
         cnt = res.get("counts") or {}
         plan = _make_plan(
             trigger="audit:" + str(source),
-            summary="代码自检：%d 处问题（high %d / mid %d），整理成 %d 条待办"
-                    % (res.get("total") or 0, cnt.get("high") or 0,
-                       cnt.get("mid") or 0, len(actions)),
+            summary=("代码自检：%d 处问题 → 复核确认 %d 处（排除误报 %d / 存疑 %d）"
+                     "→ 整理成 %d 条待办"
+                     % (res.get("total") or 0, len(confirmed),
+                        len(rejected), len(unsure), len(actions))),
             actions=actions,
-            extra={"audit_counts": cnt})
+            extra={"audit_counts": cnt, "verify": vstats,
+                   "rejected": _brief(rejected), "unsure": _brief(unsure)})
 
-    rec = {"ts": res.get("ts"), "source": source,
+    rec = {"ts": res.get("ts"), "source": source, "_ts": time.time(),
            "files": res.get("files"), "js_files": res.get("js_files"),
            "total": res.get("total"), "counts": res.get("counts"),
            "kinds": res.get("kinds"), "seconds": res.get("seconds"),
            "findings": (res.get("findings") or [])[:60],
            "plan": (plan or {}).get("id") or "",
+           "verify": vstats,
+           "regress": {k: rg.get(k) for k in
+                       ("ok", "total", "passed", "failed", "skipped",
+                        "seconds", "summary", "failed_items")} if rg else {},
            "llm_summary": llm_summary}
     try:
         _save_audit(rec)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     out = {"ok": True,
            "audit": {k: res.get(k) for k in
                      ("ts", "files", "js_files", "seconds", "counts", "kinds", "total")},
            "findings": res.get("findings") or [],
+           "regress": {k: rg.get(k) for k in
+                       ("ok", "total", "passed", "failed", "skipped",
+                        "seconds", "summary", "failed_items")} if rg else {},
+           "verify": vstats,
+           "confirmed": len(confirmed), "rejected_n": len(rejected),
+           "unsure_n": len(unsure),
+           "rejected": _brief(rejected), "unsure": _brief(unsure),
            "plan": plan, "llm_summary": llm_summary}
 
     if plan and auto_fix:

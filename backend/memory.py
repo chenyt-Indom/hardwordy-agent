@@ -21,6 +21,7 @@ import json
 import time
 import logging
 from . import config
+logger = logging.getLogger(__name__)
 
 _LOG = logging.getLogger("uvicorn.error")
 
@@ -83,7 +84,7 @@ def _index_touch():
         from . import memvec
         memvec.touch()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _size(path) -> int:
@@ -540,7 +541,7 @@ def _rename(path: str) -> None:
     try:
         os.replace(path, path + ".migrated")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 # =====================================================================

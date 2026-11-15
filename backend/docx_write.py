@@ -23,6 +23,8 @@ import io
 import re
 import zipfile
 import datetime
+import logging
+logger = logging.getLogger(__name__)
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 

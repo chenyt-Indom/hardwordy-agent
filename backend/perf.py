@@ -18,6 +18,8 @@ from __future__ import annotations
 import time
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 PROFILES = {
     "fast":   {"name": "快速", "max_tokens": 8192,  "num_ctx": 16384,  "effort": "low"},
@@ -58,7 +60,7 @@ def _detect_model_raw() -> dict:
             if have and model not in have:
                 model = next((n for n in have if "qwen3-vl" in n), "") or have[0]
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         if not model:
             return out
         out["model"] = model
@@ -79,10 +81,10 @@ def _detect_model_raw() -> dict:
                         out["max_ctx"] = min(n, MAX_CTX)
                         out["ok"] = True
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 break
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return out
 
 

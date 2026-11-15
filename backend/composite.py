@@ -16,6 +16,8 @@
 import io
 import os
 import time
+import logging
+logger = logging.getLogger(__name__)
 
 # 九宫格锚点 → (横向比例, 纵向比例)，0=贴左/上，1=贴右/下
 _POS = {

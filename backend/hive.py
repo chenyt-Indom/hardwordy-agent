@@ -30,6 +30,8 @@ import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+import logging
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 路径
 
@@ -254,10 +256,6 @@ def renew_identity() -> Dict[str, Any]:
 
 # ---------------------------------------------------------------- 群密钥
 
-def _new_key() -> bytes:
-    return secrets.token_bytes(32)
-
-
 def _key_b64(key: bytes) -> str:
     return base64.urlsafe_b64encode(key).decode().rstrip("=")
 
@@ -345,8 +343,15 @@ def verify_tag(key: bytes, gid: str) -> str:
                      hashlib.sha256).hexdigest()[:16]
 
 
-def _seal(key: bytes, obj: Any) -> str:
-    """加密一条消息体。中继只看得到这段密文。"""
+def _seal(key: bytes, obj: Any) -> str:  # noqa: dead-func 预留：消息体加密（见下方说明）
+    """加密一条消息体。中继只看得到这段密文。
+
+    ⚠️ 2026-11-15 现状：**已实现但未接入** `send_message` / `read_messages`。
+       群消息目前是明文落盘（`data/hive/groups/*/msgs.jsonl`）。
+       不贸然接上的原因：老消息没有 "0:"/"1:" 前缀，一旦开加密，
+       `_open()` 会返回 None，**历史消息会整段读不出来**。
+       正确做法是配一次迁移（旧明文补 "0:" 前缀再切换），需要单独验证，不能顺手改。
+    """
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     except Exception:
@@ -358,7 +363,7 @@ def _seal(key: bytes, obj: Any) -> str:
     return "1:" + base64.urlsafe_b64encode(nonce + ct).decode()
 
 
-def _open(key: bytes, blob: str) -> Optional[Any]:
+def _open(key: bytes, blob: str) -> Optional[Any]:  # noqa: dead-func 预留：与 _seal 配套
     if not blob:
         return None
     if blob.startswith("0:"):
@@ -1015,7 +1020,7 @@ def _has_mid(gid: str, mid: str) -> bool:
                         except Exception:
                             continue
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         _MID_CACHE[gid] = s
     if mid in s:
         return True
@@ -1332,7 +1337,7 @@ def save_file_stream(gid: str, name: str, src_path: str, mime: str = "",
             try:
                 os.fsync(fdst.fileno())
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
     meta = {
         "fid": fid, "name": safe, "size": real,
         "mime": mime or "", "kind": kind_of(mime, safe),
@@ -1369,7 +1374,7 @@ def delete_file(gid: str, fid: str) -> bool:
                 if os.path.exists(p):
                     os.remove(p)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         _write_json(_files_index_path(gid), idx)
     return True
 
@@ -1428,7 +1433,7 @@ def drop_artifact_by_name(gid: str, name: str) -> int:
                 if os.path.exists(p):
                     os.remove(p)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             idx.pop(fid, None)
         _write_json(_files_index_path(gid), idx)
     return len(gone)
@@ -1461,7 +1466,7 @@ def list_artifacts(gid: str, limit: int = 500) -> List[Dict[str, Any]]:
                 if fid and fid not in got:
                     got[fid] = dict(f)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     ad = artifacts_dir(gid)
     out = []
     for fid, m in got.items():
@@ -1541,7 +1546,7 @@ def prune_artifact_name(gid: str, name: str, keep_fid: str = "") -> int:
                 if os.path.exists(p):
                     os.remove(p)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             idx.pop(fid, None)
             gone += 1
         if gone:
@@ -1578,12 +1583,12 @@ def store_incoming_path(gid: str, meta: Dict[str, Any], src_path: str) -> Dict[s
                 try:
                     os.fsync(fdst.fileno())
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     try:
         if os.path.exists(src_path):
             os.remove(src_path)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     out = dict(meta)
     out["fid"] = fid
     out["name"] = name
@@ -1887,7 +1892,7 @@ def memory_context(gid: str, max_chars: int = 2500) -> str:
         try:
             rebuild_memory(gid)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     d = read_memory(gid)
     c = (d.get("content") or "").strip()
     if not c:

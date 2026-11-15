@@ -90,12 +90,22 @@ client = ollama_client.OllamaClient()
 logger = logging.getLogger("uvicorn.error")
 logger.info("[procwin] 黑窗防护状态：%s", _NOWIN_STATUS)
 
+# 窗口看门狗（2026-11-15）：用户报「改程序时黑窗反复弹出又消失」，
+# 但实测在补丁生效的进程里窗口数为 0 —— 说明有某条路径没被覆盖。
+# 与其猜，不如蹲守：任何控制台窗口一出现，立刻记下窗口类 / pid / exe 路径，
+# 写到 data/procwin_watch.jsonl。下次再闪就能直接定位元凶。
+try:
+    _WD_OK = _procwin.watchdog_start()
+    logger.info("[procwin] 窗口看门狗：%s", "已启动" if _WD_OK else "未启动")
+except Exception as _e:            # noqa: BLE001
+    logger.warning("[procwin] 窗口看门狗启动失败：%s: %s", type(_e).__name__, _e)
+
 # 启动时就把知识库目录建好 —— 用户可以直接往里拷 .txt / .md，
 # 不用先"导入"一次才知道往哪放。
 try:
     kb.ensure_dir()
 except Exception:
-    pass
+    logger.debug("silent-except", exc_info=True)
 
 # 最近一次出现过的图片（base64），供后续「把这张图改成…」直接微改，免去重新导入。
 # 单用户桌面应用，保存最近一张即可；换新图时自动覆盖。
@@ -162,7 +172,7 @@ def _ds_key(header_key: str = "") -> str:
             from . import keyvault
             keyvault.remember_key(k)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return k
     return _env_ds_key()
 
@@ -185,7 +195,7 @@ def _remember_image(images: list) -> None:
 try:
     _load_last_image()
 except Exception:
-    pass
+    logger.debug("silent-except", exc_info=True)
 
 
 def _recent_image() -> list:
@@ -345,7 +355,11 @@ def _reply_template_ctx() -> str:
       · 「回复被截断」→ 三段式短结构，推理过程折叠，正文不冗长。
     """
     return (
-        "【回复格式（固定模板，务必遵守）】\n"
+        "【回复格式（仅在「要做东西/要修问题」的轮次套用）】\n"
+        "0. ⚠️ **先判断这一轮是不是任务轮**：\n"
+        "   · 要产出东西（写文档/代码/表格/图片/PPT）、要修 bug、要排查、要动手改 → **套用下面的模板**；\n"
+        "   · 寒暄、闲聊、道谢、确认收到、单纯解释概念、回答一个事实问题 → "
+        "**不要套模板**，像正常人一样 1~3 句说清，禁止出现「结论：」「改动：」「验证：」三段。\n"
         "1. 首行只写结论：「结论：X 已完成」或「结论：X 未完成」，"
         "并紧跟验证方式（如「已跑通 py -3 -m pytest」「已用 curl 实测返回 200」）。\n"
         "2. 第二段写改动：「改动：文件路径 + 要点」，逐条列改了什么。\n"
@@ -409,14 +423,17 @@ def _clip_reply(text: str, limit: int = _REPLY_MAX_CHARS) -> str:
         line = lines[idx]
         if used + len(line) > limit:
             # 三段块本身超限：截到句末标点，别切半句
-            room = max(0, limit - used)
+            # ⚠️ 2026-11-15 回归测试抓到：这里原来先按满额截、再追加「…（已截断）」，
+            # 结果比上限多 6 字。后缀必须先占位。
+            _cut_tail = "…（已截断）"
+            room = max(0, limit - used - len(_cut_tail))
             piece = line[:room]
             cut = max(piece.rfind(c) for c in "。！？；.!?;\n")
             if cut > 0:
                 piece = piece[:cut + 1]
             kept_parts.append(piece)
             used += len(piece)
-            kept_parts.append("…（已截断）")
+            kept_parts.append(_cut_tail)
             return "".join(kept_parts)
         kept_parts.append(line)
         used += len(line)
@@ -441,7 +458,16 @@ def _clip_reply(text: str, limit: int = _REPLY_MAX_CHARS) -> str:
 
     out = "".join(kept_parts)
     if len(out) < len(s):
-        out = out.rstrip() + "\n…（回复过长，已压缩中间推理；结论/改动/验证已保留）"
+        _tail = "\n…（回复过长，已压缩中间推理；结论/改动/验证已保留）"
+        # ⚠️ 2026-11-15 回归测试抓到：这个后缀原来是在预算用完之后才追加的，
+        # 结果实际长度会超上限（实测 limit=2000 时出来 2006 字）。先留出它的位置。
+        room = max(0, limit - len(_tail))
+        if len(out) > room:
+            out = out[:room]
+            _cut = max(out.rfind(c) for c in "。！？；.!?;\n")
+            if _cut > 0:
+                out = out[:_cut + 1]
+        out = out.rstrip() + _tail
     return out
 
 
@@ -569,50 +595,22 @@ def _dedupe_paragraphs(text: str, threshold: float = 0.85) -> str:
     return "\n\n".join(p for p, _ in kept).strip()
 
 
-def _postprocess_reply(text: str) -> str:
-    """回复组装前的轻量后处理：去过渡语 + 段落去重。"""
-    return _dedupe_paragraphs(_strip_transitions(text))
+def _postprocess_reply(text: str) -> str:  # noqa: dead-func 非流式通道预留
+    """回复组装前的轻量后处理：去过渡语 + 段落去重。
 
+    ⚠️ 2026-11-15 现状：**当前没有调用点**，这是有意的。
 
-def _finalize_reply(text: str, conclusion: str = "", verify: str = "") -> str:
-    """把最终回复组装成「结论前置」模板。
+    对话走的是流式（逐 token 下发），而这里是对**整段文本**做后处理。
+    硬套在流式上会让已经显示出来的内容突然变短、跳动，所以不能接。
+    它的正确用途是**非流式**通道（定时任务总结、工具结果转述这类一次成型的文本）。
 
-    强制首行「结论：…」+「验证：…」，把原推理过程折叠进 details；
-    超长时优先保留结论段、从中间截断分析段。
+    「同一结论说两遍」「结论埋在长文里」现在由提示层约束 ——
+    见 `_reply_template_ctx()`（已接线到系统提示），比事后删段落更合适。
 
-    这是消除「只诊断不修复」「结论埋长文」「被截断」三个摩擦点的核心改动，
-    不改任何业务逻辑。
+    （原 `_finalize_reply` 已于 2026-11-15 删除：它会给**每一条**回复强制套
+      「结论：/验证：」头，闲聊也会被套上，且同样无法在流式里生效。）
     """
-    body = _postprocess_reply(str(text or "")).strip()
-    concl = str(conclusion or "").strip()
-    ver = str(verify or "").strip()
-    # 没显式给结论时，从正文里找一句最像结论的（首句/含「结论」的行）
-    if not concl:
-        for line in body.splitlines():
-            s = line.strip()
-            if s.startswith("结论：") or s.startswith("结论:"):
-                concl = s.split("：", 1)[-1].split(":", 1)[-1].strip()
-                break
-    if not concl:
-        first = body.splitlines()[0].strip() if body else ""
-        concl = first[:120] if first else "（无）"
-    if not ver:
-        ver = "已按上述结论执行；如需复核可展开下方分析。"
-    # 正文去掉已被提取为结论的首行，避免重复
-    lines = body.splitlines()
-    if lines and lines[0].strip() == concl:
-        lines = lines[1:]
-    analysis = "\n".join(lines).strip()
-    # 超长时从中间截断分析段，优先保留结论段
-    MAX_ANALYSIS = 4000
-    if len(analysis) > MAX_ANALYSIS:
-        head = analysis[: MAX_ANALYSIS // 2]
-        tail = analysis[-(MAX_ANALYSIS // 2):]
-        analysis = head + "\n…（中间省略 %d 字）…\n" % (len(analysis) - MAX_ANALYSIS) + tail
-    parts = ["结论：" + concl, "验证：" + ver]
-    if analysis:
-        parts.append("<details><summary>分析过程</summary>\n\n" + analysis + "\n\n</details>")
-    return "\n\n".join(parts)
+    return _dedupe_paragraphs(_strip_transitions(text))
 
 
 def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
@@ -964,7 +962,7 @@ def _image_tokens(images_b64: list) -> int:
             if side > 1024:                          # 超大的才线性放大
                 per = int(1030 * (side / 1024.0) ** 2)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         total += per
     return total
 
@@ -995,7 +993,9 @@ def _clamp_message_text(text: str, max_tokens: int) -> tuple:
     """
     s = str(text or "")
     if _no_limit() or max_tokens <= 0 or not s:      # 用户要求"去掉限制"：不裁剪任何消息
-        return text, s, False
+        # ⚠️ 2026-11-15 自检抓到：这一支原来写 `return text, s, False`，
+        # 而其它分支都返回 (新文本, 原字数, 保留字数) —— 类型对不上，
+        # 调用方按三元组解包时会把字符串当字数用。统一成 (str, int, int)。
         return s, len(s), len(s)
     if _est_tokens(s) <= max_tokens:
         return s, len(s), len(s)
@@ -1407,7 +1407,7 @@ def _llm_extract(prompt: str, model: str, cfg: dict,
             model = (next((n for n in _have if "qwen3-vl" in n), "")
                      or _have[0])
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     params = dict(cfg)
     params["temperature"] = 0.2
     params["max_tokens"] = budget
@@ -1481,7 +1481,7 @@ def _llm_extract_stream(model: str, prompt: str, params: dict, abort):
             if resp is not None:
                 resp.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return text.strip(), reason
 
 
@@ -2129,7 +2129,8 @@ def diag_nowin():
     """
     try:
         from . import procwin
-        return {"ok": True, "status": procwin.status(), "probe": procwin.probe()}
+        return {"ok": True, "status": procwin.status(), "probe": procwin.probe(),
+                "watchdog": procwin.watchdog_status()}
     except Exception as exc:                   # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
 
@@ -2153,7 +2154,7 @@ def update_config(body: dict):
         from . import map_tools as _mt
         _mt.invalidate_online()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"ok": True, "config": merged}
 
 
@@ -2460,6 +2461,23 @@ def selfiter_audit_overview():
     from . import self_iterate as _si
     try:
         return _si.audit_overview()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/regress")
+def selfiter_regress(body: dict):
+    """跑一遍**行为级回归**（真跑断言，抓静态检查看不见的逻辑 bug）。
+
+    2026-11-15 用户要求「彻底解决逻辑 bug 查不出来」的问题。
+    静态检查只能看名字/结构；off-by-one、条件写反这类必须真跑才知道。
+    scope=quick（默认，约 1 秒）| full（追加全量自检 + 全模块导入，约 10 秒）。
+    """
+    from . import regress as _rg
+    b = body or {}
+    try:
+        return _rg.run(scope=str(b.get("scope") or "quick"),
+                       only=b.get("only") or None)
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
 
@@ -3508,7 +3526,7 @@ def _ollama_port_alive(timeout: float = 0.6) -> bool:
         try:
             s.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
 
 def _try_start_ollama() -> None:
@@ -3530,7 +3548,7 @@ def _try_start_ollama() -> None:
         import shutil
         exe = shutil.which("ollama") or ""
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     if not exe:
         for p in (os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"),
                   r"C:\Program Files\Ollama\ollama.exe"):
@@ -4093,7 +4111,7 @@ def _loads_lenient(s: str):
     try:
         return json.loads(s)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     stack, in_str, esc = [], False, False
     for ch in s:
         if in_str:
@@ -4568,7 +4586,7 @@ def _reconcile_streamed(state: dict, ui_events: list, final: bool = False) -> li
                         os.remove(p)
                         logger.info("清掉孤儿预览文件：%s/%s（正式写入在 %s）", used, rel, rp)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         # ② 只有预览、没有正式写入 —— 只在整次生成结束时收拾
         if final:
             left = [r for r in streamed if r not in written]
@@ -4583,7 +4601,7 @@ def _reconcile_streamed(state: dict, ui_events: list, final: bool = False) -> li
                         with open(p, "w", encoding="utf-8", newline="") as fh:
                             fh.write(before)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             if left:
                 notices.append(
                     "模型这次没能把文件写完（输出被截断，或没走写文件工具），"
@@ -5279,7 +5297,7 @@ class _SystemPrompt:
                     "· 改完让用户 Ctrl+F5，并自查三条：顶栏是否还在一行、输入框是否还在底部、"
                     "消息区是否还能正常滚动。")
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return "\n\n".join(p for p in parts if p)
 
 
@@ -5315,7 +5333,7 @@ async def _stream_lines(resp, session: str = ""):
             for ln in resp.iter_lines(decode_unicode=False):
                 loop.call_soon_threadsafe(_q_put, q, ln)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         finally:
             loop.call_soon_threadsafe(_q_put, q, None)   # 结束哨兵
 
@@ -5343,7 +5361,7 @@ async def _stream_lines(resp, session: str = ""):
         try:
             resp.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
 
 def _q_put(q, item) -> None:
@@ -5354,11 +5372,11 @@ def _q_put(q, item) -> None:
         try:
             q.get_nowait()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         try:
             q.put_nowait(item)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
 
 # ---------- 正在进行的生成（供「终止任务」使用）----------
@@ -5381,7 +5399,7 @@ def _unregister_stream(session: str, resp) -> None:
         try:
             lst.remove(resp)
         except ValueError:
-            pass
+            logger.debug("silent-except", exc_info=True)
         if not lst:
             _active_streams.pop(session or "", None)
 
@@ -5398,7 +5416,7 @@ def _stop_streams(session: str = "") -> int:
                     resp.close()
                     killed += 1
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         return killed
 
 
@@ -5438,6 +5456,13 @@ async def chat(req: ChatRequest,
             t2i.unload()
     except Exception:
         logger.warning("对话前释放绘图引擎失败（不影响对话）", exc_info=True)
+    # ★ 2026-11-15：记一笔「用户刚说了话」—— 抽空自检靠它判断现在是不是空档。
+    #   只在真实聊天入口打点；定时任务写 session 不算活动（否则空档永远等不到）。
+    try:
+        from . import self_iterate as _si_act
+        _si_act.touch_activity()
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
     # 新一轮对话 → 清掉上一轮的"自动确认"，避免跨任务生效
     _AUTO_OK["on"] = False
     _AUTO_OK["hits"] = 0
@@ -5485,7 +5510,7 @@ async def chat(req: ChatRequest,
                               "下载完在下拉里选它即可。" % (model, _alt))
                 model = _alt
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     images = list(req.images_b64 or [])
     _remember_image(images)          # 记住本轮图片，供后续「把这张图改成…」直接引用
     # ⚠️ 发给模型的那份要**压到长边 ≤1024**：图片是按像素折算 token 的，
@@ -5572,7 +5597,7 @@ async def chat(req: ChatRequest,
     try:
         tools.ask_guard_reset(session)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     sys_prompt = _SystemPrompt.build(last_user, session, req.docs, no_tools=code_model_on)
     globals()["_LAST_SESSION"] = session   # 交接卡：重启前要读这个会话的历史（见 backend/handoff.py）
 
@@ -5740,6 +5765,12 @@ async def chat(req: ChatRequest,
     # 用户 2026-09-22 的要求：**问题个数不限制、允许多轮询问**，两种模式的区别只在
     # "问到什么程度就动手"；同时必须"无重复、每个都关键、别问个没完"。
     sys_prompt += _ask_rules(cfg)
+
+    # 回复格式模板（2026-11-15 接线）。
+    # ⚠️ 这里以前只定义了 `_reply_template_ctx()` 却**从没调用过** ——
+    #   自检的 dead-func 抓到的就是这个：模板写了，但模型根本看不到，
+    #   于是「结论埋在长文里」「回复过长被截断」一直存在（体验评估反复报 ×3、×4）。
+    sys_prompt += "\n\n" + _reply_template_ctx()
 
     # ⚠️ 跨轮串扰：用户 2026-09-22 报「上一轮画水母、这一轮要旅行计划，结果又出了水母的图」。
     # 这类问题的**根子是"默认沿用上文"**：模型会把上一轮的对象/产物/图片无脑带下来。
@@ -6156,12 +6187,12 @@ async def chat(req: ChatRequest,
             try:
                 _need_load = _need_load or t2i.rewarm_in_flight()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             if _need_load:
                 yield json.dumps({"status": "⏳ 正在加载模型 %s（首次加载较慢，之后就是秒回）…"
                                             % model}) + "\n"
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         # session 已在上面定义（记忆按对话隔离，需要提前拿到）
 
         # 空回答重试：qwen3-vl 的思考会吃掉大量 token，偶尔会「想完了但没来得及写正文」，
@@ -6401,7 +6432,7 @@ async def chat(req: ChatRequest,
                                 try:
                                     workspace.stream_write(_rel, _partial, _target)
                                 except Exception:
-                                    pass      # 落盘失败不影响模型继续生成，结束时还会正式写一次
+                                    logger.debug("silent-except", exc_info=True)      # 落盘失败不影响模型继续生成，结束时还会正式写一次
                                 yield json.dumps({"ui": {
                                     "type": "typing", "rel": _rel,
                                     "chars": len(_partial), "reset": _fresh,
@@ -6801,7 +6832,7 @@ async def chat(req: ChatRequest,
                 try:
                     t2i.rewarm_async()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 if name in _SERIAL_TOOLS:
                     logger.warning("[ws] 执行 %s 后 active_project=%s 结果=%s",
                                    name, workspace.active_project(),
@@ -6869,7 +6900,7 @@ async def chat(req: ChatRequest,
                                   ok=not str(result).startswith("[工具执行失败]"),
                                   result=result)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 # 把本次新产生的图片登记下来，后续工具（如保存到图库）可按序号引用
                 for e in ev:
                     if e.get("type") == "image":
@@ -7000,7 +7031,7 @@ async def chat(req: ChatRequest,
         try:
             memory.save_transcript(session, full)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         try:
             sessions.save_messages(session, full)
             sessions.prune(session)       # 过长则自动裁剪，避免记录无限膨胀
@@ -7011,9 +7042,9 @@ async def chat(req: ChatRequest,
                 from . import handoff as _handoff_live
                 _handoff_live.touch(session, "对话进行中（实时落盘）")
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
         # ---- 兜底：用户要了文件，模型却只是"嘴上说存好了" ----
         # 实测会这样：回答里写「已将本文写入生成文库，保存为 xxx.md」，
@@ -7070,8 +7101,16 @@ async def chat(req: ChatRequest,
                 _schedule_memory_extract(session, full[-_MEM_WINDOW_TURNS:], _mem_model, cfg,
                                          urgent=_looks_memorable(last_user))
             except Exception:
-                pass
-        yield json.dumps({"done": True, "text": final_text, "thinking": final_thinking}, ensure_ascii=False) + "\n"
+                logger.debug("silent-except", exc_info=True)
+        # 长度兜底（2026-11-15 接线）：`_clip_reply` 以前也只定义没调用。
+        # 超限时优先整块保住「结论：/改动：/验证：」三段，其余按行累加，
+        # 并在句末标点处收尾 —— 避免在「开始修」「等于」这类半句处硬切。
+        # 注意：只裁「展示文本」，落盘的 `full` 仍是完整正文（历史不被破坏）。
+        _shown = _clip_reply(final_text)
+        if len(_shown) < len(final_text):
+            logger.warning("[reply-clip] 回复 %d 字超上限，展示裁到 %d 字（历史保留全文）",
+                           len(final_text), len(_shown))
+        yield json.dumps({"done": True, "text": _shown, "thinking": final_thinking}, ensure_ascii=False) + "\n"
 
     # 用 _track_chat 包一层：登记"有聊天在跑"，后台记忆提炼会主动让路（见 _chat_busy）
     return StreamingResponse(_track_chat(gen()), media_type="application/x-ndjson")
@@ -7362,7 +7401,7 @@ def _ctx_overhead(session: str = "") -> dict:
     try:
         sp += _ask_rules(cfg)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         import json as _json
         sch = tools.make_schemas(web_enabled=bool(cfg.get("web_enabled")),
@@ -7393,7 +7432,7 @@ def _ctx_limit(num_ctx=0) -> int:
         if n > 0:
             return n
     except Exception:                                # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     cfg = config.load_config() or {}
     return int(cfg.get("num_ctx") or 8192)
 
@@ -7586,7 +7625,6 @@ def selfdev_restart():
     return {"ok": True, "pending": True, "restart": False,
             "files": _st.get("files") or [],
             "msg": "已标记新版本就绪，等待用户在前端点「立即重启」"}
-    return selfdev.restart()
 
 
 @app.post("/api/selfdev/demo")
@@ -7777,7 +7815,7 @@ def image_discover(x_image_key: str = Header(default="")):
                     len(names), names[:12], cands[:6] or "无", cur,
                     "在清单里" if cur in cands else "不在清单里")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     msg = "拿不到模型清单（Key 无效 / 网络不通）"
     if names:
         if cands:
@@ -7933,7 +7971,7 @@ def _content_to_text(c) -> str:
                 if isinstance(parsed, list):
                     return _content_to_text(parsed)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         return c
     if isinstance(c, list):
         out, imgs = [], 0
@@ -7990,6 +8028,14 @@ async def chat_deepseek(req: ChatRequest,
     #    所以用户拖图问云端模型，模型回答"我看不到图片"。
     #    实测 DeepSeek 接受 image_url（content 用数组形式），见 vision_chat()。
     _imgs = [x for x in (req.images_b64 or []) if isinstance(x, str) and len(x) > 100]
+    # ★ 2026-11-15：记一笔「用户刚说了话」（抽空自检靠它判断空档）。
+    #   这条通道和 /api/chat 是两条独立入口，两边都得打点，否则只用 DS 通道时
+    #   会被误判成"一直空闲"，抽空自检就会挑在对话中间跑。
+    try:
+        from . import self_iterate as _si_act2
+        _si_act2.touch_activity()
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
     _img_ok = model in ("deepseek-flash", "deepseek-flash-think")   # v4-pro 只支持文本
 
     # ★ 2026-11-13：**图片跨轮可见**（用户报「图片只能当轮使用，下一轮就查不到」）。
@@ -8304,7 +8350,7 @@ async def chat_deepseek(req: ChatRequest,
                 try:
                     memory.save_transcript(session, _saved)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         except Exception:
             logger.warning("云端通道落盘失败（不影响显示）", exc_info=True)
         yield json.dumps({"__end": True, "answer": _full}, ensure_ascii=False) + "\n"
@@ -8547,7 +8593,7 @@ def _stop_serve() -> None:
             try:
                 p.kill()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
     _serve.update({"proc": None, "port": 0, "project": ""})
 
 
@@ -8725,18 +8771,18 @@ def _stream_proc_ndjson(proc, rid: str = "", rel: str = "", risky=None):
                     if text:
                         q.put(text)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             finally:
                 try:
                     tail = dec.decode(b"", True)      # 冲掉结尾残留的半截字符
                     if tail:
                         q.put(tail)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 try:
                     proc.stdout.close()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 q.put(None)
 
         threading.Thread(target=_pump, daemon=True).start()
@@ -8820,7 +8866,7 @@ def _start_amap_watch():
                 if h.get("configured") and not h.get("ok"):
                     logger.warning("[amap] key 不可用：%s", h.get("message"))
             except Exception:
-                pass                      # 看门狗自己绝不能把应用带走
+                logger.debug("silent-except", exc_info=True)                      # 看门狗自己绝不能把应用带走
     try:
         import threading as _th
         _th.Thread(target=_loop, name="amap-watch", daemon=True).start()
@@ -8987,7 +9033,7 @@ def _warmup_on_start():
         try:
             selftest.run_all(_m)
         except Exception:                            # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     threading.Thread(target=_selftest_boot, daemon=True).start()
 
@@ -9362,7 +9408,7 @@ def _office_to_html(path: str, ext: str) -> str:
             try:
                 wb.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             return "<table>%s</table>" % "".join(rows)
     except Exception:
         return ""
@@ -9901,7 +9947,7 @@ def _process_rss() -> int:
                 if line.startswith("VmRSS:"):
                     return int(line.split()[1]) * 1024
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return 0
 
 
@@ -9979,7 +10025,7 @@ def memory_release(body: dict):
                     _os.remove(p)
                     n_del += 1
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             if n_del:
                 detail.append(f"清理归档记录 {n_del} 个（已先沉淀要点）")
 
@@ -10015,7 +10061,7 @@ def memory_release(body: dict):
                 swept_total += _sweep_all(
                     known_sids={s.get("id") for s in sm.list_sessions()})
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         r = memory.release("short")
         short_freed = int(r.get("freed_chars") or 0)
         detail.append(f"已释放全部短期记忆（{short_freed} 字）")
@@ -10170,7 +10216,7 @@ def local_file(body: dict):
             from urllib.parse import unquote
             raw = unquote(raw)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     raw = raw.replace("/", os.sep)
     if not os.path.isfile(raw):
         return {"ok": False, "error": "文件不存在：%s" % raw}
@@ -10232,7 +10278,7 @@ async def doc_extract_upload(file: UploadFile):
         try:
             os.remove(tmp)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return {"ok": bool(text.strip()), "name": name,
             "chars": len(text), "text": text, "note": note,
             "supported": doc_extract.is_supported(name),
@@ -10421,7 +10467,7 @@ def t2i_unload():
         if t2i.any_loaded():
             t2i.unload()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"ok": True, "device": "cloud"}
 
 
@@ -10492,7 +10538,7 @@ def session_save(sid: str, body: dict):
                         m["content"] = o_last.get("content")
                         break
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     info = sessions.save_messages(sid, msgs)
     # 前端每次对话后都会 PUT 一次 —— 这里也刷一遍交接卡，
     # 兜住「流式生成中途被中断、没走到收尾分支」的情况。
@@ -10500,7 +10546,7 @@ def session_save(sid: str, body: dict):
         from . import handoff as _handoff_put
         _handoff_put.touch(sid, "前端保存会话（实时落盘）")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"ok": True, "session": info}
 
 
@@ -11601,7 +11647,7 @@ def _broadcast_hive(event: dict) -> None:
         try:
             asyncio.run_coroutine_threadsafe(ws.send_text(data), loop)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
 
 def _hive_on_message(gid: str, msg: dict) -> None:
@@ -11647,7 +11693,7 @@ def _hive_on_cancel(gid: str, body: dict) -> None:
         if ev:
             ev.set()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 hive_client.client().on_cancel = _hive_on_cancel
@@ -11674,7 +11720,7 @@ def _hive_on_file(gid: str, meta: dict) -> None:
                     hive.prune_artifact_name(gid, nm, keep_fid=keep)
                 break
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     # ★ 保障 5 的收尾：这份文件已经落地，清掉它的补发请求记录
     try:
         _fid = str((meta or {}).get("fid") or "")
@@ -11682,7 +11728,7 @@ def _hive_on_file(gid: str, meta: dict) -> None:
             with _fsync_lock:
                 _fsync_req.pop(gid + "/" + _fid, None)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     # ★ 保障 3：收到 AI 产物并落盘 → 回执一次清单。
     #   为什么需要：A 发给 B，B 收到了，但 C 可能没收到（泛洪丢帧）。
     #   B 回执一次清单，C 就能从 B 这里补齐 —— 扩散不再只依赖发送者一个人。
@@ -11692,7 +11738,7 @@ def _hive_on_file(gid: str, meta: dict) -> None:
                 target=lambda: _hive_sync_now(gid, reason="ack", min_gap=5.0),
                 daemon=True).start()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     _broadcast_hive({"type": "file", "gid": gid, "file": meta})
 
 
@@ -11737,7 +11783,7 @@ def _hive_on_freq(gid: str, body: dict) -> None:
             target=lambda: hive_client.client().send_file(gid, meta, data),
             daemon=True).start()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 hive_client.client().on_freq = _hive_on_freq
@@ -11845,7 +11891,7 @@ def _fsync_heartbeat_loop() -> None:
             if n:
                 logger.info("[hive-fsync] 重求卡住的附件 %d 个", n)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         time.sleep(30)
 
 
@@ -11910,13 +11956,13 @@ def _hive_on_fsync(gid: str, body: dict) -> None:
                 try:
                     hive_client.client().request_file(gid, fid)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         # 我这边更新 → 回敬一份清单（让对方向我靠拢）
         if i_am_newer:
             threading.Thread(target=lambda: _hive_sync_now(gid, reason="reply"),
                              daemon=True).start()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 hive_client.client().on_fsync = _hive_on_fsync
@@ -11937,7 +11983,7 @@ def _hive_on_fdel(gid: str, body: dict) -> None:
         _broadcast_hive({"type": "artifact_del", "gid": gid, "fid": fid,
                          "broadcast": True})
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 hive_client.client().on_fdel = _hive_on_fdel
@@ -11984,9 +12030,9 @@ async def ws_hive(ws: WebSocket):
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
-        pass
+        logger.debug("silent-except", exc_info=True)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     finally:
         _hive_clients.discard(ws)
 
@@ -12029,7 +12075,7 @@ def hive_profile_renew():
     try:
         hive_client.client().refresh_identity()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"ok": True, "profile": {"user_id": p.get("user_id"), "name": p.get("name")}}
 
 
@@ -12108,7 +12154,7 @@ def hive_join(body: dict):
                         port = int(pc["port"])
                         mode = pc.get("mode") or mode
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             r = hive_client.client().join_by_password(
                 pw, b.get("name") or "", host, port, mode)
             if not r.get("ok"):
@@ -12232,7 +12278,7 @@ def hive_kick(gid: str, body: dict):
         hive_client.client().send(gid, f"{r.get('name') or '有人'} 被移出了群",
                                   mtype="system")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"ok": True, **r}
 
 
@@ -12272,13 +12318,13 @@ def hive_delete(gid: str, body: dict = None):
     try:
         hive_client.client().broadcast_gone(gid, r.get("name") or "")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     # 广播完再从 P2P 网络里摘掉：群都没了，别再去发现/广播它
     try:
         from . import hive_mesh as _MESH
         _MESH.node().remove_group(gid)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"ok": True, **r}
 
 
@@ -12303,21 +12349,21 @@ def hive_leave(gid: str, body: dict = None):
                 r0 = cli.send(gid, notice, mtype="system")
                 sent_remote = bool(r0.get("sent"))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         # ② 本地退出：移出成员表 + 记系统消息 + 打 left 标记
         r = hive.leave_group(gid)
         # ③ 名单变了，趁连接还在把新成员表发出去（别人那边才会少一个人）
         try:
             cli.broadcast_members(gid)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         # ④ 断开，别让退出的人继续收消息
         try:
             cs = cli.status()
             if cs.get("gid") == gid:
                 cli.stop()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return {"ok": True, "sent_remote": sent_remote, **r}
     except PermissionError as e:
         return {"ok": False, "error": str(e)}
@@ -12420,7 +12466,7 @@ def _hive_on_peer() -> None:
     try:
         _broadcast_hive({"type": "peers", "client": hive_client.client().status()})
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     # ★ 保障 1：有人上线 → 广播本机清单，让**迟到成员**知道群里有什么。
     #   放到后台线程并延迟 2 秒：on_peer 在 mesh 收包线程里同步调用，
     #   这里直接广播会把那条连接的读循环卡住（和下面补发附件同理）。
@@ -12429,12 +12475,12 @@ def _hive_on_peer() -> None:
             time.sleep(2.0)
             _fsync_announce_all(reason="peer", min_gap=8.0)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     try:
         threading.Thread(target=_announce_later, daemon=True).start()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     if not _pending_files:
         return
     # 补发放到后台线程、并延迟 1.2 秒：
@@ -12465,7 +12511,7 @@ def _hive_on_members(gid: str) -> None:
     try:
         _broadcast_hive({"type": "members", "gid": gid})
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _hive_send_files(gid: str, files: list) -> None:
@@ -12544,7 +12590,7 @@ def hive_upload(gid: str, body: dict):
             try:
                 hive.prune_artifact_name(gid, meta.get("name") or "", keep_fid=meta.get("fid"))
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         return {"ok": True, "file": meta, "max": hive.MAX_FILE, "tag": tag}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -12643,7 +12689,7 @@ def hive_artifact_put(gid: str, body: dict = None):
             hive.prune_artifact_name(gid, meta.get("name") or "",
                                      keep_fid=meta.get("fid"))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
         def _push():
             # 先发本体，再发清单 —— 顺序不能反：对方按清单来拿时，
@@ -12655,7 +12701,7 @@ def hive_artifact_put(gid: str, body: dict = None):
             try:
                 _hive_sync_now(gid, reason="put", force=True)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
         threading.Thread(target=_push, daemon=True).start()
         # 群里留一条记录，别人才知道"谁往文件夹里放了东西"
@@ -12668,7 +12714,7 @@ def hive_artifact_put(gid: str, body: dict = None):
             hive_client.client().send_message(gid, txt, mtype="text",
                                               extra={"files": [meta]})
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         _broadcast_hive({"type": "artifact_put", "gid": gid, "file": meta})
         return {"ok": True, "file": meta, "max": hive.MAX_FILE}
     except Exception as e:
@@ -12726,9 +12772,9 @@ def _hive_upload_parts(gid: str, uid: str) -> set:
                 try:
                     out.add(int(n[:-4]))
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return out
 
 
@@ -12838,7 +12884,7 @@ def hive_artifact_upload_finish(gid: str, body: dict = None):
             try:
                 os.fsync(out.fileno())
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         want = int(meta.get("size") or 0)
         real = os.path.getsize(blob)
         if want and real != want:
@@ -12851,7 +12897,7 @@ def hive_artifact_upload_finish(gid: str, body: dict = None):
         try:
             hive.prune_artifact_name(gid, fm.get("name") or "", keep_fid=fm.get("fid"))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         meta["done"] = True
         meta["fid"] = fm.get("fid")
         _hive_upload_save_meta(gid, uid, meta)
@@ -12861,7 +12907,7 @@ def hive_artifact_upload_finish(gid: str, body: dict = None):
             if os.path.exists(blob):
                 os.remove(blob)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
         def _push():
             try:
@@ -12872,7 +12918,7 @@ def hive_artifact_upload_finish(gid: str, body: dict = None):
             try:
                 _hive_sync_now(gid, reason="upload", force=True)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
         threading.Thread(target=_push, daemon=True).start()
         # 群里留一条记录，别人才知道"谁往文件夹里放了东西"
@@ -12882,7 +12928,7 @@ def hive_artifact_upload_finish(gid: str, body: dict = None):
             hive_client.client().send_message(gid, txt, mtype="text",
                                               extra={"files": [fm]})
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         _broadcast_hive({"type": "artifact_put", "gid": gid, "file": fm})
         return {"ok": True, "file": fm}
     except Exception as e:
@@ -12908,7 +12954,7 @@ def hive_artifact_delete(gid: str, fid: str, broadcast: int = 0):
             try:
                 hive_client.client().send_del(gid, fid, m)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         _broadcast_hive({"type": "artifact_del", "gid": gid, "fid": fid,
                          "broadcast": bool(broadcast)})
         return {"ok": bool(ok), "fid": fid, "broadcast": bool(broadcast),
@@ -12951,7 +12997,7 @@ def hive_artifact_open(gid: str, body: dict = None):
                                       hive.file_path(gid, fid)])
                     return {"ok": True, "dir": target}
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             os.startfile(target)          # noqa: S606  (Windows only)
         elif sys.platform == "darwin":
             import subprocess
@@ -13089,7 +13135,7 @@ def hive_hd_cancel(gid: str, body: dict = None):
         try:
             hive_client.client().send_cancel(gid, mid, me["user_id"])
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return {"ok": True, "task_id": mid}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -13154,12 +13200,12 @@ def _hd_emit(gid: str, mid: str, phase: str, delta: str = "",
     try:
         _broadcast_hive({"type": "hd_stream", "gid": gid, "frame": frame})
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         hive_client.client().send_stream(gid, mid, phase, delta, task or {},
                                          seq_in, full=full)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _hd_start_worker() -> None:
@@ -13273,7 +13319,7 @@ def _hive_collect_attachments(gid: str, body: dict, hist: list):
                 note += ("\n\n【附件：" + str(f.get("name") or "")
                          + "】\n" + (info.get("content") or "")[:8000])
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return images, image_mimes, note
 
 
@@ -13479,7 +13525,7 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
             try:
                 hive.drop_artifact_by_name(gid, name)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             metas.append(hive.save_file(gid, name, raw, mime,
                                         tag="ai", source=source))
         except Exception:
@@ -13506,7 +13552,7 @@ def _hive_save_artifacts(gid: str, ui_events: list) -> list:
             try:
                 hive.drop_artifact_by_name(gid, name)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             # move=False：源文件是用户的真实产物，不能搬走（搬走工作区就空了）
             metas.append(hive.save_file_stream(
                 gid, name, path, mime, tag="ai", source=source, move=False))
@@ -13602,16 +13648,16 @@ def _push_one_artifact(gid: str, meta: dict) -> None:
         try:
             _queue_pending_file(gid, dict(meta))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     # 清单也立刻同步一次，让对方按 sha 判断"是不是同一版"
     try:
         _hive_sync_now(gid, reason="ai-live", force=True)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         _broadcast_hive({"type": "artifact_put", "gid": gid, "file": dict(meta)})
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _hive_run_model_now(gid: str, instruction: str, body: dict,
@@ -13807,7 +13853,7 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                 _hd_emit(gid, mid, "tool",
                          task={"round": _t_round[0], "tools": [str(name)]})
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             _evs: list = []
             try:
                 out = tools.dispatch(name, args if isinstance(args, dict) else {},
@@ -13817,7 +13863,7 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             try:
                 _ui_all.extend(_evs or [])
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             # ★ 2026-11-15「生成即下发」：这一轮工具产出的东西**立刻**存进群文件夹
             #   并分片广播，不等整个任务结束 —— 用户要求「生成时就给每位成员一份，
             #   确保所有人第一时间收到一模一样的产物」。
@@ -13880,13 +13926,13 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                                         "\n…（全文 %d 行，这里显示前 400 行；"
                                         "完整文件在群产物文件夹里）" % len(_lines))
                         except Exception:
-                            pass
+                            logger.debug("silent-except", exc_info=True)
                     _codes.append(_c)
                     if len(_codes) > 80:        # 极端情况别把消息撑爆
                         del _codes[:-80]
                     _hd_emit(gid, mid, "code", task={"code": _c})
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             logger.warning("[hive-hd] 工具 %s → %s", name, str(out)[:160])
             return str(out)[:6000]
 
@@ -14042,7 +14088,7 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
                         target=lambda: _hive_sync_now(gid, reason="ai", force=True),
                         daemon=True).start()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     except Exception as e:
         err = f"{type(e).__name__}: {e}" if not str(e) else str(e)
     finally:
@@ -14050,13 +14096,13 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             if resp is not None:
                 resp.close()      # 关连接 = 告诉 Ollama 别再算了
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         # 解除线程级项目覆盖（线程会被复用，不清掉会带到下一个任务）
         try:
             from . import workspace as _ws_mod2
             _ws_mod2.set_thread_project("")
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     dur = int((time.time() - t0) * 1000)
     # 落盘一条完整消息：**思考过程也要存**，这样后来进群 / 重开应用的人

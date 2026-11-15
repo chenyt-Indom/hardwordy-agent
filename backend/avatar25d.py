@@ -19,6 +19,8 @@ import subprocess
 
 import numpy as np
 import cv2
+import logging
+logger = logging.getLogger(__name__)
 
 try:                                        # 包内（服务从项目根启动）
     from . import avatar2 as A2
@@ -144,7 +146,7 @@ def _prep3d(img_path: str, max_side: int = 0) -> dict:
             zn_out = cv2.GaussianBlur(np.ascontiguousarray(zn_out), (0, 0), 18.0)
             zn = np.where(mk > 0, zn, zn_out).astype(np.float32)
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     # 位移权重：头部内饱和到 1（头发与脸同速，不会裂），边界羽化 14px
     wgt = cv2.GaussianBlur(head.astype(np.float32), (0, 0), 14.0)
     wgt = np.clip(wgt * 1.45, 0.0, 1.0)
@@ -814,18 +816,18 @@ def render(img_path: str, wav_path: str, out_mp4: str, words=None,
                 try:
                     on_progress(i + 1, n)
                 except Exception:                              # noqa: BLE001
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     except Exception as e:                                     # noqa: BLE001
         try:
             proc.kill()
         except Exception:                                      # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
         return {"ok": False, "error": "渲染中断：%s: %s" % (type(e).__name__, e)}
     finally:
         try:
             proc.stdin.close()
         except Exception:                                      # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     err = proc.stderr.read() if proc.stderr else b""
     rc = proc.wait()
     if rc != 0 or not os.path.isfile(out_mp4) or os.path.getsize(out_mp4) < 1000:

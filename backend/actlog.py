@@ -27,6 +27,8 @@ import os
 import time
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 MAX_KEEP = 120          # 每个会话最多留多少条（滚动覆盖）
 SHOW = 12               # 注入时最多列几条
@@ -42,7 +44,7 @@ def _dir() -> str:
     try:
         os.makedirs(d, exist_ok=True)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return d
 
 
@@ -66,7 +68,7 @@ def _read(path: str) -> list:
                 if isinstance(o, dict):
                     out.append(o)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return out
 
 
@@ -78,7 +80,7 @@ def _write(path: str, rows: list) -> None:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         os.replace(tmp, path)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _brief(args) -> str:
@@ -127,7 +129,7 @@ def record(session: str, name: str, args=None, ok: bool = True,
             rows.append(row)
         _write(path, rows[-MAX_KEEP:])
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def render(session: str, n: int = SHOW) -> str:
@@ -159,4 +161,4 @@ def clear(session: str) -> None:
     try:
         os.remove(_path(session))
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)

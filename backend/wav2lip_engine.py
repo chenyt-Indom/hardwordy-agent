@@ -11,6 +11,8 @@ import os
 import numpy as np
 import cv2
 import onnxruntime as ort
+import logging
+logger = logging.getLogger(__name__)
 
 # ---- 音频参数（与 Wav2Lip hparams 一致）----
 SR = 16000
@@ -245,7 +247,7 @@ def _open_round_curves(text, y, n_frames, sigma=3.0):
                 src = "llm" if info.get("source") == "llm" else "llm:" + str(info.get("source"))
                 return o, r, src
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     # ---- 2) 声学兜底 ----
     o = _audio_open_curve(y, SR, n_frames, FPS, sigma=sigma)
     o = np.asarray(o, np.float32)
@@ -1045,7 +1047,7 @@ class Wav2LipEngine:
                             if _r is not None:
                                 round_seq = np.asarray(_r, np.float32)
                     except Exception:                   # noqa: BLE001
-                        pass
+                        logger.debug("silent-except", exc_info=True)
             elif geom:
                 # 源图闭嘴 → open_from_closed 只能向「张开」方向几何外推，
                 # 没有真实口腔纹理可用，实测出来是「黑色条块 + 硬边」

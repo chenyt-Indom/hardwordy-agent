@@ -17,6 +17,8 @@ import os
 import re
 
 import xlsxwriter
+import logging
+logger = logging.getLogger(__name__)
 
 DEFAULT_THEME = "blue"
 
@@ -304,7 +306,7 @@ def build_xlsx(path, sheets, theme=DEFAULT_THEME, author="Hardwordy Agent",
                     if header:
                         ws.repeat_rows(head_row)         # 每页重复表头
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
 
             # 条件格式（比如给金额列做色阶）—— 直接给列号就行
             cond = sh.get("conditional") or sh.get("color_scale")
@@ -382,7 +384,7 @@ def build_xlsx(path, sheets, theme=DEFAULT_THEME, author="Hardwordy Agent",
         try:
             wb.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
     return {"ok": True, "path": out, "sheets": made, "rows": total_rows,

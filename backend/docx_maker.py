@@ -30,6 +30,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
+import logging
+logger = logging.getLogger(__name__)
 
 # A4
 PAGE_W = Cm(21.0)
@@ -213,7 +215,7 @@ def _add_runs(p, text, size, color, font, bold=False, italic=False):
             try:
                 r.font.highlight_color = WD_COLOR_INDEX.YELLOW
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         elif seg.startswith("**") and seg.endswith("**") and len(seg) > 4:
             r = p.add_run(seg[2:-2])
             _set_font(r, size, color, bold=True, font=font)
@@ -503,7 +505,7 @@ def _mark_update_fields(doc):
         el.set(qn("w:val"), "true")
         doc.settings.element.append(el)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _render_toc(doc, b, ctx):
@@ -553,7 +555,7 @@ def _apply_header_footer(doc, ctx, text, skip_first=False, logo=""):
             try:
                 sec.different_first_page_header_footer = True
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         # logo 放页眉最右，正文页眉居中另起一段 —— 同一段里两种对齐做不到
         last = None
         if logo_path and os.path.exists(logo_path):
@@ -564,7 +566,7 @@ def _apply_header_footer(doc, ctx, text, skip_first=False, logo=""):
                 lp.add_run().add_picture(logo_path, height=Pt(16))
                 last = lp
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         if text:
             hp = (sec.header.add_paragraph()
                   if (last is not None) else sec.header.paragraphs[0])
@@ -947,7 +949,7 @@ def build_docx(path, title, blocks, subtitle="", author="", date_text="",
         try:
             _style_font(doc.styles["Table Grid"], body_font)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
         if cover:
             _add_cover(doc, ctx, str(title or "文档"), str(subtitle or ""),

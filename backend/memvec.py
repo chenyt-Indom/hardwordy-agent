@@ -39,6 +39,7 @@ import numpy as np
 
 from . import embed
 from . import memory
+logger = logging.getLogger(__name__)
 
 _LOG = logging.getLogger("uvicorn.error")
 
@@ -156,7 +157,7 @@ def _data_sig():
                 sz += st.st_size
                 mt = max(mt, int(st.st_mtime))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     parts.append("t:%d:%d:%d" % (n, sz, mt))
     return "|".join(parts)
 
@@ -338,7 +339,7 @@ def _trans_items():
             st = os.stat(p)
             files.append((st.st_mtime, fn, p, st.st_size))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     files.sort(reverse=True)          # 新的优先
 
     with _lock:
@@ -507,7 +508,7 @@ def status() -> dict:
                     tfiles += 1
                     tbytes += os.path.getsize(os.path.join(d, fn))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return {"items": len(st["items"]), "levels": levels,
             "indexed": st["mat"] is not None,
             "backend": info.get("backend", ""), "model": info.get("model", ""),
@@ -527,7 +528,7 @@ def rebuild() -> dict:
                 if os.path.isfile(p):
                     os.remove(p)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
     t0 = time.time()
     st = sync(force=True)
     info = embed.info()

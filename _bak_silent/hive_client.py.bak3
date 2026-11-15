@@ -1,0 +1,974 @@
+"""Hive 客户端 —— 门面层。
+
+**这个文件已经不再连中继了。** 中继（hive_relay.py）已按需求删除，群聊改走
+纯 P2P 的 `hive_mesh`：局域网自动发现、跨网络靠连接码、消息泛洪 + 去重。
+
+保留这个文件是为了**不破坏 main.py 的调用**：路由层只认 `client()` 上的
+8 个方法，换掉内部实现后路由一行都不用改。对外接口完全兼容：
+
+    start(url, gid) / stop() / status()
+    send / send_stream / send_file / send_cancel
+    on_message / on_stream / on_cancel / on_file
+
+url 的含义变了：
+    "" 或 "lan"            → 局域网模式（UDP 广播自动找同群的人）
+    "hive3://1.2.3.4:8899" → 主动连这个人（跨网络，人工传一次码）
+    "ws://..." / "wss://..." → 旧的中继地址，明确报错提示改法
+"""
+from __future__ import annotations
+
+import base64
+import json
+import os
+import tempfile
+import threading
+import time
+from typing import Any, Dict, List, Optional
+
+import backend.hive as H
+import backend.hive_mesh as MESH
+import backend.hive_relay_link as RELAY
+
+PROTO_VER = MESH.PROTO_VER
+
+# 中继配置：一个服务器给所有群共用。存在 data/hive/relay.json（权限 600）。
+# ★ 密钥只在本机文件里，接口只回显掩码 —— 避免前端/日志把密钥漏出去。
+RELAY_CFG = os.path.join(H._DATA, "relay.json")
+RELAY_STATE = os.path.join(H._DATA, "relay_state.json")
+
+
+def relay_config() -> Dict[str, Any]:
+    try:
+        with open(RELAY_CFG, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return {"url": "", "token": "", "enabled": False}
+    return {
+        "url": str(d.get("url") or "").strip(),
+        "token": str(d.get("token") or "").strip(),
+        "enabled": bool(d.get("enabled", True)),
+        # 额外候选地址：不填也行，客户端会从主地址自动派生备用线路。
+        # 填了就排在最前面优先试（比如你自己搭了第二台服务器）。
+        "urls": [str(x).strip() for x in (d.get("urls") or []) if str(x).strip()],
+    }
+
+
+def mask_relay(d: Dict[str, Any]) -> Dict[str, Any]:
+    """给前端看的版本：永远不含完整密钥。"""
+    tok = str(d.get("token") or "")
+    return {
+        "url": d.get("url") or "",
+        "urls": list(d.get("urls") or []),
+        "enabled": bool(d.get("enabled", True)),
+        "token_set": bool(tok),
+        "token_hint": (tok[:3] + "***") if tok else "",
+    }
+
+
+def set_relay_config(url: str = "", token: str = "", enabled: bool = True,
+                     keep_token: bool = True,
+                     urls: Any = None) -> Dict[str, Any]:
+    """写中继配置。token 留空且 keep_token=True 时保留原密钥。"""
+    old = relay_config()
+    tok = (token or "").strip() or (old.get("token") or "" if keep_token else "")
+    if urls is None:
+        ulist = list(old.get("urls") or [])
+    elif isinstance(urls, str):
+        ulist = [x.strip() for x in urls.replace("\n", ",").split(",") if x.strip()]
+    else:
+        ulist = [str(x).strip() for x in urls if str(x).strip()]
+    d = {"url": (url or "").strip(), "token": tok, "enabled": bool(enabled),
+         "urls": ulist}
+    os.makedirs(H._DATA, exist_ok=True)
+    tmp = RELAY_CFG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, RELAY_CFG)
+    try:
+        os.chmod(RELAY_CFG, 0o600)      # 只有本机当前用户能读
+    except Exception:
+        pass
+    return mask_relay(d)
+
+
+class HiveClient:
+    def __init__(self) -> None:
+        self.on_message = None      # Callable[[str, dict], None]
+        self.on_stream = None
+        self.on_cancel = None
+        self.on_file = None
+        self.on_status = None
+        # 下面三个原来只在 _on_xxx 里用 getattr 兜着取，从没在 __init__ 声明。
+        # 上层（main.py）直接赋值也能用，但声明出来更清楚，也避免拼错名字静默失效。
+        self.on_peer = None         # Callable[[], None]        有人连上/断开
+        self.on_members = None      # Callable[[str], None]     成员表变了
+        self.on_gone = None         # Callable[[str, str], None] 群被群主删了
+        # ★ 2026-11-15 修：这两个原来**从没被桥接**到 mesh。
+        #   main.py 里写了 `client().on_freq = _hive_on_freq`，但那只是给 client
+        #   对象挂了个属性，_hook() 没有把它转给 MeshNode.on_freq —— 于是
+        #   T_FREQ 到达时 mesh 那边回调是 None，补发链路实际是死的
+        #   （之前"验证通过"是测试脚本直接调了函数，没走真实帧）。
+        self.on_freq = None         # Callable[[str, dict], None] 附件补发请求
+        self.on_fsync = None        # Callable[[str, dict], None] 群文件夹清单
+        self.on_fdel = None         # Callable[[str, dict], None] 全员删除产物
+
+        self._state = "offline"
+        self._gid = ""
+        self._url = ""
+        self._error = ""
+        self._latency = 0.0
+        self._started_at = 0.0
+        self._last_ok = 0.0
+        self._files: Dict[str, Dict[str, Any]] = {}   # fid -> 攒片状态
+        self._flock = threading.Lock()
+        self._hooked = False
+        self._relay = None          # RelayLink（走公网中继时才有）
+        self._dir_ok = False        # 群是否已登记到中继目录（跨网入群靠它）
+        self._dir_err = ""
+
+    # ------------------------------------------------------------ 回调挂接
+
+    def _hook(self) -> None:
+        if self._hooked:
+            return
+        m = MESH.node()
+        m.on_msg = self._on_msg
+        m.on_stream = self._on_stream
+        m.on_cancel = self._on_cancel
+        m.on_file = self._on_file
+        m.on_peer = self._on_peer
+        m.on_members = self._on_members
+        m.on_gone = self._on_gone
+        m.on_freq = self._on_freq
+        m.on_fsync = self._on_fsync
+        m.on_fdel = self._on_fdel
+        self._hooked = True
+
+    def _on_fdel(self, gid: str, obj: Dict[str, Any]) -> None:
+        """有人按住 Shift 删了产物 → 本机也删掉那份，并通知界面刷新。"""
+        cb = getattr(self, "on_fdel", None)
+        if cb:
+            try:
+                cb(gid, obj)
+            except Exception:
+                pass
+
+    def _on_freq(self, gid: str, obj: Dict[str, Any]) -> None:
+        """别人缺附件、在问「谁有」→ 交给上层判断本机有没有。"""
+        cb = getattr(self, "on_freq", None)
+        if cb:
+            try:
+                cb(gid, obj)
+            except Exception:
+                pass
+
+    def _on_fsync(self, gid: str, obj: Dict[str, Any]) -> None:
+        """别人发来他那边群文件夹的清单 → 交给上层做一致性对齐。"""
+        cb = getattr(self, "on_fsync", None)
+        if cb:
+            try:
+                cb(gid, obj)
+            except Exception:
+                pass
+
+    def _on_gone(self, gid: str, name: str) -> None:
+        """群主把群删了：通知界面把这个群从列表里去掉。"""
+        cb = getattr(self, "on_gone", None)
+        if cb:
+            try:
+                cb(gid, name)
+            except Exception:
+                pass
+        self._emit_status()
+
+    def _on_members(self, gid: str) -> None:
+        """别人同步了成员表过来 —— 让界面刷新一下成员列表。"""
+        cb = getattr(self, "on_members", None)
+        if cb:
+            try:
+                cb(gid)
+            except Exception:
+                pass
+
+    def _on_msg(self, gid: str, msg: Dict[str, Any]) -> None:
+        if self.on_message:
+            try:
+                self.on_message(gid, msg)
+            except Exception:
+                pass
+
+    def _on_stream(self, gid: str, obj: Dict[str, Any]) -> None:
+        if self.on_stream:
+            try:
+                self.on_stream(gid, obj)
+            except Exception:
+                pass
+
+    def _on_cancel(self, gid: str, obj: Dict[str, Any]) -> None:
+        if self.on_cancel:
+            try:
+                self.on_cancel(gid, obj)
+            except Exception:
+                pass
+
+    def _on_file(self, gid: str, obj: Dict[str, Any]) -> None:
+        """附件分片到达：**边收边写临时文件**，攒齐了才搬进群目录。
+
+        ⚠️ 2026-11-15 改（用户要求「大小不被限制」）：
+           原来把所有分片攒在内存 dict 里，攒齐后 `b"".join(...)` 再整块写盘 ——
+           1GB 文件峰值要吃 2GB 内存，两个人同时传就能把机器拖死。
+           现在按 `idx*CHUNK` 偏移直接写临时文件（泛洪不保证顺序，所以必须 seek），
+           攒齐后 truncate 到真实大小再 rename 过来，峰值内存只剩一个分片。
+        """
+        fid = str(obj.get("fid") or "")
+        if not fid:
+            return
+        total = int(obj.get("total") or 0)
+        idx = int(obj.get("idx") or 0)
+        if total <= 0 or idx < 0 or idx >= total:
+            return
+        CH = int(obj.get("chunk") or self.CHUNK or (512 * 1024))
+        try:
+            raw = base64.b64decode(obj.get("data") or "")
+        except Exception:
+            return
+        st = None
+        ready = False
+        with self._flock:
+            st = self._files.get(fid)
+            if st is None:
+                tmpdir = tempfile.mkdtemp(prefix="hivepart_")
+                tmp = os.path.join(tmpdir, "part.bin")
+                st = {"tmp": tmp, "tmpdir": tmpdir, "fh": open(tmp, "w+b"),
+                      "got": set(), "lens": {}, "total": total, "chunk": CH,
+                      "meta": obj.get("meta") or {},
+                      "ts": time.time(), "gid": gid, "last": time.time(), "tries": 0}
+                self._files[fid] = st
+            try:
+                st["fh"].seek(idx * int(st.get("chunk") or CH))
+                st["fh"].write(raw)
+            except Exception:
+                return
+            st["got"].add(idx)
+            st["lens"][idx] = len(raw)
+            # 每收到一片就刷新活跃时间：sweep_partial() 靠它判断"是不是卡住了"
+            st["last"] = time.time()
+            ready = len(st["got"]) >= int(st.get("total") or total)
+            if ready:
+                self._files.pop(fid, None)
+        if not ready:
+            return
+        meta = st.get("meta") or {}
+        tmp = st.get("tmp")
+        try:
+            st["fh"].flush()
+            st["fh"].close()
+            # 最后一片通常不满，按"各片实际长度之和"截断，否则文件尾巴是 0
+            os.truncate(tmp, sum(st.get("lens", {}).values()))
+        except Exception:
+            pass
+        try:
+            rec = H.store_incoming_path(gid, meta, tmp)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            return
+        try:
+            td = st.get("tmpdir") or ""
+            if td and os.path.isdir(td):
+                os.rmdir(td)
+        except Exception:
+            pass
+        if self.on_file:
+            try:
+                self.on_file(gid, rec)
+            except Exception:
+                pass
+
+    def _on_peer(self) -> None:
+        m = MESH.node()
+        st = m.status()
+        self._state = "online" if (m.started and st["peers"] > 0) else (
+            "online" if m.started else "offline")
+        self._emit_status()
+        # ⚠️ 2026-11-13 修：原来只更新内部状态，不通知上层 ——
+        #    于是「有人上线 → 补发积压附件 / 前端刷新在线人数」这条链断了。
+        #    （main.py 之前挂到 MESH.node().on_peer 上，会被 _hook() 覆盖掉。）
+        if self.on_peer:
+            try:
+                self.on_peer()
+            except Exception:
+                pass
+
+    def _emit_status(self) -> None:
+        if self.on_status:
+            try:
+                self.on_status(self.status())
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------ 生命周期
+
+    def start(self, url: str, gid: str) -> Dict[str, Any]:
+        self._hook()
+        g = H.load_group(gid)
+        if not g:
+            self._error = "群不存在"
+            self._state = "error"
+            return self.status()
+
+        m = MESH.node()
+        if not m.started:
+            m.start(0, [gid])
+        m.add_group(gid, vt=g.get("vt") or "",
+                    gname=g.get("name") or "")
+        self._gid = gid
+        self._url = (url or "").strip()
+        self._error = ""
+        self._started_at = self._started_at or time.time()
+
+        u = self._url
+        cfg = relay_config()
+        # 没填地址时，用全局中继配置（「以后建群连接直接用密钥」就是靠这里）
+        if not u and cfg.get("enabled") and cfg.get("url"):
+            u = cfg["url"]
+            self._url = u
+
+        # 跨网打洞：punch://IP:端口 —— 本项目自带，不需要装任何外部软件。
+        # 走 UDP，和 TCP 直连的端口不是同一个，所以必须靠前缀区分。
+        if u.startswith(("punch://", "udp://")):
+            p = m.parse_code(u)
+            if not p.get("ok"):
+                self._state = "error"
+                self._error = p.get("error", "打洞地址格式不对")
+                return self.status()
+            t0 = time.time()
+            r = m.connect_punch(p["host"], p["port"], gid, timeout=10.0)
+            if not r.get("ok"):
+                self._state = "error"
+                self._error = r.get("error", "打洞没成功")
+                return self.status()
+            self._latency = round((time.time() - t0) * 1000, 1)
+            self._state = "online"
+            self._last_ok = time.time()
+            return self.status()
+
+        # 中继：hive4:// / ws:// / wss:// / tcp:// / 裸 host:port
+        # ws:// 现在是**真的 WebSocket**（挂 nginx 反代时用），不再是"剥前缀"。
+        if u and not u.startswith(("hive3://", "hive2://", "hive://")):
+            try:
+                lk = RELAY.link(RELAY_STATE)
+                st = lk.start(u, gid, cfg.get("token") or "",
+                              extra_urls=cfg.get("urls"))
+                self._relay = lk
+                if st.get("online"):
+                    self._state = "online"
+                    self._error = ""
+                    self._last_ok = time.time()
+                    self._latency = float(st.get("rtt_ms") or 0)
+                    # 连上就把群登记到中继目录 —— 跨网的人凭密码就能找到群，
+                    # 不用再互发地址。这是「入群逻辑」最关键的一环。
+                    self._publish_dir(u, gid, cfg.get("token") or "")
+                elif st.get("state") == "connecting":
+                    # 还在换线路试 —— 不是失败，后台会继续，别急着报错
+                    self._state = "connecting"
+                    self._error = st.get("error") or "正在连接服务器…"
+                else:
+                    self._state = "error"
+                    self._error = st.get("error") or "中继连不上"
+                return self.status()
+            except Exception as e:
+                self._state = "error"
+                self._error = "%s: %s" % (type(e).__name__, e)
+                return self.status()
+
+        if u.startswith(("hive3://", "hive2://", "hive://")):
+            p = m.parse_code(u)
+            if not p.get("ok"):
+                self._state = "error"
+                self._error = p.get("error", "连接码格式不对")
+                return self.status()
+            t0 = time.time()
+            r = m.connect(p["host"], p["port"], gid)
+            if not r.get("ok"):
+                self._state = "error"
+                # 家用宽带在 NAT 后面时 TCP 必然连不进来 —— 直接引导到打洞地址，
+                # 免得用户反复重试同一个连不通的地址。
+                self._error = (str(r.get("error", "连不上")) +
+                               "。如果对方用的是家庭宽带，让对方打开「📡 我的地址」，"
+                               "把 punch:// 开头的那一行发给你 —— 那个能穿透 NAT。")
+                return self.status()
+            self._latency = round((time.time() - t0) * 1000, 1)
+            self._state = "online"
+            self._last_ok = time.time()
+            return self.status()
+
+        # 局域网模式：什么都不用填，靠 UDP 广播自动发现
+        self._state = "online"
+        self._last_ok = time.time()
+        return self.status()
+
+    def stop(self) -> Dict[str, Any]:
+        if self._relay is not None:
+            try:
+                self._relay.stop()
+            except Exception:
+                pass
+            self._relay = None
+        m = MESH.node()
+        m.stop()
+        self._state = "offline"
+        self._gid = ""
+        self._url = ""
+        return self.status()
+
+    # ------------------------------------------------------------ 状态
+
+    def status(self) -> Dict[str, Any]:
+        m = MESH.node()
+        st = m.status()
+        peers = int(st.get("peers") or 0)
+        state = self._state
+        if state == "error":
+            pass
+        elif state == "connecting":
+            pass          # 正在换线路试，保持 connecting，别显示成 offline
+        elif not m.started:
+            state = "offline"
+        elif peers > 0:
+            state = "online"
+        else:
+            state = "online" if self._gid else "offline"
+
+        # compat：用对端上报的协议版本判断，不同版本只提示不拦
+        vers = [int(x.get("ver") or 0) for x in (st.get("members") or [])]
+        compat = "same"
+        if vers:
+            if any(v < PROTO_VER for v in vers):
+                compat = "older"
+            elif any(v > PROTO_VER for v in vers):
+                compat = "newer"
+
+        relay = None
+        if self._relay is not None:
+            try:
+                relay = self._relay.status()
+            except Exception:
+                relay = {"state": "error", "online": False, "error": "状态读取失败"}
+            if relay.get("online"):
+                state = "online"
+
+        mode = "mesh"
+        if relay:
+            mode = "relay"
+        elif (self._url or "").startswith(("hive3://", "hive2://", "hive://")):
+            mode = "direct"
+
+        return {
+            "ok": state != "error",
+            "state": state,
+            "mode": mode,
+            "relay": relay or {},
+            "dir_ok": bool(self._dir_ok),
+            "dir_err": self._dir_err,
+            "connected": peers > 0,
+            "url": self._url or ("局域网" if m.started else ""),
+            "gid": self._gid,
+            "latency_ms": self._latency,
+            "proto": PROTO_VER,
+            "relay_ver": (str((relay or {}).get("state") or "") if relay else ""),
+            "compat": compat,
+            "peers": peers,
+            "members": st.get("members") or [],
+            "port": st.get("port") or 0,
+            "lan_ip": st.get("lan_ip") or "",
+            "queued": st.get("queued") or 0,
+            "error": self._error,
+            "uptime": st.get("uptime") or 0,
+            "dev": st.get("dev") or "",
+            "uid_conflict": st.get("uid_conflict"),
+        }
+
+    def refresh_identity(self) -> Dict[str, Any]:
+        """换了 user_id 之后立刻生效（否则还会按老身份发消息）。"""
+        try:
+            MESH.node().refresh_identity()
+        except Exception:
+            pass
+        self._emit_status()
+        return self.status()
+
+    # ------------------------------------------------------------ 发送
+
+    def send(self, gid: str, text: str, mtype: str = "text",
+             extra: Optional[Dict] = None,
+             ref: Optional[str] = None) -> Dict[str, Any]:
+        """发一条消息：先本地落盘（拿本地 seq），再泛洪给所有在线成员。"""
+        self._hook()
+        try:
+            msg = H.send_message(gid, text, mtype=mtype, ref=ref, extra=extra)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        m = MESH.node()
+        if not m.started:
+            m.start(0, [gid])
+        m.add_group(gid)
+        n = m.broadcast(gid, MESH.T_MSG, {"msg": msg})
+        self._last_ok = time.time()
+        if n == 0:
+            self._state = "offline"
+        else:
+            self._state = "online"
+        return {"ok": True, "msg": msg, "peers": n, "queued": 0 if n else 1}
+
+    def broadcast_members(self, gid: str) -> int:
+        """把本地成员表广播出去。加群/踢人/改角色/退群后调用。"""
+        self._hook()
+        try:
+            return MESH.node().broadcast_members(gid)
+        except Exception:
+            return 0
+
+    def broadcast_gone(self, gid: str, name: str = "") -> int:
+        """群主删群后通知成员：本地那份也下线（不然列表里挂着一个打不开的群）。"""
+        self._hook()
+        try:
+            m = MESH.node()
+            if not m.started:
+                return 0
+            return m.broadcast(gid, MESH.T_GONE, {"name": name, "ttl": MESH.TTL_DEFAULT})
+        except Exception:
+            return 0
+
+    def send_stream(self, gid: str, mid: str, phase: str, delta: str = "",
+                    task: Optional[Dict[str, Any]] = None, seq_in: int = 0,
+                    full: str = "") -> Dict[str, Any]:
+        """@hd 实时进度。不落盘，直接泛洪 —— 刷屏内容没必要写进日志。
+
+        `full` 是**当前累计全文**（可选）。流式帧走泛洪、不排队不重发，
+        只发增量的话任何一次丢包都会让成员那边的思考永久少一段；
+        带上全文后，下一帧就把缺的补齐（幂等，重复收到也无害）。
+        """
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return {"ok": False, "error": "网络未启动"}
+        me = H.profile()
+        obj = {
+            "mid": mid, "phase": phase, "delta": delta or "",
+            "task": task or {}, "seq": seq_in,
+            "from": me.get("user_id", ""), "name": me.get("name", ""),
+            "ts": time.time(), "ttl": MESH.TTL_DEFAULT,
+        }
+        if full:
+            obj["full"] = full
+        n = m.broadcast(gid, MESH.T_STREAM, obj)
+        return {"ok": True, "peers": n}
+
+    def send_cancel(self, gid: str, mid: str, by: str = "") -> bool:
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return False
+        n = m.broadcast(gid, MESH.T_CANCEL, {"mid": mid, "by": by, "ttl": MESH.TTL_DEFAULT})
+        return n > 0
+
+    # 分片大小：发送和接收必须**完全一致**，接收端靠 idx*CHUNK 算写入偏移。
+    CHUNK = 512 * 1024
+
+    def send_file(self, gid: str, meta: Dict[str, Any], data: bytes = b"",
+                  mime: str = "", name: str = "", path: str = "") -> Dict[str, Any]:
+        """附件分片泛洪。大小不设上限，这里只负责拆包和广播。
+
+        为什么不用大帧一次发完：mesh 的帧上限 8MB，而且一帧太大时一个丢包
+        就得整帧重来。512KB 一片，丢一片补一片。
+
+        `path=` 是 2026-11-15 为「大小不被限制」加的：传磁盘路径时**按片读**，
+        整个文件永远不进内存（传 2GB 视频也只占一个分片的内存）。
+        """
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return {"ok": False, "error": "网络未启动"}
+        # ⚠️ 2026-11-13 修：附件 meta 的字段名是 `fid`，这里原来读的是 `id`，
+        #    于是每次调用都返回「缺少文件 id」—— 附件从来没成功广播过，
+        #    群里只有发送者本机能打开文件。实测确认（在线状态也发不出去）。
+        fid = str(meta.get("fid") or meta.get("id") or "")
+        if not fid:
+            return {"ok": False, "error": "缺少文件 id"}
+        CH = self.CHUNK
+        fh = None
+        if path:
+            try:
+                size = os.path.getsize(path)
+                fh = open(path, "rb")
+            except Exception as e:
+                return {"ok": False, "error": "读不到文件：%s" % e}
+        else:
+            size = len(data or b"")
+        if size <= 0:
+            return {"ok": False, "error": "文件是空的"}
+        total = max(1, (size + CH - 1) // CH)
+        sent = 0
+        try:
+            for i in range(total):
+                if fh is not None:
+                    chunk = fh.read(CH)
+                else:
+                    chunk = data[i * CH:(i + 1) * CH]
+                if not chunk:
+                    break
+                obj = {
+                    "fid": fid, "idx": i, "total": total, "chunk": CH,
+                    "size": size,
+                    "meta": meta, "data": base64.b64encode(chunk).decode("ascii"),
+                    "ttl": MESH.TTL_DEFAULT,
+                }
+                if m.broadcast(gid, MESH.T_FILE, obj) > 0:
+                    sent += 1
+                time.sleep(0.02)   # 片之间留间隔，否则中间几片会被网络缓冲吞掉
+        finally:
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+        return {"ok": True, "fid": fid, "total": total, "sent": sent,
+                "size": size}
+
+    def send_del(self, gid: str, fid: str,
+                 meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """广播「这个产物全群一起删掉」（2026-11-15）。
+
+        只有前端按住 Shift 点删除才走这条；普通删除只动本机
+        （一个人手滑不该把全群的产物删没）。
+        """
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return {"ok": False, "error": "网络未启动"}
+        fid = str(fid or "")
+        if not fid:
+            return {"ok": False, "error": "缺少文件 id"}
+        n = m.broadcast(gid, MESH.T_FDEL,
+                        {"fid": fid, "meta": meta or {}, "ttl": MESH.TTL_DEFAULT})
+        return {"ok": n > 0, "peers": n, "fid": fid}
+
+    def request_file(self, gid: str, fid: str) -> Dict[str, Any]:
+        """向群里问一声「谁有这个附件」，持有者会自动补发（2026-11-15）。
+
+        为什么需要：产物文件夹承诺「任何成员都能打开」，但**后入群**的人
+        从没收到过早期广播的附件本体 —— 他打开历史里的产物只会 404。
+        请求走泛洪，所以只要群里有任何一个人有这份文件就能补回来。
+        """
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return {"ok": False, "error": "网络未启动"}
+        fid = str(fid or "")
+        if not fid:
+            return {"ok": False, "error": "缺少文件 id"}
+        n = m.broadcast(gid, MESH.T_FREQ,
+                        {"fid": fid, "ttl": MESH.TTL_DEFAULT})
+        return {"ok": n > 0, "peers": n, "fid": fid}
+
+    def sweep_partial(self, timeout: float = 15.0, max_tries: int = 3) -> int:
+        """收了一半就停住的附件 → 重新求一次（最多 max_tries 次）。
+
+        为什么需要（2026-11-15）：附件是 512KB 一片泛洪，**不保证每一片都到**。
+        缺任何一片，`_on_file` 就永远攒不齐 —— 表现是"传到 80% 卡住，再也不动"，
+        而且那条攒片状态会一直占着内存。这里按"多久没新片"判断卡住，
+        重新发 T_FREQ 让持有者补发；超过次数就放弃（避免死循环刷网）。
+
+        返回：本次重求了几个。
+        """
+        now = time.time()
+        retry: List[Any] = []
+        with self._flock:
+            for fid, st in list(self._files.items()):
+                if not isinstance(st, dict):
+                    continue
+                if now - float(st.get("last") or st.get("ts") or 0) < timeout:
+                    continue            # 还在正常收，别打扰
+                n = int(st.get("tries") or 0)
+                if n >= max_tries:
+                    self._files.pop(fid, None)      # 放弃，别一直占内存
+                    # ⚠️ 2026-11-15：现在攒片落在**临时文件**上，放弃时必须清掉，
+                    #    否则传失败的大文件会在 temp 里留一堆 .part 把磁盘占满。
+                    try:
+                        st.get("fh") and st["fh"].close()
+                    except Exception:
+                        pass
+                    try:
+                        td = st.get("tmpdir") or ""
+                        if td and os.path.isdir(td):
+                            for _n in os.listdir(td):
+                                try:
+                                    os.remove(os.path.join(td, _n))
+                                except Exception:
+                                    pass
+                            os.rmdir(td)
+                    except Exception:
+                        pass
+                    continue
+                st["tries"] = n + 1
+                st["last"] = now        # 重求之后重新计时，避免每次扫描都重发
+                retry.append((str(st.get("gid") or ""), fid))
+        for gid, fid in retry:
+            try:
+                self.request_file(gid, fid)
+            except Exception:
+                pass
+        return len(retry)
+
+    def sync_artifacts(self, gid: str, items: List[Dict[str, Any]],
+                       reason: str = "") -> Dict[str, Any]:
+        """把本机群文件夹的清单广播出去，让所有成员对齐到同一份内容。
+
+        清单只带「名字 + sha + 大小 + 时间 + fid」，几十条也就几 KB ——
+        文件本体不走这里（走 T_FILE 分片）。
+
+        为什么需要：光靠 T_FILE 只是"各存一份副本"，同一个文件改三版就有
+        三个不同 fid 的同名文件散落在各人手里。清单同步之后，大家按 sha
+        判断"是不是同一版"，旧的换掉、缺的补回来。
+        """
+        self._hook()
+        m = MESH.node()
+        if not m.started:
+            return {"ok": False, "error": "网络未启动"}
+        gid = str(gid or "")
+        if not gid:
+            return {"ok": False, "error": "缺少群 id"}
+        # 清单本身也限个长度：产物文件夹理论上可能上千个文件，
+        # 一帧塞满会把 mesh 的 8MB 帧上限顶爆。
+        rows = []
+        for it in (items or [])[:400]:
+            if not isinstance(it, dict):
+                continue
+            rows.append({
+                "fid": str(it.get("fid") or ""),
+                "name": str(it.get("name") or ""),
+                "sha": str(it.get("sha") or ""),
+                "size": int(it.get("size") or 0),
+                "ts": float(it.get("ts") or 0),
+                "mime": str(it.get("mime") or ""),
+            })
+        me = H.profile()
+        obj = {
+            "items": rows, "reason": str(reason or "")[:40],
+            "from": me.get("user_id", ""), "name": me.get("name", ""),
+            "ts": time.time(), "ttl": MESH.TTL_DEFAULT,
+        }
+        n = m.broadcast(gid, MESH.T_FSYNC, obj)
+        return {"ok": True, "peers": n, "count": len(rows)}
+
+    # ------------------------------------------------------------ 附加能力
+
+    # ---------------------------------------------------------- 密码进群
+
+    def _publish_dir(self, url: str, gid: str, token: str) -> bool:
+        """把群登记到中继目录，让跨网的人凭密码就能找到。
+
+        只有**群主**能登记 —— 明文密码只存在群主本机（`group_password`
+        对成员返回空）。所以群主连过一次中继之后，别人就能查到。
+        """
+        try:
+            g = H.load_group(gid) or {}
+            if g.get("owner") != H.profile()["user_id"]:
+                return False
+            info = H.group_password(gid) or {}
+            pw = str(info.get("raw") or "")
+            vt = str(g.get("vt") or "")
+            if not pw or not vt:
+                return False
+            r = RELAY.dir_publish(url, token, pw, gid, vt, g.get("name") or "")
+            self._dir_ok = bool(r.get("ok"))
+            self._dir_err = "" if self._dir_ok else str(r.get("error") or "")
+            return self._dir_ok
+        except Exception as e:
+            self._dir_ok = False
+            self._dir_err = "%s: %s" % (type(e).__name__, e)
+            return False
+
+    def join_by_password(self, pw: str, name: str = "", host: str = "",
+                         port: int = 0, mode: str = "") -> Dict[str, Any]:
+        """用 12 位密码进群（二维码已经删掉了）。
+
+        找群的三个来源：本机已有记录、局域网 UDP 广播、你手填的地址。
+        每个候选都拿「密码派生的密钥」去核对验证标签 —— 对上了才算密码正确，
+        所以「密码错」和「没找到群」能分得清清楚楚。
+        """
+        m = MESH.node()
+        if not m.started:
+            m.start(0, [])
+        try:
+            pw_n = H.norm_password(pw)
+        except ValueError as e:
+            return {"ok": False, "stage": "format", "error": str(e)}
+
+        cands: List[Dict[str, Any]] = []
+        used = set()
+
+        def _add(gid, vt, nm, src, h="", p=0, md=""):
+            if not gid or gid in used:
+                return
+            key = H.derive_key(pw_n, gid)
+            tag = H.verify_tag(key, gid)
+            if vt and tag != vt:
+                return                      # 标签对不上 = 这个群不是这把密码
+            used.add(gid)
+            cands.append({"gid": gid, "vt": tag, "name": nm or "",
+                          "src": src, "host": h, "port": p, "key": key,
+                          "mode": md})
+
+        # (a) 本机已有记录（含之前退出的群）
+        for gid in H.all_group_ids():
+            g = H.load_group(gid) or {}
+            key = H.derive_key(pw_n, gid)
+            if g.get("kfp") == H.key_fingerprint(key):
+                _add(gid, H.verify_tag(key, gid), g.get("name") or "", "local")
+
+        # (b) 局域网广播
+        for b in m.seen_beacons():
+            _add(b.get("gid") or "", b.get("vt") or "", b.get("gn") or "",
+                 "lan", b.get("host") or "", int(b.get("port") or 0))
+
+        # (c) 手填的地址
+        net_err = ""
+        probe_ok = False
+        if host:
+            if mode == "punch":
+                pr = m.probe_punch(host, int(port))
+            else:
+                pr = m.probe(host, int(port) if port else MESH.MESH_PORT)
+            if pr.get("ok"):
+                probe_ok = True
+                for g in (pr.get("groups") or []):
+                    _add(g.get("gid") or "", g.get("vt") or "",
+                         g.get("gn") or "", "addr", host,
+                         int(pr.get("port") or port or 0), mode)
+            else:
+                net_err = pr.get("error") or "连不上"
+
+        # (d) 中继目录（跨网络）—— 这是跨网入群的关键：
+        #     原来只靠「本机记录 / 局域网广播 / 手填地址」，跨网三条都不通，
+        #     所以别人拿着密码也进不来。现在配了中继就直接按密码指纹查目录。
+        relay_err = ""
+        cfg = relay_config()
+        if cfg.get("enabled") and cfg.get("url"):
+            try:
+                dr = RELAY.dir_lookup(cfg["url"], cfg.get("token") or "", pw_n)
+                if dr.get("ok"):
+                    hit = (dr.get("raw") or {}).get("group") or {}
+                    if hit.get("gid"):
+                        _add(hit.get("gid") or "", hit.get("vt") or "",
+                             hit.get("name") or "", "relay")
+                else:
+                    relay_err = str(dr.get("error") or "")
+            except Exception as e:
+                relay_err = "%s: %s" % (type(e).__name__, e)
+
+        if not cands:
+            if net_err:
+                base = net_err.rstrip("。")
+                if mode == "punch":
+                    tail2 = ("。跨网打洞要两边都能出网，对方没开机或防火墙拦 UDP "
+                             "都会失败；配置中继后这种情况会自动兜底。")
+                else:
+                    tail2 = ("。请确认对方地址和端口，"
+                             "或者确认双方在同一 WiFi。")
+                return {"ok": False, "stage": "network",
+                        "error": base + tail2}
+            if probe_ok:
+                return {"ok": False, "stage": "password",
+                        "error": "密码不对：对方在线，但他的群没有一个和这个密码匹配。"}
+            # 提示要能指路：跨网时最常见的是「群主还没连中继」或「中继不是同一台」
+            if relay_err:
+                tail = ("中继也查不到（%s）。请确认群主那边已经连上中继，"
+                        "并且你在「🌐 中继」里填的是同一台服务器。" % relay_err)
+            elif cfg.get("enabled") and cfg.get("url"):
+                tail = ("中继上没有这个密码对应的群 —— 让群主先打开一次群"
+                        "（连上中继后会自动登记），再重试。")
+            else:
+                tail = "如果对方不在同一 WiFi，请再填上他的地址。"
+            return {"ok": False, "stage": "notfound",
+                    "error": "没找到匹配的群。先确认密码有没有输错；" + tail}
+
+        hit = cands[0]
+        try:
+            g = H.join_with_key(hit["gid"], hit["key"], name,
+                                meta={"n": hit["name"], "h": hit["host"]},
+                                allow_rekey=(hit["src"] != "local"))
+        except ValueError as e:
+            return {"ok": False, "stage": "join", "error": str(e)}
+
+        gg = H.load_group(hit["gid"]) or {}
+        m.add_group(hit["gid"], vt=gg.get("vt") or hit["vt"],
+                    gname=gg.get("name") or "")
+        self._gid = hit["gid"]
+        self._url = ""
+        self._state = "online"
+        self._error = ""
+        self._last_ok = time.time()
+        self._started_at = self._started_at or time.time()
+        warn = ""
+        if hit["src"] == "addr" and hit["host"]:
+            if hit.get("mode") == "punch":
+                cr = m.connect_punch(hit["host"], int(hit["port"]),
+                                     hit["gid"], timeout=10.0)
+                if not cr.get("ok"):
+                    warn = cr.get("error") or "打洞连接失败"
+            else:
+                m.connect(hit["host"], int(hit["port"] or MESH.MESH_PORT),
+                          hit["gid"])
+        out = {"ok": True, "group": g, "via": hit["src"],
+               "matched": len(cands), "password": H.format_password(pw_n)}
+        if warn:
+            # 已经进群了（密钥对得上），只是没连上人 —— 别当成入群失败
+            out["warn"] = warn
+        return out
+
+    def connect_code(self, gid: str) -> Dict[str, Any]:
+        self._hook()
+        return MESH.node().connect_code(gid or self._gid)
+
+    def connect_to(self, gid: str, code: str) -> Dict[str, Any]:
+        self._hook()
+        m = MESH.node()
+        p = m.parse_code(code)
+        if not p.get("ok"):
+            return p
+        # punch:// 是 UDP 打洞地址（端口和 TCP 不是同一个），必须走打洞通道
+        if p.get("mode") == "punch":
+            return m.connect_punch(p["host"], p["port"], gid, timeout=10.0)
+        return m.connect(p["host"], p["port"], gid)
+
+    def seen_beacons(self) -> List[Dict[str, Any]]:
+        """局域网里听到的所有群广播（含自己不在的群）—— 密码入群靠它找群。"""
+        m = MESH.node()
+        return m.seen_beacons()
+
+    def lan_beacons(self, gid: str) -> List[Dict[str, Any]]:
+        """局域网里发现的同群成员（不含自己）。"""
+        m = MESH.node()
+        out = []
+        for p in m.peers_of(gid):
+            out.append({
+                "user_id": p.uid, "name": p.name or p.uid,
+                "host": p.addr[0], "port": p.port,
+                "ver": p.ver, "online": p.alive,
+                "last_seen": p.last_seen,
+            })
+        return out
+
+
+_CLIENT: Optional[HiveClient] = None
+
+
+def client() -> HiveClient:
+    global _CLIENT
+    if _CLIENT is None:
+        _CLIENT = HiveClient()
+    return _CLIENT

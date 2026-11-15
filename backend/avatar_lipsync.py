@@ -18,6 +18,8 @@ import cv2
 from . import avatar2 as A2
 from . import wav2lip_engine as W2L
 from .face_detect_scrfd import SCRFD
+import logging
+logger = logging.getLogger(__name__)
 
 _MODELS = os.path.join(A2._root(), "data", "models", "wav2lip")
 _ENGINE = None
@@ -242,7 +244,7 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
                     if _g and _g.get("source_open"):
                         img_path, img = alt_p, alt
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     # 尺寸策略（两条线分开，很重要）：
     #   · 处理尺寸 proc —— Wav2Lip 只在 96x96 上生成嘴部，喂给它更大的图**不会**
     #     增加嘴部信息量，反而让脸框更大、贴回时放大倍数更高。所以处理尺寸
@@ -416,18 +418,18 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
                 try:
                     on_progress(i + 1, n)
                 except Exception:                       # noqa: BLE001
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     except Exception as e:                              # noqa: BLE001
         try:
             proc.kill()
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
         return {"ok": False, "error": "编码中断：%s: %s" % (type(e).__name__, e)}
     finally:
         try:
             proc.stdin.close()
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     err = proc.stderr.read() if proc.stderr else b""
     rc = proc.wait()
     if rc != 0 or not os.path.isfile(out_mp4) or os.path.getsize(out_mp4) < 1000:
@@ -477,14 +479,14 @@ def _grab_frames(mp4, n=2):
                 if im is not None:
                     out.append(im)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     finally:
         try:
             for f in os.listdir(tmpdir):
                 os.remove(os.path.join(tmpdir, f))
             os.rmdir(tmpdir)
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     return out
 
 

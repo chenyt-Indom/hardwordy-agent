@@ -14,6 +14,8 @@ import time
 import uuid
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 DIR = config.data("sessions")
 INDEX = os.path.join(DIR, "index.json")
@@ -194,7 +196,7 @@ def delete(sid: str) -> bool:
     try:
         os.remove(_path(sid))
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return True
 
 
@@ -266,7 +268,7 @@ def cleanup_old(days: int = SESSION_TTL_DAYS, max_count: int = 4) -> int:
             try:
                 os.remove(_path(s["id"]))
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             removed += 1
         else:
             kept.append(s)

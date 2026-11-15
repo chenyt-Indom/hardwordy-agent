@@ -38,6 +38,8 @@ import urllib.request
 
 import cv2
 import numpy as np
+import logging
+logger = logging.getLogger(__name__)
 
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 # 质检用 3B：单帧 3~5 秒，抽 3 帧 + 汇总在 15 秒内，符合「多花 30~60 秒」的预算。
@@ -454,7 +456,7 @@ def locate(img_path, model=MODEL_FAST, timeout=180, use_llm=True):
     }
 
 
-def _locate_llm_only(img_path, model=MODEL_FAST, timeout=180):
+def _locate_llm_only(img_path, model=MODEL_FAST, timeout=180):  # noqa: dead-func 有意保留
     """旧版纯 LLM 定位，保留作对照/兜底（不导出）。"""
     if not os.path.isfile(img_path):
         return {"ok": False, "error": "图片不存在"}
@@ -916,5 +918,5 @@ def available(model=MODEL_FAST):
         if any(n == model or n.startswith(model.split(":")[0]) for n in local):
             ok = True
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     return ok, names

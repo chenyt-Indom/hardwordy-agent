@@ -5,6 +5,8 @@
 import json
 import os
 import sys
+import logging
+logger = logging.getLogger(__name__)
 
 # 项目根 / 后端包目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -362,7 +364,7 @@ def load_config() -> dict:
                 user = json.load(f)
             cfg.update(user)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     if os.environ.get("MM_OLLAMA_URL"):
         cfg["ollama_url"] = os.environ["MM_OLLAMA_URL"]
     if os.environ.get("MM_MODEL"):

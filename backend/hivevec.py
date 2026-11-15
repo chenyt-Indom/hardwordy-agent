@@ -38,6 +38,7 @@ import numpy as np
 from . import embed
 from . import hive
 from . import doc_extract
+logger = logging.getLogger(__name__)
 
 _LOG = logging.getLogger("uvicorn.error")
 
@@ -223,7 +224,7 @@ def build_index(gid: str, force: bool = False) -> dict:
         try:
             os.makedirs(root, exist_ok=True)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         meta_p = os.path.join(root, _META_NAME)
         vec_p = os.path.join(root, _VEC_NAME)
         old = _read_json(meta_p, {}) or {}

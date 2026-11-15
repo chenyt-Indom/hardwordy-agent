@@ -30,6 +30,8 @@ import uuid
 from typing import Any
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
 
@@ -152,7 +154,7 @@ def _read_raw() -> list[dict] | None:
             import shutil
             shutil.copyfile(p, p + ".broken-" + time.strftime("%Y%m%d_%H%M%S"))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return []
     if isinstance(d, dict):
         d = d.get("items")
@@ -207,7 +209,7 @@ def load() -> list[dict]:
             try:
                 _write_raw(items)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         return items
 
 
@@ -572,7 +574,7 @@ def parse_share(text: str) -> dict | None:
             if isinstance(data, dict) and data.get("name"):
                 return data
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     # ② 裸 JSON（整段就是 JSON，或话里夹了一段 {...}）
     if s.startswith("{"):
@@ -581,7 +583,7 @@ def parse_share(text: str) -> dict | None:
             if isinstance(data, dict) and data.get("name"):
                 return data
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     m = re.search(r"\{[\s\S]*\"name\"[\s\S]*\}", s)
     if m:
         try:
@@ -589,7 +591,7 @@ def parse_share(text: str) -> dict | None:
             if isinstance(data, dict) and data.get("name"):
                 return data
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     # ③ 可读文本（对方只把上半段发回来了）
     def field(key: str, stops: str) -> str:

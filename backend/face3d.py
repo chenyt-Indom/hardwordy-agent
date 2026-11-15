@@ -15,6 +15,8 @@ import pickle
 import cv2
 import numpy as np
 import onnxruntime as ort
+import logging
+logger = logging.getLogger(__name__)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
@@ -355,7 +357,7 @@ def blink_2d(img, uv, pts, amount, size=256, src_size=120.0):
     return out
 
 
-def _draw_cavity(img, uv, pts, openness, size=256, src_size=120.0):
+def _draw_cavity(img, uv, pts, openness, size=256, src_size=120.0):  # noqa: dead-func 3D 路径预留
     """在上下唇之间画出张开的「口腔」。
 
     单图重建的嘴唇在纹理里是闭合的，无论网格怎么拉，都不会出现口腔内部。

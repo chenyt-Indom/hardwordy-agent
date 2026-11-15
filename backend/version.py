@@ -30,6 +30,8 @@ import time
 import json
 import threading
 import contextvars
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------- 基础
@@ -187,7 +189,7 @@ def set_owner(owner) -> None:
     try:
         _OWNER.set(str(owner or ""))
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def get_owner() -> str:
@@ -252,7 +254,7 @@ def _clear_stale_lock(max_age=90) -> bool:
             os.remove(p)
             return True
     except OSError:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return False
 
 
@@ -285,7 +287,7 @@ def _syntax_check(rels=None) -> dict:
                 if fn.endswith(".py"):
                     targets.append(fn)
         except OSError:
-            pass
+            logger.debug("silent-except", exc_info=True)
     tmpdir = tempfile.mkdtemp(prefix="verchk_")
     bad = []
     checked = 0
@@ -432,13 +434,13 @@ def flush_task(reason="任务结束", summary="", incomplete=False, owner=None) 
                  "reason": str(reason or "")[:120], "incomplete": bool(incomplete),
                  "summary": sm[:600], "steps": steps})
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         # 只清掉本任务的步骤（提交已成功，留着会导致下次重复提交同一批）；
         # 别的任务（另一个群 / 单聊）还在跑的步骤**原样保留**。
         try:
             _task_write({"steps": keep})
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return {"ok": True, "skipped": bool(res.get("skipped")), "hash": h,
                 "files": len(rels), "steps": len(steps),
                 "incomplete": bool(incomplete), "subject": head}
@@ -732,7 +734,7 @@ def rollback(hash, files=None, note="") -> dict:
                         os.remove(p)
                         restored.append("删除 " + rel)
                 except OSError:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
 
     # 2.5) 自检：回滚后的 .py 必须还能编译。
     #      用户要求（2026-11-15）：回滚到坏代码会导致应用起不来，

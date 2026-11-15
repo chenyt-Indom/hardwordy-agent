@@ -21,6 +21,8 @@ import os
 import threading
 import time
 from typing import Callable
+import logging
+logger = logging.getLogger(__name__)
 
 # —— 音频参数 ——
 SAMPLE_RATE = 16000          # sherpa-onnx 流式模型固定 16kHz 单声道
@@ -115,7 +117,7 @@ def _fire_wake_hook() -> None:
         # 放到子线程里做：置前窗口可能阻塞几百毫秒，不能拖慢音频回调
         threading.Thread(target=fn, daemon=True, name="wake-focus").start()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 # --------------------------------------------------------------------------
@@ -615,7 +617,7 @@ class VoiceListener:
         try:
             self._on_event(event)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     def _build_recognizer(self) -> bool:
         if self._recognizer is not None:
@@ -844,7 +846,7 @@ class VoiceListener:
                 try:
                     self._stream.accept_waveform(SAMPLE_RATE, buf)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             self._preroll.clear()
         self._idle_since = None
 

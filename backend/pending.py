@@ -14,6 +14,8 @@
 """
 
 import time
+import logging
+logger = logging.getLogger(__name__)
 
 _STATE = {"pending": False, "files": [], "at": 0.0, "note": ""}
 

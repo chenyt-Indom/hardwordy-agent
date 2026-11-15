@@ -29,6 +29,8 @@ import time
 from typing import Any
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 本地模型清单
 # ⚠️ 只放**确认能用 diffusers 直接加载**的官方仓库；gb 是磁盘占用估算（用于进度条）。
@@ -121,9 +123,9 @@ def dir_size(path: str) -> int:
                 try:
                     total += os.path.getsize(os.path.join(dp, f))
                 except OSError:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     except OSError:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return total
 
 
@@ -272,7 +274,7 @@ def _try_remove_tree(path: str) -> bool:
                 try:
                     os.remove(p)
                 except _DEL_ERRS:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         os.rmdir(path)
         return not os.path.isdir(path)
     except _DEL_ERRS:

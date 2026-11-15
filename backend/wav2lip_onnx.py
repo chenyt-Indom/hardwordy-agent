@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 
 import numpy as np
+import logging
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 路径
 def _root() -> str:
@@ -320,29 +322,10 @@ def _feather_mask(h: int, w: int, top: float = 0.60, bot: float = 0.88,
 
 
 # ---------------------------------------------------------------- 推理
-def _gap96(pred96: np.ndarray, my_rel: float) -> int:
-    """测 96x96 输出里唇缝暗带的高度（像素）。"""
-    import cv2
-    g = cv2.cvtColor(pred96, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    c = int(my_rel * 96)
-    a, b = max(0, c - 12), min(96, c + 12)
-    if b - a < 4:
-        return 0
-    prof = g[a:b].mean(axis=1)
-    mn = float(prof.min())
-    best = cur = 0
-    for v in (prof < (mn + 12)):
-        cur = cur + 1 if v else 0
-        best = max(best, cur)
-    return int(best)
-
-
-def _lip_openness(pred96: np.ndarray, my_rel: float, base_gap: int) -> float:
-    """估这一帧的张口量（0~1），用于幅度增强。"""
-    best = _gap96(pred96, my_rel)
-    # 相对首帧的增量，映射到 0~1
-    extra = max(0.0, float(best - base_gap))
-    return float(min(1.0, extra / 4.0))
+# 2026-11-15：`_gap96` / `_lip_openness`（测唇缝高度、算幅度增益）已一并删除 ——
+# 它们唯一的消费方 `_boost_patch` 在 2026-11-14 就删掉了（见下方注释），
+# 留着等于一个「看起来还在影响口型幅度」的假开关。
+# 口型幅度现在完全由遮罩范围驱动（模型真实生成）。
 
 
 # 2026-11-14：`_boost_patch`（按张口量纵向拉伸嘴部）已删除 ——
@@ -518,25 +501,25 @@ def render(img_path: str, wav_path: str, out_mp4: str, fps: int = 25,
                     _ex_mod.apply(frame, i / float(fps), _expr,
                                   face=_face_norm, energy=_en)
                 except Exception:                          # noqa: BLE001
-                    pass
+                    logger.debug("silent-except", exc_info=True)
 
             proc.stdin.write(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).tobytes())
             if on_progress and (i % 10 == 0 or i == n - 1):
                 try:
                     on_progress(i + 1, n)
                 except Exception:  # noqa: BLE001
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     except Exception as e:  # noqa: BLE001
         try:
             proc.kill()
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
         return {"ok": False, "error": "渲染中断：%s: %s" % (type(e).__name__, e)}
     finally:
         try:
             proc.stdin.close()
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     err = proc.stderr.read() if proc.stderr else b""
     rc = proc.wait()
     if rc != 0 or not os.path.isfile(out_mp4) or os.path.getsize(out_mp4) < 1000:

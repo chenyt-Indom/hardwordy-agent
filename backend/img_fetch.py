@@ -31,6 +31,8 @@ import time
 import urllib.parse
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 # 图片库 id 形如 a1b2c3d4e5f6（12 位十六进制）
 _ID_RE = re.compile(r"^[0-9a-f]{12}$", re.I)
@@ -60,22 +62,22 @@ def default_bases() -> list:
         from . import doclib
         out.append(doclib.LIB_DIR)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         from . import workspace
         out.append(workspace.root())
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         from . import image_library
         out.append(image_library.DIR)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     for extra in ("saved_images", "data/chat_images", "data/image_cache"):
         try:
             out.append(config.data(*extra.split("/")))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     seen, uniq = set(), []
     for b in out:
         if b and b not in seen and os.path.isdir(b):
@@ -280,7 +282,7 @@ def _memo_write(d: dict) -> None:
         with open(os.path.join(cache_dir(), _MEMO_FILE), "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def search_one(query: str, want_wide: bool = False, exclude=None) -> str:

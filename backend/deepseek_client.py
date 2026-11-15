@@ -368,7 +368,7 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
         try:
             resp.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
 
 def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
@@ -483,7 +483,7 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 try:
                     resp.close()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 time.sleep(0.4)
                 continue
             break
@@ -558,14 +558,14 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
             try:
                 resp.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
         try:
             _full_txt = "".join(content_buf)
             logger.warning("[ds] 本轮 finish=%s 正文=%d 字 工具=%d 个 尾=%r",
                         finish, len(_full_txt), len(tool_calls), _full_txt[-40:])
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
         # ★ 被 max_tokens 截断（finish_reason=length）→ **自动续写**
         #   2026-11-08 用户报「思考过程有了，但输出被限制了」：
@@ -713,9 +713,9 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 try:
                     _r.close()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     except Exception:                     # noqa: BLE001
-        pass                              # 收尾失败也不能影响已完成的产物
+        logger.debug("silent-except", exc_info=True)                              # 收尾失败也不能影响已完成的产物
 
     yield ("content", f"\n\n（已达工具调用轮次上限 {max_rounds}，停止继续调用）")
 

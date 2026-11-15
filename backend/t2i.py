@@ -15,6 +15,8 @@ import threading
 import time
 from . import config
 import urllib.request
+import logging
+logger = logging.getLogger(__name__)
 
 MODEL_REPO_DEFAULT = "stabilityai/stable-diffusion-xl-base-1.0"
 
@@ -372,7 +374,7 @@ def set_device(mode: str) -> dict:
             cfg["t2i_device"] = mode
             config.save_config(cfg)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         _forced_device = mode
         info = device_info()
         info.update({"ok": True, "requested": mode, "verified": True,
@@ -393,7 +395,7 @@ def set_device(mode: str) -> dict:
         cfg["t2i_device"] = mode
         config.save_config(cfg)
     except Exception:
-        pass      # 落盘失败不影响本次切换，只是重启后会回到上次的值
+        logger.debug("silent-except", exc_info=True)      # 落盘失败不影响本次切换，只是重启后会回到上次的值
     _forced_device = mode
     with _lock:
         _pipe = None
@@ -428,7 +430,7 @@ def set_device(mode: str) -> dict:
             cfg["t2i_device"] = "auto"
             config.save_config(cfg)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         _forced_device = "auto"
         with _lock:
             _pipe = None
@@ -450,7 +452,7 @@ def _log_exc(where: str, exc: Exception) -> None:
             f.write(f"\n{'=' * 60}\n{datetime.datetime.now():%Y-%m-%d %H:%M:%S} [{where}]\n")
             f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _log_timing(where: str, seconds: float, extra: str = "") -> None:
@@ -471,7 +473,7 @@ def _log_timing(where: str, seconds: float, extra: str = "") -> None:
             f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} [计时] "
                     f"{where}: {seconds:.1f}s{('  ' + extra) if extra else ''}\n")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def free_ollama_vram() -> list:
@@ -512,7 +514,7 @@ def free_ollama_vram() -> list:
             if _n and _n not in names:
                 names.append(_n)
     except Exception:
-        pass                      # Ollama 没开：忽略，别把画图搞挂
+        logger.debug("silent-except", exc_info=True)                      # Ollama 没开：忽略，别把画图搞挂
     if not names:
         return []
     freed = []
@@ -527,7 +529,7 @@ def free_ollama_vram() -> list:
                 r.read()
             freed.append(m)
         except Exception:
-            pass                      # Ollama 没开 / 模型没装：忽略，别把画图搞挂
+            logger.debug("silent-except", exc_info=True)                      # Ollama 没开 / 模型没装：忽略，别把画图搞挂
     _log_timing("free_ollama_vram 发卸载请求", time.time() - _t0,
                 extra="模型=%s" % (",".join(names) or "无"))
 
@@ -692,7 +694,7 @@ def rewarm_async() -> None:
                         if hasattr(exc, "read"):
                             _detail = " 服务端=%s" % exc.read()[:300].decode("utf-8", "replace")
                     except Exception:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
                     _log_timing("画完预热失败", time.time() - _t_w,
                                 extra="模型=%s 错误=%s: %s%s"
                                       % (m, type(exc).__name__, str(exc)[:150], _detail))
@@ -780,12 +782,8 @@ def _get_pipe():
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         raise last_exc
-
-
-def _pipe_loaded():
-    return _pipe is not None
 
 
 def any_loaded() -> bool:
@@ -821,7 +819,7 @@ def refine_detail(image, prompt: str, negative_prompt: str = "",
         try:
             pipe.to(device)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         # 总步数要按 strength 折算（见 edit_image 里的说明），
         # 保证实际生效的步数 ≈ base_steps()（turbo 是 4，SDXL 是 28）
         ratio = max(0.05, min(1.0, float(strength)))
@@ -854,7 +852,7 @@ def generate(prompt: str, negative_prompt: str = "", steps: int | None = None,
         try:
             pipe.to(device)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         # ⚠️⚠️ 2026-09-26 修：**SDXL 上不能真的按小尺寸生成**。
         #    实测 `width=512, height=512` + 提示词「雪地里的一只红狐」→
         #    画出来的是一幅**挂在墙上的画**（画框 + 木地板 + 白墙）——
@@ -935,7 +933,7 @@ def device_info() -> dict:
     try:
         info["forced"] = _get_forced()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         import torch
         info["torch"] = torch.__version__
@@ -1077,7 +1075,7 @@ def _get_edit_pipe():
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         raise last_exc
 
 
@@ -1122,7 +1120,7 @@ def edit_image(init_image, prompt: str, negative_prompt: str = "",
         try:
             pipe.to(device)      # 统一设备，避免多次调用后组件漂回 CPU
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         # strength 会按比例截掉时间轴前面的步数：真正执行的步数 ≈ 总步数 × strength。
         # SD-Turbo 是少步模型，若总步数直接传 steps(4)，strength 0.6 只剩 2 步，
         # 结果几乎和原图一样（看起来像"没生效"）。所以先把总步数补回来，
@@ -1578,6 +1576,6 @@ def unload():
             try:
                 torch.cuda.ipc_collect()     # 回收跨进程显存句柄，避免残留
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)

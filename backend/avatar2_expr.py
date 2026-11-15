@@ -22,6 +22,8 @@ import math
 import re
 
 import numpy as np
+import logging
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 心情定义
 # style 取值必须是 tts_speak 支持的：neutral/cheerful/gentle/serious/sad/news/excited

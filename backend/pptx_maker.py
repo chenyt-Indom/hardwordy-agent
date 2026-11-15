@@ -35,6 +35,8 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.oxml.ns import qn
 from pptx.util import Emu, Inches, Pt
+import logging
+logger = logging.getLogger(__name__)
 
 # 16:9
 SLIDE_W = Inches(13.333)
@@ -248,7 +250,7 @@ def _grad_bg(slide, c1, c2, angle=45):
     try:
         fill.gradient_angle = angle
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _textbox(slide, x, y, w, h, anchor=None, wrap=True):
@@ -279,12 +281,12 @@ def _rect(slide, x, y, w, h, fill=None, line=None, shape=MSO_SHAPE.RECTANGLE,
         try:
             sp.adjustments[0] = float(radius)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     if not shadow:
         try:
             sp.shadow.inherit = False
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return sp
 
 
@@ -559,7 +561,7 @@ def _set_hl(run, color):
         else:
             rPr.append(hl)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _badge(s, text, th, st):
@@ -762,7 +764,7 @@ def _fallback_content(s, th, st, sl, y=None):
         try:
             s.notes_slide.notes_text_frame.text = str(sl["notes"])[:2000]
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return s
 
 
@@ -1038,14 +1040,14 @@ def _add_chart(prs, th, st, sl, page_no):
         try:
             ch.chart_title.text_frame.text = str(spec["title"])
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     ch.has_legend = bool(spec.get("legend", len(series) > 1))
     try:
         ch.font.size = Pt(float(st.get("body_size") or 12))
         ch.font.name = FONTS.get(str(st.get("font") or "").strip().lower(),
                                  FONTS[DEFAULT_FONT])
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     # ⚠️ 配色默认是 pptx 自带的那套蓝橙，和主题完全撞色 —— 必须手动改。
     # 饼图/圆环按"点"上色，其余按"系列"上色，两条路径不一样。
@@ -1060,7 +1062,7 @@ def _add_chart(prs, th, st, sl, page_no):
                     dl.font.size = Pt(10)
                     dl.font.color.rgb = _rgb(th["body"])
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             for j, ser in enumerate(plot.series):
                 try:
                     if _is_pie(spec):
@@ -1073,9 +1075,9 @@ def _add_chart(prs, th, st, sl, page_no):
                         ser.format.fill.fore_color.rgb = _rgb(
                             palette[j % len(palette)])
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     if sl.get("notes"):
         s.notes_slide.notes_text_frame.text = str(sl["notes"])[:2000]
@@ -1468,7 +1470,7 @@ def _fill_alpha(shape, alpha):
                               {"val": str(int(max(0.0, min(1.0, alpha)) * 100000))})
         srgb.append(el)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _add_bg_image(slide, path, th, veil=0.72, color=None):
@@ -1498,7 +1500,7 @@ def _add_logo(slide, path, pos="tr", height_in=0.5, margin_in=0.42):
     try:
         slide.shapes.add_picture(path, int(x), int(y), width=int(w), height=int(h))
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 # --------------------------------------------------------------------------

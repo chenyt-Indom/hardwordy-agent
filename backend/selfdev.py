@@ -32,6 +32,8 @@ import sys
 import time
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 # 运行期数据/二进制目录：绝对禁止模型改写（写坏了用户数据就没了）
 DENY_DIRS = {
@@ -181,7 +183,7 @@ def mirror_dir() -> str:
         os.makedirs(d, exist_ok=True)
         os.makedirs(os.path.join(d, "_meta"), exist_ok=True)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return d
 
 
@@ -204,13 +206,13 @@ def backup_dir() -> str:
                     try:
                         os.replace(src, dst)
                     except OSError:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
             try:
                 os.rmdir(legacy)          # 空了就删掉；不空留着无害
             except OSError:
-                pass
+                logger.debug("silent-except", exc_info=True)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -225,7 +227,7 @@ def _journal_path() -> str:
             os.makedirs(os.path.dirname(p), exist_ok=True)
             os.replace(old, p)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return p
 
 
@@ -236,7 +238,7 @@ def journal(act: str, rel: str, **kw) -> None:
         with open(_journal_path(), "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def recent_journal(n: int = 30) -> list:
@@ -274,7 +276,7 @@ def ensure_restore_kit() -> dict:
             shutil.copy2(src, dst)
             out["restore"] = dst
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     # .bat 必须 GBK + CRLF（cmd 在 936 代码页下读 UTF-8 会乱码、路径含中文会失败）
     bat_lines = [
@@ -299,7 +301,7 @@ def ensure_restore_kit() -> dict:
                 f.write(text.encode("gbk", "replace"))
             out["bat" if "Desktop" not in target else "desktop"] = target
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return out
 
 
@@ -541,7 +543,7 @@ def _update_meta(batch: str, rel: str, note: str = "", added: int = 0,
         with open(p, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _backup(rel: str, note: str = "") -> str:
@@ -569,7 +571,7 @@ def _backup(rel: str, note: str = "") -> str:
         if not os.path.exists(mdst):
             shutil.copy2(dst, mdst)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return fn
 
 
@@ -609,7 +611,7 @@ def write(rel: str, content: str, note: str = "") -> dict:
             ensure_restore_kit()
             _KIT_DONE["v"] = True
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     journal("write", r, chars=len(content), backup=bak, note=note[:120],
             added=d["added"], removed=d["removed"])
     return {"ok": True, "rel": r, "path": p, "chars": len(content), "backup": bak,
@@ -1050,7 +1052,7 @@ def restart(delay: float = 1.2) -> dict:
         try:
             log = (proc.stdout.read() if proc.stdout else "")[-600:]
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         journal("restart_failed", "-", code=proc.returncode)
         return {"ok": False,
                 "error": "新进程启动后立刻退出了（退出码 %s），**已保持当前进程继续运行**"

@@ -29,6 +29,8 @@ import os
 import stat
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 _FILE = "secrets.json"
 
@@ -55,7 +57,7 @@ def _write(d: dict) -> None:
     try:                                  # POSIX 上收紧权限；Windows 忽略
         os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def get_key() -> str:

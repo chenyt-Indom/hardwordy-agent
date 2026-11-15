@@ -24,6 +24,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import logging
+logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parent.parent
 _BACKEND = _ROOT / "backend"
@@ -37,10 +39,19 @@ _LEVEL_ORDER = {"high": 0, "mid": 1, "low": 2, "info": 3}
 
 # ---------------------------------------------------------------- 基础工具
 
+# 受保护文件：回撤机制本身（selfdev.py / restore.py）。它们被 selfdev 的
+# PROTECTED 锁死、模型改不了，报出来也修不掉，只会让报告永久挂一条噪音。
+# 2026-11-15：实测 `selfdev.py:73 _extract_locked` 就是这种情况
+# （已被 `_extract_all_locked` 取代，但文件不许改，只能跳过）。
+_SKIP_FILES = {"selfdev.py", "restore.py"}
+
+
 def _py_files():
     out = []
     for p in sorted(_BACKEND.rglob("*.py")):
         if "__pycache__" in p.parts:
+            continue
+        if p.name in _SKIP_FILES:
             continue
         try:
             if p.stat().st_size > _MAX_BYTES:
@@ -48,6 +59,42 @@ def _py_files():
         except OSError:
             continue
         out.append(p)
+    return out
+
+
+def _ref_files():
+    """**引用计数**专用：backend + 根目录脚本 + 前端。
+
+    为什么要单独一份（2026-11-15）：
+      `_py_files()` 只扫 backend/，于是「根目录的 run.py / test_*.py 用到、
+      但 backend 内部没人用」的私有函数会被误判成死代码 ——
+      实测 `_lonlat_to_tile` / `_tile_latlon` 明明被 `test_mode_switch.py`
+      引用着，自检却报 dead。
+      这里把根目录和前端也纳入**只做引用计数**（不做完整检查，
+      免得测试脚本里成片的 `except: pass` 把报告淹掉）。
+    """
+    out = list(_py_files())
+    skip_dirs = {"__pycache__", "node_modules", ".git", "data", "models",
+                 "sessions", "image_library", "dist", "vendor", "_internal"}
+    try:
+        for p in sorted(_ROOT.glob("*.py")):
+            try:
+                if p.stat().st_size <= _MAX_BYTES:
+                    out.append(p)
+            except OSError:
+                continue
+        for p in sorted(_FRONTEND.rglob("*")):
+            if p.suffix not in (".js", ".html"):
+                continue
+            if any(x in p.parts for x in skip_dirs):
+                continue
+            try:
+                if p.stat().st_size <= _MAX_BYTES:
+                    out.append(p)
+            except OSError:
+                continue
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
     return out
 
 
@@ -459,12 +506,18 @@ def _check_dead_private_func(trees):
     注释或字符串里提到过也算「出现过」，宁可漏报。
     """
     counter = {}
-    for rel, (p, tree) in trees.items():
-        for w in _WORD_RE.findall(_read(p)):
-            counter[w] = counter.get(w, 0) + 1
+    # ⚠️ 用 _ref_files（backend + 根目录 + 前端）而不是只数 backend 的树：
+    #   否则「根目录测试在用、backend 内部没人用」会被误报成死代码。
+    for p in _ref_files():
+        try:
+            for w in _WORD_RE.findall(_read(p)):
+                counter[w] = counter.get(w, 0) + 1
+        except Exception:
+            continue
 
     out = []
     for rel, (p, tree) in trees.items():
+        src_lines = _read(p).splitlines()
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -474,6 +527,13 @@ def _check_dead_private_func(trees):
             if node.decorator_list:
                 continue
             if counter.get(nm, 0) > 1:
+                continue
+            # 支持 `# noqa: dead-func` 显式豁免：有些函数是**有意保留**的
+            # （如「已失效、保留仅为记录」的引擎），删了反而让后来者重复踩坑。
+            # 只在 def 行本身和紧邻的上下 2 行里找，避免远处注释误豁免。
+            _ln = getattr(node, "lineno", 0)
+            _win = src_lines[max(0, _ln - 3): _ln + 2]
+            if any("noqa" in _x.lower() for _x in _win):
                 continue
             out.append(_finding(
                 # ⚠️ 刻意用 low：接线要理解上下文，不能让信任模式自动改。
@@ -685,6 +745,127 @@ def _check_js_syntax():
 
 # ---------------------------------------------------------------- 汇总
 
+# ---------------------------------------------------------------- 10. 逻辑类检查
+# 2026-11-15 用户要求「逻辑 bug 也必须能查出来」。
+# 下面 5 类是「语法合法、名字全对、行为却一定错」的固定形态，静态可判、几乎不误报。
+# ⚠️ 边界必须说清：静态检查只能覆盖**有固定形态**的逻辑错。
+#    off-by-one、条件写反、状态时序、并发竞争没有固定形态 —— 静态永远查不出来，
+#    必须靠 regress.py 的行为级回归（真跑一遍、断言行为）来兜。
+_MUTABLE_FACTORIES = ("list", "dict", "set", "bytearray", "deque",
+                      "defaultdict", "Counter", "OrderedDict")
+
+
+def _check_mutable_default(trees):
+    """`def f(x=[])` / `={}` / `=set()`：默认值只在定义时求值一次，会被跨调用污染。"""
+    out = []
+    for rel, (p, tree) in trees.items():
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            a = node.args
+            pairs = []
+            if a.defaults:
+                pairs += list(zip(a.args[len(a.args) - len(a.defaults):], a.defaults))
+            if a.kw_defaults:
+                pairs += list(zip(a.kwonlyargs, a.kw_defaults))
+            for arg, d in pairs:
+                if d is None:
+                    continue
+                bad = isinstance(d, (ast.List, ast.Dict, ast.Set,
+                                     ast.ListComp, ast.DictComp, ast.SetComp))
+                if not bad and isinstance(d, ast.Call):
+                    nm = getattr(d.func, "id", None) or getattr(d.func, "attr", None)
+                    bad = nm in _MUTABLE_FACTORIES
+                if bad:
+                    out.append(_finding(
+                        "mid", "mutable-default", rel,
+                        getattr(d, "lineno", 0) or node.lineno,
+                        "`%s()` 的参数 `%s` 用了可变默认值 —— 默认值只在定义时创建一次，"
+                        "多次调用会共用同一个对象" % (node.name, arg.arg),
+                        "改成 `%s=None`，函数体里 `if %s is None: %s = ...`"
+                        % (arg.arg, arg.arg, arg.arg)))
+    return out
+
+
+def _check_is_literal(trees):
+    """`x is "abc"` / `x is 5`：is 比的是对象身份，和字面量比几乎恒为 False。"""
+    out = []
+    for rel, (p, tree) in trees.items():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare):
+                continue
+            for op, comp in zip(node.ops, node.comparators):
+                if not isinstance(op, (ast.Is, ast.IsNot)):
+                    continue
+                if not isinstance(comp, ast.Constant):
+                    continue
+                v = comp.value
+                if v is None or v is Ellipsis or isinstance(v, bool):
+                    continue            # is None / is True / is False 是正确写法
+                out.append(_finding(
+                    "mid", "is-literal", rel, getattr(comp, "lineno", 0) or node.lineno,
+                    "`is` 用来比对象身份，和字面量 `%r` 比较几乎永远是 False" % (v,),
+                    "字符串/数字一律用 `==`，只有 None/True/False 才用 `is`"))
+    return out
+
+
+def _check_assert_tuple(trees):
+    """`assert (a, b)` —— 非空元组恒为真，断言等于没写。"""
+    out = []
+    for rel, (p, tree) in trees.items():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assert) and isinstance(node.test, ast.Tuple) \
+                    and node.test.elts:
+                out.append(_finding(
+                    "mid", "assert-tuple", rel, node.lineno,
+                    "`assert (a, b)` 是非空元组，恒为真 —— 这个断言永远不会失败",
+                    "去掉括号：`assert a, b`（b 是失败时的提示语）"))
+    return out
+
+
+_TERMINAL = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+
+
+def _check_unreachable(trees):
+    """return/raise/break/continue 之后同一代码块里还有语句 —— 永远执行不到。"""
+    out = []
+    for rel, (p, tree) in trees.items():
+        for node in ast.walk(tree):
+            for attr in ("body", "orelse", "finalbody"):
+                block = getattr(node, attr, None)
+                if not isinstance(block, list) or len(block) < 2:
+                    continue
+                for i, st in enumerate(block[:-1]):
+                    if not isinstance(st, _TERMINAL):
+                        continue
+                    nxt = block[i + 1]
+                    out.append(_finding(
+                        "mid", "unreachable", rel, getattr(nxt, "lineno", 0) or 0,
+                        "第 %d 行的 `%s` 之后还有语句，永远执行不到"
+                        % (getattr(st, "lineno", 0), type(st).__name__.lower()),
+                        "删掉不可达代码，或确认这里是不是漏了条件分支"))
+                    break
+    return out
+
+
+def _check_return_in_finally(trees):
+    """`finally` 里的 return 会把正在抛出的异常吞掉，错误就静默消失了。"""
+    out = []
+    for rel, (p, tree) in trees.items():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            for st in node.finalbody or []:
+                for sub in ast.walk(st):
+                    if isinstance(sub, ast.Return):
+                        out.append(_finding(
+                            "mid", "return-in-finally", rel, sub.lineno,
+                            "`finally` 里的 return 会丢弃正在抛出的异常，错误被静默吞掉",
+                            "把 return 移到 finally 之外；finally 只做清理"))
+                        break
+    return out
+
+
 def audit(deep_files=None):
     """跑一遍静态自检，返回 findings（按严重程度排序）。
 
@@ -714,6 +895,11 @@ def audit(deep_files=None):
     findings += _check_except(trees)
     findings += _check_duplicate_def(trees)
     findings += _check_routes(trees)
+    findings += _check_mutable_default(trees)
+    findings += _check_is_literal(trees)
+    findings += _check_assert_tuple(trees)
+    findings += _check_unreachable(trees)
+    findings += _check_return_in_finally(trees)
     findings += _check_js_syntax()
 
     # 去重（同文件同种类同位置同描述只留一条）

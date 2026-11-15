@@ -32,6 +32,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import logging
+logger = logging.getLogger(__name__)
 
 # 参数表：name -> (最小, 最大, 默认, 中文说明)
 # 上下界不是「能接受的极端值」，而是「不会把画面做坏的边界」。
@@ -117,7 +119,7 @@ def _dir():
     try:
         os.makedirs(root, exist_ok=True)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     _TUNE_DIR = root
     return root
 
@@ -236,7 +238,7 @@ def _load_cache(key):
         if isinstance(d, dict) and isinstance(d.get("params"), dict):
             return d
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     return None
 
 
@@ -245,7 +247,7 @@ def _save_cache(key, data):
         with open(os.path.join(_dir(), key + ".json"), "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _b64_small(path, side=512):
@@ -436,7 +438,7 @@ def plan_close(img_path, geom=None, timeout=90):
                 hint.append("画面高度 %.0f，嘴中心在 %.0f%% 高度处"
                             % (_H, 100.0 * float(geom.get("cy") or 0) / _H))
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     prompt = _CLOSE_PROMPT
     if hint:
         prompt += "\n补充信息（可直接参考）：\n" + "\n".join(hint)

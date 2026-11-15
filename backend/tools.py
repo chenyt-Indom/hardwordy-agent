@@ -29,6 +29,7 @@ from . import file_tools
 from . import memory as memory_mod
 from . import doclib as library_mod
 from . import docx_write
+logger = logging.getLogger(__name__)
 
 
 # =====================================================================
@@ -1602,7 +1603,7 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
         if any(i["enabled"] and i["mode"] == "auto" for i in _skills_mod.load()):
             schemas.append(_SKILL_LOAD_SCHEMA)    # 有「自动」类技能才给 load_skill
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     # ---------- 自开发工具（改自己的源码）----------
     # 只有用户在界面上打开「🛠 自开发」才给。关着时模型连这些工具都看不到，
@@ -1611,7 +1612,7 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
         if (config.load_config() or {}).get("self_dev_enabled"):
             schemas.extend(_selfdev_schemas())
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     if office:
         # 只留"能产出办公文件"的那几个（见函数开头 office 的说明）。
@@ -1690,7 +1691,7 @@ def _do_vision(name: str, arguments: dict, context: dict = None) -> str:
                 try:
                     path = os.path.join(_sd.project_root(), raw.lstrip("/"))
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             d = V.describe(path, str(a.get("question") or ""),
                            ds_key=key, model=model)
             if not d.get("ok"):
@@ -1910,8 +1911,15 @@ def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
         _vc = _version_commit(act, r or {}, str(_SD_NOTE.get("note") or ""))
         if isinstance(r, dict):
             r["version"] = _vc
+            # ★ 2026-11-15 接线：`_version_commit_line` 之前**定义了却从没调用**。
+            #   后果：改动「有没有登记进版本库」用户完全看不到 ——
+            #   万一登记失败（文件已写入，但这一步退不回去），也没有任何提示。
+            #   只在**失败**时写进工具结果（成功是常态，不必每轮都念一遍），
+            #   模型看到 `version_note` 会转告用户。
+            if isinstance(_vc, dict) and not _vc.get("ok"):
+                r["version_note"] = _version_commit_line(_vc)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     if not isinstance(ui_events, list):
         return
@@ -2058,7 +2066,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             return ("服务器版已锁定「自开发」：不允许读写服务端源码、也不允许重启服务。"
                     "如需改动请在本地改完重新部署。")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     """执行自开发工具。统一在这里兜异常，返回给模型的永远是文本。"""
     # ★ 记下这次调用的备注：改动成功后 _version_commit 会写进提交说明
     _SD_NOTE["note"] = str((arguments or {}).get("note") or "")
@@ -2071,7 +2079,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             _sd_fix.patch = _sd_patch_fixed
             _sd_fix._patch_fixed = True
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     from . import selfdev as _sd
     if not _sd.enabled():
         return ("自开发模式没打开。请让用户点顶栏「🛠 自开发」打开后再试 —— "
@@ -2214,7 +2222,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                 from . import handoff as _hd2
                 _hd2.snapshot(str((context or {}).get("session") or ""), "模型请求重启")
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             if isinstance(ui_events, list):
                 ui_events.append({"type": "restart_ready", **st})
             return ("已自检通过，前端已弹出「新版本已就绪」提示。\n"
@@ -2252,7 +2260,7 @@ def available_science_libs() -> list:
                 if importlib.util.find_spec(m):
                     ok.append(m)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         _sci_cache = ok
     return _sci_cache
 
@@ -2740,11 +2748,6 @@ def _ui(events, event):
     events.append(event)
 
 
-def _tool_call_msg(name, args) -> str:
-    args_s = json_dumps(args)
-    return f"[工具已调用] {name}({args_s})"
-
-
 def json_dumps(o) -> str:
     try:
         return __import__("json").dumps(o, ensure_ascii=False)
@@ -3069,7 +3072,7 @@ def _do_hive_files(arguments, context):
             try:
                 hivevec.build_index(gid, force=True)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             return "[群文件库] 已保存「%s」（%.1f KB）到群文件夹。%s" % (
                 m.get("name"), int(m.get("size") or 0) / 1024.0,
                 "已同步给群成员。" if synced else "本地已存好，清单会在下次同步时广播。")
@@ -3097,16 +3100,30 @@ def _do_self_audit(arguments):
     cnt = res.get("counts") or {}
     lines = ["代码自检完成：扫了 %s 个 py + %s 个 js，用时 %s 秒。"
              % (res.get("files"), res.get("js_files"), res.get("seconds")),
-             "发现 %s 处：high %s / mid %s / info %s"
-             % (res.get("total"), cnt.get("high"), cnt.get("mid"), cnt.get("info"))]
-    fs = [f for f in (r.get("findings") or []) if f.get("level") in ("high", "mid")]
+             # ⚠️ 2026-11-15 修：这里原来只统计 high/mid/info，**把 low 漏掉了** ——
+             #   于是出现过「发现 1 处」但下面一条都不列（那 1 条正是 low），
+             #   用户只会以为自检坏了。
+             "发现 %s 处：high %s / mid %s / low %s / info %s"
+             % (res.get("total"), cnt.get("high"), cnt.get("mid"),
+                cnt.get("low"), cnt.get("info"))]
+    allf = r.get("findings") or []
+    fs = [f for f in allf if f.get("level") in ("high", "mid")]
     if fs:
         lines.append("\n**需要处理的：**")
         for f in fs[:12]:
             lines.append("- [%s] %s:%d %s —— %s"
                          % (f["level"], f["file"], f["line"], f["kind"], f["msg"]))
     else:
-        lines.append("没有 high / mid 级问题（info 级的静默 except 是历史遗留，不急）。")
+        lines.append("没有 high / mid 级问题（会崩、会调错的那种）。")
+    # low：多是「写了没接线」，不影响运行但会让人误以为改动生效了
+    lows = [f for f in allf if f.get("level") == "low"]
+    if lows:
+        lines.append("\n**低级（写了没接线，不影响运行，但别被它骗）：**")
+        for f in lows[:8]:
+            lines.append("- %s:%d %s —— %s"
+                         % (f["file"], f["line"], f["kind"], f["msg"]))
+        if len(lows) > 8:
+            lines.append("- …另有 %d 条" % (len(lows) - 8))
     if r.get("llm_summary"):
         lines.append("\nLLM 深度审查：%s" % r["llm_summary"])
     auto_r = r.get("auto") or {}
@@ -3331,17 +3348,6 @@ def _dedupe(items: list) -> list:
             seen.add(key)
             out.append(it)
     return out
-
-
-def _relevant(query: str, results: list) -> bool:
-    """粗略判断检索结果是否与查询相关（看实词命中比例）。"""
-    import re
-    words = [w for w in re.split(r"[\s,，、/]+", query) if len(w) >= 2]
-    if not words:
-        return True
-    text = " ".join((r.get("title", "") + " " + r.get("desc", "")) for r in results)
-    hits = sum(1 for w in words if w in text)
-    return hits >= max(1, len(words) // 3)
 
 
 def _do_web_search(arguments, ui_events):
@@ -3782,7 +3788,7 @@ def _translate_model(cfg: dict) -> str:
             pick = (next((n for n in have if "qwen3-vl" in n), "")
                     or (have[0] if have else want))
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     _TRANS_MODEL.update({"ts": now, "name": pick})
     return pick
 
@@ -4026,7 +4032,7 @@ def _autosave_image(b64: str, prompt: str, origin: str, extra: str = "") -> dict
                     "w": meta.get("w") or 0, "h": meta.get("h") or 0,
                     "size": meta.get("size") or 0}
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {}
 
 
@@ -4072,7 +4078,7 @@ def _gen_local(arguments, ui_events):
     try:
         t2i.unload()                 # 画完立刻放掉，别让它占着显卡
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return ("已生成图片（本地 %s，%s，%.1f 秒），已展示给用户。"
             % (result.get("model") or "", result.get("size") or "", cost))
 
@@ -4211,7 +4217,7 @@ def _edit_local(arguments, ui_events, context):
     try:
         t2i.unload()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return "已%s（本地，%.1f 秒），已展示给用户。" % (how, cost)
 
 
@@ -4351,7 +4357,7 @@ def _do_compose_images(arguments, ui_events, context):
                 imgs.append(fp)
                 continue
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         # ⚠️ 也许它本身就是 base64 / data URL（前端有时这么传）——
         #    只有这种情况才交给 t2i；否则**直接算"找不到"**。
         #    不判这一下的话，一个拼错的路径会被当 base64 去解码，报出
@@ -4440,7 +4446,7 @@ def _do_compose_images(arguments, ui_events, context):
         image_library.save_image(b64, name=os.path.splitext(os.path.basename(rel))[0]
                                  if rel else "", source="多图缝合", origin="compose")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     _ui(ui_events, {"type": "image", "mime": "image/png", "b64": b64,
                     "prompt": "缝合：%d 张图 / %s" % (r["count"], r["layout"]),
                     "size": "%d x %d" % (out.size[0], out.size[1]),
@@ -4604,7 +4610,7 @@ def _do_video_edit(arguments, ui_events, context):
             if os.path.isfile(fp):
                 return fp
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return p
 
     def _target(ext):
@@ -4850,7 +4856,7 @@ def _do_cutout_image(arguments, ui_events, context):
                 if os.path.isfile(fp):
                     src = fp
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         looks_b64 = len(src) > 512 and not any(ch in src for ch in "\\/:*?\"<>|")
         if not os.path.isfile(src) and not looks_b64:
             return "错误：找不到要抠的图片：%s" % src
@@ -4882,7 +4888,7 @@ def _do_cutout_image(arguments, ui_events, context):
             name=os.path.splitext(os.path.basename(rel))[0] if rel else "",
             source="抠图", origin="cutout")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     _ui(ui_events, {"type": "image", "mime": "image/png", "b64": b64,
                     "prompt": "抠图（%s）" % r["model"],
@@ -4920,7 +4926,7 @@ def _do_composite_image(arguments, ui_events, context):
             if os.path.isfile(fp):
                 return fp
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return s
 
     subject = _resolve(arguments.get("subject"))
@@ -4967,7 +4973,7 @@ def _do_composite_image(arguments, ui_events, context):
             name=os.path.splitext(os.path.basename(rel))[0] if rel else "",
             source="图片合成", origin="composite")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     _ui(ui_events, {"type": "image", "mime": "image/png", "b64": b64,
                     "prompt": "图片合成（位置 %s）" % (r.get("position"),),
@@ -5436,7 +5442,7 @@ def run_file(path: str, allow_risky: bool = False, args: str = "",
         _old_pp = env.get("PYTHONPATH") or ""
         env["PYTHONPATH"] = _pp + (os.pathsep + _old_pp if _old_pp else "")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         # 用 Popen + communicate（而不是 subprocess.run）：超时分支里还能
         # **拿到已经打印出来的内容**。run 的 TimeoutExpired 会把缓冲一起丢掉，
@@ -5699,7 +5705,7 @@ def _do_workspace_pack(arguments=None, ui_events=None) -> str:
             f.write(data)
         saved = fp
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     # 2026-11-15：打包结果也要能进群产物文件夹 ——
     # 群里让它做完项目再打包，成员应该能直接下载到 zip，而不是只有执行者本机有。
     if isinstance(ui_events, list) and saved:
@@ -5708,7 +5714,7 @@ def _do_workspace_pack(arguments=None, ui_events=None) -> str:
                               "path": saved, "project": proj,
                               "chars": len(data)})
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     lines = ["已把项目「%s」打包好：%s（%.1f KB）。" % (proj, name, len(data) / 1024.0)]
     lines.append("下载链接（直接点就能存下来）：/api/ws/zip?proj=%s" % proj)
     if saved:
@@ -5962,7 +5968,7 @@ def _do_make_pptx(arguments=None, ui_events=None) -> str:
         try:
             os.remove(tmp)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     w = _dl.save_bytes(base, data)
     if not w.get("ok"):
@@ -6042,7 +6048,7 @@ def _pick_blocks(a: dict) -> list:
                 try:
                     v = json.loads(v)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             if isinstance(v, str):
                 return _dm.markdown_blocks(v)
         if isinstance(v, dict):
@@ -6139,7 +6145,7 @@ def _do_make_docx(arguments=None, ui_events=None) -> str:
         try:
             os.remove(tmp)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     w = _dl.save_bytes(base, data)
     if not w.get("ok"):
@@ -6216,7 +6222,7 @@ def _do_make_xlsx(arguments=None, ui_events=None) -> str:
             try:
                 os.remove(tmp)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     w = _dl.save_bytes(base, data)
     if not w.get("ok"):
@@ -6818,7 +6824,7 @@ def _do_edit_office(arguments=None, ui_events=None) -> str:
     try:
         _dl.copy_file(rel, "改前备份_%s" % os.path.basename(rel))
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     ok, msg, warns = _oe.edit(path, ops, img_bases=_img_bases())
 
@@ -7052,7 +7058,7 @@ def _do_write_code(arguments, ui_events=None, context=None) -> str:
                             _ws.stream_write(rel, prev)
                             wrote_any = True
                         except Exception:
-                            pass
+                            logger.debug("silent-except", exc_info=True)
                     last_t, last_n = now, len(_whole)
             return got, "stop"
         resp = _main.client.chat(msgs, model=model, stream=True, params=params)
@@ -7081,7 +7087,7 @@ def _do_write_code(arguments, ui_events=None, context=None) -> str:
                             _ws.stream_write(rel, prev)
                             wrote_any = True
                         except Exception:
-                            pass
+                            logger.debug("silent-except", exc_info=True)
                     last_t, last_n = now, len(_whole)
             if o.get("done"):
                 reason = str(o.get("done_reason") or "")
@@ -7126,7 +7132,7 @@ def _do_write_code(arguments, ui_events=None, context=None) -> str:
             _ws.stream_write(rel, _strip_code_fence(buf))
             wrote_any = True
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     code = _strip_code_fence(buf)
     if not code.strip():
@@ -7420,7 +7426,7 @@ def _do_library(arguments, ui_events=None):
                 try:
                     os.remove(tmp)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             except Exception as e:
                 logging.getLogger("uvicorn.error").warning(
                     "排版模块导出失败，退回简易版：%s", e, exc_info=True)

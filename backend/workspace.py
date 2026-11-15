@@ -21,6 +21,7 @@
 """
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -31,6 +32,7 @@ import zipfile
 from .procwin import NOWIN as _NOWIN
 
 from . import config
+logger = logging.getLogger(__name__)
 
 # 单文件大小上限（协同开发里没有大文件，超过多半是模型写飞了）
 MAX_TEXT = 2 * 1024 * 1024
@@ -91,7 +93,7 @@ def active_project() -> str:
         try:
             os.makedirs(os.path.join(base(), safe_project(_ov)), exist_ok=True)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return _ov
     if _ACTIVE and os.path.isdir(os.path.join(base(), _ACTIVE)):
         return _ACTIVE
@@ -102,7 +104,7 @@ def active_project() -> str:
             _ACTIVE = n
             return n
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     # 没设置 / 目录不在 → 退到第一个存在的项目，都没有就用默认名
     ps = [p["name"] for p in projects()]
     _ACTIVE = ps[0] if ps else DEFAULT_PROJECT
@@ -123,7 +125,7 @@ def set_active_project(name: str) -> str:
         cfg["active_project"] = n
         config.save_config(cfg)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return n
 
 
@@ -545,7 +547,7 @@ def start_run(rel: str, proj: str = "", run_id: str = "",
         _old_pp = env.get("PYTHONPATH") or ""
         env["PYTHONPATH"] = _proj_root + (os.pathsep + _old_pp if _old_pp else "")
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         # 命令行参数：像 argparse / 需要位置参数的工具，**不给参数就是什么都不做**
         # （实测用户点运行一个 argparse 脚本，界面显示"跑完了但没有输出"，以为坏了）。
@@ -578,7 +580,7 @@ def start_run(rel: str, proj: str = "", run_id: str = "",
             proc.stdin.write(_t if _t.endswith("\n") else _t + "\n")
             proc.stdin.flush()
         except Exception:
-            pass      # 喂不进去不影响启动，用户还可以在运行中输入
+            logger.debug("silent-except", exc_info=True)      # 喂不进去不影响启动，用户还可以在运行中输入
     _RUNS[run_id] = proc
     return {"ok": True, "proc": proc, "rel": safe_rel(rel), "risky": risky}
 
@@ -644,7 +646,7 @@ def start_run_code(code: str, run_id: str = "", stdin_text: str = "") -> dict:
             proc.stdin.write(_t if _t.endswith("\n") else _t + "\n")
             proc.stdin.flush()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return {"ok": True, "proc": proc, "rel": "(代码片段)", "risky": risky}
 
 
@@ -759,7 +761,7 @@ def stop_run(run_id: str = "") -> dict:
                     proc.kill()
                 n += 1
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         _drop_run_dir(k)
     return {"ok": True, "stopped": n}
 
@@ -909,7 +911,7 @@ def focus_ide_window(proj: str = "", open_rel: str = "") -> dict:
                     _sp.Popen([exe, _abs], close_fds=True)
                     opened = True
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         # ② 然后把窗口还原并置前
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, 9)     # SW_RESTORE：最小化了要先还原
@@ -1093,10 +1095,10 @@ def reap_orphan_code_server() -> dict:
                             encoding="utf-8", errors="replace")
                     killed = 1
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             os.remove(f)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     _CODE_SERVER.update({"proc": None, "port": 0, "project": ""})
     return {"ok": True, "killed": killed}
 
@@ -1107,7 +1109,7 @@ def _remember_cs(pid: int, port: int, project: str) -> None:
         with open(_cs_state_file(), "w", encoding="utf-8") as fh:
             _json.dump({"pid": pid, "port": port, "project": project}, fh)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _forget_cs() -> None:
@@ -1116,7 +1118,7 @@ def _forget_cs() -> None:
         if os.path.isfile(f):
             os.remove(f)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def stop_code_server() -> dict:
@@ -1133,7 +1135,7 @@ def stop_code_server() -> dict:
             try:
                 p.kill()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
     _forget_cs()
     _CODE_SERVER.update({"proc": None, "port": 0, "project": ""})
     return {"ok": True}
@@ -1213,7 +1215,7 @@ def _ensure_vs_settings() -> None:
         with open(p, "w", encoding="utf-8") as fh:
             _json.dump(cur, fh, ensure_ascii=False, indent=2)
     except Exception:
-        pass                            # 写不进去也不该拦住 VS Code 启动
+        logger.debug("silent-except", exc_info=True)                            # 写不进去也不该拦住 VS Code 启动
 
 
 def start_code_server(proj: str = "") -> dict:
@@ -1302,7 +1304,7 @@ def start_code_server(proj: str = "") -> dict:
     try:
         proc.terminate()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"ok": False, "error": "启动超时（20 秒内没监听上）"}
 
 

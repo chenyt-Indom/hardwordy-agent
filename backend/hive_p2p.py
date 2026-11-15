@@ -44,6 +44,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 
 import backend.hive as H
+import logging
+logger = logging.getLogger(__name__)
 
 MAGIC = b"HVp2"
 PROTO = 1
@@ -305,7 +307,7 @@ def upnp_unmap(port: int) -> None:
               "<NewRemoteHost></NewRemoteHost><NewExternalPort>%d</NewExternalPort>"
               "<NewProtocol>TCP</NewProtocol>" % port)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _lan_ip() -> str:
@@ -378,7 +380,7 @@ def _sender_worker(tid: str, gid: str, fid: str, path: str,
     try:
         srv.close()
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _serve_peer(tid: str, gid: str, fid: str, path: str, key: bytes,
@@ -444,7 +446,7 @@ def _serve_peer(tid: str, gid: str, fid: str, path: str, key: bytes,
         try:
             conn.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         with _LOCK:
             n = max(0, (_TRANSFERS.get(tid) or {}).get("peers", 1) - 1)
         _upd(tid, peers=n)
@@ -728,7 +730,7 @@ def _recv_worker(tid: str, gid: str, fid: str, host: str, port: int,
         try:
             os.remove(part)      # 大文件已被 os.replace 移走，小文件在这删
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         _upd(tid, state="done", done=size, speed=0.0, eta=0, fid_out=meta2["fid"])
     except ConnectionAbortedError:
         _upd(tid, state="canceled", speed=0.0)
@@ -739,7 +741,7 @@ def _recv_worker(tid: str, gid: str, fid: str, host: str, port: int,
             try:
                 sock.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
 
 def _read_all(path: str) -> bytes:
@@ -864,7 +866,7 @@ def _beacon_sender(tid: str, gid: str, fid: str, name: str, size: int,
             try:
                 s.sendto(BEACON_MAGIC + payload, ("255.255.255.255", BEACON_PORT))
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             time.sleep(2.0)
     finally:
         s.close()
@@ -882,7 +884,7 @@ def _beacon_listener() -> None:
     try:
         me = H.profile().get("user_id") or ""
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     while not _BEACON_STOP.is_set():
         try:
             data, addr = s.recvfrom(8192)

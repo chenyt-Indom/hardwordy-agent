@@ -1,0 +1,450 @@
+"""行为级回归测试 —— 补上静态检查永远看不到的那一类 bug。
+
+为什么需要它
+------------
+code_audit 只能看「名字 / 结构」：调了不存在的函数、未定义变量、重复定义……
+但真正让程序出错的，往往是**语法完全合法、名字全都存在、行为却错**的代码：
+
+    def sum_all(xs):
+        s = 0
+        for i in range(len(xs) - 1):     # off-by-one，最后一个元素永远加不上
+            s += xs[i]
+        return s
+
+    def grade(score):
+        if score < 60:                   # 条件写反
+            return "及格"
+
+这类 bug 静态检查**一个都查不出来**（实测：6 类逻辑 bug，自检报 0 条）。
+唯一可靠的检验方式是**真跑一遍、断言外部可见的行为**。所以这个模块把关键
+流程的行为固化成断言，改动前后各跑一遍 —— 一旦改坏立刻能看出来。
+
+判定口径
+--------
+    每条用例只断言**外部可见的行为**（返回值、长度、内容、几何位置），
+    不碰内部实现细节 —— 否则一重构就全是误报，那还不如没有。
+    不联网、不调 LLM、不加载模型：必须秒级、可重复。
+
+用法
+----
+    from . import regress
+    r = regress.run()                 # quick：约 1~3 秒
+    r = regress.run(scope="full")     # 追加全量自检 + 全模块导入（约 10 秒）
+    r["ok"]                           # False 表示有回归
+    r["failed_items"]                 # [{'name':..., 'why':...}]
+
+谁在用
+------
+    self_iterate.execute_approved()  每次自动改完代码 → 跑 quick →
+                                     失败立刻回滚（这是「改坏自动撤销」的兜底）
+"""
+import ast
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_BACKEND = Path(__file__).resolve().parent
+_ROOT = _BACKEND.parent
+
+_CASES = []
+
+
+def case(name, scope="quick"):
+    """注册一条用例。scope=quick 每次改完都跑；full 只在手动/定时全检时跑。"""
+    def deco(fn):
+        _CASES.append({"name": name, "scope": scope, "fn": fn})
+        return fn
+    return deco
+
+
+def _skip():
+    return "skip"
+
+
+# ---------------------------------------------------------------- 回复裁剪
+def _clip_cases():
+    from . import main as M
+    return M
+
+
+@case("clip.短文本原样返回")
+def _c_clip_short():
+    M = _clip_cases()
+    s = "结论：已完成。"
+    got = M._clip_reply(s, limit=6000)
+    assert got == s, "短文本被改动了：%r" % got[:80]
+
+
+@case("clip.超限时保留结论/改动/验证")
+def _c_clip_keep():
+    M = _clip_cases()
+    body = "\n".join("这是第 %d 行推理过程，用来把回复撑长。" % i for i in range(400))
+    s = "结论：已修好。\n改动：backend/x.py。\n验证：跑了一遍。\n" + body
+    got = M._clip_reply(s, limit=2000)
+    assert len(got) <= 2000, "裁剪后仍然超限：%d > 2000" % len(got)
+    for h in ("结论：", "改动：", "验证："):
+        assert h in got, "裁剪把「%s」这段丢了（用户最需要看的就是它）" % h
+
+
+@case("clip.不在半句处硬切")
+def _c_clip_cut():
+    """切点必须落在句子中间，才能验出「有没有回退到句末」。
+
+    ⚠️ 这条用例本身踩过坑：最早用「推理内容很长很长。」（9 字）重复，
+    800 字的切点恰好落在句号上，于是「直接按长度硬切」的错误实现也能通过。
+    现在换成 10 字一句、前置 8 字标题，切点必然落在句子中间。
+    """
+    M = _clip_cases()
+    s = "结论：已完成。\n" + ("推理内容稍微长一点。" * 600)
+    got = M._clip_reply(s, limit=800)
+    assert got, "裁剪后成了空串"
+    # 去掉实现自己追加的提示语，再看正文最后是不是一个完整句子
+    body = got.split("\n…（回复过长")[0].split("…（已截断）")[0].rstrip()
+    tail = body[-1:]
+    assert tail in "。！？；.!?;…）)》", \
+        "裁剪落在半句处（正文结尾是 %r），用户会看到断掉的话：…%s" % (tail, body[-30:])
+
+
+# ---------------------------------------------------------------- 回复模板
+@case("template.带闲聊豁免条款")
+def _c_template():
+    M = _clip_cases()
+    t = M._reply_template_ctx()
+    assert "寒暄" in t or "闲聊" in t, "模板里没有「闲聊不套模板」的豁免说明"
+    assert "禁止出现" in t, "模板没有明确禁止在闲聊轮次出现三段式"
+    assert "结论：" in t, "模板丢了「结论前置」这条核心要求"
+
+
+# ---------------------------------------------------------------- 路径白名单
+@case("path.白名单拦得住越界")
+def _c_path():
+    from . import self_iterate as SI
+    ok = ["backend/tools.py", "frontend/app.js"]
+    bad = ["data/secrets.json", "models/x.bin", "sessions/a.json",
+           "../../etc/passwd", "backend/__pycache__/x.pyc",
+           "C:/Windows/system32/x.py", "backend/x.exe"]
+    for rel in ok:
+        assert SI._norm_rel(rel), "该放行的路径被拦了：%s" % rel
+    for rel in bad:
+        assert not SI._norm_rel(rel), "该拦的路径被放行了：%s" % rel
+
+
+# ---------------------------------------------------------------- 黑窗防护
+@case("nowin.子进程自动继承补丁")
+def _c_nowin_child():
+    """孙子进程也必须装补丁 —— 否则它起的进程会弹黑窗。
+
+    2026-11-15 现场证据（data/procwin_watch.jsonl）：
+        PseudoConsoleWindow | cmd.exe | 父链 pythonw(子进程) ← pythonw(后端)
+    实测：PYTHONPATH 不带 _pysite → 起 3 次 cmd 出 5 个控制台窗口；
+          带上 → 0 个。这条用例锁住「机制」，防止以后又退回去。
+    """
+    import os
+    import subprocess
+
+    pysite = str(_BACKEND / "_pysite")
+    assert os.path.isdir(pysite), "backend/_pysite 不见了，子进程不会再有防护"
+
+    env = dict(os.environ)
+    cur = env.get("PYTHONPATH", "") or ""
+    env["PYTHONPATH"] = pysite + (os.pathsep + cur if cur else "")
+    code = ("import subprocess,json;"
+            "print(json.dumps({'p':bool(getattr(subprocess.Popen,'_nowin_patched',False))}))")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       timeout=60, env=env, creationflags=0x08000000)
+    txt = (r.stdout or b"").decode("utf-8", "replace").strip()
+    assert '"p": true' in txt.lower(), "子进程没装上补丁（输出：%r）" % txt[:200]
+
+
+@case("nowin.看门狗只动自己的窗口")
+def _c_nowin_scope():
+    """看门狗不能隐藏用户自己的终端窗口（2026-11-15 实际发生过）。"""
+    import os
+
+    from . import procwin
+
+    assert procwin._is_descendant_of_me(os.getpid()), "连自己都判不出来"
+    for foreign in (1, 4):          # 系统进程，一定不是我们的后代
+        assert not procwin._is_descendant_of_me(foreign), \
+            "把系统进程 %s 当成自己的后代了 → 会误隐藏用户窗口" % foreign
+
+
+# ---------------------------------------------------------------- 逻辑型检查器
+def _trees_of(src):
+    return {"backend/_probe.py": (None, ast.parse(src))}
+
+
+@case("audit.logic.可变默认参数")
+def _c_l1():
+    from . import code_audit as CA
+    out = CA._check_mutable_default(_trees_of(
+        "def f(a, b=[]):\n    b.append(a)\n    return b\n"))
+    assert len(out) == 1, "没抓到可变默认参数（返回 %d 条）" % len(out)
+
+
+@case("audit.logic.is 比字面量")
+def _c_l2():
+    from . import code_audit as CA
+    out = CA._check_is_literal(_trees_of("def f(x):\n    return x is 'abc'\n"))
+    assert len(out) == 1, "没抓到 is 比字面量（返回 %d 条）" % len(out)
+    # is None / is True 是正确写法，绝不能误报
+    out2 = CA._check_is_literal(_trees_of("def f(x):\n    return x is None or x is True\n"))
+    assert not out2, "把 `is None` / `is True` 误报了：%s" % out2
+
+
+@case("audit.logic.assert 元组恒真")
+def _c_l3():
+    from . import code_audit as CA
+    out = CA._check_assert_tuple(_trees_of("def f(x):\n    assert (x, '必须非空')\n"))
+    assert len(out) == 1, "没抓到 assert 元组（返回 %d 条）" % len(out)
+
+
+@case("audit.logic.不可达代码")
+def _c_l4():
+    from . import code_audit as CA
+    out = CA._check_unreachable(_trees_of(
+        "def f():\n    return 1\n    return 2\n"))
+    assert len(out) == 1, "没抓到 return 之后的死代码（返回 %d 条）" % len(out)
+    # 正常分支不应误报
+    out2 = CA._check_unreachable(_trees_of(
+        "def f(x):\n    if x:\n        return 1\n    return 2\n"))
+    assert not out2, "把正常分支误报了：%s" % out2
+
+
+@case("audit.logic.finally 里 return")
+def _c_l5():
+    from . import code_audit as CA
+    out = CA._check_return_in_finally(_trees_of(
+        "def f():\n    try:\n        pass\n    finally:\n        return 1\n"))
+    assert len(out) == 1, "没抓到 finally 里的 return（返回 %d 条）" % len(out)
+
+
+@case("audit.logic.干净代码零误报")
+def _c_l6():
+    from . import code_audit as CA
+    src = (
+        "def add(a, b=None):\n"
+        "    if b is None:\n"
+        "        b = []\n"
+        "    assert a is not None, 'a 不能为空'\n"
+        "    if a > 0:\n"
+        "        return a\n"
+        "    return 0\n")
+    t = _trees_of(src)
+    for fn in (CA._check_mutable_default, CA._check_is_literal,
+               CA._check_assert_tuple, CA._check_unreachable,
+               CA._check_return_in_finally):
+        out = fn(t)
+        assert not out, "%s 对干净代码误报了 %d 条：%s" % (
+            fn.__name__, len(out), out[0].get("msg") if out else "")
+
+
+# ---------------------------------------------------------------- 嘴部几何
+@case("mouth.几何顺序与派生量自洽")
+def _c_mouth():
+    """嘴部几何的**不变量**：只验顺序与派生量，不绑死具体像素。
+
+    这样换一张形象图也不会误报，但一旦几何逻辑被改坏（顺序错乱、
+    衰减终点跑到衣服上、开口高度和上下界对不上）立刻能抓住。
+    """
+    img_p = _ROOT / "data" / "avatar2" / "avatar.png"
+    cfg_p = _ROOT / "data" / "avatar2" / "mouth.json"
+    if not img_p.is_file() or not cfg_p.is_file():
+        return _skip()
+    import cv2
+    from . import avatar_mouth as AM
+    img = cv2.imread(str(img_p))
+    if img is None:
+        return _skip()
+    h, w = img.shape[:2]
+    cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
+    if not cfg.get("y"):
+        return _skip()
+    r = AM.analyze(img, cfg)
+    if not r:
+        raise AssertionError("analyze 返回了空结果")
+    ys = float(r.get("y_split") or 0)
+    yh = float(r.get("y_hole_bot") or 0)
+    yl = float(r.get("y_lip_bot") or 0)
+    yf = float(r.get("y_fade") or 0)
+    oh = float(r.get("open_h") or 0)
+    mh = max(8.0, float(cfg["h"]) * h)
+
+    assert ys < yh <= yl < yf, (
+        "几何顺序错乱：唇缝 %.1f / 口腔底 %.1f / 下唇底 %.1f / 衰减终点 %.1f"
+        "（必须严格递增）" % (ys, yh, yl, yf))
+    assert abs(oh - (yh - ys)) < 0.01, (
+        "开口高度与上下界对不上：open_h=%.2f，但 y_hole_bot-y_split=%.2f"
+        % (oh, yh - ys))
+    assert 0 <= ys and yf <= h, (
+        "几何越出图像边界：y_split=%.1f / y_fade=%.1f，图高 %d" % (ys, yf, h))
+    assert yf - ys < mh * 6, (
+        "形变纵向跨度 %.1fpx 超过嘴高 %.1fpx 的 6 倍 —— 会拖到下巴/衣服上"
+        % (yf - ys, mh))
+
+
+@case("mouth.闭嘴基准判为闭合")
+def _c_mouth_closed():
+    img_p = _ROOT / "data" / "avatar2" / "avatar_closed.png"
+    cfg_p = _ROOT / "data" / "avatar2" / "mouth.json"
+    if not img_p.is_file() or not cfg_p.is_file():
+        return _skip()
+    import cv2
+    from . import avatar_mouth as AM
+    img = cv2.imread(str(img_p))
+    if img is None:
+        return _skip()
+    cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
+    if not cfg.get("y"):
+        return _skip()
+    r = AM.analyze(img, cfg)
+    if not r:
+        raise AssertionError("analyze 返回了空结果")
+    # 历史 bug：判据太松，闭嘴图被判成张嘴 → warp 版被选中 → 嘴根本不动。
+    assert r.get("source_open") is False, (
+        "闭嘴基准被判成「张着嘴」（open_h=%s），会导致 warp 版被选中但嘴不动"
+        % r.get("open_h"))
+
+
+# ---------------------------------------------------------------- 全量（full）
+@case("audit.全量自检无 high", scope="full")
+def _c_audit():
+    from . import code_audit as CA
+    r = CA.audit()
+    highs = [f for f in (r.get("findings") or []) if f.get("level") == "high"]
+    assert not highs, "自检报出 %d 条 high：%s" % (
+        len(highs), "；".join("%s:%s" % (f["file"], f["line"]) for f in highs[:5]))
+
+
+@case("imports.全模块可导入", scope="full")
+def _c_imports():
+    import importlib
+    bad = []
+    for p in sorted(_BACKEND.glob("*.py")):
+        nm = p.stem
+        if nm.startswith("_") or nm in ("__init__", "__main__"):
+            continue
+        try:
+            importlib.import_module("backend.%s" % nm)
+        except Exception as e:                              # noqa: BLE001
+            bad.append("%s: %s: %s" % (nm, type(e).__name__, e))
+    assert not bad, "有 %d 个模块导入失败：%s" % (len(bad), "；".join(bad[:4]))
+
+
+# ---------------------------------------------------------------- 运行
+def run(scope="quick", only=None):
+    """跑一遍回归。scope=quick 只跑快用例；full 追加全量自检与导入检查。"""
+    t0 = time.time()
+    if only:
+        picked = [c for c in _CASES if c["name"] in only]
+    elif scope == "full":
+        picked = list(_CASES)
+    else:
+        picked = [c for c in _CASES if c["scope"] == "quick"]
+
+    items, passed, failed, skipped = [], 0, 0, 0
+    for c in picked:
+        try:
+            r = c["fn"]()
+            if r == "skip":
+                skipped += 1
+                items.append({"name": c["name"], "ok": True, "skipped": True})
+            else:
+                passed += 1
+                items.append({"name": c["name"], "ok": True})
+        except AssertionError as e:
+            failed += 1
+            items.append({"name": c["name"], "ok": False, "why": str(e)[:400]})
+        except Exception as e:                              # noqa: BLE001
+            failed += 1
+            items.append({"name": c["name"], "ok": False,
+                          "why": "%s: %s" % (type(e).__name__, e)})
+
+    failed_items = [i for i in items if not i["ok"]]
+    return {
+        "ok": failed == 0,
+        "scope": scope,
+        "total": len(picked),
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "seconds": round(time.time() - t0, 2),
+        "items": items,
+        "failed_items": failed_items,
+        "summary": ("全部通过（%d 条，跳过 %d 条）" % (passed, skipped)) if failed == 0
+                   else ("%d/%d 条回归失败：%s" % (
+                       failed, len(picked),
+                       "；".join("%s（%s）" % (i["name"], i["why"][:80])
+                                for i in failed_items[:3]))),
+    }
+
+
+_MARK = "@@REGRESS@@"
+_DISK_RUNNER = (
+    "import io,sys\n"
+    "sys.stdout=io.TextIOWrapper(sys.stdout.buffer,encoding='utf-8',errors='replace')\n"
+    "sys.path.insert(0,'.')\n"
+    "import json\n"
+    "from backend import regress\n"
+    "r=regress.run(scope=sys.argv[1])\n"
+    "print('%s'+json.dumps(r,ensure_ascii=False))\n" % _MARK
+)
+
+
+def run_disk(scope="quick", timeout=180):
+    """在**子进程**里跑回归 —— 读的是磁盘上刚写完的最新代码。
+
+    为什么必须是子进程（这轮实测踩到的坑）
+    ------------------------------------
+    execute_approved 把 patch 写到文件之后，当前进程里的模块还是**改动前**的
+    旧代码 —— Python 不会因为文件变了就自动重新加载。所以在进程内跑回归，
+    等于在测旧代码：实测把 `_norm_rel` 的路径校验改坏（放行 data/secrets.json），
+    进程内回归**照样全过**，于是「改坏了自动回滚」这道兜底形同虚设。
+
+    子进程从磁盘重新 import，验的才是刚改的代码。代价约 1~2 秒，值得。
+    """
+    import subprocess
+    t0 = time.time()
+    err_box = {"ok": False, "scope": scope, "total": 0, "passed": 0, "failed": 1,
+               "skipped": 0, "seconds": 0.0, "items": [], "failed_items": []}
+    try:
+        r = subprocess.run([sys.executable, "-c", _DISK_RUNNER, scope],
+                           cwd=str(_ROOT), capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        err_box["seconds"] = round(time.time() - t0, 2)
+        err_box["failed_items"] = [{"name": "regress", "why": "子进程超时"}]
+        err_box["summary"] = "回归子进程超时（%d 秒）" % timeout
+        return err_box
+
+    txt = (r.stdout or b"").decode("utf-8", "replace")
+    line = ""
+    for ln in txt.splitlines():
+        if ln.startswith(_MARK):
+            line = ln[len(_MARK):]
+    if not line:
+        err = (r.stderr or b"").decode("utf-8", "replace")[-500:]
+        err_box["seconds"] = round(time.time() - t0, 2)
+        err_box["failed_items"] = [{"name": "regress", "why": err or "无输出"}]
+        err_box["summary"] = "回归子进程没跑起来（rc=%s）：%s" % (r.returncode, err[:200])
+        return err_box
+    try:
+        out = json.loads(line)
+    except Exception as e:                                  # noqa: BLE001
+        err_box["seconds"] = round(time.time() - t0, 2)
+        err_box["failed_items"] = [{"name": "regress", "why": str(e)}]
+        err_box["summary"] = "回归结果解析失败：%s" % e
+        return err_box
+    out["via"] = "subprocess"
+    return out
+
+
+def as_text(r):
+    """给聊天界面/日志用的单行摘要。"""
+    lines = ["回归 %s：%s（%.2fs）" % (r.get("scope"), r.get("summary"), r.get("seconds") or 0)]
+    for i in r.get("failed_items") or []:
+        lines.append("  ✗ %s —— %s" % (i["name"], i.get("why") or ""))
+    return "\n".join(lines)

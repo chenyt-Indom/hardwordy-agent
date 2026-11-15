@@ -24,9 +24,12 @@ import base64
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 # 视觉模型：默认用已装的 qwen3-vl 8B（比 30B 快，够看布局）
 _VL_PREFER = ("qwen3-vl:8b", "qwen3-vl:30b", "qwen2.5vl:3b")
@@ -65,7 +68,10 @@ def screenshot(url: str = "http://127.0.0.1:8000", width: int = 1280,
     if not os.path.isfile(edge):
         return {"ok": False, "error": "找不到 msedge（Edge 没装？）"}
     out = os.path.join(_out_dir(), "shot_%s.png" % time.strftime("%H%M%S"))
-    prof = os.path.join(_out_dir(), "prof_%s" % time.strftime("%H%M%S"))
+    # Edge 每次启动会往 --user-data-dir 写几百个 profile 文件。
+    # 2026-11-15 修：原来放在 data/shots/prof_HHMMSS 且从不删除，
+    # 实测堆了 132403 个文件 / 43.8GB。改成系统临时目录 + 用完即删。
+    prof = tempfile.mkdtemp(prefix="mm_shot_")
     try:
         subprocess.run(
             [edge, "--headless=new", "--disable-gpu", "--no-first-run",
@@ -77,6 +83,8 @@ def screenshot(url: str = "http://127.0.0.1:8000", width: int = 1280,
             capture_output=True, timeout=90)
     except Exception as e:                            # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    finally:
+        shutil.rmtree(prof, ignore_errors=True)
     if not os.path.isfile(out) or os.path.getsize(out) < 2000:
         return {"ok": False, "error": "截图失败（文件没生成或太小）"}
     return {"ok": True, "path": out, "bytes": os.path.getsize(out),

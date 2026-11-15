@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 import re
 import zipfile
+import logging
+logger = logging.getLogger(__name__)
 
 # 纯文本类扩展名
 TEXT_EXTS = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".log",
@@ -218,7 +220,7 @@ def _xlsx_text(z, names, limit) -> str:
                 parts = re.findall(r"(?is)<t[^>]*>(.*?)</t>", si)
                 shared.append(_unescape("".join(parts)).strip())
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     # 工作表真实名称（xl/workbook.xml 里）
     sheet_names = []
@@ -228,7 +230,7 @@ def _xlsx_text(z, names, limit) -> str:
             sheet_names = [_unescape(m) for m in
                            re.findall(r"(?is)<sheet[^>]*name=\"([^\"]*)\"", wb)]
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     def a1_col(ref: str) -> int:
         """把 'C12' 里的列字母转成 0 基列号。"""

@@ -15,6 +15,8 @@
 
 import copy
 import os
+import logging
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # 通用小工具
@@ -33,19 +35,12 @@ def _rgb_hex(color):
         return ""
 
 
-def _has_solid_fill(shape):
-    try:
-        return shape.fill.type is not None and shape.fill.type == 1   # 1 = solid
-    except Exception:
-        return False
-
-
 def _fill_hex(shape):
     try:
         if shape.fill.type == 1:
             return _rgb_hex(shape.fill.fore_color)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return ""
 
 
@@ -73,7 +68,7 @@ def _shape_kind(shape):
             if "AUTO_SHAPE" in nm or "AUTO" in nm:
                 return "形状"
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     if getattr(shape, "has_text_frame", False) and shape.text_frame.text.strip():
         return "文本框"
     return "形状"
@@ -86,13 +81,13 @@ def _shape_text(shape, limit=60):
                            if x.strip())
             return t[:limit]
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         if shape.has_table:
             tb = shape.table
             return "%d行×%d列" % (len(tb.rows), len(tb.columns))
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return ""
 
 
@@ -119,7 +114,7 @@ def inspect_pptx(path, limit=4000):
             if nt:
                 out.append("   备注：「%s」" % nt[:60])
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         if sum(len(x) for x in out) > limit:
             out.append("  …（内容较多，已截断）")
             break
@@ -142,7 +137,7 @@ def _delete_slide(prs, idx):
         try:
             prs.part.drop_rel(rId)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     lst.remove(el)
     return True
 
@@ -175,7 +170,7 @@ def _duplicate_slide(prs, idx):
                                         sh.width, sh.height)
                 continue
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         el = copy.deepcopy(sh._element)
         # 拷过来的 XML 里可能还引用着原页的关系 ID（图片/超链接），
         # 直接留着会指向不存在的关系 → 打开报错。一律摘掉。
@@ -189,7 +184,7 @@ def _duplicate_slide(prs, idx):
         dest.notes_slide.notes_text_frame.text = \
             src.notes_slide.notes_text_frame.text
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return True
 
 
@@ -274,7 +269,7 @@ def _replace_in_slide(slide, find, repl):
                     r.text = r.text.replace(find, repl)
                     n += 1
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return n
 
 
@@ -497,7 +492,7 @@ def _detect_pptx_theme(prs, themes):
                 for st in bg.gradient_stops:
                     seen[_rgb_hex(st.color).upper()] += 3
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         for sh in slide.shapes:
             fh = _fill_hex(sh)
             if fh:
@@ -510,7 +505,7 @@ def _detect_pptx_theme(prs, themes):
                             if rc:
                                 seen[rc] += 1
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
     best, score = "blue", -1
     for name, th in themes.items():
         s = sum(seen.get(str(th.get(k) or "").upper(), 0)
@@ -553,7 +548,7 @@ def _recolor(prs, old, new, themes):
                         stop.color.rgb = _hex2rgb(mapping[cur])
                         n += 1
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         for sh in slide.shapes:
             fh = _fill_hex(sh)
             if fh and fh.upper() in mapping:
@@ -561,7 +556,7 @@ def _recolor(prs, old, new, themes):
                     sh.fill.fore_color.rgb = _hex2rgb(mapping[fh.upper()])
                     n += 1
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             try:
                 if sh.has_text_frame:
                     for p in sh.text_frame.paragraphs:
@@ -571,7 +566,7 @@ def _recolor(prs, old, new, themes):
                                 r.font.color.rgb = _hex2rgb(mapping[rc])
                                 n += 1
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
     return n
 
 
@@ -657,7 +652,7 @@ def _detect_docx_theme(doc, themes):
                             colors[shd.get(
                                 "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}fill").upper()] += 5
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     best, score = "blue", -1
     for name, th in themes.items():
         s = sum(colors.get(str(th.get(k) or "").upper(), 0)

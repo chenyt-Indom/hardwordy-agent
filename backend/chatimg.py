@@ -156,7 +156,7 @@ def _load_b64(path: str, max_side: int = 1024) -> str:
                     im2.save(buf, format="JPEG", quality=88)
                     raw = buf.getvalue()
         except Exception:
-            pass          # 不是图片 / 没装 PIL：原样返回
+            logger.debug("silent-except", exc_info=True)          # 不是图片 / 没装 PIL：原样返回
         return base64.b64encode(raw).decode("ascii")
     except Exception:
         logger.warning("读取历史图片失败：%s", path, exc_info=True)

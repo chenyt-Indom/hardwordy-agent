@@ -27,6 +27,7 @@ import logging
 import numpy as np
 
 from . import config
+logger = logging.getLogger(__name__)
 
 _LOG = logging.getLogger("uvicorn.error")
 

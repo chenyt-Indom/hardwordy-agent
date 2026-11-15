@@ -33,6 +33,8 @@ import struct
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import logging
+logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ 常量
 
@@ -138,7 +140,7 @@ class ReliableUDPSock:
                 self.udp.sendto(pkt, self.peer)
                 self.stats["sent"] += 1
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def recv(self, n: int) -> bytes:
         """标准 socket 语义：有数据就返回（最多 n 字节），没数据才等。
@@ -172,7 +174,7 @@ class ReliableUDPSock:
         try:
             self.udp.sendto(HDR.pack(PKT_BYE, 0), self.peer)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         with self._cv:
             self._cv.notify_all()
 
@@ -185,7 +187,7 @@ class ReliableUDPSock:
         try:
             self.udp.sendto(HDR.pack(PKT_ACK, seq), self.peer)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     def feed(self, typ: int, seq: int, payload: bytes, addr: Any = None) -> None:
         """由 PunchNode 的接收循环把包喂进来。"""
@@ -243,7 +245,7 @@ class ReliableUDPSock:
                     self.udp.sendto(pkt, self.peer)
                     self.stats["retx"] += 1
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
 
     def label(self) -> str:
         return self.name or ("%s:%s" % self.peer)
@@ -284,7 +286,7 @@ class PunchNode:
                 try:
                     u.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             # 缓冲区尽量开大：实测默认值下 3MB 传输会因接收缓冲溢出
             # 丢约 190 片（数据仍能靠重传补齐，但白白多花时间）。
             for opt, val in ((socket.SO_RCVBUF, 4 * 1024 * 1024),
@@ -292,7 +294,7 @@ class PunchNode:
                 try:
                     u.setsockopt(socket.SOL_SOCKET, opt, val)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             u.bind(("0.0.0.0", int(port or 0)))
             u.settimeout(0.3)
         except Exception as e:
@@ -314,7 +316,7 @@ class PunchNode:
             try:
                 self.udp.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             self.udp = None
 
     # -------------------------------------------------- 映射地址
@@ -440,7 +442,7 @@ class PunchNode:
                 try:
                     self.udp.sendto(HDR.pack(PKT_BYE, 0), key)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
 
     def _on_punch(self, data: bytes, key: Tuple[str, int]) -> None:
         kind = data[len(PUNCH_MAGIC):len(PUNCH_MAGIC) + 1]
@@ -449,7 +451,7 @@ class PunchNode:
             try:
                 self.udp.sendto(PUNCH_MAGIC + b"R" + data[len(PUNCH_MAGIC) + 1:], key)  # type: ignore
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             with self._lock:
                 self._punch_seen[key] = time.time()
                 t = self.tunnels.get(key)
@@ -465,7 +467,7 @@ class PunchNode:
                     threading.Thread(target=self.on_tunnel, args=(t, key),
                                      daemon=True).start()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         elif kind == b"R":
             with self._lock:
                 self._punch_ok[key] = key

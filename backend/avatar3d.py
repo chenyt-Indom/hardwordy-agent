@@ -14,6 +14,8 @@ import tempfile
 
 import cv2
 import numpy as np
+import logging
+logger = logging.getLogger(__name__)
 
 try:                        # 包内导入（服务实际走这条路：backend.main → from . import avatar3d）
     from . import avatar2 as A2
@@ -151,7 +153,7 @@ def render(img_path, wav_path, out_mp4, fps=FPS, size=DEFAULT_SIZE,
             os.remove(os.path.join(tmpdir, fn))
         os.rmdir(tmpdir)
     except OSError:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"ok": True, "path": out_mp4, "frames": n,
             "duration": round(dur, 2), "size": [W, H]}
 

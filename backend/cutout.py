@@ -28,6 +28,8 @@ import threading
 import time
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 # 默认档位：通用 + MIT 许可，质量与兼容性最平衡。
 MODEL_DEFAULT = "birefnet-general"
@@ -156,7 +158,7 @@ def ensure_model(model: str) -> tuple:
                 try:
                     os.remove(dest)
                 except OSError:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 continue
             return True, ""
     return False, ("抠图模型 %s 下载失败（已试过国内镜像）。最后一次错误：%s。\n"

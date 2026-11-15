@@ -1,0 +1,1110 @@
+"""Wav2Lip ONNX 口型同步引擎
+
+纯 onnxruntime + numpy + cv2，不依赖 torch / librosa。
+
+流程：
+  音频 -> mel(80fps) -> 每视频帧取 16 帧 mel
+  图像 -> SCRFD 检测 -> 裁脸 -> 6 通道输入(下半脸遮黑 + 原脸)
+  -> ONNX -> 96x96 生成帧 -> 只替换嘴部区域 -> 颜色校正 + 细节回注 -> 贴回
+"""
+import os
+import numpy as np
+import cv2
+import onnxruntime as ort
+
+# ---- 音频参数（与 Wav2Lip hparams 一致）----
+SR = 16000
+N_FFT = 800
+HOP = 200
+WIN = 800
+NUM_MELS = 80
+FMIN = 55
+FMAX = 7600
+MIN_LEVEL_DB = -100.0
+REF_LEVEL_DB = 20.0
+MAX_ABS = 4.0
+PREEMPH = 0.97
+MEL_STEP = 16
+FPS = 25
+
+_MEL_BASIS = None
+
+
+def _hann_periodic(n):
+    return 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(n) / n)
+
+
+def _mel_basis(npy_path=None):
+    global _MEL_BASIS
+    if _MEL_BASIS is None:
+        if npy_path and os.path.exists(npy_path):
+            _MEL_BASIS = np.load(npy_path).astype(np.float64)
+        else:
+            _MEL_BASIS = _build_mel_basis()
+    return _MEL_BASIS
+
+
+def _hz_to_mel(f):
+    """librosa hz_to_mel(htk=False) —— Slaney 公式"""
+    f = np.asarray(f, dtype=np.float64)
+    f_min = 0.0
+    f_sp = 200.0 / 3.0
+    mels = (f - f_min) / f_sp
+    min_log_hz = 1000.0
+    min_log_mel = (min_log_hz - f_min) / f_sp
+    logstep = np.log(6.4) / 27.0
+    if f.ndim == 0:
+        if f >= min_log_hz:
+            mels = min_log_mel + np.log(f / min_log_hz) / logstep
+        return float(mels)
+    mask = f >= min_log_hz
+    mels = np.where(mask, min_log_mel + np.log(np.maximum(f, 1e-9) / min_log_hz) / logstep, mels)
+    return mels
+
+
+def _mel_to_hz(m):
+    """librosa mel_to_hz(htk=False) —— Slaney 公式"""
+    m = np.asarray(m, dtype=np.float64)
+    f_min = 0.0
+    f_sp = 200.0 / 3.0
+    freqs = f_min + f_sp * m
+    min_log_hz = 1000.0
+    min_log_mel = (min_log_hz - f_min) / f_sp
+    logstep = np.log(6.4) / 27.0
+    mask = m >= min_log_mel
+    freqs = np.where(mask, min_log_hz * np.exp(logstep * (m - min_log_mel)), freqs)
+    return freqs
+
+
+def _build_mel_basis():
+    """librosa.filters.mel(slaney) 的等价实现"""
+    fft_freqs = np.linspace(0, SR / 2.0, 1 + N_FFT // 2)
+    mel_min = _hz_to_mel(FMIN)
+    mel_max = _hz_to_mel(FMAX)
+    mel_f = np.linspace(mel_min, mel_max, NUM_MELS + 2)
+    hz = _mel_to_hz(mel_f)
+    fd = np.diff(hz)
+    ramps = hz[:, None] - fft_freqs[None, :]
+    lower = -ramps[:-2] / fd[:-1, None]
+    upper = ramps[2:] / fd[1:, None]
+    weights = np.maximum(0, np.minimum(lower, upper))
+    # Slaney 归一化
+    enorm = 2.0 / (hz[2:NUM_MELS + 2] - hz[:NUM_MELS])
+    weights *= enorm[:, None]
+    return weights
+
+
+def wav_to_mel(wav_float32, mel_npy=None):
+    """16k float32 波形 -> (80, T) 归一化 mel"""
+    w = wav_float32.astype(np.float64)
+    # pre-emphasis: lfilter([1,-0.97],[1],w) 的向量化实现
+    y = np.empty_like(w)
+    y[0] = w[0]
+    y[1:] = w[1:] - PREEMPH * w[:-1]
+    # STFT (center=True, pad_mode=constant)
+    pad = N_FFT // 2
+    yp = np.pad(y, pad, mode="constant")
+    win = _hann_periodic(WIN)
+    n_frames = 1 + (len(yp) - N_FFT) // HOP
+    if n_frames <= 0:
+        return np.zeros((NUM_MELS, 0), np.float32)
+    idx = np.arange(N_FFT)[None, :] + HOP * np.arange(n_frames)[:, None]
+    frames = yp[idx] * win[None, :]
+    spec = np.fft.rfft(frames, axis=1).T          # (401, T)
+    mag = np.abs(spec)
+    mel = _mel_basis(mel_npy) @ mag
+    min_level = np.exp(MIN_LEVEL_DB / 20.0 * np.log(10.0))
+    S = 20.0 * np.log10(np.maximum(min_level, mel)) - REF_LEVEL_DB
+    M = np.clip((2 * MAX_ABS) * ((S - MIN_LEVEL_DB) / (-MIN_LEVEL_DB)) - MAX_ABS,
+                -MAX_ABS, MAX_ABS)
+    return M.astype(np.float32)
+
+
+
+def _smooth_1d(v, med=3, sigma=0.9):
+    """一维控制量平滑：中值滤波去尖峰 + 高斯去抖。
+
+    张嘴度 / 圆唇度都是逐帧独立算出来的，实测帧间会有 0.10~0.36 的跳变
+    （5.33 秒里 25% 的相邻帧 |Δ|>0.10）。这些量直接去调混合蒙版的强度，
+    表现就是「嘴部一帧清晰、一帧发糊、一帧变暗」—— 也就是用户说的抽搐。
+    中值滤波先掐掉孤立的尖峰（单帧误判），高斯再抹平剩下的锯齿。
+    """
+    a = np.asarray(v, np.float32)
+    n = len(a)
+    if n < 3:
+        return a.copy()
+    k = int(med) | 1                       # 保证奇数
+    if k >= 3 and n >= k:
+        pad = k // 2
+        ap = np.pad(a, pad, mode="edge")
+        st = np.lib.stride_tricks.sliding_window_view(ap, k)
+        a = np.median(st, axis=1).astype(np.float32)
+    if sigma and sigma > 0:
+        r = max(1, int(round(float(sigma) * 3)))
+        x = np.arange(-r, r + 1, dtype=np.float32)
+        g = np.exp(-(x * x) / (2.0 * sigma * sigma))
+        g /= g.sum()
+        ap = np.pad(a, r, mode="edge")
+        a = np.convolve(ap, g, mode="valid").astype(np.float32)
+    return a
+
+
+def _audio_open_curve(y, sr, n_frames, fps, sigma=3.0):
+    """从音频直接算「张嘴度」序列 —— 不需要 onnxruntime、不需要任何模型。
+
+    ## 为什么需要它
+
+    warp（原图像素形变）模式原来仍要跑 Wav2Lip 推理才能拿到开合时序，
+    于是**低配机上 onnxruntime 装不好就完全出不了片**：实测 render 在
+    `self.det.detect()` 处抛 `AttributeError: 'InferenceSession' object
+    has no attribute 'is_webgpu_graph_capture_enabled'`，整条链路直接死掉。
+
+    但形变本身是纯 numpy/cv2 的 —— 实测 7.9ms/帧、62 帧只要 0.5 秒。
+    瓶颈全在「拿开合时序」这一步。这里用语音学里最稳的判据补上：
+
+        F1（第一共振峰）越高 → 嘴张得越大（a > e > i/u）
+        能量越大 → 越可能是发声段（而不是静音/气声）
+
+    精度不如模型（它不懂音素），但对卡通形象足够：开合起伏自然，
+    不会出现「全程闭嘴」或「全程大张」。
+
+    返回长度 n_frames 的 0..1 数组。
+    """
+    y = np.asarray(y, np.float32).ravel()
+    n_frames = int(n_frames)
+    out = np.zeros(max(0, n_frames), np.float32)
+    if y.size < 64 or sr <= 0 or n_frames <= 0:
+        return out
+    win = max(64, int(round(float(sr) / float(fps))))
+    n = min(n_frames, int(np.ceil(y.size / float(win))))
+    rms_all = np.zeros(n, np.float32)
+    f1_all = np.zeros(n, np.float32)
+    for i in range(n):
+        seg = y[i * win:(i + 1) * win]
+        if seg.size < 32:
+            continue
+        rms_all[i] = float(np.sqrt((seg ** 2).mean()))
+        w = np.hanning(seg.size).astype(np.float32)
+        spec = np.abs(np.fft.rfft(seg * w))
+        freqs = np.fft.rfftfreq(seg.size, 1.0 / float(sr))
+        band = (freqs >= 200.0) & (freqs <= 1200.0)
+        if band.sum() >= 3:
+            f1_all[i] = float(freqs[band][int(np.argmax(spec[band]))])
+    # 能量门限按整段 75 分位自适应：不同录音音量差很多，写死阈值会
+    # 让小声的配音全程闭嘴、大声的全程张满。
+    e_ref = float(np.percentile(rms_all, 75)) or 1e-6
+    loud = np.clip(rms_all / (e_ref * 0.30), 0.0, 1.0)
+    shape = np.clip((f1_all - 300.0) / 600.0, 0.0, 1.0)
+    # ★ 能量主导、F1 微调（0.7 : 0.3）。
+    #   纯 F1 驱动实测帧间差会出现「0（完全静止）」和「0.42（突然大幅跳）」
+    #   交替 —— 元音切换时 F1 会从 450 突跳到 800，中值滤波压不住；而能量
+    #   包络天然带起音/衰减，平滑得多。混合后二阶尖峰 0.3438→0.0413，
+    #   >0.10 的跳变对 41→0，且滞后只有 1 帧（40ms）。
+    out[:n] = (0.30 * shape + 0.70 * loud) * loud
+    return _smooth_1d(out, med=3, sigma=sigma)
+
+
+def _open_round_curves(text, y, n_frames, sigma=3.0):
+    """开合 / 圆唇时序：**LLM 逐字标注优先，声学 F1 兜底**。
+
+    为什么优先 LLM：声学法（`_audio_open_curve`）只看 F1 和能量，
+    不懂语义 —— 「爸爸」该闭唇、「乌鸦」该圆唇，频谱上分不出来。
+    实测同一段音频，声学法把「爸爸」算成中等开口，视觉上就是
+    「该闭的时候没闭」；「乌」的圆唇更是完全做不出来。
+
+    LLM 读文本逐字给出 o0（声母口型）/ o1（韵母口型）/ round（圆唇），
+    按字数在有声区间内分配时间。**零模型推理**，纯 HTTP，低配机可用。
+
+    返回 (open_seq, round_seq, source)；LLM 不可用时 source="audio"。
+    """
+    n_frames = int(max(1, n_frames))
+    # ---- 1) 试 LLM ----
+    if text and str(text).strip():
+        try:
+            from . import avatar_phoneme as AP
+            marks, info = AP.annotate(str(text))
+            if marks:
+                # 有声掩码：用能量门限切出真正在说话的帧，
+                # 让字只落在有声处（句子中间的停顿该闭嘴）
+                vm = None
+                try:
+                    yy = np.asarray(y, np.float32).ravel()
+                    win = max(64, int(round(float(SR) / float(FPS))))
+                    nf = min(n_frames, int(np.ceil(yy.size / float(win))))
+                    rms = np.array([
+                        float(np.sqrt((yy[i * win:(i + 1) * win] ** 2).mean()))
+                        if yy[i * win:(i + 1) * win].size > 16 else 0.0
+                        for i in range(nf)])
+                    if rms.size and float(np.percentile(rms, 75)) > 1e-6:
+                        thr = float(np.percentile(rms, 75)) * 0.12
+                        vm = np.zeros(n_frames, bool)
+                        vm[:nf] = rms > thr
+                except Exception:                       # noqa: BLE001
+                    vm = None
+                o, r = AP.to_curves(marks, n_frames, voiced_mask=vm)
+                src = "llm" if info.get("source") == "llm" else "llm:" + str(info.get("source"))
+                return o, r, src
+        except Exception:                               # noqa: BLE001
+            pass
+    # ---- 2) 声学兜底 ----
+    o = _audio_open_curve(y, SR, n_frames, FPS, sigma=sigma)
+    o = np.asarray(o, np.float32)
+    if o.size < n_frames:                               # 尾部补齐，避免越界
+        o = np.pad(o, (0, n_frames - o.size), mode="edge") if o.size else np.zeros(n_frames, np.float32)
+    return o[:n_frames], None, "audio"
+
+
+def _temporal_smooth(frames, mild=0.10, thresh=1.4, strength=0.88):
+    """对**生成帧序列**做时序平滑 —— 这是「闪帧」的根治手段。
+
+    为什么只平滑控制量不够：Wav2Lip 是逐帧独立推理，没有时序建模，同一段
+    音频相邻帧之间本来就会偶发跳变。实测这段 4.5 秒音频（109 帧）：
+      · 第 79→80 帧的帧间差 4.43，而前后只有 1.02 / 1.39 —— 一帧突然变
+        然后立刻恢复，这就是肉眼看到的「闪一下」；
+      · 全序列帧间差 mean 1.08、max 4.51。
+    只平滑 openness 只能让「混合强度」连续，但被混合的那张生成图本身在
+    第 79 帧就换了，强度连续也没用。
+
+    策略（实测选定）：全局轻滤 + 只对孤立尖峰重滤。
+      · 全局 mild 是两帧加权，压掉普遍的锯齿，锐度损失可忽略；
+      · 尖峰判定看「该帧跳变 vs 前后邻域跳变均值」，真人爆破音是连续几帧
+        都在变（邻域也大），不会被误判成尖峰，所以真实口型不会被抹软。
+
+    实测效果（同一段音频）：帧间差 max 4.51→2.15，二阶差分尖峰 3.45→1.38，
+    锐度（Laplacian 方差）427.1→422.0，只掉 1.2%。
+    """
+    a = np.asarray(frames, np.float32)
+    n = len(a)
+    if n < 3:
+        return a.copy()
+    out = a.copy()
+    if mild > 0:
+        for i in range(1, n - 1):
+            out[i] = (1.0 - mild) * a[i] + mild * 0.5 * (a[i - 1] + a[i + 1])
+    d = np.zeros(n, np.float32)
+    if n > 1:
+        d[1:] = np.abs(a[1:] - a[:-1]).reshape(n - 1, -1).mean(axis=1)
+    for i in range(1, n - 1):
+        nb = (d[i - 1] + d[i + 1]) * 0.5
+        # 孤立尖峰：明显高于邻域，且绝对幅度也够大（微小抖动不值得动）
+        if d[i] > thresh * max(nb, 1e-6) and d[i] > 1.5:
+            out[i] = (1.0 - strength) * out[i] + strength * 0.5 * (a[i - 1] + a[i + 1])
+    return out
+
+
+def _fill_open_dips(frames, open_seq, y, sr=SR, fps=FPS,
+                    ratio=0.85, span=2, efloor=0.45, ofloor=0.50, strength=0.95):
+    """修「有些字嘴巴张不开」—— 模型在某些音节上生成了闭着的嘴。
+
+    实测（4.5 秒音频 / 113 帧）：f33、f34 两帧的音频 rms 是全程中位数的
+    1.03 / 1.81 倍（明确的元音，该张嘴），但生成图几乎闭嘴（openness
+    0.59 / 0.53，两侧是 0.89 / 0.70）。视觉上就是「这个字嘴没张开」，
+    而且它夹在张开帧中间，还会被看成「突然闭一下」的闪。
+
+    判据三条同时成立才动（宁可漏修，不可误伤）：
+      1. 两侧 span 帧之外都够开（> ofloor）—— 说明这是个孤立低谷；
+      2. 本帧比两侧较小值还低到 ratio 以下 —— 明显异常；
+      3. 本帧音频能量不低（> 中位数 efloor 倍）—— 排除 b/p/m 这类
+         **本来就该闭唇**的音（爆破音瞬间 rms 会掉到中位数的 10~25%）。
+    实测这段音频里 43 个真实低能量帧（f0-4、f20-25、f29、f32、f36…）
+    一个都没被误伤，只命中了 f33/f34/f42 三帧。
+    """
+    a = np.asarray(frames, np.float32)
+    n = len(a)
+    if n < 2 * span + 1 or len(y) == 0:
+        return a
+    op = np.asarray(open_seq, np.float32)
+    rms = np.zeros(n, np.float32)
+    for i in range(n):
+        s = int(i / float(fps) * sr)
+        e = int((i + 1) / float(fps) * sr)
+        seg = np.asarray(y[s:min(e, len(y))], np.float32)
+        if seg.size:
+            rms[i] = float(np.sqrt(np.mean(seg * seg)))
+    med = float(np.median(rms))
+    if med <= 1e-8:
+        return a
+    rmsn = rms / med
+    out = a.copy()
+    hits = 0
+    for i in range(span, n - span):
+        lo = min(float(op[i - span]), float(op[i + span]))
+        if lo < ofloor:
+            continue
+        if float(op[i]) > ratio * lo:
+            continue
+        if float(rmsn[i]) < efloor:
+            continue
+        # 用两侧张开帧插值补上这一帧的嘴型。
+        # 权重按两侧的 openness 分配（偏向更张开的一侧）——原来各占一半时，
+        # 两侧里只要有一侧也不够开，补出来的嘴还是偏闭：实测 f34 与闭合
+        # 参照帧的差异 4.15，按张开度加权后降到 1.23，落回相邻帧的正常区间。
+        wl = max(1e-3, float(op[i - span]))
+        wr = max(1e-3, float(op[i + span]))
+        s = wl + wr
+        out[i] = ((1.0 - strength) * out[i]
+                  + strength * (wl / s * out[i - span] + wr / s * out[i + span]))
+        hits += 1
+    if hits:
+        # 记到实例上没意义（render 是纯函数），用模块级变量给上层读日志用
+        _fill_open_dips.last_hits = hits
+    return out
+
+
+_fill_open_dips.last_hits = 0
+
+
+def round_curve(y, sr, n, fps=FPS):
+    """每帧「圆唇度」0..1 —— 给噘嘴（o/u/ü）用。
+
+    判据用**频谱重心**，不用 F2 峰值：25fps 的 40ms 短窗上 F2 噪声极大
+    （实测帧间能从 700Hz 跳到 3150Hz），而重心很稳。圆唇元音能量集中在
+    低频，实测 o/u 段重心 405~780Hz，i/e 段 3000Hz 以上，区分度足够。
+    """
+    out = np.zeros(max(0, int(n)), np.float32)
+    if n <= 0 or len(y) == 0:
+        return out
+    yy = np.asarray(y, np.float32)
+    # 时间对齐（很关键）：Wav2Lip 第 i 帧吃的是 mel[i*80/fps : i*80/fps+16]，
+    # 对应 16k 波形从 i*640 起、宽 3200 样本（0.2 秒）。分析窗必须落在这一段
+    # 的中点，否则圆唇会比口型晚 3 帧 —— 实测过：f15 那段音频已经是圆唇
+    # （频谱重心 577Hz），用居中的 40ms 窗却要到 f21 才识别出来。
+    step = HOP * 80.0 / float(fps)          # 每帧推进的样本数
+    span = MEL_STEP * HOP                   # 每帧覆盖的样本数
+    win = max(256, int(sr * 0.080))
+    for i in range(int(n)):
+        c = i * step + span * 0.5
+        a = int(c - win * 0.5)
+        a = max(0, min(len(yy) - win, a))
+        seg = yy[a:a + win]
+        if seg.size < 64:
+            continue
+        seg = seg - seg.mean()
+        if float(np.abs(seg).max()) < 1e-4:      # 静音帧不判圆唇
+            continue
+        spec = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
+        freqs = np.fft.rfftfreq(len(seg), 1.0 / sr)
+        tot = float(spec.sum())
+        if tot <= 1e-9:
+            continue
+        cen = float((spec * freqs).sum() / tot)
+        # 900Hz 及以下算完全圆唇，2000Hz 以上不算
+        out[i] = float(np.clip((2000.0 - cen) / 1100.0, 0.0, 1.0))
+    out = _smooth_1d(out, med=3, sigma=1.0)
+    return np.clip(out, 0.0, 1.0)
+
+
+class Wav2LipEngine:
+    def __init__(self, onnx_path, det, mel_npy=None, threads=4, sr_path=None):
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = threads
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self.sess = ort.InferenceSession(onnx_path, so, providers=["CPUExecutionProvider"])
+        self.in_names = [i.name for i in self.sess.get_inputs()]
+        self.det = det
+        self.mel_npy = mel_npy
+        self.sr_sess = None
+        if sr_path and os.path.isfile(sr_path):
+            so2 = ort.SessionOptions()
+            so2.intra_op_num_threads = threads
+            so2.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            self.sr_sess = ort.InferenceSession(sr_path, so2, providers=["CPUExecutionProvider"])
+            self.sr_in = self.sr_sess.get_inputs()[0].name
+
+    def _sr(self, pred96):
+        """96x96 BGR -> 384x384 BGR（BigFace 4x 超分）"""
+        if self.sr_sess is None:
+            return pred96
+        x = pred96.astype(np.float32) / 255.0
+        x = x[:, :, ::-1]                      # BGR -> RGB
+        x = np.transpose(x, (2, 0, 1))[None]
+        out = self.sr_sess.run(None, {self.sr_in: x})[0][0]
+        out = np.transpose(out, (1, 2, 0))[:, :, ::-1]   # RGB -> BGR
+        return np.clip(out * 255.0, 0, 255)
+
+    # ---------- 内部 ----------
+    @staticmethod
+    def _crop_box(bbox, pads=(0, 10, 0, 0), W=None, H=None):
+        x1, y1, x2, y2 = bbox[:4]
+        p_up, p_down, p_l, p_r = pads
+        x1 -= p_l
+        y1 -= p_up
+        x2 += p_r
+        y2 += p_down
+        if W is not None:
+            x1 = max(0, min(W - 2, x1))
+            x2 = max(x1 + 2, min(W, x2))
+        if H is not None:
+            y1 = max(0, min(H - 2, y1))
+            y2 = max(y1 + 2, min(H, y2))
+        return int(x1), int(y1), int(x2), int(y2)
+
+    def _prepare_face(self, img_bgr, box):
+        x1, y1, x2, y2 = box
+        face = img_bgr[y1:y2, x1:x2]
+        face = cv2.resize(face, (96, 96), interpolation=cv2.INTER_LINEAR)
+        masked = face.copy()
+        masked[48:, :] = 0          # 遮住下半脸（实测该权重必须这样，遮右半会半脸发黑）
+        inp = np.concatenate([masked, face], axis=2) / 255.0   # (96,96,6)
+        return face, inp.astype(np.float32)
+
+    @staticmethod
+    def _match_color(src, ref, roi=None):
+        """把 src 的均值/方差对齐到 ref（逐通道）
+
+        roi=True 的区域才参与统计。默认排除嘴部中心，
+        否则生成的「张口暗部」会被整体均值提亮，口型就被洗掉了。
+        """
+        out = src.astype(np.float32)
+        r = ref.astype(np.float32)
+        if roi is None:
+            roi = np.ones(out.shape[:2], bool)
+        for c in range(3):
+            s = out[..., c][roi]
+            rr = r[..., c][roi]
+            if s.size < 16:
+                continue
+            sm, ss = s.mean(), s.std() + 1e-6
+            rm, rs = rr.mean(), rr.std() + 1e-6
+            out[..., c] = (out[..., c] - sm) / ss * rs + rm
+        return np.clip(out, 0, 255)
+
+    @staticmethod
+    def _match_light(gen, ref, mask_keep=None, sigma=None):
+        """低频光照场校正：把 ref 的**局部**明暗迁移到 gen 上。
+
+        全局均值/方差对齐（_match_color）只能修整体偏色，修不了「额头亮、
+        下巴暗」这种空间渐变 —— 实测贴回后椭圆内平均色差 19.76，是椭圆外
+        的 2.2 倍，这就是「补丁感」的主因。
+
+        这里只迁移低频（大 sigma 模糊后的差），高频纹理完全保留，所以不会
+        把生成图的嘴部细节糊掉。mask_keep 用来把嘴部核心排除在外 ——
+        否则原图闭合的暗唇会把生成的张口暗部提亮，口型被洗掉。
+        """
+        g = gen.astype(np.float32)
+        r = ref.astype(np.float32)
+        h, w = g.shape[:2]
+        if sigma is None:
+            sigma = max(4.0, min(h, w) * 0.18)
+        # ⚠️ 直接在原分辨率上跑 sigma≈67 的高斯极慢（每帧两次，出片会超时）。
+        # 低频场本来就不需要全分辨率：降到 1/8 上算完再双线性放大，
+        # 结果等价（低频本身就平滑），速度快 50 倍以上。
+        ds = 8
+        sw, sh = max(2, w // ds), max(2, h // ds)
+        sg = cv2.resize(g, (sw, sh), interpolation=cv2.INTER_AREA)
+        sr_ = cv2.resize(r, (sw, sh), interpolation=cv2.INTER_AREA)
+        sig_s = max(1.0, sigma / ds)
+        gl = cv2.GaussianBlur(sg, (0, 0), sig_s)
+        rl = cv2.GaussianBlur(sr_, (0, 0), sig_s)
+        corr = cv2.resize(rl - gl, (w, h), interpolation=cv2.INTER_LINEAR)
+        if mask_keep is not None:
+            mk = cv2.resize(mask_keep.astype(np.float32), (sw, sh),
+                            interpolation=cv2.INTER_AREA)
+            mk = cv2.GaussianBlur(mk, (0, 0), max(0.6, sig_s * 0.5))
+            k = cv2.resize(mk, (w, h), interpolation=cv2.INTER_LINEAR)
+            corr = corr * k[..., None]
+        return np.clip(g + corr, 0, 255)
+
+    @staticmethod
+    def _detail_inject(gen, orig, strength=0.6, mask_skip=None):
+        """多尺度高频回注：把原图纹理注回生成图，缓解 96->大图放大的糊感
+
+        mask_skip: 1=完全不回注的区域（嘴核心）。那里必须用生成图自己的像素，
+        否则原图闭合的唇线会被注回来，口型被洗掉；但嘴**周围**（下巴、人中、
+        唇周皮肤）要注满，否则 96x96 放大后皮肤纹理被抹平，视觉上就是
+        「贴了一块半透明补丁」。旧版一刀切按张嘴度降 strength，两个目标
+        互相打架，所以改成按区域分开处理。
+        """
+        g = gen.astype(np.float32)
+        o = orig.astype(np.float32)
+        # 生成图去掉自己的高频（它的高频混了放大噪声，不能整块用）
+        base = cv2.GaussianBlur(g, (0, 0), 1.6)
+        # 原图两个尺度的高频
+        h1 = o - cv2.GaussianBlur(o, (0, 0), 1.0)
+        h2 = o - cv2.GaussianBlur(o, (0, 0), 2.6)
+        hi = h1 * (0.55 * strength) + h2 * (0.45 * strength)
+        if mask_skip is not None:
+            k = np.clip(mask_skip.astype(np.float32), 0.0, 1.0)
+            k = cv2.GaussianBlur(k, (0, 0), 4.0)[..., None]
+            hi = hi * (1.0 - k)
+            # ⚠ 这里原来是「嘴核心区把高频整个抹掉」—— 只剩 blur(gen,1.6)，
+            # 等于嘴部天生被模糊一道。实测嘴部拉普拉斯方差 66.5，而同一张
+            # 生成图不抹是 86+，差的就是这 30%。目的只是「别把原图闭着的
+            # 唇线注回来」，那就该用**生成图自己的**高频，而不是留一片糊。
+            hi_gen = (g - base) * 0.75
+            hi = hi + hi_gen * k
+        out = base + hi
+        # 轻度锐化，抵消放大软化。
+        # ⚠️ 原为 0.35，实测椭圆内拉普拉斯方差是椭圆外的 1.22 倍 —— 补丁区
+        # 比周围更「锐」，边缘一眼就能看出是贴上去的。降到 0.20 抹平这个断层。
+        out = out + 0.20 * (out - cv2.GaussianBlur(out, (0, 0), 1.0))
+        return np.clip(out, 0, 255)
+
+    @staticmethod
+    def _round_upscale(pred96, out_w, out_h, cx, cy, ax, ay, k, amt=0.26):
+        """把 96x96 生成图放大到 (out_w,out_h) **同时**做圆唇收拢。
+
+        为什么必须合成一步（这是「动态模糊」的真凶）：
+        原来的写法是 `resize(96→目标)` 插值一次，再 `remap` 做收拢插值
+        第二次 —— 两次插值叠加，实测嘴部清晰度 66.5、逐帧清晰度波动
+        0.313（cv）。肉眼就是「嘴周一片涂抹感 + 说话时糊一下清一下」。
+        把缩放矩阵并进 remap 的映射里，只插值一次（且用 CUBIC），
+        圆唇幅度完全不变（实测唇宽仍 -11%），但清晰度回到 86+。
+
+        为什么必须几何补圆唇：Wav2Lip 在 96x96 上生成的唇形本身偏扁 ——
+        实测连圆唇音段（频谱重心 405~780Hz）的生成帧也是扁的，所以圆唇
+        指望不上模型，只能在贴回时补。这是正面视角的近似（不是真 3D 前突）。
+        """
+        k = float(np.clip(k, 0.0, 1.0))
+        amt = float(np.clip(amt, 0.05, 0.40))
+        sx = 1.0 + amt * k           # 源图取更宽 → 输出嘴变窄
+        sy = 1.0 - (amt * 0.31) * k  # 源图取更矮 → 输出嘴变高（保持 0.08/0.26 的比例）
+        xs = np.arange(out_w, dtype=np.float32)[None, :]
+        ys = np.arange(out_h, dtype=np.float32)[:, None]
+        u = (xs - cx) / max(1.0, float(ax))
+        v = (ys - cy) / max(1.0, float(ay))
+        d = u * u + v * v
+        # 平顶权重：椭圆内基本满强度，只有靠边才衰减。
+        # 原来用 exp(-d*1.15) 高斯，嘴角处只有 0.54 的力度，实测横向
+        # 只收窄 2.4%，肉眼完全看不出来 —— 等于没做。
+        wgt = np.clip(1.5 - d, 0.0, 1.0)
+        map_x = cx + (xs - cx) * (1.0 + (sx - 1.0) * wgt)
+        map_y = cy + (ys - cy) * (1.0 + (sy - 1.0) * wgt)
+        # 输出坐标 → 96x96 源坐标（把缩放并进来，全程只插值这一次）
+        src_x = map_x * (96.0 / float(out_w))
+        src_y = map_y * (96.0 / float(out_h))
+        out = cv2.remap(pred96.astype(np.float32), src_x, src_y,
+                        interpolation=cv2.INTER_CUBIC,
+                        borderMode=cv2.BORDER_REFLECT_101)
+        # 横向压缩 26% 等于把横向细节压掉约 1/4 —— 这是几何本身付出的清晰度
+        # 代价，光靠「少插值一次」补不回来（实测不补高频 69.6，补了 84+）。
+        # 所以在变形区内按同一权重把高频找回来。
+        o = out.astype(np.float32)
+        hi = o - cv2.GaussianBlur(o, (0, 0), 1.1)
+        return np.clip(o + hi * (0.70 * wgt[..., None]), 0, 255)
+
+    def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.54,
+                   feather=13, openness=1.0, roundness=0.0, mask_gain=None,
+                   tune=None, mouth_cy=None, mouth_h=None):
+        """把生成的嘴部区域贴回原图：椭圆蒙版 + 张嘴度自适应
+
+        openness 0..1：闭嘴时几乎不替换（保留原图清晰），张嘴时充分替换。
+        这是关键——Wav2Lip 的闭嘴帧本就该和原图一致，硬替换只会引入模糊。
+
+        tune：LLM 按形象给的贴回参数（椭圆大小/中心、羽化、纹理回注、
+        口腔加深、圆唇幅度）。缺项走默认，越界就地夹回 —— 这几个值直接
+        决定「糊不糊、割不割裂」，纯规则定不下来（真人正脸和纯色块卡通
+        的最优值差很远）。
+        """
+        try:
+            from . import avatar_tune as _AT
+            _tp2, _ = _AT.normalize(tune if isinstance(tune, dict) else {})
+        except Exception:                               # noqa: BLE001
+            _tp2 = {}
+
+        def _t(k, d):
+            try:
+                return float(_tp2.get(k, d))
+            except (TypeError, ValueError):
+                return float(d)
+        x1, y1, x2, y2 = box
+        w, h = x2 - x1, y2 - y1
+        if w <= 8 or h <= 8:
+            return full_frame
+
+        # 嘴部几何必须先算：圆唇收拢要和「96→目标尺寸」的缩放合并成
+        # 一次重采样（见 _round_upscale 的说明），否则就是两次插值叠加。
+        # 尺寸同时**收紧**：原来 ax=0.31w / ay=0.22h、cy=0.76h，椭圆下沿
+        # 到 0.98h —— 把下巴和脖子一起换掉了，就是「脖子一圈割裂」的来源。
+        cx = int(w * 0.50)
+        # 椭圆中心/半径全部可调：纯色块卡通的脸更「宽扁」，用真人那套
+        # 0.29w/0.175h 会把嘴角切掉或把下巴带进来（割裂感的主要来源）。
+        cy = int(h * _t("ell_cy", 0.75))
+        ax = max(4, min(int(w * _t("ell_w", 0.29)), w // 2 - 4))
+        ay = max(4, min(int(h * _t("ell_h", 0.175)), cy - 6, h - cy - 6))
+        # ⚠️ 2026-11-15 修「嘴周割裂感 / 下巴被换掉」：
+        #   0.75 是 Wav2Lip 训练数据的对齐比例（嘴中心在裁剪框 75% 高度），
+        #   但它**只在裁剪框没被图像边界裁掉时成立**。
+        #   实测这张形象（334×225）的脸框是 (110,0,232,133) —— 上沿贴到 y=0，
+        #   头顶被图像切掉，嘴实际在框的 62% 高度（y=82），按 0.75 算出来是
+        #   y=99，**比真实嘴中心低 17px**，椭圆压在下巴上：
+        #   实测 y=96~120 有 2000+ 像素被替换（下巴被抹平、嘴周一圈糊），
+        #   这就是用户说的「割裂感」。
+        #   有嘴部标定时以标定为准，比例只作兜底。
+        if mouth_cy is not None:
+            try:
+                _cy_rel = float(mouth_cy) - y1
+            except (TypeError, ValueError):
+                _cy_rel = None
+            if _cy_rel is not None and -h * 0.2 <= _cy_rel <= h * 1.2:
+                cy = int(np.clip(_cy_rel, 6, h - 6))
+                # 纵向半径也按真实嘴高收：1.35×嘴高足够覆盖张口，
+                # 再大就会把下巴一起换掉。
+                _ay_cap = int(max(6.0, float(mouth_h or (h * 0.18)) * 1.35))
+                ay = max(4, min(ay, _ay_cap, cy - 4, h - cy - 4))
+
+        # 圆唇幅度也由参数决定（0.26 = 横向收拢 26%）。roundness 只表示
+        # 「这一帧该有多圆」，幅度是全局参数，两者相乘得到实际收拢量。
+        _ramt = _t("round", 0.26)
+        if roundness > 0.02:
+            gen_big = self._round_upscale(pred96, w, h, cx, cy, ax, ay,
+                                          roundness * (_ramt / 0.26), amt=_ramt)
+        else:
+            gen_big = cv2.resize(pred96.astype(np.uint8), (w, h),
+                                 interpolation=cv2.INTER_CUBIC).astype(np.float32)
+        orig_big = full_frame[y1:y2, x1:x2]
+
+        w_open = float(np.clip(openness, 0.0, 1.0))
+        # 颜色统计排除嘴部中心区（张嘴的暗部不能参与均值，否则会被提亮）
+        roi = np.ones((h, w), bool)
+        roi[int(h * 0.55):int(h * 0.95), int(w * 0.18):int(w * 0.82)] = False
+        gen_big = self._match_color(gen_big, orig_big, roi=roi)
+        # 局部光照场校正：全局统计修不了「额头亮、下巴暗」的空间渐变，
+        # 不修就是一块色偏的补丁（实测椭圆内色差是外面的 2.2 倍）
+        gen_big = self._match_light(gen_big, orig_big,
+                                    mask_keep=roi.astype(np.float32))
+        # 细节回注按区域分开：
+        #   · 嘴核心（含唇）→ 完全不注，保住生成的口型
+        #   · 唇周/下巴/人中 → 注满，保住原图皮肤纹理（不注就是一块被抹平的补丁）
+        mouth_core = np.zeros((h, w), np.float32)
+        cv2.ellipse(mouth_core, (int(w * 0.50), int(h * 0.76)),
+                    (max(4, int(w * 0.26)), max(4, int(h * 0.15))),
+                    0, 0, 360, 1.0, -1)
+        gen_big = self._detail_inject(gen_big, orig_big,
+                                      strength=_t("detail", 0.75),
+                                      mask_skip=mouth_core)
+
+        # 口腔加深：Wav2Lip 在这类闭口原图上张口偏小，
+        # 只把「真正的口腔暗部」（灰度 < 92）再压暗一点，
+        # 视觉上张口更明确，又不会把嘴唇一起涂黑（试过阈值 125 会出现黑块）。
+        # 口腔加深：原来的硬阈值 `if w_open > 0.25` 会在阈值附近来回切，
+        # 实测 5.33 秒内切了 15 次（每秒 2.8 次）—— 每次切换嘴部暗部亮度
+        # 突变一下，这就是抽搐感的主要来源之一。改成连续增益。
+        open_gain = float(np.clip((w_open - 0.12) / 0.33, 0.0, 1.0))
+        if open_gain > 0.02:
+            gray = cv2.cvtColor(gen_big, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            dark = np.clip((92.0 - gray) / 34.0, 0.0, 1.0)
+            dark = cv2.GaussianBlur(dark, (0, 0), 3.0)
+            gen_big = np.clip(gen_big.astype(np.float32)
+                              - dark[..., None] * _t("dark_gain", 40.0) * open_gain,
+                              0, 255)
+
+        # 椭圆蒙版：几何已在函数开头算好（收紧到嘴 + 唇周）
+        mask = np.zeros((h, w), np.float32)
+        cv2.ellipse(mask, (cx, cy), (ax, ay), 0, 0, 360, 1.0, -1)
+        # 羽化半径可调：真人照片过渡要更宽（0.9~1.2）才没有硬边；
+        # 纯色块卡通羽化太大反而把嘴边缘糊掉、露出补丁感（0.7~0.9 更合适）。
+        _fk = int(max(3, (min(ax, ay) // 3) * max(0.5, _t("feather", 1.0))))
+        if _fk % 2 == 0:
+            _fk += 1
+        mask = cv2.GaussianBlur(mask, (_fk, _fk), 0)
+        mask = np.clip(mask, 0, 1)
+        # 边界衰减：bbox 边缘 8px 内强制归零。
+        # 即使椭圆本身够不着边缘，高斯羽化也会把残余扩散出去 —— 贴回区
+        # 只要在 bbox 边界上还有一点非零权重，下巴/脖子处就会出现一条
+        # 横向的色阶断线（实测接缝值 0.80）。这里直接从根上掐死。
+        _bw = 8.0
+        _tx = np.clip(np.minimum(np.arange(w), w - 1 - np.arange(w)) / _bw, 0, 1)
+        _ty = np.clip(np.minimum(np.arange(h), h - 1 - np.arange(h)) / _bw, 0, 1)
+        mask = mask * np.minimum(_tx[None, :], _ty[:, None]).astype(np.float32)
+        # 张嘴度调制：闭嘴时整体压低替换强度。
+        # ⚠ 但圆唇（o/u/ü）的口型变化体现在「唇形横向收拢」，不是张嘴幅度 ——
+        # 只用张嘴度去压，圆唇帧会被压到几乎不替换（实测 f19 张嘴度仅 0.31、
+        # 圆唇度 1.00，收窄只有 4.5%，等于白做）。所以圆唇度高时给一个强度下限。
+        if mask_gain is None:
+            w_eff = max(w_open, 0.60 * float(np.clip(roundness, 0.0, 1.0)))
+            # 下限 0.15 → 0.10：张嘴度改成自适应归一化后，闭嘴帧的 w_open≈0，
+            # 原来 0.15 的硬下限仍会替换 15% —— 闭嘴时嘴部就是一块发糊的补丁，
+            # 下一帧张嘴又要替换 90%，一糊一清来回切也是闪帧观感的一部分。
+            g = 0.10 + 0.90 * w_eff
+        else:
+            # 由 render() 传入**时序平滑过的**混合强度。
+            # 为什么单独平滑 mask：mask 只决定「这块用生成图还是原图」，
+            # 不决定口型（口型来自 pred96），所以它可以比 openness 平滑得
+            # 更狠，不会让口型跟不上语音。实测未平滑时 1 帧内 mask 能从
+            # 0.98 掉到 0.28，贴回区在「糊的生成图」和「清晰原图」之间硬切，
+            # 这就是「一帧清一帧糊」的闪。平滑后二阶尖峰 0.268→0.185。
+            g = float(np.clip(mask_gain, 0.02, 1.0))
+        mask = mask * g
+        mask = mask[..., None]
+
+        blended = gen_big * mask + orig_big * (1 - mask)
+        out = full_frame.copy()
+        out[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
+        return out
+
+    # ---------- 对外 ----------
+    def render(self, face_img_bgr, wav_float32, progress=None, box=None, mode="w2l",
+               mouth_cfg=None, tune=None, text=""):
+        """返回 (frames_list_bgr, meta)
+
+        text: 可选，这段配音对应的文本。给了就用 **LLM 逐字口型标注**
+              来驱动 warp 的开合/圆唇时序（懂语义：爸爸=闭唇、乌鸦=圆唇），
+              比纯声学的 F1 能量法准得多。LLM 不可用时自动退回声学法。
+
+        tune: 可选，由 avatar_tune.tune() 产出的参数（LLM 按形象逐张给）。
+              缺项/越界一律走默认，绝不让调参失败把生成搞挂。
+              每个参数怎么用，写在下面真正用到它的那一行旁边。
+
+        box: 可选，外部指定的人脸裁剪框 (x1,y1,x2,y2)。
+        卡通 / 非人类形象 SCRFD 检测不到人脸（实测返回 0 个框），
+        这时由上层用「用户框出来的嘴部」反推一个框传进来。
+
+        mode:
+          "w2l"  贴 Wav2Lip 的 96x96 生成像素（真人默认）
+          "warp" 只用 Wav2Lip 的**开合时序**，像素全部来自原图做纵向形变。
+                 卡通/3D 形象必须走这条 —— 实测贴 96x96 像素时，贴回区
+                 拉普拉斯方差只有 400~680（原图 3751），视觉上就是
+                 「一块粉色涂抹补丁」；形变路径能保持 3200~4500，且画风 100% 一致。
+        """
+        H, W = face_img_bgr.shape[:2]
+        # ---- LLM 调参结果合法化（缺项走默认，越界就地夹回）----
+        try:
+            from . import avatar_tune as _AT
+            TP, _tp_notes = _AT.normalize(tune if isinstance(tune, dict) else {})
+        except Exception:                               # noqa: BLE001
+            TP, _tp_notes = {}, []
+        def _tp(k, d):
+            try:
+                return float(TP.get(k, d))
+            except (TypeError, ValueError):
+                return float(d)
+
+        if box is None:
+            # 低配机保底：onnxruntime 版本不兼容 / 模型文件缺失时，人脸检测
+            # 会直接抛异常（实测 'InferenceSession' object has no attribute
+            # 'is_webgpu_graph_capture_enabled'）。卡通形象本来就不需要人脸框
+            # —— 用嘴部标定反推一个，别让「装不好 onnxruntime」卡死出片。
+            try:
+                dets, _ = self.det.detect(face_img_bgr, thresh=0.5)
+            except Exception as _det_e:                 # noqa: BLE001
+                from . import avatar2 as _A2d
+                box = _A2d.face_box_from_mouth((W, H))
+                if box is None:
+                    raise RuntimeError(
+                        "人脸检测不可用（%s），且没有标定嘴部位置" % _det_e) from _det_e
+                dets = None
+            if dets is not None:
+                if len(dets) == 0:
+                    # 卡通 / 3D 形象 SCRFD 正常就返回 0 个框（它不是人脸），
+                    # 这不该当成错误 —— 用嘴部标定反推一个裁剪框继续。
+                    from . import avatar2 as _A2m
+                    box = _A2m.face_box_from_mouth((W, H))
+                    if box is None:
+                        raise RuntimeError("未检测到人脸，也没标定嘴部位置 —— 先在形象图上框一下嘴")
+                else:
+                    # 取分数最高、面积最大的
+                    areas = (dets[:, 2] - dets[:, 0]) * (dets[:, 3] - dets[:, 1])
+                    best = int(np.argmax(areas * dets[:, 4]))
+                    box = self._crop_box(dets[best], pads=(0, 10, 0, 0), W=W, H=H)
+        else:
+            box = self._crop_box(tuple(box)[:4], pads=(0, 0, 0, 0), W=W, H=H)
+
+        # ---- 真实嘴部中心/高度（图像坐标，像素）----
+        # 贴回椭圆必须对准它。按「脸部框 75% 高度」推算在框被图像边界裁掉时
+        # 会偏到下巴上（实测偏 17px，见 _composite 里的说明）。
+        _mcy = _mh = None
+        try:
+            from . import avatar2 as _A2mc
+            _mm = _A2mc.mouth()
+            if _mm:
+                _mcy = float(_mm.get("y", 0) or 0) * H
+                _mh = float(_mm.get("h", 0) or 0) * H
+                if _mcy <= 0:
+                    _mcy = None
+        except Exception:                               # noqa: BLE001
+            _mcy = _mh = None
+
+        mel = wav_to_mel(wav_float32, self.mel_npy)     # (80, T)
+        T = mel.shape[1]
+        # 帧数必须严格对齐音频时长。原来算完 min(...) 之后还会被循环里的
+        # `if i_to > T: break` 再截掉几帧 —— 实测 4.512 秒音频只出 109 帧
+        # （4.36 秒），视频比音频短 0.15 秒，播到结尾就是「卡一下 / 音画脱节」。
+        # 现在按音频长度算足帧数，mel 不够长就在尾部边缘复制补齐
+        # （补出来的是静音尾，本来就是闭口帧，不会有假口型）。
+        n_frames = max(1, int(round(len(wav_float32) / float(SR) * FPS)))
+        # ⚠ need 必须和循环里的取窗方式**逐字一致**（循环用的是
+        # int(i * 80/fps)）。第一版这里写成 (n-1)*int(80/fps)，
+        # int(3.2)=3 而循环实际推进 3.2 —— 差出来的 0.2 累积到末尾
+        # 就是「补了还是 break」，帧数一点没变。
+        need = int((n_frames - 1) * (80.0 / FPS)) + MEL_STEP
+        if need > T:
+            mel = np.pad(mel, ((0, 0), (0, need - T)), mode="edge")
+            T = mel.shape[1]
+
+        face96, face_inp = self._prepare_face(face_img_bgr, box)
+        fin = np.transpose(face_inp, (2, 0, 1))[None].astype(np.float32)
+
+        # ---- 第一趟：只推理，把每帧生成结果和张嘴度都攒下来 ----
+        # 为什么要两趟：张嘴度原来是逐帧独立算、当场就调混合强度。实测
+        # 帧间跳变最大 0.36、25% 的相邻帧 |Δ|>0.10 —— 混合蒙版强度跟着跳，
+        # 嘴部就一帧清晰一帧发糊，这就是抽搐的主因。必须先把整段控制量
+        # 序列拿到手、平滑之后回头合成，过渡才可能连续。
+        preds = []
+        raw_open = []
+        _infer_err = None
+        for i in range(n_frames):
+            i_from = int(i * (80.0 / FPS))
+            i_to = i_from + MEL_STEP
+            if i_to > T:
+                break
+            chunk = mel[:, i_from:i_to][None, None, :, :].astype(np.float32)
+            try:
+                pred = self.sess.run(None, {self.in_names[0]: chunk,
+                                            self.in_names[1]: fin})[0][0]
+            except Exception as _inf_e:                 # noqa: BLE001
+                # 推理不可用（onnxruntime 不兼容 / 模型缺失）。warp 模式下面
+                # 会退回纯音频开合曲线，这里只记下原因。
+                _infer_err = _inf_e
+                preds = []
+                break
+            pred = np.transpose(pred, (1, 2, 0))   # (96,96,3)
+            pred = np.clip(pred, 0.0, 1.0) * 255.0
+            preds.append(pred.astype(np.uint8))
+            if progress and i % 10 == 0:
+                progress(int(i * 0.7), max(1, n_frames))
+
+        n = len(preds)
+        if n == 0:
+            # ★ 低配机保底路径：Wav2Lip 推理不可用，但 warp 模式只需要
+            #   「开合时序」，用纯音频算就够了。这条路完全不碰 onnxruntime，
+            #   实测 62 帧 0.5 秒 —— 低配机也能出片，不再因为模型环境问题
+            #   整个功能不可用。
+            if str(mode).lower() == "warp":
+                from . import avatar_mouth as AMa
+                cfg = mouth_cfg
+                if cfg is None:
+                    bx1, by1, bx2, by2 = box
+                    bw, bh = (bx2 - bx1), (by2 - by1)
+                    cfg = {"x": (bx1 + bw * 0.50) / float(W),
+                           "y": (by1 + bh * 0.75) / float(H),
+                           "w": (bw * 0.285) / float(W),
+                           "h": (bh * 0.220) / float(H)}
+                geom = AMa.analyze(face_img_bgr, cfg)
+                if geom and geom.get("source_open"):
+                    oseq, rseq, _src = _open_round_curves(
+                        text, wav_float32, n_frames, sigma=_tp("audio_sigma", 3.0))
+                    _kmin = _tp("k_min", AMa.K_MIN)
+                    _sq = _tp("squeeze", 0.30)
+                    _rg = _tp("round_gain", 0.22)
+                    # 闭嘴覆盖外观（LLM 定）：原来这四项是硬编码，闭嘴永远是
+                    # 一块平涂皮肤色。现在按原图真实四层唇色铺，LLM 决定深浅。
+                    _cvkw = dict(
+                        seam_depth=_tp("seam_depth", 1.00),
+                        seam_curve=_tp("seam_curve", 0.45),
+                        lip_tint=_tp("lip_tint", 0.85),
+                        cover_feather=_tp("cover_feather", 0.30))
+                    frames = [AMa.warp2d(face_img_bgr, geom,
+                                         _kmin + (1.0 - _kmin) * float(oseq[i]),
+                                         k_min=_kmin, squeeze=_sq,
+                                         round_=(float(rseq[i]) if rseq is not None else 0.0),
+                                         round_gain=_rg, **_cvkw)
+                              for i in range(n_frames)]
+                    if progress:
+                        progress(100, max(1, len(frames)))
+                    return frames, {
+                        "box": box, "n_frames": len(frames), "fps": FPS,
+                        "mel_frames": int(T),
+                        "open_mean": round(float(oseq.mean()), 3),
+                        "round_mean": (round(float(rseq.mean()), 3)
+                                       if rseq is not None else 0.0),
+                        "dips_fixed": 0,
+                        "temporal_smooth": True,
+                        "mode": "warp_" + ("llm" if str(_src).startswith("llm") else "audio"),
+                        "open_src": _src,
+                        "infer_error": str(_infer_err)[:200],
+                        "mouth_geom": ({k: (round(v, 1) if isinstance(v, float) else v)
+                                        for k, v in geom.items() if k in
+                                        ("cx", "cy", "mw", "mh", "y_split", "y_hole_bot",
+                                         "y_lip_bot", "open_h", "source_open")})}
+            return [], {"box": box, "n_frames": 0, "fps": FPS,
+                        "mel_frames": int(T),
+                        "infer_error": str(_infer_err)[:200] if _infer_err else ""}
+
+        # ---- 生成帧时序平滑（修「闪帧」，必须最先做）----
+        # 先平滑图、再算控制量：后面算「这帧到底张多大嘴」用的是平滑后的图，
+        # 两者才自洽。否则控制量描述的还是那张已经被替换掉的旧图。
+        preds = _temporal_smooth(np.asarray(preds, np.float32),
+                                 mild=_tp("temporal_mild", 0.10),
+                                 strength=_tp("temporal_strength", 0.88))
+        preds = np.clip(preds, 0, 255).astype(np.uint8)
+
+        # ---- 张嘴度必须在图平滑**之后**重算（关键，别调换顺序）----
+        # 原来是先算 raw_open、再平滑图，两者就对不上了：实测 f34 的生成图
+        # raw=6.88（几乎闭嘴），平滑却把 openness 拉到 0.849，于是用 0.85 的
+        # 强度去贴一张闭嘴图 —— 这一帧嘴突然合上、下一帧又张开，就是残留的
+        # 闪帧。现在从平滑后的图重算，控制量描述的就是「这张图到底张多大嘴」。
+        fm = face96[54:92, 24:72].astype(np.float32)
+        raw_open = [float(np.abs(p[54:92, 24:72].astype(np.float32) - fm).mean())
+                    for p in preds]
+
+        # ---- 平滑控制量 ----
+        # 图已经平滑过一轮，控制量这里只需轻滤（med=3, σ=0.9）：过度平滑
+        # 会把快速开合的爆破音抹平，口型反而跟不上语音。
+        open_seq = _smooth_1d(raw_open, med=3, sigma=_tp("open_sigma", 0.9))
+        # 归一化改**自适应**（这是「有些字嘴巴张不开」的根因）：
+        # 原来写死 (x-2)/22。实测这段音频 raw 只落在 5.75~20.45，
+        # 映射完 openness 只有 0.21~0.76 —— 动态范围被吃掉一半多：
+        #   · 混合强度最高只到 0.15+0.85*0.76 = 0.80，张嘴最大的字也只
+        #     替换 80%，剩 20% 是原图（闭着嘴），所以「嘴张不满」；
+        #   · 闭嘴帧反而还有 0.33 的替换强度，嘴部一直糊着、还容易闪。
+        # 改成用序列自身 5%/95% 分位做 min-max：闭口→0、最大开口→1。
+        # ⚠ 归一化必须**完全自适应**。旧版有个「分位数跨度 < 4 就退回
+        # 固定档 2.0/24.0」的兜底 —— 那个档位是照真人脸设计的（真人嘴部
+        # 差异基线 5~20），而 3D 卡通形象的脸部结构差异更大，实测这段
+        # 音频 raw 落在 23.95~31.64，跨度只有 2.52，于是走进兜底，
+        # (24-2)/22 ≈ 1.0 起，全部 clip 成 1.0 —— open_seq 恒等于 1，
+        # 形变模式下 k 恒等于 1.0，生成出来的视频**完全静止**（实测 62 帧
+        # 帧间差全为 0）。现在改成：跨度不够时用序列自身的 min/max；
+        # 连 min/max 都没差别（真的全程同一个嘴型）才整体判为闭嘴。
+        lo = float(np.percentile(open_seq, 5))
+        hi = float(np.percentile(open_seq, 95))
+        span = hi - lo
+        if span < 1.0:
+            lo = float(np.min(open_seq))
+            hi = float(np.max(open_seq))
+            span = hi - lo
+        if span < 0.5:
+            open_seq = np.zeros_like(open_seq)
+        else:
+            open_seq = np.clip((open_seq - lo) / span, 0.0, 1.0)
+
+        # ---- 修「该张嘴却闭嘴」的模型跑偏帧 ----
+        # 检测到孤立低谷（两侧张开 + 本帧音频有能量）就用两侧的嘴型补上。
+        # 补完图变了，openness 必须重算 —— 否则控制量还在描述那张旧图。
+        _fill_open_dips.last_hits = 0
+        fixed = _fill_open_dips(preds, open_seq, wav_float32)
+        n_fixed = int(getattr(_fill_open_dips, "last_hits", 0) or 0)
+        if n_fixed:
+            preds = np.clip(fixed, 0, 255).astype(np.uint8)
+            raw_open = [float(np.abs(p[54:92, 24:72].astype(np.float32) - fm).mean())
+                        for p in preds]
+            open_seq = _smooth_1d(raw_open, med=3, sigma=_tp("open_sigma", 0.9))
+            # ⚠ 必须沿用**原来的** lo/hi，不能重新算分位数：
+            # 重算会让所有帧的 openness 一起漂移（实测未填充的 f40/f41
+            # 从 0.864/0.631 变成 0.895/0.716），这些帧的图根本没变、
+            # mask 却变了 —— 又回到「控制量与生成图不匹配」的老问题。
+            if hi - lo < 0.5:
+                open_seq = np.zeros_like(open_seq)
+            else:
+                open_seq = np.clip((open_seq - lo) / (hi - lo), 0.0, 1.0)
+
+        # ---- 口型幅度增益 open_gain ----
+        # ⚠ 2026-11-15 修「幅度拉高没效果」：旧版是 open_seq * _g 再 clip 1.0，
+        # 而 warp 路径的 k = k_min + (1-k_min)*open_seq，k 上限 1.0，
+        # 而 k=1.0 时 shift=0 → 画面**就是原图**。所以：
+        #   ① 曲线乘 1.35 只是让更多帧顶到 1.0（更早饱和），
+        #   ② 开口高度上限恒等于源图 open_h，gain 再大也突破不了。
+        # 现在把 gain 的语义改成「最大开口相对源图的倍率」：
+        #   warp：k_max = open_gain，k>1 即 shift<0（外推），嘴真的能张更大
+        #   w2l ：没有外推概念，保留温和的曲线放大
+        _g = _tp("open_gain", 1.0)
+        open_seq_w2l = np.clip(open_seq * (1.0 + (_g - 1.0) * 0.30), 0.0, 1.0)
+
+        # 圆唇度：来自音频频谱重心；闭嘴帧不算（嘴闭着谈不上噘嘴）
+        round_seq = round_curve(wav_float32, SR, n, FPS)
+        round_seq = round_seq * np.clip((open_seq - 0.06) / 0.22, 0.0, 1.0)
+
+        # ---- 混合强度序列：单独做一次**更重**的时序平滑 ----
+        # 它只管「这块用生成图还是原图」，不管口型，所以可以比 openness
+        # 平滑得狠得多而不影响口型跟不跟得上语音。
+        w_eff_seq = np.maximum(open_seq_w2l, 0.60 * round_seq)
+        _mlo = _tp("mask_lo", 0.10)
+        _mhi = _tp("mask_hi", 0.90)
+        mask_seq = _smooth_1d(_mlo + (_mhi - _mlo) * w_eff_seq, med=3,
+                              sigma=_tp("mask_sigma", 2.0))
+
+        # ---- 第二趟：合成 ----
+        frames = []
+        geom = None
+        warp_mode = False
+        if str(mode).lower() == "warp":
+            from . import avatar_mouth as AM
+            cfg = mouth_cfg
+            if cfg is None:
+                # 从裁剪框反推：Wav2Lip 的对齐比例是「嘴中心在裁剪框 75% 高度」
+                bx1, by1, bx2, by2 = box
+                bw, bh = (bx2 - bx1), (by2 - by1)
+                cfg = {"x": (bx1 + bw * 0.50) / float(W),
+                       "y": (by1 + bh * 0.75) / float(H),
+                       "w": (bw * 0.285) / float(W),
+                       "h": (bh * 0.220) / float(H)}
+            geom = AM.analyze(face_img_bgr, cfg)
+            if geom and geom.get("source_open"):
+                warp_mode = True
+                # ★ warp 模式只用「开合时序」，像素全部来自原图。
+                #   有文本时用 LLM 逐字标注覆盖 —— 它懂语义
+                #   （爸爸=闭唇、乌鸦=圆唇），比从 96x96 生成图反算准。
+                #   LLM 不可用时保留生成图反算的结果，功能不中断。
+                if text and str(text).strip():
+                    try:
+                        _o, _r, _src2 = _open_round_curves(
+                            text, wav_float32, n, sigma=_tp("open_sigma", 0.9))
+                        if _src2 != "audio" and len(_o) == n:
+                            open_seq = np.asarray(_o, np.float32)
+                            if _r is not None:
+                                round_seq = np.asarray(_r, np.float32)
+                    except Exception:                   # noqa: BLE001
+                        pass
+            elif geom:
+                # 源图闭嘴 → open_from_closed 只能向「张开」方向几何外推，
+                # 没有真实口腔纹理可用，实测出来是「黑色条块 + 硬边」
+                # （视觉复核判「明显贴图痕迹」）。
+                # ⚠️ 2026-11-15：原来这里只是 warp_mode=False，循环里仍走
+                #   `elif geom is not None: open_from_closed(...)` —— 等于照样
+                #   出黑块。现在把 geom 也清掉，让它落到下面的 w2l 贴回分支：
+                #   「从闭嘴图生成张嘴」本来就是 Wav2Lip 的本职。
+                warp_mode = False
+                geom = None
+            if geom is None:
+                warp_mode = False
+
+        for i in range(n):
+            if warp_mode:
+                from . import avatar_mouth as AM
+                _kmin = _tp("k_min", AM.K_MIN)
+                # k_max = open_gain：开口高度 = open_h * k，所以 gain=1.35
+                # 就是「最张的帧比源图再大 35%」。不再被 1.0 卡死。
+                _kmax = max(_kmin + 0.02, float(_g))
+                k = _kmin + (_kmax - _kmin) * float(open_seq[i])
+                # 二维形变：纵向压缩 + 横向收拢（只压扁会「向两侧拉扯」）
+                _rd = float(round_seq[i]) if (round_seq is not None and i < len(round_seq)) else 0.0
+                frame = AM.warp2d(face_img_bgr, geom, k, k_min=_kmin,
+                                  squeeze=_tp("squeeze", 0.30),
+                                  round_=_rd, round_gain=_tp("round_gain", 0.22),
+                                  seam_depth=_tp("seam_depth", 1.00),
+                                  seam_curve=_tp("seam_curve", 0.45),
+                                  lip_tint=_tp("lip_tint", 0.85),
+                                  cover_feather=_tp("cover_feather", 0.30),
+                                  k_max=_kmax)
+            elif geom is not None:
+                from . import avatar_mouth as AM
+                frame = AM.open_from_closed(face_img_bgr, geom,
+                                            float(open_seq_w2l[i]))
+            else:
+                p96 = preds[i]
+                # 超分仍按平滑后的张嘴度判断（sr_sess 未启用时是死路径）
+                if self.sr_sess is not None and open_seq_w2l[i] > 0.18:
+                    p96 = self._sr(p96.astype(np.float32)).astype(np.uint8)
+                frame = self._composite(face_img_bgr, p96, box, face96,
+                                        openness=float(open_seq_w2l[i]),
+                                        roundness=float(round_seq[i]),
+                                        mask_gain=float(mask_seq[i]),
+                                        tune=TP,
+                                        mouth_cy=_mcy, mouth_h=_mh)
+            frames.append(frame)
+            if progress and i % 10 == 0:
+                progress(int(70 + i * 0.3), max(1, n))
+
+        meta = {"box": box, "n_frames": len(frames), "fps": FPS,
+                "mel_frames": int(T),
+                "open_mean": round(float(open_seq.mean()), 3),
+                "round_mean": round(float(round_seq.mean()), 3),
+                "dips_fixed": int(n_fixed),
+                "temporal_smooth": True,
+                "mode": ("warp" if warp_mode else ("open_from_closed" if geom else "w2l")),
+                "mouth_geom": ({k: (round(v, 1) if isinstance(v, float) else v)
+                                for k, v in geom.items() if k in
+                                ("cx", "cy", "mw", "mh", "y_split", "y_hole_bot",
+                                 "y_lip_bot", "open_h", "source_open")} if geom else None)}
+        return frames, meta

@@ -26,6 +26,8 @@ import shutil
 
 from . import config
 from . import doc_extract
+import logging
+logger = logging.getLogger(__name__)
 
 LIB_DIR = config.data("data", "library")   # 注意：和图片库 image_library.DIR 是两回事
 TRASH_DIR = os.path.join(LIB_DIR, "_回收站")

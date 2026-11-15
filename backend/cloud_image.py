@@ -29,6 +29,8 @@ import time
 from typing import Any
 
 import requests
+import logging
+logger = logging.getLogger(__name__)
 
 # 默认服务商（用户指定）：xingpan.site 的 OpenAI 兼容代理
 DEFAULT_BASE = "https://xingpan.site/v1"
@@ -184,7 +186,7 @@ def _key(k: str) -> str:
             from . import keyvault
             keyvault.remember_image_key(k)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         return k
     try:
         from . import keyvault
@@ -358,7 +360,7 @@ def _remember_model(model: str, *, edit: bool = False) -> None:
             cfg[keyn] = model
             _c.save_config(cfg)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def generate(prompt: str, key: str, *, size: str = "", aspect: str = "",

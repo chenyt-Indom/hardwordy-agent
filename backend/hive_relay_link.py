@@ -39,6 +39,8 @@ from typing import Any, Dict, List, Optional
 import backend.hive as H
 import backend.hive_mesh as MESH
 from backend import ws_min
+import logging
+logger = logging.getLogger(__name__)
 
 PROTO = 1
 HDR = struct.Struct(">IB")
@@ -245,19 +247,19 @@ def _set_keepalive(sock: socket.socket) -> None:
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         if hasattr(socket, "TCP_KEEPIDLE"):        # Linux / macOS
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 20)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         if hasattr(socket, "SIO_KEEPALIVE_VALS"):  # Windows
             sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 20000, 5000))
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _wrap_tls(sock: socket.socket, host: str, port: int, timeout: float):
@@ -280,7 +282,7 @@ def _wrap_tls(sock: socket.socket, host: str, port: int, timeout: float):
         try:
             sock.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     # 宽松重试：重新建一条连接再包
     s2 = socket.create_connection((host, port), timeout=timeout)
     s2.settimeout(timeout)
@@ -323,7 +325,7 @@ def probe(url: str, token: str = "", timeout: float = 4.0) -> Dict[str, Any]:
             c = json.loads(body.decode("utf-8"))
             nonce = str(c.get("nonce") or "")
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         _send_pkt(s, K_CTRL, json.dumps({"op": "health"}).encode("utf-8"))
         got = _recv_pkt(s)
         info: Dict[str, Any] = {}
@@ -339,7 +341,7 @@ def probe(url: str, token: str = "", timeout: float = 4.0) -> Dict[str, Any]:
         try:
             s.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
 
 # ---------------------------------------------------------------- 虚拟 peer
@@ -372,7 +374,7 @@ def _open_sock(p, timeout: float = 5.0):
             try:
                 s.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             raise RuntimeError("WebSocket 握手失败")
         s = ws_min.WSSock(s, rest=rest, mask_out=True)
     return s
@@ -394,7 +396,7 @@ def _dir_call(url: str, token: str, op: str, extra: Dict[str, Any],
         try:
             nonce = str(json.loads(got[1].decode("utf-8")).get("nonce") or "")
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         mac = hmac.new(token.encode("utf-8"),
                        (nonce + "|dir").encode("utf-8"),
                        hashlib.sha256).hexdigest()
@@ -416,7 +418,7 @@ def _dir_call(url: str, token: str, op: str, extra: Dict[str, Any],
             try:
                 s.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
 
 def dir_publish(url: str, token: str, password: str, gid: str,
@@ -548,7 +550,7 @@ class RelayLink:
                 json.dump({"seq": self._seqs}, f)
             os.replace(tmp, self._state_path)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     def _note_seq(self, seq: int) -> None:
         if seq <= self.last_seq:
@@ -640,18 +642,18 @@ class RelayLink:
                 try:
                     node.peers.remove(peer)
                 except ValueError:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         sock = self.sock
         self.sock = None
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             try:
                 sock.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     # -------------------------------------------------- 连接循环
 
@@ -786,7 +788,7 @@ class RelayLink:
                     try:
                         sock.shutdown(socket.SHUT_RDWR)
                     except Exception:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
                 continue
             try:
                 sent = self.ping()
@@ -801,7 +803,7 @@ class RelayLink:
                     try:
                         sock.shutdown(socket.SHUT_RDWR)
                     except Exception:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
 
     def _connect_once(self, p: Optional[Dict[str, Any]] = None,
                       last: bool = False) -> bool:
@@ -833,7 +835,7 @@ class RelayLink:
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         _set_keepalive(sock)
         self.tls_unverified = False
         self._fail_hard = False      # True = 这条不是我们的中继，别频繁重试
@@ -855,7 +857,7 @@ class RelayLink:
                 try:
                     sock.close()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 return False
             if rest is None:
                 self.error = ("WebSocket 握手失败 —— 检查 nginx 里 %s 这条 "
@@ -864,7 +866,7 @@ class RelayLink:
                 try:
                     sock.close()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 return False
             sock = ws_min.WSSock(sock, rest=rest, mask_out=True)
 
@@ -919,7 +921,7 @@ class RelayLink:
         try:
             sock.settimeout(None)      # 握手完成，恢复正常阻塞收包
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         self.sock = sock
 
         # 把中继挂成一个 peer —— 从此 mesh 的所有发送都会经过它
@@ -1121,7 +1123,7 @@ class RelayLink:
             try:
                 node._dispatch(peer, typ, obj)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         if not self._stop:
             self.state = "connecting"
             self.error = "连接断开，正在重连"

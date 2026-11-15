@@ -1,0 +1,392 @@
+# -*- coding: utf-8 -*-
+"""全局配置：Hardwordy Agent
+所有可在界面中调整的参数集中在此，便于“包括环境与参数”的定制需求。
+"""
+import json
+import os
+import sys
+import logging
+logger = logging.getLogger(__name__)
+
+# 项目根 / 后端包目录
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+
+
+def is_frozen() -> bool:
+    """是否处于 PyInstaller 打包运行状态。"""
+    return bool(getattr(sys, "frozen", False))
+
+
+def res_root() -> str:
+    """只读打包资源根（打包后为 _MEIPASS/_internal；源码运行时为项目根）。
+    frontend、SD 模型权重等只读资源都放这里。"""
+    return getattr(sys, "_MEIPASS", PROJECT_ROOT)
+
+
+def data_root() -> str:
+    """可写运行数据根。
+
+    优先级：环境变量 MM_DATA_DIR > 打包后 exe 同级目录 > 源码项目根。
+    config.json、data/ 记忆与会话等运行时数据放这里。
+    Docker 部署时设置 MM_DATA_DIR=/data，即可只挂载一个卷实现全部数据持久化。
+    """
+    env = os.environ.get("MM_DATA_DIR")
+    if env:
+        os.makedirs(env, exist_ok=True)
+        return env
+    return os.path.dirname(sys.executable) if is_frozen() else PROJECT_ROOT
+
+
+def res(*parts: str) -> str:
+    """拼只读资源路径。"""
+    return os.path.join(res_root(), *parts)
+
+
+def models_root() -> str:
+    """模型权重根目录（2026-10-16 补：便携整合包的核心）。
+
+    为什么要单独有这个概念：原来权重路径是**写死的绝对路径**
+    （`E:\\local-multimodal-models\\sdxl-base`），一旦包被挪到别的盘、
+    或者别人拿到的是便携包，就找不到权重 —— 而代码在找不到时会去联网下载
+    （国内下不动），用户只看到"一直等待上线中"。
+    改成**相对自身**解析后，整个目录整块拷到任何位置都能直接用。
+
+    优先级：
+      1) 环境变量 `MM_MODELS_DIR`（便携包的启动器会设成 `<包根>\\models`）；
+      2) 环境变量 `MM_BUNDLE_ROOT` 下的 `models\\`；
+      3) 源码/包内约定：代码在 `app\\` 里 ⇒ 用 `<包根>\\models`；
+      4) `<资源根>\\models`（开发机把权重放源码树里时）；
+    都不存在时返回第 3（或 4）条候选 —— 调用方会用 `_missing_model_error`
+    把"找过哪些位置"告诉用户。
+    """
+    env = os.environ.get("MM_MODELS_DIR")
+    if env:
+        return env
+    bundle = os.environ.get("MM_BUNDLE_ROOT")
+    if bundle:
+        return os.path.join(bundle, "models")
+    root = res_root().rstrip("\\/") or res_root()
+    cands = []
+    if os.path.basename(root).lower() == "app":
+        cands.append(os.path.join(os.path.dirname(root), "models"))
+    cands.append(os.path.join(root, "models"))
+    for c in cands:
+        if os.path.isdir(c):
+            return c
+    return cands[-1]
+
+
+def data(*parts: str) -> str:
+    """拼可写数据路径，并确保父目录存在。"""
+    path = os.path.join(data_root(), *parts)
+    os.makedirs(os.path.dirname(path) or data_root(), exist_ok=True)
+    return path
+
+
+CONFIG_FILE = data("config.json")
+
+DEFAULT_CONFIG = {
+    # Ollama 本地服务地址（请保证 ollama serve 已启动）
+    "ollama_url": "http://127.0.0.1:11434",
+    # 默认模型。⚠️ 2026-09-26 从 qwen3-vl:8b 升到 **qwen3-vl:30b**：
+    #   · 30B MoE（总参 30.5B / 激活 3.3B），知识广度与看图能力明显强于 8B；
+    #   · 实测看图问答 52.8 tok/s（MoE 只激活 3.3B，速度没受参数量拖累）；
+    #   · Q4_K_M 约 19GB，12GB 显存装不满 → 部分落内存，但 MoE 的掉速远小于 dense。
+    #   ⚠️ 这个模型是从 ModelScope 的 GGUF 导入的（ollama 官方源国内下不动，见 README）。
+    #   ⚠️ 导入时必须同时带 mmproj（视觉投影层），否则图片输入会报
+    #      `this model is missing data required for image input`。
+    # 默认模型。⚠️ 2026-09-26 两次调整：8b → 30b(instruct) → **30b(Thinking)**。
+    #
+    # 为什么要 Thinking 版：用户明确要求「模型要输出思考过程」。
+    # ⚠️⚠️ 实测踩过的坑：**Instruct 权重 + thinking 渲染器 = 正文永远是空的** ——
+    #   模型把回答整个塞进 `thinking` 字段，`content` 返回空字符串
+    #   （问「什么是质数」→ 思考里写满了答案，正文 0 字）。
+    #   必须用真正的 Thinking 版权重，才既有思考又有正文。
+    #
+    # 为什么走 ModelScope 的 GGUF：ollama 官方源在国内反复卡停
+    #   （掉到 0~1.8 KB/s，重试还会让进度倒退），ModelScope 实测 8~14 MB/s。
+    # ⚠️ 导入时必须同时带 mmproj（视觉投影层），Modelfile 里写两个 FROM；
+    #   只导主模型的话图片输入会报 `this model is missing data required for image input`。
+    #
+    # ⚠️ 速度实情：12GB 显存装不下 18.3GB 的 Q4_K_M，约 9GB 落在内存里跑，
+    #   实测 12~14 tok/s、首字 2.4s。**think=false 关不掉思考**（旧模型也实测无效）。
+    "default_model": "qwen3-vl:30b",
+    # 推理参数
+    "temperature": 0.6,
+    # ★ 2026-11-14 群聊 @hd 的输出上限（token 数）。
+    #   原来在 main.py 里写死 2400 —— 约 1200~1500 个汉字，
+    #   让模型写长文/长报告必然半路截断（实测模型自己在结尾写
+    #   「文章达到 max_tokens 上限被截断」）。
+    #   默认 0 = **跟随单人配置**（上面的 max_tokens，8192），
+    #   这样「群里和单聊能力一致」；填正数才单独覆盖群聊。
+    #   代码里夹紧到 512~32000。
+    #   ⚠️ 必须放在 DEFAULT_CONFIG 里：save_config() 只回写这里列出的键，
+    #      不放进来会在用户保存设置时被静默清掉。
+    "hive_max_tokens": 0,
+    # ---------- 采样：专门用来压「思考打转」（复读）----------
+    # ⚠️ 症状：思考过程里同一段话换个连接词反复写 ——
+    #    「可能的题目：… 或者：… 可能需要换一个例子：… 例如：…」，
+    #    同一句出现三四遍。用户看到的就是"思考里全是重复内容"。
+    #    它不报错、不超时，只是把输出预算全烧在绕圈上（2026-09-19 用户反馈）。
+    #
+    # ⚠️⚠️ **真正的元凶是 Ollama 的 `repeat_last_n` 默认值 64**：
+    #    64 个 token ≈ 40 个汉字，而打转是**段落级**的 —— 重复的那段话本身就有
+    #    30~60 个字，窗口刚好"盖不住"，惩罚压根没作用在重复段上。
+    #
+    # 实测（用真实那一轮的上下文，每组跑 2 次，"重复短语组数 / 最高重复次数 /
+    # 打转词出现次数"）：
+    #    现状（temp0.7 + Ollama 默认 64）→ 15·7  / 5·3 / 8·7   ← 最差
+    #    last_n=512 + 1.15              → 3·6  / 2·3 / 8·5
+    #    temp0.6 + 512 + presence 1.0   → 1·5  / 2·2 / 2·5
+    #    temp0.6 + last_n=1024 + 1.2    → 1·2  / 1·1 / 2·3   ← 最好，选它
+    #
+    # 调参提示：`repeat_penalty` 别超过 1.3 —— 太高会让模型变得结巴、用词错乱，
+    # 比重复更糟（1.6 实测更差）。觉得模型话变啰嗦/变笨了就把它调回 1.1。
+    "repeat_penalty": 1.2,
+    "repeat_last_n": 1024,
+    # 采样范围（nucleus sampling）：只在"概率加起来到 top_p 的那批词"里挑下一个词。
+    # 0.95 是 Qwen3 官方推荐值 —— 既排掉长尾的胡言乱语，又保留一点灵活度。
+    # · 调到 1.0：连很离谱的词也纳入候选 → 更有创意、但也更容易跑偏/胡编
+    # · 调低于 0.5：变得死板，而且**容易开始重复**（可挑的词太少，来回绕）
+    # 界面上顶栏「🎛 采样」可以直接拖，改完立刻生效（不用重启）。
+    "top_p": 0.95,
+    # 上下文窗口（token 数）。**这个值必须在所有模型调用里保持一致** ——
+    # Ollama 只要发现与已加载的不同，就会卸载重载模型（实测约 5 秒），
+    # 而重载会中断正在进行的生成，表现为"模型加载一半、思考一半、没有回答"。
+    #
+    # 固定开销比想象中大得多（2026-09-26 用 Ollama 实报的 token 数校准）：
+    #   39 个工具的 schema = **15595 token**，系统提示约 6600 —— 光这两项就 22000+。
+    #   于是 24576 时"带 1 张图"只剩 1332 给思考+回答，**带 3 张图直接 400**
+    #   （`exceed_context_size_error`，用户看到的是一句报错）。
+    #   ⇒ 配套修法有三条，都已落地：① 带图的轮次自动精简工具集（省 ≈3900）；
+    #     ② 图片 token 估算按实测校准（原来低估 3 倍）；③ 窗口从 24576 提到 28672。
+    #
+    # ⚠️⚠️ 2026-09-27 从 28672 再提到 **40960**（换成 30B 后，原来那套依据已失效）。
+    #   老注释里"24576/28672 都 100% 驻显存、58 tok/s"是**跑 8B 时**测的；
+    #   30B-A3B 是 MoE、66% 权重在系统内存，今天实测（RTX 5070 Ti Laptop 12GB）：
+    #     28672 → 46.1 tok/s，模型总量 22.10GB（显存 9.69 + 内存 12.41）
+    #     40960 → 42.4 tok/s，模型总量 23.32GB（显存 9.71 + 内存 13.61）  ← 只慢 8%
+    #
+    #   为什么**必须**提：窗口装不下"提示词 + 输出额度"。实测开联网时
+    #   提示词 **21927 token**（41 个工具就占 17.7k），
+    #   28672 − 21927 = **只剩 6745** 给"历史 + 思考 + 正文"，
+    #   而 max_tokens 写的是 8192 ⇒ 第一轮**必然**被窗口边界截断，两种症状都出现过：
+    #     · 思考吃光 6745 → 正文为空 → 界面弹「模型思考占满了本次输出空间，正在腾出空间…」
+    #     · 工具调用 JSON 被腰斩 → Ollama 报 `unexpected end of JSON input`
+    #   实测同一条「查广州天气」：第一次白等 **53 秒**，靠重试才成功。
+    #   提到 40960 后剩余 **19033**，第一轮就能"想完 + 写完 + 调工具"。
+    #   代价：内存多占 1.2GB、速度 −8%。**这个交换很划算**（换来每条消息省几十秒）。
+    # 显存/内存更小的机器可调回 28672 / 16384 / 8192（Ollama 会自动降级到 CPU）。
+    "num_ctx": 40960,
+    # Qwen3-VL 无法关闭思考，思考会先吃掉大量 token。实测 2048 时常出现
+    # 「思考到一半就断、正文一个字都没写」（Ollama 会返回 done_reason=length）。
+    # 提到 4096 后基本能「想完 + 写完」；主流程另有截断自动重试兜底。
+    #
+    # ⚠️ 这个值**必须小于「窗口 − 提示词 − 历史预留」**，否则请求实际拿不到这么多额度
+    #   （只会被 Ollama 在窗口边界截断）。改过 num_ctx 或工具集后要重新核账：
+    #     额度 ≤ num_ctx − 真实提示词 − 历史预留 − 512
+    #   量真实提示词最快的办法：把 system+tools 组装好发一次
+    #   /api/chat {num_predict:1}，读返回里的 prompt_eval_count（比字符估算准得多）。
+    "max_tokens": 8192,
+    # 模型在显存里的保活时长。Ollama 默认只保活 **5 分钟**，
+    # 超时就把模型卸掉 —— 用户隔一会儿再发消息，就要重新加载模型
+    # （8B 时代实测 4.5 秒起步；**换成 30B 后实测冷启动约 20 秒**），
+    # 体感就是"发出去半天不吐字"。
+    #
+    # 2026-09-27 从 "30m" 提到 "4h"：加载成本随模型体积涨得比预期快得多。
+    #   30 分钟对"边想边打字"够用，但用户常常是"聊几句 → 去看别的 → 回来接着聊"，
+    #   30 分钟一到就白等 20 秒。4 小时覆盖了绝大多数"一次坐下来用"的场景。
+    #   ⚠️ 显存紧张可调小（如 "5m"）；"0" = 用完立刻卸载；"-1" = 永不卸载
+    #      （**不建议 -1**：这台机器还要训 YOLO，9GB 常驻显存会挤掉训练）。
+    #   ⚠️ 画图前会主动卸载（12GB 卡装不下 SDXL + 30B），画完由
+    #      t2i.rewarm_async() 自动请回来 —— 所以保活时长不影响画图。
+    "model_keep_alive": "4h",
+    # 启动后是否**主动预热**默认模型（提前加载进显存，第一条消息就不用等加载）。
+    # 原来这件事挂在"开发台"里，而开发台已移除 → 预热从来没跑过（实测确认）。
+    # ⚠️ 只预热默认模型：显卡 16GB 装不下默认模型 + 代码模型两个，
+    # 同时加载会溢出到内存反而更慢。
+    "warmup_on_start": True,
+    # —— 能力开关（前端控制）——
+    "rag_enabled": False,        # 知识库检索增强生成开关
+    "web_enabled": False,        # 联网搜索开关（默认关闭，打开才会联网）
+    "memory_enabled": True,      # 长期记忆开关
+    "auto_memorize": True,       # 对话后自动提取重要内容存入短期记忆
+    # 询问模式（前端「快速询问 / 深度询问」两选一）：
+    #   quick = 只问最关键的 1~3 个问题，拿到基本信息就开工（默认，尽量不打扰）
+    #   deep  = 可以分多轮问、每个方向都问透，直到有把握做出用户真正想要的东西
+    # ⚠️ 两种模式都**不限制问题个数**（用户 2026-09-22 的要求："每次询问的问题个数也可以不限制"），
+    #    区别只在"问到什么程度就动手"。所以这里是一个**模式**，不是开关。
+    "ask_mode": "quick",
+    # 联网搜索每轮最多注入结果条数
+    "web_top_k": 4,
+    # 高德地图 Web 服务 key（**可选**，留空即不用）。
+    # 填了之后：联网模式下地图全走高德 —— 真实 POI（连小卖店都搜得到）、
+    # 场所评分、实时路况、公交换乘、真实步行/骑行路径；
+    # 没填、或「联网」开关关着，就回退到 OpenStreetMap（能力弱但免 key）。
+    # 申请：https://console.amap.com/dev/key/app → 新建应用 → 添加 Key，
+    # ⚠️ 服务平台必须选「**Web 服务**」（选成"Web端(JS API)"是另一套 key，不能用）。
+    # ⚠️ 别提交到仓库 —— config.json 已在 .gitignore 里。
+    "amap_key": "",
+    # 高德**总开关**：断开时只是不用它（key 本身留着），不要清空 key ——
+    # 用户要求"断开后重新输入太麻烦"，所以断开 ≠ 删 key。
+    "amap_enabled": True,
+    # RAG 每轮最多检索文档数
+    "rag_top_k": 4,
+    # 记忆每轮最多注入条数
+    "memory_top_k": 5,
+    # 可调用的外部 API 工具（前端设置界面可配置）
+    "api_tools": [],
+    # 绘图（文生图/图片微改）使用的计算设备：
+    #   "auto" = 自动（有可用显卡就用显卡）
+    #   "cpu"  = 强制 CPU
+    #   "gpu"  = 强制显卡（无显卡时切换会被拒绝，不会静默回退）
+    "t2i_device": "auto",
+    # 文生图/图片微改用哪个权重。留空 = 用代码里的默认（见 t2i.MODEL_REPO）。
+    # ⚠️⚠️ 2026-09-26 实测：默认的 sd-turbo 是 **SD2.1 蒸馏版**，代码里对它把
+    #    guidance_scale 设成 0（**CFG 关闭**）→ 提示词只当弱条件用。实测：
+    #      「一只橘猫坐在木质窗台上」→ 河边鹅卵石滩
+    #      「一位女性站在实验室里微笑」→ 坐在海中央石板上
+    #      「实训室里工位上的学生」→ 空教室，一个人都没有
+    #    而且 negative_prompt **完全失效**（负面词靠的正是 CFG 的反向引导）。
+    #    ⇒ 要"画什么就是什么"必须换 **CFG 可用**的权重：SDXL base（原生 1024，约 6.9GB）。
+    "sd_model": "stabilityai/stable-diffusion-xl-base-1.0",
+    # 局部重绘（精确微改用）：把图里**圈定的那块**重画，其余像素完全保留。
+    # ⚠️ 与 sd_model（纯 img2img）的关键区别：img2img 是**整图去噪**，没有"只改这里"
+    #    的约束 —— 实测「换衣服颜色」「加眼镜」在 0.45/0.60/0.85 全都没生效，
+    #    0.85 换背景还会把脸重画。inpainting + 蒙版才能做到"只改这一块"。
+    "inpaint_model": "AI-ModelScope/stable-diffusion-xl-1.0-inpainting-0.1",
+    "inpaint_model_dir": "",
+    # 本地权重目录（离线用）。留空 = 自动探测（打包目录 / 源码本机路径）。
+    # 下载好的放这儿，之后就不联网。
+    "sd_model_dir": "",
+    # ---------- 云端图片 API（2026-11-08 起：文生图/微改都走这里）----------
+    # 为什么换成云端：本地 SDXL 要 6.5GB 权重 + 吃满 12GB 显存，画一张要 50 秒
+    # 加载流水线，还和 30B 对话模型抢显卡。云端出图质量更高、不占显存。
+    # 走 OpenAI 兼容协议（/images/generations、/images/edits），Key 由前端填，
+    # **不写进这里**（这里只放地址和模型名）。
+    # 单次对话最多连续调用工具多少轮（用户 2026-11-08：「8 次不够，放宽到最多」）
+    # 写代码/搭项目是"一轮一个文件 + 一轮跑一次"，本来就要几十轮。
+    "max_tool_rounds": 60,
+    # 单轮对话的墙钟上限（秒）。轮次再多也不许无限跑；超了就收尾交代进度。
+    "max_tool_seconds": 1200,
+    # ---------- 自开发（让应用能改自己的源码）----------
+    # ⚠️ 打开后模型可以直接读写本项目的 backend/frontend 文件并重启自己。
+    #    默认关闭：这是个"能把自己改坏"的能力，必须用户明确打开。
+    "self_dev_enabled": False,
+    # ★ 完全访问（2026-11-08 用户要求，类比 WorkBuddy 的权限开关）
+    #   OFF：只能改 frontend/ 与新建文件（默认，最安全）
+    #   ON ：允许改 backend/*.py 等核心源码（危险，但自我迭代改后端需要）
+    "self_dev_full_access": False,
+    # ★ 性能档位：fast / medium / high / ultra（映射见 backend/perf.py）
+    "perf_profile": "medium",
+    # 上下文长度：可无极调节（4k~128k），留 0 = 跟随档位
+    "num_ctx_override": 0,
+    # 允许改写的根目录（留空 = 本项目根）
+    "self_dev_root": "",
+    "image_api_base": "https://xingpan.site/v1",
+    "image_api_model": "gpt-image-2.5-flare",
+    # 微改用的云端模型（留空 = 跟生成用同一个）
+    "image_api_model_edit": "",
+    # 绘图后端：cloud=云端 API（默认，不占显存）；local=本地权重（要下载，吃显存）
+    "image_backend": "cloud",
+    # 本地图片权重的托管目录（留空 = 自动：沿用 E://本地多模态助手-Docker//models）
+    "image_models_dir": "",
+    # 下本地权重用的 HF 镜像（本机直连 huggingface.co 不通）
+    "hf_endpoint": "https://hf-mirror.com",
+    # 代码生成交给谁：local=本地 code_model；deepseek=直接用 DeepSeek V4.1。
+    # 用户 2026-11-08 要求「代码生成改用 deepseek V4.1」。
+    "code_backend": "deepseek",
+    "code_model_ds": "deepseek-flash",
+    # 用户在前端选的**代码模型**（代码生成 + 自我迭代都用它）：
+    #   auto（有 Key 走 V4.1）/ deepseek-flash / deepseek-flash-think / deepseek-v4-pro
+    #   / local:qwen3-vl:8b 等
+    "code_model_choice": "auto",
+    # 程序启动时自动打开麦克风监听（说「小千小千」唤醒）。
+    # 容器里没有麦克风，会自动跳过并提示，不影响其它功能。
+    "voice_auto_start": True,
+    # 语音输入用哪个麦克风（**留空 = 系统默认**）。
+    # 可以填设备名（界面上「语音」提示条里的下拉框会写进来），也可以填序号。
+    # ⚠️ 为什么要能选：本机默认给的是**摄像头上的麦克风**，底噪高达 0.007~0.009，
+    #    不但识别差，还会让"静音判定"失效（一轮永远结束不了 → 下次喊不动）。
+    #    界面上有实时电平条，哪只麦克风有声音一眼就能看出来。
+    "voice_input_device": "",
+    # 语音识别用哪个模型（**留空 = 自动挑**，通常就是中文专用的 zipformer-zh-14M）。
+    # 实测中文口语字错率：中文专用 3.8% / 中英双语 17.0%（双语还会把「小千小千」
+    # 多认出一个「小千」）—— 所以自动挑会选中文专用的。想试别的就填目录名（如
+    # 「sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20」）。
+    "voice_asr_model": "",
+
+    # ---------- 写代码 / 离线计算 ----------
+    # 专用代码模型。**为什么需要它**（实测）：
+    # 默认的 qwen3-vl:8b 是视觉模型，写代码时"思考"会失控 ——
+    # 同一道 LRU 缓存的题，有时 9 秒正常出代码，有时陷入原地重复的思考死循环，
+    # 121 秒后 done_reason=length、正文一个字都没有（3 道题只过 1 道）。
+    # 而代码专用模型是**非思考型**的，不会出现这个问题。
+    #
+    # ⚠️ 2026-09-26 从 qwen2.5-coder:14b 换成 **qwen3-coder:30b**。理由：
+    #   · 30.5B 总参 / **仅 3.3B 激活**的 MoE —— 参数量翻倍还多，但每 token 只算 3.3B，
+    #     所以**显存装不满时的掉速远小于 dense 模型**（这是选它、而不是
+    #     qwen2.5-coder:32b 的关键：32B 是 dense，12GB 卡上一部分落内存就慢到没法用）；
+    #   · 它**原生支持工具调用**（qwen2.5-coder 不支持，代码轮只能走"文本协议"兜底）；
+    #   · 256K 原生上下文。
+    #   代价：Q4 约 19GB，12GB 显存装不下（会有一部分落内存）。模型存放目录已迁到 E 盘。
+    # 留空 = 不启用路由；填了但本机没下载时自动退回 default_model，不会报错。
+    "code_model": "qwen3-coder:30b",
+    # 自动路由：识别到"要写代码"的请求就改用代码模型。
+    # 关掉则一律用 default_model（省去切换模型时的加载等待）。
+    "code_auto_route": True,
+    # 本地代码执行（也就是"离线计算"）：模型写完 Python 后**在本机真跑一遍**，
+    # 把算出来的真实结果给你，而不是让它自己心算。
+    # **默认关闭** —— 打开后模型写的代码会在你电脑上执行，请自行判断风险。
+    "code_exec_enabled": False,
+    # 模型跑代码时的时限（秒，5~600）。
+    # ⚠️ 这只管**模型工具**：回答"算完就退出"的一次性计算够用了，也避免一个死循环
+    # 把整轮对话挂住。**它不影响你自己点「▶ 运行」** —— 那个入口不设时限，
+    # 计时器、服务器这类要一直跑的程序请点 ▶ 运行。
+    "run_timeout": 60,
+}
+
+
+def load_config() -> dict:
+    """读取配置文件；不存在则写入默认配置。
+
+    环境变量可覆盖个别关键项（容器化部署用，未设置时行为不变）：
+      MM_OLLAMA_URL  → ollama_url（精简版镜像里 Ollama 是独立容器，需指向服务名）
+      MM_MODEL       → default_model
+      SD_MODEL       → sd_model（换文生图权重，如 stabilityai/stable-diffusion-xl-base-1.0）
+      SD_MODEL_DIR   → sd_model_dir（本地权重目录，离线用）
+    """
+    cfg = dict(DEFAULT_CONFIG)
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                user = json.load(f)
+            cfg.update(user)
+        except Exception:
+            pass
+    if os.environ.get("MM_OLLAMA_URL"):
+        cfg["ollama_url"] = os.environ["MM_OLLAMA_URL"]
+    if os.environ.get("MM_MODEL"):
+        cfg["default_model"] = os.environ["MM_MODEL"]
+    if os.environ.get("SD_MODEL"):
+        cfg["sd_model"] = os.environ["SD_MODEL"]
+    if os.environ.get("SD_MODEL_DIR"):
+        cfg["sd_model_dir"] = os.environ["SD_MODEL_DIR"]
+
+    # ⚠️ 把 localhost 换成 127.0.0.1。
+    # Windows 上 localhost 会先解析到 IPv6 的 ::1，而 Ollama 只监听 IPv4，
+    # 于是每次连接都要先等一次回退超时 —— **实测 2065ms，换成 127.0.0.1 只需 1ms**。
+    # 模型调用很频繁，这一项每年要白等掉大量时间，所以在这里统一兜住：
+    # 即使老配置里还写着 localhost 也会被自动纠正。
+    url = str(cfg.get("ollama_url") or "")
+    if "localhost" in url:
+        cfg["ollama_url"] = url.replace("localhost", "127.0.0.1")
+    return cfg
+
+
+def save_config(cfg: dict) -> None:
+    """把用户修改后的配置写回文件，实现参数持久化。"""
+    clean = {k: cfg.get(k) for k in DEFAULT_CONFIG}
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(clean, f, ensure_ascii=False, indent=2)

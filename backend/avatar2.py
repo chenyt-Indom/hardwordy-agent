@@ -39,6 +39,8 @@ import uuid
 from urllib.parse import quote as _q
 
 import numpy as np
+import logging
+logger = logging.getLogger(__name__)
 
 # 嘴部默认位置：脸的中下部。默认值不会对所有图都准，前端可以拖动校准。
 # 2026-11-15：y 0.735 → 0.66。analyze 的搜索框是 cy-1.55*mh ~ cy+0.65*mh，
@@ -119,7 +121,7 @@ def ffmpeg() -> str:
         if p and os.path.isfile(p):
             return p
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     p = shutil.which("ffmpeg")
     return p or ""
 
@@ -216,7 +218,7 @@ def mouth() -> dict:
             try:
                 m[k] = float(v)
             except (TypeError, ValueError):
-                pass
+                logger.debug("silent-except", exc_info=True)
     # 夹到合法区间，别让脏数据把嘴画到画面外
     m["x"] = min(max(m["x"], 0.0), 1.0)
     m["y"] = min(max(m["y"], 0.0), 1.0)
@@ -232,7 +234,7 @@ def set_mouth(d: dict) -> dict:
             try:
                 cur[k] = float(d[k])
             except (TypeError, ValueError):
-                pass
+                logger.debug("silent-except", exc_info=True)
     _write_json(_MOUTH, cur)
     return mouth()
 
@@ -396,7 +398,7 @@ def save_bytes(raw: bytes, source: str = "") -> dict:
             if os.path.isfile(_stale):
                 os.remove(_stale)
         except OSError:
-            pass
+            logger.debug("silent-except", exc_info=True)
     # 存完立刻自动定位嘴：上传照片和 AI 头像的构图差别极大，靠默认值一定偏，
     # 检测到就覆盖 mouth.json；检测不到保留默认值，前端可手动拖动校准。
     auto = detect_mouth(_img_path())
@@ -455,7 +457,7 @@ def reset() -> dict:
             try:
                 os.remove(p)
             except OSError:
-                pass
+                logger.debug("silent-except", exc_info=True)
     return info()
 
 
@@ -499,7 +501,7 @@ def apply_closed_preview() -> dict:
     try:
         os.remove(src)
     except OSError:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"ok": True, "closed": True, "info": info()}
 
 
@@ -510,7 +512,7 @@ def drop_closed_preview() -> dict:
         try:
             os.remove(p)
         except OSError:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return {"ok": True, "dropped": True}
 
 
@@ -652,7 +654,7 @@ def _blend_mouth_back(img_bgr, patched_rgb, geom, x0, y0, cs):
                         if len(_light):
                             sub[_y, _x] = _light.mean(axis=0)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     return _np.clip(base, 0, 255).astype(_np.uint8)[:, :, ::-1]
 
@@ -752,7 +754,7 @@ def _cloud_close(img_bgr, geom, key, plan, timeout=300):
             from . import cloud_image as _CI
             msg = _CI.scrub(msg)
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
         return {"ok": False, "images": [], "err": msg[:300], "mode": mode}
 
     cost = _t.time() - t0
@@ -845,7 +847,7 @@ def _sdxl_hires_close(img_bgr, geom, strength: float = 0.96,
         try:
             os.remove(tmp)
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     if not r or not r.get("ok"):
         return None
     try:
@@ -910,7 +912,7 @@ def _sdxl_hires_close(img_bgr, geom, strength: float = 0.96,
                         if len(_light):
                             sub[_y, _x] = _light.mean(axis=0)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     return _np.clip(base, 0, 255).astype(_np.uint8)[:, :, ::-1]     # RGB→BGR
 
@@ -1343,7 +1345,7 @@ def close_mouth(force: bool = False, preview: bool = False,
                 if os.path.isfile(_img_closed_path()):
                     os.remove(_img_closed_path())
             except OSError:
-                pass
+                logger.debug("silent-except", exc_info=True)
         if not force:
             return {"ok": True, "closed": False, "preview": bool(preview),
                     "reason": "看起来已经是闭嘴（没有找到成块的口腔区域），不用处理"}
@@ -1538,7 +1540,7 @@ def _find_asr() -> str:
         try:
             cands.extend(glob.glob(pat, recursive=True))
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     for d in cands:
         if not os.path.isdir(d):
             continue
@@ -1948,24 +1950,24 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
                                   face=_face_norm,
                                   energy=min(1.0, float(op) * 1.6))
                 except Exception:                       # noqa: BLE001
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             proc.stdin.write(fr.tobytes())
             if on_progress and (i % 10 == 0 or i == n - 1):
                 try:
                     on_progress(i + 1, n)
                 except Exception:                       # noqa: BLE001
-                    pass
+                    logger.debug("silent-except", exc_info=True)
     except Exception as e:                              # noqa: BLE001
         try:
             proc.kill()
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
         return {"ok": False, "error": "渲染中断：%s: %s" % (type(e).__name__, e)}
     finally:
         try:
             proc.stdin.close()
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     err = proc.stderr.read() if proc.stderr else b""
     rc = proc.wait()
     if rc != 0 or not os.path.isfile(out_mp4) or os.path.getsize(out_mp4) < 1000:
@@ -2125,7 +2127,7 @@ def list_videos(limit: int = 50, scope: str = "avatar") -> list:
                               "url": "/api/doclib/download?rel="
                                      + quote(f["rel"])})
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     items.sort(key=lambda x: x.get("_ts", 0), reverse=True)
     for it in items:
@@ -2215,7 +2217,7 @@ def concat_videos(names, out_name: str = "") -> dict:
         try:
             os.remove(lst)
         except Exception:                              # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
     # 时长直接读合并后的成品：累加各段时若某一段探测失败会返回 0，
     # 实测就出现过 101 秒的片子报成 54.6 秒（用户会以为丢了一半）。
     dur = round(_probe_duration(out), 2)

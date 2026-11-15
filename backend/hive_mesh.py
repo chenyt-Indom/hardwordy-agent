@@ -234,7 +234,7 @@ def tailscale_ip() -> str:
                 if parts[0] == "100" and 64 <= second <= 127:
                     return ip
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     return ""
 
 
@@ -309,11 +309,11 @@ class Peer:
         try:
             self.sock.shutdown(socket.SHUT_RDWR)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         try:
             self.sock.close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     def label(self) -> str:
         return self.uid or ("%s:%s" % self.addr)
@@ -394,7 +394,7 @@ class MeshNode:
                 try:
                     s.close()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         if not srv:
             self._last_err = "端口被占用：%s" % last
             return self.status()
@@ -441,7 +441,7 @@ class MeshNode:
         try:
             sock.settimeout(60.0)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         threading.Thread(target=self._serve, args=(sock, addr, True),
                          daemon=True).start()
 
@@ -452,7 +452,7 @@ class MeshNode:
                 try:
                     p.send(T_BYE, {"uid": self.uid})
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 p.close()
             self.peers.clear()
         for s in (self._srv, self._udp):
@@ -460,14 +460,14 @@ class MeshNode:
                 if s:
                     s.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         self._srv = None
         self._udp = None
         if self.punch:
             try:
                 self.punch.stop()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             self.punch = None
         self.started = False
         self.groups.clear()
@@ -490,7 +490,7 @@ class MeshNode:
                     try:
                         self.peers.remove(p)
                     except ValueError:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
 
     # ------------------------------------------------------------ 状态
 
@@ -536,7 +536,7 @@ class MeshNode:
             try:
                 self.broadcast_members(gid)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         return self.status()
 
     def peers_of(self, gid: str) -> List[Peer]:
@@ -561,7 +561,7 @@ class MeshNode:
                 try:
                     c.close()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
 
     def _serve(self, sock: socket.socket, addr: Tuple[str, int], inbound: bool) -> None:
         """处理一条连接：先收 HELLO 确定是哪个群，再进入读循环。"""
@@ -662,15 +662,15 @@ class MeshNode:
                         try:
                             p.sock.shutdown(socket.SHUT_RDWR)
                         except Exception:
-                            pass
+                            logger.debug("silent-except", exc_info=True)
                         try:
                             p.sock.close()
                         except Exception:
-                            pass
+                            logger.debug("silent-except", exc_info=True)
                         try:
                             self.peers.remove(p)
                         except ValueError:
-                            pass
+                            logger.debug("silent-except", exc_info=True)
                         break
                 self.peers.append(peer)
                 if peer.uid:
@@ -682,7 +682,7 @@ class MeshNode:
                 try:
                     self.on_peer()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             # 有新成员进来就告诉大家，让其他人也能直连他 ——
             # 否则后加入的人只能靠中间人转发，中间人一掉线就断。
             threading.Thread(target=self._announce_peers, args=(gid,),
@@ -697,12 +697,12 @@ class MeshNode:
                     try:
                         self.peers.remove(peer)
                     except ValueError:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
                 if self.on_peer:
                     try:
                         self.on_peer()
                     except Exception:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
 
     def _read_loop(self, peer: Peer) -> None:
         while not self._stop and peer.alive:
@@ -763,7 +763,7 @@ class MeshNode:
             try:
                 peer.send(T_SYNC, {"since": H.max_ts(gid)})
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             return
         if typ == T_MEMBERS:
             self._merge_members(gid, obj.get("members"), obj.get("kicked"))
@@ -818,7 +818,7 @@ class MeshNode:
                 try:
                     self.on_msg(gid, saved)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             # 继续转发（去掉来源那条，TTL 减一）
             ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
             if ttl > 0:
@@ -832,7 +832,7 @@ class MeshNode:
                 if H.load_group(gid):
                     H.delete_group(gid, force=True)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             with _LOCK:
                 self.groups.discard(gid)
                 self.vts.pop(gid, None)
@@ -842,7 +842,7 @@ class MeshNode:
                 try:
                     self.on_gone(gid, nm)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
             if ttl > 0:
                 self._fanout(gid, T_GONE, {"name": nm, "ttl": ttl}, skip=peer)
@@ -852,7 +852,7 @@ class MeshNode:
                 try:
                     self.on_stream(gid, obj)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
             if ttl > 0:
                 self._fanout(gid, T_STREAM, dict(obj, ttl=ttl), skip=peer)
@@ -862,7 +862,7 @@ class MeshNode:
                 try:
                     self.on_cancel(gid, obj)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
             if ttl > 0:
                 self._fanout(gid, T_CANCEL, dict(obj, ttl=ttl), skip=peer)
@@ -874,7 +874,7 @@ class MeshNode:
                 try:
                     self.on_file(gid, obj)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
             if ttl > 0:
                 self._fanout(gid, T_FILE, dict(obj, ttl=ttl), skip=peer)
@@ -886,7 +886,7 @@ class MeshNode:
                 try:
                     self.on_freq(gid, obj)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
             if ttl > 0:
                 self._fanout(gid, T_FREQ, dict(obj, ttl=ttl), skip=peer)
@@ -898,7 +898,7 @@ class MeshNode:
                 try:
                     self.on_fsync(gid, obj)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
             if ttl > 0:
                 self._fanout(gid, T_FSYNC, dict(obj, ttl=ttl), skip=peer)
@@ -910,7 +910,7 @@ class MeshNode:
                 try:
                     self.on_fdel(gid, obj)
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             ttl = int(obj.get("ttl") or TTL_DEFAULT) - 1
             if ttl > 0:
                 self._fanout(gid, T_FDEL, dict(obj, ttl=ttl), skip=peer)
@@ -949,7 +949,7 @@ class MeshNode:
         try:
             local_n = len(H.read_messages(gid, 0, 4))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         with _LOCK:
             need_full = local_n <= 3 and gid not in self._full_req
             if need_full:
@@ -993,7 +993,7 @@ class MeshNode:
             try:
                 self.on_members(gid)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _learn(self, k: Dict[str, Any], gid: str) -> None:
         """记住一个人的地址；如果还不认识，主动连过去（peer exchange 的核心）。"""
@@ -1104,7 +1104,7 @@ class MeshNode:
             try:
                 s.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             return {"ok": False, "error": str(e)}
         threading.Thread(target=self._serve, args=(s, (host, port), False),
                          daemon=True).start()
@@ -1165,7 +1165,7 @@ class MeshNode:
             try:
                 sock.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             return r if not r.get("ok") else {"ok": False, "error": "打洞后握手帧发送失败"}
         threading.Thread(target=self._serve, args=(sock, (host, int(port)), False),
                          daemon=True).start()
@@ -1279,7 +1279,7 @@ class MeshNode:
                 if s:
                     s.close()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def probe_punch(self, host: str, port: int,
                     timeout: float = 6.0) -> Dict[str, Any]:
@@ -1313,7 +1313,7 @@ class MeshNode:
                                      "复制「局域网」那一串（192.168.x.x:端口）给你；"
                                      "或者两边连同一个 WiFi，直接输密码就能进，不用地址"}
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         r = self.punch.connect(host, int(port), timeout=timeout)
         if not r.get("ok"):
             return {"ok": False, "error": r.get("error") or "打洞失败"}
@@ -1352,7 +1352,7 @@ class MeshNode:
                 try:
                     sock.close()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
 
     def seen_beacons(self, gid: str = "") -> List[Dict[str, Any]]:
         """局域网里听到的群（不限自己所在的群）—— 密码入群靠它搜。"""
@@ -1409,9 +1409,9 @@ class MeshNode:
                         self._udp.sendto(pkt, (lan_ip().rsplit(".", 1)[0] + ".255",
                                                 self._beacon_port))
                     except Exception:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             time.sleep(BEACON_EVERY)
 
     def _udp_recv_loop(self) -> None:
@@ -1484,7 +1484,7 @@ class MeshNode:
                     try:
                         self.peers.remove(p)
                     except ValueError:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
                     p.close()
                 if dead:
                     self.flush()
@@ -1492,14 +1492,14 @@ class MeshNode:
                 try:
                     self.on_peer()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
             # 自动重连：知道地址但当前没连上的人，定期再试一次。
             # 没有这一步，跨公网（收不到对方 UDP 广播）一旦断线就永远连不回去，
             # 只能重新传一次连接码 —— 群主不在、只剩两个非群主时最难受的正是这里。
             try:
                 self._retry_known()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _retry_known(self) -> None:
         """把 known 里「知道地址但没连上」的人重新连一遍（每人 20 秒最多一次）。"""

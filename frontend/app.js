@@ -12729,6 +12729,7 @@
         '<div class="iter-bar">' +
           '<button type="button" class="btn sm iter-run">🔄 现在反思一次</button>' +
           '<button type="button" class="btn sm ghost iter-audit-btn">🔍 代码自检</button>' +
+          '<button type="button" class="btn sm ghost iter-regress-btn">🧪 行为回归</button>' +
           '<button type="button" class="btn sm ghost iter-diag-btn">🩺 诊断不达标</button>' +
           '<button type="button" class="btn sm ghost iter-eval-btn">📊 评估体验</button>' +
           '<button type="button" class="btn sm ghost iter-eval-fix-btn">🔧 评估并改进</button>' +
@@ -12755,6 +12756,7 @@
     el.querySelector(".iter-close").onclick = hide;
     el.querySelector(".iter-run").onclick = runReflect;
     el.querySelector(".iter-audit-btn").onclick = runAudit;
+    el.querySelector(".iter-regress-btn").onclick = runRegress;
     el.querySelector(".iter-restart-btn").onclick = doRestart;
     el.querySelector(".iter-trust-cb").onchange = onTrustToggle;
     el.querySelector(".iter-diag-btn").onclick = toggleDiag;
@@ -13209,9 +13211,36 @@
     let msg = "自检完成：" + (a.total || 0) + " 处（high " + (c.high || 0) +
               " / mid " + (c.mid || 0) + "），扫了 " + (a.files || 0) + " 个文件，用时 " +
               (a.seconds || 0) + " 秒。";
+    const rg = r.regress || {};
+    if (rg && rg.summary) {
+      msg += rg.ok ? " 行为回归通过（" + (rg.passed || 0) + " 条）。"
+                   : " ⚠️ 行为回归失败：" + rg.summary;
+    }
     if (r.need_restart) { showRestart(true); msg += " 已自动修好，需要重启才生效。"; }
-    say(msg, (c.high || 0) > 0 ? "warn" : "good");
+    say(msg, ((c.high || 0) > 0 || (rg && rg.ok === false)) ? "warn" : "good");
     await load();
+  }
+
+  async function runRegress() {
+    if (busy) return;
+    busy = true;
+    say("行为回归中…真跑断言验关键流程（队列/裁剪/路径/嘴部几何/逻辑检查器），约 2 秒");
+    const r = await api("/api/selfiter/regress", { scope: "quick" });
+    busy = false;
+    if (!r) { say("回归接口没响应", "bad"); return; }
+    if (r.error) { say("回归跑不起来：" + r.error, "bad"); return; }
+    const items = r.items || [];
+    const bad = items.filter(function (i) { return !i.ok; });
+    const lines = [];
+    lines.push((r.ok ? "✅ 行为回归全部通过" : "❌ " + bad.length + " 条回归失败") +
+      " · " + (r.passed || 0) + "/" + (r.total || 0) + " 条 · " +
+      (r.seconds || 0) + " 秒" +
+      (r.skipped ? " · 跳过 " + r.skipped + " 条（缺素材）" : ""));
+    items.forEach(function (i) {
+      const flag = i.skipped ? "◻" : (i.ok ? "✓" : "✗");
+      lines.push(flag + " " + (i.name || "") + (i.why ? " —— " + i.why : ""));
+    });
+    say(lines.join("\n"), r.ok ? "good" : "bad");
   }
 
   async function doRestart() {

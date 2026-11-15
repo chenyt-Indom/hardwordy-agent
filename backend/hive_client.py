@@ -28,6 +28,8 @@ from typing import Any, Dict, List, Optional
 import backend.hive as H
 import backend.hive_mesh as MESH
 import backend.hive_relay_link as RELAY
+import logging
+logger = logging.getLogger(__name__)
 
 PROTO_VER = MESH.PROTO_VER
 
@@ -87,7 +89,7 @@ def set_relay_config(url: str = "", token: str = "", enabled: bool = True,
     try:
         os.chmod(RELAY_CFG, 0o600)      # 只有本机当前用户能读
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return mask_relay(d)
 
 
@@ -151,7 +153,7 @@ class HiveClient:
             try:
                 cb(gid, obj)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _on_freq(self, gid: str, obj: Dict[str, Any]) -> None:
         """别人缺附件、在问「谁有」→ 交给上层判断本机有没有。"""
@@ -160,7 +162,7 @@ class HiveClient:
             try:
                 cb(gid, obj)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _on_fsync(self, gid: str, obj: Dict[str, Any]) -> None:
         """别人发来他那边群文件夹的清单 → 交给上层做一致性对齐。"""
@@ -169,7 +171,7 @@ class HiveClient:
             try:
                 cb(gid, obj)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _on_gone(self, gid: str, name: str) -> None:
         """群主把群删了：通知界面把这个群从列表里去掉。"""
@@ -178,7 +180,7 @@ class HiveClient:
             try:
                 cb(gid, name)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         self._emit_status()
 
     def _on_members(self, gid: str) -> None:
@@ -188,28 +190,28 @@ class HiveClient:
             try:
                 cb(gid)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _on_msg(self, gid: str, msg: Dict[str, Any]) -> None:
         if self.on_message:
             try:
                 self.on_message(gid, msg)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _on_stream(self, gid: str, obj: Dict[str, Any]) -> None:
         if self.on_stream:
             try:
                 self.on_stream(gid, obj)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _on_cancel(self, gid: str, obj: Dict[str, Any]) -> None:
         if self.on_cancel:
             try:
                 self.on_cancel(gid, obj)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _on_file(self, gid: str, obj: Dict[str, Any]) -> None:
         """附件分片到达：**边收边写临时文件**，攒齐了才搬进群目录。
@@ -266,26 +268,26 @@ class HiveClient:
             # 最后一片通常不满，按"各片实际长度之和"截断，否则文件尾巴是 0
             os.truncate(tmp, sum(st.get("lens", {}).values()))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         try:
             rec = H.store_incoming_path(gid, meta, tmp)
         except Exception:
             try:
                 os.remove(tmp)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             return
         try:
             td = st.get("tmpdir") or ""
             if td and os.path.isdir(td):
                 os.rmdir(td)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         if self.on_file:
             try:
                 self.on_file(gid, rec)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _on_peer(self) -> None:
         m = MESH.node()
@@ -300,14 +302,14 @@ class HiveClient:
             try:
                 self.on_peer()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     def _emit_status(self) -> None:
         if self.on_status:
             try:
                 self.on_status(self.status())
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
 
     # ------------------------------------------------------------ 生命周期
 
@@ -415,7 +417,7 @@ class HiveClient:
             try:
                 self._relay.stop()
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
             self._relay = None
         m = MESH.node()
         m.stop()
@@ -496,7 +498,7 @@ class HiveClient:
         try:
             MESH.node().refresh_identity()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         self._emit_status()
         return self.status()
 
@@ -634,7 +636,7 @@ class HiveClient:
                 try:
                     fh.close()
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
         return {"ok": True, "fid": fid, "total": total, "sent": sent,
                 "size": size}
 
@@ -700,7 +702,7 @@ class HiveClient:
                     try:
                         st.get("fh") and st["fh"].close()
                     except Exception:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
                     try:
                         td = st.get("tmpdir") or ""
                         if td and os.path.isdir(td):
@@ -708,10 +710,10 @@ class HiveClient:
                                 try:
                                     os.remove(os.path.join(td, _n))
                                 except Exception:
-                                    pass
+                                    logger.debug("silent-except", exc_info=True)
                             os.rmdir(td)
                     except Exception:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
                     continue
                 st["tries"] = n + 1
                 st["last"] = now        # 重求之后重新计时，避免每次扫描都重发
@@ -720,7 +722,7 @@ class HiveClient:
             try:
                 self.request_file(gid, fid)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         return len(retry)
 
     def sync_artifacts(self, gid: str, items: List[Dict[str, Any]],

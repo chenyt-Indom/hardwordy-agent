@@ -23,6 +23,8 @@ import tempfile
 import time
 import uuid
 import wave
+import logging
+logger = logging.getLogger(__name__)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(_ROOT, "data", "tts")
@@ -223,7 +225,7 @@ def _sapi_one(text: str, voice_name: str, rate_int: int, path: str) -> None:
         try:
             stream.Close()
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
 
 def _sapi_synth(text: str, voice_id: str, rate_int: int, path: str) -> None:

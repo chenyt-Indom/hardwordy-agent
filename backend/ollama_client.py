@@ -7,6 +7,8 @@ import io
 import requests
 from PIL import Image
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 
 class OllamaError(Exception):

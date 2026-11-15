@@ -18,6 +18,8 @@ import time
 import uuid
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 DIR = config.data("image_library")
 INDEX = os.path.join(DIR, "index.json")
@@ -120,7 +122,7 @@ def save_image(data, name: str = "", source: str = "",
         with Image.open(io.BytesIO(raw)) as im:
             w, h = im.size
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     meta = {"id": iid, "name": (name or "").strip()[:40] or f"图片 {iid[:6]}",
             "source": (source or "").strip()[:200], "origin": origin,
@@ -171,7 +173,7 @@ def delete(iid: str) -> bool:
         try:
             os.remove(p)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return True
 
 

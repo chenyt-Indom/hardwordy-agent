@@ -20,7 +20,19 @@ if sys.stdout is None or sys.stderr is None:
     try:
         _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
         os.makedirs(_log_dir, exist_ok=True)
-        _f = open(os.path.join(_log_dir, "app.log"), "a", encoding="utf-8", buffering=1)
+        # ★ 2026-11-15：日志原来无轮转，实测 data/app.log 已 33.8MB / 48 万行且只增不减。
+        #   启动时检查一次：超过 8MB 就轮转成 app.log.1（旧的 .1 覆盖），只留一份旧档。
+        #   在 open 之前做，此刻文件没被占用，Windows 上也能改名。
+        _log_path = os.path.join(_log_dir, "app.log")
+        try:
+            if os.path.isfile(_log_path) and os.path.getsize(_log_path) > 8 * 1024 * 1024:
+                _old = _log_path + ".1"
+                if os.path.isfile(_old):
+                    os.remove(_old)
+                os.replace(_log_path, _old)
+        except Exception:
+            pass
+        _f = open(_log_path, "a", encoding="utf-8", buffering=1)
         if sys.stdout is None:
             sys.stdout = _f
         if sys.stderr is None:

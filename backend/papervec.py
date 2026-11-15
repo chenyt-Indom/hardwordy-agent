@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 
 from . import embed
+logger = logging.getLogger(__name__)
 
 _LOG = logging.getLogger("uvicorn.error")
 
@@ -56,7 +57,7 @@ def _ensure():
     try:
         _DATA.mkdir(parents=True, exist_ok=True)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _read_json(p, default):
@@ -164,7 +165,7 @@ def add_batch(items, source_hint: str = "") -> dict:
         try:
             build_index(force=False)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return {"added": added, "dup": len(items) - added, "total": total}
 
 
@@ -462,7 +463,7 @@ def _parse_json(txt):
     try:
         return json.loads(s)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     i, j = s.find("{"), s.rfind("}")
     if i >= 0 and j > i:
         try:
@@ -578,7 +579,7 @@ def _evaluate_batch(items, project_brief: str = "", pains: str = "") -> dict:
         try:
             build_index(force=True)
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return {"ok": True, "evaluated": len(saved), "papers": saved}
 
 

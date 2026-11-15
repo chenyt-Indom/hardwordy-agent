@@ -45,6 +45,8 @@ import os
 
 import cv2
 import numpy as np
+import logging
+logger = logging.getLogger(__name__)
 
 # 形变下限：实测 k<0.78 时牙齿/舌头开始糊，视觉判定「生硬」
 # （那是**只做几何压缩**时的结论；配合下面的口腔覆盖后，k 可以更低）
@@ -288,7 +290,7 @@ def analyze(img, mouth_cfg, verbose=False):
                 y_lip_bot = int(_y)
                 break
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     # ★ 衰减终点不能越过「下巴底」：原式 y_lip_bot + max(24, 1.6*open_h)，
     #   修正几何后 open_h=22 → y_fade=916，而这张图衣服从 y=896 就开始（纯黑），

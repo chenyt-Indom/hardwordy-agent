@@ -22,6 +22,8 @@ import sys
 import threading
 import time
 import collections
+import logging
+logger = logging.getLogger(__name__)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEPLOY_DIR = os.path.join(ROOT, "data", "deploy")
@@ -44,7 +46,7 @@ def _harden(path: str) -> None:
     try:
         os.chmod(path, 0o600)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _mask(secret: str, head: int = 6, tail: int = 4) -> str:
@@ -123,7 +125,7 @@ def clear_server_config() -> dict:
         if os.path.exists(SERVER_CFG):
             os.remove(SERVER_CFG)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return server_config()
 
 
@@ -226,7 +228,7 @@ def clear_ssh_key() -> dict:
         if os.path.exists(SSH_KEY):
             os.remove(SSH_KEY)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return ssh_key_status()
 
 

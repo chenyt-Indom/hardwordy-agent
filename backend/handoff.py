@@ -29,6 +29,8 @@ import os
 import time
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 DIR = os.path.join(config.data("data"), "handoff")
 LAST = os.path.join(DIR, "last.json")
@@ -74,7 +76,7 @@ def _write(d: dict) -> None:
             json.dump(d, f, ensure_ascii=False, indent=2)
         os.replace(tmp, LAST)          # 原子替换，避免写一半断电把交接卡写坏
     except Exception:
-        pass                           # 交接卡写失败**不能影响**正常对话/改代码
+        logger.debug("silent-except", exc_info=True)                           # 交接卡写失败**不能影响**正常对话/改代码
 
 
 # =====================================================================
@@ -103,7 +105,7 @@ def record_change(rel: str, note: str = "", added: int = 0, removed: int = 0,
             it["added"] = int(it.get("added") or 0) + added
             it["removed"] = int(it.get("removed") or 0) + removed
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         if note:
             it["note"] = note
         it["act"] = act
@@ -127,7 +129,7 @@ def record_from_tool(r: dict, act: str = "write", note: str = "") -> None:
         record_change(str((r or {}).get("rel") or ""), note=note, act=act,
                       added=d.get("added") or 0, removed=d.get("removed") or 0)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 # =====================================================================
@@ -182,7 +184,7 @@ def touch(session: str = "", reason: str = "") -> None:
         _LAST_TOUCH["session"] = session
         _LAST_TOUCH["ts"] = now
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 # =====================================================================

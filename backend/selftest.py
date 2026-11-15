@@ -33,6 +33,8 @@ import time
 from typing import Any
 
 from . import config
+import logging
+logger = logging.getLogger(__name__)
 
 
 def _ok(detail: str = "", hint: str = "") -> dict:
@@ -104,7 +106,7 @@ def check_cloud_model(target: str = "") -> dict:
                 extra = "" if wire == tgt else "（实际调用 " + wire + "）"
                 return _ok("云端 " + str(m.get("name") or tgt) + "，无需下载" + extra)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return _bad("未知的云端模型 id：" + tgt, "刷新页面重新选择模型")
 
 
@@ -295,7 +297,7 @@ def check_files() -> dict:
             try:
                 os.unlink(p)
             except Exception:
-                pass
+                logger.debug("silent-except", exc_info=True)
         # 磁盘余量
         try:
             free = shutil.disk_usage(d).free / 1024 ** 3
@@ -448,7 +450,7 @@ def check_gpu_mem() -> dict:
                                 "关掉占显存的程序（游戏 / 浏览器硬件加速）")
                 return _ok("%.1f / %.1f GB 可用" % (free_gb, total_gb))
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
 
     # 退回 torch（能导入就用它，导入失败就如实说清楚，别只丢一个异常名）
     try:

@@ -19,6 +19,7 @@ import numpy as np
 
 from . import config
 from . import embed as embed_mod
+logger = logging.getLogger(__name__)
 
 KB_DIR = config.data("data", "kb")
 INDEX_FILE = os.path.join(KB_DIR, "_index.json")
@@ -63,7 +64,7 @@ def ensure_dir() -> str:
                         "也支持子文件夹 —— 按课程、按项目分门别类放，检索时照样找得到。\n"
                         "以 _ 开头的文件或文件夹会被忽略（说明和索引就放在这类名字下）。\n")
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
     return KB_DIR
 
 

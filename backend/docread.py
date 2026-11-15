@@ -16,6 +16,8 @@
 import io
 import os
 import re
+import logging
+logger = logging.getLogger(__name__)
 
 MAX_CHARS = 200000          # 单次导入的硬上限，防止把整个大文件塞进内存
 
@@ -284,7 +286,7 @@ def _read_doc(raw: bytes) -> tuple:
         try:
             ole.close()
         except Exception:                               # noqa: BLE001
-            pass
+            logger.debug("silent-except", exc_info=True)
 
 
 # 常见二进制格式的魔数。必须靠它兜底：gb18030 几乎能"成功解码"任何字节序列

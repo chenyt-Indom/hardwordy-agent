@@ -10,6 +10,8 @@
 import os
 import re
 import base64
+import logging
+logger = logging.getLogger(__name__)
 
 TEXT_EXTS = {
     ".txt", ".md", ".py", ".json", ".csv", ".log", ".ini", ".cfg",

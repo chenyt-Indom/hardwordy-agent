@@ -24,6 +24,8 @@ import time
 import traceback
 
 from . import self_iterate as _si
+import logging
+logger = logging.getLogger(__name__)
 
 # 事件保留上限：太多会把 task.json 撑大，前端也不需要这么久的历史
 _MAX_EVENTS = 400
@@ -55,7 +57,7 @@ def _load():
                 _STATE["running"] = None
                 _STATE["queue"] = []
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _save():
@@ -69,7 +71,7 @@ def _save():
         _FILE.parent.mkdir(parents=True, exist_ok=True)
         _FILE.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _emit(tid, kind, **kw):

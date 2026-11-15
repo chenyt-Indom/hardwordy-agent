@@ -32,6 +32,8 @@ import time
 from typing import Any
 
 import requests
+import logging
+logger = logging.getLogger(__name__)
 
 # Ollama 地址**走配置**，别写死 —— 换端口 / 换机器（远程 Ollama）时要能跟着走。
 # 之前写死 127.0.0.1:11434，配置改了这里不生效。
@@ -132,7 +134,7 @@ def _worker(model: str) -> None:
                     try:
                         resp.close()
                     except Exception:
-                        pass
+                        logger.debug("silent-except", exc_info=True)
                     _STATE["status"] = "cancelled"
                     _STATE["finished_at"] = time.time()
                     return
@@ -255,7 +257,7 @@ def unload_all() -> dict:
                           timeout=(5, 30), proxies=_NO_PROXY)
             out["freed"].append(m)
         except Exception:                         # noqa: BLE001
-            pass                                  # 单个失败不影响其它的
+            logger.debug("silent-except", exc_info=True)                                  # 单个失败不影响其它的
 
     # 等它真的落地：最多 12 秒（和 t2i 那边同一套经验值）
     t0 = time.time()

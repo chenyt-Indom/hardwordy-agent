@@ -30,6 +30,8 @@ import time
 import uuid
 
 from . import config, sessions
+import logging
+logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
 _THREAD = None
@@ -76,7 +78,7 @@ def _parse_hhmm(s: str):
         if 0 <= h <= 23 and 0 <= m <= 59:
             return h, m
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return None
 
 
@@ -242,7 +244,7 @@ def _run_local(M, cfg: dict, model: str, prompt: str, schemas: list, ctx: dict) 
         if have and model not in have:
             model = next((n for n in have if "qwen3-vl" in n), "") or have[0]
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     # ★ 2026-11-10 修「定时任务只输出一半」。
     #   用户实测：国际新闻那条断在「#### 2. 油价飙升至五年高位：能源市场」，
@@ -287,7 +289,7 @@ def _run_local(M, cfg: dict, model: str, prompt: str, schemas: list, ctx: dict) 
                     params["max_tokens"] = min(
                         24576, max(int(params.get("max_tokens") or 4096) * 2, room))
                 except Exception:
-                    pass
+                    logger.debug("silent-except", exc_info=True)
                 continue
             if reason == "length":
                 parts.append("\n\n（⚠️ 这条输出达到长度上限被截断，"
@@ -383,7 +385,7 @@ def _run_selfiter(job: dict) -> dict:
         old.append({"role": "assistant", "ts": stamp, "content": answer})
         sessions.save_messages(sid, old)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         pth = os.path.join(_logs_dir(), "%s_%s.md" % (job.get("id"),
                                                       time.strftime("%Y%m%d_%H%M%S")))
@@ -391,7 +393,7 @@ def _run_selfiter(job: dict) -> dict:
             f.write("# %s\n\n- 时间：%s\n- 类型：每日自我反思\n\n## 结果\n\n%s\n"
                     % (job.get("name") or "", _now(), answer))
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"answer": answer, "model": "selfiter", "channel": "builtin", "session": sid}
 
 
@@ -448,7 +450,7 @@ def _run_selfaudit(job: dict) -> dict:
         old.append({"role": "assistant", "ts": stamp, "content": answer})
         sessions.save_messages(sid, old)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         pth = os.path.join(_logs_dir(), "%s_%s.md" % (job.get("id"),
                                                       time.strftime("%Y%m%d_%H%M%S")))
@@ -456,7 +458,7 @@ def _run_selfaudit(job: dict) -> dict:
             f.write("# %s\n\n- 时间：%s\n- 类型：每日代码自检\n\n## 结果\n\n%s\n"
                     % (job.get("name") or "", _now(), answer))
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"answer": answer, "model": "selfaudit", "channel": "builtin", "session": sid}
 
 
@@ -535,7 +537,7 @@ def _run_selfexp(job: dict) -> dict:
         old.append({"role": "assistant", "ts": stamp, "content": answer})
         sessions.save_messages(sid, old)
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     try:
         pth = os.path.join(_logs_dir(), "%s_%s.md" % (job.get("id"),
                                                       time.strftime("%Y%m%d_%H%M%S")))
@@ -543,8 +545,90 @@ def _run_selfexp(job: dict) -> dict:
             f.write("# %s\n\n- 时间：%s\n- 类型：定时体验评估\n\n## 结果\n\n%s\n"
                     % (job.get("name") or "", _now(), answer))
     except Exception:                                   # noqa: BLE001
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"answer": answer, "model": "selfexp", "channel": "builtin", "session": sid}
+
+
+def _run_selfidle(job: dict) -> dict:
+    """内置任务：抽空自检（kind="selfidle"）。
+
+    用户原话：「自检这东西能不能也是和自动迭代一样，自从抽空检测」。
+    默认每 20 分钟触发一次，但**绝大多数时候什么都不做** —— 只做一件事：
+    问一句「现在是不是空档」，不是就直接返回，不写会话、不写日志文件
+    （否则聊天区会被成片的「已跳过」刷满）。
+
+    空档的判定在 self_iterate.idle_gate()：开关、用户安静时长、
+    距上次自检的间隔、有没有反思/迭代在跑，四条全过才真跑。
+    """
+    from . import self_iterate as _si
+    s = _si.load_settings()
+    gate = _si.idle_gate(s)
+    if not gate.get("ok"):
+        return {"answer": "", "model": "selfidle", "channel": "builtin",
+                "session": "", "skipped": True,
+                "reason": gate.get("reason") or "不是空档"}
+
+    auto = bool(s.get("trust_mode"))
+    try:
+        r = _si.run_audit(deep=bool(s.get("deep_audit")), source="idle",
+                          create_plan=True, auto_fix=auto)
+    except Exception as e:                              # noqa: BLE001
+        raise RuntimeError("抽空自检失败：%s: %s" % (type(e).__name__, e))
+    if not r.get("ok"):
+        raise RuntimeError("抽空自检失败：%s" % r.get("error"))
+
+    a = r.get("audit") or {}
+    cnt = a.get("counts") or {}
+    total = int(a.get("total") or 0)
+    acts = (r.get("plan") or {}).get("actions") or []
+    auto_r = r.get("auto") or {}
+
+    # 干干净净又没改代码 → 不打扰用户（记录在 audits.json，抽屉里能查到）
+    if total <= 0 and not auto_r:
+        return {"answer": "", "model": "selfidle", "channel": "builtin",
+                "session": "", "skipped": True,
+                "reason": "空档自检完成，没有发现问题（%s 秒）" % a.get("seconds")}
+
+    lines = ["【抽空自检】%s" % (a.get("ts") or ""), ""]
+    lines.append("- 趁空档扫了 %s 个 py + %s 个 js，用时 %s 秒"
+                 % (a.get("files"), a.get("js_files"), a.get("seconds")))
+    lines.append("- 发现 %s 处：high %s / mid %s / low %s / info %s"
+                 % (total, cnt.get("high"), cnt.get("mid"),
+                    cnt.get("low"), cnt.get("info")))
+    lines.append("- 整理成 %d 条待办" % len(acts))
+    if auto_r:
+        lines.append("- 信任模式：自动执行 %s/%s 条"
+                     % (auto_r.get("done"), auto_r.get("total")))
+        if auto_r.get("need_restart"):
+            lines.append("- ⚠️ 改了代码，需要点「立即重启」才生效")
+    elif acts and not auto:
+        lines.append("- 等你批准（信任模式没开）")
+    answer = "\n".join(lines)
+
+    sid = str(job.get("session") or "")
+    if not sid:
+        try:
+            sid = sessions.ensure_default().get("id") or ""
+        except Exception:                               # noqa: BLE001
+            sid = ""
+    try:
+        old = sessions.get_messages(sid) or []
+        stamp = _now()
+        old.append({"role": "user", "ts": stamp,
+                    "content": "【定时任务·%s】抽空自检" % (job.get("name") or "代码自检")})
+        old.append({"role": "assistant", "ts": stamp, "content": answer})
+        sessions.save_messages(sid, old)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    try:
+        pth = os.path.join(_logs_dir(), "%s_%s.md" % (job.get("id"),
+                                                      time.strftime("%Y%m%d_%H%M%S")))
+        with open(pth, "w", encoding="utf-8") as f:
+            f.write("# %s\n\n- 时间：%s\n- 类型：抽空自检\n\n## 结果\n\n%s\n"
+                    % (job.get("name") or "", _now(), answer))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return {"answer": answer, "model": "selfidle", "channel": "builtin", "session": sid}
 
 
 def _run_once(job: dict) -> dict:
@@ -560,6 +644,9 @@ def _run_once(job: dict) -> dict:
     # ★ 内置任务（定时体验评估）—— 同上
     if str(job.get("kind") or "") == "selfexp":
         return _run_selfexp(job)
+    # ★ 内置任务（抽空自检）—— 同上
+    if str(job.get("kind") or "") == "selfidle":
+        return _run_selfidle(job)
 
     cfg = config.load_config() or {}
     prompt = str(job.get("prompt") or "").strip()
@@ -625,7 +712,7 @@ def _run_once(job: dict) -> dict:
         old.append({"role": "assistant", "ts": stamp, "content": answer})
         sessions.save_messages(sid, old)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
     # 日志留档
     try:
@@ -636,7 +723,7 @@ def _run_once(job: dict) -> dict:
                        "云端" if channel == "cloud" else "本机",
                        model, describe(job), prompt, answer))
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return {"answer": answer, "model": model, "channel": channel, "session": sid}
 
 
@@ -660,7 +747,7 @@ def run_now(job_id: str, background: bool = True) -> dict:
             try:
                 run_now(job_id, background=False)
             except Exception:                        # noqa: BLE001
-                pass
+                logger.debug("silent-except", exc_info=True)
         _th.Thread(target=_bg, daemon=True).start()
         return {"ok": True, "started": True, "id": job_id,
                 "msg": "已开始，通常 1~2 分钟；结果会写回会话并留档"}
@@ -668,8 +755,12 @@ def run_now(job_id: str, background: bool = True) -> dict:
     try:
         r = _run_once(job)
         job["last_run"] = _now()
-        job["last_status"] = "ok"
-        job["last_preview"] = (r.get("answer") or "")[:200]
+        if r.get("skipped"):
+            job["last_status"] = "skipped"
+            job["last_preview"] = str(r.get("reason") or "")[:200]
+        else:
+            job["last_status"] = "ok"
+            job["last_preview"] = (r.get("answer") or "")[:200]
         job["next_run"] = _next_run(job)
         save_jobs(jobs)
         return {"ok": True, **r}
@@ -803,8 +894,12 @@ def _loop() -> None:
                 _STATE["running"] = j["id"]
                 try:
                     _r = _run_once(j)
-                    j["last_status"] = "ok"
-                    j["last_preview"] = str(_r.get("answer") or "")[:200]
+                    if _r.get("skipped"):
+                        j["last_status"] = "skipped"
+                        j["last_preview"] = str(_r.get("reason") or "")[:200]
+                    else:
+                        j["last_status"] = "ok"
+                        j["last_preview"] = str(_r.get("answer") or "")[:200]
                 except Exception as e:                # noqa: BLE001
                     j["last_status"] = "error: %s" % e
                 finally:
@@ -814,7 +909,7 @@ def _loop() -> None:
                     save_jobs(jobs)
             _STATE["last_tick"] = now
         except Exception:
-            pass
+            logger.debug("silent-except", exc_info=True)
         time.sleep(20)
 
 
@@ -863,7 +958,7 @@ def _load_vec_cache() -> dict:
             _VEC_CACHE = {"sig": str(d.get("sig") or ""),
                           "items": dict(d.get("items") or {})}
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
     return _VEC_CACHE
 
 
@@ -876,7 +971,7 @@ def _save_vec_cache() -> None:
             json.dump(_VEC_CACHE, f)
         os.replace(tmp, p)
     except Exception:
-        pass
+        logger.debug("silent-except", exc_info=True)
 
 
 def _job_search_text(job: dict) -> str:
