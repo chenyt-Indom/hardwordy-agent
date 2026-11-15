@@ -3088,9 +3088,7 @@
       const moSel = $("#av2Motion");
       if (moSel && (mode === "w2l" || mode === "p25d")) {
         const mv = parseFloat(moSel.value);
-        // 兜底 0（静止）：动作层 _warp 会做整头 yaw/pitch/roll + 缩放，
-        // 实测改动 9.43% 全图像素，是「脖子一直乱扭」的直接原因。
-        base.motion = isNaN(mv) ? 0 : mv;
+        base.motion = isNaN(mv) ? 1 : mv;
         try { localStorage.setItem("avatar2_motion", String(base.motion)); } catch (e) {}
       }
       // 眨眼：单图没有「闭眼后」的眼皮纹理，合成出来是一块糊的皮肤，

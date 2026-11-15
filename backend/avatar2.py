@@ -1946,14 +1946,9 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
             if _ex_mod is not None:
                 try:
                     # 张口度本身就是「此刻在不在说话」的代理指标
-                    # head_motion=False：不做整帧仿射。
-                    # 原因：_affine 每帧都会算 zoom（预放大防露边），zoom 随
-                    # dx/dy/th 逐帧变化 → 整幅画面（含脖子、肩膀、背景）每帧
-                    # 缩放脉动，静态照片上就是「脖子一直乱扭」。
                     _ex_mod.apply(fr, i / float(fps), _expr,
                                   face=_face_norm,
-                                  energy=min(1.0, float(op) * 1.6),
-                                  head_motion=False)
+                                  energy=min(1.0, float(op) * 1.6))
                 except Exception:                       # noqa: BLE001
                     logger.debug("silent-except", exc_info=True)
             proc.stdin.write(fr.tobytes())

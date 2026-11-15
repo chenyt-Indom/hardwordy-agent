@@ -45,15 +45,9 @@ def _engine():
     if _ENGINE is None:
         p = _paths()
         _DET = SCRFD(p["det"])
-        # ⚠ 2026-11-15 重新评估「超分是不是负收益」：
-        #   旧结论的前提是「形象图只有 334×225，嘴部最终显示尺寸远小于 384」——
-        #   那时超分确实是白烧算力。但现在形象图是 1024×1024（嘴部框 200+），
-        #   96×96 的生成图**上采样**到 250 是插值糊，而 384 的**下采样**到 250
-        #   是真信息降采样，两者清晰度差一个档次（用户反馈的「糊」就是这个）。
-        #   所以改为：模型文件存在就启用，不存在自动退回（sr_sess=None 时 _sr 原样返回）。
-        _sr_path = os.path.join(_MODELS, "bigface_x4.onnx")
-        _ENGINE = W2L.Wav2LipEngine(p["onnx"], _DET, mel_npy=p["mel"], threads=8,
-                                    sr_path=(_sr_path if os.path.isfile(_sr_path) else None))
+        # 注：4x 超分(bigface_x4.onnx)实测在合成阶段是负收益
+        # （嘴部最终显示尺寸远小于 384，超分高频被缩放与细节回注吃掉），故不启用
+        _ENGINE = W2L.Wav2LipEngine(p["onnx"], _DET, mel_npy=p["mel"], threads=8)
     return _ENGINE
 
 
@@ -264,32 +258,6 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
     except (TypeError, ValueError):
         max_side = 1024
     max_side = max(480, min(1920, max_side))
-    # ---- 内存自适应（防「渲染到一半卡住 / 前端等超时断开」）----
-    # 渲染时**全部帧驻留内存**：n 帧 × 边长² × 3 字节。
-    #   1024² × 100 帧 = 314MB；1600² × 200 帧 = 1.5GB。
-    # 本机可用内存实测只剩 8.5GB（31.4GB 总、已用 72.9%、swap 已动用 2.6GB），
-    # 长会话上下文 + 渲染峰值会把进程顶进 swap，表现就是「跑到一半卡死、
-    # 前端请求超时断开」。这里按可用内存的 30% 作帧缓冲预算反推处理尺寸。
-    _mem_note = None
-    try:
-        import wave as _wave
-        with _wave.open(wav_path, "rb") as _wf:
-            _dur0 = _wf.getnframes() / float(_wf.getframerate() or 1)
-        _nfrm0 = max(1, int(_dur0 * float(W2L.FPS)) + 2)
-        import psutil as _ps
-        _budget = float(_ps.virtual_memory().available) * 0.30
-        _cap = min(max_side, max(H, W))
-        _need = _nfrm0 * (_cap ** 2) * 3.0
-        if _budget > 0 and _need > _budget:
-            _k = (_budget / _need) ** 0.5
-            _new = max(384, int(_cap * max(0.5, _k)) // 2 * 2)
-            if _new < _cap:
-                _mem_note = {"from": _cap, "to": _new, "frames": _nfrm0,
-                             "need_mb": int(_need / 1048576),
-                             "budget_mb": int(_budget / 1048576)}
-                max_side = min(max_side, _new)
-    except Exception:                                   # noqa: BLE001
-        logger.debug("silent-except", exc_info=True)
     proc_side = min(max_side, max(H, W))
     if max(H, W) > proc_side:
         s = proc_side / float(max(H, W))
@@ -380,17 +348,6 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
             tune = dict(tune or {})
             tune["params"] = _pr
             tune["amp_override"] = {"from": _old, "to": _amp}
-
-    # ---- 唇音同步补偿 ----
-    # 实测方法：取每帧嘴部暗像素占比作开口度，与音频 RMS 包络做互相关
-    #   （480²/25fps/1.94s）：最佳延迟 -1 帧 = -40ms，r=0.703
-    #   → 嘴比声音**早**约一帧，用户感知就是「口型对不上」。
-    # 做法：给「驱动音频」前面补 40ms 静音，Wav2Lip 生成的嘴动作整体后移 1 帧；
-    #   而下面第 401 行混流用的仍是原始 wav_path，声音一个采样都不动，
-    #   于是嘴被推后、声音不动，正好抵消。
-    _sync_pad = int(round(sr * 0.040))
-    if _sync_pad > 0 and len(y) > _sync_pad:
-        y = np.concatenate([np.zeros(_sync_pad, dtype=y.dtype), y])
 
     t0 = time.time()
     frames, meta = eng.render(img, y.astype(np.float32), box=box_override,
@@ -492,8 +449,7 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
                       "notes": (tune or {}).get("notes"),
                       # 用户手动拖了「口型幅度」时，记下它覆盖了 AI 的哪个值
                       "amp_override": (tune or {}).get("amp_override")}
-                     if tune else None),
-            "mem_scale": _mem_note}
+                     if tune else None)}
 
 
 def _grab_frames(mp4, n=2):
@@ -535,15 +491,11 @@ def _grab_frames(mp4, n=2):
 
 
 def speak(text, voice="", rate=None, style="", engine="auto",
-          blink=True, head=True, max_side=1600, motion=0.0,
+          blink=True, head=True, max_side=1600, motion=1.0,
           mode="auto", variants=False, review=True, amp=None):
     """文本 → TTS → 口型 → mp4
 
     motion:   头部动作强度 0（完全不动）~ 1（标准）~ 1.6（活跃）
-        ⚠ 2026-11-15：默认值从 1.0 改成 0.0。整头动作层会对**整帧**做
-        yaw/pitch/roll + 缩放，实测让头顶/额头/下巴帧间差升到 0.5~2.2，
-        在静态照片上就是用户反馈的「脖子一直乱扭」。前端已默认传 0，
-        这里再兜一层：任何不传 motion 的调用方也默认静止。
     mode:     auto / w2l / warp
     variants: True 时一次生成多个版本（画风优先 + 口型优先），各自质检，
               让用户自己挑。卡通形象下两版差别很大，值得都看一眼。
@@ -635,9 +587,6 @@ def speak(text, voice="", rate=None, style="", engine="auto",
             "qa": qa,
             "qa_score": (qa or {}).get("score"),
             "tune": r.get("tune"),
-            # 内存降档如实上报（None = 没降）；超分是否真的启用也一并给出
-            "mem_scale": r.get("mem_scale"),
-            "sr": bool(getattr(_engine(), "sr_sess", None) is not None),
         })
 
     good = [v for v in versions if v.get("ok")]
