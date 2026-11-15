@@ -1206,6 +1206,77 @@ def _watch_snapshot(query: str, kind: str = "web") -> dict:
         return {"ok": False, "text": "", "error": "%s: %s" % (type(e).__name__, e)}
 
 
+def add_watch(query: str, kind: str = "web", interval_min: int = 0,
+              name: str = "", session: str = "") -> dict:
+    """登记一条「盯着 XX」的后台任务（add_watch 别名，参数顺序更直观）。
+
+    与 register_watch 完全等价，只是把 kind 提到 interval_min 前面，
+    方便调用方写 add_watch("显卡价格", "web", 30)。
+    """
+    return register_watch(query, interval_minutes=interval_min, kind=kind,
+                          name=name, session=session)
+
+
+def tick_watch() -> dict:
+    """跑一轮所有到期的盯事任务：抓取 → 比对 → 有变化就记时间线 + actlog。
+
+    为什么单独开一个（而不是只靠 _loop 里的 _run_once）：
+      · _run_once 走的是「模型执行 prompt」那条路，盯事任务不需要模型；
+      · 这里只挑 kind=="watch" 且 next_run 已到期的任务，逐个调 run_watch，
+        把结果写回 job（last_hash / last_preview / timeline / last_status /
+        next_run），再 save_jobs 一次落盘；
+      · 任何一条任务炸掉都不影响其它任务 —— 每条单独 try。
+
+    返回 {ok, ran, changed, errors}，方便调用方/测试断言。
+    """
+    now = time.time()
+    ran = 0
+    changed = 0
+    errors = []
+    with _LOCK:
+        jobs = load_jobs()
+        dirty = False
+        for job in jobs:
+            if str(job.get("kind") or "") != "watch":
+                continue
+            if not job.get("enabled"):
+                continue
+            try:
+                due = float(job.get("next_run") or 0)
+            except Exception:
+                due = 0.0
+            if due and due > now:
+                continue
+            ran += 1
+            try:
+                r = run_watch(job)
+            except Exception as e:                    # noqa: BLE001
+                r = {"ok": False, "changed": False, "added": 0, "removed": 0,
+                     "error": "%s: %s" % (type(e).__name__, e)}
+            job["last_run"] = _now()
+            if not r.get("ok"):
+                job["last_status"] = "抓取失败：%s" % (r.get("error") or "未知错误")
+                errors.append({"id": job.get("id"), "error": r.get("error")})
+            elif r.get("changed"):
+                changed += 1
+                job["last_status"] = "有变化（+%s / -%s）" % (r.get("added") or 0,
+                                                              r.get("removed") or 0)
+            elif r.get("baseline"):
+                job["last_status"] = "已记录基线"
+            else:
+                job["last_status"] = "无变化"
+            # 重算下一次（用 every_minutes；没有就退回默认值）
+            sch = job.get("schedule") or {}
+            if not sch.get("every_minutes"):
+                sch = {"every_minutes": WATCH_DEFAULT_MINUTES}
+                job["schedule"] = sch
+            job["next_run"] = _next_run({"schedule": sch}, base=now)
+            dirty = True
+        if dirty:
+            save_jobs(jobs)
+    return {"ok": True, "ran": ran, "changed": changed, "errors": errors}
+
+
 def register_watch(query: str, interval_minutes: int = 0, kind: str = "web",
                    name: str = "", session: str = "") -> dict:
     """登记一条「盯着 XX」的后台任务，返回 {ok, job} 或 {ok:False, error}。

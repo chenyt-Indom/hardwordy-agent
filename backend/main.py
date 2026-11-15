@@ -2861,6 +2861,66 @@ def selfloop_stats():
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfloop/status")
+def selfloop_status():
+    """自循环状态卡：plans / triggers / runs / last_error / last_run_at。
+
+    ★ 2026-11-16 用户要求：设置抽屉顶部要有一张「自循环状态卡」，30 秒刷新一次。
+      数据源是 data/selfloop.json（selfloop 模块自己维护的落盘状态）。
+      这里**只读**，绝不触发思考、不改配额 —— 前端每 30 秒轮询一次，
+      如果这里顺手做点什么，等于每 30 秒白烧一次调用。
+
+    返回结构（前端按字段名直接取，缺字段一律给安全默认值，避免前端 undefined）：
+      ok           是否读到（文件不存在也算 ok，只是全 0）
+      enabled      自循环总开关
+      plans        今日已生成计划数
+      triggers     今日触发思考次数
+      runs         今日自动执行次数
+      last_error   最近一次错误（没有就是空串）
+      last_run_at  最近一次运行时间（没有就是空串）
+      daily_plans  每日计划上限（前端显示 x/y 用）
+      busy         是否正在思考
+    """
+    out = {"ok": True, "enabled": False, "plans": 0, "triggers": 0,
+           "runs": 0, "last_error": "", "last_run_at": "",
+           "daily_plans": 0, "busy": False}
+    # ① 先读落盘文件（最权威：重启后也还在）
+    try:
+        p = config.data("selfloop.json")
+        if os.path.isfile(p):
+            with open(p, encoding="utf-8") as f:
+                d = json.load(f) or {}
+            if isinstance(d, dict):
+                out["enabled"] = bool(d.get("enabled", False))
+                out["plans"] = int(d.get("plans_today") or d.get("plans") or 0)
+                out["triggers"] = int(d.get("triggers_today") or d.get("triggers") or 0)
+                out["runs"] = int(d.get("runs_today") or d.get("runs") or 0)
+                out["last_error"] = str(d.get("last_error") or "")
+                out["last_run_at"] = str(d.get("last_run_at") or "")
+                out["daily_plans"] = int(d.get("daily_plans") or 0)
+                out["busy"] = bool(d.get("busy", False))
+    except Exception as e:                              # noqa: BLE001
+        # 文件坏了不能让状态卡整个挂掉 —— 记下原因，继续用内存里的 stats 兜底
+        out["last_error"] = "读取 selfloop.json 失败：%s: %s" % (type(e).__name__, e)
+    # ② 再用 selfloop.stats() 补齐（内存里的实时值更新，比如 busy / 配额）
+    try:
+        from . import selfloop as _sl
+        s = _sl.stats() or {}
+        if isinstance(s, dict) and s.get("ok", True):
+            out["enabled"] = bool(s.get("enabled", out["enabled"]))
+            out["plans"] = int(s.get("plans_today", out["plans"]) or 0)
+            out["triggers"] = int(s.get("triggers_today", out["triggers"]) or 0)
+            out["runs"] = int(s.get("runs_today", out["runs"]) or 0)
+            out["daily_plans"] = int(s.get("daily_plans", out["daily_plans"]) or 0)
+            out["busy"] = bool(s.get("busy", out["busy"]))
+            lt = s.get("last_trigger") or {}
+            if not out["last_run_at"] and lt.get("at"):
+                out["last_run_at"] = str(lt.get("at"))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    return out
+
+
 @app.post("/api/selfloop/think")
 @app.post("/api/selfloop/creative")
 def selfloop_creative(body: dict = None):

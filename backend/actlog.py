@@ -234,6 +234,48 @@ def fail_stats(window: int = 100, path: str = "") -> dict:
     return dict(c.most_common())
 
 
+def aggregate_fail_kinds(since_hours: int = 24, path: str = "") -> dict:
+    """按**时间窗**聚合 events 里的 fail_kind 计数，返回 {fail_kind: count}。
+
+    为什么单独开一个（2026-11-17 改动证据卡）：
+      fail_stats() 只按**条数**截断（最近 100 条），跟时间无关 —— 一个 3 个月前
+      反复出现的 fail_kind 会一直算作「有」，幽灵修复照样放行。这里按**时间窗**
+      过滤，只统计 since_hours 小时内真实发生过的失败，计数为 0 就说明这段时间
+      根本没发生过，属于凭空捏的失败。
+
+    参数：
+      since_hours  时间窗（小时），<=0 表示不限时间（退化成 fail_stats 的语义）
+      path         显式指定 task.json 路径（测试用）
+
+    返回：{fail_kind: count}，按次数降序。任何异常都返回 {} —— 账本坏了不能
+          影响主流程（调用方据此判断「查不到」还是「真的是 0」）。
+    """
+    try:
+        h = float(since_hours)
+    except (TypeError, ValueError):
+        h = 24.0
+    cutoff = 0.0
+    if h > 0:
+        cutoff = time.time() - h * 3600.0
+    events = _load_events(path)
+    kinds = []
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        k = e.get("fail_kind")
+        if not isinstance(k, str) or not k.strip():
+            continue
+        if cutoff > 0:
+            ts = _event_ts(e)
+            # 时间戳解析不出来（0）时按「算它一次」处理：宁可放行也不要
+            # 因为格式不认识就把真实失败判成幽灵修复。
+            if ts and ts < cutoff:
+                continue
+        kinds.append(k.strip())
+    c = Counter(kinds)
+    return dict(c.most_common())
+
+
 def count_fail_kind(fail_kind: str, days: int = 7, path: str = "") -> int:
     """统计某个 fail_kind 在最近 days 天内的真实发生次数。
 

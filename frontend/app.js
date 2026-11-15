@@ -13032,7 +13032,18 @@
   let pushing = false;
   // 已上报过的问答对指纹。原来每次把最近窗口整段重推，
   // 后端就记成好几条同样的问答，体验评估会误判「用户重复发送同一需求」。
+  // ★ 2026-11-16 用户报「点完重启弹窗又出现」：这个 Set 原来只在内存里，
+  //   刷新/重启后清空 → 前端把最近 10 条历史对话当新任务重推 → 后端又反思
+  //   一轮 → 又改代码 → 弹窗再出现，形成死循环。所以必须持久化。
+  const PUSH_LS = "iter_pushed_keys";
   const pushedKeys = new Set();
+  try {
+    const rawLS = localStorage.getItem(PUSH_LS);
+    if (rawLS) (JSON.parse(rawLS) || []).forEach(function (k) { pushedKeys.add(k); });
+  } catch (e) { /* 隐私模式 / 坏数据，忽略 */ }
+  function savePushed() {
+    try { localStorage.setItem(PUSH_LS, JSON.stringify(Array.from(pushedKeys).slice(-300))); } catch (e) {}
+  }
   function sigKey(u, a) {
     return String(u || "").slice(0, 120) + "\u0000" + String(a || "").slice(0, 120);
   }
@@ -13057,6 +13068,7 @@
         pushedKeys.clear();
         keep.forEach(function (x) { pushedKeys.add(x); });
       }
+      savePushed();
     } finally {
       pushing = false;
     }
@@ -13809,6 +13821,111 @@
       .then(function (d) { loopStats = d; if (el) render(); })
       .catch(function () { /* 拿不到就不显示，不影响抽屉其它内容 */ });
   }
+
+  // ---------- 自循环状态卡（设置抽屉顶部，30 秒刷新）----------
+  // ★ 2026-11-16 用户要求：设置抽屉顶部渲染一张状态卡，显示
+  //   plans / triggers / runs / last_error / last_run_at，30 秒刷新一次。
+  //   数据源 /api/selfloop/status（只读，不会触发思考）。
+  //   为什么单独做一张卡而不是塞进「迭代想法」的 chip：
+  //     · 迭代想法是「看它想了什么」，设置抽屉是「看它现在什么状态」；
+  //     · 状态卡要能一眼看到 last_error（出问题时用户第一眼就该看到红字），
+  //       chip 里塞错误信息会被挤成一团。
+  let loopStatus = null;
+  let _loopStatusTimer = 0;
+
+  function fmtLoopTime(s) {
+    const t = String(s || "").trim();
+    if (!t) return "—";
+    // 后端可能给 "2026-11-16 14:03:22" 或 ISO 串，只取「时:分」够看
+    const m = t.match(/(\d{1,2}:\d{2})/);
+    if (m) return m[1];
+    return t.length > 16 ? t.slice(0, 16) : t;
+  }
+
+  function renderLoopStatus() {
+    const box = document.getElementById("loopStatusCard");
+    if (!box) return;
+    const L = loopStatus;
+    if (!L) {
+      box.innerHTML = '<div class="loop-st-hint">正在读取自循环状态…</div>';
+      return;
+    }
+    if (L.ok === false) {
+      box.innerHTML = '<div class="loop-st-hint bad">读取失败：' +
+        esc(String(L.error || "未知原因")) + '</div>';
+      return;
+    }
+    const on = !!L.enabled;
+    const err = String(L.last_error || "").trim();
+    const dp = Number(L.daily_plans || 0);
+    const plans = Number(L.plans || 0);
+    const planTxt = dp > 0 ? (plans + "/" + dp) : String(plans);
+    let h = '<div class="loop-st-head">' +
+      '<span class="loop-st-title">🔁 自循环</span>' +
+      '<span class="loop-st-dot ' + (on ? "on" : "off") + '" title="' +
+        (on ? "已开启" : "已关闭") + '"></span>' +
+      '<span class="loop-st-state">' + (on ? "运行中" : "已关闭") + '</span>' +
+      (L.busy ? '<span class="loop-st-busy">正在思考…</span>' : '') +
+      '<button type="button" class="loop-st-refresh" title="立刻刷新状态">↻</button>' +
+      '</div>';
+    h += '<div class="loop-st-grid">' +
+      '<div class="loop-st-cell"><b>' + plans + '</b><i>计划' +
+        (dp > 0 ? ' / ' + dp : '') + '</i></div>' +
+      '<div class="loop-st-cell"><b>' + Number(L.triggers || 0) + '</b><i>触发</i></div>' +
+      '<div class="loop-st-cell"><b>' + Number(L.runs || 0) + '</b><i>执行</i></div>' +
+      '<div class="loop-st-cell"><b>' + esc(fmtLoopTime(L.last_run_at)) + '</b><i>上次运行</i></div>' +
+      '</div>';
+    if (err) {
+      h += '<div class="loop-st-err" title="' + esc(err) + '">⚠ ' + esc(err) + '</div>';
+    }
+    box.innerHTML = h;
+    const btn = box.querySelector(".loop-st-refresh");
+    if (btn) btn.onclick = function () { loadLoopStatus(true); };
+  }
+
+  function loadLoopStatus(force) {
+    const box = document.getElementById("loopStatusCard");
+    if (!box) return;
+    if (!force && box.dataset.busy === "1") return;
+    box.dataset.busy = "1";
+    fetch("/api/selfloop/status")
+      .then(function (r) { return r.json(); })
+      .then(function (d) { loopStatus = d || { ok: false, error: "空响应" }; renderLoopStatus(); })
+      .catch(function (e) {
+        loopStatus = { ok: false, error: (e && e.message) ? e.message : String(e) };
+        renderLoopStatus();
+      })
+      .then(function () { box.dataset.busy = "0"; });
+  }
+
+  // 30 秒刷新：只在设置抽屉打开时跑，关掉就停 —— 别让后台一直轮询。
+  function startLoopStatusTimer() {
+    if (_loopStatusTimer) return;
+    loadLoopStatus(true);
+    _loopStatusTimer = setInterval(function () {
+      const box = document.getElementById("loopStatusCard");
+      // 抽屉关了 / 元素没了 → 停表，下次打开再启动
+      if (!box || !box.offsetParent) { stopLoopStatusTimer(); return; }
+      loadLoopStatus(false);
+    }, 30000);
+  }
+  function stopLoopStatusTimer() {
+    if (_loopStatusTimer) { clearInterval(_loopStatusTimer); _loopStatusTimer = 0; }
+  }
+  (function bindLoopStatus() {
+    const box = document.getElementById("loopStatusCard");
+    if (!box) return;
+    // 设置抽屉是 <details>：打开时启动刷新，关闭时停表
+    const drawer = box.closest("details");
+    if (drawer) {
+      drawer.addEventListener("toggle", function () {
+        if (drawer.open) startLoopStatusTimer(); else stopLoopStatusTimer();
+      });
+      if (drawer.open) startLoopStatusTimer();
+    } else {
+      startLoopStatusTimer();
+    }
+  })();
 
   function loopChips() {
     const L = loopStats;

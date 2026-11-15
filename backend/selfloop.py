@@ -85,6 +85,52 @@ def _today():
     return time.strftime("%Y-%m-%d")
 
 
+# ---- 跨重启去重（2026-11-16 用户报「点完重启弹窗又出现」的根因修复）----
+# 真实时间线（数据来自 selfloop.json / boot_gate.json）：
+#   03:55:48 自动迭代改了 selfdev.py / reply_gate.py
+#   03:55:53 用户点重启    03:56:04 重启完成
+#   03:56:10 又触发一轮反思 → 又改代码 → pending.mark() → 弹窗又冒出来
+# 原因：前端 pushedKeys 和后端 _LAST_AT 都在**内存**里，一重启全清空，
+# 前端重抓最近 10 条历史对话当成新任务重推，后端节流也归零直接放行。
+# 于是「改代码 → 弹窗 → 重启 → 又改代码」自己咬自己，用户永远关不掉弹窗。
+# 修法：把「哪些对话已经思考过」和「上次开跑时间」都落盘。
+_SEEN_KEEP = 300         # 最多记多少个对话指纹
+_SEEN_TTL = 86400        # 超过一天的指纹作废（用户真重发同一句话还该再想一次）
+
+
+def _sig_hash(u, a):
+    """一段问答对的指纹。截断后取 md5，避免 seen 表无限膨胀。"""
+    import hashlib
+    s = (str(u or "")[:400] + "\u0000" + str(a or "")[:400]).encode("utf-8", "ignore")
+    return hashlib.md5(s).hexdigest()[:16]
+
+
+def _seen_hit(d, sig):
+    """这个指纹是不是已经思考过了（在 TTL 内）。"""
+    if not sig:
+        return False
+    seen = d.get("seen") or {}
+    if not isinstance(seen, dict):
+        return False
+    ts = float(seen.get(sig) or 0)
+    return bool(ts) and (time.time() - ts) < _SEEN_TTL
+
+
+def _seen_add(d, sig):
+    """记下这个指纹，顺手清掉过期的和超量的。"""
+    if not sig:
+        return
+    now = time.time()
+    seen = d.get("seen")
+    if not isinstance(seen, dict):
+        seen = {}
+    seen[sig] = now
+    if len(seen) > _SEEN_KEEP:
+        items = sorted(seen.items(), key=lambda kv: float(kv[1] or 0))[-_SEEN_KEEP:]
+        seen = dict(items)
+    d["seen"] = {k: v for k, v in seen.items() if now - float(v or 0) < _SEEN_TTL}
+
+
 def load():
     """读状态文件。坏文件按空处理 —— 统计坏了不能连累主流程。"""
     try:
@@ -211,8 +257,14 @@ def on_turn_end(user_text, assistant_text="", meta=None, source="chat"):
         ok, why = is_real_task(user_text, meta)
         if not ok:
             return {"ok": True, "skipped": why}
+        # ★ 跨重启去重（2026-11-16 用户报「点完重启弹窗又出现」）：
+        #   重启后前端会把最近 10 条历史对话整段重推一遍，那些**已经思考过**的
+        #   绝不能再想一次，否则就是「重启 → 又改代码 → 又弹窗」的死循环。
+        sig = _sig_hash(user_text, assistant_text)
+        if _seen_hit(d, sig):
+            return {"ok": True, "skipped": "这段对话已经思考过了"}
         return _maybe_think("对话结束（%s）" % why,
-                            focus_user=user_text, source=source)
+                            focus_user=user_text, source=source, sig=sig)
     except Exception as e:                              # noqa: BLE001
         logger.warning("selfloop.on_turn_end 失败：%s: %s", type(e).__name__, e)
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
@@ -242,12 +294,20 @@ def on_task_end(info):
         logger.warning("selfloop.on_task_end 失败：%s: %s", type(e).__name__, e)
 
 
-def _maybe_think(reason, focus_user="", source="chat", gap=None):
+def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     """三重检查都过了才真的开线程。"""
     d = cfg()
     if _quota_left(d) <= 0:
         return {"ok": True, "skipped": "今日计划数已满（%d）" % d.get("daily_plans")}
     now = time.time()
+    # ★ 节流跨重启有效：_LAST_AT 是内存变量，重启后归零 → waited 变成天文数字
+    #   → 节流形同虚设（实测 03:55:16 跑完，03:56:10 重启后又跑了一轮）。
+    #   所以第一次用到时从落盘的 last_at 恢复。
+    if not _LAST_AT[0]:
+        try:
+            _LAST_AT[0] = float(d.get("last_at") or 0)
+        except Exception:                               # noqa: BLE001
+            _LAST_AT[0] = 0.0
     need = float(gap if gap is not None else (d.get("min_gap_sec") or 90))
     with _LOCK:
         if _BUSY[0]:
@@ -263,6 +323,10 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None):
         d = cfg()
         d["triggers"] = int(d.get("triggers") or 0) + 1
         d["last_trigger"] = {"at": _now(), "reason": reason[:200], "source": source}
+        d["last_at"] = now          # ★ 落盘，重启后节流还能接上
+        # ★ 只在**真正开跑**时记指纹：被节流挡掉的那次不算思考过，
+        #   下一轮重推还应该有机会。这样既不重复烧钱，也不会漏掉真实需求。
+        _seen_add(d, sig)
         _save(d)
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
@@ -447,6 +511,7 @@ def think_now(focus=""):
             _LAST_AT[0] = time.time()
         d["triggers"] = int(d.get("triggers") or 0) + 1
         d["last_trigger"] = {"at": _now(), "reason": "手动触发", "source": "manual"}
+        d["last_at"] = _LAST_AT[0]
         _save(d)
         record_trigger("手动触发", "manual")
         threading.Thread(target=_cycle, args=("手动触发", focus, "manual"),
