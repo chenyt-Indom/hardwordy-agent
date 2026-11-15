@@ -10787,11 +10787,15 @@ def avatar_lipsync_speak(body: dict):
         _ms = 1024
     _ms = max(480, min(1920, _ms))
     # 头部动作强度：0 = 完全不动，1 = 标准，1.6 = 活跃（夹在 0~2）
-    _mo = body.get("motion", 1.0)
+    # ⚠️ 2026-11-15：兜底默认从 1.0 改成 0.0（静止，只有嘴动）。
+    #   动作层（avatar25d._warp）会做整头 yaw/pitch/roll + 缩放，
+    #   实测改动 9.43% 全图像素 —— 就是用户说的「整个脸都变形了」。
+    #   用户想要头动，前端下拉框里显式选「轻微/自然/活跃」即可。
+    _mo = body.get("motion", 0.0)
     try:
-        _mo = float(_mo) if _mo not in (None, "") else 1.0
+        _mo = float(_mo) if _mo not in (None, "") else 0.0
     except Exception:                                           # noqa: BLE001
-        _mo = 1.0
+        _mo = 0.0
     _mo = max(0.0, min(2.0, _mo))
     # 口型幅度：前端滑块的 0.6~2.0，映射到 open_gain（最大开口相对源图的倍率）。
     # 2026-11-15：这个字段原来在路由层就被丢掉了，滑块等于死控件。

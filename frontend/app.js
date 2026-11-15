@@ -2879,7 +2879,19 @@
     if (moSel0) {
       try {
         const saved = localStorage.getItem(MOTION_KEY);
-        if (saved !== null && saved !== "") moSel0.value = saved;
+        // ⚠️ 2026-11-15：默认动作改成「静止（只有嘴动）」——用户要求只动嘴部，
+        //   而动作层会做整头旋转/点头/缩放（实测改动 9.43% 全图像素，
+        //   是「整个脸都在变形」的直接原因）。
+        //   浏览器里存着的老默认值 "1" 会把新默认盖掉，看起来像「改了没生效」，
+        //   所以把历史默认值 "1" 当「未设置」处理；用户真选过 0.6 / 1.6 的保留。
+        if (saved === "1") {
+          try { localStorage.removeItem(MOTION_KEY); } catch (e2) {}
+          moSel0.value = "0";
+        } else if (saved !== null && saved !== "") {
+          moSel0.value = saved;
+        } else {
+          moSel0.value = "0";
+        }
       } catch (e) {}
       moSel0.onchange = () => {
         try { localStorage.setItem(MOTION_KEY, moSel0.value); } catch (e) {}

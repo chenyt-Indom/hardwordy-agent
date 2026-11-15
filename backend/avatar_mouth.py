@@ -304,7 +304,16 @@ def analyze(img, mouth_cfg, verbose=False):
         "y_lip_bot": int(y_lip_bot),
         "y_fade": y_fade,
         "open_h": float(open_h),
-        "source_open": bool(open_h >= max(4.0, mh * 0.12)),
+        # ⚠️ 2026-11-15：判据原来是 max(4.0, mh*0.12)，太松。
+        #   实测一张**双唇紧闭**的真人照（334×225，mh=15.9）量出 open_h=5.0，
+        #   5 >= 4.0 就判成「源图张嘴」→ 渲染走 warp 形变，
+        #   可闭嘴图没有口腔纹理可压，嘴几乎张不开（实测暗行只有 1~3 行，
+        #   而 w2l 版是 3~9 行），等于选了一版不会动的。
+        #   改成「开口高度至少占嘴框高的 32%」才算真张嘴：
+        #   闭嘴照 5/15.9=31% → False；大笑卡通 22/26=85% → True。
+        #   拿不准时判 False 更安全 —— warp 要求源图**明显**张开，
+        #   否则退回 w2l（由模型生成口腔），不会出黑块硬边。
+        "source_open": bool(open_h >= max(5.5, mh * 0.32)),
         "skin_gray": skin,
         "hole_thr": thr,
         # ★ 记住几何是在**哪张图**上算出来的。objective_score 拿去量视频帧时，

@@ -261,6 +261,15 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
         s = proc_side / float(max(H, W))
         img = cv2.resize(img, (int(W * s) // 2 * 2, int(H * s) // 2 * 2),
                          interpolation=cv2.INTER_AREA)
+    # ⚠️ 2026-11-15 修崩溃：小图（长边 ≤ max_side）原来不缩放、保留奇数尺寸，
+    #   而 _prep3d 会把尺寸强制取偶（334×225 → 334×224），
+    #   两边差 1 行 → _warp 里 `amt*(f-blur)` 抛
+    #   ValueError: (224,334,1) vs (225,334,3)。
+    #   这里统一取偶，和 _prep3d / 视频编码的口径一致。
+    if img.shape[1] % 2 or img.shape[0] % 2:
+        img = cv2.resize(img, (max(2, img.shape[1] // 2 * 2),
+                               max(2, img.shape[0] // 2 * 2)),
+                         interpolation=cv2.INTER_AREA)
     H, W = img.shape[:2]
 
     sr, y = A2._read_wav(wav_path)
@@ -359,7 +368,15 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
         t_motion = time.time() - t1
 
     # 输出放大：处理尺寸之上只做插值放大（libx264 要求宽高偶数）
-    scale = max_side / float(max(W, H))
+    # ⚠️ 2026-11-15 修「嘴部割裂感 / 画面发糊」：原来无条件把输出放大到 max_side。
+    #   源图只有 334×225 时这等于 3 倍纯插值 —— 不增加任何细节，只把
+    #   贴回区的色阶过渡拉成一片糊，接缝反而更明显（实测非嘴部超 8 灰度
+    #   像素 852 个，全部来自放大重采样）。
+    #   现在以**源图原生长边**为上限：源图够大就照用户选的放大，源图本身就小
+    #   就保持原生，不虚张声势。
+    _src_long = max(int(img.shape[1]), int(img.shape[0]))
+    _out_target = min(int(max_side), _src_long)
+    scale = _out_target / float(max(W, H))
     if scale > 1.001:
         oW = max(2, int(round(W * scale / 2.0)) * 2)
         oH = max(2, int(round(H * scale / 2.0)) * 2)
@@ -524,6 +541,13 @@ def speak(text, voice="", rate=None, style="", engine="auto",
         _geom = AM.analyze(_img, _cfg) if (_img is not None and _cfg) else None
     except Exception:                                   # noqa: BLE001
         _geom = None
+
+    # ⚠️ 2026-11-15：源图**闭嘴**时 warp 没有口腔纹理可压，render 内部会退回
+    #   w2l —— 两版出来几乎一样，白花一倍时间，还可能被质检随机选到差的那版。
+    #   这种情况只出 w2l 一版。
+    if variants and len(modes) > 1 and _geom is not None \
+            and not _geom.get("source_open"):
+        modes = ["w2l"]
 
     from urllib.parse import quote
     versions = []

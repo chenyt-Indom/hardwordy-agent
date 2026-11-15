@@ -585,7 +585,7 @@ class Wav2LipEngine:
 
     def _composite(self, full_frame, pred96, box, orig_face96, mouth_ratio=0.54,
                    feather=13, openness=1.0, roundness=0.0, mask_gain=None,
-                   tune=None):
+                   tune=None, mouth_cy=None, mouth_h=None):
         """把生成的嘴部区域贴回原图：椭圆蒙版 + 张嘴度自适应
 
         openness 0..1：闭嘴时几乎不替换（保留原图清晰），张嘴时充分替换。
@@ -622,6 +622,26 @@ class Wav2LipEngine:
         cy = int(h * _t("ell_cy", 0.75))
         ax = max(4, min(int(w * _t("ell_w", 0.29)), w // 2 - 4))
         ay = max(4, min(int(h * _t("ell_h", 0.175)), cy - 6, h - cy - 6))
+        # ⚠️ 2026-11-15 修「嘴周割裂感 / 下巴被换掉」：
+        #   0.75 是 Wav2Lip 训练数据的对齐比例（嘴中心在裁剪框 75% 高度），
+        #   但它**只在裁剪框没被图像边界裁掉时成立**。
+        #   实测这张形象（334×225）的脸框是 (110,0,232,133) —— 上沿贴到 y=0，
+        #   头顶被图像切掉，嘴实际在框的 62% 高度（y=82），按 0.75 算出来是
+        #   y=99，**比真实嘴中心低 17px**，椭圆压在下巴上：
+        #   实测 y=96~120 有 2000+ 像素被替换（下巴被抹平、嘴周一圈糊），
+        #   这就是用户说的「割裂感」。
+        #   有嘴部标定时以标定为准，比例只作兜底。
+        if mouth_cy is not None:
+            try:
+                _cy_rel = float(mouth_cy) - y1
+            except (TypeError, ValueError):
+                _cy_rel = None
+            if _cy_rel is not None and -h * 0.2 <= _cy_rel <= h * 1.2:
+                cy = int(np.clip(_cy_rel, 6, h - 6))
+                # 纵向半径也按真实嘴高收：1.35×嘴高足够覆盖张口，
+                # 再大就会把下巴一起换掉。
+                _ay_cap = int(max(6.0, float(mouth_h or (h * 0.18)) * 1.35))
+                ay = max(4, min(ay, _ay_cap, cy - 4, h - cy - 4))
 
         # 圆唇幅度也由参数决定（0.26 = 横向收拢 26%）。roundness 只表示
         # 「这一帧该有多圆」，幅度是全局参数，两者相乘得到实际收拢量。
@@ -779,6 +799,21 @@ class Wav2LipEngine:
                     box = self._crop_box(dets[best], pads=(0, 10, 0, 0), W=W, H=H)
         else:
             box = self._crop_box(tuple(box)[:4], pads=(0, 0, 0, 0), W=W, H=H)
+
+        # ---- 真实嘴部中心/高度（图像坐标，像素）----
+        # 贴回椭圆必须对准它。按「脸部框 75% 高度」推算在框被图像边界裁掉时
+        # 会偏到下巴上（实测偏 17px，见 _composite 里的说明）。
+        _mcy = _mh = None
+        try:
+            from . import avatar2 as _A2mc
+            _mm = _A2mc.mouth()
+            if _mm:
+                _mcy = float(_mm.get("y", 0) or 0) * H
+                _mh = float(_mm.get("h", 0) or 0) * H
+                if _mcy <= 0:
+                    _mcy = None
+        except Exception:                               # noqa: BLE001
+            _mcy = _mh = None
 
         mel = wav_to_mel(wav_float32, self.mel_npy)     # (80, T)
         T = mel.shape[1]
@@ -1012,8 +1047,15 @@ class Wav2LipEngine:
                     except Exception:                   # noqa: BLE001
                         pass
             elif geom:
-                # 源图闭嘴 → 只能向「张开」方向外推（没有真实口腔纹理可用）
+                # 源图闭嘴 → open_from_closed 只能向「张开」方向几何外推，
+                # 没有真实口腔纹理可用，实测出来是「黑色条块 + 硬边」
+                # （视觉复核判「明显贴图痕迹」）。
+                # ⚠️ 2026-11-15：原来这里只是 warp_mode=False，循环里仍走
+                #   `elif geom is not None: open_from_closed(...)` —— 等于照样
+                #   出黑块。现在把 geom 也清掉，让它落到下面的 w2l 贴回分支：
+                #   「从闭嘴图生成张嘴」本来就是 Wav2Lip 的本职。
                 warp_mode = False
+                geom = None
             if geom is None:
                 warp_mode = False
 
@@ -1048,7 +1090,8 @@ class Wav2LipEngine:
                                         openness=float(open_seq_w2l[i]),
                                         roundness=float(round_seq[i]),
                                         mask_gain=float(mask_seq[i]),
-                                        tune=TP)
+                                        tune=TP,
+                                        mouth_cy=_mcy, mouth_h=_mh)
             frames.append(frame)
             if progress and i % 10 == 0:
                 progress(int(70 + i * 0.3), max(1, n))

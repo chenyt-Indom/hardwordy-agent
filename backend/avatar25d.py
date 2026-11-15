@@ -466,6 +466,28 @@ def _warp(img, prep, yaw=0.0, pitch=0.0, roll=0.0,
     zn = prep["zn"]
     wg = prep["wgt"]
 
+    # ⚠️ 2026-11-15 修崩溃：prep 的尺寸和当前帧**不一定一致**。
+    #   _prep3d 会把尺寸强制取偶（334×225 → 334×224），而 avatar_lipsync.render
+    #   只在「图比 max_side 大」时才 resize，小图原样保留奇数高。
+    #   于是 wg 是 (224,334,1)、帧是 (225,334,3)，第 527 行的
+    #   `amt * (f - blur)` 直接抛：
+    #     ValueError: operands could not be broadcast together
+    #     with shapes (224,334,1) (225,334,3)
+    #   这里把 zn/wgt 对齐到当前帧尺寸（本来就该按帧走），ROI 一并夹回边界。
+    _fh, _fw = img.shape[:2]
+    if wg.shape[:2] != (_fh, _fw):
+        zn = cv2.resize(np.ascontiguousarray(zn), (_fw, _fh),
+                        interpolation=cv2.INTER_LINEAR)
+        wg = cv2.resize(np.ascontiguousarray(wg), (_fw, _fh),
+                        interpolation=cv2.INTER_LINEAR)
+        x0 = max(0, min(int(x0), _fw - 2))
+        x1 = max(x0 + 2, min(int(x1), _fw))
+        y0 = max(0, min(int(y0), _fh - 2))
+        y1 = max(y0 + 2, min(int(y1), _fh))
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return img
+        W, H = _fw, _fh
+
     # 位移权重（ROI 网格直接索引，省一次 remap）
     # ⚠️ 平移/缩放/roll 原本是**全局**变换，与权重无关 —— 实测纯背景角落的
     # 帧间差 0.436、背景/头部变化比 0.506，背景在跟着头一起晃；而 ROI 外又
