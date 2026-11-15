@@ -259,6 +259,10 @@ def _ensure_conclusion_first(text: str) -> str:
 _EMPTY_FALLBACK_TEMPLATE = "已知：%s；下一步：%s"
 # 最近一轮用户输入摘要的最大长度（避免兜底模板本身过长）
 _EMPTY_FALLBACK_SUMMARY_MAX = 80
+# 最近一条工具结果摘要的最大长度（用于「当前已知」部分）
+_TOOL_RESULT_SUMMARY_MAX = 120
+# 待办摘要的最大长度（用于「下一步要查」部分）
+_TODO_SUMMARY_MAX = 120
 
 
 def _summarize_user_input(user_input) -> str:
@@ -273,13 +277,47 @@ def _summarize_user_input(user_input) -> str:
     return s
 
 
-def _empty_output_fallback(user_input=None, suggested_action=None) -> str:
+def _summarize_tool_result(tool_result) -> str:
+    """把最近一条工具结果压成一句短摘要（用于「当前已知」部分）。
+
+    工具结果可能是 str / list / dict / None，统一转文本后压成单行并截断。
+    空结果返回空串，由调用方决定是否回退到用户输入摘要。
+    """
+    s = _as_text(tool_result).strip()
+    if not s:
+        return ""
+    s = " ".join(s.split())
+    if len(s) > _TOOL_RESULT_SUMMARY_MAX:
+        s = s[:_TOOL_RESULT_SUMMARY_MAX].rstrip() + "…"
+    return s
+
+
+def _summarize_todos(todos) -> str:
+    """把待办压成一句短摘要（用于「下一步要查」部分）。
+
+    支持 str / list / dict；空待办返回空串，由调用方决定回退文案。
+    """
+    s = _as_text(todos).strip()
+    if not s:
+        return ""
+    s = " ".join(s.split())
+    if len(s) > _TODO_SUMMARY_MAX:
+        s = s[:_TODO_SUMMARY_MAX].rstrip() + "…"
+    return s
+
+
+def _empty_output_fallback(user_input=None, suggested_action=None,
+                           tool_result=None, todos=None) -> str:
     """空输出兜底：输出为空或纯空白时，强制返回「已知 + 下一步」模板。
 
     对应「空回复硬失败」—— 宁可给一句有信息量的占位，也不让用户看到空白。
+
+    「当前已知」优先取最近一条工具结果摘要（信息量最大），没有工具结果时
+    回退到用户输入摘要；「下一步要查」优先取待办摘要，其次取建议动作，
+    都没有时给一句通用提示。
     """
-    known = _summarize_user_input(user_input)
-    nxt = _as_text(suggested_action).strip() or "请重试或换个说法"
+    known = _summarize_tool_result(tool_result) or _summarize_user_input(user_input)
+    nxt = _summarize_todos(todos) or _as_text(suggested_action).strip() or "请重试或换个说法"
     return _EMPTY_FALLBACK_TEMPLATE % (known, nxt)
 
 

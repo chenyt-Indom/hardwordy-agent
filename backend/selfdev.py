@@ -905,6 +905,7 @@ def patch(rel: str, find: str, replace: str, note: str = "",
     #       · 拒绝原因/证据文案集中一处，前端卡片直接吃 evidence 字段。
     _fk = str(fail_kind or "").strip()
     _real = -1              # -1 = 未查/查不到（不拦）
+    _evidence = ""          # 改动证据卡：一句话证据（写进 journal / 返回给前端）
     if _fk:
         # ★ 2026-11-17 硬前置：走 _require_real_failure，不再依赖模型自觉。
         #   不通过（reason=='phantom'）直接返回，连读文件/冷却都不做。
@@ -917,6 +918,7 @@ def patch(rel: str, find: str, replace: str, note: str = "",
                     "reason": _gate.get("reason") or "phantom",
                     "evidence": _gate.get("evidence") or ""}
         _real = int(_gate.get("count") or 0)
+        _evidence = _gate.get("evidence") or ""
         if _real <= 0:
             # 账本不可读时 _require_real_failure 保守放行，count=0；
             # 这里保持 -1 语义（未查/查不到），避免证据卡误报「0 次」。

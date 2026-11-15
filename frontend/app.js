@@ -587,10 +587,39 @@
     }
   }
 
+  // ---------- 思考块内容清洗（2026-11-16）----------
+  // 模型/后端有时会吐出「空思考」或内部占位符（如「🧠 本次没有思考内容」「归位」等），
+  // 这些不该出现在用户眼前：空思考块直接不渲染，占位符从可见文本里洗掉。
+  // 判空：去掉空白、零宽字符、常见内部标记后为空 → 视为空。
+  const THINK_PLACEHOLDER_RE = /(?:🧠\s*)?本次没有思考内容|本次无思考内容|无思考内容|没有思考内容|（?\s*无\s*）?|归位/g;
+  const THINK_INVISIBLE_RE = /[\s\u200b\u200c\u200d\u2060\ufeff]+/g;
+  function cleanThinkText(text) {
+    if (text == null) return "";
+    let s = String(text);
+    // 先摘掉内部占位符，再压缩空白
+    s = s.replace(THINK_PLACEHOLDER_RE, " ");
+    s = s.replace(THINK_INVISIBLE_RE, " ").trim();
+    return s;
+  }
+  function isThinkEmpty(text) {
+    return cleanThinkText(text) === "";
+  }
+  // 用户可见文本（正文/气泡）里的占位符清洗：只摘「本次没有思考内容」这类，
+  // 不动正常正文；「归位」是卡片按钮文案，正文里出现多半是泄漏，也一并摘掉。
+  function cleanVisibleText(text) {
+    if (text == null) return "";
+    return String(text).replace(THINK_PLACEHOLDER_RE, "").replace(/\n{3,}/g, "\n\n");
+  }
+  window.__cleanThinkText = cleanThinkText;
+  window.__isThinkEmpty = isThinkEmpty;
+  window.__cleanVisibleText = cleanVisibleText;
+
   function showThinking(text) {
+    // 空思考 / 仅含内部占位符 → 不渲染任何东西（返回 null，调用方需判空）
+    if (isThinkEmpty(text)) return null;
     const el = document.createElement("div");
     el.className = "msg bot";
-    el.innerHTML = `<div class="bubble thinking">⏳ ${esc(text)}</div>`;
+    el.innerHTML = `<div class="bubble thinking">⏳ ${esc(cleanThinkText(text))}</div>`;
     messagesEl.appendChild(el);
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return el;
@@ -9575,7 +9604,13 @@
       go.disabled = true;
       go.textContent = "重启中…";
       try {
-        const r = await (await fetch("/api/selfdev/apply_restart", { method: "POST" })).json();
+        // ★ 用户要求（2026-11-16）：只有这个按钮点下去才跑代码自检，
+        //   所以必须带上 src=ready 让后端区分是哪个入口。
+        const r = await (await fetch("/api/selfdev/apply_restart", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ src: "ready" }),
+        })).json();
         if (!r || !r.ok) {
           showToast("重启失败：" + ((r && r.error) || "原因未知"), "warn");
           go.disabled = false;
@@ -13625,6 +13660,9 @@
     if (s.indexOf("自动迭代") >= 0) return "自动迭代后重启";
     if (s.indexOf("熔断") >= 0 || s.indexOf("已自检") >= 0) return "反复重启，已熔断";
     if (s.indexOf("过期") >= 0) return "按冷启动处理";
+    // 2026-11-16：抽屉「一键重启」/ 没指定自检的重启，都不自检
+    if (s.indexOf("一键重启") >= 0) return "一键重启（不自检）";
+    if (s.indexOf("没有指定") >= 0) return "这类重启不自检";
     return s.length > 12 ? s.slice(0, 12) + "…" : s;
   }
 
@@ -14012,7 +14050,8 @@
     if (!confirm("现在重启后端？对话会短暂中断，页面会自动刷新。")) return;
     busy = true;
     say("重启中…页面会自己刷新");
-    try { await api("/api/selfdev/apply_restart", {}); } catch (e) { /* 重启时连接会断，属正常 */ }
+    // ★ 用户要求（2026-11-16）：抽屉这个「一键重启」**不跑**代码自检。
+    try { await api("/api/selfdev/apply_restart", { src: "drawer" }); } catch (e) { /* 重启时连接会断，属正常 */ }
     setTimeout(function () { location.reload(); }, 2500);
   }
 
@@ -14419,6 +14458,33 @@
     return out;
   }
 
+  // 勾选状态变化后同步批量按钮的可用性 / 计数（没有勾选时批量按钮置灰）。
+  function syncPickBar() {
+    const box = layer();
+    if (!box) return;
+    const n = pickedIds().length;
+    const all = box.querySelectorAll(".iter-ck").length;
+    box.querySelectorAll(".iter-sel-ok, .iter-sel-no").forEach(function (b) {
+      b.disabled = n === 0;
+      b.classList.toggle("has-pick", n > 0);
+    });
+    const cnt = box.querySelector(".iter-pick-count");
+    if (cnt) cnt.textContent = n ? ("已选 " + n + " / " + all) : "未勾选";
+    const master = box.querySelector(".iter-ck-all");
+    if (master) {
+      master.checked = all > 0 && n === all;
+      master.indeterminate = n > 0 && n < all;
+    }
+  }
+
+  // 全选 / 全不选（表头那个总勾选框）。
+  function togglePickAll(on) {
+    const box = layer();
+    if (!box) return;
+    box.querySelectorAll(".iter-ck").forEach(function (x) { x.checked = !!on; });
+    syncPickBar();
+  }
+
   function onBodyClick(e) {
     const t = e.target;
     const card = t.closest ? t.closest(".iter-act") : null;
@@ -14427,12 +14493,18 @@
       // 批量操作：批量一律「先攒着」，不立刻执行（用户明确要求）。
       if (t.classList.contains("iter-all-ok")) { noteFor = null; doApprove(null, "", false); return; }
       if (t.classList.contains("iter-all-no")) { noteFor = null; doReject(null, ""); return; }
+      if (t.classList.contains("iter-ck-all")) {
+        togglePickAll(t.checked);
+        return;
+      }
       if (t.classList.contains("iter-sel-ok") || t.classList.contains("iter-sel-no")) {
         const ids = pickedIds();
         if (!ids.length) { say("先在动作前面勾几条，再点这个。", "warn"); return; }
         noteFor = null;
         if (t.classList.contains("iter-sel-ok")) doApprove(ids, "", false);
         else doReject(ids, "");
+        // 批量操作后清空勾选，避免误触下一批
+        togglePickAll(false);
         return;
       }
       if (t.classList.contains("iter-exec")) { doExecute(); return; }
@@ -14452,7 +14524,7 @@
       return;
     }
     const id = card.getAttribute("data-id");
-    if (t.classList.contains("iter-ck")) return;   // 点勾选框只改选中状态，别弹备注框
+    if (t.classList.contains("iter-ck")) { syncPickBar(); return; }   // 点勾选框只改选中状态，别弹备注框
     if (t.classList.contains("iter-ok") || t.classList.contains("iter-no")) {
       noteFor = { id: id, kind: t.classList.contains("iter-ok") ? "approve" : "reject" };
       render();

@@ -1118,6 +1118,36 @@ body.dragging .drop-overlay,
 .md-text { white-space: pre-wrap; }
 .md-text.muted { color: var(--muted); font-style: italic; }
 
+/* ---------- 批准面板：勾选框（单条 / 批量）----------
+   2026-11-16 用户要求：批准面板加勾选框，支持单条 / 批量勾选与操作。
+   要点：勾选框**不能挤压标题** —— 用固定尺寸 + flex:none，标题 flex:1 min-width:0
+   允许省略号，勾选框永远占自己那一小块，标题再长也不会把它挤变形。 */
+.iter-ck {
+  flex: 0 0 auto; width: 16px; height: 16px; margin: 0 2px 0 0;
+  accent-color: var(--accent); cursor: pointer; vertical-align: middle;
+}
+.iter-ck-all {
+  flex: 0 0 auto; width: 16px; height: 16px; margin: 0 6px 0 0;
+  accent-color: var(--accent); cursor: pointer; vertical-align: middle;
+}
+/* 动作行：勾选框 + 标题 + 右侧按钮，标题可收缩但绝不把勾选框挤走 */
+.iter-act { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.iter-act > .iter-title,
+.iter-act > .iter-sum {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 批量操作条：勾选计数 + 批量按钮，按钮在没勾选时置灰 */
+.iter-pickbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+}
+.iter-pick-count { font-size: 12px; color: var(--muted); margin-right: auto; }
+.iter-pickbar .btn { width: auto; margin: 0; padding: 6px 12px; font-size: 12.5px; }
+.iter-pickbar .btn:disabled { opacity: .45; cursor: not-allowed; }
+.iter-pickbar .btn.has-pick { border-color: var(--accent); color: var(--accent); }
+
 /* ---------- 危险操作确认弹窗 ---------- */
 .confirm-layer {
   position: fixed; inset: 0; z-index: 10000; display: flex;

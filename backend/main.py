@@ -8220,32 +8220,42 @@ def selfdev_pending():
 
 
 @app.post("/api/selfdev/apply_restart")
-def selfdev_apply_restart():
-    """用户点了「立即重启」才走到这里 —— 唯一真正重启的入口。"""
+def selfdev_apply_restart(body: dict = None):
+    """用户点了「立即重启」才走到这里 —— 唯一真正重启的入口。
+
+    ``body.src`` 说明是哪个按钮点的（2026-11-16 用户第二次更正）：
+      · ``"ready"``  —— 「新版本已就绪」弹窗里的「立即重启」→ **自检**
+      · 其它/缺省    —— 抽屉「一键重启」等 → **不自检**
+    """
     # ★ 重启闸门：把「这次为什么重启」写进磁盘，下次启动据此决定要不要自检。
-    #   用户要求（2026-11-16）：「自动迭代更新重启不要自检，其他情况重启才需要
-    #   自检；关闭到打开也不要自检，否则可能会无限自检下去」。
     #   必须**在真正重启之前**写 —— pending 是内存状态，新进程里读不到。
     #   先判再写交接卡：这样交接卡里的 reason_kind 能记成真实的类别
     #   （selfdev_iterate / user_restart），而不是一律「用户手动重启」。
+    _src = str((body or {}).get("src") or "").strip().lower()
     _mk = {}
     try:
         from . import bootgate as _bg
-        # ★ 2026-11-16 用户明确要求：「只有④「只重启服务」自检，①②③都不自检」。
-        #   ①②③ 都走这个接口（抽屉一键重启 / 聊天区立即重启 / 横幅立即重启），
-        #   所以这里直接 force="skip"，不再靠「30 分钟内改没改过代码」去猜。
-        _mk = _bg.mark_restart("用户点了「立即重启」", force="skip")
-        logger.info("[bootgate] 已记录重启：force=skip（本次不自检）")
+        # ★ 用户原话：「只有这个重启按下之后才要自检，剩下的不用自检」——
+        #   「这个」= 「新版本已就绪」弹窗的「立即重启」（src=ready）。
+        if _src == "ready":
+            _mk = _bg.mark_restart("点了「新版本已就绪」的「立即重启」", force="audit")
+            logger.info("[bootgate] 已记录重启：force=audit（本次会跑一次代码自检）")
+        else:
+            _mk = _bg.mark_restart("用户点了「立即重启」", force="skip")
+            logger.info("[bootgate] 已记录重启：force=skip（本次不自检，src=%s）",
+                        _src or "缺省")
     except Exception:
         logger.warning("写重启闸门标记失败（不影响重启）", exc_info=True)
+    _why = ("点了「新版本已就绪」的「立即重启」" if _src == "ready"
+            else "用户点了「一键重启」")
     try:
         from . import handoff as _hdy
-        _hdy.snapshot(str(globals().get("_LAST_SESSION") or ""), "用户点了「立即重启」",
+        _hdy.snapshot(str(globals().get("_LAST_SESSION") or ""), _why,
                       kind=("selfdev_iterate" if _mk.get("auto_iter") else "user_restart"))
     except Exception:
         logger.warning("重启前写交接卡失败（不影响重启）", exc_info=True)
     # 重启前自动打一次版本快照（用户要求：改完能一键回到上一版）
-    _version_autosnapshot("用户点了「立即重启」")
+    _version_autosnapshot(_why)
     from . import pending as _pend
     v = selfdev.verify_import()
     if not v.get("ok"):
@@ -14887,14 +14897,13 @@ def deploy_run(body: dict):
     """一键部署到服务器（后台线程跑，日志用 /api/deploy/log 增量拉）。"""
     b = body or {}
     _ro = bool(b.get("restart_only"))
-    # ★ 2026-11-16 用户要求：「只有④「只重启服务」自检，其余都不自检」。
-    #   这是唯一一个「用户刻意重启、不是为了应用某次改动」的入口，
-    #   所以只有它写 force="audit"，启动后跑一次代码自检。
+    # ★ 2026-11-16 用户第二次更正：「只有「新版本已就绪」弹窗的「立即重启」
+    #   才自检，剩下的不用自检」——「只重启服务」也属于「剩下的」，不自检。
     if _ro:
         try:
             from . import bootgate as _bg2
-            _bg2.mark_restart("自开发面板点了「只重启服务」", force="audit")
-            logger.info("[bootgate] 只重启服务 → 本次启动会跑一次代码自检")
+            _bg2.mark_restart("自开发面板点了「只重启服务」", force="skip")
+            logger.info("[bootgate] 只重启服务 → 本次启动不自检")
         except Exception:
             logger.warning("写重启闸门标记失败（不影响重启）", exc_info=True)
     return deploy_keys.start_deploy(restart_only=_ro)
