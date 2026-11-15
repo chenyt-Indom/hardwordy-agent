@@ -12947,9 +12947,29 @@
         '</div>' +
         '<div class="iter-act-d">' + esc(a.detail) + '</div>' +
         '<div class="iter-act-f">' + esc((a.files || []).join(" · ") || "（未指定文件）") + '</div>';
+      // 2026-11-15：用户要「详细说明实现了什么功能 / 改了什么」。
+      // 后端从补丁归纳出「新建/修改 + 增删行 + 新增或动到的函数」，这里直接摊开讲。
+      if (a.changelog && a.changelog.summary) {
+        h += '<div class="iter-li iter-chg"><b>这次改了什么：</b>' +
+             esc(a.changelog.summary) + '</div>';
+      }
       if (a.error) {
-        h += '<div class="iter-li" style="border-color:#fed7d7;color:#c53030">' +
-             esc(a.error) + '</div>';
+        // 2026-11-15：失败分类显示。用户问「为什么信任模式下迭代会显示失败」——
+        // 查完 11 条历史失败发现：5 条是护栏**按设计**拦下的（反复修改熔断、
+        // 拒绝占位式修补），6 条才是真问题（JSON 解析、文件截断、回归超时）。
+        // 以前两者在界面上一模一样，都是红底「失败」，难怪看着像系统坏了。
+        const FK = {
+          guard: { t: "护栏拦截 · 正常", c: "#2b6cb0" },
+          model: { t: "模型输出问题", c: "#b7791f" },
+          env: { t: "环境/超时 · 可重跑", c: "#b7791f" },
+          unsolved: { t: "功能未做成 · 已回滚", c: "#c53030" },
+          other: { t: "其他", c: "#718096" }
+        };
+        const fk = a.fail_kind || "other";
+        const f = FK[fk] || FK.other;
+        h += '<div class="iter-li iter-fail fk-' + esc(fk) + '">' +
+             '<b class="iter-fk-t" style="color:' + f.c + '">' +
+             esc(f.t) + '</b>' + esc(a.error) + '</div>';
       }
       if (a.note) {
         h += '<div class="iter-li">你的备注：' + esc(a.note) + '</div>';
@@ -13244,6 +13264,27 @@
     let h = '';
     rows.forEach(function (x) {
       const ok = x.result === "ok";
+      // 2026-11-15：用户要「详细说明实现了什么功能 / 改了什么」。
+      // changelog 是后端从补丁归纳的结构化摘要；老记录没有这个字段，退回原来的「改了：文件名」。
+      const cl = x.changelog || {};
+      const det = String(x.detail || "");
+      const showDet = det && det !== cl.summary;
+      let chg = "";
+      if ((cl.files || []).length) {
+        let rows2 = "";
+        cl.files.forEach(function (f) {
+          rows2 += '<div class="iter-chg-row">' +
+            '<span class="iter-chg-f">' + esc(f.rel || "") + '</span>' +
+            '<span class="iter-chg-n">' + (f.new_file ? "新建" : "修改") +
+            ' <b>+' + (f.add || 0) + '</b> <i>−' + (f.del || 0) + '</i></span>' +
+            ((f.added || []).length
+              ? '<span class="iter-chg-s">新增 ' + esc((f.added || []).join("、")) + '</span>' : '') +
+            ((f.touched || []).length
+              ? '<span class="iter-chg-s">动到 ' + esc((f.touched || []).join("、")) + '</span>' : '') +
+            '</div>';
+        });
+        chg = '<details class="iter-chg-det"><summary>逐文件明细</summary>' + rows2 + '</details>';
+      }
       h += '<div class="iter-act ' + (ok ? "risk-low" : "risk-high") + '">' +
         '<div class="iter-act-head">' +
           '<span class="iter-act-t">' + esc(x.title || x.action || "") + '</span>' +
@@ -13251,9 +13292,14 @@
           (x.auto ? '<span class="iter-act-st">自动</span>' : '') +
           '<span class="iter-act-st">' + esc(String(x.ts || "").slice(11)) + '</span>' +
         '</div>' +
-        '<div class="iter-act-d">改了：' + esc((x.files || []).join("、") || "—") +
-          (x.detail ? '<br>' + esc(x.detail) : '') +
+        '<div class="iter-act-d">' +
+          (x.feature ? '<b>实现了什么：</b>' + esc(x.feature) + '<br>' : '') +
+          (cl.summary
+            ? '<b>改了什么：</b>' + esc(cl.summary)
+            : '改了：' + esc((x.files || []).join("、") || "—")) +
+          (showDet ? '<br>' + esc(det) : '') +
           (x.backup ? '<br>备份：' + esc(x.backup) : '') + '</div>' +
+        chg +
         '</div>';
     });
     return h;

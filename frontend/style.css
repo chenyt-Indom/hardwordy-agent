@@ -5571,6 +5571,23 @@ html[data-theme="light"] select.pill-select option {
 .iter-act-st { background: #edf2f7; color: #4a5568; }
 .iter-act-d { font-size: 12.5px; line-height: 1.65; margin-bottom: 6px; color: var(--muted, #4a5568); }
 .iter-act-f { font-size: 11.5px; color: #8a94a6; margin-bottom: 8px; word-break: break-all; }
+/* 2026-11-15：用户要「详细说明实现了什么功能 / 改了什么」——摘要 + 可折叠的逐文件明细 */
+.iter-chg {
+  font-size: 12.5px; line-height: 1.7; padding: 6px 8px; border-radius: 8px;
+  background: #f0f7ff; border-left: 3px solid #4299e1; margin-bottom: 6px;
+  word-break: break-all;
+}
+.iter-chg-det { font-size: 12px; margin: 2px 0 8px; }
+.iter-chg-det > summary { cursor: pointer; color: #2b6cb0; padding: 2px 0; }
+.iter-chg-row {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline;
+  padding: 4px 0 4px 8px; border-bottom: 1px dashed var(--border, #e2e8f0);
+}
+.iter-chg-f { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; word-break: break-all; }
+.iter-chg-n { font-size: 11.5px; color: #4a5568; white-space: nowrap; }
+.iter-chg-n b { color: #2f855a; }
+.iter-chg-n i { color: #c53030; font-style: normal; }
+.iter-chg-s { font-size: 11.5px; color: #718096; word-break: break-all; }
 .iter-act-btns { display: flex; gap: 8px; flex-wrap: wrap; }
 .iter-note {
   width: 100%; margin-top: 8px; min-height: 54px; resize: vertical;
@@ -5584,6 +5601,15 @@ html[data-theme="light"] select.pill-select option {
   color: var(--muted, #4a5568);
 }
 .iter-li b { color: var(--text, #2d3748); }
+/* 失败分类（2026-11-15）：护栏拦截是**正常的**，不能和真故障一个颜色，
+   否则用户会以为系统坏了。蓝=护栏正常拦下；橙=模型/环境问题可重试；红=功能没做成。 */
+.iter-fail { border-left-width: 3px; }
+.iter-fk-t { margin-right: 6px; font-weight: 600; }
+.iter-fail.fk-guard    { background: #ebf8ff; border-left-color: #3182ce; }
+.iter-fail.fk-model    { background: #fffaf0; border-left-color: #dd6b20; }
+.iter-fail.fk-env      { background: #fffaf0; border-left-color: #dd6b20; }
+.iter-fail.fk-unsolved { background: #fff5f5; border-left-color: #e53e3e; }
+.iter-fail.fk-other    { background: #f7fafc; border-left-color: #cbd5e0; }
 .iter-tag {
   font-size: 11px; color: #c05621; background: #fffaf0;
   border-radius: 6px; padding: 0 5px; margin-right: 4px;

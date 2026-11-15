@@ -677,6 +677,11 @@ def _log_act(plan, act, ok, detail=""):
              "files": (act or {}).get("files") or [],
              "result": "ok" if ok else "fail",
              "detail": str(detail or "")[:500],
+             # 2026-11-15：用户要「详细说明实现了什么功能 / 改了什么」——
+             # feature = 这个动作打算实现什么（动作自带的描述），
+             # changelog = 实际改成了什么样（从补丁归纳）。两者配对才讲得清。
+             "feature": str((act or {}).get("detail") or "")[:300],
+             "changelog": (act or {}).get("changelog") or {},
              "backup": (act or {}).get("backup") or "",
              "auto": bool((act or {}).get("auto"))})
 
@@ -2063,6 +2068,61 @@ def _norm_rel(rel):
     return s
 
 
+_SYM_RE = re.compile(r"^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+([A-Za-z_]\w*)", re.M)
+
+
+def _change_summary(patches):
+    """把一次动作的补丁整理成「到底实现了什么 / 改了什么」的可读说明。
+
+    2026-11-15 用户要求：「每次自动迭代能不能详细说明实现了什么功能或改了什么功能」。
+    原来执行日志只有一句「改了：xxx.py」，看不出动了什么。这里从补丁本身提取：
+    是新建还是修改、增删行数、新增/改动了哪些函数或类。
+
+    只做静态归纳，不猜语义 —— 猜错了比不说更糟。函数名来自补丁里的 def/class，
+    所以「新增 format_reply」这种是可信的；具体行为由动作的 detail/note 说明。
+    """
+    by, order = {}, []
+    for pt in (patches or []):
+        if not isinstance(pt, dict):
+            continue
+        rel = _norm_rel(pt.get("file"))
+        if not rel:
+            # 路径校验不通过的补丁本来也不会被应用；这里不能退回原样显示，
+            # 否则摘要里会出现「新建 ../../etc/passwd」这种假改动。
+            continue
+        if rel not in by:
+            by[rel] = {"rel": rel, "add": 0, "del": 0, "new_file": False,
+                       "added": [], "touched": []}
+            order.append(rel)
+        e = by[rel]
+        find = str(pt.get("find") or "")
+        rep = str(pt.get("replace") or "")
+        if not find.strip():
+            e["new_file"] = True
+        e["add"] += len([ln for ln in rep.splitlines() if ln.strip()])
+        e["del"] += len([ln for ln in find.splitlines() if ln.strip()])
+        fs = _SYM_RE.findall(find)
+        for s in _SYM_RE.findall(rep):
+            if s not in fs and s not in e["added"]:
+                e["added"].append(s)
+        for s in fs:
+            if s not in e["touched"]:
+                e["touched"].append(s)
+
+    files = [by[r] for r in order]
+    parts = []
+    for f in files:
+        head = "新建" if f["new_file"] else "改"
+        s = "%s %s（+%d −%d" % (head, f["rel"], f["add"], f["del"])
+        if f["added"]:
+            s += "，新增 " + "、".join(f["added"][:5])
+        elif f["touched"]:
+            s += "，动到 " + "、".join(f["touched"][:5])
+        s += "）"
+        parts.append(s)
+    return {"summary": "；".join(parts), "files": files}
+
+
 def _read_text(rel):
     try:
         with open(_ROOT / rel, "r", encoding="utf-8") as f:
@@ -2160,6 +2220,57 @@ def _apply_find_replace(rel, find, replace):
         return False, "写入失败：%s" % e
 
 
+def classify_fail(msg):
+    """把失败原因归类，让用户一眼分清「护栏正常工作」和「真出故障」。
+
+    2026-11-15 用户问：「为什么信任模式下迭代会显示失败，这个能不能解决？」
+    查了 data/self_iterate/plans.json 里全部 11 条历史失败，性质完全不同：
+      · 5 条是护栏**按设计**拦下的（反复修改熔断 4 条、拒绝占位式修补 1 条）
+        —— 这些失败是**对的**，说明防护生效了，没让项目被改乱；
+      · 6 条是真问题（模型没给合法 JSON 2 条、文件内容被截断 2 条、
+        回归子进程超时 1 条、模型写出乱码被语法校验拦下 1 条）。
+    以前两者在界面上长得一模一样（都是红底「失败」），用户自然以为系统坏了。
+    现在每条失败带一个 kind，前端据此显示不同颜色和说明。
+
+    返回值：
+      guard    护栏主动拦下 —— 不是故障，可以放心
+      model    模型输出质量问题 —— 已加重试，仍失败需人工看
+      env      环境/依赖/超时 —— 通常是临时性的，可重跑
+      unsolved 功能确实没做成 —— 已完整回滚，无残留
+      other    未归类
+    """
+    s = str(msg or "")
+    if not s:
+        return "unknown"
+    # ⚠️ 顺序很重要：「截断」必须排在「无法安全实施」之前。
+    # 实测那条「临时验证脚本自动清理」的 error 是
+    #   「模型判断无法安全实施：…文件内容在 read() 处被截断（显示"后略"）…」
+    # 表面是「无法安全实施」（看着像护栏），但**根因是我们只给了前 14000 字符**，
+    # 属于可修的真问题。按 guard 归类会把真 bug 藏起来。
+    if "截断" in s:
+        return "model"
+    # ⚠️ 「先停手」「远超阈值」都要认：_loop_guard 有两条文案
+    #   · 冷却闸门：反复修改熔断：xxx 在最近 60 分钟内已被自动改成功 N 次…
+    #   · 硬熔断：xxx 已自动改 16 次、远超阈值（阈值 3），先停手换思路
+    # 只匹配前者会把后者归到 other，看着像故障。
+    for k in ("反复修改熔断", "占位式修补", "无法安全实施", "涉及文件过多",
+              "未接入主链路", "先停手", "远超阈值", "改动让自检问题"):
+        if k in s:
+            return "guard"
+    for k in ("没给出合法 JSON", "没有给出任何 patch", "模型没返回合法",
+              "不是合法 JSON", "无法生成"):
+        if k in s:
+            return "model"
+    for k in ("ModuleNotFoundError", "No module named", "ImportError",
+              "断言文件不存在", "读不到文件", "超时", "timeout",
+              "FileNotFoundError", "PermissionError", "SyntaxError"):
+        if k in s:
+            return "env"
+    if "自修" in s and "仍未通过" in s:
+        return "unsolved"
+    return "other"
+
+
 def _plan_patch_for_action(plan, action):
     """让 LLM 针对这一条动作产出具体 patch（此时才读相关文件内容）。"""
     want = [f for f in (action.get("files") or []) if isinstance(f, str)]
@@ -2179,11 +2290,60 @@ def _plan_patch_for_action(plan, action):
     new_files = [f for f in want if not (_ROOT / f).is_file()]
     if not files and not new_files:
         return None, "没有可读的目标文件（动作里没写 files，文本里也没找到已存在的路径）"
+    # 2026-11-15 修：原来单文件硬截 14000 字符。selfdev.py 有 47904 字节，
+    # 模型只看到前 30%，而要改的函数在后面 → 生成不出「一字不差」的 find，
+    # 实测 2 条动作因此失败（error 都是「文件内容被截断，无法生成 find」）。
+    # 现在：单文件额度提到 26000、总预算 46000；截断时如实报「已给到第几行/共几行」，
+    # 并且**按动作文本里点名的函数名去定位**，把截断点之后那一段也附上 ——
+    # 否则模型永远看不到它真正要改的地方。
+    _CTX_TOTAL = 46000
+    _CTX_ONE = 26000
+    _nfiles = max(1, min(len(files), _MAX_FILES_PER_ACTION))
+    _per = max(6000, min(_CTX_ONE, _CTX_TOTAL // _nfiles))
+    _ids_all = re.findall(
+        r"[A-Za-z_][A-Za-z0-9_]{3,}",
+        "%s %s" % (action.get("title") or "", action.get("detail") or ""))
     ctx = []
     for rel in files[:_MAX_FILES_PER_ACTION]:
         body = _read_text(rel)
-        if len(body) > 14000:
-            body = body[:14000] + "\n…（后略，文件过长，请只针对你确定存在的片段给 find）"
+        if len(body) > _per:
+            _tot_lines = body.count("\n") + 1
+            _cut = body[:_per]
+            _shown = _cut.count("\n") + 1
+            _tail = ""
+            _rest = body[_per:]
+            # 标识符按长度降序：`_read_text` 比 `read` 有用得多。
+            # 实测按原顺序直接 find("read")，命中的是 subprocess 参数
+            # （`.executable, entry)`），补出来的根本不是要改的函数 ——
+            # 白占上下文还误导模型。改成「函数定义处 > 调用处 > 裸词」。
+            _STOP = {"self", "file", "data", "with", "from", "return", "import",
+                     "print", "open", "path", "text", "true", "false", "none",
+                     "str", "int", "list", "dict", "json", "os", "sys"}
+            for _id in sorted(dict.fromkeys(_ids_all), key=len, reverse=True):
+                if len(_id) < 4 or _id.lower() in _STOP:
+                    continue
+                _pos = _rest.find("def " + _id)
+                if _pos < 0:
+                    # ⚠️ 不能用 find(id + "(")：实测 `read(` 会命中 `f.read()`，
+                    # 那是文件对象的属性调用，不是要改的函数。
+                    # 用 (?<![.\w]) 排除「点号或字母数字之后」的匹配。
+                    _mm = re.search(r"(?<![.\w])" + re.escape(_id) + r"\s*\(", _rest)
+                    _pos = _mm.start() if _mm else -1
+                if _pos < 0:
+                    _mm = re.search(r"(?<![.\w])" + re.escape(_id) + r"(?![.\w])", _rest)
+                    _pos = _mm.start() if _mm else -1
+                if _pos < 0:
+                    continue
+                _seg = _rest[max(0, _pos - 1200):_pos + 2400]
+                if _seg and _seg not in _tail:
+                    _tail += ("\n…（下面这段是按你需求里提到的 `%s` 定位到的，"
+                              "它位于上面截断点之后）\n%s" % (_id, _seg))
+                if len(_tail) > 7000:
+                    break
+            body = (_cut
+                    + "\n…（后略：上面给了前 %d 行，全文共 %d 行 / %d 字符）"
+                      % (_shown, _tot_lines, len(body))
+                    + _tail)
         ctx.append("### 文件：%s\n```\n%s\n```" % (rel, body))
     for rel in new_files[:_MAX_FILES_PER_ACTION]:
         ctx.append("### 待新建文件：%s\n（这个文件还不存在。要新建它，"
@@ -2215,7 +2375,21 @@ def _plan_patch_for_action(plan, action):
         return None, err
     data = _parse_json(txt)
     if not isinstance(data, dict):
-        return None, "模型没给出合法 JSON"
+        # 2026-11-15 修：原来一次解析失败就直接放弃（实测有 2 条动作因此判死：
+        # 「回复长度硬上限」「信任模式与自迭代状态自报」，error 都是「模型没给出
+        # 合法 JSON」）。这类失败往往只是它多写了几个字或包了代码围栏，
+        # 重试一次、把格式要求再说一遍、温度压到 0，就能救回来。
+        _retry = prompt + (
+            "\n\n## 特别注意（你上一次的回答无法解析）\n"
+            "上一次的输出不是合法 JSON。这次请**只输出一个 JSON 对象**：\n"
+            "- 不要 ``` 代码围栏\n- 不要任何解释文字\n- 不要前后缀\n"
+            "- 字符串里的换行写成 \\n\n")
+        txt2, err2 = _llm_text(_retry, max_tokens=3600, temperature=0.0)
+        if not err2:
+            data = _parse_json(txt2)
+        if not isinstance(data, dict):
+            return None, ("模型没给出合法 JSON（已重试 1 次，两次都无法解析；"
+                          "首次输出前 120 字：%s）" % (txt or "")[:120])
     if data.get("skip"):
         return None, "模型判断无法安全实施：%s" % str(data.get("skip"))[:200]
     patches = data.get("patches") or []
@@ -2654,6 +2828,7 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
     cancelled = False
     skipped = 0
     for _i, a in enumerate(todo):
+        _rp = {}                     # 自修轮的结果（没走自修就是空）
         if _stop():
             cancelled = True
             skipped = len(todo) - _i
@@ -2904,9 +3079,15 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
 
         a["status"] = "done"
         a["error"] = ""
+        # 2026-11-15 用户要求「每次自动迭代详细说明实现了什么功能或改了什么」。
+        # 补丁本身就是原料（find/replace）；自修轮的补丁也必须算进来，
+        # 否则「自修 2 轮才通过」的功能，摘要里看不到那 2 轮到底改了什么。
+        _allpt = list(patches or []) + list((_rp or {}).get("patches") or [])
+        a["changelog"] = _change_summary(_allpt)
         results.append({"id": a["id"], "ok": True, "files": list(dict.fromkeys(done_rels)),
-                        "backup": tag2})
-        _log_act(plan, a, True, "改了：" + "、".join(dict.fromkeys(done_rels)))
+                        "backup": tag2, "changelog": a["changelog"]})
+        _log_act(plan, a, True, (a["changelog"].get("summary")
+                                 or "改了：" + "、".join(dict.fromkeys(done_rels))))
         _ev("step", text="%s 完成（%s）" % (
             a.get("id"), "、".join(dict.fromkeys(done_rels))))
         _ev("code", **_card(a, patches, True, "", False,
@@ -3014,6 +3195,17 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
             logger.warning("自动收敛失败", exc_info=True)
             out["converge_error"] = "%s: %s" % (type(_e).__name__, _e)
             _ev("step", text="自动收敛失败：%s: %s" % (type(_e).__name__, _e))
+
+    # 2026-11-15：给每条失败补上「失败类型」（用户问「为什么老显示失败」）。
+    # 查 11 条历史失败发现：5 条是护栏按设计拦下的、6 条是真问题，但界面上一模一样。
+    # 这里统一打标，前端据此分色显示「护栏拦截（正常）」/「模型输出」/「环境」/「未做成」。
+    try:
+        for _a in (plan.get("actions") or []):
+            if isinstance(_a, dict) and _a.get("status") == "failed":
+                _a["fail_kind"] = classify_fail(_a.get("error") or "")
+        save_plans(d)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
     return out
 
 
@@ -4084,6 +4276,8 @@ def overview():
         _last_audit = (audit_overview().get("latest") or None)
     except Exception:                                   # noqa: BLE001
         _last_audit = None
+    if latest:
+        fill_fail_kind(latest)
     return {
         "ok": True,
         "latest": latest,
@@ -4099,8 +4293,31 @@ def overview():
     }
 
 
+def fill_fail_kind(p):
+    """给历史失败动作补上 fail_kind（按 error 文本现算）。
+
+    2026-11-15 用户问「解决了吗」时发现：`fail_kind` 只在**新执行**的动作上
+    落盘，而库里那 11 条历史失败一个都没有。前端读的是 `a.fail_kind || "other"`，
+    于是它们全被归成灰色「其他」—— 护栏拦下的和真故障还是分不开，
+    等于这个功能对历史数据完全没生效。
+
+    这里在**出口**统一补齐：历史记录、以及任何没走 execute_approved 的
+    写入路径，都能得到正确分类。不改磁盘上的旧数据（避免动到审计痕迹）。
+    """
+    if not isinstance(p, dict):
+        return p
+    for a in (p.get("actions") or []):
+        if not isinstance(a, dict):
+            continue
+        if a.get("status") != "failed":
+            continue
+        if not a.get("fail_kind"):
+            a["fail_kind"] = classify_fail(a.get("error") or a.get("detail") or "")
+    return p
+
+
 def get_plan(pid):
     d, p = _find_plan(pid)
     if not p:
         return {"ok": False, "error": "找不到这次反思"}
-    return {"ok": True, "plan": p}
+    return {"ok": True, "plan": fill_fail_kind(p)}

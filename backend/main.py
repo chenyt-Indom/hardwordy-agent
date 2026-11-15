@@ -2678,9 +2678,9 @@ def selfiter_audit(body: dict):
     from . import self_iterate as _si
     b = body or {}
     try:
-        # 暂停闸：非手动来源（daily / idle / auto）的自检整个跳过。
-        if str(b.get("source") or "manual") != "manual":
-            g = _si.paused_gate("定时自检")
+        # 暂停闸：整个跳过。只有前端手动点「代码自检」带 force=true。
+        if not b.get("force"):
+            g = _si.paused_gate("自检")
             if g:
                 return g
         s = _si.load_settings()
@@ -2797,6 +2797,11 @@ def selfiter_evaluate(body: dict):
     use_llm = b.get("use_llm")
     use_llm = True if use_llm is None else bool(use_llm)
     try:
+        # 暂停闸：定时体验评估整个跳过。前端手动点按钮带 force=true。
+        if not b.get("force"):
+            g = _si.paused_gate("体验评估")
+            if g:
+                return g
         if b.get("improve"):
             return _si.evaluate_and_improve(limit=limit, use_llm=use_llm,
                                             trigger=str(b.get("trigger") or "manual"),
