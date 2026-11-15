@@ -2914,7 +2914,7 @@ def _norm_rel(rel):
 _SYM_RE = re.compile(r"^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+([A-Za-z_]\w*)", re.M)
 
 
-def _change_summary(patches):
+def _change_summary(patches, fail_kind=""):
     """把一次动作的补丁整理成「到底实现了什么 / 改了什么」的可读说明。
 
     2026-11-15 用户要求：「每次自动迭代能不能详细说明实现了什么功能或改了什么功能」。
@@ -2923,6 +2923,12 @@ def _change_summary(patches):
 
     只做静态归纳，不猜语义 —— 猜错了比不说更糟。函数名来自补丁里的 def/class，
     所以「新增 format_reply」这种是可信的；具体行为由动作的 detail/note 说明。
+
+    2026-11-16 追加：带上真实 fail_kind 计数。
+    用户要求「针对 fail_kind=X 共 N 次」写进 changelog；若计数为 0 则标记
+    phantom 并记录原因，不再静默通过（对应 arXiv:2611.17336v1 Phantom Guardrails
+    的幽灵修复问题）。计数来自 actlog.fail_kind_counts，异常时按「未知」处理，
+    不阻断摘要生成。
     """
     by, order = {}, []
     for pt in (patches or []):
@@ -2963,7 +2969,45 @@ def _change_summary(patches):
             s += "，动到 " + "、".join(f["touched"][:5])
         s += "）"
         parts.append(s)
-    return {"summary": "；".join(parts), "files": files}
+
+    # ---- fail_kind 真实计数（2026-11-16 用户要求）----
+    # 把「针对 fail_kind=X 共 N 次」写进 changelog；N=0 时标记 phantom 并
+    # 记录原因，不再静默通过。计数异常时按「未知」处理，不阻断摘要生成。
+    fk = str(fail_kind or "").strip()
+    fk_info = {"fail_kind": fk, "count": None, "phantom": False,
+               "reason": ""}
+    if fk:
+        try:
+            from . import actlog as _actlog_mod
+            # ★ 2026-11-16 修 [missing-attr]：actlog.py 里并没有
+            #   `fail_kind_counts`，直接调用会抛 AttributeError；外面套了
+            #   except 就会静默失效（计数永远「未知」，phantom 检测形同虚设）。
+            #   这里做兼容：优先用 actlog 提供的计数函数（若将来补上），
+            #   否则回落到本模块自己的 `_count_fail_kind`（读 actlog.jsonl）。
+            _counter = getattr(_actlog_mod, "fail_kind_counts", None)
+            if callable(_counter):
+                counts = _counter(days=7) or {}
+            else:
+                counts = _count_fail_kind(fk, days=7)
+            n = int(counts.get(fk) or 0)
+            fk_info["count"] = n
+            if n > 0:
+                parts.append("针对 fail_kind=%s 共 %d 次" % (fk, n))
+            else:
+                fk_info["phantom"] = True
+                fk_info["reason"] = (
+                    "fail_kind=%s 近 7 天真实计数为 0（幽灵修复），"
+                    "本次改动无真实失败依据" % fk)
+                parts.append("针对 fail_kind=%s 共 0 次（phantom：%s）"
+                             % (fk, fk_info["reason"]))
+        except Exception as e:                          # noqa: BLE001
+            fk_info["reason"] = "fail_kind 计数失败：%s: %s" % (
+                type(e).__name__, e)
+            parts.append("针对 fail_kind=%s 计数未知（%s）"
+                         % (fk, fk_info["reason"]))
+
+    return {"summary": "；".join(parts), "files": files,
+            "fail_kind": fk_info}
 
 
 def _read_text(rel):
