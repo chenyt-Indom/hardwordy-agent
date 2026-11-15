@@ -53,7 +53,12 @@ _META = "meta.json"
 
 FPS = 25
 MAX_SECONDS = 90          # 单次最长 90 秒，再长渲染太慢
-MAX_SIDE = 720            # 输出长边上限，够看又不至于渲染几分钟
+# ⚠ 2026-11-15 修「嘴张不开」：这个值原来是 720，而形象原图是 787×1400，
+#   缩到 720 长边后**嘴部 open_h 从 18px 压到 5px**，warp 形变的可用位移
+#   只剩 3.4px —— 无论 open_gain 调多高，嘴都动不了几像素（实测成片 186 帧
+#   开口高度 std 只有 0.7）。形变分辨率必须和嘴部像素尺度匹配。
+#   1080 时 open_h=13.9px（恢复 2.8 倍），渲染成本约 2.2 倍。
+MAX_SIDE = 1080           # 输出长边上限（形变分辨率同步提高，嘴部动作才明显）
 
 
 # ---------------------------------------------------------------- 目录与配置
@@ -1973,7 +1978,7 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
 
 # ---------------------------------------------------------------- 一站式
 def speak(text: str, voice: str = "", rate=None, style: str = "",
-          engine: str = "auto", mood: str = "", expr: bool = True,
+          engine: str = "auto", mood: str = "", expr: bool = False,
           amp: float = 1.0) -> dict:
     """文本 → TTS → 口型对齐 → mp4。这是给工具/前端调的主入口。
 

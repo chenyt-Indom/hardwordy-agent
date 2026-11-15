@@ -855,7 +855,7 @@ class Wav2LipEngine:
                     # 闭嘴覆盖外观（LLM 定）：原来这四项是硬编码，闭嘴永远是
                     # 一块平涂皮肤色。现在按原图真实四层唇色铺，LLM 决定深浅。
                     _cvkw = dict(
-                        seam_depth=_tp("seam_depth", 0.62),
+                        seam_depth=_tp("seam_depth", 1.00),
                         seam_curve=_tp("seam_curve", 0.45),
                         lip_tint=_tp("lip_tint", 0.85),
                         cover_feather=_tp("cover_feather", 0.30))
@@ -1030,7 +1030,7 @@ class Wav2LipEngine:
                 frame = AM.warp2d(face_img_bgr, geom, k, k_min=_kmin,
                                   squeeze=_tp("squeeze", 0.30),
                                   round_=_rd, round_gain=_tp("round_gain", 0.22),
-                                  seam_depth=_tp("seam_depth", 0.62),
+                                  seam_depth=_tp("seam_depth", 1.00),
                                   seam_curve=_tp("seam_curve", 0.45),
                                   lip_tint=_tp("lip_tint", 0.85),
                                   cover_feather=_tp("cover_feather", 0.30),

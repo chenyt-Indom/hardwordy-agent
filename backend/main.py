@@ -10559,7 +10559,12 @@ def avatar2_speak(body: dict):
                          style=str(body.get("style") or ""),
                          engine=str(body.get("engine") or "auto"),
                          mood=str(body.get("mood") or ""),
-                         expr=bool(body.get("expr", True)),
+                         # ⚠ 2026-11-15：默认关掉微表情层。它会做整头摆动(sway=1.6)
+                         #   /点头(nod=1.5)/旋转(rot=0.4)，实测改动 9.43% 全图像素
+                         #   （上部 12540px、右脸 1605px、底部 8995px），而嘴部形变
+                         #   只改 0.739% —— 这就是用户说的「整个脸都在动」。
+                         #   需要生动感时前端显式传 expr:true 即可。
+                         expr=bool(body.get("expr", False)),
                          amp=_amp)
 
 

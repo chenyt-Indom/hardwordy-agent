@@ -292,7 +292,14 @@ def render(img_path, wav_path, out_mp4, blink=True, head=True, fps=W2L.FPS,
     # （原图 3751），形变路径 3200~4500，而且画风 100% 一致。
     use_mode = str(mode or "auto").lower()
     if use_mode not in ("w2l", "warp"):
-        use_mode = "w2l" if len(dets) > 0 else "warp"
+        # ⚠ 2026-11-15 修「整个脸都在动 / 嘴张不开」：auto 原来在**检测到人脸**
+        #   时就选 w2l（Wav2Lip 在 96×96 上重绘嘴部再放大贴回）。两个后果：
+        #     ① 贴回要缩放对齐，整张脸跟着一起动 —— 就是用户说的「整个脸都在动」；
+        #     ② 这条路根本不走 warp2d，前面所有嘴部形变修复全部落空
+        #        （实测 warp2d 一次都没被调用）。
+        #   auto 改成优先 warp：像素全部来自原图、只做嘴部纵向形变 + 口腔覆盖，
+        #   脸的其他部分一个像素都不碰。geom 不可用时 render 内部会自动退回 w2l。
+        use_mode = "warp"
     if len(dets) == 0:
         box_override = A2.face_box_from_mouth((W, H))
         if box_override is None:

@@ -413,7 +413,7 @@ def warp(img, geom, k, k_min=None):
 
 
 def warp2d(img, geom, k, k_min=None, squeeze=0.30, round_=0.0, round_gain=0.22,
-           cover=None, seam_depth=0.62, seam_curve=0.45, lip_tint=0.85,
+           cover=None, seam_depth=1.00, seam_curve=0.45, lip_tint=0.85,
            cover_feather=0.30, k_max=1.0):
     """二维形变：纵向压缩 + **横向收拢**。
 
@@ -489,12 +489,25 @@ def warp2d(img, geom, k, k_min=None, squeeze=0.30, round_=0.0, round_gain=0.22,
     if sq > 0.01 or (rg > 0.01 and rd > 0.01):
         xs = np.arange(W, dtype=np.float32)[None, :]
         ys = np.arange(H, dtype=np.float32)[:, None]
-        y_mid = (float(geom["y_split"]) + float(geom["y_lip_bot"])) * 0.5
-        # 纵向权重：只在嘴部高度带内收拢，下巴/脸颊不跟着变窄
-        wy = np.clip(1.0 - np.abs(ys - y_mid) / max(1.0, float(geom["mh"]) * 1.05),
-                     0.0, 1.0)
+        # 纵向权重：只覆盖**真实唇部高度带**（唇缝 → 唇下沿）+ 少量羽化。
+        # ⚠ 2026-11-15 修「整个脸都在动」：原来以 y_mid 为中心、半径 mh*1.05，
+        #   而 mh 是用户标定的嘴框高（这张图 41.7px，把下巴也圈进去了），
+        #   实测收拢带扩到 y 819~906 —— 唇缝上方 25 行、下巴下方 17 行都跟着变窄。
+        pad_y = max(3.0, float(geom["mh"]) * 0.18)
+        y0 = float(geom["y_split"]) - pad_y
+        y1 = float(geom["y_lip_bot"]) + pad_y
+        wy = np.clip(np.minimum((ys - y0) / max(1.0, pad_y),
+                                (y1 - ys) / max(1.0, pad_y)), 0.0, 1.0)
         u = (xs - float(geom["cx"])) / max(1.0, float(geom["mw"]) * 0.58)
-        wx = np.clip(u * u, 0.0, 1.0)          # ★ 嘴角权重最高
+        # 横向权重：嘴角最高，**嘴宽之外快速衰减到 0**。
+        # ⚠ 2026-11-15 修「脸颊跟着变形」：原来 wx = clip(u*u, 0, 1)，|u|>1 之后
+        #   饱和成 1.0 —— 也就是脸颊外侧一直按**最大**权重缩放。实测改动横向铺到
+        #   cx±180px（382 列）、右脸颊 4641 个像素在动，这就是「整个脸都在动」。
+        #   core 负责「嘴角最大」，fade 负责「超出嘴宽归零」。
+        au = np.abs(u)
+        core = np.clip(u * u, 0.0, 1.0)                  # 嘴角处=1
+        fade = np.clip((1.45 - au) / 0.45, 0.0, 1.0)     # |u|>=1.45 完全不动
+        wx = core * fade
         # ⚠ 下限原来是 1.0 —— 而 k>1（外推）时 (1-k)<0，这一项本来是**变宽**的，
         # 被 clip 到 1.0 就全削掉了，结果外推只剩纵向拉长，嘴变成细长条
         # （视觉复核：「纵向拉长，圆形感减弱」）。放开到 0.70 后，外推时
@@ -581,8 +594,14 @@ def _lip_palette(img, geom):
             return np.array([190.0, 180.0, 240.0], np.float32)  # 浅粉兜底(BGR)
         return np.median(p, axis=0)
 
-    up = _med(ys - 14, ys - 6)      # 上唇（亮粉白）
-    seam = _med(ys - 3, ys - 1)     # 唇线（暗红）
+    # ⚠ 2026-11-15：上唇采样要**避开** y_split-1 那条唇线（实测 L=109），
+    #   原来取到 ys-6 正好把它算进中位数，上唇色被拉暗到 L=192（真值 215）。
+    up = _med(ys - 14, ys - 7)      # 上唇（亮粉白）
+    # ⚠ 2026-11-15 修「闭不上、像涂抹」：唇线原来取 ys-3~ys-1，
+    #   实测那里是**上唇体**（L=234，比上唇 210 还亮），真正的唇缝在
+    #   ys~ys+3（L=20，深黑）。取错位置 → 覆盖后整片是亮色、唇缝消失，
+    #   视觉上就是「一块平涂色」。改取真实唇缝带。
+    seam = _med(ys + 1, ys + 3)     # 唇缝（最暗）
     dn = _med(yl - 9, yl - 1)       # 下唇（粉红）
     sk = _med(yl + 3, yl + 8)       # 下巴皮肤
     return up, seam, dn, sk
@@ -609,7 +628,7 @@ def _skin_colors(img, geom):
     return p[np.argsort(s)[int(len(s) * 0.55):]].mean(0)
 
 
-def _cover_cavity(out, src, geom, cover, seam_depth=0.62, seam_curve=0.45,
+def _cover_cavity(out, src, geom, cover, seam_depth=1.00, seam_curve=0.45,
                   lip_tint=0.85, feather=0.30):
     """把压缩后仍然可见的口腔内容（牙齿 / 舌头 / 暗腔）用唇色盖掉。
 
@@ -637,10 +656,13 @@ def _cover_cavity(out, src, geom, cover, seam_depth=0.62, seam_curve=0.45,
     H, W = out.shape[:2]
     cx = float(geom["cx"])
     mw = float(geom["mw"])
-    y0 = float(geom["y_split"]) - 5.0
+    # ⚠ 2026-11-15 修「上唇被涂改」：上界原来取 y_split-5，把**完好的上唇**
+    #   （839~843）也纳入覆盖区 —— 上唇本来没有口腔内容要盖，涂它等于把好的
+    #   唇色换成采样色，实测上唇 840~843 的均值被从原图 217~228 拉到 141~201。
+    #   上界收到 y_split-1，覆盖只从唇缝开始。
+    y0 = float(geom["y_split"]) - 1.0
     # 下界必须到 y_lip_bot（含舌头段）。原来只到 y_hole_bot，实测开口真实范围
     # 是 840~865（牙齿+口腔+舌头），852 以下没盖住 → 视觉上仍「露牙露舌」。
-    # 上界再往上延 3px：实测 834~836 的牙尖仍在覆盖椭圆之上。
     y1 = float(geom.get("y_lip_bot") or geom["y_hole_bot"]) + 3.0
     if y1 <= y0:
         return out
@@ -656,27 +678,85 @@ def _cover_cavity(out, src, geom, cover, seam_depth=0.62, seam_curve=0.45,
     sd = float(np.clip(seam_depth, 0.0, 1.0))
     seam_c = sk * (1.0 - sd) + seam_c * sd
 
-    m = np.zeros((H, W), np.float32)
-    cv2.ellipse(m, (int(round(cx)), int(round(y_mid))),
-                (int(max(2, mw * 0.62)), int(ry)), 0, 0, 360, 1.0, -1)
-    fw = float(np.clip(feather, 0.05, 1.0))
-    m = cv2.GaussianBlur(m, (0, 0), max(0.9, ry * fw))
-
     X = np.arange(W, dtype=np.float32)[None, :]
     Y = np.arange(H, dtype=np.float32)[:, None]
+    # ⚠ 2026-11-15 修「上唇/下唇边缘没被覆盖到」：椭圆蒙版在 y=841（上唇体）
+    #   横向只剩 ±21px（实测 42px 宽），而真实嘴宽 64px —— 上唇有 1/3 露在
+    #   覆盖之外，剖面显示上唇区均值 128 ≈ 原图 127，等于根本没盖上。
+    #   换成 n=4 的超椭圆（近似矩形带圆角），同一行覆盖 70px，贴合唇形。
+    # 蒙版用「矩形 + 横向圆角窗」，不用椭圆：
+    #   椭圆在 y=841（上唇下缘）横向只剩 ±21px，而嘴宽 64px，盖不住；
+    #   超椭圆在**上下边缘覆盖为 0**，唇缝那一行反而没盖住。
+    #   嘴唇本质是「横向拉长的矩形 + 圆嘴角」——矩形保满覆盖，横向窗做圆角。
+    m = np.zeros((H, W), np.float32)
+    xa = int(round(cx - mw * 0.60))
+    xb = int(round(cx + mw * 0.60))
+    m[int(y0):int(y1), max(0, xa):min(W, xb)] = 1.0
+    xwin = np.clip(1.0 - (np.abs(X - cx) / max(1.0, mw * 0.72)) ** 6, 0.0, 1.0)
+    m = m * xwin
+    fw = float(np.clip(feather, 0.05, 1.0))
+    # ⚠ 2026-11-15 修「嘴周围一圈颜色都在变」：羽化半径原来直接取 ry*feather
+    #   （ry=22.5、feather=0.30 → sigma=6.8），高斯外溢约 20px，覆盖从 839~884
+    #   扩散到 **829~898**。封顶 2.4px 后既能软化边缘，又不会外溢到上唇和下巴。
+    m = cv2.GaussianBlur(m, (0, 0), float(np.clip(ry * fw * 0.55, 0.9, 2.4)))
     u = np.clip((X - cx) / max(1.0, mw * 0.5), -1.0, 1.0)
-    # 微笑弧：中间低、两端高。用直线会被判「太直、太硬」。
+    # ⚠ 2026-11-15 修「覆盖后没有唇形、像一块涂抹」：唇缝位置原来从**椭圆中心**
+    #   推算（y_mid + sc*ry*(u²-0.5)），实测落在 y=856.4，而真实唇缝在 y=844 ——
+    #   偏 12.4px。结果唇缝被画到口腔中部，上唇整片变成亮色、看不出唇形。
+    #   改成**锚定解剖位置**：唇缝固定对齐 y_split，下唇下沿对齐 y_lip_bot。
+    ys_f = float(geom["y_split"])
+    yl = float(geom.get("y_lip_bot") or geom["y_hole_bot"])
     sc = float(np.clip(seam_curve, 0.0, 1.0))
-    seam_y = y_mid + sc * ry * (u * u - 0.5)
+    # 唇缝中心：真实唇缝占 y_split~y_split+3（实测 844~846），中心取 +1.5。
+    # ⚠ 2026-11-15 修「唇缝不够暗」：原来基准直接落在 ys_f 再叠加 (u²-0.5) 的
+    #   -0.5625 偏移，实际中心在 ys_f-0.56 —— y=845 处 w_seam 只剩 0.725，
+    #   混进 27% 下唇色，唇缝 L 只有 65（原图 17），视觉上「几乎看不到唇缝线」。
+    # 微笑弧：嘴角相对中心上翘，幅度限制在 2.5px 内，避免把唇缝拉弯成弧线
+    seam_y = ys_f + 1.5 + sc * 2.5 * (u * u - 0.5)
     d = Y - seam_y
+    # 唇缝带宽：真实唇缝 2~3px，按嘴高自适应但封顶
+    sw = float(np.clip((yl - ys_f) * 0.12, 1.6, 4.5))
 
-    # 四段权重：上唇(上) / 唇线(中) / 下唇(下) / 皮肤(最下，避免椭圆下沿色带)
-    w_seam = np.exp(-(d / max(0.8, ry * 0.16)) ** 2)
-    w_up = np.clip(-d / max(1.0, ry * 0.75), 0.0, 1.0)
-    w_dn = np.clip(d / max(1.0, ry * 0.55), 0.0, 1.0)
-    w_sk = np.clip((d - ry * 0.55) / max(1.0, ry * 0.45), 0.0, 1.0)
+    # 四段权重：上唇(上) / 唇缝(中，最暗) / 下唇(下) / 皮肤(最下)
+    # 唇缝权重用**平顶窗**而不是高斯：高斯只有中心那一行够暗（实测 y=845
+    # L=21 达标，但 844 是 50、846 是 65），而真实唇缝 844~846 三行都是 19~23。
+    # 平顶 1.8px + 外侧线性衰减，才能画出一条 3~4px 的实心唇线。
+    _ad = np.abs(d)
+    w_seam = np.clip(1.0 - np.maximum(0.0, _ad - 1.8) / max(0.9, sw * 0.40),
+                     0.0, 1.0)
+    # 上唇体在椭圆里只有 ~5px（y_split-5 ~ 唇缝），过渡带必须比它短，
+    # 否则整段上唇只混到 23~71% 的唇色，看起来发暗。
+    w_up = np.clip(-d / max(1.0, sw * 0.75), 0.0, 1.0)
+    w_dn = np.clip(d / max(1.0, sw * 1.4), 0.0, 1.0)
+    # 下唇下沿 → 皮肤：从唇底（yl）开始过渡，避免把下唇整片涂成皮肤色
+    w_sk = np.clip((d - (yl - ys_f)) / max(1.0, sw * 1.5), 0.0, 1.0)
 
-    fill = np.broadcast_to(dn[None, None, :], (H, W, 3)).astype(np.float32).copy()
+    # 下唇纵向渐变：直接采原图下唇的**逐行**中位色。
+    # ⚠ 2026-11-15 修「下唇是一整条平涂」：原来整段下唇用同一个中位色
+    #   （实测 L=191），剖面 y848~880 全是 191 —— 一条死平线，这就是
+    #   「像贴纸 / 像涂抹」的来源。原图下唇是 211→183 的真实渐变
+    #   （高光→阴影），照它铺开才有体积感。
+    # ⚠ 2026-11-15：剖面两端要**避开**口腔底（y_hole_bot 那行 L=172，偏暗）
+    #   和下唇描边（y_lip_bot 那行 L=52，极暗）。含进去会把渐变压平
+    #   （实测下唇 std 只有 4.6，而原图下唇本身有 10+ 的层次）。
+    lip_top = float(geom["y_hole_bot"]) + 1.0
+    lip_bot = yl - 1.0
+    nrow = int(max(2, round(lip_bot - lip_top)))
+    xa = max(0, int(round(cx - mw * 0.25)))
+    xb = min(W, max(xa + 1, int(round(cx + mw * 0.25))))
+    prof = np.zeros((nrow, 3), np.float32)
+    for i in range(nrow):
+        yy = int(np.clip(round(lip_top + i), 0, H - 1))
+        rowp = src[yy, xa:xb].reshape(-1, 3).astype(np.float32)
+        prof[i] = np.median(rowp, 0) if len(rowp) else dn
+    # 按「离唇缝的归一化距离」查表，让填充区自带原图的明暗走向
+    tt = np.clip((Y - seam_y) / max(1.0, lip_bot - ys_f), 0.0, 1.0)
+    ii = np.clip((tt * (nrow - 1)).astype(np.int32), 0, nrow - 1)
+    dn_map = prof[ii]                      # (H,1,3)
+    # lip_tint 同样作用到渐变上，保持「下唇饱和度」这一个旋钮的语义
+    dn_map = sk[None, None, :] * (1.0 - lt) + dn_map * lt
+
+    fill = np.broadcast_to(dn_map, (H, W, 3)).astype(np.float32).copy()
     fill = fill * (1.0 - w_up[..., None]) + \
         np.broadcast_to(up[None, None, :], (H, W, 3)) * w_up[..., None]
     fill = fill * (1.0 - w_seam[..., None]) + \
