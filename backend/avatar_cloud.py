@@ -219,6 +219,12 @@ def _post(url: str, payload: dict, timeout: int = 60) -> dict:
     h = _auth()
     h["Content-Type"] = "application/json"
     h["X-DashScope-Async"] = "enable"
+    # 实测（2026-11-16）：upload() 上传到 DashScope 临时 OSS 后返回的是
+    # oss://xxx 私有路径，服务端默认不会去解析，任务会 PENDING 后立刻
+    # FAILED —— InvalidURL / "Unable to download the media resource during
+    # the data inspection process"。加上这个头之后服务端才认 oss:// 并
+    # 自己去取文件（同一次真实任务从 FAILED 变成 SUCCEEDED）。
+    h["X-DashScope-OssResourceResolve"] = "enable"
     r = requests.post(url, json=payload, headers=h, timeout=timeout)
     try:
         body = r.json()
@@ -338,8 +344,13 @@ def wait(task_id: str, on_progress=None, timeout: float = POLL_TIMEOUT) -> dict:
                 raise RuntimeError("任务成功但没给 video_url")
             return r
         if st == "FAILED":
-            raise RuntimeError("云端任务失败：%s %s"
-                               % (r.get("code") or "", r.get("message") or ""))
+            code = r.get("code") or ""
+            msg = r.get("message") or ""
+            if "InvalidURL" in code or "Unable to download" in msg:
+                raise RuntimeError(
+                    "云端取不到素材（InvalidURL）：图片/音频上传后服务端下载失败。"
+                    "检查请求是否带了 X-DashScope-OssResourceResolve: enable")
+            raise RuntimeError("云端任务失败：%s %s" % (code, msg))
         if time.time() - t0 > timeout:
             raise RuntimeError("等待超时（%d 秒），任务可能还在跑，task_id=%s"
                                % (int(timeout), task_id))
