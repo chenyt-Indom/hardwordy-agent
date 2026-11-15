@@ -11175,6 +11175,62 @@ def avatar2_speak(body: dict):
                          amp=_amp)
 
 
+@app.get("/api/talkhead/info")
+def talkhead_info():
+    """数字人 v3（音素驱动口型）能力自检。"""
+    from . import talkhead
+    from .talkhead import engine as th_engine
+    return {
+        "ok": True,
+        "version": talkhead.__version__,
+        "engine": "phoneme-driven viseme",
+        "dims": ["open", "round", "spread", "teeth", "lower", "press"],
+        "fps": th_engine.FPS,
+        "max_seconds": th_engine.MAX_SECONDS,
+        "align": "静音锚点 + 音节权重（不依赖 whisper）",
+        "cpu_ok": True,
+        "note": "纯 CPU 可跑，无神经网络推理；牙齿/口腔为程序化合成，"
+                "自然度受形象素材限制（闭嘴单张照片无法凭空长出真实口腔）",
+    }
+
+
+@app.post("/api/talkhead/speak")
+def talkhead_speak(body: dict):
+    """文本 → 配音 → 音素对齐 → 渲染 → mp4。
+
+    body: {text, voice, rate, style, engine}
+    ⚠️ 同步路由，FastAPI 丢线程池跑；10 秒片子约 4~8 秒渲染完。
+    """
+    body = body or {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 不能为空")
+    if len(text) > 6000:
+        raise HTTPException(status_code=400, detail="单次最多 6000 字")
+    from . import avatar2 as _av
+    from .talkhead import engine as th_engine
+    img = _av._img_path()
+    if not os.path.isfile(img):
+        raise HTTPException(status_code=400,
+                            detail="还没有数字人形象，请先上传一张图")
+    try:
+        rate = int(body.get("rate") or 0)
+    except Exception:                                # noqa: BLE001
+        rate = 0
+    r = th_engine.render_text(
+        text, img,
+        voice=str(body.get("voice") or ""),
+        rate=rate,
+        style=str(body.get("style") or ""),
+        engine=str(body.get("engine") or "auto"),
+    )
+    if r.get("ok") and r.get("path"):
+        name = os.path.basename(r["path"])
+        r["name"] = name
+        r["url"] = "/api/avatar2/video/" + quote(name)
+    return r
+
+
 @app.get("/api/avatar3d/info")
 def avatar3d_info():
     """3D 数字人能力自检：模型是否就绪、能做什么。"""
