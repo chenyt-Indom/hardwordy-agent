@@ -20,6 +20,10 @@ FOLD_PREVIEW = 120
 DEFAULT_MAX_CHARS = 4000
 # 回复超过这个字数就强制「结论前置 + 过程折叠」形态（对应「回复被截断」）
 FORCE_CONCLUSION_THRESHOLD = 800
+# 长度预判阈值：预估输出超过这个字数时，强制先输出「结论 + 已改文件 + 待办」
+# 三行摘要，再展开细节 —— 避免一次性超长输出被截断后用户拿到零信息。
+# 比 FORCE_CONCLUSION_THRESHOLD 略低，留出摘要本身占用的空间。
+PREDICT_TRUNCATE_THRESHOLD = 700
 # 结尾固定输出的「已改文件 / 待办」分隔线
 _TAIL_SEP = "\n\n---\n"
 
@@ -442,6 +446,57 @@ def _build_tail(actions=None, todos=None) -> str:
     return _TAIL_SEP + "**已改文件**：%s\n**待办**：%s" % (file_line, todo_line)
 
 
+def _build_head_summary(conclusion, actions=None, todos=None) -> str:
+    """长度预判命中时，生成「结论 + 已改文件 + 待办」三行摘要。
+
+    对应「回复被截断后用户拿到零信息」：在展开细节之前，先把最关键的三件事
+    压成三行放在最前面，即使后面的细节被截断，用户也至少知道：
+      · 本轮结论是什么；
+      · 改了哪些文件；
+      · 下一步要做什么。
+
+    结论取首行（首个空行前），过长时截断；已带结论类前缀的不重复加。
+    """
+    head = (conclusion or "").strip()
+    if not head:
+        head = "本轮已处理"
+    # 取首段（首个空行前）作为结论行
+    head = head.split("\n\n", 1)[0].strip()
+    if not head:
+        head = "本轮已处理"
+    # 结论行太长时截一下，摘要本身要短
+    if len(head) > 200:
+        head = head[:200].rstrip() + "…"
+    head = _ensure_conclusion_label(head)
+
+    files = _collect_changed_files(actions)
+    file_line = "、".join(files) if files else "（本轮未改动文件）"
+    todo_line = _as_text(todos).strip() if todos else ""
+    if not todo_line:
+        todo_line = "验证改动是否生效；如未生效，下一轮继续修"
+
+    return "%s\n**已改文件**：%s\n**待办**：%s" % (head, file_line, todo_line)
+
+
+def _predict_will_truncate(conclusion, process, artifacts, limit) -> bool:
+    """长度预判：按当前形态组装后，预估输出是否会超过上限被截断。
+
+    判据用「结论 + 过程 + 产物」的原始总长（折叠前），因为折叠后虽然变短，
+    但折叠块本身也有开销；宁可早一点触发摘要，也不要等真被截断。
+
+    返回 True 表示「预估会超长，需要先输出三行摘要」。
+    """
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = DEFAULT_MAX_CHARS
+    if limit <= 0:
+        limit = DEFAULT_MAX_CHARS
+    raw_len = len(conclusion or "") + len(process or "") + len(artifacts or "")
+    # 超过预判阈值，或原始总长已经逼近上限，都视为会截断
+    return raw_len > PREDICT_TRUNCATE_THRESHOLD or raw_len > limit
+
+
 def enforce(text, user_input=None, suggested_action=None, actions=None, todos=None,
             max_chars=DEFAULT_MAX_CHARS) -> str:
     """回复形态闸门（单一入口）：结论前置 + 过程折叠 + 空输出兜底。
@@ -566,11 +621,21 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
     raw_len = len(conclusion) + len(process) + len(artifacts)
     force_form = raw_len > FORCE_CONCLUSION_THRESHOLD
 
+    # ★ 长度预判兜底：预估输出会超长被截断时，强制先输出「结论 + 已改文件 + 待办」
+    #   三行摘要，再展开细节。这样即使后面的细节被截断，用户也至少拿到三行关键信息，
+    #   而不是一片空白或半截过程。
+    predict_truncate = _predict_will_truncate(conclusion, process, artifacts, limit)
+
     if force_form:
         conclusion = _ensure_conclusion_label(conclusion)
 
     parts = []
-    if conclusion:
+    if predict_truncate:
+        # 三行摘要永远在最前面，且不参与后续折叠/截断
+        parts.append(_build_head_summary(conclusion, actions, todos))
+        # 摘要已含结论行，正文里不再重复结论（避免「结论：…」出现两次）
+        conclusion = ""
+    elif conclusion:
         parts.append(conclusion)
 
     folded = _fold_process(process, force=force_form)
@@ -601,14 +666,17 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
 
     # ★ 结尾固定输出「已改文件 / 待办」：长回复或本轮有 patch 动作时必带。
     #   放在截断之前，保证这两行永远在（截断只砍过程/产物尾部）。
-    if force_form or _has_patch_action(actions):
+    #   长度预判命中时，三行摘要里已经带了「已改文件 / 待办」，不再重复追加。
+    if (force_form or _has_patch_action(actions)) and not predict_truncate:
         if "**已改文件**" not in text and "已改文件：" not in text:
             text = text.rstrip() + _build_tail(actions, todos)
 
     if len(text) <= limit:
         return text
 
-    # 超长：优先砍产物，再砍过程，结论不动
+    # 超长：优先砍产物，再砍过程，结论不动。
+    # 长度预判命中时，三行摘要已经占了 parts[0]，结论已并入摘要，head 为空，
+    # 截断只砍后面的过程/产物，摘要三行永远保留。
     head = conclusion
     tail_parts = []
     if folded:

@@ -862,29 +862,27 @@ def patch(rel: str, find: str, replace: str, note: str = "",
     #     时间窗统计，而不是 fail_stats 的「最近 100 条」。原因：fail_stats 只按
     #     条数截断，3 个月前反复出现的 fail_kind 会一直算作「有」，幽灵修复照样
     #     放行。现在只有「近 7 天真的发生过」才放行，证据卡上展示的也是这个数。
+    #   ★ 2026-11-17 三次调整（幽灵修复闸门·第一步）：把这段逻辑抽成
+    #     _check_failure_evidence()，patch 入口只调用它。好处：
+    #       · 单步可验证 —— 闸门逻辑独立成函数，可单独断言；
+    #       · 与 write()/insert_after() 复用同一套判定，避免两处口径漂移；
+    #       · 拒绝原因/证据文案集中一处，前端卡片直接吃 evidence 字段。
     _fk = str(fail_kind or "").strip()
     _real = -1              # -1 = 未查/查不到（不拦）
     if _fk:
-        try:
-            from . import actlog as _actlog
-            _cnt, _ok = _actlog.count_fail_kind_ex(_fk, days=7)
-            _real = int(_cnt) if _ok else -1
-        except Exception:
-            _real = -1          # 查不到就不拦（账本坏了不能挡住正常改动）
-        if _real == 0:
-            # 写一条 phantom 事件：含 kind、时间、拒绝原因，便于事后审计
-            try:
-                journal("patch_rejected_phantom", str(rel or ""),
-                        fail_kind=_fk,
-                        reason="fail_kind 近 7 天真实计数为 0（幽灵修复）",
-                        ts=time.strftime("%Y-%m-%d %H:%M:%S"))
-            except Exception:
-                logger.debug("silent-except", exc_info=True)
-            return {"ok": False,
-                    "error": ("拒绝：fail_kind=%s 在最近 7 天里真实计数为 0，"
-                              "说明这个失败并没有发生过（幽灵修复）。\n"
-                              "请先确认真正的问题再改；若确有失败，请给出复现步骤。"
-                              % _fk)}
+        _ev = _check_failure_evidence(_fk, days=7)
+        if not _ev.get("ok"):
+            # _check_failure_evidence 内部已记 phantom 事件，这里直接拒绝
+            return {"ok": False, "error": _ev.get("reason") or
+                    ("拒绝：fail_kind=%s 在最近 7 天里真实计数为 0，"
+                     "说明这个失败并没有发生过（幽灵修复）。" % _fk)}
+        _real = int(_ev.get("count") or 0) if not _ev.get("phantom") else 0
+        if _ev.get("phantom"):
+            _real = 0
+        elif _real <= 0:
+            # 账本不可读时 _check_failure_evidence 保守放行，count=0；
+            # 这里保持 -1 语义（未查/查不到），避免证据卡误报「0 次」。
+            _real = -1
     got = read(rel)
     if not got.get("ok"):
         return got
