@@ -168,7 +168,9 @@ _DEFAULT_SETTINGS = {
     # 任务结果没达到预期时，自动触发一次「是不是代码问题」的诊断。
     "diagnose_on_fail": True,
     # 信任模式下一轮最多自动执行几条动作 —— 防止一次改太多没法收拾。
-    "max_auto_actions": 6,
+    # 2026-11-15 用户要求新功能也要自动落地。一轮典型是「2~4 条 bug 修复 +
+    # 2~4 条新功能」，上限 6 会把排在后面的功能动作整批截掉，所以提到 10。
+    "max_auto_actions": 10,
     # ---- 体验评估（2026-11-15 追加）----
     # 用户要求「主动评估任务完成效果，闲聊里也要能读出体验」。
     # 启发式每轮都算（零成本）；LLM 批量评估按下面两个开关控制频率。
@@ -968,13 +970,99 @@ def experience_summary():
             "recent": items[:3], "low": low}
 
 
+def runtime_metrics():
+    """真实运行指标 —— 不是模型自评，是 actlog 里记下来的硬数据。
+
+    用户要求（2026-11-15）：「根据工作效率以及效果……主动提出增加全新的功能」。
+    原来的 experience_brief() 喂给模型的只有 LLM 自己打的分（完成度 x/10、
+    效率 y/10），**一条真实运行数据都没有** —— 它判断「效率低」全靠自我感觉，
+    看不出「自动改动成功率只有 60%」「同一文件被回滚了 5 次」这种硬事实。
+    这里把这些量化出来，作为「该不该做新功能、该先修哪里」的依据。
+    """
+    out = {"total": 0, "ok": 0, "fail": 0, "rate": None, "rollback": 0,
+           "fuse": 0, "files_24h": 0, "avg_sec": None, "last_ts": "",
+           "by_file": []}
+    try:
+        logs = list_actlog(300)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return out
+    if not logs:
+        return out
+    ok = fail = rb = fz = 0
+    secs = []
+    files24 = set()
+    per_file = {}
+    now = time.time()
+    for x in logs:
+        res = str(x.get("result") or "")
+        detail = str(x.get("detail") or "")
+        if res == "ok":
+            ok += 1
+        elif res == "fail":
+            fail += 1
+        if "回滚" in detail:
+            rb += 1
+        if "熔断" in detail:
+            fz += 1
+        m = re.search(r"(\d+(?:\.\d+)?)\s*秒", detail)
+        if m:
+            try:
+                secs.append(float(m.group(1)))
+            except Exception:                           # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+        for f in (x.get("files") or []):
+            if not f:
+                continue
+            per_file[f] = per_file.get(f, 0) + 1
+        ts = str(x.get("ts") or "")
+        if ts:
+            try:
+                if now - time.mktime(time.strptime(ts[:19], "%Y-%m-%d %H:%M:%S")) <= 86400:
+                    for f in (x.get("files") or []):
+                        if f:
+                            files24.add(f)
+            except Exception:                           # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+    total = len(logs)
+    out.update({
+        "total": total, "ok": ok, "fail": fail,
+        "rate": round(ok * 100.0 / total, 1) if total else None,
+        "rollback": rb, "fuse": fz, "files_24h": len(files24),
+        "avg_sec": round(sum(secs) / len(secs), 1) if secs else None,
+        "last_ts": str((logs[0] or {}).get("ts") or ""),
+        "by_file": [{"file": k, "n": v} for k, v in
+                    sorted(per_file.items(), key=lambda kv: -kv[1])[:5]],
+    })
+    return out
+
+
 def experience_brief():
     """压成一段纯文本，塞进 reflect 的 prompt 里。"""
     s = experience_summary()
+    rt = runtime_metrics()
+    real = []
+    if rt.get("total"):
+        seg = ("【真实运行指标（不是自评，来自自动改动日志）】最近 %d 次自动改动："
+               "成功 %d / 失败 %d，成功率 %s%%；回滚 %d 次，熔断 %d 次；"
+               "近 24 小时改过 %d 个文件"
+               % (rt["total"], rt["ok"], rt["fail"], rt.get("rate"), rt["rollback"],
+                  rt["fuse"], rt["files_24h"]))
+        if rt.get("avg_sec"):
+            seg += "；平均单次改动耗时 %s 秒" % rt["avg_sec"]
+        if rt.get("by_file"):
+            seg += "；被改最多次的文件：" + "、".join(
+                "%s(%d 次)" % (x["file"], x["n"]) for x in rt["by_file"][:3])
+        real.append(seg)
+        if rt.get("rate") is not None and rt["rate"] < 70:
+            real.append("⚠️ 成功率偏低（<70%），说明我的改动经常失败/被回滚 —— "
+                        "**应该优先提高改动的可靠性，而不是加新功能**。")
     if not s.get("count"):
-        return "（还没有体验评估数据）"
-    lines = ["平均完成度 %s / 10，平均效率 %s / 10，趋势：%s" %
-             (s.get("avg_completion"), s.get("avg_efficiency"), s.get("trend") or "样本不足")]
+        return "\n".join(real) or "（还没有体验评估数据）"
+    lines = list(real)
+    lines.append("平均完成度 %s / 10，平均效率 %s / 10，趋势：%s" %
+                 (s.get("avg_completion"), s.get("avg_efficiency"),
+                  s.get("trend") or "样本不足"))
     for f in (s.get("frictions") or [])[:5]:
         lines.append("- 摩擦点「%s」出现 %s 次：%s → 建议：%s" %
                      (f.get("tag"), f.get("count"), f.get("detail"), f.get("suggestion")))
@@ -1359,9 +1447,24 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
 3. **消除体验摩擦**（优先级**高于**加新功能）：上面「用户体验评估」里反复出现的
    摩擦点，必须给出具体到环节的消除办法。过程繁琐就去砍步骤，评分低就去查
    是不是我的做法本身有问题——**不要写"我会更仔细"这种空话**。
-4. **可增加的功能**：结合上面的技术动态和项目现状，提出真正值得做的功能。
-   每条要说明"为什么值得做"和"大概怎么实现"。
-5. **可执行的动作**：这是最重要的一项。给出**具体到文件**的改动计划，
+4. **预判用户接下来要做什么**（新增，很重要）：从对话里推断用户**未来可能处理
+   什么业务**、**当下已经卡在哪**。只写有证据的，每条必须带证据（用户原话/反复
+   出现的模式）和把握程度（high/mid/low）。没证据就不要编 —— 编出来的预判比没有更糟。
+5. **可增加的功能 / 新技术**：结合技术动态、论文评估和上面的预判，提出真正值得做的。
+   ⚠️ **允许提「技术还没成熟、但理论上可行」的方案**（借鉴论文即可），只要对用户
+   真有用。用户明确说过：哪怕这项技术还没出来，只要有用且理论可行就可以做。
+   ⚠️ 但**必须说清落在哪**：改哪些文件（files，只能从上面的清单里选）、改哪个函数
+   （anchor）。说不清 files/anchor 的建议不算有效 —— 那说明你自己也没想清怎么落地。
+   ⚠️ 如果上面「真实运行指标」显示成功率偏低，**先提高可靠性，别急着加新功能**。
+   ⚠️ **同一个需求只能写一处**：要改代码就写进 actions，只提建议就写进 features，
+      绝对不要两处都写 —— 实测这样会产生两条动作改同一处，既浪费名额又互相覆盖。
+   ⚠️ 也不要在 features 里写一条**概括**、再在 actions 里写同一件事的**细分**
+      （例如 features 写「回复形态闸门：结论前置+过程折叠+长度上限」，actions 又拆成
+      三条）—— 那会变成四条动作改同一处。粒度只选一种：要么整体写进 actions 一条，
+      要么拆细写进 actions 多条。
+6. **想问用户的问题**（新增）：某个预判缺关键信息、且猜错代价很大时，提一个问题。
+   只问「问了能改变你怎么做」的，别凑数；没有就给空数组。
+7. **可执行的动作**：这是最重要的一项。给出**具体到文件**的改动计划，
    每条动作要能被单独批准/拒绝。风险等级自己判断（low=文案/参数/样式，
    mid=新增函数/接口，high=改核心逻辑）。
    ⚠️ 只允许改 backend/ 和 frontend/ 下的 .py/.js/.css/.html。
@@ -1373,7 +1476,10 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
   "summary": "一句话总结这次反思（30字内）",
   "weaknesses": [{"title":"短标题","detail":"具体问题+证据","severity":"high|mid|low"}],
   "user_insights": [{"title":"短标题","detail":"观察+证据","suggestion":"可以怎么改进"}],
-  "features": [{"title":"功能名","why":"为什么值得做","how":"大概怎么做","effort":"S|M|L"}],
+  "forecast": [{"biz":"用户未来可能处理的业务","evidence":"依据（原话/重复出现的模式）","confidence":"high|mid|low","prepare":"可以提前准备什么"}],
+  "needs": [{"pain":"当下遇到的问题","evidence":"证据","impact":"影响了什么"}],
+  "features": [{"title":"功能名","why":"为什么值得做（必须说清）","pain":"对应哪个痛点或预判","how":"大概怎么做","effort":"S|M|L","files":["backend/xxx.py"],"anchor":"改哪个函数","risk":"low|mid|high","verify":"怎么验证有效","theory":"理论/论文依据，没有就留空"}],
+  "questions": [{"q":"想问用户的一句话","why":"为什么这个信息会改变做法","options":["选项1","选项2"]}],
   "tech_takeaways": [{"title":"技术名","source":"来源","url":"链接","takeaway":"一句话要点","applicable":"对本项目有没有用，怎么用"}],
   "actions": [{"title":"短标题","detail":"具体改什么、为什么","risk":"low|mid|high","files":["backend/xxx.py"]}]
 }
@@ -1505,6 +1611,21 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
             "backup": "",
         })
 
+    # 用户要求（2026-11-15）：「只要是对用户有用，且理论上可行……主动迭代增加
+    # 这项新技术，然后记得需要跟用户说明为什么」。原来 features 只展示、永不执行，
+    # 这里把它转成可执行动作，和 bug 修复走同一条链路（同四道护栏）。
+    feats = [f for f in (data.get("features") or []) if isinstance(f, dict)]
+    feat_actions = []
+    try:
+        feat_actions = _features_to_actions(
+            feats, start=len(actions), limit=4,
+            existing=[a.get("title") for a in actions])
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("features 转动作失败：%s: %s", type(e).__name__, e)
+    if feat_actions:
+        actions.extend(feat_actions)
+        set_stage("plan", "另有 %d 条新功能要落地" % len(feat_actions))
+
     plan = {
         "id": _pid(),
         "ts": _now(),
@@ -1512,7 +1633,11 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
         "summary": str(data.get("summary") or "")[:200],
         "weaknesses": data.get("weaknesses") or [],
         "user_insights": data.get("user_insights") or [],
-        "features": data.get("features") or [],
+        "features": feats,
+        "forecast": [x for x in (data.get("forecast") or []) if isinstance(x, dict)],
+        "needs": [x for x in (data.get("needs") or []) if isinstance(x, dict)],
+        "questions": [x for x in (data.get("questions") or []) if isinstance(x, dict)],
+        "feature_actions": len(feat_actions),
         "tech_takeaways": data.get("tech_takeaways") or [],
         "actions": actions,
         "tech_raw": {k: (v or [])[:6] for k, v in (tech or {}).items()},
@@ -1522,12 +1647,14 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
         "paper_brief": paper_brief[:2000],
     }
 
+    plan["notice"] = _plan_notice(plan)
+
     d = load_plans()
     d["items"].insert(0, plan)
     d["items"] = d["items"][:60]          # 最多留 60 次
     save_plans(d)
 
-    out = {"ok": True, "plan": plan}
+    out = {"ok": True, "plan": plan, "notice": plan["notice"]}
     # 信任模式：用户要求「不用批准，自动迭代，改完提示重启」。
     # 只在真的有计划动作时才执行，避免空跑。
     if auto_execute is None:
@@ -2455,6 +2582,152 @@ def _keep_real_files(files):
     return [f for f in (files or []) if f in exist]
 
 
+def _similar_title(a, b):
+    """判断两条建议是不是在说同一件事（用于 actions/features 去重）。
+
+    实测：模型会把同一个需求**同时**写进 actions 和 features（比如
+    「验证类回复强制结论优先模板」和「验证类请求的结论优先回复模板」），
+    转成动作后就是两条动作改同一处 —— 既浪费名额，又可能互相覆盖。
+    """
+    def _n(s):
+        return re.sub(r"[^\u4e00-\u9fa5a-zA-Z0-9]", "", str(s or ""))
+    a, b = _n(a), _n(b)
+    if not a or not b:
+        return False
+    if a in b or b in a:
+        return True
+
+    def _g(s):
+        return set(s[i:i + 2] for i in range(max(0, len(s) - 1)))
+    ga, gb = _g(a), _g(b)
+    if not ga or not gb:
+        return False
+    return len(ga & gb) / float(len(ga | gb)) >= 0.45
+
+
+def _features_to_actions(features, start=0, limit=4, existing=None):
+    """把「可增加的功能」转成**可执行动作** —— 用户要求主动迭代落地新技术。
+
+    2026-11-15 用户原话：「只要是对用户有用，且理论上可行，可以借鉴论文参考，
+    主动迭代增加这项新技术，然后记得需要跟用户说明为什么」。
+
+    原来的 features 只做展示（前端一行 listHtml），**永远不会变成改动** ——
+    用户看得到、点不了。这里把它接进同一条执行链路：信任模式下自动批准，
+    并和 bug 修复一样过预检/熔断/回归/基线四道护栏。
+
+    ⚠️ 刻意**不**给功能动作设 targets：targets 是「这条动作针对哪几处静态问题」，
+    功能类本来就不对应静态问题；设了会被预检当成「问题已不存在」全部跳过
+    （实测踩过：6 条功能改进动作被 100% 误杀）。
+    """
+    out = []
+    try:
+        exist = set(_file_catalog())
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        exist = set()
+    seen = [str(x or "") for x in (existing or []) if x]
+    for f in features or []:
+        if len(out) >= limit:
+            break
+        if not isinstance(f, dict):
+            continue
+        title = str(f.get("title") or "").strip()
+        if not title:
+            continue
+        if any(_similar_title(title, t) for t in seen):
+            logger.debug("功能与已有动作重复，跳过：%s", title[:40])
+            continue
+        seen.append(title)
+        files = []
+        for x in (f.get("files") or []):
+            if not isinstance(x, str):
+                continue
+            n = _norm_rel(x)
+            if n and n in exist and n not in files:
+                files.append(n)
+        why = str(f.get("why") or "").strip()
+        how = str(f.get("how") or "").strip()
+        anchor = str(f.get("anchor") or "").strip()
+        theory = str(f.get("theory") or "").strip()
+        verify = str(f.get("verify") or "").strip()
+        pain = str(f.get("pain") or "").strip()
+        risk = str(f.get("risk") or "mid").lower()
+        if risk not in ("low", "mid", "high"):
+            risk = "mid"
+        parts = []
+        if pain:
+            parts.append("对应痛点：%s" % pain)
+        if why:
+            parts.append("为什么值得做：%s" % why)
+        if how:
+            parts.append("怎么做：%s" % how)
+        if anchor:
+            parts.append("改哪里：%s" % anchor)
+        if theory:
+            parts.append("理论/论文依据：%s" % theory)
+        if verify:
+            parts.append("怎么验证：%s" % verify)
+        if not files:
+            parts.append("⚠️ 没给出可改的真实文件，执行时只能靠模型自己找位置。")
+        out.append({
+            "id": "f%d" % (start + len(out) + 1),
+            "title": title[:120],
+            "detail": "\n".join(parts)[:900],
+            "risk": risk,
+            "files": files[:_MAX_FILES_PER_ACTION],
+            "origin": "feature",
+            "why": why[:400],
+            "status": "pending",
+            "note": "",
+            "error": "",
+            "backup": "",
+        })
+    return out
+
+
+def _plan_notice(plan):
+    """把这次反思压成一条**给用户看的**摘要（聊天区推送用）。
+
+    用户要求：「做完告诉我改了什么、为什么」+「两者都要：聊天区推一条摘要，
+    详情在抽屉里」。所以这里只挑「为什么」和「要改什么」，不堆细节。
+    """
+    p = plan or {}
+    acts = p.get("actions") or []
+    feats = p.get("features") or []
+    fc = p.get("forecast") or []
+    needs = p.get("needs") or []
+    qs = p.get("questions") or []
+    lines = ["🌱 反思完成：%s" % (p.get("summary") or "（无摘要）")]
+    if fc:
+        lines.append("\n【我猜你接下来会做】")
+        for x in fc[:3]:
+            if isinstance(x, dict):
+                lines.append("· %s（把握 %s）—— 依据：%s" %
+                             (x.get("biz") or "", x.get("confidence") or "?",
+                              str(x.get("evidence") or "")[:80]))
+    if needs:
+        lines.append("\n【你当下卡在哪】")
+        for x in needs[:3]:
+            if isinstance(x, dict):
+                lines.append("· %s" % (x.get("pain") or ""))
+    if feats:
+        lines.append("\n【我想加的新功能（以及为什么）】")
+        for x in feats[:4]:
+            if isinstance(x, dict):
+                lines.append("· %s —— %s" % (x.get("title") or "",
+                                             str(x.get("why") or "")[:100]))
+    if acts:
+        lines.append("\n【本轮要改的代码 %d 条】" % len(acts))
+        for a in acts[:4]:
+            if isinstance(a, dict):
+                lines.append("· %s%s" % (a.get("title") or "",
+                                         "（高风险）" if a.get("risk") == "high" else ""))
+    if qs:
+        lines.append("\n【想问你 %d 个问题】在「AI 迭代想法」抽屉里 —— "
+                     "答案会改变我下一步怎么做。" % len(qs))
+    return "\n".join(lines)[:1800]
+
+
 def _actions_from_findings(findings, limit=6):
     """把静态检查发现按文件聚合成「可执行的动作」。
 
@@ -2732,15 +3005,34 @@ def auto_approve_only(pid, max_n=0):
     d, plan = _find_plan(pid)
     if not plan:
         return {"ok": False, "error": "找不到这次计划"}
-    cap = int(max_n or s.get("max_auto_actions") or 6)
+    cap = int(max_n or s.get("max_auto_actions") or 10)
+    pend = [a for a in (plan.get("actions") or []) if a.get("status") == "pending"]
+    # 用户要求「全部自动做」。设置文件里可能残留旧默认值 6（老版本留下的），
+    # 实测它会把排在后面的功能动作整批切掉（4 条功能只进 1 条）。所以本轮
+    # 动作数不超过硬上限 10 时就不截断；超过才按配额截。
+    _HARD_CAP = 10
+    if len(pend) <= _HARD_CAP:
+        cap = max(cap, len(pend))
+    else:
+        cap = min(cap, _HARD_CAP)
+    # 用户要求「新功能也要自动落地」。但 bug 修复动作排在数组前面，会先占满名额，
+    # 把功能动作整批挤掉 —— 实测 cap=6 时 4 条功能动作只进了 1 条。所以给功能
+    # 留保底配额（约 cap 的 1/3），剩下的名额再按原顺序给 bug 修复。
+    feat = [a for a in pend if a.get("origin") == "feature"]
+    quota = min(len(feat), max(1, cap // 3)) if feat else 0
     picked = []
-    for a in plan.get("actions") or []:
+    for a in feat[:quota]:
+        a["status"] = "approved"
+        a["auto"] = True
+        picked.append(a)
+    for a in pend:
         if len(picked) >= cap:
             break
-        if a.get("status") == "pending":
-            a["status"] = "approved"
-            a["auto"] = True
-            picked.append(a)
+        if a.get("status") != "pending":
+            continue
+        a["status"] = "approved"
+        a["auto"] = True
+        picked.append(a)
     save_plans(d)
     return {"ok": bool(picked), "approved": len(picked),
             "plan": plan,

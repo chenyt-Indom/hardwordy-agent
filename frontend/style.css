@@ -5554,6 +5554,8 @@ html[data-theme="light"] select.pill-select option {
 .iter-tech a { color: #2b6cb0; text-decoration: none; }
 .iter-tech a:hover { text-decoration: underline; }
 .iter-hist { font-size: 12px; color: var(--muted, #718096); line-height: 1.85; }
+/* 反思摘要推到聊天区时保留换行（textContent 不会把 \n 变成 <br>） */
+.bubble.iter-push { white-space: pre-wrap; }
 .iter-dot {
   display: inline-block; min-width: 15px; height: 15px; line-height: 15px;
   border-radius: 8px; background: #e53e3e; color: #fff;

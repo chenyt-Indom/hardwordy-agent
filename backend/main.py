@@ -387,6 +387,49 @@ def _recurrence_template_ctx() -> str:
     )
 
 
+def _verification_card(tool_events: list) -> str:
+    """本轮调用过 selfdev_run/run_python/selfdev_patch 时，生成 ≤6 行结论卡片。
+
+    直击三个摩擦点：结论埋在长文里、回复被截断、只诊断不修复。
+    从工具结果里抽取 pass/fail 计数与失败项，拼成固定格式置于回复首部。
+    没有相关工具调用时返回空串（不干扰普通对话）。
+    """
+    if not tool_events:
+        return ""
+    names = {"selfdev_run", "run_python", "selfdev_patch"}
+    hits = [e for e in tool_events if str((e or {}).get("name") or "") in names]
+    if not hits:
+        return ""
+    passed = failed = 0
+    fails: list = []
+    log_path = ""
+    for e in hits:
+        res = e.get("result")
+        text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+        m = re.search(r"(\d+)\s*passed", text)
+        if m:
+            passed += int(m.group(1))
+        m = re.search(r"(\d+)\s*failed", text)
+        if m:
+            failed += int(m.group(1))
+        for fm in re.finditer(r"FAILED\s+([^\s:]+)", text):
+            if fm.group(1) not in fails:
+                fails.append(fm.group(1))
+        lm = re.search(r"(?:日志|log)[:：]\s*(\S+)", text)
+        if lm and not log_path:
+            log_path = lm.group(1)
+    if not (passed or failed or fails):
+        return ""
+    ok = failed == 0 and not fails
+    lines = ["结论：%s" % ("通过" if ok else "未通过")]
+    lines.append("通过 %d / 失败 %d" % (passed, failed))
+    if fails:
+        lines.append("失败项：" + "、".join(fails[:3]) + (" 等" if len(fails) > 3 else ""))
+    if log_path:
+        lines.append("日志：" + log_path)
+    return "\n".join(lines[:6]) + "\n\n"
+
+
 def _reply_template_ctx() -> str:
     """固定回复模板（2026-11-11 用户要求）。
 

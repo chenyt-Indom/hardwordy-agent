@@ -12795,6 +12795,24 @@
            inner + '</div>';
   }
 
+  // 用户要求「两者都要：聊天区推一条摘要，详情在抽屉里」。
+  // 抽屉和主聊天是两个独立作用域，拿不到 addMsg，所以直接往 .messages 插节点。
+  // ⚠️ 用 textContent 不用 innerHTML —— 摘要里含用户原话，不能当 HTML 解析。
+  function pushChat(text) {
+    try {
+      const box = document.querySelector(".messages");
+      if (!box || !text) return;
+      const d = document.createElement("div");
+      d.className = "msg assistant";
+      const b = document.createElement("div");
+      b.className = "bubble iter-push";
+      b.textContent = text;
+      d.appendChild(b);
+      box.appendChild(d);
+      box.scrollTop = box.scrollHeight;
+    } catch (e) { /* 聊天区可能还没渲染，忽略 */ }
+  }
+
   function actionsHtml(actions) {
     actions = actions || [];
     if (!actions.length) {
@@ -12847,13 +12865,40 @@
     if (!items.length) return '<div class="iter-li">（这次没有）</div>';
     return items.map(function (it) {
       let h = '<div class="iter-li">';
+      if (kind === "fc") {                       // 未来业务预判
+        h += '<b>' + esc(it.biz || "") + '</b>';
+        if (it.confidence) h += ' <span class="iter-tag">把握 ' + esc(it.confidence) + '</span>';
+        if (it.evidence) h += '<br>依据：' + esc(it.evidence);
+        if (it.prepare) h += '<br>可以提前准备：' + esc(it.prepare);
+        return h + '</div>';
+      }
+      if (kind === "nd") {                       // 当下痛点
+        h += '<b>' + esc(it.pain || "") + '</b>';
+        if (it.evidence) h += '<br>证据：' + esc(it.evidence);
+        if (it.impact) h += '<br>影响：' + esc(it.impact);
+        return h + '</div>';
+      }
+      if (kind === "q") {                        // 想问用户
+        h += '<b>' + esc(it.q || "") + '</b>';
+        if (it.why) h += '<br>为什么问：' + esc(it.why);
+        const op = it.options || [];
+        if (op.length) h += '<br>可选：' + op.map(function (x) { return esc(x); }).join(" / ");
+        return h + '</div>';
+      }
       if (kind === "w" && it.severity) {
         h += '<span class="iter-tag">' + esc(it.severity) + '</span>';
       }
       h += '<b>' + esc(it.title || "") + '</b>';
       if (it.detail) h += ' — ' + esc(it.detail);
+      if (it.pain) h += '<br>对应痛点：' + esc(it.pain);
       if (it.why) h += '<br>为什么：' + esc(it.why);
       if (it.how) h += '<br>怎么做：' + esc(it.how);
+      if (kind === "f") {
+        if (it.anchor) h += '<br>改哪里：' + esc(it.anchor);
+        if ((it.files || []).length) h += '<br>文件：' + esc((it.files || []).join(" · "));
+        if (it.verify) h += '<br>怎么验证：' + esc(it.verify);
+        if (it.theory) h += '<br>理论依据：' + esc(it.theory);
+      }
       if (it.suggestion) h += '<br>建议：' + esc(it.suggestion);
       if (it.effort) h += ' <span class="iter-tag">工作量 ' + esc(it.effort) + '</span>';
       h += '</div>';
@@ -13139,7 +13184,16 @@
              actionsHtml(p.actions));
     h += sec("🪞 我对自己的反思", listHtml(p.weaknesses, "w"));
     h += sec("👤 我对你的观察", listHtml(p.user_insights, "u"));
-    h += sec("💡 可以加的功能", listHtml(p.features, "f"));
+    if ((p.forecast || []).length) {
+      h += sec("🔮 我猜你接下来会做", listHtml(p.forecast, "fc"));
+    }
+    if ((p.needs || []).length) {
+      h += sec("🧩 你当下卡在哪", listHtml(p.needs, "nd"));
+    }
+    h += sec("💡 可以加的功能（含为什么）", listHtml(p.features, "f"));
+    if ((p.questions || []).length) {
+      h += sec("❓ 想问你（回答会改变我下一步）", listHtml(p.questions, "q"));
+    }
     h += sec("📡 论文雷达（向量检索 + 四维评估）", papersHtml());
     h += sec("🌐 网上最新动态（抓到 " + (p.tech_total || 0) + " 条）", techHtml(p));
     h += sec("📜 历史反思", (d.history || []).map(function (x) {
@@ -13169,6 +13223,7 @@
     busy = false;
     if (!r || !r.ok) { say((r && r.error) || "反思失败", "bad"); return; }
     say("反思完成：" + ((r.plan && r.plan.summary) || ""), "good");
+    if (r.notice) pushChat(r.notice);
     // 信任模式下，后端已经把动作提交到迭代队列 —— 立刻在聊天界面开卡片。
     if (r.task && r.task.ok) {
       feedStart();
