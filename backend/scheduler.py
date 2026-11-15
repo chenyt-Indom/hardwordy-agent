@@ -52,13 +52,95 @@ def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ★ 2026-11-15 用户要求：「让自检以及自我反思成为这份代码里的真正一部分，
+#   这和自己增加的那些自动化任务大不相同」。
+#   现状是：四个内置任务的**执行逻辑**（_run_selfiter / _run_selfaudit /
+#   _run_selfexp / _run_selfidle）本来就写死在代码里，但「这些任务存在」这件事
+#   只写在 data/schedules.json —— 文件丢了、或换机器只拷了 exe 没拷 data 目录，
+#   load_jobs() 直接返回 []，四个内置任务静默消失（日志里连错都不报）。
+#   所以把**任务定义**也搬进代码：下面这份清单是权威来源，
+#   schedules.json 只承担「运行状态」和「用户改过的时间」两个角色，
+#   缺了就用这里的默认值补回（_ensure_builtins），用户自己建的任务一概不碰。
+_BUILTIN_DEFS = (
+    {"kind": "selfiter",  "name": "每日自我反思", "at_time": "04:30"},
+    {"kind": "selfaudit", "name": "每日代码自检", "at_time": "05:10"},
+    {"kind": "selfexp",   "name": "定时体验评估", "every_minutes": 120},
+    {"kind": "selfidle",  "name": "抽空代码自检", "every_minutes": 20},
+)
+
+# 补回失败时的节流时间戳（只读文件系统/磁盘满时，别每 20 秒重试一次刷日志）
+_ENSURE_FAIL_AT = [0.0]
+# 自愈写盘的互斥锁（load_jobs 会被多个线程同时调用，而自愈要写盘）
+_ENSURE_LOCK = threading.Lock()
+
+
+def _builtin_job(d: dict) -> dict:
+    """按代码里的定义造一条内置任务记录（只用于「缺失时补回」）。"""
+    sch = {}
+    if d.get("at_time"):
+        sch["at_time"] = d["at_time"]
+    elif d.get("every_minutes"):
+        sch["every_minutes"] = int(d["every_minutes"])
+    return {"id": uuid.uuid4().hex[:8],
+            "name": d["name"], "prompt": "", "schedule": sch,
+            "session": "", "model": "", "kind": d["kind"], "focus": "",
+            "enabled": True, "created": _now(), "builtin_auto": True,
+            "last_run": "", "last_status": "", "last_preview": "",
+            "next_run": _next_run({"schedule": sch})}
+
+
+def _ensure_builtins(jobs: list) -> tuple:
+    """补齐缺失的内置任务，返回 (jobs, 补回的 kind 列表)。
+
+    · 只补「kind 在 _BUILTIN_DEFS 里、但 jobs 里一条都没有」的；
+    · 已经存在的一律不动 —— 包括用户暂停了的（enabled=False）、改过时间的。
+      所以「暂停」不会被自愈悄悄恢复成启用，这是必须守住的一条；
+    · 用户自己建的业务任务（kind 为空）完全不参与。
+    """
+    have = {str(j.get("kind") or "") for j in jobs}
+    added = []
+    for d in _BUILTIN_DEFS:
+        if d["kind"] in have:
+            continue
+        jobs.append(_builtin_job(d))
+        added.append(d["kind"])
+    return jobs, added
+
+
 def load_jobs() -> list:
     try:
         with open(_jobs_path(), "r", encoding="utf-8") as f:
             d = json.load(f)
-        return d if isinstance(d, list) else []
+        jobs = d if isinstance(d, list) else []
     except Exception:
-        return []
+        jobs = []
+    # 内置任务自愈：文件丢了 / 被清空了，这里把它补回来并落盘
+    try:
+        jobs, added = _ensure_builtins(list(jobs))
+        if added and time.time() - _ENSURE_FAIL_AT[0] > 60:
+            # ★ 加锁 + 双检：load_jobs 会被调度线程（每 20 秒）和各个接口同时调用，
+            #   而自愈要写盘。两个线程都发现缺失时，如果不锁就会同时写同一个
+            #   schedules.json.tmp，可能交错出半个文件。拿锁后重读一遍，
+            #   别人已经补好了就直接用他的结果。
+            with _ENSURE_LOCK:
+                try:
+                    with open(_jobs_path(), "r", encoding="utf-8") as f:
+                        _d = json.load(f)
+                    _cur = _d if isinstance(_d, list) else []
+                except Exception:
+                    _cur = []
+                _cur, _added = _ensure_builtins(list(_cur))
+                if _added:
+                    try:
+                        save_jobs(_cur)
+                        logger.warning("内置任务缺失，已自动补回：%s", ",".join(_added))
+                    except Exception:
+                        _ENSURE_FAIL_AT[0] = time.time()
+                        logger.debug("补回内置任务写盘失败", exc_info=True)
+                jobs = _cur
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    return jobs
 
 
 def save_jobs(jobs: list) -> None:
@@ -934,17 +1016,34 @@ def _loop() -> None:
                     due.append(j)
             for j in due:
                 _STATE["running"] = j["id"]
-                try:
-                    _r = _run_once(j)
+
+                def _attempt(_j=j):
+                    _r = _run_once(_j)
                     if _r.get("skipped"):
-                        j["last_status"] = "skipped"
-                        j["last_preview"] = str(_r.get("reason") or "")[:200]
+                        _j["last_status"] = "skipped"
+                        _j["last_preview"] = str(_r.get("reason") or "")[:200]
                     else:
-                        j["last_status"] = "ok"
-                        j["last_preview"] = str(_r.get("answer") or "")[:200]
+                        _j["last_status"] = "ok"
+                        _j["last_preview"] = str(_r.get("answer") or "")[:200]
+
+                try:
+                    try:
+                        _attempt()
+                    except Exception as _e1:          # noqa: BLE001
+                        # ★ 内置任务（反思/自检/评估）失败重试一次。
+                        #   一次反思要几十秒，偶发的模型超时或网络抖动不该让
+                        #   今天这一轮直接报废；重试仍失败才记 error。
+                        #   用户自建的任务**不重试** —— 它们可能带副作用
+                        #   （发消息、跑脚本），重跑一遍不是用户想要的。
+                        if not str(j.get("kind") or ""):
+                            raise
+                        logger.warning("内置任务 %s 首次失败，重试一次：%s",
+                                       j.get("kind"), _e1)
+                        _attempt()
                 except Exception as e:                # noqa: BLE001
                     j["last_status"] = "error: %s" % e
                 finally:
+                    j.pop("catchup", None)
                     j["last_run"] = _now()
                     j["next_run"] = _next_run(j)
                     _STATE["running"] = ""
@@ -955,10 +1054,52 @@ def _loop() -> None:
         time.sleep(20)
 
 
+def _catchup_builtins() -> list:
+    """应用关着时错过了内置任务的执行时间 → 启动后补跑一次，返回补跑的 kind。
+
+    ★ 2026-11-15：光有「到点必定执行」不够 —— 关机一夜，第二天开机时
+    next_run 还停在昨天，不补跑就要白等一整天（内置任务多是每天一次）。
+    这里把**已过期**的内置任务 next_run 拉到「现在」，调度循环 20 秒内就会
+    真跑一次；跑完会重算 next_run，所以只会补一次，不会反复触发。
+
+    两条护栏：
+      · 只补 enabled 的（用户暂停了就尊重，不自作主张）；
+      · 过期不到 5 分钟的不算「错过」，交给 _loop 正常处理，不插队。
+    """
+    jobs = load_jobs()
+    now = time.time()
+    due = []
+    for j in jobs:
+        if not j.get("enabled"):
+            continue
+        if not str(j.get("kind") or ""):
+            continue
+        nr = float(j.get("next_run") or 0)
+        if nr and nr < now - 300:
+            j["next_run"] = now
+            j["catchup"] = True
+            due.append(str(j.get("kind")))
+    if due:
+        save_jobs(jobs)
+    return due
+
+
 def start() -> dict:
     global _THREAD
     if _THREAD and _THREAD.is_alive():
         return {"ok": True, "already": True}
+    # ★ 启动先自愈一次：schedules.json 丢了也能把四个内置任务补回来
+    try:
+        load_jobs()
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    # ★ 再补跑关机期间错过的（只对内置任务）
+    try:
+        _c = _catchup_builtins()
+        if _c:
+            logger.warning("启动补跑内置任务：%s", ",".join(_c))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
     _THREAD = threading.Thread(target=_loop, daemon=True, name="scheduler")
     _THREAD.start()
     return {"ok": True, "started": True}

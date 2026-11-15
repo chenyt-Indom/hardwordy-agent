@@ -1598,6 +1598,131 @@ def _asr_words(wav_path: str) -> list:
 
 
 # ---------------------------------------------------------------- 口型参数
+# ---------------------------------------------------------------- 音素驱动（viseme）
+# 为什么需要这一层：纯声学只能知道「此刻有多响」，不知道「发的是哪个音」，
+# 于是 b/p/m 这类必须闭唇的音做不出来，u/i 这类圆扁唇也分不清 —— 这正是
+# 「嘴在动但对不上口型」的根因，靠调平滑参数永远解决不了。
+# 有 ASR 字级时间戳时，把每个字转拼音，按声母/韵母给出目标唇形，
+# 再与声学曲线混合：声学负责强弱节奏，音素负责唇形对不对。
+_VIS_INIT = {                      # 声母 → 该字起始段的张口度
+    "b": 0.02, "p": 0.02, "m": 0.02,        # 双唇闭音：必须闭上
+    "f": 0.26,
+    "d": 0.45, "t": 0.45, "n": 0.45, "l": 0.45,
+    "g": 0.40, "k": 0.40, "h": 0.40,
+    "j": 0.38, "q": 0.38, "x": 0.38,
+    "zh": 0.40, "ch": 0.40, "sh": 0.40, "r": 0.40,
+    "z": 0.40, "c": 0.40, "s": 0.40,
+}
+_VIS_FIN = {                       # 韵母 → (张口度, 唇宽倍率<1 圆唇 / >1 扁唇)
+    "a": (0.88, 1.08), "o": (0.62, 0.76), "e": (0.58, 1.10),
+    "i": (0.34, 1.26), "u": (0.40, 0.72), "v": (0.40, 0.72),
+    "ai": (0.78, 1.10), "ei": (0.46, 1.20), "ao": (0.82, 0.86),
+    "ou": (0.56, 0.74), "an": (0.72, 1.05), "en": (0.52, 1.10),
+    "ang": (0.80, 1.02), "eng": (0.56, 1.08), "ong": (0.60, 0.76),
+    "er": (0.55, 1.00), "uo": (0.60, 0.78), "ua": (0.78, 1.02),
+    "ui": (0.44, 1.16), "iu": (0.46, 0.82), "ie": (0.46, 1.20),
+    "ve": (0.42, 0.80), "ian": (0.50, 1.18), "in": (0.34, 1.22),
+    "ing": (0.36, 1.20), "iang": (0.70, 1.10), "uan": (0.60, 0.82),
+    "un": (0.44, 0.80), "van": (0.60, 0.82),
+    "ia": (0.62, 1.18), "iao": (0.72, 1.06), "iong": (0.48, 0.82),
+    "uai": (0.60, 0.90), "uang": (0.72, 0.92), "ueng": (0.50, 0.92),
+    "vn": (0.38, 0.78), "io": (0.55, 0.86),
+}
+_PY_CACHE: dict = {}
+
+
+def _py_of(ch: str) -> str:
+    """单字 → 无声调拼音（失败返回空串）。带缓存，pypinyin 逐字调用很慢。"""
+    if ch in _PY_CACHE:
+        return _PY_CACHE[ch]
+    out = ""
+    try:
+        from pypinyin import lazy_pinyin
+        r = lazy_pinyin(ch)
+        out = (r[0] if r else "") or ""
+    except Exception:                                   # noqa: BLE001
+        out = ""
+    _PY_CACHE[ch] = out
+    return out
+
+
+# 零声母音节：pypinyin 写出来是 y/w 开头，但真正的韵母不是 "yu"/"wo"/"yi"。
+# 不还原的话「鱼、我、一、月、五」这些高频字全都匹配不到唇形表 ——
+# 实测它们原本完全不受音素约束（声学 0.84 原样输出），等于白改。
+_ZERO_INIT = {
+    "yi": "i", "ya": "ia", "ye": "ie", "yao": "iao", "you": "iu",
+    "yan": "ian", "yin": "in", "yang": "iang", "ying": "ing",
+    "yong": "iong", "yo": "o",
+    "yu": "v", "yue": "ve", "yuan": "van", "yun": "vn",
+    "wu": "u", "wa": "ua", "wo": "uo", "wai": "uai", "wei": "ui",
+    "wan": "uan", "wen": "un", "wang": "uang", "weng": "ueng",
+}
+
+
+def _split_py(py: str):
+    """拼音 → (声母, 韵母)。zh/ch/sh 是双字母，必须先判；零声母先还原。"""
+    if py in _ZERO_INIT:
+        return "", _ZERO_INIT[py]
+    for ini in ("zh", "ch", "sh"):
+        if py.startswith(ini):
+            return ini, py[2:]
+    if py and py[0] in "bpmfdtnlgkhjqxrzcs":
+        return py[0], py[1:]
+    return "", py
+
+
+def _viseme_curve(words: list, n: int, fps: int):
+    """按字级时间戳生成目标唇形曲线。
+
+    返回 (op_t, wd_t, conf)：
+      op_t 每帧目标张口度，-1 表示该帧无音素约束；
+      wd_t 每帧目标唇宽；
+      conf 约束强度 0~1（闭唇给得最强，因为它最容易看错）。
+
+    字内分两段：前 35% 是声母（决定「怎么起唇」），后 65% 是韵母（决定「张多大」）。
+    """
+    op_t = np.full(n, -1.0, dtype=np.float32)
+    wd_t = np.ones(n, dtype=np.float32)
+    conf = np.zeros(n, dtype=np.float32)
+    for item in (words or []):
+        try:
+            ch, t0, t1 = item[0], float(item[1]), float(item[2])
+        except Exception:                               # noqa: BLE001
+            continue
+        py = _py_of(str(ch))
+        if not py:
+            continue
+        ini, fin = _split_py(py)
+        fo, fw = _VIS_FIN.get(fin, (None, None))
+        if fo is None and fin:
+            fo, fw = _VIS_FIN.get(fin[:2], (None, None))
+        if fo is None and fin:
+            fo, fw = _VIS_FIN.get(fin[:1], (None, None))
+        io = _VIS_INIT.get(ini)
+        if io is None and fo is None:
+            continue
+        i0 = int(round(t0 * fps))
+        i1 = int(round(t1 * fps))
+        if i1 <= i0:
+            i1 = i0 + 1
+        span = max(i1 - i0, 1)
+        for k in range(max(0, i0), min(i1, n)):
+            pos = (k - i0) / float(span)
+            if pos < 0.35 and io is not None:
+                o = io if io < 0.10 else (io * 0.6 + (fo or io) * 0.4)
+                c = 0.90 if io < 0.10 else 0.70
+            elif fo is not None:
+                o = fo
+                c = 0.72
+            else:
+                continue
+            op_t[k] = o
+            if fw is not None:
+                wd_t[k] = fw
+            conf[k] = max(conf[k], c)
+    return op_t, wd_t, conf
+
+
 def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS,
                   amp: float = 1.0) -> list:
     """把声学特征 + 字边界 → 每帧的 (openness, width) 0~1 附近的口型参数。
@@ -1665,12 +1790,33 @@ def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS,
     # 归一到 99 分位（不用最大值，避免一声爆音把整体压扁）
     openness = np.clip(openness / max(_pct(openness, 99, 1e-3), 1e-3), 0.0, 1.0)
 
+    # ---- 音素层：按拼音把唇形改对（声学只负责「多响」，音素负责「哪个音」）----
+    # 只在这里做「修正」不做「取代」：blend 上限 0.85，保留声学的强弱起伏，
+    # 否则整段会变成均一的开合、像机械嘴。
+    _vis = None
+    if words:
+        _op_t, _wd_t, _cf = _viseme_curve(words, n, fps)
+        if float(_cf.max()) > 0.0:
+            # 约束强度也要平滑：字与字交界处硬切会让张嘴幅度一帧内跳变
+            _c = _one_pole(_cf, 30, fps)
+            _m = _op_t >= 0.0
+            # 闭唇音（b/p/m）单独给更高上限：0.85 的混合只能把 0.84 压到 0.14，
+            # 画面上仍是半张嘴；闭唇本来就该压到接近 0，这是唯一允许「盖过声学」的情况。
+            _lim = np.where(_op_t < 0.10, 0.95, 0.85)
+            _b = np.where(_m, np.minimum(_c, _lim), 0.0)
+            openness = openness * (1.0 - _b) + np.maximum(_op_t, 0.0) * _b
+            _vis = (_wd_t, np.where(_m, np.minimum(_c, 0.75), 0.0))
+
     # 唇形：亮音偏扁（宽），闷音偏圆（窄）。同样用低通去掉帧级毛刺。
     # ⚠ tau 从 60ms 降到 40ms：实测 60ms 把唇宽变化压得太平（std 0.080，
     #   而开合是 0.313），唇形看起来几乎不动。40ms 时 std 0.103、帧间|Δ| 0.106，
     #   比开合略活跃但不抽搐；25ms 虽更活跃（0.130）却接近原始 bright 的噪声水平。
     width = 0.70 + bright * 0.55
     width = _one_pole(width, 40, fps)
+
+    # 音素层：圆唇（u/o）收窄、扁唇（i/e）拉宽。纯声学靠过零率分不清 u 和 i。
+    if _vis is not None:
+        width = width * (1.0 - _vis[1]) + _vis[0] * _vis[1]
 
     # 字外低能量段轻压：ASR 字尾到下一个字起点之间是换气，嘴应该闭上。
     # 旧版这里是 *=0.05 的硬跳变，本身也贡献抖动；改成按能量平滑衰减。
@@ -1680,8 +1826,15 @@ def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS,
             i0 = int(t0 * fps)
             i1 = int(t1 * fps) + 1
             mask[max(0, i0):min(n, i1)] = True
-        outside = _smoothstep((0.045 - e) / 0.045) * (~mask)
-        openness = openness * (1.0 - 0.85 * outside)
+        # ⚠ 旧版这里只在 e<0.045 时才压，但真实语音字间换气仍有 0.1~0.3 能量，
+        #   条件几乎从不成立 —— 结果是嘴在整段里一直半张、每个字开头都提前张着，
+        #   实测各字「张嘴沿」比「能量沿」平均超前 63ms，这正是「对不上口型」的主因。
+        #   现在改成「无字程度 × 能量」：ASR 明确无字就往闭合收，
+        #   但能量仍高时（ASR 漏识别）保留，不会把有声音的地方压闭。
+        gap = (~mask).astype(np.float32)
+        gap = _one_pole(gap, 45, fps)              # 平滑，避免字边界硬切
+        lvl = np.clip(e / 0.30, 0.0, 1.0)          # 能量越高越不压
+        openness = openness * (1.0 - 0.80 * gap * (1.0 - lvl))
 
     # ---- 幅度增益 ----
     # 纯乘系数会让曲线整体抬高，连「本来就闭嘴」的静音段也一起抬高，
@@ -1749,10 +1902,28 @@ def _prep(img_path: str):
     # 唇缝阴影层（比 patch 窄一点、扁一点，只覆盖唇部）
     sw = max(4, int(round(mw * 0.92)))
     sh = max(3, int(round(mh * 0.62)))
-    return {"base": base, "patch": patch, "mask": mask,
+
+    # ---- 超采样素材（抗「拉伸涂抹」）----
+    # 纵向形变最狠时 1 源像素要铺成 ~4.2px（kmin=0.24），而双线性插值在这种
+    # 拉伸比下就是一块渐变糊 —— 实测嘴部拉普拉斯方差 34.8，比同帧脸颊 50.6 低 31%，
+    # 视觉复核也判「唇线不锐、涂抹感」。根因不是锐化不够，而是**形变本身在
+    # 低分辨率上算的**：位移场在 1px 网格上量化，拉伸后放大的是量化误差。
+    # 解法是标准超采样：把贴片放大 SS 倍，在高分辨率上做形变，再 LANCZOS 降回来。
+    #   · SS=2 时 1 源像素有 4 个采样点，4.2x 拉伸下仍有 2px 真实像素打底；
+    #   · 只放大嘴部贴片（287x179 → 574x358），整帧仍是原分辨率，成本可控。
+    SS = 2
+    if SS > 1:
+        hi_size = (patch.width * SS, patch.height * SS)
+        patch_hi = patch.resize(hi_size, Image.BICUBIC)
+        geom_hi = (cx * SS - x0 * SS, cy * SS - ytop * SS, mw * SS, mh * SS)
+    else:
+        patch_hi, geom_hi = patch, (cx - x0, cy - ytop, mw, mh)
+
+    return {"base": base, "patch": patch, "patch_hi": patch_hi,
+            "mask": mask, "ss": SS,
             "box": (x0, ytop, x1, ybot),
             "shadow_size": (sw, sh),
-            "geom": (cx, cy, mw, mh), "wh": (W, H)}
+            "geom": (cx, cy, mw, mh), "geom_hi": geom_hi, "wh": (W, H)}
 
 
 def _h_mask(w: int, h: int, feather: int = 3) -> "object":
@@ -1789,10 +1960,11 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     """
     from PIL import Image
     base = prep["base"]
-    patch = prep["patch"]
+    patch = prep.get("patch_hi") or prep["patch"]
     mask = prep["mask"]
     out = base.copy()
-    cx, cy, mw, mh = prep["geom"]
+    ss = int(prep.get("ss") or 1)
+    cx, cy, mw, mh = prep.get("geom_hi") or prep["geom"]
     x0, ytop, x1, ybot = prep["box"]
 
     op = float(np.clip(openness, 0.0, 1.0))
@@ -1803,7 +1975,8 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
 
     pw, ph = patch.size
     parr = np.asarray(patch, dtype=np.float32)
-    cyi = int(round(cy - ytop))
+    cxi = float(cx)          # 贴片内坐标（超采样时已是 SS 倍空间）
+    cyi = int(round(cy))
     cyi = max(3, min(ph - 4, cyi))
 
     # ---- 连续二维形变场 ----
@@ -1822,7 +1995,7 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     #   影响半径只从 76px 到 81px（差 2.5%），肉眼完全看不出唇形变化，
     #   这正是「口型不丰富」的直接原因。wd 现在改为驱动真正的横向形变（见下）。
     sig_h = 0.80 * mw * 0.5
-    wh = np.exp(-((xx - (cx - x0)) / max(sig_h, 1.0)) ** 2)
+    wh = np.exp(-((xx - cxi) / max(sig_h, 1.0)) ** 2)
     # 幅度：amp 只做「温和」的强度调节，主体增益在 _build_params 的曲线上。
     # 为什么不大幅调这里 —— 实测把系数拉到 0.72*1.4 + kmin 0.16 时，
     # 唇缝能到 41px，但视觉复核判定「嘴角拉扯、上唇边缘平、下巴僵硬」。
@@ -1854,9 +2027,9 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     # 乘 wv 是关键：只在唇部生效，不会把鼻子或下巴一起横向拉扯。
     if abs(wd - 1.0) > 0.02:
         kx = 1.0 - 1.40 * (wd - 1.0)
-        wx = np.exp(-((xx - (cx - x0)) / (0.80 * mw * 0.5)) ** 2)
+        wx = np.exp(-((xx - cxi) / (0.80 * mw * 0.5)) ** 2)
         f = (kx - 1.0) * wx * wv * op
-        sx = np.clip((cx - x0) + (xx - (cx - x0)) * (1.0 + f), 0, pw - 1)
+        sx = np.clip(cxi + (xx - cxi) * (1.0 + f), 0, pw - 1)
         j0 = np.floor(sx).astype(np.int32)
         j1 = np.minimum(j0 + 1, pw - 1)
         f2 = (sx - j0)[..., None]
@@ -1868,6 +2041,10 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     outp = outp * dark[..., None]
 
     img = Image.fromarray(np.clip(outp, 0, 255).astype(np.uint8), mode="RGB")
+    if ss > 1:
+        # 超采样降回原尺寸。用 BICUBIC 而非 LANCZOS：后者在唇线这类强对比边缘
+        # 会产生振铃（白边），紧跟着的 USM 会把它放大成一条亮线。
+        img = img.resize(prep["patch"].size, Image.BICUBIC)
 
     # 唇形宽窄已经由上面形变场的横向 sigma 表达，这里不再对整帧做横向 resize。
     # 演进记录：原先用 resize 实现唇宽，且按 |sx-1|>0.005 决定缩不缩 ——
@@ -2040,7 +2217,7 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
         "style": final_style,
         "expr": bool(expr),
         "amp": _amp,
-        "lipsync_label": "声学形变口型",
+        "lipsync_label": ("音素+声学口型" if words else "声学形变口型"),
         "audio_url": a.get("url") or "",
         "audio_engine": a.get("engine") or "",
         "align": ("字级对齐 %d 字" % len(words)) if words else "声学驱动（未找到 ASR 模型）",
@@ -2073,8 +2250,9 @@ def status() -> dict:
         "max_side": MAX_SIDE,
         "has_image": os.path.isfile(_img_path()),
         "engines": ["param"],
-        "note": "参数化口型（声学特征驱动）"
-                + ("，已启用字级对齐" if asr else "，未找到 ASR 模型，仅声学驱动"),
+        "note": "参数化口型"
+                + ("（拼音音素驱动唇形 + 声学驱动节奏，已启用字级对齐）"
+                   if asr else "（声学特征驱动；未找到 ASR 模型，无法按拼音校正 b/p/m 闭唇）"),
     }
 
 
