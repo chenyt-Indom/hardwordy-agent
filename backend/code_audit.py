@@ -313,6 +313,85 @@ def _check_undefined_call(trees):
     return out
 
 
+# ---------------------------------------------------------------- 4a. 子进程绕过 procwin
+
+_SUBPROC_ATTRS = {"Popen", "run", "call", "check_output", "check_call"}
+
+
+def _check_subprocess_bypass(trees):
+    """backend/*.py 里直接调 subprocess.Popen/run/call/check_output，
+    但同文件没有 import procwin（也没走封装）—— 会弹黑窗口，报 high。
+
+    2026-11-15 用户要求：防黑窗口复发。
+    """
+    out = []
+    for rel, (p, tree) in trees.items():
+        if not rel.startswith("backend/"):
+            continue
+        src = _read(p)
+        if "procwin" in src:
+            continue
+        seen = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not isinstance(fn, ast.Attribute):
+                continue
+            if fn.attr not in _SUBPROC_ATTRS:
+                continue
+            if not isinstance(fn.value, ast.Name) or fn.value.id != "subprocess":
+                continue
+            key = (getattr(node, "lineno", 0), fn.attr)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(_finding(
+                "high", "subprocess-bypass", rel, getattr(node, "lineno", 0),
+                "直接调用了 `subprocess.%s(...)`，但本文件没有 import procwin" % fn.attr,
+                "Windows 下会弹黑窗口；请改用 procwin 封装（procwin.run 等）"))
+    return out
+
+
+# ---------------------------------------------------------------- 4a-2. subprocess 未走 procwin（mid）
+
+def _check_subprocess_nowin(trees):
+    """AST 扫 subprocess.Popen/run/call，同文件无 procwin 引用且无 creationflags 则报 mid。
+
+    与 _check_subprocess_bypass 的区别：那条按源码字符串判断、报 high；
+    这条按 AST 判断，且允许显式传 creationflags（自己处理了窗口）的情况。
+    """
+    out = []
+    for rel, (p, tree) in trees.items():
+        if not rel.startswith("backend/"):
+            continue
+        src = _read(p)
+        if "procwin" in src:
+            continue
+        seen = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not isinstance(fn, ast.Attribute):
+                continue
+            if fn.attr not in _SUBPROC_ATTRS:
+                continue
+            if not isinstance(fn.value, ast.Name) or fn.value.id != "subprocess":
+                continue
+            if any(kw.arg == "creationflags" for kw in node.keywords):
+                continue
+            key = (getattr(node, "lineno", 0), fn.attr)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(_finding(
+                "mid", "subprocess-nowin", rel, getattr(node, "lineno", 0),
+                "`subprocess.%s(...)` 未走 procwin 且未传 creationflags" % fn.attr,
+                "Windows 下可能弹黑窗口；请改用 procwin 封装或显式传 creationflags"))
+    return out
+
+
 # ---------------------------------------------------------------- 4b. 使用未定义的名字
 
 def _star_imports(tree):
@@ -866,6 +945,199 @@ def _check_return_in_finally(trees):
     return out
 
 
+# ---------------------------------------------------------------- 逻辑形态
+# 2026-11-15 用户要求「彻底解决：静态检查查不出逻辑 bug」。
+# 诚实地说：off-by-one、条件写反这类**没有固定形态**，静态不可能全查出来
+# （那要靠 regress.py 真跑断言）。但其中有几种**形态是固定的**，可以查：
+#   · while True 里没有任何出口            → 一定卡死
+#   · `x == x` 自比较                      → 结果恒定
+#   · `range(len(x) - 1)`                  → 少遍历最后一个（off-by-one 经典形态）
+#   · `for i in range(len(x))` 里 `x[i+1]` → 最后一轮越界
+# 后两种只是「嫌疑」（也可能是刻意比较相邻元素），所以定 low：**报告但不自动改**，
+# 免得模型把本来对的代码改错 —— 这正是用户反复强调的「不要误判乱改」。
+
+
+def _walk_shallow(nodes):
+    """遍历语句块，但**不进嵌套函数/类** —— 里面的 return/break 不算外层循环的出口。"""
+    stack = list(nodes)
+    while stack:
+        n = stack.pop()
+        yield n
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                          ast.Lambda, ast.ClassDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(n))
+
+
+def _unparse(node):
+    try:
+        return ast.unparse(node)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return "?"
+
+
+def _check_while_true(trees):
+    """`while True:` 里没有 break/return/raise —— 进去就出不来。"""
+    out = []
+    for rel, (p, tree) in trees.items():
+        # ① 被 try/except 包着的 `while True` —— 靠捕获异常退出是标准写法
+        #    （实测 main.py:12030 是 WebSocket 收包循环，靠 WebSocketDisconnect 退出）。
+        guarded = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Try) and n.handlers:
+                for b in n.body:
+                    for s in ast.walk(b):
+                        if isinstance(s, ast.While):
+                            guarded.add(s.lineno)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.While):
+                continue
+            t = node.test
+            if not (isinstance(t, ast.Constant) and t.value is True):
+                continue
+            if node.lineno in guarded:
+                continue
+            body = list(_walk_shallow(node.body))
+            if any(isinstance(s, (ast.Break, ast.Return, ast.Raise)) for s in body):
+                continue
+            # ⚠️ 这条规则的第一版在真实代码上误报了 2 处，都是**正确的服务循环**：
+            #   main.py:12030  WebSocket 收包循环（靠 WebSocketDisconnect 异常退出）
+            #   main.py:13220  队列 worker 的 `while True: job = q.get()`（阻塞等待）
+            # 它们体内**没有任何 Call/Await 之外的东西**，静态分不出「故意常驻」
+            # 和「忘了写 break」——而误判成 mid 会被信任模式自动改，直接搞死调度线程。
+            # 所以只有「体内连一个调用都没有」的纯计算死循环才定 mid（必卡死、零误报）；
+            # 有调用/Await 的一律 low：报告给人看，不自动改。
+            # ⚠️ 2026-11-15 二次降噪：体内有 `sleep(...)` 的是**标准轮询循环**
+            # （看门狗、调度器主循环都是这个形态，靠 daemon 线程随主进程退出），
+            # 实测 5 条里 5 条都是这种，全误报 —— 一律不报。
+            has_sleep = any(
+                isinstance(s, ast.Call) and (
+                    getattr(s.func, "id", None) == "sleep"
+                    or getattr(s.func, "attr", None) == "sleep")
+                for s in body)
+            if has_sleep:
+                continue
+            # ② 队列 worker 形态：`while True: job = q.get()` —— 阻塞等待任务，
+            #    跑在 daemon 线程里随主进程退出（实测 main.py:13220）。
+            has_qget = any(
+                isinstance(s, ast.Call) and getattr(s.func, "attr", None) == "get"
+                for s in body)
+            if has_qget:
+                continue
+            has_blocking = any(
+                isinstance(s, (ast.Call, ast.Await)) for s in body)
+            out.append(_finding(
+                "low" if has_blocking else "mid", "while-true-no-exit", rel, node.lineno,
+                "`while True` 里没有 break/return/raise —— 这个循环没有出口，会把线程卡死",
+                "补一个出口条件（break），或改成 `while <条件>:`"))
+    return out
+
+
+def _check_self_compare(trees):
+    """`x == x` / `x != x` —— 两边是同一个表达式，结果恒定。"""
+    out = []
+    for rel, (p, tree) in trees.items():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare):
+                continue
+            left = node.left
+            if isinstance(left, ast.Call):
+                continue                    # 调用可能有副作用，不算自比较
+            for op, comp in zip(node.ops, node.comparators):
+                if isinstance(comp, ast.Call):
+                    continue
+                if not isinstance(comp, (ast.Name, ast.Attribute, ast.Subscript)):
+                    continue
+                # ⚠️ 第一版把 `f != f` / `val != val` 全报了 —— 那是**标准 NaN 判断**
+                # （唯一能判 NaN 的写法，真实代码里 3 处全是这个用途）。
+                # 变量和自己做 ==/!= 一律视为 NaN 惯用法，不算 bug；
+                # 只有 <、>、<=、>= 和自己比（恒假）才是真写错。
+                if (isinstance(left, ast.Name) and isinstance(comp, ast.Name)
+                        and isinstance(op, (ast.Eq, ast.NotEq))):
+                    continue
+                if ast.dump(left) == ast.dump(comp):
+                    out.append(_finding(
+                        "mid", "self-compare", rel, node.lineno,
+                        "`%s` 两边是同一个表达式，比较结果恒定（==/<= 恒真，!=/< 恒假）"
+                        % _unparse(node)[:70],
+                        "这里应该是拿两个不同的值比较，检查是不是变量名写错了"))
+    return out
+
+
+def _check_range_len_minus(trees):
+    """`range(len(x) - 1)` —— 少遍历最后一个元素的经典 off-by-one 写法。"""
+    out = []
+    for rel, (p, tree) in trees.items():
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", None) == "range"):
+                continue
+            # ⚠️ 三参数的 range 一律不报：`range(len(x) - 1, -1, -1)` 是**倒序遍历**
+            # （从最后一个元素往前走），是完全正确的写法。第一版没排除它，
+            # 真实代码里 13 条有 8 条都是这个形态 —— 全是误报。
+            if len(node.args) != 1:
+                continue
+            for a in node.args:
+                if (isinstance(a, ast.BinOp) and isinstance(a.op, ast.Sub)
+                        and isinstance(a.right, ast.Constant) and a.right.value == 1
+                        and isinstance(a.left, ast.Call)
+                        and getattr(a.left.func, "id", None) == "len"):
+                    # ⚠️ 2026-11-15 二次降噪：实测 13 条**全部是正确写法** ——
+                    #   ① 相邻比较 `for i in range(len(x)-1): x[i], x[i+1]`
+                    #   ② 中文 bigram 切分 `ch[i:i+2]`（必须到 len-1，否则越界）
+                    # 静态分不出「刻意少一个」和「写错少一个」，所以降到 info：
+                    # 只作参考提示，不进 low 统计、更不会变成可执行动作。
+                    out.append(_finding(
+                        "info", "range-len-minus", rel, node.lineno,
+                        "`range(len(...) - 1)` 少遍历最后一个元素 —— 若是在比较相邻元素或做"
+                        "滑窗/切片，这是正确写法；只有本意要遍历全部时才是 off-by-one",
+                        "确认本意：要遍历全部 → 用 `range(len(x))`；比较相邻 → 可忽略"))
+    return out
+
+
+def _check_index_shift(trees):
+    """`for i in range(len(x)):` 里访问 `x[i+1]` —— 最后一轮必然越界。"""
+    out = []
+    for rel, (p, tree) in trees.items():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.For):
+                continue
+            it = node.iter
+            if not (isinstance(it, ast.Call)
+                    and getattr(it.func, "id", None) == "range"):
+                continue
+            if not isinstance(node.target, ast.Name):
+                continue
+            iv = node.target.id
+            seqs = set()
+            for a in it.args:
+                if (isinstance(a, ast.Call) and getattr(a.func, "id", None) == "len"
+                        and a.args and isinstance(a.args[0], ast.Name)):
+                    seqs.add(a.args[0].id)
+            if not seqs:
+                continue
+            for s in _walk_shallow(node.body):
+                if not isinstance(s, ast.Subscript):
+                    continue
+                if not (isinstance(s.value, ast.Name) and s.value.id in seqs):
+                    continue
+                sl = s.slice
+                if (isinstance(sl, ast.BinOp) and isinstance(sl.op, (ast.Add, ast.Sub))
+                        and isinstance(sl.left, ast.Name) and sl.left.id == iv
+                        and isinstance(sl.right, ast.Constant)
+                        and isinstance(sl.right.value, int)):
+                    out.append(_finding(
+                        "low", "index-shift", rel, s.lineno,
+                        "循环 `for %s in range(len(%s))` 里访问 `%s[%s%s%d]` —— "
+                        "边界那一轮会越界" % (iv, s.value.id, s.value.id, iv,
+                                            "+" if isinstance(sl.op, ast.Add) else "-",
+                                            sl.right.value),
+                        "把循环上界改小（range(len(x)-1)），或在访问前判断边界"))
+                    break
+    return out
+
+
 def audit(deep_files=None):
     """跑一遍静态自检，返回 findings（按严重程度排序）。
 
@@ -900,6 +1172,10 @@ def audit(deep_files=None):
     findings += _check_assert_tuple(trees)
     findings += _check_unreachable(trees)
     findings += _check_return_in_finally(trees)
+    findings += _check_while_true(trees)
+    findings += _check_self_compare(trees)
+    findings += _check_range_len_minus(trees)
+    findings += _check_index_shift(trees)
     findings += _check_js_syntax()
 
     # 去重（同文件同种类同位置同描述只留一条）

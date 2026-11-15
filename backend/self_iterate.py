@@ -187,6 +187,16 @@ _DEFAULT_SETTINGS = {
     # 静态检查只能看名字/结构，逻辑错要靠真跑断言 —— 每次改完代码自动跑一遍，
     # 失败就回滚（regress.py）。
     "regress_after_change": True,
+    # ---- 自检防重复触发（2026-11-15 追加）----
+    # 实测事故：一个卡死的测试脚本每分钟调一次自检，配合信任模式连续建了
+    # 3 个计划并自动改代码 —— 用户看到的就是「程序被反复修改」。
+    # 同一来源在这么多秒内重复触发 → 直接跳过，不建计划。
+    "audit_cooldown_sec": 60,
+    # ---- 单轮内自动收敛（2026-11-15 追加）----
+    # 一次执行内最多接续几轮，把上一轮没修完的同类问题接着修掉。
+    # 实测：探针 9 处问题，第一轮只修掉 6 处，靠它自动接续到 0，不用人再点一次。
+    # 设 0 = 关掉自动接续（每轮都要人手动触发）。
+    "converge_rounds": 2,
 }
 
 
@@ -347,6 +357,30 @@ def _pid():
     return time.strftime("%Y%m%d_%H%M%S")
 
 
+# ------------------------------------------------- 检查点落盘复用
+# 用户要求：run_audit 开头读检查点，跳过已确认的文件，避免每轮从零读代码。
+_CHECKPOINT = _DATA / "checkpoint.json"
+
+
+def save_checkpoint(data):
+    """把本轮自检的进度落盘（已确认文件、已发现问题等）。"""
+    try:
+        payload = dict(data or {})
+        payload["ts"] = time.time()
+        payload["iso"] = _now()
+        _write_json(_CHECKPOINT, payload)
+        return {"ok": True, "path": str(_CHECKPOINT)}
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("save_checkpoint 失败: %s", e)
+        return {"ok": False, "error": str(e)}
+
+
+def load_checkpoint():
+    """读回上次自检的检查点；没有或损坏时返回空 dict。"""
+    d = _read_json(_CHECKPOINT, {})
+    return d if isinstance(d, dict) else {}
+
+
 def load_plans():
     d = _read_json(_PLANS, {"items": []})
     if isinstance(d, list):
@@ -356,8 +390,81 @@ def load_plans():
     return d
 
 
+_PLANS_LOCK = threading.Lock()
+
+
+def _plans_flock(fh):
+    """跨进程文件锁（Windows 用 msvcrt，其它用 fcntl）。失败不阻断，只记日志。"""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+
+
+def _plans_funlock(fh):
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+
+
+def _merge_plans(disk, mem):
+    """按 id 合并两份 plans：内存版优先（它是最新状态），磁盘独有的保留。
+
+    ⚠️ 为什么需要：2026-11-15 实测，孤儿脚本 + 后端 + 测试脚本三个进程
+    并发「读-改-写」同一个 plans.json，后写的把先写的整个覆盖掉 ——
+    刚建的计划直接消失、动作出现 id=null，程序被反复改。
+    """
+    if not isinstance(disk, dict) or not isinstance(mem, dict):
+        return mem
+    d_items, m_items = disk.get("items"), mem.get("items")
+    if not isinstance(d_items, list) or not isinstance(m_items, list):
+        return mem
+    m_by = {p.get("id"): p for p in m_items if isinstance(p, dict)}
+    out = []
+    for p in d_items:
+        if not isinstance(p, dict):
+            continue
+        out.append(m_by.pop(p.get("id"), p))
+    out.extend(m_by.values())
+    try:
+        out.sort(key=lambda x: str(x.get("id") or ""), reverse=True)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    merged = dict(mem)
+    merged["items"] = out
+    return merged
+
+
 def save_plans(d):
-    _write_json(_PLANS, d)
+    """写计划。必须跨进程互斥 + 按 id 合并，否则并发写会丢计划。"""
+    _ensure()
+    with _PLANS_LOCK:
+        lf = None
+        try:
+            lf = open(str(_PLANS) + ".lock", "a+")
+            _plans_flock(lf)
+            disk = _read_json(_PLANS, {})
+            _write_json(_PLANS, _merge_plans(disk, d))
+        except Exception:                               # noqa: BLE001
+            logger.warning("写 plans 失败，退化为直接写", exc_info=True)
+            _write_json(_PLANS, d)
+        finally:
+            if lf is not None:
+                _plans_funlock(lf)
+                lf.close()
 
 
 def _actlog(entry):
@@ -1675,6 +1782,100 @@ def _plan_patch_for_action(plan, action):
     return patches, ""
 
 
+# ---------------------------------------------------------------- 修复质量闸门
+# 2026-11-15 实测暴露的问题一：自动修复里有一类是**占位式修补** ——
+# 把「调用不存在的函数」改成 `return 0`、把「未定义变量」改成 `return 1`。
+# 告警确实消失了（自检 0 条），但返回值是模型猜的，语义完全不对。
+# 这类改动比不改更危险：它把「会崩」变成了「悄悄返回错数据」，更难发现。
+# 所以改完必须先过这道闸：判为占位式 → 回滚，并如实标成「需人工确认」。
+_LIT_RETURN_RE = re.compile(
+    r"^\s*return\s+(0|1|-1|0\.0|None|True|False|''|\"\"|\[\]|\{\})\s*(?:#.*)?$", re.M)
+_PLACEHOLDER_RE = re.compile(r"\b(TODO|FIXME|XXX|NotImplementedError|未实现)\b")
+# 任意裸常量（数字 / None / True / False），用来抓「表达式被整体换成常量」
+_LIT_ANY_RE = re.compile(r"(?<![\w.])(-?\d+(?:\.\d+)?|None|True|False)(?![\w.])")
+_SWALLOW_RE = re.compile(r"except[^\n:]*:\s*\n\s*pass\b")
+_IDENT_RE = re.compile(r"\b([A-Za-z_]\w*)\b")
+_KEYWORDS = set((
+    "def", "class", "return", "if", "else", "elif", "for", "while", "in", "not",
+    "and", "or", "is", "None", "True", "False", "try", "except", "finally",
+    "with", "as", "import", "from", "pass", "break", "continue", "raise",
+    "lambda", "yield", "global", "nonlocal", "assert", "del", "self", "cls"))
+
+
+def _idents(s):
+    return set(w for w in _IDENT_RE.findall(s or "") if w not in _KEYWORDS)
+
+
+def _fix_quality(action, patches):
+    """判断这次改动是「真修好了」还是「只让告警消失了」。返回 [] 表示通过。
+
+    只查**能确定**的占位式修补，不做语义猜测 —— 误杀一个正确修法和放过一个
+    占位修补同样有害，所以判据要窄：
+      ① 常量返回值替换掉了原来真实存在的名字/调用（`return 0` 换掉 `f(x)`）
+      ② 新加 `except: pass`（换个方式把异常藏起来）
+      ③ 引入 TODO / NotImplementedError 占位
+      ④ 把整个函数体改成 `pass`（功能被删掉）
+    """
+    reasons = []
+    for pt in patches or []:
+        find = str(pt.get("find") or "")
+        repl = str(pt.get("replace") or "")
+        if not find:
+            continue                      # 新建文件，没有「改前」可比
+        r_lit = _LIT_RETURN_RE.findall(repl)
+        lost = _idents(find) - _idents(repl)
+        if r_lit and lost:
+            reasons.append(
+                "把 `%s` 换成了常量返回值 `return %s` —— 只是让告警消失，"
+                "返回值是模型猜的，语义不可靠"
+                % ("、".join(sorted(lost)[:3]), r_lit[0]))
+        elif lost and not _idents(repl) and _LIT_ANY_RE.search(repl):
+            # 不是整行 `return 常量`，而是把表达式整体换成裸常量（`f(x)` → `0`）。
+            # 原判据只认整行 return，这类会绕过闸门（实测被改成 `return 0`）。
+            reasons.append(
+                "把 `%s` 整体换成了裸常量 `%s` —— 只是让告警消失，"
+                "返回值是模型猜的，语义不可靠"
+                % ("、".join(sorted(lost)[:3]), repl.strip()[:24]))
+        # ①b 给「未定义的名字」直接赋一个常量 —— 和 `return 0` 同一性质，
+        #     只是换了个写法（实测模型真这么干：`undefined_variable_xyz = 0`）。
+        #     判据要窄：只认「这个名字在改前**只出现一次**、且不是赋值语句」，
+        #     改后却多出一句 `name = 常量`。这样才不会误杀「默认参数改 None」
+        #     那种正确修法（那里的名字在改前出现多次、且是形参）。
+        for _nm in sorted(_idents(find)):
+            if len(re.findall(r"\b%s\b" % re.escape(_nm), find)) != 1:
+                continue
+            if re.search(r"^\s*%s\s*=" % re.escape(_nm), find, re.M):
+                continue
+            if re.search(r"^\s*%s\s*=\s*(0|1|-1|0\.0|None|True|False|''|\"\"|\[\]|\{\})"
+                         r"\s*(?:#.*)?$" % re.escape(_nm), repl, re.M):
+                reasons.append("给未定义的 `%s` 直接赋了常量值 —— 只是让告警消失，"
+                               "这个值是模型猜的" % _nm)
+                break
+        # ①c 把「调用不存在的函数」整段删掉（`return f(x)` → `return x`）：
+        #     告警消失了，但原来那次计算也没了 —— 是不是原意只能人来判断。
+        if any(str(t.get("kind") or "") == "undefined-call"
+               for t in (action.get("targets") or [])):
+            # ⚠️ 必须排除关键字：`assert (x, "b")` 长得像函数调用，第一版把它
+            # 当成「调用不存在的函数 assert」误杀了 assert 的正确修法（实测踩到）。
+            _called = set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", find)) - _KEYWORDS
+            _gone = [c for c in _called
+                     if c not in ("print", "len", "str", "int", "float", "list",
+                                  "dict", "set", "tuple", "range", "isinstance",
+                                  "super", "open", "sorted", "any", "all", "min", "max")
+                     and c not in _idents(repl)]
+            if _gone:
+                reasons.append("把对不存在函数 `%s` 的调用整段删掉了 —— 那次计算也随之消失，"
+                               "需人工确认这是不是原意" % _gone[0])
+        if len(_SWALLOW_RE.findall(repl)) > len(_SWALLOW_RE.findall(find)):
+            reasons.append("新加了一个 `except: pass`，把异常吞掉了（问题只是被藏起来）")
+        if _PLACEHOLDER_RE.search(repl) and not _PLACEHOLDER_RE.search(find):
+            reasons.append("改动里留下了 TODO/未实现占位")
+        if (re.search(r"def\s+\w+\s*\([^)]*\):\s*\n\s*pass\s*$", repl)
+                and not re.search(r"def\s+\w+\s*\([^)]*\):\s*\n\s*pass\s*$", find)):
+            reasons.append("把整个函数体改成了 pass，功能被删掉了")
+    return reasons
+
+
 def _precheck_actions(actions):
     """动手前的最后一道复核：确认动作针对的问题**现在仍然存在**。
 
@@ -1735,7 +1936,55 @@ def _precheck_actions(actions):
     return out, "", base
 
 
-def execute_approved(pid, on_event=None, should_cancel=None):
+def _residual_findings(plan):
+    """上一轮改完之后，**同一批文件里的同类问题**是否还有残留。
+
+    2026-11-15 实测：探针里 9 处问题，第一轮只修掉 6 处（剩死代码、finally return、
+    裸 except 各一处），要人再点一次才收敛到 0。用户要求「彻底解决」——
+    所以一轮执行完自动接续下一轮，直到没有残留或到上限。
+    只认「同类问题」（kind 相同）且「已过复核」的，避免顺手改到无关代码。
+    """
+    from . import code_audit as CA
+    files, kinds = set(), set()
+    for a in (plan.get("actions") or []):
+        if a.get("status") != "done":
+            continue
+        for f in (a.get("files") or []):
+            if f:
+                files.add(f)
+        for t in (a.get("targets") or []):
+            if t.get("kind"):
+                kinds.add(str(t["kind"]))
+    if not files:
+        return []
+    try:
+        res = CA.audit()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return []
+    out = []
+    for f in (res.get("findings") or []):
+        if f.get("level") not in ("high", "mid"):
+            continue
+        if (f.get("file") or "") not in files:
+            continue
+        if kinds and (f.get("kind") or "") not in kinds:
+            continue
+        out.append(f)
+    if not out:
+        return []
+    # 复核门槛不能跳：残留问题同样要 verified 才允许动手
+    try:
+        from . import reverify as RV
+        out, _st = RV.verify_findings(out, use_llm=False)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return []
+    return [f for f in out
+            if (f.get("verify") or {}).get("verdict") == "verified"]
+
+
+def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
     """执行这次反思里所有 status=approved 的动作。带备份 + 校验 + 失败回滚。
 
     2026-11-15 用户要求「迭代要像普通对话一样在聊天界面跑、能看到详细操作、
@@ -1855,6 +2104,30 @@ def execute_approved(pid, on_event=None, should_cancel=None):
             _ev("code", **_card(a, patches, False, a["error"]))
             continue
 
+        # 质量闸门（计划期，逐条 hunk）：只丢掉「占位式」的那几处，保留真实修法。
+        # 实测教训：第一版是整条动作回滚 —— 9 处里 1 处占位，结果另外 8 处
+        # 正确修法也一起作废，等于什么都没修。所以改成先筛后改。
+        _bad, _good = [], []
+        for pt in patches:
+            _why = _fix_quality(a, [pt])
+            (_bad if _why else _good).append((pt, _why))
+        if _bad:
+            a["quality_rejected"] = [
+                {"file": _norm_rel(pt.get("file")) or str(pt.get("file")),
+                 "why": why[0]} for pt, why in _bad]
+            _ev("step", text="%s 丢弃 %d 处占位式修补（需人工确认语义），保留 %d 处真实修法"
+                % (a.get("id"), len(_bad), len(_good)))
+        if not _good:
+            a["status"] = "failed"
+            a["error"] = ("全部是占位式修补，已放弃（需人工确认语义）："
+                          + "；".join(w[0] for _p, w in _bad[:2]))
+            results.append({"id": a["id"], "ok": False, "error": a["error"],
+                            "quality": [w[0] for _p, w in _bad]})
+            _log_act(plan, a, False, a["error"])
+            _ev("code", **_card(a, [p for p, _w in _bad], False, a["error"], False))
+            continue
+        patches = [pt for pt, _w in _good]
+
         _ev("step", text="%s 备份并应用改动（%s）…" % (
             a.get("id"), "、".join(dict.fromkeys(rels))))
         # 备份（created 里是本次要新建的文件，回滚时会被删除）
@@ -1929,6 +2202,22 @@ def execute_approved(pid, on_event=None, should_cancel=None):
             _ev("code", **_card(a, patches, False, a["error"], True))
             continue
 
+        # 修复质量闸门：语法过了、回归过了，也可能是「占位式修补」
+        # （把出错的调用换成 return 0 —— 告警消失但语义是猜的）。
+        # 用户要求「有风险就得修，但不能因为模型判断失误把好代码改坏」，
+        # 这类改动属于「看起来修好了、其实埋了静默错误」，宁可回滚让人确认。
+        _q = _fix_quality(a, patches)
+        if _q:
+            _restore(tag2)
+            a["status"] = "failed"
+            a["error"] = "占位式修补，已回滚（需人工确认语义）：" + "；".join(_q[:2])
+            results.append({"id": a["id"], "ok": False, "error": a["error"],
+                            "quality": _q})
+            _log_act(plan, a, False, a["error"])
+            _ev("step", text="%s 判为占位式修补，已回滚（需人工确认）" % a.get("id"))
+            _ev("code", **_card(a, patches, False, a["error"], True))
+            continue
+
         a["status"] = "done"
         a["error"] = ""
         results.append({"id": a["id"], "ok": True, "files": list(dict.fromkeys(done_rels)),
@@ -1998,6 +2287,49 @@ def execute_approved(pid, on_event=None, should_cancel=None):
         except Exception as e:                          # noqa: BLE001
             logger.debug("silent-except", exc_info=True)
             out["post_audit"] = {"error": "%s: %s" % (type(e).__name__, e)}
+
+    # ---------------- 单轮内自动收敛（问题二：修不全要人再点一次）
+    # 实测：探针 9 处问题，第一轮只修掉 6 处。这里自动接续下一轮，直到
+    # 没有同类残留或到上限（默认 2 轮），用户不用手动再触发一次。
+    # 残留问题同样要过复核（verified）才允许动手，门槛不降。
+    if (not cancelled) and ok_n > 0 and _depth < int(
+            load_settings().get("converge_rounds", 2) or 0):
+        try:
+            resid = _residual_findings(plan)
+            if resid:
+                more = _actions_from_findings(resid, limit=3)
+                if more:
+                    # ⚠️ 必须自己分配 id：_actions_from_findings 只产出「候选动作」，
+                    # id 原本是 _make_plan 建计划时统一编号的。收敛是直接往现有计划
+                    # 里追加，不补 id 的话执行时 `a["id"]` 直接 KeyError ——
+                    # 实测就是这样静默失败了（异常被 except 吞掉，第 2 轮根本没跑）。
+                    _base_n = len(plan.get("actions") or [])
+                    for _k, na in enumerate(more):
+                        na["id"] = "a%d" % (_base_n + _k + 1)
+                        na["status"] = "approved"
+                        na["note"] = "第 %d 轮收敛：上一轮改完仍有残留" % (_depth + 2)
+                    plan["actions"].extend(more)
+                    save_plans(d)
+                    _ev("step", text="第 %d 轮：还有 %d 处同类残留，自动接续修复"
+                        % (_depth + 2, len(resid)))
+                    sub = execute_approved(pid, on_event=on_event,
+                                           should_cancel=should_cancel,
+                                           _depth=_depth + 1)
+                    out["converge"] = {"round": _depth + 2,
+                                       "residual": len(resid),
+                                       "done": sub.get("done") or 0}
+                    out["done"] = ok_n + int(sub.get("done") or 0)
+                    out["results"] = results + (sub.get("results") or [])
+                    out["need_restart"] = bool(out.get("need_restart")
+                                               or sub.get("need_restart"))
+                    if sub.get("converge"):
+                        out["converge"].update(sub["converge"])
+        except Exception as _e:                         # noqa: BLE001
+            # 收敛失败不能静默：第一版就是因为异常被 debug 吞掉，
+            # 第 2 轮其实没跑，但界面上看起来「已经收敛过了」。
+            logger.warning("自动收敛失败", exc_info=True)
+            out["converge_error"] = "%s: %s" % (type(_e).__name__, _e)
+            _ev("step", text="自动收敛失败：%s: %s" % (type(_e).__name__, _e))
     return out
 
 
@@ -2160,8 +2492,10 @@ def _actions_from_findings(findings, limit=6):
             # 用户要求「确保原来没问题的程序不因模型误判被反复修改」——
             # 执行前要靠它精确判断问题是否还在（按文件判断太粗：
             # 文件里只要还有别的问题就放行，会改错地方）。
+            # ⚠️ 上限给到 20（原来是 6）：实测一个文件 9 处问题时，第 7 条以后的
+            # kind 没被记进 targets，自动收敛就看不到那几类残留（会误判「已收敛」）。
             "targets": [{"file": rel, "kind": i.get("kind"),
-                         "line": i.get("line") or 0} for i in items[:6]],
+                         "line": i.get("line") or 0} for i in items[:20]],
         })
     return out
 
@@ -2215,7 +2549,43 @@ def _llm_deep_review(audit_res):
     return out, str(data.get("summary") or "")
 
 
+_AUDIT_LOCK = threading.Lock()
+_AUDIT_LAST = {}          # source -> 上次触发的时间戳
+
+
 def run_audit(deep=False, source="manual", create_plan=True, auto_fix=None, verify=None):
+    """自检入口：防重入 + 同源冷却，防止「反复建计划、反复改代码」。
+
+    ⚠️ 2026-11-15 实测事故：一个卡死的测试脚本每分钟调一次自检，配合信任模式
+    连续建了 3 个计划并自动改代码 —— 用户看到的就是「程序被反复修改」。
+    所以这里必须：
+      ① 同一时刻只允许一个自检在跑（并发会让 plans.json 读改写互相覆盖）；
+      ② 同一来源短时间内不重复触发。
+    manual（用户点的）/ after_change（改完自动跑的）豁免冷却。
+    """
+    now = time.time()
+    cool = float(load_settings().get("audit_cooldown_sec", 60) or 0)
+    if cool > 0 and source not in ("manual", "after_change"):
+        last = _AUDIT_LAST.get(source)
+        if last and (now - last) < cool:
+            return {"ok": True, "skipped": True, "findings": [], "plan": None,
+                    "confirmed": 0, "rejected_n": 0, "unsure_n": 0,
+                    "error": "同一来源 %d 秒内已跑过自检，本次跳过（防重复建计划）"
+                             % int(cool)}
+    if not _AUDIT_LOCK.acquire(blocking=False):
+        return {"ok": True, "skipped": True, "findings": [], "plan": None,
+                "confirmed": 0, "rejected_n": 0, "unsure_n": 0,
+                "error": "已有一次自检正在运行，本次跳过（防并发重复建计划）"}
+    try:
+        _AUDIT_LAST[source] = now
+        return _run_audit_impl(deep=deep, source=source, create_plan=create_plan,
+                               auto_fix=auto_fix, verify=verify)
+    finally:
+        _AUDIT_LOCK.release()
+
+
+def _run_audit_impl(deep=False, source="manual", create_plan=True, auto_fix=None,
+                    verify=None):
     """跑一次代码自检。
 
     deep=True 时再让 LLM 审一遍（费 token，手动点才用）。

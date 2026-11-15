@@ -237,10 +237,148 @@ def _c_l6():
     t = _trees_of(src)
     for fn in (CA._check_mutable_default, CA._check_is_literal,
                CA._check_assert_tuple, CA._check_unreachable,
-               CA._check_return_in_finally):
+               CA._check_return_in_finally, CA._check_while_true,
+               CA._check_self_compare, CA._check_range_len_minus,
+               CA._check_index_shift):
         out = fn(t)
         assert not out, "%s 对干净代码误报了 %d 条：%s" % (
             fn.__name__, len(out), out[0].get("msg") if out else "")
+
+
+@case("audit.logic.while True 无出口")
+def _c_l7():
+    from . import code_audit as CA
+    # 纯计算死循环（体内没有任何调用）→ mid：必卡死，可以自动修
+    out = CA._check_while_true(_trees_of(
+        "def f():\n    n = 0\n    while True:\n        n += 1\n"))
+    assert len(out) == 1 and out[0]["level"] == "mid", \
+        "纯计算死循环没被判 mid：%s" % out
+    # 队列 worker（`q.get()` 阻塞等待，跑在 daemon 线程里）是标准写法 → 不许报。
+    # ⚠️ 2026-11-15：检查器加了这条豁免，回归断言必须同步，否则「改检查器 →
+    #    回归挂 → 所有自动修复被回滚」会死锁（实测踩到 1/22 失败）。
+    out2 = CA._check_while_true(_trees_of(
+        "def f(q):\n    while True:\n        job = q.get()\n"))
+    assert not out2, "队列 worker 循环被误报了：%s" % out2
+    # 轮询循环（体内有 sleep）也是标准写法 → 不许报
+    out2c = CA._check_while_true(_trees_of(
+        "def f():\n    import time\n    while True:\n        time.sleep(1)\n"))
+    assert not out2c, "轮询循环（sleep）被误报了：%s" % out2c
+    # 被 try/except 包着（靠异常退出）→ 不许报
+    out2d = CA._check_while_true(_trees_of(
+        "def f(ws):\n    try:\n        while True:\n            ws.recv()\n"
+        "    except Exception:\n        pass\n"))
+    assert not out2d, "靠异常退出的循环被误报了：%s" % out2d
+    # 其它带调用但确实无出口的 → 只报 low，不许自动改
+    out2b = CA._check_while_true(_trees_of(
+        "def f():\n    while True:\n        do_work()\n"))
+    assert out2b and out2b[0]["level"] == "low", \
+        "带调用的无出口循环没被判 low（信任模式会把它改坏）：%s" % out2b
+    # 有 break 的正常循环不许报
+    out3 = CA._check_while_true(_trees_of(
+        "def f(q):\n    while True:\n        if not q:\n            break\n"))
+    assert not out3, "有 break 的循环被误报了：%s" % out3
+
+
+@case("audit.logic.自比较（NaN 惯用法除外）")
+def _c_l8():
+    from . import code_audit as CA
+    out = CA._check_self_compare(_trees_of(
+        "def f(o):\n    return o.x == o.x\n"))
+    assert len(out) == 1, "没抓到属性自比较（返回 %d 条）" % len(out)
+    # `v != v` 是标准 NaN 判断，真实代码里 3 处都是这个用途，绝不能报
+    out2 = CA._check_self_compare(_trees_of(
+        "def f(v):\n    return v != v\n"))
+    assert not out2, "把 NaN 判断 `v != v` 误报了：%s" % out2
+
+
+@case("audit.logic.range(len-1) 少遍历一个")
+def _c_l9():
+    from . import code_audit as CA
+    out = CA._check_range_len_minus(_trees_of(
+        "def f(xs):\n    s = 0\n"
+        "    for i in range(len(xs) - 1):\n        s += xs[i]\n    return s\n"))
+    # ⚠️ 2026-11-15：这条降为 info（实测真实代码 13 条全是正确写法），
+    #    只作参考提示，不进 low 统计、不会变成可执行动作。
+    assert len(out) == 1 and out[0]["level"] == "info", \
+        "range(len(x)-1) 的级别/条数不对：%s" % out
+
+
+@case("audit.logic.索引偏移越界")
+def _c_l10():
+    from . import code_audit as CA
+    out = CA._check_index_shift(_trees_of(
+        "def f(xs):\n    for i in range(len(xs)):\n        print(xs[i + 1])\n"))
+    assert len(out) == 1, "没抓到 xs[i+1] 越界（返回 %d 条）" % len(out)
+    out2 = CA._check_index_shift(_trees_of(
+        "def f(xs):\n    for i in range(len(xs)):\n        print(xs[i])\n"))
+    assert not out2, "正常访问 xs[i] 被误报了：%s" % out2
+
+
+# ---------------------------------------------------------------- 修复质量闸门
+@case("fix.占位式修补被拦下")
+def _c_q1():
+    from . import self_iterate as SI
+    act = {"targets": [{"kind": "undefined-call", "file": "backend/x.py"}]}
+    q = SI._fix_quality(act, [{
+        "file": "backend/x.py",
+        "find": "def f():\n    return this_missing_func(1, 2)\n",
+        "replace": "def f():\n    return 0\n"}])
+    assert q, "把「调用不存在的函数」换成 `return 0` 居然放过了"
+    q2 = SI._fix_quality(act, [{
+        "file": "backend/x.py",
+        "find": "def g():\n    return undefined_variable_xyz + 1\n",
+        "replace": "def g():\n    return 1\n"}])
+    assert q2, "把「未定义变量」换成 `return 1` 居然放过了"
+    # 换汤不换药：不是 return，而是补一句 `x = 0`（实测模型真这么修）
+    q3 = SI._fix_quality(act, [{
+        "file": "backend/x.py",
+        "find": "def g():\n    return undefined_variable_xyz + 1\n",
+        "replace": "def g():\n    undefined_variable_xyz = 0\n"
+                   "    return undefined_variable_xyz + 1\n"}])
+    assert q3, "给未定义变量赋常量 `= 0` 居然放过了"
+    # 把调用整段删掉（return f(x) → return x）：计算没了，需人工确认
+    q4 = SI._fix_quality(act, [{
+        "file": "backend/x.py",
+        "find": "def h(x):\n    return this_missing_func(x)\n",
+        "replace": "def h(x):\n    return x\n"}])
+    assert q4, "把不存在的调用整段删掉居然放过了"
+
+
+@case("fix.正确修法不被误杀")
+def _c_q2():
+    from . import self_iterate as SI
+    ok_cases = [
+        ("默认参数改 None",
+         "def f(a, b=[]):\n    b.append(a)\n",
+         "def f(a, b=None):\n    if b is None:\n        b = []\n    b.append(a)\n"),
+        ("is → ==", "    if x is 'admin':\n", "    if x == 'admin':\n"),
+        ("删掉 return 之后的死代码", "    return 1\n    return 2\n", "    return 1\n"),
+        ("finally 里的 return 改成 pass", "    finally:\n        return 2\n",
+         "    finally:\n        pass\n"),
+        ("裸 except 改成具体异常",
+         "    try:\n        x()\n    except:\n        pass\n",
+         "    try:\n        x()\n    except Exception as e:\n        print(e)\n"),
+    ]
+    for name, find, repl in ok_cases:
+        q = SI._fix_quality({}, [{"file": "backend/x.py", "find": find,
+                                  "replace": repl}])
+        assert not q, "正确修法「%s」被误杀了：%s" % (name, q)
+    # 目标里含 undefined-call 时，`assert (x, 'b')` → `assert x, 'b'` 不能被
+    # 「删掉不存在的调用」规则误杀（assert 长得像函数调用，实测踩过这个坑）
+    q = SI._fix_quality({"targets": [{"kind": "undefined-call"}]},
+                        [{"file": "backend/x.py",
+                          "find": "    assert (x, 'b')\n",
+                          "replace": "    assert x, 'b'\n"}])
+    assert not q, "assert 元组的正确修法被「删掉调用」规则误杀了：%s" % q
+
+
+# ---------------------------------------------------------------- 边界（防 off-by-one）
+@case("clip.长度恰好等于上限时不裁剪")
+def _c_clip_edge():
+    M = _clip_cases()
+    s = ("结论：已完成。\n" + ("正文内容。" * 200))[:600]
+    got = M._clip_reply(s, limit=600)
+    assert got == s, "刚好等于上限也被裁了（%d → %d 字）" % (len(s), len(got))
 
 
 # ---------------------------------------------------------------- 嘴部几何

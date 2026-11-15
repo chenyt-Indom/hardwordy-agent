@@ -393,7 +393,7 @@ def list_tree(rel: str = "", depth: int = 2) -> dict:
             "more": len(lines) > 400}
 
 
-def read(rel: str, start: int = 0, end: int = 0) -> dict:
+def read(rel: str, start: int = 0, end: int = 0, inline: bool = True) -> dict:
     if locked():
         return {"ok": False, "error": "服务器版已锁定自开发：不允许读取服务端源码"}
     """读源码。**支持按行取**（2026-11-08 改）。

@@ -75,6 +75,32 @@ def win_kw(extra=None):
     return kw
 
 
+def run(*args, **kwargs):
+    """subprocess.run 的薄封装：自动带上隐藏窗口补丁。
+
+    新代码请走这里，不要直接调 subprocess.run —— 检查器会拦。
+    内部已装 NOWIN 补丁（install_nowin_patch 幂等），并补上 win_kw()。
+    """
+    import subprocess as _sp
+    install_nowin_patch()
+    if os.name == "nt" and "creationflags" not in kwargs:
+        kwargs.update(win_kw())
+    return _sp.run(*args, **kwargs)
+
+
+def popen(*args, **kwargs):
+    """subprocess.Popen 的薄封装：自动带上隐藏窗口补丁。
+
+    新代码请走这里，不要直接调 subprocess.Popen —— 检查器会拦。
+    内部已装 NOWIN 补丁（install_nowin_patch 幂等），并补上 win_kw()。
+    """
+    import subprocess as _sp
+    install_nowin_patch()
+    if os.name == "nt" and "creationflags" not in kwargs:
+        kwargs.update(win_kw())
+    return _sp.Popen(*args, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # 第一道：patch Popen.__init__（调用方**没写** creationflags 时补上）
 # ---------------------------------------------------------------------------
