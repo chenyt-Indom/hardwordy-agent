@@ -8968,7 +8968,12 @@ async def ws_upload(files: list[UploadFile] = File(...), dir: str = ""):
 @app.get("/api/ws/zip")
 def ws_zip(proj: str = ""):
     """把项目打包成 zip 下载（"拿走整个项目"用）。"""
-    data, name = workspace.export_zip(proj)
+    # ★ 2026-11-15 实测：?proj=../.. 会让 safe_project 抛 ValueError，路由没接
+    #   → 直接 500。这里按同模块 ws_raw 的写法转成 400（返回二进制，不能用 dict）。
+    try:
+        data, name = workspace.export_zip(proj)
+    except ValueError as e:
+        return PlainTextResponse(str(e), status_code=400)
     return Response(content=data, media_type="application/zip",
                     headers={"Content-Disposition":
                              'attachment; filename="%s"' % name})

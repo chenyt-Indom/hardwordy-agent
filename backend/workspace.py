@@ -1315,7 +1315,14 @@ def check_py(rel: str, proj: str = "") -> dict:
     这是"调试能力"里最省事也最有用的一环：写错了当场在编辑器里标红，
     不用等到点运行才看到报错。
     """
-    r = read_text(rel, proj)
+    try:
+        r = read_text(rel, proj)
+    except ValueError as e:
+        # ★ 2026-11-15 实测：/api/ws/check?rel=（空路径）直接 500，因为
+        #   read_text → safe_rel 抛 ValueError("路径不能为空")，而本函数没接。
+        #   这里转成和「文件不存在」一致的 error dict，调用方不用各自 try
+        #   （同模块 ws_raw 是自己 try 的，但那是 PlainTextResponse，路径不同）。
+        return {"ok": False, "error": str(e), "diagnostics": []}
     if not r.get("ok"):
         return {"ok": False, "error": r.get("error"), "diagnostics": []}
     code = r.get("text") or ""

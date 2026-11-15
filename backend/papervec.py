@@ -502,12 +502,21 @@ def _extract_cited(theory: str) -> list:
             #   现在统一走 _is_title_candidate：不像散文才当标题候选。
             if _is_title_candidate(p, first=(n == 0)):
                 out.append(p)
+    # ★ 2026-11-15 实测 bug：同一个标题会被抽**两次** —— 正则《…》抽一次（不带
+    #   书名号，因为取的是 group(1)），「论文支撑」分段又抽一次（**带**书名号，
+    #   因为 piece 原样保留了《》）。而 _match_cited 不剥书名号，于是带书名号的
+    #   那份在库里查不到 → fabricated 误判「疑似编造」，还会把 strong 降成 weak。
+    #   真实 47 条 theory 恰好都没写《》，所以线上没暴露；但「有论文支撑：《X》」
+    #   是很常见的写法（真实库里有 5 篇中文新闻标题就是这么被引的），必须修。
+    #   修法：归一化时剥掉首尾书名号，再统一去重（顺带让编造标题也只报一次）。
     seen, res = set(), []
     for x in out:
-        k = x.lower()
-        if k and k not in seen:
+        s = re.sub(r"^《\s*", "", str(x).strip())
+        s = re.sub(r"\s*》$", "", s).strip()
+        k = s.lower()
+        if s and k not in seen:
             seen.add(k)
-            res.append(x)
+            res.append(s)
     return res
 
 
@@ -529,12 +538,16 @@ def _extract_segments(theory: str) -> list:
             p = re.split(r"[（(]", piece.lstrip("：: ，, "), maxsplit=1)[0].strip()
             if p and len(p) >= 4:
                 out.append(p)
+    # 与 _extract_cited 同样剥书名号：否则「数据优先补救」拿带《》的段去
+    # _match_cited_exact 查，永远查不到，等于补救失效。
     seen, res = set(), []
     for x in out:
-        k = x.lower()
-        if k and k not in seen:
+        s = re.sub(r"^《\s*", "", str(x).strip())
+        s = re.sub(r"\s*》$", "", s).strip()
+        k = s.lower()
+        if s and k not in seen:
             seen.add(k)
-            res.append(x)
+            res.append(s)
     return res
 
 
@@ -610,10 +623,17 @@ def check_citation(theory: str, feature_text: str = "",
         it = _match_cited(c, items)
         (found.append(it) if it else missing.append(c))
     if not found:
+        # ★ 2026-11-15：模型写「（无论文直接支撑X，工程可行）可参考《Y》」时，
+        #   Y 若不在库里，原来一律返回 unverified「疑似编造」—— 但模型明明已经
+        #   声明「不是依据」，把它标成造假是冤枉。免责优先：level 给 disclaimed，
+        #   同时 fabricated 仍保留 True（「库里查不到」这个事实不能抹掉）。
+        _lv0 = "disclaimed" if disclaimer else "unverified"
+        _why0 = ("模型已声明非直接依据；引用的标题在库里查不到：%s" % missing[0][:60]
+                 if disclaimer else
+                 "引用的论文在库里查不到（疑似编造）：%s" % missing[0][:60])
         return {"titles": titles, "found": [], "missing": missing,
-                "score": 0.0, "level": "unverified", "rank": 0, "counts": False,
-                "fabricated": True, "disclaimer": disclaimer,
-                "why": "引用的论文在库里查不到（疑似编造）：%s" % missing[0][:60]}
+                "score": 0.0, "level": _lv0, "rank": 0, "counts": False,
+                "fabricated": True, "disclaimer": disclaimer, "why": _why0}
 
     # 语义相关度：功能文本 vs 论文正文（标题+英文摘要+中文要点）
     # ★ 阈值必须按真实分布标定，不能凭感觉（2026-11-15 实测 22 条真实引用）：
