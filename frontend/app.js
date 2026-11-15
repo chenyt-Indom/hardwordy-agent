@@ -12565,23 +12565,33 @@
   }
 
   let pushing = false;
+  // 已上报过的问答对指纹。原来每次把最近窗口整段重推，
+  // 后端就记成好几条同样的问答，体验评估会误判「用户重复发送同一需求」。
+  const pushedKeys = new Set();
+  function sigKey(u, a) {
+    return String(u || "").slice(0, 120) + "\u0000" + String(a || "").slice(0, 120);
+  }
   async function pushSignals() {
     if (pushing) return;
     pushing = true;
     try {
       const arr = grabRecent();
-      let lastUser = "";
-      for (let i = 0; i < arr.length; i++) {
-        if (arr[i].role === "user") lastUser = arr[i].text;
-      }
-      if (!lastUser || lastUser === lastSent) return;
       for (let i = 0; i < arr.length; i++) {
         if (arr[i].role !== "user") continue;
         const nxt = (arr[i + 1] && arr[i + 1].role === "bot") ? arr[i + 1].text : "";
+        // 最后一条且还没有回复 → 多半还在流式输出，等下一轮再记
+        if (!nxt && i >= arr.length - 1) continue;
+        const k = sigKey(arr[i].text, nxt);
+        if (pushedKeys.has(k)) continue;
+        pushedKeys.add(k);
         await api("/api/selfiter/signal", { user: arr[i].text, assistant: nxt });
         i++;
       }
-      lastSent = lastUser;
+      if (pushedKeys.size > 400) {
+        const keep = Array.from(pushedKeys).slice(-200);
+        pushedKeys.clear();
+        keep.forEach(function (x) { pushedKeys.add(x); });
+      }
     } finally {
       pushing = false;
     }
@@ -12605,18 +12615,48 @@
           '<button type="button" class="btn sm ghost iter-close">关闭</button>' +
         '</div>' +
         '<div class="iter-stats"></div>' +
+        '<div class="iter-trust">' +
+          '<label class="iter-sw">' +
+            '<input type="checkbox" class="iter-trust-cb">' +
+            '<span class="iter-sw-t">信任模式</span>' +
+          '</label>' +
+          '<span class="iter-trust-hint">开启后我改代码不再等你批准，改完只提示重启</span>' +
+        '</div>' +
         '<div class="iter-bar">' +
           '<button type="button" class="btn sm iter-run">🔄 现在反思一次</button>' +
+          '<button type="button" class="btn sm ghost iter-audit-btn">🔍 代码自检</button>' +
+          '<button type="button" class="btn sm ghost iter-diag-btn">🩺 诊断不达标</button>' +
+          '<button type="button" class="btn sm ghost iter-eval-btn">📊 评估体验</button>' +
+          '<button type="button" class="btn sm ghost iter-eval-fix-btn">🔧 评估并改进</button>' +
           '<input class="iter-focus" maxlength="200" ' +
             'placeholder="这次想让我重点关注什么？（可留空）">' +
         '</div>' +
         '<div class="iter-msg"></div>' +
+        '<div class="iter-exp"></div>' +
+        '<div class="iter-restart" hidden>' +
+          '<span>代码已改动，需要重启后端才生效。</span>' +
+          '<button type="button" class="btn sm iter-restart-btn">🔁 一键重启</button>' +
+        '</div>' +
+        '<div class="iter-diag" hidden>' +
+          '<input class="iter-diag-task" maxlength="300" placeholder="① 做的是什么任务（必填）">' +
+          '<input class="iter-diag-exp" maxlength="300" placeholder="② 预期效果">' +
+          '<input class="iter-diag-act" maxlength="300" placeholder="③ 实际结果">' +
+          '<input class="iter-diag-evi" maxlength="300" placeholder="④ 证据 / 数值（可留空）">' +
+          '<button type="button" class="btn sm iter-diag-go">开始诊断</button>' +
+        '</div>' +
         '<div class="iter-body"></div>' +
       '</div>';
     document.body.appendChild(el);
     el.addEventListener("click", function (e) { if (e.target === el) hide(); });
     el.querySelector(".iter-close").onclick = hide;
     el.querySelector(".iter-run").onclick = runReflect;
+    el.querySelector(".iter-audit-btn").onclick = runAudit;
+    el.querySelector(".iter-restart-btn").onclick = doRestart;
+    el.querySelector(".iter-trust-cb").onchange = onTrustToggle;
+    el.querySelector(".iter-diag-btn").onclick = toggleDiag;
+    el.querySelector(".iter-diag-go").onclick = runDiagnose;
+    el.querySelector(".iter-eval-btn").onclick = function () { runEvaluate(false); };
+    el.querySelector(".iter-eval-fix-btn").onclick = function () { runEvaluate(true); };
     el.querySelector(".iter-body").addEventListener("click", onBodyClick);
     return el;
   }
@@ -12630,6 +12670,7 @@
     layer();
     render();
     load();
+    loadExp();
     pushSignals();
   }
 
@@ -12739,8 +12780,95 @@
     return h + (rawH ? '<details><summary class="iter-li" style="cursor:pointer">展开原始抓取结果</summary>' + rawH + '</details>' : "");
   }
 
+  // ---------------------------------------------------------- 体验评估
+  let expData = null;
+
+  function scoreChip(v) {
+    if (v === null || v === undefined) return "—";
+    const n = Number(v);
+    if (!isFinite(n)) return "—";
+    const cls = n < 5 ? " bad" : (n < 7 ? " mid" : " good");
+    return '<b class="iter-sc' + cls + '">' + n.toFixed(1) + '</b>';
+  }
+
+  function renderExp() {
+    if (!el) return;
+    const box = el.querySelector(".iter-exp");
+    if (!box) return;
+    const e = expData;
+    if (!e || !e.count) {
+      box.innerHTML = '<div class="iter-exp-empty">🎯 还没有体验评估。' +
+        '点上面「📊 评估体验」，我会给最近几轮打分：任务完成度、过程效率、你的情绪，' +
+        '并找出让你不爽的环节。</div>';
+      return;
+    }
+    let h = '<div class="iter-sec"><div class="iter-sec-t">🎯 体验评估（已评 ' +
+      e.count + ' 次）</div>' +
+      '<div class="iter-exp-row">' +
+        '<span class="iter-chip">完成度 ' + scoreChip(e.avg_completion) + ' / 10</span>' +
+        '<span class="iter-chip">效率 ' + scoreChip(e.avg_efficiency) + ' / 10</span>' +
+        (e.trend ? '<span class="iter-chip">趋势 ' + esc(e.trend) + '</span>' : '') +
+      '</div>';
+    if (e.frictions && e.frictions.length) {
+      h += '<div class="iter-exp-sub">反复出现的摩擦点</div>';
+      e.frictions.slice(0, 6).forEach(function (f) {
+        h += '<div class="iter-li"><b>' + esc(f.tag || "") + '</b> ×' + (f.count || 1) +
+          (f.detail ? '<br>' + esc(f.detail) : '') +
+          (f.suggestion ? '<br><span class="iter-fix">→ ' + esc(f.suggestion) + '</span>' : '') +
+          '</div>';
+      });
+    }
+    if (e.suggestions && e.suggestions.length) {
+      h += '<div class="iter-exp-sub">据此想到的改进</div>';
+      e.suggestions.slice(0, 5).forEach(function (s) {
+        h += '<div class="iter-li"><b>' + esc(s.title || "") + '</b>' +
+          (s.kind ? ' <span class="iter-tag">' + esc(s.kind) + '</span>' : '') +
+          (s.why ? '<br>' + esc(s.why) : '') +
+          (s.how ? '<br><span class="iter-fix">→ ' + esc(s.how) + '</span>' : '') + '</div>';
+      });
+    }
+    h += '</div>';
+    box.innerHTML = h;
+  }
+
+  async function loadExp() {
+    const r = await api("/api/selfiter/experience");
+    if (r && r.ok) expData = r;
+    renderExp();
+  }
+
+  async function runEvaluate(improve) {
+    if (busy) return;
+    busy = true;
+    say(improve ? "评估中…不达标我会直接想出改法（约 20~40 秒）"
+               : "评估中…给最近 10 轮打分，约 10~20 秒");
+    await pushSignals();
+    const r = await api("/api/selfiter/evaluate",
+      { limit: 10, use_llm: true, improve: !!improve });
+    busy = false;
+    if (!r || !r.ok) { say((r && r.error) || "评估失败", "bad"); return; }
+    const rec = r.record || {};
+    const c = rec.avg_completion, ef = rec.avg_efficiency;
+    let msg = "完成度 " + (c === null || c === undefined ? "—" : c) +
+              " / 效率 " + (ef === null || ef === undefined ? "—" : ef);
+    if (rec.overall) msg += " —— " + rec.overall;
+    if (improve) {
+      if (r.need_improve) {
+        const acts = (((r.improve || {}).plan) || {}).actions || [];
+        msg += " ｜ 需要改进：" + (r.reason || "") + "，已整理 " + acts.length + " 条动作。";
+        if (r.need_restart) showRestart(true);
+      } else {
+        msg += " ｜ 暂时不需要专门改进。";
+      }
+    }
+    say(msg, "good");
+    if (improve) await load();
+    await loadExp();
+  }
+
   function render() {
     if (!el) return;
+    renderExp();
     const d = data || {};
     const st = d.stats || {};
     el.querySelector(".iter-stats").innerHTML =
@@ -12748,7 +12876,20 @@
       '<span class="iter-chip">提了 <b>' + (st.proposed || 0) + '</b> 条</span>' +
       '<span class="iter-chip">真做了 <b>' + (st.done || 0) + '</b> 条</span>' +
       '<span class="iter-chip">待批准 <b>' + (d.pending || 0) + '</b></span>' +
-      '<span class="iter-chip">对话样本 <b>' + (d.signals || 0) + '</b></span>';
+      '<span class="iter-chip">对话样本 <b>' + (d.signals || 0) + '</b></span>' +
+      (d.audit ? '<span class="iter-chip">上次自检 <b>' + (d.audit.total || 0) +
+                 '</b> 处 · ' + esc(String(d.audit.ts || "").slice(11, 16)) + '</span>' : '');
+
+    const s = d.settings || {};
+    const cb = el.querySelector(".iter-trust-cb");
+    if (cb) cb.checked = !!s.trust_mode;
+    const th = el.querySelector(".iter-trust-hint");
+    if (th) {
+      th.textContent = s.trust_mode
+        ? "已开启：改代码不再等你批准，改完只提示重启"
+        : "开启后我改代码不再等你批准，改完只提示重启";
+      th.className = "iter-trust-hint" + (s.trust_mode ? " on" : "");
+    }
 
     const body = el.querySelector(".iter-body");
     const p = d.latest;
@@ -12793,6 +12934,83 @@
     busy = false;
     if (!r || !r.ok) { say((r && r.error) || "反思失败", "bad"); return; }
     say("反思完成：" + ((r.plan && r.plan.summary) || ""), "good");
+    if (r.need_restart) showRestart(true);
+    await load();
+  }
+
+  async function onTrustToggle(e) {
+    const on = !!(e && e.target && e.target.checked);
+    if (on && !confirm("开启信任模式后，我会不经你批准直接改代码（包括 main.py 这类高风险文件）。\n" +
+                       "改完只提示你重启，不会自动重启；每次改动仍然会先备份、可回滚。\n\n确定开启？")) {
+      e.target.checked = false;
+      return;
+    }
+    const r = await api("/api/selfiter/settings", { trust_mode: on });
+    if (!r || !r.ok) {
+      say((r && r.error) || "设置失败", "bad");
+      e.target.checked = !on;
+      return;
+    }
+    if (data && data.settings) data.settings.trust_mode = on;
+    say(on ? "信任模式已开启：我改代码不再等你批准，改完提示你重启。"
+           : "信任模式已关闭：改代码前仍会等你批准。", on ? "warn" : "good");
+  }
+
+  async function runAudit() {
+    if (busy) return;
+    busy = true;
+    say("代码自检中…扫 backend/*.py 和 frontend/*.js（语法 / 跨模块调用 / 路由一致性），约 5~15 秒");
+    const r = await api("/api/selfiter/audit", { source: "manual", deep: false });
+    busy = false;
+    if (!r || !r.ok) { say((r && r.error) || "自检失败", "bad"); return; }
+    const a = r.audit || {};
+    const c = a.counts || {};
+    let msg = "自检完成：" + (a.total || 0) + " 处（high " + (c.high || 0) +
+              " / mid " + (c.mid || 0) + "），扫了 " + (a.files || 0) + " 个文件，用时 " +
+              (a.seconds || 0) + " 秒。";
+    if (r.need_restart) { showRestart(true); msg += " 已自动修好，需要重启才生效。"; }
+    say(msg, (c.high || 0) > 0 ? "warn" : "good");
+    await load();
+  }
+
+  async function doRestart() {
+    if (busy) return;
+    if (!confirm("现在重启后端？对话会短暂中断，页面会自动刷新。")) return;
+    busy = true;
+    say("重启中…页面会自己刷新");
+    try { await api("/api/selfdev/apply_restart", {}); } catch (e) { /* 重启时连接会断，属正常 */ }
+    setTimeout(function () { location.reload(); }, 2500);
+  }
+
+  function showRestart(on) {
+    const box = layer().querySelector(".iter-restart");
+    if (box) box.hidden = !on;
+  }
+
+  function toggleDiag() {
+    const box = layer().querySelector(".iter-diag");
+    if (box) box.hidden = !box.hidden;
+  }
+
+  async function runDiagnose() {
+    if (busy) return;
+    const box = layer();
+    const task = (box.querySelector(".iter-diag-task").value || "").trim();
+    const exp = (box.querySelector(".iter-diag-exp").value || "").trim();
+    const act = (box.querySelector(".iter-diag-act").value || "").trim();
+    const evi = (box.querySelector(".iter-diag-evi").value || "").trim();
+    if (!task) { say("先填「做的是什么任务」", "bad"); return; }
+    busy = true;
+    say("诊断中…让我判断这是不是代码的问题，约 10~25 秒");
+    const r = await api("/api/selfiter/diagnose",
+      { task: task, expected: exp, actual: act, evidence: evi });
+    busy = false;
+    if (!r || !r.ok) { say((r && r.error) || "诊断失败", "bad"); return; }
+    let msg = "诊断：" + (r.is_code_issue ? "像是代码问题" : "不像代码问题") +
+              "（置信度 " + (r.confidence || 0) + "）" +
+              (r.reason ? " —— " + r.reason : "");
+    if (r.need_restart) { showRestart(true); msg += " 已自动修好，需要重启才生效。"; }
+    say(msg, r.is_code_issue ? "warn" : "good");
     await load();
   }
 

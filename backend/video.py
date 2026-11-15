@@ -17,6 +17,7 @@
   3. **没有 ffprobe**：imageio-ffmpeg 只给 ffmpeg，不给 ffprobe。
      所以时长/分辨率/有无音轨都靠解析 `ffmpeg -i` 的 stderr 得到。
 """
+import base64
 import os
 import re
 import subprocess
@@ -121,6 +122,56 @@ def info(path):
         return {"ok": False, "error": "这个文件既没有视频流也没有音频流（不是媒体文件？）"}
     return {"ok": True, "duration": round(dur, 2), "width": w, "height": h,
             "fps": fps, "has_video": has_video, "has_audio": has_audio}
+
+
+def extract_frames(path, n=6, max_side=768):
+    """从视频里均匀抽 n 帧，返回 base64 JPEG。
+
+    2026-11-15：代码自检发现 `video.extract_frames` 被两处调用
+    （`/api/video/analyze` 和 read_file 工具的「读视频」分支），
+    但这个函数**从来没实现过** —— 一调就 AttributeError。
+    这里补上：均匀取时间点，单帧直接 pipe 成 JPEG，不落临时文件。
+
+    max_side：长边上限。帧是喂给视觉模型看的，768 足够，再大只是白烧 token。
+    """
+    inf = info(path)
+    if not inf.get("ok"):
+        return inf
+    dur = float(inf.get("duration") or 0)
+    if dur <= 0:
+        return {"ok": False, "error": "读不出视频时长，没法定位抽帧时间点"}
+    exe = ffmpeg_exe()
+    if not exe:
+        return {"ok": False, "error": "本机没有可用的 ffmpeg"}
+
+    n = max(1, min(int(n or 6), 12))
+    w = int(inf.get("width") or 0)
+    h = int(inf.get("height") or 0)
+    vf = ""
+    if max(w, h) > max_side:
+        vf = ("scale=%d:-2" % max_side) if w >= h else ("scale=-2:%d" % max_side)
+
+    frames = []
+    for i in range(n):
+        # 取每段的中点，避开片头片尾的黑场
+        t = dur * (i + 0.5) / n
+        args = [exe, "-hide_banner", "-nostdin", "-loglevel", "error",
+                "-ss", "%.3f" % t, "-i", str(path), "-frames:v", "1"]
+        if vf:
+            args += ["-vf", vf]
+        args += ["-q:v", "4", "-f", "image2", "-vcodec", "mjpeg", "pipe:1"]
+        try:
+            r = subprocess.run(args, capture_output=True, timeout=90,
+                               creationflags=_NOWIN)
+        except Exception:                               # noqa: BLE001
+            continue
+        if r.returncode == 0 and r.stdout:
+            frames.append(base64.b64encode(r.stdout).decode("ascii"))
+
+    if not frames:
+        return {"ok": False, "error": "抽帧失败：ffmpeg 一帧画面都没输出"}
+    return {"ok": True, "frames": frames, "count": len(frames),
+            "duration": round(dur, 2), "width": w, "height": h}
 
 
 def _even(n):

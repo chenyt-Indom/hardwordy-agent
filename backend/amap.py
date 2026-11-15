@@ -75,10 +75,6 @@ def has_stored_key() -> bool:
     return bool(stored_key())
 
 
-def has_key() -> bool:
-    return bool(key())
-
-
 def verify_key(k: str) -> tuple:
     """拿一个 key 真去调一次高德，确认能用。返回 (是否可用, 给用户看的话)。
 

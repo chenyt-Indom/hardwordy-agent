@@ -20,12 +20,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -44,6 +46,39 @@ _FORBIDDEN_PARTS = ("data/", "models/", "sessions/", "image_library/",
 
 _MAX_FILES_PER_ACTION = 3
 _SIGNAL_KEEP = 60
+
+# ---- 设置（2026-11-15 用户要求）----
+# 用户原话：「再设置一个信任模式的开关，开启就可以让模型不用通过用户批准，
+# 自动进行迭代，然后改完之后就提示重启」。
+# 另外要求智能体能主动检查自己的代码、任务没达到预期时能自己怀疑是代码问题。
+_SETTINGS = _DATA / "settings.json"
+_AUDITS = _DATA / "audits.json"
+
+_DEFAULT_SETTINGS = {
+    # 信任模式：反思产出的动作**不再等批准**，直接执行。
+    # 用户明确选了「全部自动，包括高风险（改 main.py、一次改多个文件），
+    # 但高风险会单独在前端提示一声」。
+    "trust_mode": False,
+    # 改完代码后：用户选的是「弹提示 + 给一个一键重启按钮」，不自动重启。
+    "auto_restart": False,
+    # 每次改完代码自动跑一次静态自检（用户要求「每次代码被改完就自动跑」）。
+    "audit_after_change": True,
+    # 每天定时自检一次（用户要求「+ 每天一次」）。
+    "audit_daily": True,
+    # 自检时是否让 LLM 做深度逻辑审查（会花 token，默认关，手动点才用）。
+    "deep_audit": False,
+    # 任务结果没达到预期时，自动触发一次「是不是代码问题」的诊断。
+    "diagnose_on_fail": True,
+    # 信任模式下一轮最多自动执行几条动作 —— 防止一次改太多没法收拾。
+    "max_auto_actions": 6,
+    # ---- 体验评估（2026-11-15 追加）----
+    # 用户要求「主动评估任务完成效果，闲聊里也要能读出体验」。
+    # 启发式每轮都算（零成本）；LLM 批量评估按下面两个开关控制频率。
+    "evaluate_auto": True,          # 检测到明显不满/报错时，自动跑一次 LLM 评估
+    "evaluate_periodic": True,      # 定时（默认 2 小时）跑一次批量评估
+    "evaluate_every_min": 120,      # 定时评估间隔（分钟）
+    "evaluate_min_turns": 4,        # 至少攒够几轮才评估，避免重复评同一批
+}
 
 
 # ---------------------------------------------------------------- 存储层
@@ -71,6 +106,47 @@ def _write_json(path, obj):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+def load_settings():
+    """读设置。缺字段一律回落到默认值，避免旧文件少字段导致 KeyError。"""
+    raw = _read_json(_SETTINGS, {})
+    out = dict(_DEFAULT_SETTINGS)
+    if isinstance(raw, dict):
+        for k in _DEFAULT_SETTINGS:
+            if k in raw and raw[k] is not None:
+                out[k] = raw[k]
+    return out
+
+
+def get_settings():
+    s = load_settings()
+    return {"ok": True, "settings": s,
+            "trust_mode": bool(s.get("trust_mode"))}
+
+
+def set_settings(**kw):
+    """改设置。只接受白名单里的字段（防止乱写进无关的键）。"""
+    cur = load_settings()
+    changed = {}
+    for k, v in kw.items():
+        if k not in _DEFAULT_SETTINGS or v is None:
+            continue
+        if isinstance(_DEFAULT_SETTINGS[k], bool):
+            v = bool(v)
+        elif isinstance(_DEFAULT_SETTINGS[k], int) and not isinstance(v, bool):
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                continue
+        cur[k] = v
+        changed[k] = v
+    save_settings(cur)
+    return {"ok": True, "settings": cur, "changed": changed}
+
+
+def save_settings(d):
+    _write_json(_SETTINGS, d)
 
 
 def _now():
@@ -115,16 +191,458 @@ def add_signal(user_text, assistant_text, meta=None):
     只留最近 _SIGNAL_KEEP 条，避免文件无限增长。
     """
     d = load_signals()
+    u = str(user_text or "")[:800]
+    a = str(assistant_text or "")[:800]
+    # 幂等去重：前端每次都会把最近窗口整段重推，不去重就会把「同一条问答」
+    # 记成好几条，体验评估便会误判成「用户重复发送同一需求」（2026-11-15 实测踩到）。
+    # 用 用户+回复 一起做指纹：真的重复提问，回复内容是不同的。
+    key = hashlib.sha1((u[:400] + "\x00" + a[:400]).encode("utf-8", "replace")).hexdigest()[:16]
+    for it in d["items"][-60:]:
+        if it.get("key") == key:
+            return {"ok": True, "count": len(d["items"]), "dup": True}
+    # 同一句话之前出现过 → 间隔超过 3 分钟才算「用户真的又提了一遍」；
+    # 短间隔的通常是我这边重试/重新生成，不是用户重复。
+    repeat = False
+    for it in reversed(d["items"][-30:]):
+        if str(it.get("user") or "")[:300] == u[:300]:
+            try:
+                t0 = time.mktime(time.strptime(str(it.get("ts")),
+                                               "%Y-%m-%d %H:%M:%S"))
+                gap = time.time() - t0
+            except (TypeError, ValueError):
+                gap = 99999
+            repeat = gap > 180
+            break
+    h = _heur_eval(u, a, meta)
     d["items"].append({
         "ts": _now(),
-        "user": str(user_text or "")[:800],
-        "assistant": str(assistant_text or "")[:800],
+        "user": u,
+        "assistant": a,
         "meta": meta or {},
+        "heur": h,
+        "key": key,
+        "repeat": repeat,
     })
     if len(d["items"]) > _SIGNAL_KEEP:
         d["items"] = d["items"][-_SIGNAL_KEEP:]
     save_signals(d)
+    if h.get("need_llm"):
+        _maybe_auto_evaluate()
     return {"ok": True, "count": len(d["items"])}
+
+
+_AUTO_LOCK = threading.Lock()
+_LAST_AUTO = [0.0]
+
+
+def _maybe_auto_evaluate():
+    """用户明确不满 / 报错时，后台自动评一次。
+
+    这是「主动评估」的实时那一半（另一半是定时任务）。
+    节流 10 分钟，避免用户连续几句抱怨就触发好几次 LLM。
+    """
+    try:
+        if not load_settings().get("evaluate_auto", True):
+            return
+        now = time.time()
+        with _AUTO_LOCK:
+            if now - _LAST_AUTO[0] < 600:
+                return
+            _LAST_AUTO[0] = now
+        threading.Thread(target=_auto_eval_worker, daemon=True).start()
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def _auto_eval_worker():
+    try:
+        evaluate(limit=6, use_llm=True, trigger="auto")
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+# ---------------------------------------------------------------- 体验评估
+# 2026-11-15 用户追加要求（原话要点）：
+#   · 主动在交流中评估任务的完成效果；评分不好或过程繁琐，就自己想怎么优化；
+#   · 哪怕平时闲聊，也要能从用户的反应里读出体验好坏，并思考以后怎么改进。
+#
+# 设计：分两层，避免每轮都调 LLM 烧 token
+#   ① 启发式（零成本，每轮都算）—— 只用来判断「要不要认真评估」，不当最终结论；
+#   ② LLM 批量评估（攒够几轮再跑）—— 打分 + 找摩擦点 + 给可执行改进。
+# 评估结果会喂回 reflect()，变成下一轮迭代的输入。
+
+_EXP = _DATA / "experience.json"
+_EXP_KEEP = 400
+
+# 强信号：出现基本就说明这一轮有问题（都是这套系统里用户真实说过的话）
+_BAD_STRONG = (
+    "一点都不", "不满意", "没解决", "没有解决", "没搞定", "全乱", "乱套",
+    "退步", "垃圾", "崩了", "报错", "忘了", "偏离", "不对", "不行", "没用",
+    "失败", "太严重", "糊", "丑", "越来越差", "搞错", "理解错", "答非所问",
+    "恶心", "难看", "不好看", "不自然", "别扭", "没效果", "没反应", "没变",
+    "没生效", "没起作用", "不如以前", "差远了",
+)
+# 弱信号：单独出现不算问题，累积才算
+_BAD_WEAK = (
+    "还是", "又", "为什么", "重新", "再来", "麻烦", "繁琐", "太慢", "错",
+    "偏了", "不够", "不行", "没有", "卡", "重复",
+)
+# 正面信号（用词组，避免「好」命中「不好」）
+_GOOD_WORDS = ("不错", "完美", "搞定", "满意", "谢谢", "厉害", "可以了", "很好", "对味", "到位")
+
+
+def _count_hits(text, words):
+    t = str(text or "")
+    return sum(1 for w in words if w in t)
+
+
+def _count_good(text):
+    """数正面词，但排除疑问/否定用法：「搞定了吗」「没搞定」都不算夸。"""
+    t = str(text or "")
+    n = 0
+    for w in _GOOD_WORDS:
+        for m in re.finditer(re.escape(w), t):
+            tail = t[m.end():m.end() + 2]
+            if tail[:1] in ("吗", "么", "没") or tail[:2] in ("了吗", "了没"):
+                continue
+            n += 1
+            break
+    return n
+
+
+def _heur_eval(user_text, assistant_text="", meta=None):
+    """零成本启发式打分：关键词 + 长度 + 复发模式 + 报错。"""
+    u = str(user_text or "")
+    meta = meta or {}
+    bad_s = _count_hits(u, _BAD_STRONG)
+    bad_w = _count_hits(u, _BAD_WEAK)
+    good = _count_good(u)
+    score = 7.0 - min(5.0, bad_s * 1.7 + bad_w * 0.45) + min(1.5, good * 0.6)
+    flags = []
+    if bad_s >= 1:
+        flags.append("明确不满")
+    if bad_w >= 3:
+        flags.append("多处抱怨")
+    if good and not bad_s:
+        flags.append("正面反馈")
+    if len(u) > 160 and (bad_s or bad_w >= 2):
+        flags.append("长段吐槽")           # 愿意打这么多字 = 问题不小
+    if re.search(r"(还是|又|再次|仍然|依然).{0,10}(不行|没|问题|错|偏|乱)", u):
+        flags.append("问题复发")
+    if meta.get("error") or meta.get("failed"):
+        flags.append("执行报错")
+    try:
+        if int(meta.get("turns") or 0) >= 6:
+            flags.append("过程繁琐")
+    except (TypeError, ValueError):
+        pass
+    if not u.strip():
+        flags.append("空输入")
+    score = max(0.0, min(10.0, score))
+    return {"score": round(score, 1), "bad_strong": bad_s, "bad_weak": bad_w,
+            "good": good, "flags": flags,
+            "need_llm": bool(bad_s or bad_w >= 3 or meta.get("error"))}
+
+
+def load_experience():
+    d = _read_json(_EXP, {"items": []})
+    if isinstance(d, list):
+        d = {"items": d}
+    if not isinstance(d.get("items"), list):
+        d["items"] = []
+    if not isinstance(d.get("seen"), list):
+        d["seen"] = []
+    return d
+
+
+def _turn_key(it):
+    """一轮对话的稳定指纹（用于「这一轮已经评过了」判断）。"""
+    raw = (str(it.get("user") or "") + "\x00" + str(it.get("assistant") or "")[:200])
+    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+# 摩擦点同义归并：两次评估对同一个问题往往叫法不同，
+# 不归并的话「回复截断 / 输出截断」会各占一条，看起来像两个问题。
+_FRICTION_CANON = (
+    ("回复被截断", ("截断", "断掉", "半句", "不完整", "没收尾", "断在")),
+    ("同一需求被重复发送", ("重复", "复述", "重发", "再说一遍", "复问", "同一需求",
+                            "说三遍", "粘贴三", "三次", "又说", "再提")),
+    ("只诊断不修复", ("只诊断", "不修", "未闭环", "没落地", "未落地", "不闭环",
+                      "只表态", "不动手", "表态", "不落地", "不交付")),
+    ("过度确认", ("确认", "询问", "ask", "反问", "请示")),
+    ("空回复", ("空回复", "无响应", "没有回复", "空答")),
+    ("绕路/用错工具", ("绕路", "用错工具", "调错", "多绕", "工具用错")),
+    ("改完不验证", ("不验证", "没验证", "未验证", "没测", "没自测")),
+    ("过程过长/碎步", ("过长", "太长", "啰嗦", "碎步", "思考过")),
+)
+
+
+def _canon_tag(tag):
+    t = str(tag or "")
+    for canon, keys in _FRICTION_CANON:
+        for k in keys:
+            if k in t:
+                return canon
+    return t
+
+
+def _dedupe_turns(items):
+    """按**用户原话**归并同一句话的多条记录。
+
+    为什么不能只按「用户+回复」去重：一条回复被截断后重试，会产生
+    「同一句用户话 + 两条不同回复」，看起来像用户说了两遍，其实是系统侧重试。
+    这里合并成一条，保留最长的那条回复，并记下出现了几次（_dup），
+    真正的「用户又说了一遍」由 add_signal 里的 repeat 标记负责。
+    """
+    order, groups = [], {}
+    for it in items or []:
+        k = str(it.get("user") or "")[:300]
+        if k not in groups:
+            groups[k] = {"item": it, "n": 1, "repeat": bool(it.get("repeat"))}
+            order.append(k)
+            continue
+        g = groups[k]
+        g["n"] += 1
+        g["repeat"] = g["repeat"] or bool(it.get("repeat"))
+        if len(str(it.get("assistant") or "")) > len(str(g["item"].get("assistant") or "")):
+            g["item"] = it
+    out = []
+    for k in order:
+        g = groups[k]
+        it = dict(g["item"])
+        it["_dup"] = g["n"]
+        it["repeat"] = g["repeat"]
+        out.append(it)
+    return out
+
+
+def save_experience(d):
+    _write_json(_EXP, d)
+
+
+def _build_eval_prompt(items):
+    lines = []
+    for i, it in enumerate(items, 1):
+        u = (it.get("user") or "").replace("\n", " ")[:420]
+        a = (it.get("assistant") or "").replace("\n", " ")[:420]
+        fl = ",".join((it.get("heur") or {}).get("flags") or [])
+        note = ""
+        if int(it.get("_dup") or 1) > 1:
+            note += ("（⚠️ 这条用户消息系统侧记录了 %d 次，含截断重试/重推，"
+                     "**不要**当成用户重复提问）" % int(it.get("_dup")))
+        if it.get("repeat"):
+            note += "（⚠️ 用户确实又把这句话提了一次，这是真实的重复诉求）"
+        lines.append("%d. 用户：%s\n   我：%s\n   机器初判：%s%s"
+                     % (i, u, a, fl or "无", note))
+    return """你是这个本地多模态助手项目的「用户体验评估器」。请**严格、不客套**地评估下面这几轮交流。
+
+%s
+
+## 评估维度
+1. **任务完成度**（0-10）：用户要的东西真的做成了吗？有没有答非所问、只做一半、
+   或者**声称做了其实没做**（这是最严重的）。
+2. **过程效率**（0-10）：绕了多少弯路？该用的工具用了吗？有没有反复确认、
+   反复返工、让用户把同一件事说三遍？
+3. **用户情绪**：满意 / 中性 / 不耐烦 / 不满。**哪怕只是闲聊，也要从语气、
+   追问、纠错、催促里判断**——用户没明说「不满意」也要能读出来。
+4. **摩擦点**：具体哪一步让用户不爽（例如「用错工具」「没查证就编」
+   「改完不验证」「配置要重复填」「问太多废话」）。
+
+## 输出格式（严格 JSON，不要额外文字）
+{
+  "turns": [{"i":1,"task":"一句话说这轮在干什么","completion":8,"efficiency":5,
+             "sentiment":"满意|中性|不耐烦|不满","evidence":"用户原话里的证据",
+             "problem":"最大的问题（没有就写空字符串）","fix":"下次具体怎么改（可执行）"}],
+  "frictions": [{"tag":"摩擦点短标签","count":2,"detail":"具体表现","suggestion":"怎么消除"}],
+  "suggestions": [{"title":"改进项","why":"为什么值得做","how":"怎么做",
+                   "kind":"prompt|ui|feature|code","files":["backend/xxx.py"]}],
+  "overall": "这几轮的整体判断（40字内）"
+}
+⚠️ 证据必须来自上面的原话，不要编。⚠️ 没有问题就给高分，不要为了显得认真而挑刺。
+只输出 JSON。""" % "\n".join(lines)
+
+
+def evaluate(limit=12, use_llm=True, trigger="manual"):
+    """评估最近几轮交流。启发式先跑（LLM 挂了也有数据），LLM 再补深度判断。"""
+    sig = load_signals().get("items", [])
+    if not sig:
+        return {"ok": False, "error": "还没有对话素材（先在对话里聊几轮）"}
+    seen = set(load_experience().get("seen") or [])
+    window = sig[-max(1, min(int(limit or 12), 30)):]
+    items = _dedupe_turns([it for it in window if _turn_key(it) not in seen])
+    if not items:
+        return {"ok": False, "skipped": True,
+                "error": "最近 %d 轮都已经评估过了，多聊几轮再来（不重复评，避免刷分）"
+                         % len(window)}
+    rec = {"id": "e" + _pid(), "ts": _now(), "trigger": trigger,
+           "n": len(items), "turns": [], "frictions": [], "suggestions": [],
+           "overall": "", "avg_completion": None, "avg_efficiency": None,
+           "llm": False}
+    for i, it in enumerate(items, 1):
+        h = it.get("heur") or _heur_eval(it.get("user"), it.get("assistant"), it.get("meta"))
+        rec["turns"].append({"i": i, "task": (it.get("user") or "").replace("\n", " ")[:70],
+                             "completion": h["score"], "efficiency": h["score"],
+                             "sentiment": ("不满" if h["score"] < 5 else
+                                           ("满意" if h["score"] >= 8 else "中性")),
+                             "evidence": "启发式：" + ("、".join(h["flags"]) or "无明显信号"),
+                             "problem": "", "fix": ""})
+    if use_llm:
+        txt, err = _llm_text(_build_eval_prompt(items), max_tokens=3000, temperature=0.4)
+        data = _parse_json(txt) if not err else None
+        if isinstance(data, dict):
+            rec["llm"] = True
+            turns = [t for t in (data.get("turns") or []) if isinstance(t, dict)]
+            if turns:
+                rec["turns"] = turns
+            rec["frictions"] = [f for f in (data.get("frictions") or []) if isinstance(f, dict)]
+            rec["suggestions"] = [s for s in (data.get("suggestions") or []) if isinstance(s, dict)]
+            rec["overall"] = str(data.get("overall") or "")[:200]
+        elif err:
+            rec["llm_error"] = str(err)[:200]
+    # 汇总
+    def _avg(key):
+        vals = []
+        for t in rec["turns"]:
+            try:
+                vals.append(float(t.get(key)))
+            except (TypeError, ValueError):
+                pass
+        return round(sum(vals) / len(vals), 1) if vals else None
+    rec["avg_completion"] = _avg("completion")
+    rec["avg_efficiency"] = _avg("efficiency")
+    d = load_experience()
+    d["items"].insert(0, rec)
+    d["items"] = d["items"][:_EXP_KEEP]
+    d["seen"] = (list(seen) + [_turn_key(it) for it in items])[-800:]
+    save_experience(d)
+    return {"ok": True, "record": rec, "summary": experience_summary()}
+
+
+def experience_summary():
+    """给前端和 reflect 用的汇总：均分、趋势、反复出现的摩擦点、待做改进。"""
+    items = load_experience().get("items", [])
+    if not items:
+        return {"ok": True, "count": 0, "avg_completion": None,
+                "avg_efficiency": None, "trend": "", "frictions": [],
+                "suggestions": [], "recent": [], "low": []}
+    turns = []
+    for r in items:
+        for t in (r.get("turns") or []):
+            turns.append(t)
+    def _avg(vals):
+        vals = [v for v in vals if isinstance(v, (int, float))]
+        return round(sum(vals) / len(vals), 1) if vals else None
+    comp = _avg([t.get("completion") for t in turns])
+    eff = _avg([t.get("efficiency") for t in turns])
+    # 趋势：最近 10 轮 vs 之前 10 轮（turns 是按时间正序塞进 records 的）
+    ordered = []
+    for r in reversed(items):
+        ordered.extend(r.get("turns") or [])
+    trend = ""
+    if len(ordered) >= 8:
+        half = len(ordered) // 2
+        a = _avg([t.get("completion") for t in ordered[:half]])
+        b = _avg([t.get("completion") for t in ordered[half:]])
+        if a is not None and b is not None:
+            d = b - a
+            trend = ("上升 %.1f" % d) if d >= 0.5 else (("下降 %.1f" % abs(d)) if d <= -0.5 else "持平")
+    # 摩擦点按 tag 累计
+    fmap = {}
+    for r in items:
+        rid = str(r.get("id") or r.get("ts") or "")
+        for f in (r.get("frictions") or []):
+            tag = str(f.get("tag") or "").strip()
+            if not tag:
+                continue
+            tag = _canon_tag(tag)
+            it = fmap.setdefault(tag, {"tag": tag, "by": {}, "detail": "",
+                                       "suggestion": ""})
+            try:
+                c = int(f.get("count") or 1)
+            except (TypeError, ValueError):
+                c = 1
+            # 同一批评估里两种叫法往往指同一批轮次 → 取最大值，不重复累加；
+            # 不同批次覆盖的是不同轮次，才相加。
+            it["by"][rid] = max(it["by"].get(rid, 0), c)
+            it["detail"] = it["detail"] or str(f.get("detail") or "")[:200]
+            it["suggestion"] = it["suggestion"] or str(f.get("suggestion") or "")[:200]
+    for it in fmap.values():
+        it["count"] = sum(it["by"].values())
+    frictions = sorted(fmap.values(), key=lambda x: -x["count"])[:8]
+    # 待做改进：取最近两轮的 suggestions
+    sugg = []
+    for r in items[:2]:
+        sugg.extend([s for s in (r.get("suggestions") or []) if isinstance(s, dict)])
+    low = [t for t in ordered if isinstance(t.get("completion"), (int, float))
+           and t.get("completion") < 6][-8:]
+    return {"ok": True, "count": len(items), "avg_completion": comp,
+            "avg_efficiency": eff, "trend": trend, "frictions": frictions,
+            "suggestions": sugg[:10],
+            "recent": items[:3], "low": low}
+
+
+def experience_brief():
+    """压成一段纯文本，塞进 reflect 的 prompt 里。"""
+    s = experience_summary()
+    if not s.get("count"):
+        return "（还没有体验评估数据）"
+    lines = ["平均完成度 %s / 10，平均效率 %s / 10，趋势：%s" %
+             (s.get("avg_completion"), s.get("avg_efficiency"), s.get("trend") or "样本不足")]
+    for f in (s.get("frictions") or [])[:5]:
+        lines.append("- 摩擦点「%s」出现 %s 次：%s → 建议：%s" %
+                     (f.get("tag"), f.get("count"), f.get("detail"), f.get("suggestion")))
+    for t in (s.get("low") or [])[-4:]:
+        if t.get("problem") or t.get("fix"):
+            lines.append("- 低分轮次「%s」：问题 %s；改法 %s" %
+                         (str(t.get("task"))[:40], t.get("problem"), t.get("fix")))
+    return "\n".join(lines)
+
+
+def evaluate_and_improve(limit=10, use_llm=True, trigger="periodic",
+                         auto_improve=None):
+    """评估最近几轮 → 不达标就**主动**想怎么改。
+
+    用户原话：「如果评分不好或过程繁琐就要思考怎么解决这个问题或怎么优化，
+    以提高效率与减少出错率」。所以这里不只看分数，也看「反复出现的摩擦点」。
+    """
+    ev = evaluate(limit=limit, use_llm=use_llm, trigger=trigger)
+    if not ev.get("ok"):
+        if ev.get("skipped"):
+            return {"ok": True, "skipped": True, "need_improve": False,
+                    "reason": str(ev.get("error") or "最近没有新对话可评"),
+                    "summary": experience_summary()}
+        return ev
+    rec = ev.get("record") or {}
+    s = ev.get("summary") or {}
+    comp = rec.get("avg_completion")
+    eff = rec.get("avg_efficiency")
+    why = []
+    if isinstance(comp, (int, float)) and comp < 6.5:
+        why.append("完成度均分 %.1f" % comp)
+    if isinstance(eff, (int, float)) and eff < 6.5:
+        why.append("效率均分 %.1f" % eff)
+    repeat = [f for f in (s.get("frictions") or [])
+              if int(f.get("count") or 0) >= 2]
+    if repeat:
+        why.append("反复摩擦：" + "、".join(str(f.get("tag")) for f in repeat[:3]))
+    need = bool(why)
+    out = {"ok": True, "record": rec, "summary": s,
+           "need_improve": need, "reason": "；".join(why)}
+    if not need:
+        return out
+    if auto_improve is None:
+        auto_improve = bool(load_settings().get("trust_mode"))
+    focus = ("用户体验评估发现这些问题：%s。整体判断：%s。"
+             "请针对每一条摩擦点给出**具体到环节**的改法，"
+             "优先砍步骤、减少返工，而不是加新功能。" %
+             (out["reason"], rec.get("overall") or "（无）"))
+    r = reflect(trigger="experience", use_web=False, focus=focus,
+                auto_execute=auto_improve)
+    out["improve"] = r
+    out["need_restart"] = bool((r or {}).get("need_restart"))
+    if (r or {}).get("plan"):
+        out["plan_id"] = r["plan"].get("id")
+    return out
 
 
 # ---------------------------------------------------------------- 技术情报
@@ -349,7 +867,7 @@ _PROJECT_BRIEF = """本项目是一个"本地多模态助手"（Python FastAPI �
 后端文件：backend/*.py（main.py 约1.4万行、tools.py、avatar_*.py、cloud_image.py、keyvault.py 等）"""
 
 
-def _build_reflect_prompt(signals, tech, journal, focus=""):
+def _build_reflect_prompt(signals, tech, journal, focus="", exp=""):
     sig_lines = []
     for it in signals[-30:]:
         u = (it.get("user") or "").replace("\n", " ")[:220]
@@ -373,6 +891,9 @@ def _build_reflect_prompt(signals, tech, journal, focus=""):
 ## 我最近已经做过的改动（⚠️ 这些**已经修过了**，绝对不要再把它们提成 action）
 %s
 
+## 用户体验评估（真实打分，这是**最重要的输入之一**）
+%s
+
 ## 最近的技术动态（真实抓取，可能与本项目无关，请自己判断相关性）
 %s
 
@@ -381,9 +902,12 @@ def _build_reflect_prompt(signals, tech, journal, focus=""):
    不要写"我会更努力"这种空话。优先找**反复出现**的问题。
 2. **对用户的观察**：从对话里看出用户的工作习惯、反复提出的诉求、被浪费的时间。
    只写有证据的，没证据就不要编。
-3. **可增加的功能**：结合上面的技术动态和项目现状，提出真正值得做的功能。
+3. **消除体验摩擦**（优先级**高于**加新功能）：上面「用户体验评估」里反复出现的
+   摩擦点，必须给出具体到环节的消除办法。过程繁琐就去砍步骤，评分低就去查
+   是不是我的做法本身有问题——**不要写"我会更仔细"这种空话**。
+4. **可增加的功能**：结合上面的技术动态和项目现状，提出真正值得做的功能。
    每条要说明"为什么值得做"和"大概怎么实现"。
-4. **可执行的动作**：这是最重要的一项。给出**具体到文件**的改动计划，
+5. **可执行的动作**：这是最重要的一项。给出**具体到文件**的改动计划，
    每条动作要能被单独批准/拒绝。风险等级自己判断（low=文案/参数/样式，
    mid=新增函数/接口，high=改核心逻辑）。
    ⚠️ 只允许改 backend/ 和 frontend/ 下的 .py/.js/.css/.html。
@@ -403,12 +927,17 @@ def _build_reflect_prompt(signals, tech, journal, focus=""):
 %s""" % (_PROJECT_BRIEF,
         "\n".join(sig_lines) or "（暂无）",
         "\n".join(jr) or "（暂无）",
+        exp or experience_brief(),
         "\n".join(tech_lines) or "（本次没抓到，可能没联网）",
         ("## 用户这次的额外关注点\n" + focus) if focus else "")
 
 
-def reflect(trigger="manual", use_web=True, focus=""):
-    """跑一次完整反思，生成一个 plan（状态 pending，等用户批准）。"""
+def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
+    """跑一次完整反思，生成一个 plan。
+
+    auto_execute=None → 看设置里的 trust_mode（信任模式开着就自动执行）；
+    auto_execute=True/False → 强制指定（前端手动触发时用）。
+    """
     _ensure()
     tech, tech_total = ({}, 0)
     if use_web:
@@ -416,7 +945,8 @@ def reflect(trigger="manual", use_web=True, focus=""):
     sig = load_signals().get("items", [])
     journal = _journal_tail()
 
-    prompt = _build_reflect_prompt(sig, tech, journal, focus=focus)
+    prompt = _build_reflect_prompt(sig, tech, journal, focus=focus,
+                                   exp=experience_brief())
     txt, err = _llm_text(prompt, max_tokens=4200, temperature=0.55)
     if err:
         return {"ok": False, "error": err}
@@ -465,7 +995,16 @@ def reflect(trigger="manual", use_web=True, focus=""):
     d["items"].insert(0, plan)
     d["items"] = d["items"][:60]          # 最多留 60 次
     save_plans(d)
-    return {"ok": True, "plan": plan}
+
+    out = {"ok": True, "plan": plan}
+    # 信任模式：用户要求「不用批准，自动迭代，改完提示重启」。
+    # 只在真的有计划动作时才执行，避免空跑。
+    if auto_execute is None:
+        auto_execute = bool(load_settings().get("trust_mode"))
+    if auto_execute and actions:
+        out["auto"] = auto_approve_and_execute(plan["id"])
+        out["need_restart"] = bool((out.get("auto") or {}).get("need_restart"))
+    return out
 
 
 # ---------------------------------------------------------------- 审批
@@ -763,9 +1302,21 @@ def execute_approved(pid):
 
     save_plans(d)
     ok_n = sum(1 for r in results if r["ok"])
-    return {"ok": ok_n > 0, "done": ok_n, "total": len(results), "results": results,
-            "plan": plan,
-            "need_restart": ok_n > 0}
+    out = {"ok": ok_n > 0, "done": ok_n, "total": len(results), "results": results,
+           "plan": plan,
+           "need_restart": ok_n > 0}
+
+    # 用户要求：每次代码被改完就自动跑一次自检。
+    # ⚠️ create_plan=False —— 否则自检又会建计划、又会被信任模式执行，
+    #    变成「自检→改→自检→改」的死循环。
+    if ok_n > 0 and load_settings().get("audit_after_change"):
+        try:
+            a = run_audit(source="after_change", create_plan=False)
+            out["post_audit"] = a.get("audit") or {}
+            out["post_audit_findings"] = (a.get("findings") or [])[:12]
+        except Exception as e:                          # noqa: BLE001
+            out["post_audit"] = {"error": "%s: %s" % (type(e).__name__, e)}
+    return out
 
 
 def _restore(tag):
@@ -806,6 +1357,373 @@ def rollback(pid):
     return {"ok": hit > 0, "rolled_back": hit, "plan": plan}
 
 
+# ---------------------------------------------------------------- 计划构造
+
+def _make_plan(trigger, summary, actions, extra=None):
+    """建一个 plan 并落盘（反思、自检、诊断都走这里，保证结构一致）。"""
+    norm = []
+    for i, a in enumerate(actions or []):
+        if not isinstance(a, dict):
+            continue
+        a = dict(a)
+        a.setdefault("id", "a%d" % (i + 1))
+        a.setdefault("status", "pending")     # pending/approved/rejected/done/failed
+        a.setdefault("note", "")
+        a.setdefault("error", "")
+        a.setdefault("backup", "")
+        a.setdefault("risk", "mid")
+        a.setdefault("files", [])
+        a.setdefault("detail", "")
+        a.setdefault("title", "（未命名动作）")
+        norm.append(a)
+    plan = {"id": _pid(), "ts": _now(), "trigger": trigger,
+            "summary": str(summary or "")[:200],
+            "weaknesses": [], "user_insights": [], "features": [],
+            "tech_takeaways": [], "actions": norm,
+            "tech_raw": {}, "tech_total": 0, "signals_used": 0}
+    if extra:
+        plan.update(extra)
+    d = load_plans()
+    d["items"].insert(0, plan)
+    d["items"] = d["items"][:60]
+    save_plans(d)
+    return plan
+
+
+# ---------------------------------------------------------------- 代码自检
+
+def _audit_history():
+    d = _read_json(_AUDITS, {"items": []})
+    if not isinstance(d, dict) or not isinstance(d.get("items"), list):
+        return {"items": []}
+    return d
+
+
+def _save_audit(rec):
+    d = _audit_history()
+    d["items"].insert(0, rec)
+    d["items"] = d["items"][:20]
+    _write_json(_AUDITS, d)
+
+
+def _file_catalog():
+    """允许改的文件清单（白名单内的真实文件）。
+
+    ⚠️ 必须喂给 LLM：实测让它诊断「闭嘴效果不好」，它编出了
+    `backend/mouth_inpaint.py`、`backend/face_edit_pipeline.py` 这种
+    **根本不存在**的文件名（真实文件是 avatar_mouth.py / avatar2.py）。
+    不给清单，它就会一本正经地指向空气，执行时要么失败要么凭空造垃圾文件。
+    """
+    out = []
+    for base in ("backend", "frontend"):
+        p = _ROOT / base
+        if not p.is_dir():
+            continue
+        for f in sorted(p.rglob("*")):
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in _ALLOWED_EXT:
+                continue
+            if "__pycache__" in f.parts:
+                continue
+            out.append(str(f.relative_to(_ROOT)).replace("\\", "/"))
+    return out
+
+
+def _catalog_text():
+    cat = _file_catalog()
+    return "、".join(cat) if cat else "（空）"
+
+
+def _keep_real_files(files):
+    """只保留真实存在的文件（防止 LLM 编文件名）。"""
+    exist = set(_file_catalog())
+    return [f for f in (files or []) if f in exist]
+
+
+def _actions_from_findings(findings, limit=6):
+    """把静态检查发现按文件聚合成「可执行的动作」。
+
+    聚合而不是一条一个动作：一个文件里同类的 5 处问题，一次改完比改 5 次
+    安全得多（每次改都要备份 + 校验 + 回滚，来回 5 次更容易撞车）。
+    """
+    groups = {}
+    for f in findings or []:
+        if f.get("level") not in ("high", "mid"):
+            continue
+        groups.setdefault(f.get("file") or "", []).append(f)
+    out = []
+    for rel, items in groups.items():
+        if len(out) >= limit:
+            break
+        if not _norm_rel(rel):
+            continue
+        lines = []
+        for it in items[:6]:
+            lines.append("第 %d 行 [%s] %s%s"
+                         % (it.get("line") or 0, it.get("kind") or "",
+                            it.get("msg") or "",
+                            ("　→ " + it["hint"]) if it.get("hint") else ""))
+        top = "high" if any(i.get("level") == "high" for i in items) else "mid"
+        out.append({
+            "title": "修 %s 里的 %d 处问题" % (rel, len(items)),
+            "detail": "\n".join(lines),
+            "risk": "mid" if top == "high" else "low",
+            "files": [rel],
+        })
+    return out
+
+
+def _llm_deep_review(audit_res):
+    """让 LLM 在静态检查结果里挑出真该修的，并给出最小修法。
+
+    ⚠️ 刻意**不**把整个代码库塞进去：token 太贵，而且模型拿到一大坨代码
+    容易越改越乱。它的任务只有一个——在已知问题里判断「哪些真会出事」。
+    """
+    from . import code_audit as CA
+    items = (audit_res or {}).get("findings") or []
+    if not items:
+        return [], "静态检查没发现问题，无需深度审查"
+    brief = CA.for_llm(audit_res, limit=40)
+    prompt = """你是这个项目的维护者。下面是对代码做静态检查的结果。请判断**哪些是真该修的**，并给出最小修法。
+
+%s
+
+## 你可以改的文件（files 只能从下面这个清单里选，不许编文件名）
+%s
+
+## 判断原则
+1. 只挑「会真的导致功能失效 / 崩溃 / 静默错误」的；为了整洁好看而重构的一律不挑。
+2. 每条给出最小改动方案：改哪个文件、哪一段、改成什么。
+3. 拿不准的宁可标 low，不要瞎猜。
+4. 最多 5 条，宁少勿滥。
+
+## 输出（只输出 JSON，不要解释）
+{"actions":[{"title":"...","detail":"...","risk":"low|mid|high","files":["backend/xxx.py"]}],
+ "summary":"一句话总结"}
+""" % (brief, _catalog_text())
+    txt, err = _llm_text(prompt, max_tokens=2600, temperature=0.3)
+    if err:
+        return [], err
+    data = _parse_json(txt)
+    if not isinstance(data, dict):
+        return [], "模型没给出合法 JSON"
+    out = []
+    for a in data.get("actions") or []:
+        if not isinstance(a, dict) or not str(a.get("title") or "").strip():
+            continue
+        files = [_norm_rel(f) for f in (a.get("files") or []) if isinstance(f, str)]
+        files = _keep_real_files([f for f in files if f])
+        if not files:
+            continue                      # 指向不存在的文件 → 这条没法执行，直接丢
+        out.append({"title": str(a["title"])[:120],
+                    "detail": str(a.get("detail") or "")[:900],
+                    "risk": str(a.get("risk") or "mid").lower(),
+                    "files": files[:_MAX_FILES_PER_ACTION]})
+    return out, str(data.get("summary") or "")
+
+
+def run_audit(deep=False, source="manual", create_plan=True, auto_fix=None):
+    """跑一次代码自检。
+
+    deep=True 时再让 LLM 审一遍（费 token，手动点才用）。
+    create_plan=True 且发现 high/mid 问题时，自动建一个待执行计划。
+    auto_fix=True（信任模式）→ 建完计划直接执行。
+    """
+    from . import code_audit as CA
+    try:
+        res = CA.audit()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "自检器崩了：%s: %s" % (type(e).__name__, e)}
+
+    actions, llm_summary = [], ""
+    if deep:
+        actions, llm_summary = _llm_deep_review(res)
+    if not actions:
+        actions = _actions_from_findings(res.get("findings") or [])
+
+    plan = None
+    if create_plan and actions:
+        cnt = res.get("counts") or {}
+        plan = _make_plan(
+            trigger="audit:" + str(source),
+            summary="代码自检：%d 处问题（high %d / mid %d），整理成 %d 条待办"
+                    % (res.get("total") or 0, cnt.get("high") or 0,
+                       cnt.get("mid") or 0, len(actions)),
+            actions=actions,
+            extra={"audit_counts": cnt})
+
+    rec = {"ts": res.get("ts"), "source": source,
+           "files": res.get("files"), "js_files": res.get("js_files"),
+           "total": res.get("total"), "counts": res.get("counts"),
+           "kinds": res.get("kinds"), "seconds": res.get("seconds"),
+           "findings": (res.get("findings") or [])[:60],
+           "plan": (plan or {}).get("id") or "",
+           "llm_summary": llm_summary}
+    try:
+        _save_audit(rec)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+    out = {"ok": True,
+           "audit": {k: res.get(k) for k in
+                     ("ts", "files", "js_files", "seconds", "counts", "kinds", "total")},
+           "findings": res.get("findings") or [],
+           "plan": plan, "llm_summary": llm_summary}
+
+    if plan and auto_fix:
+        out["auto"] = auto_approve_and_execute(plan["id"])
+        out["need_restart"] = bool((out.get("auto") or {}).get("need_restart"))
+    return out
+
+
+def audit_overview():
+    """给前端：最近几次自检的摘要 + 最近一次的 findings。"""
+    d = _audit_history()
+    items = d.get("items") or []
+    return {"ok": True,
+            "settings": load_settings(),
+            "latest": items[0] if items else None,
+            "history": [{"ts": i.get("ts"), "source": i.get("source"),
+                         "total": i.get("total"), "counts": i.get("counts"),
+                         "seconds": i.get("seconds")} for i in items[:10]]}
+
+
+# ---------------------------------------------------------------- 信任模式
+
+def auto_approve_and_execute(pid, max_n=0):
+    """信任模式：把待批准的动作全部标成 approved，并立刻执行。
+
+    用户明确要求「全部自动，包括高风险；高风险也自动进行，但会在前端跟用户
+    说一声」—— 所以这里不按风险过滤，只把高风险挑出来放进返回值，让前端提示。
+    """
+    s = load_settings()
+    if not s.get("trust_mode"):
+        return {"ok": False, "error": "没开信任模式，不能免批准执行"}
+    d, plan = _find_plan(pid)
+    if not plan:
+        return {"ok": False, "error": "找不到这次计划"}
+    cap = int(max_n or s.get("max_auto_actions") or 6)
+    picked = []
+    for a in plan.get("actions") or []:
+        if len(picked) >= cap:
+            break
+        if a.get("status") == "pending":
+            a["status"] = "approved"
+            a["auto"] = True
+            picked.append(a)
+    save_plans(d)
+    if not picked:
+        return {"ok": False, "error": "没有待执行的动作（可能已经处理过了）"}
+    r = execute_approved(pid)
+    r["auto_approved"] = len(picked)
+    r["trust"] = True
+    r["high_risk"] = [{"id": a.get("id"), "title": a.get("title")}
+                      for a in picked if str(a.get("risk") or "mid") == "high"]
+    return r
+
+
+# ---------------------------------------------------------------- 任务不达标诊断
+
+def diagnose(task, expected="", actual="", evidence="", auto_fix=None,
+             create_plan=True):
+    """任务结果没达到预设效果时，判断「是不是代码有问题」。
+
+    用户要求（2026-11-15）：「当在做任务时完成结果没有达到预设效果时，
+    也能够让模型思考是不是代码有问题，从而去主动寻找发现解决 bug 和漏洞
+    以及错误」。
+
+    这条和自检的区别：自检是「代码自己看自己」，诊断是「从结果反推代码」——
+    后者能抓到静态检查永远看不出来的问题（比如参数被忽略、分支没走到）。
+    """
+    task = str(task or "").strip()
+    if not task:
+        return {"ok": False, "error": "要告诉我「做的是什么任务」"}
+    prompt = """用户交给我一个任务，结果没达到预期。请判断**是不是代码的问题**，以及问题在哪。
+
+## 任务
+%s
+
+## 预期效果
+%s
+
+## 实际结果
+%s
+
+## 证据（日志 / 数值 / 现象）
+%s
+
+## 项目里真实存在的文件（suspects.file 和 actions.files 只能从这里选，不许编）
+%s
+
+## 你要判断的
+1. 这更可能是**代码 bug**、还是参数/数据/环境/需求理解的问题？给出你的置信度。
+2. 如果是代码问题：最可能出问题的文件 + 函数 + 原因（越具体越好）。
+3. 怎么用最小的验证确认你的判断（说清看什么数值 / 跑什么）。
+4. 要改的话，给出最小修复动作（改哪个文件、改成什么）。
+
+## 输出（只输出 JSON，不要解释）
+{"is_code_issue": true/false,
+ "confidence": 0.0~1.0,
+ "reason": "一句话结论",
+ "suspects": [{"file":"backend/xxx.py","func":"函数名","why":"为什么怀疑这里"}],
+ "checks": ["验证方法1","验证方法2"],
+ "actions": [{"title":"...","detail":"...","risk":"low|mid|high","files":["backend/xxx.py"]}],
+ "summary":"给用户看的一段话"}
+""" % (task, expected or "（未说明）", actual or "（未说明）",
+       evidence or "（无）", _catalog_text())
+
+    txt, err = _llm_text(prompt, max_tokens=2600, temperature=0.3)
+    if err:
+        return {"ok": False, "error": err}
+    data = _parse_json(txt)
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "模型没给出合法 JSON", "raw": (txt or "")[:500]}
+
+    actions = []
+    for a in data.get("actions") or []:
+        if not isinstance(a, dict) or not str(a.get("title") or "").strip():
+            continue
+        files = [_norm_rel(f) for f in (a.get("files") or []) if isinstance(f, str)]
+        files = _keep_real_files([f for f in files if f])
+        if not files:
+            continue                      # 指向不存在的文件 → 没法执行，丢掉
+        actions.append({"title": str(a["title"])[:120],
+                        "detail": str(a.get("detail") or "")[:900],
+                        "risk": str(a.get("risk") or "mid").lower(),
+                        "files": files[:_MAX_FILES_PER_ACTION]})
+
+    real = set(_file_catalog())
+    suspects = [s for s in (data.get("suspects") or [])
+                if isinstance(s, dict) and _norm_rel(s.get("file") or "") in real]
+
+    plan = None
+    if create_plan and actions:
+        plan = _make_plan(
+            trigger="diagnose",
+            summary=str(data.get("summary") or data.get("reason") or "")[:200],
+            actions=actions,
+            extra={"diagnose": {"task": task[:300], "expected": expected[:300],
+                                "actual": actual[:300],
+                                "is_code_issue": bool(data.get("is_code_issue")),
+                                "confidence": data.get("confidence"),
+                                "suspects": suspects,
+                                "checks": data.get("checks") or []}})
+
+    out = {"ok": True,
+           "is_code_issue": bool(data.get("is_code_issue")),
+           "confidence": data.get("confidence"),
+           "reason": str(data.get("reason") or ""),
+           "suspects": suspects,
+           "checks": data.get("checks") or [],
+           "summary": str(data.get("summary") or ""),
+           "plan": plan}
+    if plan and auto_fix:
+        out["auto"] = auto_approve_and_execute(plan["id"])
+        out["need_restart"] = bool((out.get("auto") or {}).get("need_restart"))
+    return out
+
+
 # ---------------------------------------------------------------- 汇总
 
 def stats():
@@ -844,12 +1762,18 @@ def overview():
             elif a.get("status") == "approved":
                 approved += 1
     sig = load_signals().get("items", [])
+    try:
+        _last_audit = (audit_overview().get("latest") or None)
+    except Exception:                                   # noqa: BLE001
+        _last_audit = None
     return {
         "ok": True,
         "latest": latest,
         "pending": pending,
         "approved_waiting": approved,
         "signals": len(sig),
+        "settings": load_settings(),
+        "audit": _last_audit,
         "stats": stats(),
         "history": [{"id": p.get("id"), "ts": p.get("ts"), "summary": p.get("summary"),
                      "trigger": p.get("trigger"),

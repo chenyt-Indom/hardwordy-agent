@@ -2025,7 +2025,8 @@ def selfiter_reflect(body: dict):
     try:
         return _si.reflect(trigger=str(b.get("trigger") or "manual"),
                            use_web=bool(b.get("use_web", True)),
-                           focus=str(b.get("focus") or ""))
+                           focus=str(b.get("focus") or ""),
+                           auto_execute=b.get("auto_execute"))
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
 
@@ -2081,6 +2082,131 @@ def selfiter_signal(body: dict):
     b = body or {}
     try:
         return _si.add_signal(b.get("user"), b.get("assistant"), b.get("meta"))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfiter/settings")
+def selfiter_settings_get():
+    """读设置（信任模式 / 自动自检 / 诊断开关）。"""
+    from . import self_iterate as _si
+    try:
+        return _si.get_settings()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/settings")
+def selfiter_settings_set(body: dict):
+    """改设置。只接受白名单字段：trust_mode / audit_after_change / audit_daily /
+    deep_audit / diagnose_on_fail / max_auto_actions / auto_restart。"""
+    from . import self_iterate as _si
+    b = dict(body or {})
+    try:
+        return _si.set_settings(**{k: b[k] for k in b
+                                   if k in _si._DEFAULT_SETTINGS})
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/audit")
+def selfiter_audit(body: dict):
+    """跑一次代码自检。deep=true 时再让 LLM 审一遍（费 token）。
+
+    2026-11-15 用户要求：智能体要能主动检查自己的代码，排除语法 / 调用 /
+    逻辑漏洞；信任模式下发现问题直接修。
+    """
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        s = _si.load_settings()
+        auto = b.get("auto_fix")
+        if auto is None:
+            auto = bool(s.get("trust_mode"))
+        return _si.run_audit(deep=bool(b.get("deep", s.get("deep_audit"))),
+                             source=str(b.get("source") or "manual"),
+                             create_plan=bool(b.get("create_plan", True)),
+                             auto_fix=bool(auto))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfiter/audit_overview")
+def selfiter_audit_overview():
+    """最近几次自检的摘要 + 设置，给前端抽屉展示。"""
+    from . import self_iterate as _si
+    try:
+        return _si.audit_overview()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/diagnose")
+def selfiter_diagnose(body: dict):
+    """任务结果没达到预设效果时，判断「是不是代码问题」。
+
+    body: task / expected / actual / evidence / auto_fix
+    """
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        s = _si.load_settings()
+        auto = b.get("auto_fix")
+        if auto is None:
+            auto = bool(s.get("trust_mode"))
+        return _si.diagnose(task=str(b.get("task") or ""),
+                            expected=str(b.get("expected") or ""),
+                            actual=str(b.get("actual") or ""),
+                            evidence=str(b.get("evidence") or ""),
+                            auto_fix=bool(auto),
+                            create_plan=bool(b.get("create_plan", True)))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------- 体验评估
+@app.get("/api/selfiter/experience")
+def selfiter_experience():
+    """体验评估汇总：均分、趋势、反复摩擦点、待做改进。"""
+    from . import self_iterate as _si
+    try:
+        return _si.experience_summary()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/evaluate")
+def selfiter_evaluate(body: dict):
+    """评估最近几轮交流。
+
+    body: limit=10 / use_llm=True / improve=False（True=不达标就主动想办法改）
+    """
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        limit = int(b.get("limit") or 10)
+    except (TypeError, ValueError):
+        limit = 10
+    use_llm = b.get("use_llm")
+    use_llm = True if use_llm is None else bool(use_llm)
+    try:
+        if b.get("improve"):
+            return _si.evaluate_and_improve(limit=limit, use_llm=use_llm,
+                                            trigger=str(b.get("trigger") or "manual"),
+                                            auto_improve=b.get("auto_improve"))
+        return _si.evaluate(limit=limit, use_llm=use_llm,
+                            trigger=str(b.get("trigger") or "manual"))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/experience/clear")
+def selfiter_experience_clear(body: dict):
+    """清空体验评估记录（只清评估结果，不动对话素材）。"""
+    from . import self_iterate as _si
+    try:
+        _si.save_experience({"items": []})
+        return {"ok": True}
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
 
@@ -6686,50 +6812,7 @@ _DS_SEEN = {"has_key": None, "at": ""}
 # 目的只有一个：**无人值守的定时任务**也能用云端模型。
 # 用户在前端点「保存并校验」时顺手存一份到本机（data/secrets.json，权限 600）。
 # 对外接口一律只回布尔，绝不回显 Key 本身。
-@app.get("/api/secret/status")
-def secret_status():
-    from . import keyvault
-    return keyvault.status()
-
-
-@app.post("/api/secret/save")
-def secret_save(body: dict):
-    from . import keyvault
-    return keyvault.set_key(str((body or {}).get("key") or ""))
-
-
-@app.post("/api/secret/clear")
-def secret_clear():
-    from . import keyvault
-    return keyvault.clear()
-
-
-# ---------------- 本机保管 Key（2026-11-09）----------------
-# 目的只有一个：**无人值守的定时任务**也能用云端模型。
-# 用户在前端点「保存并校验」时顺手存一份到本机（data/secrets.json，权限 600）。
-# 对外接口一律只回布尔，绝不回显 Key 本身。
-@app.get("/api/secret/status")
-def secret_status():
-    from . import keyvault
-    return keyvault.status()
-
-
-@app.post("/api/secret/save")
-def secret_save(body: dict):
-    from . import keyvault
-    return keyvault.set_key(str((body or {}).get("key") or ""))
-
-
-@app.post("/api/secret/clear")
-def secret_clear():
-    from . import keyvault
-    return keyvault.clear()
-
-
-# ---------------- 本机保管 Key（2026-11-09）----------------
-# 目的只有一个：**无人值守的定时任务**也能用云端模型。
-# 用户在前端点「保存并校验」时顺手存一份到本机（data/secrets.json，权限 600）。
-# 对外接口一律只回布尔，绝不回显 Key 本身。
+# 2026-11-15 代码自检发现：这三组路由曾被复制粘贴了三遍，删掉多余的，只留这一份。
 @app.get("/api/secret/status")
 def secret_status():
     from . import keyvault

@@ -1460,6 +1460,61 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
         {
             "type": "function",
             "function": {
+                "name": "self_evaluate",
+                "description": "评估**最近几轮交流的体验**：任务完成度、过程效率、用户情绪（哪怕闲聊也能从语气/追问/纠错里读出来）、反复出现的摩擦点，并给出下次的具体改法。\n什么时候用：① 用户说「效果不好 / 太繁琐 / 又这样」；② 一个任务刚收尾想知道做得怎么样；③ 用户反复提同一个需求（说明上一轮没交付）。\n⚠️ 只评估**还没评过**的轮次，重复调用会提示「都已评估过」。\n约 10~20 秒（要走一次 LLM）；use_llm=false 则 1 秒内只跑启发式打分。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "评估最近几轮，默认 10，最多 30"},
+                        "improve": {"type": "boolean",
+                                    "description": "true=评分不达标时直接想改法并生成改进动作（信任模式下会自动改代码）；默认 false 只评估"},
+                        "use_llm": {"type": "boolean",
+                                    "description": "false=只跑启发式打分（不花 token、1 秒内）；默认 true"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "self_audit",
+                "description": "检查**我自己的代码**有没有问题：语法错误、跨模块调用不存在的函数、前端调了不存在的路由、裸 except 吞异常、同名函数重复定义。\n什么时候用：① 用户说「检查一下你自己的代码 / 有没有 bug」；② 某个功能反复不生效、怀疑是代码问题；③ 改完代码想确认没改坏。\n约 5~15 秒（扫 70+ 个 py 文件和全部 js）。\n信任模式下 auto_fix=true 会直接改（备份 + 语法校验 + 失败自动回滚）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "deep": {"type": "boolean",
+                                 "description": "true=再让 LLM 审一遍静态检查结果、判断哪些真该修（多花 10~20 秒和 token）；默认 false"},
+                        "auto_fix": {"type": "boolean",
+                                     "description": "true=发现问题直接修（只在信任模式下有效）；默认 false，只报告不动手"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "self_diagnose",
+                "description": "任务结果**没达到预期**时，判断「是不是我的代码有问题」。从结果反推代码，能抓到静态检查看不出的问题（参数被忽略、分支没走到、掩码没盖住等）。\n什么时候用：用户说「效果不对 / 还是不行 / 没解决」，而你已经调过参数还不行时——先用它判断该不该往代码上查，别再瞎调参数。\n它会返回：是不是代码问题、置信度、可疑的文件+函数、怎么验证、以及最小修复动作。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": {"type": "string", "description": "做的是什么任务（必填）"},
+                        "expected": {"type": "string", "description": "预期效果"},
+                        "actual": {"type": "string", "description": "实际结果"},
+                        "evidence": {"type": "string",
+                                     "description": "证据：日志片段、数值指标、用户的原话"},
+                        "auto_fix": {"type": "boolean",
+                                     "description": "true=信任模式下直接修；默认 false"},
+                    },
+                    "required": ["task"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "search_memory",
                 "description": "检索我已拥有的长期记忆和过往对话，把最相关的信息读出来，以便回答用户（例如“我之前想让你……”“你还记得……吗”）。",
                 "parameters": {
@@ -2741,6 +2796,12 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
         return _do_append_file(arguments)
     if name == "remember":
         return _do_remember(arguments, context)
+    if name == "self_audit":
+        return _do_self_audit(arguments)
+    if name == "self_diagnose":
+        return _do_self_diagnose(arguments)
+    if name == "self_evaluate":
+        return _do_self_evaluate(arguments)
     if name == "search_memory":
         return _do_search_memory(arguments)
     if name == "search_knowledge":
@@ -2758,6 +2819,159 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
     if name == "web_search":
         return _do_web_search(arguments, ui_events)
     return f"[未知工具] {name}"
+
+
+# ---------- 自我迭代：代码自检 / 不达标诊断 ----------
+def _do_self_audit(arguments):
+    """跑一遍代码自检，把结果整理成模型能直接读的文本。"""
+    from . import self_iterate as _si
+    a = arguments or {}
+    s = _si.load_settings()
+    auto = bool(a.get("auto_fix")) and bool(s.get("trust_mode"))
+    try:
+        r = _si.run_audit(deep=bool(a.get("deep")), source="tool",
+                          create_plan=True, auto_fix=auto)
+    except Exception as e:                              # noqa: BLE001
+        return "自检失败：%s: %s" % (type(e).__name__, e)
+    if not r.get("ok"):
+        return "自检失败：%s" % r.get("error")
+    res = r.get("audit") or {}
+    cnt = res.get("counts") or {}
+    lines = ["代码自检完成：扫了 %s 个 py + %s 个 js，用时 %s 秒。"
+             % (res.get("files"), res.get("js_files"), res.get("seconds")),
+             "发现 %s 处：high %s / mid %s / info %s"
+             % (res.get("total"), cnt.get("high"), cnt.get("mid"), cnt.get("info"))]
+    fs = [f for f in (r.get("findings") or []) if f.get("level") in ("high", "mid")]
+    if fs:
+        lines.append("\n**需要处理的：**")
+        for f in fs[:12]:
+            lines.append("- [%s] %s:%d %s —— %s"
+                         % (f["level"], f["file"], f["line"], f["kind"], f["msg"]))
+    else:
+        lines.append("没有 high / mid 级问题（info 级的静默 except 是历史遗留，不急）。")
+    if r.get("llm_summary"):
+        lines.append("\nLLM 深度审查：%s" % r["llm_summary"])
+    auto_r = r.get("auto") or {}
+    if auto_r:
+        lines.append("\n信任模式：已自动执行 %s/%s 条。"
+                     % (auto_r.get("done"), auto_r.get("total")))
+        if auto_r.get("need_restart"):
+            lines.append("⚠️ 改了代码，需要重启后端才生效。")
+    elif (r.get("plan") or {}).get("actions"):
+        lines.append("\n已整理成 %d 条待办，等用户批准。"
+                     % len(r["plan"]["actions"]))
+    return "\n".join(lines)
+
+
+def _do_self_evaluate(arguments):
+    """评估最近几轮交流的体验，整理成模型能直接读的文本。"""
+    from . import self_iterate as _si
+    a = arguments or {}
+    try:
+        limit = int(a.get("limit") or 10)
+    except (TypeError, ValueError):
+        limit = 10
+    use_llm = a.get("use_llm")
+    use_llm = True if use_llm is None else bool(use_llm)
+    improve = bool(a.get("improve"))
+    s = _si.load_settings()
+    try:
+        if improve:
+            r = _si.evaluate_and_improve(limit=limit, use_llm=use_llm, trigger="tool",
+                                         auto_improve=bool(s.get("trust_mode")))
+        else:
+            r = _si.evaluate(limit=limit, use_llm=use_llm, trigger="tool")
+    except Exception as e:                              # noqa: BLE001
+        return "评估失败：%s: %s" % (type(e).__name__, e)
+    if r.get("skipped"):
+        return "评估跳过：%s" % (r.get("reason") or r.get("error") or "最近没有新对话可评")
+    if not r.get("ok"):
+        return "评估失败：%s" % r.get("error")
+    rec = r.get("record") or {}
+    sm = r.get("summary") or {}
+    lines = ["体验评估完成：评了最近 %s 轮。" % rec.get("n"),
+             "完成度均分 %s / 10，效率均分 %s / 10（趋势 %s）"
+             % (rec.get("avg_completion"), rec.get("avg_efficiency"),
+                sm.get("trend") or "样本不足")]
+    if rec.get("overall"):
+        lines.append("整体判断：%s" % rec["overall"])
+    low = [t for t in (rec.get("turns") or [])
+           if isinstance(t.get("completion"), (int, float)) and t["completion"] < 6]
+    if low:
+        lines.append("\n**做得不好的轮次（<6 分）：**")
+        for t in low[:5]:
+            lines.append("- 第%s轮「%s」完成%s/效率%s：问题 %s；改法 %s"
+                         % (t.get("i"), str(t.get("task"))[:30], t.get("completion"),
+                            t.get("efficiency"), t.get("problem") or "—",
+                            t.get("fix") or "—"))
+    fr = sm.get("frictions") or []
+    if fr:
+        lines.append("\n**反复出现的摩擦点：**")
+        for f in fr[:6]:
+            lines.append("- %s ×%s：%s → %s"
+                         % (f.get("tag"), f.get("count"), f.get("detail") or "",
+                            f.get("suggestion") or ""))
+    if improve:
+        if r.get("need_improve"):
+            acts = ((r.get("improve") or {}).get("plan") or {}).get("actions") or []
+            lines.append("\n判定**需要改进**：%s" % r.get("reason"))
+            lines.append("已整理 %d 条改进动作%s。"
+                         % (len(acts),
+                            "（信任模式已自动执行）" if s.get("trust_mode")
+                            else "，等用户批准"))
+            if r.get("need_restart"):
+                lines.append("⚠️ 改了代码，需要重启后端才生效。")
+        else:
+            lines.append("\n判定暂时不需要专门改进。")
+    return "\n".join(lines)
+
+
+def _do_self_diagnose(arguments):
+    """任务不达标 → 判断是不是代码问题。"""
+    from . import self_iterate as _si
+    a = arguments or {}
+    task = str(a.get("task") or "").strip()
+    if not task:
+        return "要告诉我「做的是什么任务」。"
+    s = _si.load_settings()
+    auto = bool(a.get("auto_fix")) and bool(s.get("trust_mode"))
+    try:
+        r = _si.diagnose(task=task,
+                         expected=str(a.get("expected") or ""),
+                         actual=str(a.get("actual") or ""),
+                         evidence=str(a.get("evidence") or ""),
+                         auto_fix=auto, create_plan=True)
+    except Exception as e:                              # noqa: BLE001
+        return "诊断失败：%s: %s" % (type(e).__name__, e)
+    if not r.get("ok"):
+        return "诊断失败：%s" % r.get("error")
+    lines = ["诊断结论：%s（置信度 %s）"
+             % ("**像是代码问题**" if r.get("is_code_issue") else "不太像代码问题",
+                r.get("confidence")),
+             "理由：%s" % (r.get("reason") or "（无）")]
+    sus = r.get("suspects") or []
+    if sus:
+        lines.append("\n**可疑位置：**")
+        for x in sus[:4]:
+            lines.append("- %s :: %s —— %s"
+                         % (x.get("file"), x.get("func"), x.get("why")))
+    ck = r.get("checks") or []
+    if ck:
+        lines.append("\n**怎么验证：**")
+        for c in ck[:4]:
+            lines.append("- %s" % c)
+    auto_r = r.get("auto") or {}
+    if auto_r:
+        lines.append("\n信任模式：已自动修 %s/%s 条。"
+                     % (auto_r.get("done"), auto_r.get("total")))
+        if auto_r.get("need_restart"):
+            lines.append("⚠️ 改了代码，需要重启后端才生效。")
+    elif (r.get("plan") or {}).get("actions"):
+        lines.append("\n已生成 %d 条修复动作，等用户批准。"
+                     % len(r["plan"]["actions"]))
+    if r.get("summary"):
+        lines.append("\n给用户看的结论：%s" % r["summary"])
+    return "\n".join(lines)
 
 
 # ---------- 联网搜索 ----------

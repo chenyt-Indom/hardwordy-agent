@@ -5374,9 +5374,65 @@ html[data-theme="light"] select.pill-select option {
   border-radius: 10px; padding: 2px 8px;
 }
 .iter-chip b { color: #2b6cb0; }
+/* ---- 体验评估区块（2026-11-15 追加） ---- */
+.iter-exp { padding: 0 16px; flex: 0 0 auto; }
+.iter-exp .iter-sec { margin-top: 10px; }
+.iter-exp-empty {
+  font-size: 12.5px; color: var(--txt2, #7a8494); line-height: 1.6;
+  background: var(--bg2, #fafbfc); border: 1px dashed var(--line, #e6e9ee);
+  border-radius: 8px; padding: 10px 12px; margin-top: 10px;
+}
+.iter-exp-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.iter-exp-sub {
+  font-size: 12px; font-weight: 600; color: var(--txt2, #5b6472);
+  margin: 10px 0 4px;
+}
+.iter-sc.good { color: #2f855a; }
+.iter-sc.mid { color: #b7791f; }
+.iter-sc.bad { color: #c53030; }
+.iter-fix { color: #2b6cb0; }
+.iter-tag {
+  font-size: 11px; color: var(--txt2, #7a8494);
+  border: 1px solid var(--line, #e6e9ee); border-radius: 8px;
+  padding: 0 5px; margin-left: 4px;
+}
 .iter-bar {
   display: flex; gap: 8px; padding: 10px 16px;
   border-bottom: 1px solid var(--line, #f2f4f7); flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+/* 信任模式开关：一行放下，左边开关右边说明，窄屏自动换行 */
+.iter-trust {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 16px; flex: 0 0 auto;
+  border-bottom: 1px solid var(--line, #f2f4f7);
+  background: var(--bg2, #fafbfc);
+}
+.iter-sw { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.iter-sw input { width: 15px; height: 15px; cursor: pointer; margin: 0; }
+.iter-sw-t { font-size: 13px; font-weight: 600; color: var(--txt, #2d3748); }
+.iter-trust-hint { font-size: 12px; color: var(--txt2, #7a8494); }
+.iter-trust-hint.on { color: #b7791f; }
+/* 需要重启时的提示条 */
+.iter-restart {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 8px 16px 0; padding: 8px 12px; flex: 0 0 auto;
+  font-size: 12.5px; color: #7a4a00;
+  background: #fff8e6; border: 1px solid #f0d9a8; border-radius: 8px;
+}
+.iter-restart[hidden] { display: none; }
+/* 诊断表单：默认收起，点「🩺 诊断不达标」才展开 */
+.iter-diag {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  padding: 8px 16px; flex: 0 0 auto;
+  border-bottom: 1px solid var(--line, #f2f4f7);
+  background: var(--bg2, #fafbfc);
+}
+.iter-diag[hidden] { display: none; }
+.iter-diag input {
+  flex: 1 1 44%; min-width: 130px; font-size: 12.5px; padding: 6px 9px;
+  border: 1px solid var(--line, #dfe3e9); border-radius: 8px;
+  background: var(--bg, #fff); color: var(--txt, #2d3748);
 }
 .iter-focus {
   flex: 1; min-width: 0; font-size: 13px; padding: 6px 10px;

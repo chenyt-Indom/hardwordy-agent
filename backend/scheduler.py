@@ -395,6 +395,158 @@ def _run_selfiter(job: dict) -> dict:
     return {"answer": answer, "model": "selfiter", "channel": "builtin", "session": sid}
 
 
+def _run_selfaudit(job: dict) -> dict:
+    """内置任务：每日代码自检（kind="selfaudit"）。
+
+    2026-11-15 用户要求：「智能体还要能主动且时不时检查自己的代码并且排除
+    自己代码中不合理且存在 bug 的地方」，并且「每天定时一次」。
+
+    和 _run_selfiter 一样做成内置分支：让模型自己"记得去自检"太不可靠。
+    信任模式开着时，发现问题直接修（用户明确要求免批准）。
+    """
+    from . import self_iterate as _si
+    s = _si.load_settings()
+    auto = bool(s.get("trust_mode"))
+    deep = bool(s.get("deep_audit") or str(job.get("focus") or "") == "deep")
+    try:
+        r = _si.run_audit(deep=deep, source="daily", create_plan=True, auto_fix=auto)
+    except Exception as e:                              # noqa: BLE001
+        raise RuntimeError("代码自检失败：%s: %s" % (type(e).__name__, e))
+    if not r.get("ok"):
+        raise RuntimeError("代码自检失败：%s" % r.get("error"))
+
+    a = r.get("audit") or {}
+    cnt = a.get("counts") or {}
+    lines = ["【每日代码自检】%s" % (a.get("ts") or ""), ""]
+    lines.append("- 扫了 %s 个 py + %s 个 js，用时 %s 秒"
+                 % (a.get("files"), a.get("js_files"), a.get("seconds")))
+    lines.append("- 发现 %s 处：high %s / mid %s / info %s"
+                 % (a.get("total"), cnt.get("high"), cnt.get("mid"), cnt.get("info")))
+    acts = (r.get("plan") or {}).get("actions") or []
+    lines.append("- 整理成 %d 条待办" % len(acts))
+    auto_r = r.get("auto") or {}
+    if auto_r:
+        lines.append("- 信任模式：自动执行 %s/%s 条"
+                     % (auto_r.get("done"), auto_r.get("total")))
+        if auto_r.get("need_restart"):
+            lines.append("- ⚠️ 改了代码，需要点「立即重启」才生效")
+    elif acts and not auto:
+        lines.append("- 等你批准（信任模式没开）")
+    answer = "\n".join(lines)
+
+    sid = str(job.get("session") or "")
+    if not sid:
+        try:
+            sid = sessions.ensure_default().get("id") or ""
+        except Exception:                               # noqa: BLE001
+            sid = ""
+    try:
+        old = sessions.get_messages(sid) or []
+        stamp = _now()
+        old.append({"role": "user", "ts": stamp,
+                    "content": "【定时任务·%s】每日代码自检" % (job.get("name") or "代码自检")})
+        old.append({"role": "assistant", "ts": stamp, "content": answer})
+        sessions.save_messages(sid, old)
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        pth = os.path.join(_logs_dir(), "%s_%s.md" % (job.get("id"),
+                                                      time.strftime("%Y%m%d_%H%M%S")))
+        with open(pth, "w", encoding="utf-8") as f:
+            f.write("# %s\n\n- 时间：%s\n- 类型：每日代码自检\n\n## 结果\n\n%s\n"
+                    % (job.get("name") or "", _now(), answer))
+    except Exception:                                   # noqa: BLE001
+        pass
+    return {"answer": answer, "model": "selfaudit", "channel": "builtin", "session": sid}
+
+
+def _run_selfexp(job: dict) -> dict:
+    """内置任务：定时体验评估（kind="selfexp"）。
+
+    2026-11-15 用户要求：「主动在与用户交流中评估出任务的完成效果，
+    如果评分不好或过程繁琐就要思考怎么解决」，并且「时不时」做。
+
+    做成内置分支的理由同 selfiter/selfaudit：让模型自己记得去评估太不可靠。
+    """
+    from . import self_iterate as _si
+    s = _si.load_settings()
+    if not s.get("evaluate_periodic", True):
+        return {"answer": "【体验评估】已在设置里关闭定时评估，本次跳过。",
+                "model": "selfexp", "channel": "builtin",
+                "session": str(job.get("session") or "")}
+    try:
+        r = _si.evaluate_and_improve(limit=12, use_llm=True, trigger="periodic",
+                                     auto_improve=bool(s.get("trust_mode")))
+    except Exception as e:                              # noqa: BLE001
+        raise RuntimeError("体验评估失败：%s: %s" % (type(e).__name__, e))
+    if r.get("skipped"):
+        return {"answer": "【体验评估】%s" % (r.get("reason") or "最近没有新对话可评，跳过。"),
+                "model": "selfexp", "channel": "builtin",
+                "session": str(job.get("session") or "")}
+    if not r.get("ok"):
+        raise RuntimeError("体验评估失败：%s" % r.get("error"))
+
+    rec = r.get("record") or {}
+    sm = r.get("summary") or {}
+    lines = ["【定时体验评估】%s" % (rec.get("ts") or ""), ""]
+    lines.append("- 评了最近 %s 轮" % rec.get("n"))
+    lines.append("- 完成度均分 %s / 10，效率均分 %s / 10，趋势：%s"
+                 % (rec.get("avg_completion"), rec.get("avg_efficiency"),
+                    sm.get("trend") or "样本不足"))
+    if rec.get("overall"):
+        lines.append("- 整体判断：%s" % rec["overall"])
+    fr = sm.get("frictions") or []
+    if fr:
+        lines.append("- 摩擦点（按出现次数）：")
+        for f in fr[:5]:
+            lines.append("  · %s ×%s — %s" % (f.get("tag"), f.get("count"),
+                                              f.get("suggestion") or f.get("detail") or ""))
+    if r.get("need_improve"):
+        lines.append("- ⚠️ 判定为「需要改进」：%s" % r.get("reason"))
+        imp = r.get("improve") or {}
+        acts = (imp.get("plan") or {}).get("actions") or []
+        if acts:
+            lines.append("- 已整理 %d 条改进动作" % len(acts))
+        auto_r = imp.get("auto") or {}
+        if auto_r:
+            lines.append("- 信任模式：自动执行 %s/%s 条"
+                         % (auto_r.get("done"), auto_r.get("total")))
+            if auto_r.get("need_restart"):
+                lines.append("- ⚠️ 改了代码，需要点「立即重启」才生效")
+        elif acts:
+            lines.append("- 等你批准（信任模式没开）")
+        elif not imp.get("ok"):
+            lines.append("- 反思没跑成：%s" % imp.get("error"))
+    else:
+        lines.append("- 判定为「不需要专门改进」")
+    answer = "\n".join(lines)
+
+    sid = str(job.get("session") or "")
+    if not sid:
+        try:
+            sid = sessions.ensure_default().get("id") or ""
+        except Exception:                               # noqa: BLE001
+            sid = ""
+    try:
+        old = sessions.get_messages(sid) or []
+        stamp = _now()
+        old.append({"role": "user", "ts": stamp,
+                    "content": "【定时任务·%s】体验评估" % (job.get("name") or "体验评估")})
+        old.append({"role": "assistant", "ts": stamp, "content": answer})
+        sessions.save_messages(sid, old)
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        pth = os.path.join(_logs_dir(), "%s_%s.md" % (job.get("id"),
+                                                      time.strftime("%Y%m%d_%H%M%S")))
+        with open(pth, "w", encoding="utf-8") as f:
+            f.write("# %s\n\n- 时间：%s\n- 类型：定时体验评估\n\n## 结果\n\n%s\n"
+                    % (job.get("name") or "", _now(), answer))
+    except Exception:                                   # noqa: BLE001
+        pass
+    return {"answer": answer, "model": "selfexp", "channel": "builtin", "session": sid}
+
+
 def _run_once(job: dict) -> dict:
     """真的跑一次：自动挑通道（本机 / 云端）+ 工具循环，结果写回会话。"""
     from . import tools as T
@@ -402,6 +554,12 @@ def _run_once(job: dict) -> dict:
     # ★ 内置任务（每日自我反思）—— 不走 LLM 工具循环
     if str(job.get("kind") or "") == "selfiter":
         return _run_selfiter(job)
+    # ★ 内置任务（每日代码自检）—— 同上
+    if str(job.get("kind") or "") == "selfaudit":
+        return _run_selfaudit(job)
+    # ★ 内置任务（定时体验评估）—— 同上
+    if str(job.get("kind") or "") == "selfexp":
+        return _run_selfexp(job)
 
     cfg = config.load_config() or {}
     prompt = str(job.get("prompt") or "").strip()
