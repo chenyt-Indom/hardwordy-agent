@@ -3064,13 +3064,18 @@
     }
 
     let progHideTimer = 0;
+    // 「停止生成」用的两个状态：
+    //   curJobId —— 当前在跑的云端任务，停止时要靠它告诉后端停哪一个；
+    //   stopReq  —— 已经点过停止，避免连点把请求发好几遍。
+    let curJobId = null;
+    let stopReq = false;
 
     function progShow(on) {
       const box = $("#av2Prog");
       if (!box) return;
       if (on) {
         clearTimeout(progHideTimer);
-        box.classList.remove("done", "fail");
+        box.classList.remove("done", "fail", "stop");
         box.hidden = false;
       } else {
         box.hidden = true;
@@ -3094,6 +3099,8 @@
       fill.style.width = pct.toFixed(1) + "%";
       box.classList.toggle("done", j.status === "done");
       box.classList.toggle("fail", j.status === "failed");
+      // 停止不是失败：用中性的 stop 样式（灰），不要标红吓人
+      box.classList.toggle("stop", j.status === "cancelled");
       const bits = [];
       if (j.msg) bits.push(j.msg);
       bits.push((j.pct_estimated === false ? "" : "≈") + Math.round(pct) + "%");
@@ -3111,6 +3118,8 @@
         bits.push("完成");
       } else if (j.status === "failed") {
         bits.push("失败");
+      } else if (j.status === "cancelled") {
+        bits.push("已停止");
       } else if (hasEta && j.eta === 0) {
         // 估的时间已经用完了还没结束：明确告诉用户「还在跑、只是比预计慢」，
         // 这正是「查看状态是否正常」要看的那个信号
@@ -3174,14 +3183,36 @@
     }
 
     $("#av2Go").onclick = async () => {
-      if (busy) return;
+      const btn = $("#av2Go");
+      // 生成中再点一下这个按钮 = 停止生成。
+      // 为什么复用同一个按钮而不是加新控件：侧栏只有 300 来像素宽，
+      // 再加一个按钮会把音色下拉框挤没（之前踩过这个坑）。
+      if (busy) {
+        if (!curJobId || stopReq) return;
+        stopReq = true;
+        const oldTxt = btn.textContent;
+        btn.textContent = "停止中…";
+        try {
+          await api("/api/avatar2/cloud/cancel/" + encodeURIComponent(curJobId),
+                    { method: "POST" });
+          say("已发出停止请求，正在收尾…");
+        } catch (e) {
+          stopReq = false;
+          btn.textContent = oldTxt;
+          say("停止失败：" + (e.message || e), "err");
+        }
+        return;
+      }
       const text = (textIn.value || "").trim();
       if (!text) { say("先写点要让数字人说的话", "err"); return; }
-      const btn = $("#av2Go");
       const old = btn.textContent;
       busy = true;
-      btn.disabled = true;
-      btn.textContent = "生成中…";
+      curJobId = null;
+      stopReq = false;
+      // ⚠ 生成中这个按钮**不能** disabled —— 它就是停止按钮
+      btn.disabled = false;
+      btn.classList.add("danger");
+      btn.textContent = "⏹ 停止";
       // 配音（TTS）也要几秒，这一步就该出现进度条，别让用户干等
       progShow(true);
       progSet({ status: "running", msg: "正在配音（TTS）…", pct: 0, eta: null });
@@ -3211,6 +3242,8 @@
           throw err;
         }
         const jid = r0.job_id;
+        curJobId = jid;                 // 停止按钮靠它知道停哪一个
+        stopReq = false;
         let last = null;
         let lastMsg = "";
         progShow(true);
@@ -3227,10 +3260,14 @@
           // 同一个提示只说一次，否则每 2 秒往提示区堆一行
           if (j.msg && j.msg !== lastMsg) { lastMsg = j.msg; say("☁️ " + j.msg); }
           if (j.status === "done") { last = j.result || j; break; }
+          if (j.status === "cancelled") {
+            // 停止不是失败，走单独的 cancelled 标记，提示区不标红
+            throw Object.assign(new Error(j.error || "已停止生成"), { cancelled: true });
+          }
           if (j.status === "failed") {
             throw new Error(j.error || j.msg || "生成失败");
           }
-          btn.textContent = "生成中 " + Math.round(Number(j.pct) || 0) + "%";
+          btn.textContent = "⏹ 停止 " + Math.round(Number(j.pct) || 0) + "%";
         }
         if (!last || !last.ok) throw new Error((last && last.error) || "生成超时（20 分钟）");
         const r = last;
@@ -3250,25 +3287,47 @@
         progHideSoon(4000);
       } catch (e) {
         let msg = e.message || String(e);
+        // 欠费（Arrearage）最容易误判：用户会以为 Key 坏了，一直去重拿 Key。
+        // 后端已把话翻成中文，这里只保证**别把链接截掉**。
+        const arrears = /Arrearage|good standing|欠费|billing\.console/.test(msg);
         if (e.needKey) {
           msg += "　→ 去 " + (e.keyUrl ||
             "https://help.aliyun.com/zh/model-studio/get-api-key") +
             " 申请一个（只要 Key，不需要业务空间 ID），填进「☁️ 云端口型配置」再试。";
           showCloudCfg(true);
         }
-        // 进度条留在原地标红、8 秒后收起。
+        // 进度条留在原地、8 秒后收起。
         // 不能跳回 0 —— 那看着像根本没开始跑（后端 _progress 也是这个原则）。
         const pb = $("#av2Prog");
         if (pb && !pb.hidden) {
-          pb.classList.add("fail");
           const pt = $("#av2ProgTxt");
-          if (pt) pt.textContent = "已中断 · " + msg.slice(0, 60);
-          progHideSoon(8000);
+          if (e.cancelled) {
+            pb.classList.remove("fail");
+            pb.classList.add("stop");
+            if (pt) pt.textContent = "已停止 · 临时文件已清理";
+            progHideSoon(4000);
+          } else {
+            pb.classList.add("fail");
+            // 原来固定截 60 字，正好把「欠费 + 充值链接」那段切掉，
+            // 用户只看到半句英文 Access denied（实测踩到）。
+            if (pt) {
+              pt.textContent = "已中断 · " +
+                (arrears ? "账号欠费，去控制台充值" : msg.slice(0, 60));
+            }
+            progHideSoon(8000);
+          }
         }
-        say("生成失败：" + msg, "err");
+        if (e.cancelled) {
+          say("已停止生成（已提交的那一段云端仍会跑完，后面的段不会再提交）");
+        } else {
+          say("生成失败：" + msg, "err");
+        }
       } finally {
         busy = false;
+        curJobId = null;
+        stopReq = false;
         btn.disabled = false;
+        btn.classList.remove("danger");
         btn.textContent = old;
       }
     };

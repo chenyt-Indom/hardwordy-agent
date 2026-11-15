@@ -212,6 +212,17 @@ def _friendly(code: int, text: str) -> str:
     一大串 JSON 不知道该干嘛。
     """
     t = text or ""
+    # 实测（2026-11-16）：提交任务时真连服务器拿到
+    #   HTTP 400 {"code":"Arrearage","message":"Access denied, please make sure
+    #   your account is in good standing."}
+    # 官方错误码文档：Arrearage = 账号欠费/余额不足/充值延迟，服务端拒绝一切调用。
+    # ⚠ 这个错**不是** Key 的问题，改代码也修不好 —— 只能让用户去充值。
+    #   所以提示必须点明「欠费」并给出充值地址，否则用户会一直去重拿 Key。
+    if "Arrearage" in t or "good standing" in t or "overdue-payment" in t:
+        return ("阿里云账号**欠费**了（Arrearage），不是 Key 的问题。"
+                "服务端因此拒绝了这次调用，充完值等几分钟就能恢复。"
+                "去「费用与成本」充值：https://billing.console.aliyun.com/ "
+                "（余额与账单：https://usercenter2.aliyun.com/finance/fund-management/overview）")
     if code == 401 or "InvalidApiKey" in t:
         return ("API Key 无效（401）。请到百炼控制台重新复制，"
                 "并确认是**华北2（北京）**地域的 Key —— 别的地域的 Key 调不了这个模型")
@@ -223,6 +234,20 @@ def _friendly(code: int, text: str) -> str:
     if "WorkspaceId" in t or "workspace" in t.lower():
         return "业务空间 ID 不对：请到百炼控制台 → 业务空间 复制，形如 llm-xxxxxxxx"
     return "HTTP %s：%s" % (code, t[:300])
+
+
+def _err_of(body) -> str:
+    """从错误响应里拼出「code + message」。
+
+    ⚠ 不能只取 message：百炼的欠费错是
+        {"code":"Arrearage","message":"Access denied, please make sure ..."}
+      只看 message 会丢掉 Arrearage 这个关键判据，就没法翻成「账号欠费」。
+    """
+    if not isinstance(body, dict):
+        return str(body)[:400]
+    code = str(body.get("code") or "").strip()
+    msg = str(body.get("message") or body.get("_raw") or "").strip()
+    return (code + " " + msg).strip()[:600]
 
 
 def _post(url: str, payload: dict, timeout: int = 60) -> dict:
@@ -242,9 +267,7 @@ def _post(url: str, payload: dict, timeout: int = 60) -> dict:
     except Exception:                                       # noqa: BLE001
         body = {"_raw": r.text[:600]}
     if r.status_code != 200:
-        msg = (body.get("message") or body.get("code")
-               or body.get("_raw") or "") if isinstance(body, dict) else ""
-        raise RuntimeError(_friendly(r.status_code, str(msg)))
+        raise RuntimeError(_friendly(r.status_code, _err_of(body)))
     return body if isinstance(body, dict) else {}
 
 
@@ -256,9 +279,7 @@ def _get(url: str, timeout: int = 60) -> dict:
     except Exception:                                       # noqa: BLE001
         body = {"_raw": r.text[:600]}
     if r.status_code != 200:
-        msg = (body.get("message") or body.get("code")
-               or body.get("_raw") or "") if isinstance(body, dict) else ""
-        raise RuntimeError(_friendly(r.status_code, str(msg)))
+        raise RuntimeError(_friendly(r.status_code, _err_of(body)))
     return body if isinstance(body, dict) else {}
 
 
@@ -336,11 +357,28 @@ def fetch(task_id: str) -> dict:
     }
 
 
-def wait(task_id: str, on_progress=None, timeout: float = POLL_TIMEOUT) -> dict:
-    """轮询到出结果。超时抛异常，由调用方决定怎么提示。"""
+class Cancelled(RuntimeError):
+    """用户点了「停止生成」。
+
+    单独一个类型，是为了和真正的失败区分开 —— 停止不算错误，
+    界面上不该报红「生成失败」，而应该显示「已停止」。
+    """
+
+
+def wait(task_id: str, on_progress=None, timeout: float = POLL_TIMEOUT,
+         cancel=None) -> dict:
+    """轮询到出结果。超时抛异常，由调用方决定怎么提示。
+
+    cancel：threading.Event，用户点「停止」时被 set。
+    每轮（2 秒）检查一次 —— 不额外起线程，代价可以忽略。
+    """
     t0 = time.time()
     last = ""
     while True:
+        if cancel is not None and cancel.is_set():
+            # 注意：已经提交到云端的这一段没法撤回（接口没有取消能力），
+            # 它会在阿里云那边自己跑完。我们只是不再等它、也不再下后面的段。
+            raise Cancelled("已停止生成")
         r = fetch(task_id)
         st = r["status"]
         if st and st != last:
@@ -488,10 +526,13 @@ def concat_videos(paths: list, out_path: str) -> str:
 
 # ---------------------------------------------------------------- 主流程
 def generate(image_path: str, audio_path: str, resolution: str = "",
-             on_progress=None, keep_tmp: bool = False) -> dict:
+             on_progress=None, keep_tmp: bool = False, cancel=None) -> dict:
     """一张图 + 一段音频 → 说话视频。
 
     长音频会切成多段分别生成再拼接，因为接口硬限制单次 <20 秒。
+
+    cancel：threading.Event。用户点「停止」后，会在**下一个检查点**退出：
+    每段开始前、每次轮询时各查一次，所以最多 2 秒响应。
     """
     c = _cfg()
     if not (c.get("api_key") or "").strip():
@@ -543,6 +584,10 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
         # 进度条据此现算 —— 云端本身不给百分比。
         outs = []
         for i, seg in enumerate(segs, 1):
+            # 每段开始前先看一眼：停了就**不再提交**后面的段 ——
+            # 云端按次计费，少提交一段就少花一段的钱。
+            if cancel is not None and cancel.is_set():
+                raise Cancelled("已停止生成（第 %d/%d 段未提交）" % (i, total))
             _sec = segs_sec[i - 1] if i - 1 < len(segs_sec) else 0.0
             _done = sum(segs_sec[:i - 1])
             _p({"stage": "segment", "index": i, "total": total,
@@ -557,7 +602,7 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
             _p({"stage": "segment", "index": i, "total": total,
                 "seg_sec": _sec, "seg_t0": _t0, "done_sec": _done,
                 "msg": "第 %d/%d 段：云端生成中" % (i, total), "task_id": tid})
-            r = wait(tid, on_progress=_p)
+            r = wait(tid, on_progress=_p, cancel=cancel)
             p = os.path.join(_tmpdir(), "seg_%s_%02d.mp4" % (uuid.uuid4().hex[:6], i))
             download(r["video_url"], p)
             tmp_files.append(p)
@@ -593,6 +638,12 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
             "resolution": (resolution or c.get("resolution") or "480P").upper(),
             "lipsync_label": "云端扩散模型口型（Wan2.2-S2V）",
         }
+    except Cancelled as e:
+        # 用户主动停止 —— 这不是错误，不要打 warning 日志，也不该报红
+        logger.info("云端生成被用户停止：%s", e)
+        return {"ok": False, "cancelled": True,
+                "error": str(e).strip() or "已停止生成",
+                "elapsed": round(time.time() - t0, 1)}
     except Exception as e:                                  # noqa: BLE001
         logger.warning("云端生成失败", exc_info=True)
         # 只回用户看得懂的那句，不把 "RuntimeError: " 前缀甩到界面上
@@ -716,7 +767,7 @@ def _progress(d: dict, now: float = None) -> dict:
     else:
         # 拿不到音频时长（ffprobe 失败）→ 退回按段数均分，不给 ETA（那会是瞎猜）
         out["pct"] = round(5.0 + (91.0 * (idx - 1) / total if total else 0), 1)
-    if st == "failed":
+    if st in ("failed", "cancelled"):
         out["eta"] = None
         out["pct_estimated"] = False
     return out
@@ -733,11 +784,35 @@ def job(jid: str) -> dict:
     return snap
 
 
+def cancel(jid: str) -> dict:
+    """停止一个正在生成的任务。
+
+    ⚠ 说清能力边界：**已经提交到云端的那一段撤不回来**（百炼没有取消
+    任务的接口），它会在阿里云那边自己跑完。我们能做的是：
+      · 立刻不再等它（2 秒内跳出轮询）；
+      · 不再提交后面的段 —— 云端按次计费，这一段省下来的就是真金白银；
+      · 已经下载到一半的产物不落盘、临时文件清理掉。
+    所以文案写「已停止」，不写「已取消云端任务」—— 不夸大。
+    """
+    with _JOB_LOCK:
+        d = _JOBS.get(jid)
+        if not d:
+            return {"ok": False, "error": "任务不存在或已过期"}
+        st = d.get("status") or ""
+        if st in ("done", "failed", "cancelled"):
+            return {"ok": False, "error": "任务已经结束（%s），不用停" % st}
+        ev = d.get("_cancel")
+    if ev is not None:
+        ev.set()
+    _job_set(jid, msg="正在停止…")
+    return {"ok": True, "job_id": jid, "msg": "已发送停止信号"}
+
+
 def _gc_jobs() -> None:
     now = time.time()
     with _JOB_LOCK:
         for k in [k for k, v in _JOBS.items()
-                  if v.get("status") in ("done", "failed")
+                  if v.get("status") in ("done", "failed", "cancelled")
                   and now - v.get("updated", now) > JOB_KEEP]:
             _JOBS.pop(k, None)
 
@@ -761,10 +836,13 @@ def generate_async(image_path: str, audio_path: str, resolution: str = "",
             "seg_sec": 0.0,         # 当前这段音频几秒
             "seg_t0": 0.0,          # 当前这段从什么时候开始算
             "factor": 0.0,          # 实测的「每秒音频要等几秒」，0 = 用默认
+            # 用户点「停止」时被 set。下划线开头 → job() 不会把它吐给前端。
+            "_cancel": threading.Event(),
         }
 
     def _run():
         _job_set(jid, status="running", msg="开始生成")
+        ev = _JOBS.get(jid, {}).get("_cancel")
 
         def _p(d):
             # ⚠ 只更新这次真的给了的字段。
@@ -785,11 +863,15 @@ def generate_async(image_path: str, audio_path: str, resolution: str = "",
 
         try:
             r = generate(image_path, audio_path, resolution=resolution,
-                         on_progress=_p, **kw)
+                         on_progress=_p, cancel=ev, **kw)
         except Exception as e:                              # noqa: BLE001
             logger.warning("后台生成异常", exc_info=True)
             r = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
-        if r.get("ok"):
+        if r.get("cancelled"):
+            # 用户主动停止 → status=cancelled，前端显示「已停止」而不是报红
+            _job_set(jid, status="cancelled", msg="已停止",
+                     result=r, error=r.get("error") or "已停止生成")
+        elif r.get("ok"):
             _job_set(jid, status="done", msg="完成", result=r, error="")
         else:
             _job_set(jid, status="failed", msg=r.get("error") or "生成失败",

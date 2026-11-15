@@ -5105,6 +5105,15 @@ html[data-theme="light"] select.pill-select option {
 .av2-prog.done .av2-prog-bar > i { background: #3fb950; }
 .av2-prog.fail .av2-prog-bar > i { background: #e06c75; }
 .av2-prog.fail .av2-prog-txt { color: #e06c75; }
+/* 已停止：中性灰，别用红色 —— 那是用户自己点的，不是出错 */
+.av2-prog.stop .av2-prog-bar > i { background: var(--muted); }
+.av2-prog.stop .av2-prog-txt { color: var(--muted); }
+/* 生成中「⏹ 停止」按钮：暖红，和平时的主色按钮区分开，
+   避免用户以为点它还是「生成」 */
+.btn.sm.danger {
+  background: #b4483f; border-color: #b4483f; color: #fff;
+}
+.btn.sm.danger:hover { background: #c9554b; border-color: #c9554b; }
 .av2-list { display: flex; flex-direction: column; gap: 6px; }
 .av2-item {
   display: flex; align-items: center; gap: 8px;

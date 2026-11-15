@@ -11280,9 +11280,20 @@ def avatar2_cloud_speak(body: dict):
 
 @app.get("/api/avatar2/cloud/job/{jid}")
 def avatar2_cloud_job(jid: str):
-    """查云端生成进度。返回 status=pending/running/done/failed + msg + 进度。"""
+    """查云端生成进度。返回 status=pending/running/done/failed/cancelled + 进度。"""
     from . import avatar_cloud as ac
     return ac.job(jid)
+
+
+@app.post("/api/avatar2/cloud/cancel/{jid}")
+def avatar2_cloud_cancel(jid: str):
+    """停止生成。
+
+    ⚠ 已提交到云端的那一段撤不回来（接口没有取消能力），但会立刻停止等待、
+    且**不再提交后面的段** —— 长文本切多段时，这一段省下的就是实际费用。
+    """
+    from . import avatar_cloud as ac
+    return ac.cancel(jid)
 
 
 @app.get("/api/avatar2/raw")
