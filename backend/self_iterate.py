@@ -45,6 +45,98 @@ _FORBIDDEN_PARTS = ("data/", "models/", "sessions/", "image_library/",
                     "secrets", ".env", ".git/", "__pycache__")
 
 _MAX_FILES_PER_ACTION = 3
+# ---- 运行状态（2026-11-15 用户要求）----
+# 用户原话：「我能不能看到他的状态，比如说显示『正在自动自迭代』」。
+# 反思是同步阻塞的（20~40 秒：抓网 + 论文评估 + LLM），以前中间只有一条静态
+# 提示，用户分不清是卡住还是在跑，后台定时触发时更是完全看不到。
+# 这里维护一份进程内的运行状态，前端每 1.5 秒拉一次，显示阶段 + 已用秒数。
+_RUN = {
+    "running": False,
+    "stage": "idle",
+    "detail": "",
+    "trigger": "",
+    "started": 0.0,
+    "ended": 0.0,
+    "plan_id": "",
+    "error": "",
+}
+_RUN_LOCK = threading.Lock()
+
+_STAGES = {
+    "fetch": "抓取技术动态（arXiv / GitHub / HN / 中文媒体）",
+    "paper": "论文入库 · 向量召回 · 四维评估",
+    "think": "模型思考中（读反思素材 → 出方案）",
+    "decompose": "拆解并列需求（已有/待建/本轮做）",
+    "plan": "整理改进方案",
+    "exec": "信任模式自动改代码",
+    "audit": "改完自动自检",
+    "done": "完成",
+    "error": "出错",
+    "idle": "空闲",
+}
+
+
+def run_status():
+    """给前端轮询：现在在做什么、已经跑了多久、上一轮什么结果。"""
+    with _RUN_LOCK:
+        d = dict(_RUN)
+    st, en = d.get("started") or 0.0, d.get("ended") or 0.0
+    if d.get("running") and st:
+        d["elapsed"] = round(time.time() - st, 1)
+    elif st and en:
+        d["elapsed"] = round(en - st, 1)
+    else:
+        d["elapsed"] = 0.0
+    d["stage_label"] = _STAGES.get(d.get("stage") or "", d.get("stage") or "")
+    # 开关类功能生效自证：最近一次自动执行时间 + 累计次数 + 最近结果。
+    # 用户反复追问「有没有在跑」，这里直接贴真实数据，不再靠猜。
+    try:
+        logs = list_actlog(limit=200)
+        auto_logs = [x for x in logs if x.get("auto")]
+        d["auto_total"] = len(auto_logs)
+        if auto_logs:
+            last = auto_logs[0]
+            d["auto_last_ts"] = last.get("ts") or ""
+            d["auto_last_result"] = last.get("result") or ""
+            d["auto_last_title"] = last.get("title") or ""
+        else:
+            d["auto_last_ts"] = ""
+            d["auto_last_result"] = ""
+            d["auto_last_title"] = ""
+    except Exception:                                   # noqa: BLE001
+        d["auto_total"] = 0
+        d["auto_last_ts"] = ""
+        d["auto_last_result"] = ""
+        d["auto_last_title"] = ""
+    return d
+
+
+def set_stage(stage, detail=""):
+    """推进当前阶段。detail 是给人看的一句话（如「已抓 30 条」「评了 6 篇」）。"""
+    with _RUN_LOCK:
+        if not _RUN.get("running"):
+            return
+        _RUN["stage"] = stage
+        if detail:
+            _RUN["detail"] = str(detail)[:140]
+
+
+def _run_begin(trigger):
+    with _RUN_LOCK:
+        _RUN.update({"running": True, "stage": "fetch", "detail": "",
+                     "trigger": str(trigger or "manual"),
+                     "started": time.time(), "ended": 0.0,
+                     "plan_id": "", "error": ""})
+
+
+def _run_end(err="", plan_id=""):
+    with _RUN_LOCK:
+        ok = not err
+        _RUN.update({"running": False,
+                     "stage": ("done" if ok else "error"),
+                     "ended": time.time(),
+                     "error": str(err or "")[:300],
+                     "plan_id": str(plan_id or "")})
 _SIGNAL_KEEP = 60
 
 # ---- 设置（2026-11-15 用户要求）----
@@ -781,19 +873,27 @@ def fetch_hn(max_n=8):
         ids = json.loads(ids_txt)[:max_n]
     except Exception:                                   # noqa: BLE001
         return []
-    out = []
-    for i in ids:
+    # 2026-11-15：原来逐个请求，8 个 item 最坏要 48 秒。改成并发。
+    def _one(i):
         t = _http("https://hacker-news.firebaseio.com/v0/item/%s.json" % i, timeout=6)
         if not t:
-            continue
+            return None
         try:
             j = json.loads(t)
         except Exception:                               # noqa: BLE001
-            continue
-        if j.get("title"):
-            out.append({"source": "HackerNews", "title": j["title"][:160],
-                        "url": j.get("url") or ("https://news.ycombinator.com/item?id=%s" % i),
-                        "summary": ""})
+            return None
+        if not j.get("title"):
+            return None
+        return {"source": "HackerNews", "title": j["title"][:160],
+                "url": j.get("url") or ("https://news.ycombinator.com/item?id=%s" % i),
+                "summary": ""}
+
+    from concurrent.futures import ThreadPoolExecutor
+    out = []
+    with ThreadPoolExecutor(max_workers=max(2, len(ids))) as ex:
+        for it in ex.map(_one, ids):
+            if it:
+                out.append(it)
     return out
 
 
@@ -817,17 +917,38 @@ def fetch_cn_media(max_n=6):
     return out[:max_n * 2]
 
 
-def fetch_tech_all():
-    """四个来源都试一遍，任何一个失败都不影响其它。"""
-    got = {}
-    for name, fn in (("arxiv", fetch_arxiv), ("github", fetch_github_trending),
-                     ("hn", fetch_hn), ("cn", fetch_cn_media)):
-        try:
-            got[name] = fn()
-        except Exception:                               # noqa: BLE001
-            got[name] = []
-    total = sum(len(v) for v in got.values())
-    return got, total
+def fetch_tech_all(progress=None):
+    """四个来源**并发**抓，任何一个失败都不影响其它。
+
+    2026-11-15 改动：原来是串行（arxiv→github→hn→cn），实测 111 秒，
+    用户在这段时间里只看到一句「抓取中」，分不清是卡死还是在跑。
+    改并发后总时长 ≈ 最慢那个源；每个源回来就回调一次 progress(total, done)，
+    前端状态条能实时显示「已抓 12 条（arXiv ✓8 · GitHub ✓4）」。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    srcs = (("arxiv", "arXiv", fetch_arxiv),
+            ("github", "GitHub", fetch_github_trending),
+            ("hn", "HackerNews", fetch_hn),
+            ("cn", "中文媒体", fetch_cn_media))
+    got, done, total = {}, [], 0
+    with ThreadPoolExecutor(max_workers=len(srcs)) as ex:
+        futs = {ex.submit(fn): (k, label) for k, label, fn in srcs}
+        for fu in as_completed(futs):
+            k, label = futs[fu]
+            try:
+                got[k] = fu.result() or []
+            except Exception:                           # noqa: BLE001
+                got[k] = []
+            total += len(got[k])
+            done.append("%s ✓%d" % (label, len(got[k])))
+            if progress:
+                try:
+                    progress(total, list(done))
+                except Exception:                       # noqa: BLE001
+                    pass
+    # 保持固定顺序，方便前端/日志稳定阅读
+    ordered = {k: got.get(k, []) for k, _, _ in srcs}
+    return ordered, total
 
 
 # ---------------------------------------------------------------- LLM
@@ -1020,15 +1141,35 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
 
 
 def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
-    """跑一次完整反思，生成一个 plan。
+    """跑一次完整反思（带运行状态包装）。
 
     auto_execute=None → 看设置里的 trust_mode（信任模式开着就自动执行）；
     auto_execute=True/False → 强制指定（前端手动触发时用）。
+
+    包装的目的：内部实现有多条 return（LLM 报错、JSON 非法、正常完成），
+    每条都要把 running 置回 False，否则前端会一直转圈。
     """
+    _run_begin(trigger)
+    try:
+        out = _reflect_impl(trigger=trigger, use_web=use_web,
+                            focus=focus, auto_execute=auto_execute)
+    except Exception as e:                              # noqa: BLE001
+        _run_end(err="%s: %s" % (type(e).__name__, e))
+        raise
+    _run_end(err="" if out.get("ok") else str(out.get("error") or "未知错误"),
+             plan_id=str(((out.get("plan") or {}).get("id")) or ""))
+    return out
+
+
+def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
     _ensure()
     tech, tech_total = ({}, 0)
     if use_web:
-        tech, tech_total = fetch_tech_all()
+        set_stage("fetch", "并发抓取 4 个来源…")
+        tech, tech_total = fetch_tech_all(
+            progress=lambda n, done: set_stage(
+                "fetch", "已抓 %d 条（%s）" % (n, " · ".join(done))))
+        set_stage("fetch", "抓到 %d 条技术动态" % (tech_total or 0))
     sig = load_signals().get("items", [])
     journal = _journal_tail()
     exp_txt = experience_brief()
@@ -1044,9 +1185,11 @@ def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
     paper_meta = {}
     try:
         from . import papervec
+        set_stage("paper", "论文入库去重…")
         flat = [x for arr in (tech or {}).values() for x in (arr or [])]
         if flat:
             paper_meta["added"] = papervec.add_batch(flat)
+        set_stage("paper", "新增入库 %d 篇，向量召回中…" % (paper_meta.get("added") or 0))
         q = ((exp_txt or "")[:500] + " " + (focus or "")).strip()
         recalled = papervec.search(q, top_k=6, only_unevaluated=True) if q else []
         fresh = [i for i in flat if str(i.get("source") or "") == "arXiv"][:5]
@@ -1062,10 +1205,13 @@ def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
                 brief += _file_inventory(limit=70)
             except Exception:
                 pass
+            set_stage("paper", "四维评估 %d 篇（可行性/创新性/效益/效率）…"
+                      % len(to_eval[:6]))
             r = papervec.evaluate(to_eval[:6], project_brief=brief,
                                   pains=exp_txt, max_n=6)
             paper_meta["eval"] = {"ok": r.get("ok"), "n": r.get("evaluated"),
                                   "error": r.get("error") or ""}
+            set_stage("paper", "已评估 %d 篇" % (r.get("evaluated") or 0))
         paper_brief = papervec.brief_for_prompt(5)
         paper_meta["stats"] = papervec.stats()
         paper_meta["recalled"] = len(recalled)
@@ -1080,9 +1226,12 @@ def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
         prompt += _file_inventory()
     except Exception:
         pass
+    set_stage("think", "把 %d 轮对话 + %d 条技术动态喂给模型…"
+              % (len(sig), tech_total or 0))
     txt, err = _llm_text(prompt, max_tokens=4200, temperature=0.55)
     if err:
         return {"ok": False, "error": err}
+    set_stage("plan", "模型已返回，整理动作清单…")
 
     data = _parse_json(txt)
     if not isinstance(data, dict):
@@ -1137,6 +1286,7 @@ def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
     if auto_execute is None:
         auto_execute = bool(load_settings().get("trust_mode"))
     if auto_execute and actions:
+        set_stage("exec", "自动执行 %d 条动作…" % len(actions))
         out["auto"] = auto_approve_and_execute(plan["id"])
         out["need_restart"] = bool((out.get("auto") or {}).get("need_restart"))
         # 执行走的是重新 load 的一份 plan，这里刷新回去，

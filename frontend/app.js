@@ -33,6 +33,36 @@
   const inputEl = $("#input");
   const mainEl = $("#main");
 
+  // ---------- 最近自动执行（actlog）----------
+  // 后端 /api/actlog 早就有了，但前端一直没引用 —— 用户完全看不到「最近自动执行」。
+  // 这里在抽屉里加一个折叠区块，拉最近 5 条（时间 + 结果）渲染出来。
+  async function loadActLog() {
+    const box = $("#actlogList");
+    if (!box) return;
+    box.textContent = "加载中…";
+    try {
+      const r = await fetch("/api/actlog");
+      const data = await r.json();
+      const items = Array.isArray(data) ? data : (data.items || data.logs || []);
+      const recent = items.slice(-5).reverse();
+      if (!recent.length) { box.textContent = "暂无自动执行记录"; return; }
+      box.innerHTML = recent.map((it) => {
+        const t = it.time || it.ts || it.at || "";
+        const ok = it.ok !== false && it.success !== false;
+        const res = it.result || it.msg || it.message || it.action || "";
+        return `<div class="actlog-item"><span class="actlog-time">${esc(String(t))}</span>` +
+          `<span class="actlog-res ${ok ? "ok" : "fail"}">${esc(String(res))}</span></div>`;
+      }).join("");
+    } catch (e) {
+      box.textContent = "读取失败：" + (e && e.message ? e.message : e);
+    }
+  }
+  (function bindActLog() {
+    const d = $("#actlogBox");
+    if (!d) return;
+    d.addEventListener("toggle", () => { if (d.open) loadActLog(); });
+  })();
+
   // ---------- 基础工具 ----------
   function esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -12616,6 +12646,68 @@
     m.className = "iter-msg " + (kind || "");
   }
 
+  // ---- 运行状态（2026-11-15 用户要求「能看到正在自动自迭代」）----
+  // 反思是同步阻塞的（抓网 + 论文评估 + LLM，十几到几十秒），原来中间只有一条
+  // 静态提示，用户分不清是在跑还是卡死。这里每 1.5 秒拉一次后端状态。
+  let status = null;
+  let wasRunning = false;
+  let pollTimer = null;
+
+  async function pollStatus() {
+    try {
+      const d = await api("/api/selfiter/status");
+      if (d && d.ok) status = d.status;
+    } catch (e) { /* 忽略 */ }
+    renderStatus();
+  }
+
+  function renderStatus() {
+    if (!el) return;
+    const bar = el.querySelector(".iter-runbar");
+    const btn = document.getElementById("iterBtn");
+    const s = status || {};
+    if (btn) btn.classList.toggle("iter-running", !!s.running);
+    if (!bar) return;
+    if (!s.running) {
+      bar.hidden = true;
+      // 从「在跑」变成「跑完了」：自动刷一次列表，用户不用手动点刷新
+      if (wasRunning) {
+        wasRunning = false;
+        load();
+        loadActlog();
+        loadExp();
+        const err = s.error || "";
+        say(err ? ("上一轮反思失败：" + err)
+                : ("反思已完成，用时 " + (s.elapsed || 0) + " 秒"),
+            err ? "bad" : "good");
+      }
+      return;
+    }
+    wasRunning = true;
+    bar.hidden = false;
+    bar.innerHTML =
+      '<div class="iter-run-h">' +
+        '<span class="iter-run-spin"></span>' +
+        '<b>正在自动自迭代</b>' +
+        (s.trigger && s.trigger !== "manual"
+          ? '<span class="iter-run-tag">' + esc(s.trigger) + '</span>' : '') +
+        '<span class="iter-run-el">已 ' + (s.elapsed || 0) + ' 秒</span>' +
+      '</div>' +
+      '<div class="iter-run-d">' + esc(s.stage_label || "") +
+        (s.detail ? ' · ' + esc(s.detail) : '') +
+      '</div>';
+  }
+
+  function startPoll() {
+    stopPoll();
+    pollStatus();
+    pollTimer = setInterval(pollStatus, 1500);
+  }
+
+  function stopPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
   function layer() {
     if (el) return el;
     el = document.createElement("div");
@@ -12643,6 +12735,7 @@
           '<input class="iter-focus" maxlength="200" ' +
             'placeholder="这次想让我重点关注什么？（可留空）">' +
         '</div>' +
+        '<div class="iter-runbar" hidden></div>' +
         '<div class="iter-msg"></div>' +
         '<div class="iter-restart" hidden>' +
           '<span>代码已改动，需要重启后端才生效。</span>' +
@@ -12673,6 +12766,7 @@
   }
 
   function hide() {
+    stopPoll();
     if (el) { el.remove(); el = null; }
     noteFor = null;
   }
@@ -12683,7 +12777,9 @@
     load();
     loadExp();
     loadPapers();
+    loadActlog();
     pushSignals();
+    startPoll();
   }
 
   // ---------------------------------------------------------- 渲染
@@ -12963,6 +13059,44 @@
     if (el) render();
   }
 
+  // ---------------------------------------------------------- 自动执行日志
+  // 后端：GET /api/selfiter/actlog?limit=20 → {ok, rows:[{ts,title,files,result,detail,backup,auto}]}
+  let actlogData = null;
+
+  async function loadActlog() {
+    try {
+      const r = await api("/api/selfiter/actlog?limit=20");
+      if (r && r.ok) {
+        actlogData = r.items || [];
+        if (el) render();
+      }
+    } catch (e) { /* 日志拿不到不影响抽屉其它部分 */ }
+  }
+
+  function actlogHtml() {
+    const rows = actlogData || [];
+    if (!rows.length) {
+      return '<div class="iter-li">信任模式还没自动改过代码。开启信任模式后点「🔄 现在反思一次」，' +
+        '改完这里会出现记录（时间 / 改了哪个文件 / 成功失败 / 备份位置）。</div>';
+    }
+    let h = '';
+    rows.forEach(function (x) {
+      const ok = x.result === "ok";
+      h += '<div class="iter-act ' + (ok ? "risk-low" : "risk-high") + '">' +
+        '<div class="iter-act-head">' +
+          '<span class="iter-act-t">' + esc(x.title || x.action || "") + '</span>' +
+          '<span class="iter-risk">' + (ok ? "成功" : "失败") + '</span>' +
+          (x.auto ? '<span class="iter-act-st">自动</span>' : '') +
+          '<span class="iter-act-st">' + esc(String(x.ts || "").slice(11)) + '</span>' +
+        '</div>' +
+        '<div class="iter-act-d">改了：' + esc((x.files || []).join("、") || "—") +
+          (x.detail ? '<br>' + esc(x.detail) : '') +
+          (x.backup ? '<br>备份：' + esc(x.backup) : '') + '</div>' +
+        '</div>';
+    });
+    return h;
+  }
+
   function render() {
     if (!el) return;
     const d = data || {};
@@ -12988,7 +13122,7 @@
     }
 
     const body = el.querySelector(".iter-body");
-    let h = expHtml();
+    let h = expHtml() + sec("🛠️ 最近自动执行（信任模式）", actlogHtml());
     const p = d.latest;
     if (!p) {
       body.innerHTML = h + '<div class="iter-empty">还没有反思过。<br><br>' +

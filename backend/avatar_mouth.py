@@ -329,7 +329,7 @@ def analyze(img, mouth_cfg, verbose=False):
     return out
 
 
-def _displace_map(H, W, geom, shift, fade=None):
+def _displace_map(H, W, geom, shift, fade=None, diff_report=None):
     """构造纵向映射场：唇缝以下按比例**压缩**，压缩量 = shift。
 
     ⚠ 这里必须是「压缩」而不是「平移」。第一版写成整体上移

@@ -336,6 +336,115 @@ def _memory_ctx(session: str, last_user_text: str, cfg: dict) -> str:
         "  不要只说「加油」「坚持就是胜利」这种空话。")
 
 
+def _reply_template_ctx() -> str:
+    """固定回复模板（2026-11-11 用户要求）。
+
+    直击三个摩擦点：
+      · 「只诊断不修复」→ 首行必须给结论（已完成/未完成），不许只报问题；
+      · 「结论后置」→ 结论放第一行，别让用户翻到最后才知道结果；
+      · 「回复被截断」→ 三段式短结构，推理过程折叠，正文不冗长。
+    """
+    return (
+        "【回复格式（固定模板，务必遵守）】\n"
+        "1. 首行只写结论：「结论：X 已完成」或「结论：X 未完成」，"
+        "并紧跟验证方式（如「已跑通 py -3 -m pytest」「已用 curl 实测返回 200」）。\n"
+        "2. 第二段写改动：「改动：文件路径 + 要点」，逐条列改了什么。\n"
+        "3. 第三段写验证：「验证：命令或数据」，给出可复现的命令或实测数据。\n"
+        "4. 推理过程（分析、试错、中间思考）**折叠**到最后的「<details>推理过程</details>」里，"
+        "不要铺在正文前面。\n"
+        "5. 能修就直接修，**不要只诊断不修复**；确实修不了，首行也要写「结论：X 未完成」并说明卡点。\n"
+        "6. 正文保持精简，避免长篇大论导致回复被截断。"
+    )
+
+
+# 回复长度上限（字符数）。超限时按「结论+改动+验证」三段优先保留，
+# 压缩中间推理，避免在「开始修」「等于」等半句处硬截断导致用户看不到结果。
+_REPLY_MAX_CHARS = 6000
+# 三段标题（用于识别与保留）
+_REPLY_SECTION_HEADS = ("结论：", "改动：", "验证：")
+
+
+def _clip_reply(text: str, limit: int = _REPLY_MAX_CHARS) -> str:
+    """给回复加长度上限，超限时优先保留「结论+改动+验证」三段。
+
+    策略（宁多留结果、少留推理）：
+      1. 未超限 → 原样返回；
+      2. 超限 → 先按行扫描，抽出以「结论：/改动：/验证：」开头的段落块；
+         这些块**整块保留**（不截半句）；
+      3. 剩余预算给正文/推理，按行累加，超出就停；
+      4. 若三段块本身已超限，则按段顺序保留，最后一段可截断但**在句末标点处收尾**，
+         并追加「…（已截断）」提示；
+      5. 绝不在「开始修」「等于」这类半句处硬切：截断点回退到最近的句末标点/换行。
+    """
+    s = str(text or "")
+    if limit <= 0 or len(s) <= limit:
+        return s
+
+    lines = s.splitlines(keepends=True)
+    # 标记每行属于哪个三段块（块从标题行开始，到下一个标题行或空行结束）
+    keep_idx = set()
+    i = 0
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].lstrip()
+        if any(stripped.startswith(h) for h in _REPLY_SECTION_HEADS):
+            j = i
+            while j < n:
+                if j > i:
+                    nxt = lines[j].lstrip()
+                    if any(nxt.startswith(h) for h in _REPLY_SECTION_HEADS):
+                        break
+                    if not lines[j].strip():
+                        break
+                keep_idx.add(j)
+                j += 1
+            i = j
+        else:
+            i += 1
+
+    kept_parts = []
+    used = 0
+    # 先放三段块（按原顺序），保证结果可见
+    for idx in sorted(keep_idx):
+        line = lines[idx]
+        if used + len(line) > limit:
+            # 三段块本身超限：截到句末标点，别切半句
+            room = max(0, limit - used)
+            piece = line[:room]
+            cut = max(piece.rfind(c) for c in "。！？；.!?;\n")
+            if cut > 0:
+                piece = piece[:cut + 1]
+            kept_parts.append(piece)
+            used += len(piece)
+            kept_parts.append("…（已截断）")
+            return "".join(kept_parts)
+        kept_parts.append(line)
+        used += len(line)
+
+    # 再把非三段块的行按原顺序补进去（推理/正文），预算用完即止
+    for idx, line in enumerate(lines):
+        if idx in keep_idx:
+            continue
+        if used + len(line) > limit:
+            room = max(0, limit - used)
+            if room <= 0:
+                break
+            piece = line[:room]
+            cut = max(piece.rfind(c) for c in "。！？；.!?;\n")
+            if cut > 0:
+                piece = piece[:cut + 1]
+            kept_parts.append(piece)
+            used += len(piece)
+            break
+        kept_parts.append(line)
+        used += len(line)
+
+    out = "".join(kept_parts)
+    if len(out) < len(s):
+        out = out.rstrip() + "\n…（回复过长，已压缩中间推理；结论/改动/验证已保留）"
+    return out
+
+
 def _sched_ctx() -> str:
     """定时任务的**现状摘要**（全局，跨会话共享）。
 
@@ -372,6 +481,138 @@ def _sched_ctx() -> str:
             + "；".join(bits)
             + "\n· 想看全部任务或某次运行的完整结果 → 调 list_schedules"
               "（要正文加 with_result=true）。")
+
+
+_TRANSITION_PATTERNS = (
+    "我不再猜", "不再猜测", "找到关键线索了", "找到关键线索",
+    "让我确认", "让我再确认", "让我先确认", "让我核实", "让我再核实",
+    "让我检查一下", "让我看看", "让我想想", "让我梳理一下",
+    "我先确认", "我先核实", "我先检查", "我先看看",
+)
+
+
+def _strip_transitions(text: str) -> str:
+    """过滤「我不再猜」「找到关键线索了」「让我确认」这类无信息过渡句。
+
+    只删**整句就是过渡语**的行/句，不碰含实质内容的句子（避免误删正文）。
+    """
+    s = str(text or "")
+    if not s:
+        return s
+    out_lines = []
+    for line in s.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            out_lines.append(line)
+            continue
+        # 整行就是一句过渡语（去掉标点后仍匹配）→ 丢弃
+        core = stripped.strip("。！？!?，,、…~ 　")
+        if core and any(core == p or core == p + "了" for p in _TRANSITION_PATTERNS):
+            continue
+        # 行内以过渡语开头、后面紧跟逗号/句号再接正文 → 只去掉前缀
+        for p in _TRANSITION_PATTERNS:
+            for sep in ("，", "。", "！", "？", ",", ".", "：", ":"):
+                pref = p + sep
+                if stripped.startswith(pref):
+                    stripped = stripped[len(pref):].lstrip()
+                    break
+            else:
+                continue
+            break
+        if stripped:
+            out_lines.append(stripped)
+    return "\n".join(out_lines).strip()
+
+
+def _para_similarity(a: str, b: str) -> float:
+    """两段文字的轻量相似度（0~1）：字符 3-gram Jaccard，够用且不引依赖。"""
+    a = re.sub(r"\s+", "", str(a or ""))
+    b = re.sub(r"\s+", "", str(b or ""))
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    ga = {a[i:i + 3] for i in range(max(0, len(a) - 2))} or {a}
+    gb = {b[i:i + 3] for i in range(max(0, len(b) - 2))} or {b}
+    inter = len(ga & gb)
+    union = len(ga | gb)
+    return inter / union if union else 0.0
+
+
+def _dedupe_paragraphs(text: str, threshold: float = 0.85) -> str:
+    """段落相似度 > threshold 时只保留**最后一次**（后说的通常是修正后的结论）。
+
+    针对「同一结论说两遍」和「自我推翻式直播推理」。
+    """
+    s = str(text or "")
+    if not s.strip():
+        return s
+    paras = s.split("\n\n")
+    kept = []          # [(原文, 归一化)]
+    for p in paras:
+        norm = re.sub(r"\s+", "", p)
+        if not norm:
+            kept.append((p, norm))
+            continue
+        dup_idx = -1
+        for i, (_, prev) in enumerate(kept):
+            if not prev:
+                continue
+            if _para_similarity(norm, prev) > threshold:
+                dup_idx = i
+                break
+        if dup_idx >= 0:
+            # 只保留最后一次：用新段替换旧段（位置沿用旧段，保持行文顺序）
+            kept[dup_idx] = (p, norm)
+        else:
+            kept.append((p, norm))
+    return "\n\n".join(p for p, _ in kept).strip()
+
+
+def _postprocess_reply(text: str) -> str:
+    """回复组装前的轻量后处理：去过渡语 + 段落去重。"""
+    return _dedupe_paragraphs(_strip_transitions(text))
+
+
+def _finalize_reply(text: str, conclusion: str = "", verify: str = "") -> str:
+    """把最终回复组装成「结论前置」模板。
+
+    强制首行「结论：…」+「验证：…」，把原推理过程折叠进 details；
+    超长时优先保留结论段、从中间截断分析段。
+
+    这是消除「只诊断不修复」「结论埋长文」「被截断」三个摩擦点的核心改动，
+    不改任何业务逻辑。
+    """
+    body = _postprocess_reply(str(text or "")).strip()
+    concl = str(conclusion or "").strip()
+    ver = str(verify or "").strip()
+    # 没显式给结论时，从正文里找一句最像结论的（首句/含「结论」的行）
+    if not concl:
+        for line in body.splitlines():
+            s = line.strip()
+            if s.startswith("结论：") or s.startswith("结论:"):
+                concl = s.split("：", 1)[-1].split(":", 1)[-1].strip()
+                break
+    if not concl:
+        first = body.splitlines()[0].strip() if body else ""
+        concl = first[:120] if first else "（无）"
+    if not ver:
+        ver = "已按上述结论执行；如需复核可展开下方分析。"
+    # 正文去掉已被提取为结论的首行，避免重复
+    lines = body.splitlines()
+    if lines and lines[0].strip() == concl:
+        lines = lines[1:]
+    analysis = "\n".join(lines).strip()
+    # 超长时从中间截断分析段，优先保留结论段
+    MAX_ANALYSIS = 4000
+    if len(analysis) > MAX_ANALYSIS:
+        head = analysis[: MAX_ANALYSIS // 2]
+        tail = analysis[-(MAX_ANALYSIS // 2):]
+        analysis = head + "\n…（中间省略 %d 字）…\n" % (len(analysis) - MAX_ANALYSIS) + tail
+    parts = ["结论：" + concl, "验证：" + ver]
+    if analysis:
+        parts.append("<details><summary>分析过程</summary>\n\n" + analysis + "\n\n</details>")
+    return "\n\n".join(parts)
 
 
 def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
@@ -2004,6 +2245,20 @@ def selfiter_overview():
     from . import self_iterate as _si
     try:
         return _si.overview()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfiter/status")
+def selfiter_status():
+    """运行状态：现在在做什么、跑到哪个阶段、已经用了多少秒。
+
+    2026-11-15 用户要求「能看到他的状态，比如显示正在自动自迭代」。
+    前端在抽屉打开时每 1.5 秒拉一次；没在跑就返回 running=false。
+    """
+    from . import self_iterate as _si
+    try:
+        return {"ok": True, "status": _si.run_status()}
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
 
