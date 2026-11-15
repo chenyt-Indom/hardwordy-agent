@@ -33,6 +33,8 @@ from pathlib import Path
 import logging
 logger = logging.getLogger(__name__)
 
+from . import jsonfix as _jsonfix
+
 _ROOT = Path(__file__).resolve().parent.parent
 _DATA = _ROOT / "data" / "self_iterate"
 _BACKUPS = _DATA / "backups"
@@ -1783,7 +1785,26 @@ def fetch_tech_all(progress=None):
 
 # ---------------------------------------------------------------- LLM
 
-def _llm_text(prompt, max_tokens=4200, temperature=0.55):
+# JSON 修复的实现在 backend/jsonfix.py（self_iterate / papervec / reverify 共用一份，
+# 免得三个模块各有一份弱实现、各踩一遍同样的坑）。这里只留薄委托。
+def _strip_llm_notice(txt):
+    return _jsonfix.strip_notice(txt)
+
+
+def _json_balanced(txt):
+    return _jsonfix.balanced(txt)
+
+
+def _llm_text(prompt, max_tokens=8192, temperature=0.55, want_json=False):
+    """调一次 LLM 取纯文本。
+
+    ⚠️ 2026-11-16 修「上一轮反思失败：模型返回的不是合法 JSON」：
+      ① 原来 max_tokens=4200，而反思的计划 JSON 实测约 11000 字节（中文），
+         装不下 → 被截断 → 解析失败。提到 8192（API 上限）。
+      ② `chat_stream` **没有**续写逻辑（续写只写在 chat_stream_with_tools 里），
+         所以截断了也没人管。这里给 want_json=True 的调用补上：
+         检测括号不配平 → 追加一轮「从中断处继续输出剩余 JSON」。
+    """
     try:
         from . import keyvault
         from .deepseek_client import chat_stream, DeepSeekError
@@ -1796,15 +1817,42 @@ def _llm_text(prompt, max_tokens=4200, temperature=0.55):
         key = ""
     if not key:
         return None, "没有可用的 DeepSeek Key（先在顶栏 🔑 填一个）"
-    try:
+
+    def _once(msgs, mt):
         buf = []
         for kind, txt in chat_stream(
-                [{"role": "user", "content": prompt}],
-                "deepseek-flash", key, temperature=temperature,
-                max_tokens=max_tokens, thinking=False):
+                msgs, "deepseek-flash", key, temperature=temperature,
+                max_tokens=mt, thinking=False,
+                # 取 JSON 时不能把「（输出达到 max_tokens 上限被截断）」混进正文，
+                # 那行中文会插在 JSON 中间，结构直接坏掉（2026-11-16 实测）
+                truncation_notice=False):
             if kind == "content" and txt:
                 buf.append(txt)
-        return "".join(buf).strip(), None
+        return _strip_llm_notice("".join(buf).strip())
+
+    try:
+        txt = _once([{"role": "user", "content": prompt}], max_tokens)
+        # 截断检测 + 自动续写（最多续 2 次，防止死循环）
+        if want_json:
+            for _ in range(2):
+                if _json_balanced(txt):
+                    break
+                set_stage("think", "输出被长度上限截断，正在续写剩余 JSON…")
+                more = _once([
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": txt},
+                    {"role": "user", "content": (
+                        "（系统提示）你上一条输出**被长度上限截断了**，JSON 没写完。"
+                        "现在**从断开的地方继续输出剩余的 JSON**："
+                        "不要重复已经写过的内容，不要重新开头，"
+                        "不要加解释、不要加代码围栏，直接接着写。")},
+                ], max_tokens)
+                if not more:
+                    break
+                # 去掉可能被重复输出的开头
+                more = re.sub(r"^\s*```(?:json)?", "", more).strip()
+                txt = txt.rstrip() + more
+        return txt, None
     except DeepSeekError as e:
         return None, "DeepSeek 失败：%s" % e
     except Exception as e:                              # noqa: BLE001
@@ -1812,24 +1860,17 @@ def _llm_text(prompt, max_tokens=4200, temperature=0.55):
 
 
 def _parse_json(txt):
-    """LLM 常把 JSON 包在 ```json 里，或前后带解释文字。这里尽量抠出来。"""
-    if not txt:
-        return None
-    s = txt.strip()
-    m = re.search(r"```(?:json)?\s*(.+?)```", s, re.S)
-    if m:
-        s = m.group(1).strip()
-    try:
-        return json.loads(s)
-    except Exception:                                   # noqa: BLE001
-        logger.debug("silent-except", exc_info=True)
-    i, j = s.find("{"), s.rfind("}")
-    if i >= 0 and j > i:
-        try:
-            return json.loads(s[i:j + 1])
-        except Exception:                               # noqa: BLE001
-            return None
-    return None
+    """从 LLM 输出里抠出 JSON（含截断修复/脏格式清洗）。
+
+    实现见 backend/jsonfix.py —— self_iterate / papervec / reverify 共用一份，
+    免得三个模块各有一份弱实现、各踩一遍「截断 → 不是合法 JSON」的坑。
+    """
+    return _jsonfix.parse(txt)
+
+
+def _dump_bad_raw(txt, where="reflect"):
+    """解析失败时把原始输出落盘 —— 没有证据就只能靠猜。"""
+    return _jsonfix.dump_raw(txt, _ROOT / "data" / "self_iterate", where)
 
 
 # ---------------------------------------------------------------- 反思
@@ -2575,14 +2616,18 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
         logger.debug("silent-except", exc_info=True)
     set_stage("think", "把 %d 轮对话 + %d 条技术动态喂给模型…"
               % (len(sig), tech_total or 0))
-    txt, err = _llm_text(prompt, max_tokens=4200, temperature=0.55)
+    txt, err = _llm_text(prompt, max_tokens=8192, temperature=0.55,
+                         want_json=True)
     if err:
         return {"ok": False, "error": err}
     set_stage("plan", "模型已返回，整理动作清单…")
 
     data = _parse_json(txt)
     if not isinstance(data, dict):
-        return {"ok": False, "error": "模型返回的不是合法 JSON",
+        # 落盘原始输出 —— 2026-11-16 那次失败就是因为没留证据，只能现查
+        _bad = _dump_bad_raw(txt, "reflect")
+        return {"ok": False,
+                "error": "模型返回的不是合法 JSON（原始输出已存 %s）" % _bad,
                 "raw": (txt or "")[:600]}
 
     actions = []

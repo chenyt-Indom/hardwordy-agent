@@ -332,7 +332,8 @@ def vision_chat(prompt: str, image_b64, model: str, api_key: str,
 def chat_stream(messages: list[dict], model: str, api_key: str,
                 temperature: float = 0.7, max_tokens: int = 8192,
                 thinking: bool | None = None,
-                reasoning_effort: str | None = None) -> Iterator[tuple[str, str]]:
+                reasoning_effort: str | None = None,
+                truncation_notice: bool = True) -> Iterator[tuple[str, str]]:
     """流式对话。
 
     参数
@@ -460,9 +461,15 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
 
             finish = choices[0].get("finish_reason")
             if finish:
-                # content_filter / length 这类要告诉用户，别静默截断
+                # content_filter / length 这类要告诉用户，别静默截断。
+                # ⚠️ 2026-11-16：这行是给**对话**看的；`_llm_text` 拿它去解析 JSON
+                #   时，这串中文会被拼进 JSON 中间，结构直接坏掉、连截断修复都救不回。
+                #   所以加开关，取结构化输出时关掉。
                 if finish == "length":
-                    yield ("content", "\n\n（输出达到 max_tokens 上限被截断）")
+                    if truncation_notice:
+                        yield ("content", "\n\n（输出达到 max_tokens 上限被截断）")
+                    else:
+                        yield ("note", "输出达到 max_tokens 上限被截断")
                 break
     finally:
         try:

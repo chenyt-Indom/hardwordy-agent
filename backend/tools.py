@@ -6914,10 +6914,13 @@ def _code_gen_text(prompt: str, cfg: dict, context: dict,
                 model or "deepseek-flash",
                 str((context or {}).get("ds_key") or ""),
                 temperature=temperature, max_tokens=max_tokens,
-                thinking=False):
+                thinking=False,
+                # 这里拿到的就是代码正文，不能混入截断提示（2026-11-16）
+                truncation_notice=False):
             if k == "content" and piece:
                 buf.append(piece)
-        return "".join(buf)
+        from . import jsonfix as _jf
+        return _jf.strip_notice("".join(buf))
 
     # 本地：挑一个已装的
     from . import main as _main
@@ -7051,7 +7054,12 @@ def _do_write_code(arguments, ui_events=None, context=None) -> str:
                     msgs, ds_model, ds_key,
                     temperature=float(cfg.get("code_temperature") or 0.2),
                     max_tokens=int(cfg.get("code_max_tokens") or 8192),
-                    thinking=False):
+                    thinking=False,
+                    # ⚠️ 2026-11-16：这里拿到的内容会**直接写进用户的代码文件**。
+                    #   原来截断时 chat_stream 会往正文里塞一句
+                    #   「（输出达到 max_tokens 上限被截断）」，那行中文会被
+                    #   stream_write 落进 demo.py 之类的文件末尾，把代码搞坏。
+                    truncation_notice=False):
                 if kind != "content" or not piece:
                     continue
                 got += piece

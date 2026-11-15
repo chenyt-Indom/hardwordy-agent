@@ -13019,9 +13019,20 @@
         loadActlog();
         loadExp();
         const err = s.error || "";
-        say(err ? ("上一轮反思失败：" + err)
-                : ("反思已完成，用时 " + (s.elapsed || 0) + " 秒"),
-            err ? "bad" : "good");
+        // 技术错误翻成人话：用户不需要看 "不是合法 JSON" 这种词
+        let msg;
+        if (!err) {
+          msg = "反思已完成，用时 " + (s.elapsed || 0) + " 秒";
+        } else if (/json|合法/i.test(err)) {
+          msg = "这轮模型输出格式没对上，已把原始输出存下来（data/self_iterate/last_bad_*.txt），下一轮会自动重试";
+        } else if (/欠费|Arrearage/i.test(err)) {
+          msg = "反思没跑成：云端账号欠费了，去控制台充值后再试";
+        } else if (/Key|密钥/i.test(err)) {
+          msg = "反思没跑成：还没填模型 Key";
+        } else {
+          msg = "上一轮反思失败：" + err;
+        }
+        say(msg, err ? "bad" : "good");
       }
       return;
     }

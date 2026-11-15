@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 
 from . import embed
+from . import jsonfix as _jsonfix
 logger = logging.getLogger(__name__)
 
 _LOG = logging.getLogger("uvicorn.error")
@@ -804,10 +805,13 @@ def _llm(prompt, max_tokens=5000, temperature=0.35):
         buf = []
         for kind, txt in chat_stream([{"role": "user", "content": prompt}],
                                      "deepseek-flash", key, temperature=temperature,
-                                     max_tokens=max_tokens, thinking=False):
+                                     max_tokens=max_tokens, thinking=False,
+                                     # 取 JSON 时不能把「（输出达到 max_tokens 上限被截断）」
+                                     # 混进正文，那行中文会插在 JSON 中间（2026-11-16）
+                                     truncation_notice=False):
             if kind == "content" and txt:
                 buf.append(txt)
-        return "".join(buf).strip(), None
+        return _jsonfix.strip_notice("".join(buf)), None
     except DeepSeekError as e:
         return None, "DeepSeek 失败：%s" % e
     except Exception as e:                              # noqa: BLE001
@@ -815,23 +819,8 @@ def _llm(prompt, max_tokens=5000, temperature=0.35):
 
 
 def _parse_json(txt):
-    if not txt:
-        return None
-    s = txt.strip()
-    m = re.search(r"```(?:json)?\s*(.+?)```", s, re.S)
-    if m:
-        s = m.group(1).strip()
-    try:
-        return json.loads(s)
-    except Exception:
-        logger.debug("silent-except", exc_info=True)
-    i, j = s.find("{"), s.rfind("}")
-    if i >= 0 and j > i:
-        try:
-            return json.loads(s[i:j + 1])
-        except Exception:
-            return None
-    return None
+    """从 LLM 输出里抠出 JSON（含截断修复）。实现见 backend/jsonfix.py。"""
+    return _jsonfix.parse(txt)
 
 
 def evaluate(items, project_brief: str = "", pains: str = "", max_n: int = 8) -> dict:

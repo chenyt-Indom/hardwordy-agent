@@ -33,6 +33,8 @@ import time
 import tokenize
 from pathlib import Path
 
+from . import jsonfix as _jsonfix
+
 logger = logging.getLogger(__name__)
 
 _BACKEND = Path(__file__).resolve().parent
@@ -385,10 +387,12 @@ def _llm_once(prompt, max_tokens=1800, temperature=0.2):
         for kind, txt in chat_stream([{"role": "user", "content": prompt}],
                                      "deepseek-flash", key,
                                      temperature=temperature,
-                                     max_tokens=max_tokens, thinking=False):
+                                     max_tokens=max_tokens, thinking=False,
+                                     # 取 JSON 时不能把截断提示混进正文（2026-11-16）
+                                     truncation_notice=False):
             if kind == "content" and txt:
                 buf.append(txt)
-        return "".join(buf).strip(), None
+        return _jsonfix.strip_notice("".join(buf)), None
     except DeepSeekError as e:
         return None, "DeepSeek 失败：%s" % e
     except Exception as e:                              # noqa: BLE001
@@ -396,20 +400,8 @@ def _llm_once(prompt, max_tokens=1800, temperature=0.2):
 
 
 def _parse_json(txt):
-    if not txt:
-        return None
-    t = txt.strip()
-    t = re.sub(r"^```(?:json)?|```$", "", t, flags=re.M).strip()
-    try:
-        return json.loads(t)
-    except (ValueError, TypeError):
-        m = re.search(r"\{.*\}", t, re.S)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except (ValueError, TypeError):
-                return None
-    return None
+    """从 LLM 输出里抠出 JSON（含截断修复）。实现见 backend/jsonfix.py。"""
+    return _jsonfix.parse(txt)
 
 
 def _llm_review(items, rounds=2):
