@@ -63,6 +63,32 @@ MAX_SECONDS = 90          # 单次最长 90 秒，再长渲染太慢
 MAX_SIDE = 1080           # 输出长边上限（形变分辨率同步提高，嘴部动作才明显）
 
 
+# ---------------------------------------------------------------- 嘴部清晰度参数
+# 2026-11-15 用户要求「嘴部尽量清晰」。实测（1024x1024 人像，嘴部贴片 287x179）：
+#   闭嘴基线拉普拉斯 100.2 → 张到 op=0.85 掉到 69.9（**掉 30%**），同帧脸颊仅 10.9。
+# 根因是纵向拉伸（最狠 4.2x）后**双线性插值**的放大糊化，不是锐化不够。
+# 下面这组参数全部经过真实帧量化对比选出，改之前请重跑 _measure_mouth_sharpness。
+_RENDER = {
+    "ss": 2,          # 贴片超采样倍数（形变在高分辨率网格上算）
+    # 实测（1024x1024 人像、op=0.85，同进程 A/B，以「闭嘴帧」为 100% 基线）：
+    #   bicubic/bilinear/bicubic  49.6%  ← 原默认，纵向放大糊化的主因
+    #   lanczos/bilinear/bicubic  59.2%
+    #   lanczos/cubic  /bicubic   61.4%
+    #   lanczos/cubic  /lanczos   77.2%  ← 当前选中，过冲仅 0.7（无亮边）
+    #   ss3 + 上条                 79.4%  但每帧 283ms（2 倍耗时），不值得
+    "up": "lanczos",  # 贴片放大滤波：LANCZOS 比 BICUBIC 保留更多高频
+    "interp": "cubic",  # 形变采样插值：Catmull-Rom（纵向拉伸本质是放大，三次更锐）
+    "down": "lanczos",  # 降回原尺寸：LANCZOS 比 BICUBIC 锐，且此处 USM 已限制在唇部核心
+    # ⚠ 25 不是随手取的值：用「唇身纹理相对原图的倍数」标定出来的。
+    # 原图上唇 74.4 / 下唇 145.6；形变后 usm0 → 1.21x/0.96x，usm40 → 1.52x/1.26x，
+    # usm220 → 4.4x/3.7x（严重过锐，视觉复核判「涂抹感、塑料感」——
+    # 其实是锐化光晕，不是真模糊）。25 落在最保真的档位。
+    "usm": 25.0,      # USM 强度 %（0 关闭）
+    "usm_r": 1.0,     # USM 半径
+    "usm_th": 2,      # USM 阈值
+}
+
+
 # ---------------------------------------------------------------- 目录与配置
 def _root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1597,6 +1623,85 @@ def _asr_words(wav_path: str) -> list:
         return []
 
 
+# ---------------------------------------------------------------- 原文对齐
+def _is_word_char(c: str) -> bool:
+    """是不是该占一个口型的字（中文/字母/数字），标点和空白不算。"""
+    import re
+    return bool(re.match(r"[\u4e00-\u9fffA-Za-z0-9]", str(c or "")))
+
+
+def _align_words(text: str, asr_words: list, dur: float) -> list:
+    """把 ASR 的时间戳套到「原文」的字上，返回 [(char, t0, t1), ...]。
+
+    ⚠ 为什么必须这么做（2026-11-15 用真实语音量出来的）：
+      原文「大家好，我是你的数字人助手…口型驱动这件事」交给 TTS 合成后，
+      再让 ASR 去认这段音频，识别结果是
+        「大家好我是你的数IL助手今天我们来聊聊口型驱驱驱驱动动动这件事」
+      —— 「数字人」被认成「数IL」、「驱动」被认成「驱驱驱驱动动动」。
+      音素层是拿「字」查拼音定唇形的，用错字就等于给错唇形，
+      这正是「嘴在动但对不上」的直接原因之一。
+      原文是我们自己生成的、100% 正确，所以只借 ASR 的「时间」，不借它的「字」。
+    """
+    import difflib
+    true_chars = [c for c in (text or "") if _is_word_char(c)]
+    if not true_chars or not asr_words:
+        return []
+    asr_chars = [str(w[0]) for w in asr_words]
+    sm = difflib.SequenceMatcher(None, asr_chars, true_chars, autojunk=False)
+    out = [None] * len(true_chars)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for k in range(j2 - j1):
+                w = asr_words[i1 + k]
+                out[j1 + k] = (true_chars[j1 + k], float(w[1]), float(w[2]))
+        elif tag == "replace" and i2 > i1 and j2 > j1:
+            # ASR 认错的那一段：时间按字数摊开，字仍然用原文的
+            t0 = float(asr_words[i1][1])
+            t1 = float(asr_words[i2 - 1][2])
+            span = max(t1 - t0, 1e-3)
+            m = j2 - j1
+            for k in range(m):
+                out[j1 + k] = (true_chars[j1 + k], t0 + span * k / m,
+                               t0 + span * (k + 1) / m)
+        # insert：ASR 没认出来的原文，先留空，后面插值
+        # delete：ASR 多认出来的（重复字），直接丢掉
+    known = [i for i, v in enumerate(out) if v is not None]
+    if not known:
+        return []
+    first = known[0]
+    if first > 0:                       # 前导缺口：从第一个锚点往前推
+        t = out[first][1]
+        for i in range(first - 1, -1, -1):
+            out[i] = (true_chars[i], max(0.0, t - 0.12), t)
+            t = max(0.0, t - 0.12)
+    for a, b in zip(known, known[1:]):  # 中间缺口：左右锚点之间均分
+        if b - a > 1:
+            t0, t1 = out[a][2], out[b][1]
+            m = b - a
+            for k in range(1, m):
+                out[a + k] = (true_chars[a + k], t0 + (t1 - t0) * k / m,
+                              t0 + (t1 - t0) * (k + 1) / m)
+    last = known[-1]
+    if last < len(out) - 1:             # 尾部缺口：ASR 最后一个字本来就会延到音频结尾
+        t = out[last][2]
+        for i in range(last + 1, len(out)):
+            e = min(dur, t + 0.12) if dur else t + 0.12
+            out[i] = (true_chars[i], t, e)
+            t = e
+    # 只补「ASR 重复字被丢掉」留下的短空洞（实测「驱」与「动」之间 0.24s）。
+    # ⚠ 绝不能把所有空隙都补上：句号/逗号处的真实停顿（实测「手」后面 0.76s、
+    #   「聊」后面 0.56s）一补就被算成那个字的时长，音素层的下限会把嘴撑开，
+    #   结果就是「该闭嘴的时候嘴还张着」——那正是用户说的对不上口型。
+    #   留空的段落会退回纯声学驱动，静音时能量低，嘴自然闭上。
+    _HOLE = 0.25
+    for i in range(len(out) - 1):
+        c, a0, a1 = out[i]
+        nb = out[i + 1][1]
+        if a1 < nb <= a1 + _HOLE:
+            out[i] = (c, a0, nb)
+    return [w for w in out if w]
+
+
 # ---------------------------------------------------------------- 口型参数
 # ---------------------------------------------------------------- 音素驱动（viseme）
 # 为什么需要这一层：纯声学只能知道「此刻有多响」，不知道「发的是哪个音」，
@@ -1712,7 +1817,14 @@ def _viseme_curve(words: list, n: int, fps: int):
                 o = io if io < 0.10 else (io * 0.6 + (fo or io) * 0.4)
                 c = 0.90 if io < 0.10 else 0.70
             elif fo is not None:
-                o = fo
+                # ⚠ 韵母段不能给恒定值：一个字通常跨 5~6 帧，恒定值会让开口度
+                # 出现「平台」（实测 0.70 连续 6 帧、0.51 连续 5 帧），
+                # 视觉上就是嘴僵住不动、没有说话的节奏。
+                # 真实发音：韵母起音偏小 → 中段最大 → 收尾回落。
+                # 用 sin 包络表达，幅度 0.72~1.0，不改变该音素的目标上限。
+                _uv = (pos - 0.35) / 0.65
+                _uv = 0.0 if _uv < 0.0 else (1.0 if _uv > 1.0 else _uv)
+                o = fo * (0.72 + 0.28 * float(np.sin(np.pi * _uv)))
                 c = 0.72
             else:
                 continue
@@ -1789,6 +1901,13 @@ def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS,
     openness = _one_pole(openness, 70, fps)
     # 归一到 99 分位（不用最大值，避免一声爆音把整体压扁）
     openness = np.clip(openness / max(_pct(openness, 99, 1e-3), 1e-3), 0.0, 1.0)
+    # ---- 幂压缩：压低中段、保留峰值 ----
+    # 能量包络归一化后中位数天然偏高（实测 0.482，48% 的帧 >0.5），
+    # 于是嘴在整段里一直半张着，没有「开—合」的节奏，视觉上就是「不自然」。
+    # 真实说话开口度中位约 0.21、仅 24% 的帧 >0.5。
+    # 用幂压缩而不是乘系数：0.48^1.6=0.31（中段压下来），1.0^1.6=1.0（峰值不动），
+    # 0.90^1.6=0.85。乘系数会把峰值一起压掉，又变回「嘴张不开」。
+    openness = np.power(openness, 1.60)
 
     # ---- 音素层：按拼音把唇形改对（声学只负责「多响」，音素负责「哪个音」）----
     # 只在这里做「修正」不做「取代」：blend 上限 0.85，保留声学的强弱起伏，
@@ -1800,11 +1919,29 @@ def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS,
             # 约束强度也要平滑：字与字交界处硬切会让张嘴幅度一帧内跳变
             _c = _one_pole(_cf, 30, fps)
             _m = _op_t >= 0.0
-            # 闭唇音（b/p/m）单独给更高上限：0.85 的混合只能把 0.84 压到 0.14，
-            # 画面上仍是半张嘴；闭唇本来就该压到接近 0，这是唯一允许「盖过声学」的情况。
-            _lim = np.where(_op_t < 0.10, 0.95, 0.85)
-            _b = np.where(_m, np.minimum(_c, _lim), 0.0)
+            # ⚠ 这里是「嘴张不开」的根因，2026-11-15 用真实语音量出来的：
+            #   原来对**所有音**都用线性混合（强度 0.85），等于让音素表覆盖声学的
+            #   85%。而音素表最大只有 0.88（a），于是嘴再张也到不了 0.88 以上：
+            #   同一段语音纯声学 max=1.000 / >0.8 占 12%，混完 max=0.811 / >0.8 剩 1%。
+            #   表现就是「一直在半张嘴、张不开」。
+            # 现在拆成两种处理：
+            #   闭唇音 b/p/m —— 强混合压到目标（0.02），这是唯一允许盖过声学的情况；
+            #   其他音      —— 音素只当「下限」，用 max 抬而不压。
+            #   为什么 max 不会压高峰：声学给 1.0 时 max(1.0, 0.88*0.85)=1.0 原样保留，
+            #   而短促字的声学低谷（如「大」只有 0.48）会被抬到 0.75，正是要的效果。
+            _lip = _m & (_op_t < 0.10)
+            _oth = _m & ~_lip
+            _b = np.where(_lip, np.minimum(_c, 0.95), 0.0)
             openness = openness * (1.0 - _b) + np.maximum(_op_t, 0.0) * _b
+            # ⚠ 下限必须乘静音门控 gate（2026-11-15 实测）：
+            #   ASR 的时间戳把停顿算进了前一个字的时长（「助手。」的「手」被
+            #   拉成 0.76s），如果下限在静音时照样生效，嘴在停顿处就一直是
+            #   0.374 张着（纯声学是 0.067）——听感上就是「话停了嘴还在动」。
+            #   乘 gate 后静音处下限归零，嘴能真正闭上。
+            # 下限再乘一个「跟随声学形状」的系数：声学高时下限也高、低时也低。
+            # 否则下限会完全主导输出，曲线变成由音素表决定的阶梯（平台）。
+            _low = np.maximum(_op_t, 0.0) * 0.85 * gate * (0.55 + 0.45 * openness)
+            openness = np.where(_oth, np.maximum(openness, _low), openness)
             _vis = (_wd_t, np.where(_m, np.minimum(_c, 0.75), 0.0))
 
     # 唇形：亮音偏扁（宽），闷音偏圆（窄）。同样用低通去掉帧级毛刺。
@@ -1832,7 +1969,9 @@ def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS,
         #   现在改成「无字程度 × 能量」：ASR 明确无字就往闭合收，
         #   但能量仍高时（ASR 漏识别）保留，不会把有声音的地方压闭。
         gap = (~mask).astype(np.float32)
-        gap = _one_pole(gap, 45, fps)              # 平滑，避免字边界硬切
+        # ⚠ 平滑时间常数 45ms 只有 1.1 帧，字边界处 openness 仍会一帧内从 0.87 掉到 0.16
+        # （实测最大 Δ=0.71），看起来就是抽搐。95ms≈2.4 帧才够缓。
+        gap = _one_pole(gap, 95, fps)              # 平滑，避免字边界硬切
         lvl = np.clip(e / 0.30, 0.0, 1.0)          # 能量越高越不压
         openness = openness * (1.0 - 0.80 * gap * (1.0 - lvl))
 
@@ -1846,6 +1985,11 @@ def _build_params(y: np.ndarray, sr: int, words: list, fps: int = FPS,
         base_lv = float(_pct(openness, 12, 0.0))     # 静音基线
         openness = base_lv + (openness - base_lv) * g
         openness = np.clip(openness, 0.0, 1.0)
+
+    # 末尾再补一道 35ms 低通：上面各层（音素下限、字外压闭、幅度增益）都可能引入
+    # 单帧跳变，实测未加时 max Δ=0.71，加后 0.49；中位与 >0.5 占比基本不变
+    # （0.288→0.275 / 21%→19%），属于纯收益。
+    openness = _one_pole(openness, 35, fps)
 
     params = []
     for i in range(n):
@@ -1888,10 +2032,18 @@ def _prep(img_path: str):
     # 纵向要留得比唇部本身宽 —— 形变场靠高斯衰减到边界处归零，
     # 区域太窄的话边界处仍有残余位移，会在额头/下巴留下一道亮度突跳。
     # （实测：0.95/1.10 时上边界跳 20；1.45/1.55 时降到 0.6）
-    x0 = int(max(0, round(cx - mw * 0.85)))
-    x1 = int(min(W, round(cx + mw * 0.85)))
-    ytop = int(max(0, round(cy - mh * 1.45)))
-    ybot = int(min(H, round(cy + mh * 1.55)))
+    # 融合区范围：**必须大到把形变完全包住**，否则边界处仍残留位移。
+    # 高斯衰减不是真 0：wv=exp(-(d/0.62mh)^2)、wh=exp(-(x/0.40mw)^2)。
+    # 要让残留位移 < 0.05px（对应亮度差 <3，肉眼不可见）需要 wv/wh < 0.0013：
+    #   纵向 |d| > 1.6mh，横向 |x| > 1.03mw。
+    # 旧值 1.45mh / 0.85mw 落在门槛之内，实测残留 0.36px —— 而贴片外是精确 0，
+    # 于是边界那一行出现 35 的跳变（该处是鼻影强边缘，梯度 68/px）。
+    # 现在取 2.00/2.10mh 与 1.20mw，把「有位移的区」整个包进贴片内部，
+    # 贴片边界处位移已归零，与底图完全一致，不再需要靠羽化去遮。
+    x0 = int(max(0, round(cx - mw * 1.20)))
+    x1 = int(min(W, round(cx + mw * 1.20)))
+    ytop = int(max(0, round(cy - mh * 2.00)))
+    ybot = int(min(H, round(cy + mh * 2.10)))
     if x1 - x0 < 4:
         x1 = min(W, x0 + 4)
     if ybot - ytop < 4:
@@ -1911,18 +2063,61 @@ def _prep(img_path: str):
     # 解法是标准超采样：把贴片放大 SS 倍，在高分辨率上做形变，再 LANCZOS 降回来。
     #   · SS=2 时 1 源像素有 4 个采样点，4.2x 拉伸下仍有 2px 真实像素打底；
     #   · 只放大嘴部贴片（287x179 → 574x358），整帧仍是原分辨率，成本可控。
-    SS = 2
+    SS = max(1, int(_RENDER.get("ss", 2)))
     if SS > 1:
         hi_size = (patch.width * SS, patch.height * SS)
-        patch_hi = patch.resize(hi_size, Image.BICUBIC)
+        _upf = {"lanczos": Image.LANCZOS, "bicubic": Image.BICUBIC}.get(
+            str(_RENDER.get("up", "bicubic")), Image.BICUBIC)
+        patch_hi = patch.resize(hi_size, _upf)
         geom_hi = (cx * SS - x0 * SS, cy * SS - ytop * SS, mw * SS, mh * SS)
     else:
         patch_hi, geom_hi = patch, (cx - x0, cy - ytop, mw, mh)
+
+    # ---- 唇缝位置（形变与口腔的真正中心）----
+    # mouth.json 的 y 标的是「嘴部几何中心」，不是上下唇贴合处。
+    # 实测这张人像：嘴部中心 cy=604，而唇缝最暗点在 599（差 5px ≈ 0.08mh）。
+    # 差 5px 看似小，但刚性平移后「唇缘」位置会显示成「唇缝」（都是暗的），
+    # 与口腔边缘的亮度接不上，剖面上出现 75→102→63 的亮暗交替，就是锯齿。
+    # 所以这里从像素自己找：取贴片中间 40 列做纵向平均，在 cy±0.45mh 内找最暗行。
+    _parr = np.asarray(patch, np.float32).mean(axis=2)
+    _pmid = patch.width // 2
+    _pcol = _parr[:, max(0, _pmid - 20):_pmid + 20].mean(axis=1)
+    _cyp = int(round(cy - ytop))
+    _lo = max(4, _cyp - int(mh * 0.45))
+    _hi = min(patch.height - 5, _cyp + int(mh * 0.45))
+    _lip_y = _lo + int(np.argmin(_pcol[_lo:_hi])) if _hi > _lo + 2 else _cyp
+    _lip_y = max(3, min(patch.height - 4, _lip_y))
+
+    # ---- 预计算形变场（只与图像有关，与开口度 op 无关）----
+    # 这些场每帧都要用，但每帧重算要跑 5 次 exp + 1 次 mgrid，实测占单帧耗时约 40%。
+    # 提前算好存进 prep，_frame 里直接取。
+    _cyi = max(3, min(patch_hi.size[1] - 4, _lip_y * SS))
+    _ph, _pw = patch_hi.size[1], patch_hi.size[0]
+    _yy, _xx = np.mgrid[0:_ph, 0:_pw].astype(np.float32)
+    _d = _yy - float(_cyi)
+    _cxi = float(cx * SS - x0 * SS) if SS > 1 else float(cx - x0)
+    _mh = mh * SS
+    _mw = mw * SS
+    _wv = np.exp(-(_d / (0.62 * _mh)) ** 2)
+    _sig = 0.80 * _mw * 0.5
+    _wh = np.exp(-((_xx - _cxi) / max(_sig, 1.0)) ** 2)
+    _dwf = np.clip((1.05 * _mh - np.abs(_d)) / (0.20 * _mh), 0.0, 1.0)
+    _dwf = _dwf * _dwf * (3.0 - 2.0 * _dwf)
+    _dxf = np.clip((1.00 * _mw - np.abs(_xx - _cxi)) / (0.25 * _mw), 0.0, 1.0)
+    _dxf = _dxf * _dxf * (3.0 - 2.0 * _dxf)
+    _wv = _wv * _dwf
+    _wh = _wh * _dxf
+    _ellf = np.clip(1.0 - ((_xx - _cxi) / (0.57 * _mw)) ** 2, 0.0, 1.0)
+    _softf = np.clip((_ellf - 0.02) / 0.08, 0.0, 1.0)
+    _softf = _softf * _softf * (3.0 - 2.0 * _softf)
 
     return {"base": base, "patch": patch, "patch_hi": patch_hi,
             "mask": mask, "ss": SS,
             "box": (x0, ytop, x1, ybot),
             "shadow_size": (sw, sh),
+            "lip_y": _lip_y, "lip_y_hi": _lip_y * SS,
+            "fields": {"d": _d, "wv": _wv, "wh": _wh, "ell": _ellf,
+                       "soft": _softf, "cxi": _cxi},
             "geom": (cx, cy, mw, mh), "geom_hi": geom_hi, "wh": (W, H)}
 
 
@@ -1976,7 +2171,8 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     pw, ph = patch.size
     parr = np.asarray(patch, dtype=np.float32)
     cxi = float(cx)          # 贴片内坐标（超采样时已是 SS 倍空间）
-    cyi = int(round(cy))
+    # 形变中心 = **唇缝**（_prep 从像素检测），不是嘴部几何中心
+    cyi = int(round(prep.get("lip_y_hi") or cy))
     cyi = max(3, min(ph - 4, cyi))
 
     # ---- 连续二维形变场 ----
@@ -1987,35 +2183,173 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     #   上下唇片硬错开 + 中间填一条平均色，实测是一条边缘生硬的暗带，
     #   视觉模型判定为「贴纸」。而连续拉伸用的是原图自己的像素，
     #   缝隙是原图唇缝被拉长，不会有外来色块。
-    yy, xx = np.mgrid[0:ph, 0:pw].astype(np.float32)
-    d = yy - cyi
-    wv = np.exp(-(d / (0.62 * mh)) ** 2)                    # 纵向：唇缝最强
-    # 横向：嘴角固定，形变范围只覆盖唇部（不碰两颊）。
-    # ⚠ 这里不再用 wd 调 sigma —— 实测那样做，wd 从 0.72 变到 1.08 时
-    #   影响半径只从 76px 到 81px（差 2.5%），肉眼完全看不出唇形变化，
-    #   这正是「口型不丰富」的直接原因。wd 现在改为驱动真正的横向形变（见下）。
-    sig_h = 0.80 * mw * 0.5
-    wh = np.exp(-((xx - cxi) / max(sig_h, 1.0)) ** 2)
+    # 形变场优先取 _prep 预计算好的（与 op 无关，不必每帧重算 mgrid/exp）。
+    # 实测这些计算占单帧耗时约 40%；贴片放大到 405x245 后单帧曾达 162ms。
+    _F = prep.get("fields") or {}
+    _pf = bool(_F) and getattr(_F.get("d"), "shape", None) == (ph, pw)
+    if _pf:
+        d = _F["d"]
+        wv = _F["wv"]
+        wh = _F["wh"]
+        cxi = _F["cxi"]
+        # 横向形变仍需要列坐标；用 broadcast 的 (1,pw) 代替整张 mgrid，
+        # 既满足 xx - cxi 的运算，又不生成 (ph,pw) 大数组。
+        xx = np.arange(pw, dtype=np.float32)[None, :]
+    else:
+        yy, xx = np.mgrid[0:ph, 0:pw].astype(np.float32)
+        d = yy - cyi
+        wv = np.exp(-(d / (0.62 * mh)) ** 2)                # 纵向：唇缝最强
+        sig_h = 0.80 * mw * 0.5
+        wh = np.exp(-((xx - cxi) / max(sig_h, 1.0)) ** 2)
+    # ---- 形变场的远场截断（以唇心为中心）----
+    # 高斯永远不到 0：在 |d|=1.36mh(81px) 处 wv 仍有 0.0087，对应 0.33px 亚像素位移。
+    # 平时看不见，但那里正好是**鼻底强边缘**（相邻像素 124.7→27.3，梯度约 97/px），
+    # 0.33px × 97 ≈ 32 的亮度变化 —— 这就是人中/鼻底那条「割裂」横带的来源。
+    # 不能靠调小 sigma 解决（那会改掉唇缝的过渡形状），所以单独乘一个硬窗：
+    # 窗在 |d| ≤ 1.05mh 时为 1（唇部只占 0.6mh，完全不受影响），到 1.40mh 降为 0。
+    # 贴片本身取到 ±2.00/2.10mh，因此「有位移的区域」被整个包在贴片内部，
+    # 贴片边界处位移精确为 0，与底图逐像素一致。
+    # 窗位是扫出来的（唇外残差 / 暗带高度两列一起看，确认没削弱张嘴）：
+    #   1.40/1.05mh → 残差 28.7 ；1.20/1.00 → 15.3 ；1.05/0.85 → 7.7（地板）
+    #   而暗带高度在所有窗位下都是 29→35px 不变 —— 说明收紧窗不影响唇形。
+    if not _pf:
+        _dw = np.clip((1.05 * mh - np.abs(d)) / (0.20 * mh), 0.0, 1.0)
+        _dw = _dw * _dw * (3.0 - 2.0 * _dw)
+        _dx = np.clip((1.00 * mw - np.abs(xx - cxi)) / (0.25 * mw), 0.0, 1.0)
+        _dx = _dx * _dx * (3.0 - 2.0 * _dx)
+        wv = wv * _dw
+        wh = wh * _dx
     # 幅度：amp 只做「温和」的强度调节，主体增益在 _build_params 的曲线上。
     # 为什么不大幅调这里 —— 实测把系数拉到 0.72*1.4 + kmin 0.16 时，
     # 唇缝能到 41px，但视觉复核判定「嘴角拉扯、上唇边缘平、下巴僵硬」。
     # 所以这里只给 0.35 的斜率，kmin 下限停在 0.24（约 4.2x），再狠就拉丝。
     _a = float(np.clip(amp, 0.60, 2.00))
-    coef_base = 0.72 * (1.0 + 0.35 * (_a - 1.0))
-    kmin = max(0.24, 0.40 - 0.16 * (_a - 1.0))
-    # 上下唇不对称：真人说话下唇动作明显大于上唇。
-    # 实测变化重心 上唇 51.9%/下唇 48.1%（对称）→ 45.3%/54.7%（0.8:1.2）。
-    # 再偏（1.6:1）视觉复核判定「上唇被压得过薄、下唇过凸、像在抿嘴」，故取 0.8:1.2。
-    coef = np.where(d > 0, coef_base * 1.20, coef_base * 0.80)
-    k = 1.0 - coef * op * wv * wh
-    k = np.maximum(k, kmin)
-    src = np.clip(cyi + d * k, 0, ph - 1)
+    # ---- 上下唇分离（替代「整体纵向拉伸」）----
+    # 旧做法 k = 1 - coef*op*wv 是**连续拉伸**：把唇缝那条 3px 暗线拉宽。
+    # 实测 op=0.85 时暗带只从 29px 变到 35px（+20%），视觉复核判定
+    # 「上下唇仍然紧闭」——因为**唇形轮廓根本没分离**，只是那条线变粗了。
+    # 真人张嘴的实质是：上唇上移、下唇下移，中间露出缝隙（口腔暗部）。
+    # 所以改成三段式位移场：
+    #   |d| < 0.18mh  过渡区：位移从 0 平滑升到满量，被拉伸的内容正好填成缝隙
+    #   0.18~0.55mh   唇身区：**刚性平移**（位移恒定），纹理不缩放 → 不糊
+    #   > 0.55mh      远场：衰减到 0.85mh 归零，人中/下巴不受影响
+    # 上下唇不对称由 s2 的起始位置控制（下唇 0.50mh、上唇 0.58mh），
+    # 实测真人变化重心 上唇 45%/下唇 55%。
+    # ⚠ 位移场必须**严格单调**（d(src)/dy > 0），否则源坐标倒退 → 画面内容折叠，
+    # 表现为唇缘出现「二维码状」水平波纹/撕裂。实测第一版用平滑窗：
+    #   shift' = sep × 1.5/(0.18mh) ≈ 2.14 > 1  → 必然折叠，视觉复核判「纹理崩坏」。
+    # 所以改成显式分段映射，每段都单调，且在两段交界处连续：
+    #   缝隙 |d| < sep  ：源 = d × 3/sep   （把唇缝上下 3px 拉伸成缝隙，颜色取自唇缝本身）
+    #   上唇 d ≤ -sep   ：源 = d + (sep-3)  （刚性上移，纹理不缩放 → 不糊）
+    #   下唇 d ≥ +sep   ：源 = d - (sep-3)  （刚性下移）
+    # 交界 d=±sep 处两式都等于 ±3，连续。
+    # sep 乘 wh → 嘴角处缝隙收窄到闭合，缝隙自然呈梭形（真人嘴角也是汇合的）。
+    # 上下唇**完全刚性平移**：src = d ∓ sep，任何位置都不做缩放。
+    # 为什么不能留「压缩过渡区」：实测把源图 cyi±3px 压缩铺成 ±sep(15px)，
+    # 而**真实唇线正好落在这 3px 里**（剖面实测唇缝最暗在 d=-5），
+    # 于是 1px 的锐利唇线被铺成 5px 渐变 → 视觉复核判「唇线锯齿、二维码状断裂」。
+    # 对照实验确认这是形变造成的：同一区域未处理原图被判定「锐利、有唇纹、无锯齿」。
+    # 现在唇身不缩放（纹理原样平移），空隙 |d|<sep 由下面的口腔合成覆盖。
+    # ⚠ 先减 2px 再判缝隙：wh 在嘴角处把 sep 压到 2~3px，那点宽度不足以形成口腔，
+    # 却仍然被填成暗色 —— 而嘴角原图是唇峰高光（实测亮度 202），一填就变成 125，
+    # 于是嘴角两侧各出现一段「暗线」，连起来就是视觉判定的「笔直黑线横贯嘴部」。
+    # 减 2px 后嘴角 sep_map 归零，完全不张嘴（真人嘴角本来也是闭合的）。
+    # 系数 0.30→0.34 抵消这 2px，保证中间最大缝隙宽度不变（约 15px）。
+    # 缝隙形状用**椭圆**而不是高斯：高斯在中间 60% 宽度内几乎不变，缝隙呈「平底」，
+    # 视觉上就是一条极扁的「一」字（实测视觉复核原话）。真人张嘴是中间最宽、
+    # 向嘴角收窄的梭形/椭圆。椭圆半宽取 0.52mw ≈ 嘴半宽，嘴角处自然归零。
+    # 幅度 0.26：说话时开口度大部分在 10~25% 之间，只有重音才大张。
+    # 开口越大，2D 合成越需要口腔细节（牙齿/舌/深度），越容易露馅；
+    # 实测 0.40（开口 37px）视觉判定「贴了一块纯黑遮罩」，0.26（约 22px）更像自然轻张。
+    _sep = op * mh * (0.26 * (1.0 + 0.30 * (_a - 1.0)))
+    # 半宽 0.57mw（略大于嘴半宽 0.5mw）：让 sep_map 在嘴角处缓慢归零，
+    # 否则嘴角会出现「尖锐应力点」（视觉复核原话）。
+    # ⚠ 不能用 max(sep*sqrt(ell) - 2, 0)：那是在 ell 很小时硬截断，
+    # 会让开口两端突然收成一个**尖角**（视觉复核原话「像刀切一样收束成一个点」）。
+    # 改成乘一个平滑窗：ell<0.02 时为 0（嘴角不张嘴，避免黑线），ell>0.10 时为 1。
+    if _pf:
+        _ell = _F["ell"]
+        _soft = _F["soft"]
+    else:
+        _ell = np.clip(1.0 - ((xx - cxi) / (0.57 * mw)) ** 2, 0.0, 1.0)
+        _soft = np.clip((_ell - 0.02) / 0.08, 0.0, 1.0)
+        _soft = _soft * _soft * (3.0 - 2.0 * _soft)
+    _sep_map = _sep * np.sqrt(_ell) * _soft
+    _mouth = np.abs(d) < _sep_map
+    # 平移量取 sep-3：把「唇缝最暗点往上 3px」（即唇线）刚好推到口腔边界，
+    # 于是边界两侧一边是唇线、一边是口腔边缘，亮度能接上，不再出现亮暗交替的锯齿。
+    # 平移量必须随距离衰减：唇部（|d|<0.42mh）完整平移 sep，到 0.67mh 归零。
+    # 为什么：完全刚性平移会把「上唇上方的人中/鼻底」整块推上来顶替唇部位置，
+    # 而那里纹理很少 —— 实测上唇纹理掉到原图的 0.63x，视觉判「上唇唇纹被抹平」。
+    # 衰减后唇部仍是刚性（不糊），只有唇外的皮肤区做平滑过渡。
+    # 分布：唇缝(|d|<0.10mh) 满量 → 唇缘(0.42mh) 降到 45% → 唇外(0.72mh) 归零。
+    # 这符合真人：张嘴时唇缝处位移最大，唇峰/嘴角位移小得多。
+    # 纯刚性（唇缘也满量）会把上唇整体错位约 10px，上唇下部顶到上唇中部的位置，
+    # 实测纹理掉到 0.66x、视觉判「上唇唇纹被抹平」。
+    _sh_fade = 1.0 - 0.55 * np.clip(
+        (np.abs(d) - 0.10 * mh) / (0.32 * mh), 0.0, 1.0)
+    _sh_fade = _sh_fade * (1.0 - np.clip(
+        (np.abs(d) - 0.50 * mh) / (0.22 * mh), 0.0, 1.0))
+    src = np.clip(cyi + d - np.sign(d) * np.maximum(_sep_map - 3.0, 0.0)
+                  * _sh_fade, 0, ph - 1)
 
-    i0 = np.floor(src).astype(np.int32)
-    i1 = np.minimum(i0 + 1, ph - 1)
-    frac = (src - i0)[..., None]
     cols = np.arange(pw)[None, :]
-    outp = parr[i0, cols] * (1.0 - frac) + parr[i1, cols] * frac
+    if str(_RENDER.get("interp", "bilinear")) == "cubic":
+        # Catmull-Rom 三次插值：纵向拉伸本质是**放大**，双线性在放大时会糊，
+        # 三次核保留更多高频（代价是极强边缘可能轻微过冲，故仅纵向用）。
+        i0 = np.floor(src).astype(np.int32)
+        t = (src - i0)[..., None]
+        im1 = np.clip(i0 - 1, 0, ph - 1)
+        ip1 = np.minimum(i0 + 1, ph - 1)
+        ip2 = np.minimum(i0 + 2, ph - 1)
+        p0 = parr[im1, cols]
+        p1 = parr[i0, cols]
+        p2 = parr[ip1, cols]
+        p3 = parr[ip2, cols]
+        a3 = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3
+        b3 = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3
+        c3 = -0.5 * p0 + 0.5 * p2
+        outp = ((a3 * t + b3) * t + c3) * t + p1
+    else:
+        i0 = np.floor(src).astype(np.int32)
+        i1 = np.minimum(i0 + 1, ph - 1)
+        frac = (src - i0)[..., None]
+        outp = parr[i0, cols] * (1.0 - frac) + parr[i1, cols] * frac
+
+    # ---- 口腔合成：缝隙内容单独生成，不靠拉伸 ----
+    # 为什么必须单独合成：缝隙里没有任何可采样的「口腔像素」——
+    # 原图是闭着嘴的，那个位置只有唇缝本身。拉伸唇缝只能得到一条放大的暗线（糊）。
+    # 这里用**唇缝自己的颜色**（逐列取均值，保留横向明暗变化，不是一片纯色）做纵向渐变：
+    #   缝隙中心压到 38%（口腔深处），靠近唇缘回到 72% —— 有深度感，不是死黑块。
+    # 叠一层极轻噪点（σ=2.2，固定种子）避免出现「完全平坦的塑料块」。
+    # 边界形状由 |d| = sep*wh 决定，是平滑曲线，所以口腔与唇身交界不会有锯齿。
+    if _sep > 1.0:
+        _c0 = int(max(0, cyi - 3))
+        _c1 = int(min(ph, cyi + 4))
+        _lipcol = parr[_c0:_c1].mean(axis=0)                  # (pw, 3)
+        _tt = np.clip(np.abs(d) / np.maximum(_sep_map, 1.0), 0.0, 1.0)
+        # ⚠ 中心暗度必须随**缝宽**自适应，否则嘴角会出现一条贯穿式黑细线：
+        # sep 乘了横向窗 wh，到嘴角只剩 0.5~3px，但中心仍是 0.35 的暗，
+        # 于是在那 1~2px 里就形成一条笔直的黑线（视觉复核判「横贯画面的黑色细线」）。
+        # 现在：缝宽 ≥10px 才压到 0.35（真口腔），≤2px 时完全不压暗（自然闭合）。
+        _w_mouth = np.clip((_sep_map - 2.0) / 8.0, 0.0, 1.0)
+        # ⚠ 中心不能压太狠：0.28 时实测口腔中心亮度只有 21/255，
+        # 视觉复核判「纯黑窟窿，看不到牙齿舌头和阴影过渡」。自然光下口腔内壁约 40~70。
+        _c_dark = 1.0 - 0.38 * _w_mouth
+        # 过渡带要够宽：0.27 时边界像「剪切接缝」，0.42 才像唇缘的自然阴影过渡。
+        _k = np.clip((_tt - 0.45) / 0.42, 0.0, 1.0)
+        _k = _k * _k * (3.0 - 2.0 * _k)
+        _fade = _c_dark + (1.0 - _c_dark) * _k
+        # 口腔不能是一块均匀的暗色（视觉复核原话：「颜色均匀的死黑色块，像贴了遮罩」）。
+        # 真实口腔有纵向结构：上颌（硬腭）最暗，舌面稍亮，下唇内侧有湿润反光。
+        # 三层都从原图唇缝色派生，所以不会跳出画面色调。
+        _u = d / np.maximum(_sep_map, 1.0)
+        _grad_v = 0.80 + 0.34 * np.clip(_u, 0.0, 1.0)          # 上暗下亮
+        _gloss = 1.0 + 0.14 * np.exp(-((_u - 0.72) / 0.18) ** 2)  # 下唇内侧反光
+        _fill = _lipcol[None, :, :] * (_fade * _grad_v * _gloss)[..., None]
+        _fill = _fill + np.random.RandomState(12345).normal(
+            0.0, 2.2, _fill.shape)
+        outp = np.where(_mouth[..., None], _fill, outp)
 
     # ---- 横向形变：真正改变唇形宽窄（圆唇 / 扁唇）----
     # wd > 1 扁唇（i/e，嘴角向两边拉）；wd < 1 圆唇（u/o，嘴唇收拢）。
@@ -2036,15 +2370,25 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
         rows = np.arange(ph)[:, None]
         outp = outp[rows, j0] * (1.0 - f2) + outp[rows, j1] * f2
 
-    # 唇缝中心轻微压暗：模拟口腔深度。只压 14%，再重就是一条黑带。
-    dark = 1.0 - (0.14 + 0.05 * (_a - 1.0)) * op * np.exp(-(d / (0.26 * mh)) ** 2) * wh
+    # 缝隙压暗 = 口腔深度。
+    # ⚠ 这一步不能省、也不能弱：上下唇分离后，缝隙里采样到的是**上唇的唇色**
+    # （源行被推到了上唇区域），不压暗的话缝隙是「一坨唇色」，看着像嘴唇肿了。
+    # 真人张嘴时缝隙是口腔，比唇色暗得多。实测：
+    #   压 14%（旧值）→ 缝隙亮度仅降 12%，暗带宽度仍是 7px，视觉判「紧闭」
+    #   压 42% → 缝隙呈明显暗部，暗带随 op 单调变宽
+    # 覆盖半径给到 0.34mh，因为缝隙总宽是 2×sep（op=1 时约 36px ≈ 0.6mh）。
+    # 口腔区已由上面的合成自带渐变暗部，这里不再二次压暗（否则变成死黑块）。
+    dark = 1.0 - (0.42 + 0.05 * (_a - 1.0)) * op * np.exp(
+        -(d / (0.34 * mh)) ** 2) * wh * np.where(_mouth, 0.0, 1.0)
     outp = outp * dark[..., None]
 
     img = Image.fromarray(np.clip(outp, 0, 255).astype(np.uint8), mode="RGB")
     if ss > 1:
-        # 超采样降回原尺寸。用 BICUBIC 而非 LANCZOS：后者在唇线这类强对比边缘
+        # 超采样降回原尺寸。默认 BICUBIC 而非 LANCZOS：后者在唇线这类强对比边缘
         # 会产生振铃（白边），紧跟着的 USM 会把它放大成一条亮线。
-        img = img.resize(prep["patch"].size, Image.BICUBIC)
+        _dnf = {"lanczos": Image.LANCZOS, "bicubic": Image.BICUBIC}.get(
+            str(_RENDER.get("down", "bicubic")), Image.BICUBIC)
+        img = img.resize(prep["patch"].size, _dnf)
 
     # 唇形宽窄已经由上面形变场的横向 sigma 表达，这里不再对整帧做横向 resize。
     # 演进记录：原先用 resize 实现唇宽，且按 |sx-1|>0.005 决定缩不缩 ——
@@ -2058,12 +2402,31 @@ def _frame(prep: dict, openness: float, width: float, amp: float = 1.0):
     # 轻度 USM 补偿：percent=70 是实测平衡点（拉普拉斯均值 5.59 → 6.84），再高会出白边。
     # ⚠ 同样不能「op>0.15 才锐化」：阈值来回跨越时锐度会一帧开一帧关，也是闪烁源。
     #   改成按 op 连续加权 —— op=0 不锐化、op≥0.25 全额，中间平滑过渡。
-    amt = 70.0 * float(_smoothstep(min(max(op / 0.25, 0.0), 1.0)))
+    amt = float(_RENDER.get("usm", 70.0)) * float(
+        _smoothstep(min(max(op / 0.25, 0.0), 1.0)))
     if amt >= 1.0:
         from PIL import ImageFilter
-        img = img.filter(ImageFilter.UnsharpMask(radius=1.0,
-                                                 percent=int(round(amt)),
-                                                 threshold=2))
+        sharp = img.filter(ImageFilter.UnsharpMask(
+            radius=float(_RENDER.get("usm_r", 1.0)),
+            percent=int(round(amt)),
+            threshold=int(_RENDER.get("usm_th", 2))))
+        # ⚠ 锐化必须**只作用在唇部核心**，不能在整片贴片上做。
+        # 原因（实测）：贴片被 USM 锐化、贴片外没有，而 _h_mask 上下羽化只有 3px，
+        # 于是锐度在 3px 内从 0 突变到全量，在人中/下巴留下一条可见横带。
+        # 量化：op=0.85 时贴片上边界(y=518)下方 3~6px 处帧间差最大 43.0，
+        # 且该值随 usm 强度同步上涨（usm 70→43.0，usm 120→52.3），
+        # 说明它完全是锐化造成的，不是形变造成的。
+        # 解法：用形变场同一组高斯权重 wv*wh 做混合 —— 唇部=1 全额锐化，
+        # 贴片边界处 wv/wh 都衰减到 ~0.01，锐化自然归零，与底图锐度连续。
+        w_lip = wv * wh
+        if w_lip.shape != (img.height, img.width):
+            w_lip = np.asarray(
+                Image.fromarray(np.clip(w_lip * 255.0, 0, 255).astype(np.uint8))
+                .resize(img.size, Image.BILINEAR), np.float32) / 255.0
+        _al = np.clip(w_lip, 0.0, 1.0)[..., None]
+        img = Image.fromarray(np.clip(
+            np.asarray(img, np.float32) * (1.0 - _al)
+            + np.asarray(sharp, np.float32) * _al, 0, 255).astype(np.uint8))
     out.paste(img, (nbx, ytop), m2)
     return out
 
@@ -2112,7 +2475,9 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (W, H),
            "-r", str(fps), "-i", "-",
            "-i", wav_path,
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+           # 嘴部清晰度：crf20/veryfast → crf18/medium。实测「解码帧 vs 原始帧」的
+           # 嘴部 RMSE 2.462 → 2.090（降 15%），代价是文件约 2 倍（每秒 94KB→186KB）。
+           "-c:v", "libx264", "-preset", "medium", "-crf", "18",
            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
            "-shortest", "-movflags", "+faststart", out_mp4]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
@@ -2156,21 +2521,121 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
 
 
 # ---------------------------------------------------------------- 一站式
+# ---------------------------------------------------------------- 云端口型
+# 本地参数化口型（下面 speak 的默认路径）本质是「按声学曲线形变嘴部贴片」：
+# 发 b/p/m 时不知道该闭唇、发 u 时不知道该圆唇 —— 这是原理性上限，调参无解。
+# 云端走阿里云百炼 Wan2.2-S2V：扩散模型按音频重绘口型，效果不在一个量级。
+# 但它按次计费、单次音频硬限制 <20 秒，所以保留本地路径作为无 Key 时的兜底。
+CLOUD_ENGINES = ("cloud", "api", "wan", "wan2.2-s2v", "s2v")
+
+
+def _cloud_status() -> dict:
+    """云端配置状态。avatar_cloud 出任何问题都不能让 status() 崩掉。"""
+    try:
+        from . import avatar_cloud as ac
+        c = ac.config()
+        return {
+            "ready": bool(c.get("ready")),
+            "has_key": bool(c.get("has_key")),
+            "workspace_id": c.get("workspace_id") or "",
+            "resolution": c.get("resolution") or "480P",
+            "model": c.get("model") or "wan2.2-s2v",
+            "missing": c.get("missing") or [],
+            "max_audio_sec": ac.MAX_AUDIO_SEC,
+            "key_url": ac.KEY_URL,
+            "signup_url": ac.SIGNUP_URL,
+        }
+    except Exception as e:                                  # noqa: BLE001
+        return {"ready": False, "has_key": False, "workspace_id": "",
+                "missing": ["云端模块不可用"], "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def _is_cloud_engine(engine: str) -> bool:
+    return (engine or "").strip().lower() in CLOUD_ENGINES
+
+
+def _cloud_precheck():
+    """云端生成的前置检查。返回 (ok, 错误 dict 或 None)。"""
+    from . import avatar_cloud as ac
+    c = ac.config()
+    if not c.get("ready"):
+        return False, {
+            "ok": False, "need_key": True,
+            "error": "云端口型还没配置：缺%s" % "、".join(c.get("missing") or []),
+            "signup_url": ac.SIGNUP_URL, "key_url": ac.KEY_URL,
+            "missing": c.get("missing") or [],
+        }
+    return True, None
+
+
+def speak_cloud(text: str, voice: str = "", rate=None, style: str = "",
+                resolution: str = "") -> dict:
+    """文本 → TTS → 云端 Wan2.2-S2V → mp4（同步版，会阻塞 1~3 分钟）。"""
+    from . import avatar_cloud as ac
+
+    t = (text or "").strip()
+    if not t:
+        return {"ok": False, "error": "文本是空的"}
+    if not os.path.isfile(_img_path()):
+        return {"ok": False, "error": "还没有数字人形象，请先上传一张图或用 AI 生成一张"}
+
+    ok, err = _cloud_precheck()
+    if not ok:
+        return err
+
+    from . import tts as tts_mod
+    a = tts_mod.synth(t, voice=voice or "", rate=int(rate or 0),
+                      engine="auto", style=(style or "").strip())
+    if not a.get("ok"):
+        return {"ok": False, "error": "配音失败：%s" % a.get("error")}
+
+    r = ac.generate(_img_path(), a.get("path") or "", resolution=resolution)
+    if not r.get("ok"):
+        return r
+    from urllib.parse import quote
+    r["url"] = "/api/avatar2/video/" + quote(r.get("name") or "")
+    return r
+
+
+def speak_async(text: str, voice: str = "", rate=None, style: str = "",
+                resolution: str = "") -> dict:
+    """云端生成的异步版：立刻返回 job_id，前端轮询进度。
+
+    一次生成 1~3 分钟（长文本切多段更久），挂在 HTTP 长连接上很容易被中间层
+    掐断，前端也拿不到「第几段」。所以统一走「提交 → 轮询」。
+    """
+    from . import avatar_cloud as ac
+
+    t = (text or "").strip()
+    if not t:
+        return {"ok": False, "error": "文本是空的"}
+    if not os.path.isfile(_img_path()):
+        return {"ok": False, "error": "还没有数字人形象，请先上传一张图或用 AI 生成一张"}
+
+    ok, err = _cloud_precheck()
+    if not ok:
+        return err
+
+    from . import tts as tts_mod
+    a = tts_mod.synth(t, voice=voice or "", rate=int(rate or 0),
+                      engine="auto", style=(style or "").strip())
+    if not a.get("ok"):
+        return {"ok": False, "error": "配音失败：%s" % a.get("error")}
+
+    jid = ac.generate_async(_img_path(), a.get("path") or "", resolution=resolution)
+    return {"ok": True, "job_id": jid}
+
+
 def speak(text: str, voice: str = "", rate=None, style: str = "",
           engine: str = "auto", mood: str = "", expr: bool = False,
           amp: float = 1.0) -> dict:
-    """文本 → TTS → 云端 Wan2.2-S2V → mp4。这是给工具/前端调的主入口。
+    """文本 → TTS → 口型对齐 → mp4。这是给工具/前端调的主入口。
 
-    2026-11-15 重构：本地 2D 形变已**整体停用**，改走阿里云百炼 Wan2.2-S2V。
-    原因是形变原理上做不出 b/p/m 闭唇、舌位、牙齿，怎么调参都是橡皮嘴；
-    云端是扩散模型逐帧重绘，口型由音频真正驱动。
-
-    参数现在的实际作用（都只影响配音，不再影响口型渲染）：
-      engine = TTS 引擎（auto/edge/sapi）
-      mood   = 心情：auto/""（按语境自动判断）/ happy/calm/serious/gentle/
-               sad/excited/surprise/worried/confident
-      rate   = 语速 -50~50；None 表示用心情的建议值
-      expr / amp = 本地渲染时代的参数，云端不再使用，保留只为兼容老调用方
+    engine  = TTS 引擎（auto/edge/sapi）
+    mood    = 心情：auto/""（按语境自动判断）/ happy/calm/serious/gentle/
+              sad/excited/surprise/worried/confident
+    rate    = 语速 -50~50；None 表示用心情的建议值
+    expr    = 是否叠加微表情（整头轻动 + 眉眼带轻形变）
     """
     t = (text or "").strip()
     if not t:
@@ -2178,24 +2643,16 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
     if not os.path.isfile(_img_path()):
         return {"ok": False, "error": "还没有数字人形象，请先上传一张图或用 AI 生成一张"}
 
-    # ---- 云端没配好就早退，把「缺什么、去哪拿」直接告诉调用方
-    from . import avatar_cloud as cl
-    cstat = cl.status()
-    if not cstat.get("ready"):
-        c = cl.config()
-        return {
-            "ok": False, "need_key": True,
-            "error": "云端口型还没配置：缺%s" % "、".join(c.get("missing") or ["API Key"]),
-            "signup_url": c.get("signup_url"), "key_url": c.get("key_url"),
-            "doc_url": c.get("doc_url"),
-        }
+    # 云端口型：效果远好于本地形变，但按次计费，所以只在明确要求时走
+    if _is_cloud_engine(engine):
+        return speak_cloud(t, voice=voice, rate=rate, style=style)
 
     # ---- 心情 + 语速解析（auto 时走规则，拿不准的标记交给调用方决定）
-    # 注意：这两个现在只影响 TTS 配音，不影响口型（口型由云端模型按音频重绘）
     from . import avatar2_expr as ex
     cfg = ex.resolve(mood, rate, t)
     final_rate = int(cfg.get("rate", 0))
     final_style = (style or "").strip() or str(cfg.get("style") or "")
+    expr_cfg = cfg if expr else None
 
     from . import tts as tts_mod
     a = tts_mod.synth(t, voice=voice or "", rate=final_rate,
@@ -2203,24 +2660,37 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
     if not a.get("ok"):
         return {"ok": False, "error": "配音失败：%s" % a.get("error")}
     audio = a.get("path") or ""
+    try:
+        wav = _to_wav16k(audio)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "音频转码失败：%s: %s" % (type(e).__name__, e)}
 
-    # ---- 云端生成（内部会按 <20 秒自动切段，再拼接）
-    r = cl.generate(_img_path(), audio)
+    words = _asr_words(wav)
+    if words:
+        # ASR 会认错字（实测「数字人」→「数IL」、「驱动」→「驱驱驱驱动动动」），
+        # 而音素层是拿「字」查拼音定唇形的，错字就是错唇形。
+        # 原文是我们自己给的、一定对，所以只借 ASR 的「时间」，不借它的「字」。
+        try:
+            _sr, _y = _read_wav(wav)
+            words = _align_words(t, words, len(_y) / float(_sr)) or words
+        except Exception:                               # noqa: BLE001
+            pass
+    name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
+    out = os.path.join(_vdir(), name)
+    _amp = float(np.clip(amp, 0.60, 2.00))
+    r = render(_img_path(), wav, out, words=words, expr=expr_cfg, amp=_amp)
     if not r.get("ok"):
         return r
     from urllib.parse import quote
     return {
         "ok": True,
-        "name": r["name"],
-        "url": "/api/avatar2/video/" + quote(r["name"]),
-        "path": r["path"],
-        "duration": r.get("duration"),
-        "bytes": r.get("bytes"),
-        "segments": r.get("segments"),
-        "elapsed": r.get("elapsed"),
-        "engine": r.get("engine"),
-        "resolution": r.get("resolution"),
-        "lipsync_label": r.get("lipsync_label"),
+        "name": name,
+        "url": "/api/avatar2/video/" + quote(name),
+        "path": out,
+        "duration": r["duration"],
+        "size": r["size"],
+        "frames": r["frames"],
+        "bytes": r["bytes"],
         "mood": cfg.get("key", "calm"),
         "mood_label": cfg.get("label", "平静"),
         "mood_auto": bool(cfg.get("auto")),
@@ -2228,84 +2698,49 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
         "mood_why": cfg.get("auto_why") or [],
         "rate": final_rate,
         "style": final_style,
+        "expr": bool(expr),
+        "amp": _amp,
+        "lipsync_label": ("音素+声学口型" if words else "声学形变口型"),
         "audio_url": a.get("url") or "",
         "audio_engine": a.get("engine") or "",
+        "align": ("字级对齐 %d 字" % len(words)) if words else "声学驱动（未找到 ASR 模型）",
         "text": t[:200],
     }
 
 
-def speak_async(text: str, voice: str = "", rate=None, style: str = "",
-                engine: str = "auto", mood: str = "") -> dict:
-    """提交云端生成任务，立刻返回 job_id（前端轮询进度用）。
-
-    为什么要有异步版：一次生成 1~3 分钟（长音频还要多段），挂在 HTTP
-    长连接上容易被中间层掐断，前端也拿不到「第几段」的进度。
-    """
-    t = (text or "").strip()
-    if not t:
-        return {"ok": False, "error": "文本是空的"}
-    if not os.path.isfile(_img_path()):
-        return {"ok": False, "error": "还没有数字人形象，请先上传一张图或用 AI 生成一张"}
-
-    from . import avatar_cloud as cl
-    c = cl.config()
-    if not c.get("ready"):
-        return {"ok": False, "need_key": True,
-                "error": "云端口型还没配置：缺%s" % "、".join(c.get("missing") or ["API Key"]),
-                "signup_url": c.get("signup_url"), "key_url": c.get("key_url")}
-
-    from . import avatar2_expr as ex
-    cfg = ex.resolve(mood, rate, t)
-    final_rate = int(cfg.get("rate", 0))
-    final_style = (style or "").strip() or str(cfg.get("style") or "")
-
-    from . import tts as tts_mod
-    a = tts_mod.synth(t, voice=voice or "", rate=final_rate,
-                      engine=engine or "auto", style=final_style)
-    if not a.get("ok"):
-        return {"ok": False, "error": "配音失败：%s" % a.get("error")}
-
-    jid = cl.generate_async(_img_path(), a.get("path") or "")
-    return {"ok": True, "job_id": jid,
-            "audio_url": a.get("url") or "",
-            "audio_engine": a.get("engine") or "",
-            "rate": final_rate, "style": final_style,
-            "mood": cfg.get("key", "calm"),
-            "mood_label": cfg.get("label", "平静"),
-            "text": t[:200]}
-
-
 def status() -> dict:
-    """能力自检：让前端如实告诉用户现在能做什么、缺什么。
-
-    2026-11-15：本地形变已停用，这里报的是**云端配置**状态。
-    字段尽量兼容老前端（ffmpeg / has_image 仍保留）。
-    """
-    from . import avatar_cloud as cl
-    c = cl.status()
+    """能力自检：让前端如实告诉用户现在能做什么、缺什么。"""
+    exe = ffmpeg()
+    asr = _find_asr()
+    torch_ok = False
+    torch_ver = ""
     try:
-        exe = ffmpeg()
+        import torch  # noqa: F401
+        torch_ok = True
+        torch_ver = getattr(torch, "__version__", "")
     except Exception:                                   # noqa: BLE001
-        exe = ""
+        torch_ok = False
     return {
         "ok": True,
-        "engine": "cloud",
-        "engine_label": "阿里云百炼 Wan2.2-S2V",
-        "ready": bool(c.get("ready")),
-        "has_key": bool(c.get("has_key")),
-        "workspace_id": c.get("workspace_id") or "",
-        "resolution": c.get("resolution") or "480P",
-        "model": c.get("model") or "wan2.2-s2v",
-        "max_audio_sec": c.get("max_audio_sec"),
         "ffmpeg": bool(exe),
-        "ffmpeg_path": exe or "",
+        "ffmpeg_path": exe,
+        "asr": bool(asr),
+        "asr_dir": asr,
+        "torch": torch_ok,
+        "torch_version": torch_ver,
+        "fps": FPS,
+        "max_seconds": MAX_SECONDS,
+        "max_side": MAX_SIDE,
         "has_image": os.path.isfile(_img_path()),
-        "engines": ["cloud"],
-        "note": c.get("note") or "",
-        "signup_url": cl.SIGNUP_URL,
-        "key_url": cl.KEY_URL,
-        "doc_url": cl.DOC_URL,
+        "engines": ["cloud", "param"],
+        "cloud": _cloud_status(),
+        "note": ("云端 Wan2.2-S2V（推荐）" if _cloud_status().get("ready")
+                 else "本地参数化口型"
+                      + ("（拼音音素驱动唇形 + 声学驱动节奏，已启用字级对齐）"
+                         if asr else "（声学特征驱动；未找到 ASR 模型，无法按拼音校正 b/p/m 闭唇）")),
     }
+
+
 
 
 def list_videos(limit: int = 50, scope: str = "avatar") -> list:

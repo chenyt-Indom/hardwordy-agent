@@ -1322,9 +1322,10 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                 "name": "avatar_speak",
                 "description": (
                     "【数字人说话视频】把一张人物图片 + 一段文字，做成**会说话的 mp4 视频**：\n"
-                    "先用 TTS 配音，再驱动嘴部形变：本机有 ASR 模型时按字级时间戳把每个字"
-                    "转拼音、按音素决定唇形（b/p/m 闭唇、u/o 圆唇、i/e 扁唇），"
-                    "同时按声音强弱决定张口幅度，最后用 ffmpeg 合成视频。\n"
+                    "先用 TTS 配音，再由**拼音音素**驱动 6 维口型（开口/圆唇/展唇/齿露/"
+                    "下唇/闭唇）—— 声母决定该不该闭唇（b/p/m 闭）、韵母决定唇形"
+                    "（u/o 圆、i/e 扁），字与字之间做协同发音过渡，最后用 ffmpeg 合成。\n"
+                    "引擎是本地 v3（backend/talkhead/），纯 CPU、免费、不需要任何 API Key。\n"
                     "用户说「让这个形象说话」「做个数字人视频」「用这张图念这段话」"
                     "「数字人播报」时用它。\n"
                     "⚠️ 需要先有形象：传 image 参数（本地图片路径），或用户已在「数字人」"
@@ -4519,17 +4520,18 @@ def _do_tts_speak(arguments, ui_events, context):
 
 
 def _do_avatar_speak(arguments, ui_events, context):
-    """数字人说话视频：图 + 文字 → mp4。
+    """数字人说话视频：图 + 文字 → mp4（v3 音素驱动引擎）。
 
     ⚠️ 渲染 8~15 秒，先发 status 别让界面看着像卡死。
     ⚠️ 返回里必须写清"参数化口型"这个局限。
     """
     from . import avatar2
+    from .talkhead import engine as th_engine
 
     text = str(arguments.get("text") or "").strip()
     if not text:
         return "错误：text 是空的。把要让数字人念的文字给我。"
-    if len(text) > 6000:      # 与 /api/avatar2/speak 一致；再长请分段
+    if len(text) > 6000:      # 与 /api/talkhead/speak 一致；再长请分段
         text = text[:6000]
 
     img = str(arguments.get("image") or "").strip()
@@ -4549,32 +4551,39 @@ def _do_avatar_speak(arguments, ui_events, context):
         rate = int(arguments.get("rate") or 0)
     except Exception:
         rate = 0
-    try:
-        amp = float(arguments.get("amp") or 1.0)
-    except Exception:
-        amp = 1.0
-    r = avatar2.speak(text,
-                      voice=str(arguments.get("voice") or ""),
-                      rate=rate,
-                      style=str(arguments.get("style") or ""),
-                      amp=amp)
+    # 2026-11-15：主引擎换成 v3（backend/talkhead/，音素驱动 6 维口型）。
+    # 旧 avatar2.speak 是声学驱动 —— 它只知道「此刻多响」，分不出「爸」和「大」
+    # 该闭唇还是张嘴，这是原理性缺陷，所以降级为备用。
+    # ⚠️ v3 没有 amp（幅度增益）参数：它的张口幅度由音素本身决定，不需要用户调。
+    r = th_engine.render_text(
+        text, avatar2._img_path(),
+        voice=str(arguments.get("voice") or ""),
+        rate=rate,
+        style=str(arguments.get("style") or ""),
+    )
     if not r.get("ok"):
         return "数字人视频生成失败：%s" % (r.get("error") or "未知原因")
 
-    url = r.get("url") or ""
+    # v3 只回 path，没有 name/url，这里自己拼播放地址（产物落在同一个 videos 目录）
+    path = r.get("path") or ""
+    name = os.path.basename(path) if path else ""
+    from urllib.parse import quote
+    url = ("/api/avatar2/video/" + quote(name)) if name else ""
     lines = [
-        "数字人视频已生成：**%s**" % r.get("name"),
+        "数字人视频已生成：**%s**" % name,
         "时长 %.1f 秒 · %dx%d · %d 帧 · %.0f KB"
         % (float(r.get("duration") or 0),
            int((r.get("size") or [0, 0])[0]), int((r.get("size") or [0, 0])[1]),
            int(r.get("frames") or 0), float(r.get("bytes") or 0) / 1024.0),
-        "口型：%s" % (r.get("align") or "声学驱动"),
+        "口型：音素驱动 · %d 个音节 · 对齐 %d 字"
+        % (int(r.get("syllables") or 0), int(r.get("aligned") or 0)),
         "[播放视频](%s)" % url,
         "[下载视频](%s)" % url,
         "",
-        "说明：口型是**音素+声学双层**——按拼音音素决定唇形"
-        "（b/p/m 会真的闭唇、u/o 圆唇、i/e 扁唇），按声音强弱决定张口幅度。"
-        "仍不是神经网络重绘，细微的舌位和齿位不会变。",
+        "说明：口型由**拼音音素**驱动——按声母/韵母算出 6 维口型"
+        "（开口/圆唇/展唇/齿露/下唇/闭唇），b/p/m 会真的闭唇、"
+        "u/o 圆唇、i/e 扁唇。仍是参数化形变而非神经网络重绘，"
+        "舌位和齿位不会变。",
     ]
     return "\n".join(lines)
 

@@ -3062,6 +3062,108 @@
     }
 
     // —— 生成 ——
+    // —— 云端生成：提交 → 轮询 ——
+    // 一次生成 1~3 分钟（长文本后端会自动按 20 秒切段再拼接），挂 HTTP
+    // 长连接等不到结果，所以后端返回 job_id，这里每 2 秒问一次进度。
+    async function runCloud(text, base, btn) {
+      const sub = await api("/api/avatar2/cloud/speak", {
+        method: "POST",
+        body: JSON.stringify({ text: text, voice: base.voice, rate: base.rate }),
+      });
+      if (!sub.ok) {
+        if (sub.need_key) showCloudCfg(true);
+        const err = new Error(sub.error || "提交失败");
+        err.needKey = !!sub.need_key;
+        err.signup = sub.signup_url || "";
+        throw err;
+      }
+      const jid = sub.job_id;
+      let last = "";
+      const deadline = Date.now() + 20 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((z) => setTimeout(z, 2000));
+        let j;
+        try {
+          j = await api("/api/avatar2/cloud/job/" + encodeURIComponent(jid));
+        } catch (e) {
+          continue;            // 偶发网络抖动不该中断整轮生成
+        }
+        const m = j.msg || "";
+        if (m && m !== last) {
+          last = m;
+          say("☁️ " + m);
+          if (j.total > 1) btn.textContent = "云端 " + (j.index || 0) + "/" + j.total;
+        }
+        if (j.status === "done") return j.result || {};
+        if (j.status === "failed") throw new Error(j.error || "云端生成失败");
+      }
+      throw new Error("等待超时（20 分钟）");
+    }
+
+    // 云端口型配置块的显示/隐藏 + 读取保存
+    function showCloudCfg(on) {
+      const box = $("#av2Cloud");
+      if (box) box.hidden = !on;
+    }
+
+    async function loadCloudCfg() {
+      try {
+        const c = await api("/api/avatar2/cloud");
+        // 2026-11-15：云端（Wan2.2-S2V）已整体移除，后端返回 {removed:true}。
+        // 这里直接隐藏整个配置块 —— 否则会显示成「缺：」让用户以为还得填东西。
+        if (c && c.removed) {
+          const box = $("#av2Cloud");
+          if (box) { box.hidden = true; box.innerHTML = ""; }
+          return null;
+        }
+        const st = $("#av2CloudState");
+        if (st) {
+          st.textContent = c.ready ? "已配置" : ("缺：" + (c.missing || []).join("、"));
+          st.className = "av2-cloud-state " + (c.ready ? "on" : "off");
+        }
+        const cbox = $("#av2Cloud");
+        if (cbox) cbox.classList.toggle("ok", !!c.ready);
+        const k = $("#av2CloudKey");
+        // 只回脱敏值：已有 Key 时显示掩码，不把明文塞回输入框
+        if (k) k.value = c.has_key ? (c.api_key || "") : "";
+        const ws = $("#av2CloudWs");
+        if (ws) ws.value = c.workspace_id || "";
+        const rs = $("#av2CloudRes");
+        if (rs && c.resolution) rs.value = c.resolution;
+        const help = $("#av2CloudHelp");
+        if (help && !c.ready) {
+          help.innerHTML = '去 <a href="' + esc(c.signup_url || "") +
+            '" target="_blank" rel="noopener">百炼控制台</a> 开通，' +
+            '再到 <a href="' + esc(c.key_url || "") +
+            '" target="_blank" rel="noopener">API Key 页面</a> 创建（必须是「华北2（北京）」地域）。';
+        } else if (help) {
+          help.textContent = "单次音频上限 " + (c.max_audio_sec || 19) +
+            " 秒，超长会自动切段再拼接。";
+        }
+        return c;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function saveCloudCfg() {
+      const k = ($("#av2CloudKey") && $("#av2CloudKey").value || "").trim();
+      const ws = ($("#av2CloudWs") && $("#av2CloudWs").value || "").trim();
+      const rs = $("#av2CloudRes") ? $("#av2CloudRes").value : "480P";
+      const body = { resolution: rs };
+      if (k) body.api_key = k;
+      if (ws) body.workspace_id = ws;
+      const r = await api("/api/avatar2/cloud/config", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) { say(r.error || "保存失败", "err"); return; }
+      await loadCloudCfg();
+      say(r.ready ? "☁️ 云端配置已保存，可以生成了"
+        : "已保存，但还缺：" + (r.missing || []).join("、"),
+        r.ready ? "" : "err");
+    }
+
     $("#av2Go").onclick = async () => {
       if (busy) return;
       const text = (textIn.value || "").trim();
@@ -3077,10 +3179,11 @@
       // 渲染模式：2d = 只有嘴动；p25d = 伪3D（深度位移 + 头姿）；3d = 真网格重画
       const modeSel2 = $("#av2Mode");
       const mode = modeSel2 ? modeSel2.value : "2d";
-      const speakUrl = mode === "w2l" ? "/api/avatar_lipsync/speak"
-        : mode === "3d" ? "/api/avatar3d/speak"
-          : mode === "p25d" ? "/api/avatar25d/speak"
-            : "/api/avatar2/speak";
+      const speakUrl = mode === "v3" ? "/api/talkhead/speak"
+        : mode === "w2l" ? "/api/avatar_lipsync/speak"
+          : mode === "3d" ? "/api/avatar3d/speak"
+            : mode === "p25d" ? "/api/avatar25d/speak"
+              : "/api/avatar2/speak";
       const base = {
         voice: voiceSel.value,
         mood: moodSel ? moodSel.value : "auto",
@@ -3119,43 +3222,14 @@
       // 所以分段长度按模式递减，保证每段都在请求超时窗口内。
       // Wav2Lip 实测 138 字 = 29 秒语音 = 37.7 秒渲染，接近超时线，
       // 所以按 90 字分段（每段约 19 秒语音、约 24 秒渲染），更稳
-      const segLen = mode === "3d" ? 60 : (mode === "p25d" || mode === "w2l") ? 90 : 120;
+      // v3 实测 13.5 秒渲染出 4.34 秒视频（约 3.1 秒渲染 / 秒语音），
+      // 60 字约 12 秒语音 → 约 37 秒渲染，留在请求超时窗口内。
+      const segLen = (mode === "3d" || mode === "v3") ? 60
+        : (mode === "p25d" || mode === "w2l") ? 90 : 120;
       try {
-        // ☁️ 云端模式：切段/拼接都在服务端做（20 秒限制是服务端的知识），
-        // 前端只负责提交 + 轮询进度。所以这里直接 return，不走下面的分段逻辑。
-        if (mode === "cloud") {
-          say("正在提交云端生成（口型由音频驱动，约 1~3 分钟）…");
-          const st = await api("/api/avatar2/cloud/speak", {
-            method: "POST",
-            body: JSON.stringify({
-              text: text, voice: base.voice, mood: base.mood, rate: base.rate,
-            }),
-          });
-          if (!st.ok) {
-            const err = new Error(st.error || "提交失败");
-            err.needKey = !!st.need_key;
-            err.signup = st.signup_url || "";
-            throw err;
-          }
-          let done = null;
-          for (let i = 0; i < 600; i++) {      // 2 秒一次，最多等 20 分钟
-            await new Promise((r2) => setTimeout(r2, 2000));
-            const j = await api("/api/avatar2/cloud/job/" + encodeURIComponent(st.job_id));
-            if (!j || !j.ok) throw new Error((j && j.error) || "任务丢失（服务可能重启过）");
-            if (j.msg) btn.textContent = String(j.msg).slice(0, 20);
-            if (j.status === "done") { done = j.result; break; }
-            if (j.status === "failed") {
-              throw new Error(j.error || j.msg || "云端生成失败");
-            }
-          }
-          if (!done) throw new Error("等待超时（20 分钟），任务可能还在云端跑");
-          say("已生成 " + done.duration + " 秒 · " + (done.segments || 1) +
-              " 段 · " + (done.resolution || "") + " · 耗时 " + done.elapsed + " 秒" +
-              (done.lipsync_label ? " · " + done.lipsync_label : ""), "");
-          playVideo(done.name);
-          loadVideos();
-          return;
-        }
+        // 2026-11-15：云端（Wan2.2-S2V）分支已整体删除 —— 后端 avatar_cloud
+        // 模块与路由都已移除。v3 引擎走下面的通用同步分段逻辑即可（实测
+        // 13.5 秒出 4.34 秒视频，比云端快一个量级，且不需要任何 Key）。
         // 长文本切成多段分别生成，每段都在请求超时窗口内，最后合并成一个视频。
         // 之前一次性发整篇，字数一多就渲染超时（用户反馈的那个问题）。
         // 120 字约 25 秒语音、渲染约 25 秒；实测 260 字要渲染 55 秒，
@@ -3163,10 +3237,11 @@
         const parts = splitSpeech(text, segLen);
         let r;
         if (parts.length <= 1) {
-          say(mode === "w2l" ? "正在配音 → Wav2Lip 生成嘴型 → 合成，约 10 秒…"
-            : mode === "3d" ? "正在 3D 重建 → 网格渲染 → 合成，约 30 秒…"
-              : mode === "p25d" ? "正在配音 → 深度位移 + 头姿 → 合成，约 10 秒…"
-                : "正在配音 → 口型对齐 → 合成，约 10 秒…");
+          say(mode === "v3" ? "正在配音 → 拼音音素对齐 → 6 维口型渲染，约 10 秒…"
+            : mode === "w2l" ? "正在配音 → Wav2Lip 生成嘴型 → 合成，约 10 秒…"
+              : mode === "3d" ? "正在 3D 重建 → 网格渲染 → 合成，约 30 秒…"
+                : mode === "p25d" ? "正在配音 → 深度位移 + 头姿 → 合成，约 10 秒…"
+                  : "正在配音 → 口型对齐 → 合成，约 10 秒…");
           r = await api(speakUrl, {
             method: "POST",
             body: JSON.stringify(Object.assign({}, base, { text: parts[0] || text })),
@@ -3229,12 +3304,12 @@
         playVideo(r.name);
         loadVideos();
       } catch (e) {
-        // 缺 Key 是最常见的失败：直接把「缺什么 + 去哪拿」说清楚，
-        // 不要只丢一句「生成失败」，用户会以为程序坏了。
+        // 2026-11-15：云端已移除，不再有「缺 Key」这条路。原来的提示会让
+        // 用户去找一个不存在的配置块，改成如实说明 + 指向 v3 引擎。
         let msg = e.message || String(e);
         if (e.needKey) {
-          msg += "　→ 在下面「☁️ 云端口型配置」里填 Key，或去百炼控制台申请"
-            + (e.signup ? "：" + e.signup : "");
+          msg += "　→ 云端方案已移除。把上方引擎换成「🎯 v3 音素口型」"
+            + "即可生成，不需要任何 API Key。";
         }
         say("生成失败：" + msg, "err");
       } finally {
@@ -3244,52 +3319,23 @@
       }
     };
 
-    // —— 云端口型配置 ——
-    // Key 只存在本机 data/avatar2/cloud.json，后端回给前端的永远是脱敏值，
-    // 所以这里「显示脱敏值 + 不覆盖」是正常行为，不是 bug。
-    async function loadCloud() {
-      try {
-        const c = await api("/api/avatar2/cloud");
-        if (!c || !c.ok) return;
-        const kEl = $("#av2CloudKey"), wEl = $("#av2CloudWs"), rEl = $("#av2CloudRes");
-        if (kEl && c.api_key) kEl.value = c.api_key;
-        if (wEl) wEl.value = c.workspace_id || "";
-        if (rEl && c.resolution) rEl.value = c.resolution;
-        const st = $("#av2CloudState");
-        if (st) {
-          st.textContent = c.ready ? "✓ 已配置" : ("缺 " + (c.missing || []).join("、"));
-          st.className = "av2-cloud-state " + (c.ready ? "on" : "off");
-        }
-        const box = $("#av2CloudBox");
-        if (box) box.classList.toggle("ok", !!c.ready);
-      } catch (e) { /* 拿不到就不改界面 */ }
-    }
-    const cloudSave = $("#av2CloudSave");
-    if (cloudSave) cloudSave.onclick = async () => {
-      cloudSave.disabled = true;
-      try {
-        const r = await api("/api/avatar2/cloud/config", {
-          method: "POST",
-          body: JSON.stringify({
-            api_key: ($("#av2CloudKey") || {}).value || "",
-            workspace_id: ($("#av2CloudWs") || {}).value || "",
-            resolution: ($("#av2CloudRes") || {}).value || "480P",
-          }),
-        });
-        if (!r || !r.ok) { say((r && r.error) || "保存失败", "err"); return; }
-        say(r.ready ? "云端口型已就绪，可以生成了"
-          : "已保存，还缺：" + (r.missing || []).join("、"), r.ready ? "" : "err");
-        await loadCloud();
-      } catch (e) {
-        say("保存失败：" + e.message, "err");
-      } finally {
-        cloudSave.disabled = false;
-      }
-    };
-
     // —— 启动 ——
+    // —— 云端配置块 ——
+    (function initCloudCfg() {
+      const saveBtn = $("#av2CloudSave");
+      if (saveBtn) saveBtn.onclick = () => { saveCloudCfg(); };
+      const ms = $("#av2Mode");
+      if (ms) {
+        ms.addEventListener("change", () => showCloudCfg(ms.value === "cloud"));
+      }
+      loadCloudCfg().then(() => {
+        // 默认就是云端，所以一进来就把配置块露出来 —— 缺 Key 时用户要能直接填
+        if (ms && ms.value === "cloud") showCloudCfg(true);
+      });
+    })();
+
     loadInfo().then(() => {
-      loadStatus(); loadVoices(); loadMoods(); loadVideos(); loadCloud();
+      loadStatus(); loadVoices(); loadMoods(); loadVideos();
     });
     setPin(localStorage.getItem(PIN_KEY) === "1");
 

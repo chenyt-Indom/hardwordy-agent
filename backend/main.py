@@ -11190,6 +11190,45 @@ def avatar2_status():
     return avatar2.status()
 
 
+# ---------------------------------------------------------------- 数字人 · 云端口型
+_CLOUD_GONE = {
+    "ok": False,
+    "removed": True,
+    "engine": "talkhead",
+    "error": "云端 Wan2.2-S2V 方案已移除（要 API Key + 业务空间 ID，配置麻烦）。"
+             "改用「数字人 v3」引擎即可，不需要任何 Key。",
+    "use_instead": "/api/talkhead/speak",
+}
+
+
+# 2026-11-15 二次确认：avatar_cloud.py 已整体删除，但下面 4 个路由留着会在
+# 每次调用时 ModuleNotFoundError → 500（前端点「保存云端配置」就炸）。
+# 现在统一返回 ok=False + removed=True，让前端能优雅降级到 v3 引擎，
+# 而不是抛 500 让用户以为程序坏了。
+@app.get("/api/avatar2/cloud")
+def avatar2_cloud_cfg():
+    """云端口型已移除 —— 返回提示而不是 500，供前端降级判断。"""
+    return dict(_CLOUD_GONE)
+
+
+@app.post("/api/avatar2/cloud/config")
+def avatar2_cloud_set(body: dict):                          # noqa: ARG001
+    """云端口型已移除（保留路由只为前端优雅降级）。"""
+    return dict(_CLOUD_GONE)
+
+
+@app.post("/api/avatar2/cloud/speak")
+def avatar2_cloud_speak(body: dict):                        # noqa: ARG001
+    """云端生成已移除 —— 请改调 /api/talkhead/speak。"""
+    return dict(_CLOUD_GONE)
+
+
+@app.get("/api/avatar2/cloud/job/{jid}")
+def avatar2_cloud_job(jid: str):                            # noqa: ARG001
+    """云端任务轮询已移除。"""
+    return dict(_CLOUD_GONE)
+
+
 @app.get("/api/avatar2/raw")
 def avatar2_raw():
     p = avatar2._img_path()
@@ -11495,67 +11534,8 @@ def avatar2_speak(body: dict):
                          amp=_amp)
 
 
-# ---------------------------------------------------------------- 云端口型（2026-11-15 重构）
-# 本地 2D 形变做不出 b/p/m 闭唇、舌位、牙齿，怎么调都是橡皮嘴，
-# 整条换成阿里云百炼 Wan2.2-S2V（扩散模型逐帧重绘，口型由音频真正驱动）。
-@app.get("/api/avatar2/cloud")
-def avatar2_cloud_cfg():
-    """云端口型配置状态。api_key 只回脱敏值，绝不回明文。"""
-    from . import avatar_cloud
-    return avatar_cloud.config()
-
-
-@app.post("/api/avatar2/cloud/config")
-def avatar2_cloud_set(body: dict):
-    """保存 API Key / 业务空间 ID / 分辨率。传脱敏值表示「不改这一项」。"""
-    from . import avatar_cloud
-    return avatar_cloud.set_config(body or {})
-
-
-@app.post("/api/avatar2/cloud/speak")
-def avatar2_cloud_speak(body: dict):
-    """提交云端生成，立刻返回 job_id（生成要 1~3 分钟，不能挂长连接）。
-
-    body: {text, voice, rate, style, engine, mood}
-    """
-    body = body or {}
-    text = str(body.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text 不能为空")
-    if len(text) > 6000:
-        raise HTTPException(status_code=400,
-                            detail="单次最多 6000 字；更长的文本请分段生成")
-    _r = body.get("rate")
-    if _r is None or _r == "":
-        rate = None
-    else:
-        try:
-            rate = int(_r)
-        except Exception:
-            rate = None
-    return avatar2.speak_async(
-        text,
-        voice=str(body.get("voice") or ""),
-        rate=rate,
-        style=str(body.get("style") or ""),
-        engine=str(body.get("engine") or "auto"),
-        mood=str(body.get("mood") or ""),
-    )
-
-
-@app.get("/api/avatar2/cloud/job/{jid}")
-def avatar2_cloud_job(jid: str):
-    """轮询生成进度；完成后把 result 里的播放地址补上。"""
-    from . import avatar_cloud
-    r = avatar_cloud.job(jid)
-    if r.get("ok") and r.get("status") == "done" and isinstance(r.get("result"), dict):
-        from urllib.parse import quote
-        res = dict(r["result"])
-        res["url"] = "/api/avatar2/video/" + quote(res.get("name") or "")
-        r["result"] = res
-    return r
-
-
+# 2026-11-15 回退：云端 Wan2.2-S2V 方案已整体移除（要 API Key + 业务空间 ID，
+# 配置麻烦且效果未验证）。数字人回到本地 2D 形变，口型由「拼音音素 + 声学」驱动。
 @app.get("/api/talkhead/info")
 def talkhead_info():
     """数字人 v3（音素驱动口型）能力自检。"""

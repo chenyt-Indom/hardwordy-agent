@@ -301,39 +301,33 @@
              既保留原图细节，又有头部体积感；真 3D 是重画网格，观感反而更假。 -->
         <div class="av2-row av2-row-3d">
           <select id="av2Mode"
-                  title="云端：扩散模型逐帧重绘，口型由音频真正驱动（能做出闭唇/圆唇，需要 API Key）。本地那几种是 2D 形变，原理上做不出 b/p/m 闭唇，仅供对比">
-            <option value="cloud" selected>☁️ 云端 Wan2.2-S2V（口型最准 · 推荐）</option>
-            <option value="w2l">Wav2Lip 生成口型（本地 · 不推荐）</option>
-            <option value="2d">标准 2D（本地 · 只有嘴动）</option>
+                  title="v3 是音素驱动（按拼音声母/韵母定唇形，6 维口型：开口/圆唇/展唇/齿露/下唇/闭唇）；2D 是旧的声学驱动">
+            <option value="v3" selected>🎯 v3 音素口型（本地 · 免费 · 无需配置）</option>
+            <option value="2d">标准 2D（本地 · 旧版声学驱动）</option>
             <option value="p25d">伪 3D（本地 · 头会动）</option>
+            <option value="w2l">Wav2Lip 生成口型（本地 · 嘴位易偏移）</option>
             <option value="3d">真 3D 网格（本地 · 可转头 · 慢）</option>
           </select>
         </div>
-        <!-- 云端口型配置：API Key 只存本机 data/avatar2/cloud.json，不回传明文 -->
-        <div class="av2-row av2-cloud" id="av2CloudBox">
+        <!-- 云端配置：Key 只回脱敏值，前端不会拿到明文。
+             生成走「提交 → 轮询」，因为一次要 1~3 分钟，长连接会被中间层掐断。 -->
+        <div class="av2-cloud" id="av2Cloud" hidden>
           <div class="av2-cloud-head">
-            <span>☁️ 云端口型配置</span>
-            <span class="av2-cloud-state" id="av2CloudState">读取中…</span>
+            <span class="av2-cloud-title">☁️ 云端口型配置</span>
+            <span class="av2-cloud-state" id="av2CloudState">未配置</span>
           </div>
           <div class="av2-cloud-fields">
-            <input id="av2CloudKey" type="password" placeholder="API Key（sk- 开头）"
-                   autocomplete="off" spellcheck="false" />
-            <input id="av2CloudWs" placeholder="业务空间 ID（如 llm-xxxxxxxx）"
-                   autocomplete="off" spellcheck="false" />
-            <select id="av2CloudRes" title="480P 更快更便宜；720P 更清晰">
-              <option value="480P">480P 快</option>
-              <option value="720P">720P 清晰</option>
+            <input type="password" id="av2CloudKey"
+                   placeholder="API Key（sk- 开头）" autocomplete="off" />
+            <input type="text" id="av2CloudWs"
+                   placeholder="业务空间 ID（llm-xxxxxxxx）" autocomplete="off" />
+            <select id="av2CloudRes" title="分辨率：480P 更快更省，720P 更清楚">
+              <option value="480P" selected>480P</option>
+              <option value="720P">720P</option>
             </select>
-            <button class="btn sm" id="av2CloudSave">保存</button>
+            <button class="btn sm primary" id="av2CloudSave">保存</button>
           </div>
-          <div class="av2-cloud-help">
-            没配过？
-            <a id="av2CloudSignup" href="https://bailian.console.aliyun.com/" target="_blank"
-               rel="noopener">打开百炼控制台</a> ·
-            <a id="av2CloudDoc" href="https://help.aliyun.com/zh/model-studio/wan-s2v-api"
-               target="_blank" rel="noopener">接口文档</a>
-            <span class="av2-cloud-tip">Key 只存在本机，不联网校验以外不上传</span>
-          </div>
+          <div class="av2-cloud-help" id="av2CloudHelp"></div>
         </div>
         <div class="av2-acts av2-acts-doc">
           <button class="btn sm ghost" id="av2DocBtn"

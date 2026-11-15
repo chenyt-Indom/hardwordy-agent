@@ -142,15 +142,37 @@ def set_config(d: dict) -> dict:
     c = _cfg()
     if "api_key" in d:
         v = str(d.get("api_key") or "").strip()
-        if "…" in v or "***" in v:
-            pass                      # 前端回传的脱敏值，忽略
+        # 只有「…」是前端回传的脱敏值（_mask 用 U+2026）。星号一定是用户
+        # 自己粘进来的 —— 多半是从截图/聊天里复制的打码值，静默忽略只会让
+        # 用户看到「已保存，但还缺 API Key」，完全不知道是自己没复制全。
+        if "…" in v:
+            pass                      # 前端回传的脱敏值，这一项不改
+        elif "*" in v:
+            return {"ok": False,
+                    "error": "API Key 里含 * 号，说明它被打码或没复制全。"
+                             "请到百炼控制台点「复制」按钮拿完整 Key"
+                             "（形如 sk- 加 32 位字符，共 35 位）"}
         elif v and not v.startswith("sk-"):
             return {"ok": False, "error": "API Key 应该以 sk- 开头（百炼控制台里复制）"}
+        elif v and len(v) < 30:
+            return {"ok": False,
+                    "error": "API Key 只有 %d 位，太短了。百炼的通常是 35 位，"
+                             "请确认完整复制" % len(v)}
         else:
             c["api_key"] = v
     if "workspace_id" in d:
         v = str(d.get("workspace_id") or "").strip()
-        if "…" not in v:
+        if "…" in v:
+            pass                      # 前端回传的脱敏值，这一项不改
+        elif "*" in v:
+            return {"ok": False,
+                    "error": "业务空间 ID 里含 * 号，说明没复制全。"
+                             "请到百炼控制台 → 业务空间 复制（形如 llm-xxxxxxxx）"}
+        elif v and not v.startswith("llm-"):
+            return {"ok": False,
+                    "error": "业务空间 ID 形如 llm-xxxxxxxx，"
+                             "在百炼控制台左侧「业务空间」里复制"}
+        else:
             c["workspace_id"] = v
     if "resolution" in d:
         v = str(d.get("resolution") or "").strip().upper()

@@ -863,6 +863,13 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
         return {"ok": False, "error": "音频转码失败：%s: %s" % (type(e).__name__, e)}
 
     words = A2._asr_words(wav)
+    if words:
+        # 同 avatar2：ASR 只借时间，字以原文为准（ASR 会把「数字人」认成「数IL」）
+        try:
+            _sr, _y = A2._read_wav(wav)
+            words = A2._align_words(t, words, len(_y) / float(_sr)) or words
+        except Exception:                                   # noqa: BLE001
+            pass
     name = "avatar25d_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
     out = os.path.join(A2._vdir(), name)
     r = render(img, wav, out, words=words, amp=amp, motion=motion, blink=blink)
