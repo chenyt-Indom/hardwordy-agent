@@ -578,7 +578,8 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 if _attempt < 2:
                     time.sleep(0.4)
                     continue
-                raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(e)}") from None
+                raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(e)}",
+                                    code=_code_for_exc(e)) from None
             if resp.status_code == 550 and _attempt < 2:
                 try:
                     resp.close()
@@ -588,7 +589,8 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 continue
             break
         if resp is None:
-            raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(last_exc)}")
+            raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(last_exc)}",
+                                code=_code_for_exc(last_exc))
 
         if resp.status_code != 200:
             try:
@@ -602,8 +604,14 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 hint = "（余额不足）"
             elif resp.status_code == 429:
                 hint = "（请求太频繁）"
+            # ⚠️ 2026-11-15 修：原来**没传 code**，于是 DeepSeekError.code 永远是
+            #   "unknown" —— 调用方（llm_fallback 降级判断）根本分不清是余额不足
+            #   还是 Key 错，降级因此完全不触发。chat_stream / vision_chat 都传了，
+            #   只有这里漏了。
             raise DeepSeekError(
-                f"DeepSeek 返回 {resp.status_code}{hint}：{scrub(detail)}")
+                f"DeepSeek 返回 {resp.status_code}{hint}：{scrub(detail)}",
+                code=_code_for_status(resp.status_code),
+                status=resp.status_code)
 
         content_buf: list[str] = []
         tool_calls: dict[int, dict] = {}

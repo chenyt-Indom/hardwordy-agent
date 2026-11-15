@@ -192,6 +192,12 @@ _AUDITS = _DATA / "audits.json"
 _ACT = _DATA / "activity.json"
 
 _DEFAULT_SETTINGS = {
+    # 全局暂停闸（2026-11-15 用户要求）：「自动化可以增加一个暂停按钮，
+    # 再次按下则继续，正常开启绿灯，暂停暗灯」。
+    # True = 所有**自动**触发全部停手（定时反思 / 定时自检 / 抽空自检 /
+    # 自动评估 / 信任模式下的自动执行）；用户手动点的操作仍然照常跑，
+    # 否则「暂停」会变成「整个功能不可用」。
+    "paused": False,
     # 信任模式：反思产出的动作**不再等批准**，直接执行。
     # 用户明确选了「全部自动，包括高风险（改 main.py、一次改多个文件），
     # 但高风险会单独在前端提示一声」。
@@ -210,6 +216,10 @@ _DEFAULT_SETTINGS = {
     # 2026-11-15 用户要求新功能也要自动落地。一轮典型是「2~4 条 bug 修复 +
     # 2~4 条新功能」，上限 6 会把排在后面的功能动作整批截掉，所以提到 10。
     "max_auto_actions": 10,
+    # 同文件改动冷却（2026-11-15）：同一文件被自动改了 N 次**且上次失败**时，
+    # 先停手换思路。真实数据：self_iterate.py 被改 16 次、main.py 14 次，
+    # 整体成功率只有 76~79% —— 反复改同一处就是在同一个坑里越挖越深。
+    "change_cool_limit": 3,
     # ---- 体验评估（2026-11-15 追加）----
     # 用户要求「主动评估任务完成效果，闲聊里也要能读出体验」。
     # 启发式每轮都算（零成本）；LLM 批量评估按下面两个开关控制频率。
@@ -238,6 +248,11 @@ _DEFAULT_SETTINGS = {
     # 实测：探针 9 处问题，第一轮只修掉 6 处，靠它自动接续到 0，不用人再点一次。
     # 设 0 = 关掉自动接续（每轮都要人手动触发）。
     "converge_rounds": 2,
+    # ---- 新功能自修轮数（2026-11-15 追加）----
+    # 用户要求「加入之后要自动验证是否完全正常，并反复改到完全正常为止」。
+    # 验收断言不过时，带着失败输出重改，最多这么多轮；仍不过才回滚。
+    # 设 0/1 = 只验一次不改（回到旧行为）。
+    "feature_repair_rounds": 3,
 }
 
 
@@ -282,7 +297,50 @@ def load_settings():
 def get_settings():
     s = load_settings()
     return {"ok": True, "settings": s,
+            "paused": bool(s.get("paused")),
             "trust_mode": bool(s.get("trust_mode"))}
+
+
+def is_paused():
+    """自动化是否处于暂停状态。
+
+    只该在**自动触发**的入口调用（定时任务、抽空自检、自动评估、
+    信任模式自动执行）。用户手动点的操作不该被这个闸挡住。
+    任何异常都按「没暂停」处理 —— 暂停是便利功能，不能因为它坏了
+    就把整个自动化锁死。
+    """
+    try:
+        return bool(load_settings().get("paused"))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return False
+
+
+def paused_gate(what="自动化"):
+    """自动入口的统一闸门。返回 None 表示放行，否则返回「已跳过」结果。
+
+    用法：
+        g = paused_gate("定时反思")
+        if g: return g
+    """
+    if not is_paused():
+        return None
+    return {"ok": True, "skipped": True, "paused": True,
+            "reason": "自动化已暂停，%s 未执行（点顶部暂停按钮可恢复）" % what}
+
+
+def toggle_pause(paused=None):
+    """切换 / 设置暂停状态。
+
+    paused=None → 翻转当前状态（按钮点一下切换）；
+    paused=True/False → 直接设为该值（给 API 显式指定用）。
+    """
+    cur = load_settings()
+    now = (not bool(cur.get("paused"))) if paused is None else bool(paused)
+    out = set_settings(paused=now)
+    return {"ok": True, "paused": now,
+            "settings": out.get("settings") or {},
+            "label": "已暂停（灯灭）" if now else "运行中（绿灯）"}
 
 
 def set_settings(**kw):
@@ -346,6 +404,8 @@ def idle_gate(settings=None):
       4. 没有反思 / 迭代队列在跑（不抢资源、不并发改代码）
     """
     s = settings or load_settings()
+    if s.get("paused"):
+        return {"ok": False, "paused": True, "reason": "自动化已暂停"}
     if not s.get("idle_audit"):
         return {"ok": False, "reason": "抽空自检开关关着"}
 
@@ -401,6 +461,95 @@ def _pid():
 # ------------------------------------------------- 检查点落盘复用
 # 用户要求：run_audit 开头读检查点，跳过已确认的文件，避免每轮从零读代码。
 _CHECKPOINT = _DATA / "checkpoint.json"
+
+
+_ROUNDS = _DATA / "rounds.jsonl"
+
+
+def _change_gate(rel, count, last_failed=False, threshold=None):
+    """同文件改动冷却闸门：改太多次还没成，就先停手换思路。
+
+    返回 {"allow": bool, "reason": str}。
+
+    为什么需要（真实数据，不是猜的）
+    --------------------------------
+    `self_iterate.py` 被自动改过 16 次、`main.py` 14 次，整体成功率 76~79%。
+    反复改同一个文件 = 在同一个坑里越挖越深：前一次没成，下一次往往还在
+    同一个错误假设上打转。与其继续硬改，不如先放下、换个切入点。
+
+    判据刻意保守：**只有「次数超阈值」且「上次确实失败」才拦**。
+    次数多但每次都成功（比如同一个文件连着加三个小功能）不该被拦。
+    """
+    try:
+        limit = int(threshold if threshold is not None
+                    else (_DEFAULT_SETTINGS.get("change_cool_limit") or 3))
+    except Exception:                                     # noqa: BLE001
+        limit = 3
+    try:
+        cnt = int(count or 0)
+    except Exception:                                     # noqa: BLE001
+        cnt = 0
+    rel = str(rel or "")
+    # 拦两种：
+    #   ① 超阈值 **且** 上次失败 —— 在同一个坑里反复挖，先停；
+    #   ② 次数已经**远超**阈值（2 倍以上）—— 不管上次成没成，这么改本身就不正常
+    #      （真实数据里 self_iterate.py 被改 16 次，就是这种）。
+    if cnt >= limit and (bool(last_failed) or cnt >= limit * 2):
+        return {"allow": False,
+                "reason": "%s 已自动改 %d 次%s（阈值 %d），先停手换思路"
+                          % (rel, cnt, "且上次失败" if last_failed else "、远超阈值", limit)}
+    return {"allow": True, "reason": ""}
+
+
+def record_round(plan):
+    """把本轮反思的结构化结果记一条，供「自主创新流水线可观测卡片」展示。
+
+    只记**结构化摘要**（标题/数量/论文统计/能力缺口），不记全文 ——
+    这个文件每轮追加一行，记全文会很快涨到几十 MB。
+    """
+    try:
+        p = plan or {}
+        rec = {
+            "ts": time.time(),
+            "iso": _now(),
+            "id": str(p.get("id") or ""),
+            "summary": str(p.get("summary") or "")[:300],
+            "features": [str((f or {}).get("title") or "")[:80]
+                         for f in (p.get("features") or [])][:8],
+            "n_actions": len(p.get("actions") or []),
+            "n_feature_actions": len([a for a in (p.get("actions") or [])
+                                      if str((a or {}).get("origin")) == "feature"]),
+            "paper": p.get("paper") or {},
+            "gaps": str(p.get("gaps") or "")[:200],
+        }
+        _ROUNDS.parent.mkdir(parents=True, exist_ok=True)
+        with open(_ROUNDS, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        return rec
+    except Exception as e:                                # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return {"error": "%s: %s" % (type(e).__name__, e)}
+
+
+def recent_rounds(n=10):
+    """读回最近 n 轮的结构化记录（新的在前）。"""
+    try:
+        if not _ROUNDS.is_file():
+            return []
+        rows = []
+        with open(_ROUNDS, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:                         # noqa: BLE001
+                    continue
+        return rows[-int(n):][::-1] if n else rows[::-1]
+    except Exception:                                     # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return []
 
 
 def save_checkpoint(data):
@@ -589,6 +738,27 @@ def _loop_guard(files):
         for f in (r.get("files") or []):
             if f in files:
                 hit[f] = hit.get(f, 0) + 1
+
+    # ★ 2026-11-15 接线 _change_gate：上面只数「最近 N 分钟内**成功**改了几次」，
+    #   完全不看失败 —— 于是「同一个文件改了 5 次全失败」这种最该停手的情况
+    #   反而放行（因为它一次都没成功，hit 是 0）。这里补一层：
+    #   累计改动次数 + 上次是否失败。
+    try:
+        _cnt, _last_fail = {}, {}
+        for r in rows:
+            for f in (r.get("files") or []):
+                if f in files:
+                    _cnt[f] = _cnt.get(f, 0) + 1
+                    # rows 是最新在前，第一次遇到就是「上次」，别被更旧的覆盖
+                    if f not in _last_fail:
+                        _last_fail[f] = (r.get("result") != "ok")
+        for f in files:
+            _g = _change_gate(f, _cnt.get(f, 0), _last_fail.get(f, False))
+            if not _g.get("allow"):
+                return False, str(_g.get("reason") or "改动冷却")
+    except Exception:                                     # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+
     hot = [(f, n) for f, n in hit.items() if n >= _LOOP_MAX_HITS]
     if hot:
         f, n = sorted(hot, key=lambda x: -x[1])[0]
@@ -670,6 +840,8 @@ def _maybe_auto_evaluate():
     节流 10 分钟，避免用户连续几句抱怨就触发好几次 LLM。
     """
     try:
+        if is_paused():
+            return
         if not load_settings().get("evaluate_auto", True):
             return
         now = time.time()
@@ -892,6 +1064,10 @@ def _build_eval_prompt(items):
 
 def evaluate(limit=12, use_llm=True, trigger="manual"):
     """评估最近几轮交流。启发式先跑（LLM 挂了也有数据），LLM 再补深度判断。"""
+    if trigger != "manual":
+        g = paused_gate("自动评估")
+        if g:
+            return g
     sig = load_signals().get("items", [])
     if not sig:
         return {"ok": False, "error": "还没有对话素材（先在对话里聊几轮）"}
@@ -1506,6 +1682,11 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
    ⚠️ 但**必须说清落在哪**：改哪些文件（files，只能从上面的清单里选）、改哪个函数
    （anchor）。说不清 files/anchor 的建议不算有效 —— 那说明你自己也没想清怎么落地。
    ⚠️ 如果上面「真实运行指标」显示成功率偏低，**先提高可靠性，别急着加新功能**。
+   ★ **features 与 actions 的分工必须分清**（用户 2026-11-15 明确要求「完全能自主
+     增加新功能」）：修 bug、补护栏、改现有流程 → 写进 actions；
+     **凭空新增的能力**（以前根本没有的功能/技术）→ 写进 features。
+     features **至少给 2 条**（确实没有值得加的才允许更少，并在 summary 里说明原因）。
+     不要因为「怕重复」就把所有想法都塞进 actions —— 那样自主创新永远落不了地。
    ⚠️ **同一个需求只能写一处**：要改代码就写进 actions，只提建议就写进 features，
       绝对不要两处都写 —— 实测这样会产生两条动作改同一处，既浪费名额又互相覆盖。
    ⚠️ 也不要在 features 里写一条**概括**、再在 actions 里写同一件事的**细分**
@@ -1608,7 +1789,31 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
         flat = [x for arr in (tech or {}).values() for x in (arr or [])]
         if flat:
             paper_meta["added"] = papervec.add_batch(flat)
-        set_stage("paper", "新增入库 %d 篇，向量召回中…" % (paper_meta.get("added") or 0))
+        # ★ 2026-11-15 修致命 bug：add_batch() 返回的是 dict
+        #   {"added":2,"dup":28,"total":32}，原来直接拿它去 %d 格式化 →
+        #   TypeError: %d format: a real number is required, not dict，
+        #   整个论文块被 except 吞掉 → paper_brief 为空 → features 的 theory
+        #   全空 → 模型提的新功能**完全没有论文依据**（实测 20261115_202048 那轮）。
+        _added = paper_meta.get("added")
+        if isinstance(_added, dict):
+            _n_added = _added.get("added") or 0
+        else:
+            _n_added = _added or 0
+        set_stage("paper", "新增入库 %d 篇，向量召回中…" % _n_added)
+        # ★ 2026-11-15 新增：按**当前痛点**定向抓 arXiv 论文入库。
+        #   为什么需要：库里 32 篇里 16 篇正文不足 20 字，内容全是「SpaceX 星舰」
+        #   「折纸飞机」这类新闻，跟本项目痛点毫无关系 → search(痛点) 经常 0 条
+        #   → features 的 theory 只能写「无论文，工程可行」。
+        #   这里先用痛点转英文检索词，直接查 arXiv 官方 API 补一批**对口**的，
+        #   再走下面的召回 + 四维评估。抓取失败只是少一批输入，不影响主流程。
+        try:
+            from . import need2query
+            set_stage("paper", "按痛点定向检索 arXiv…")
+            paper_meta["harvest"] = need2query.harvest(
+                ((exp_txt or "")[:400] + " " + (focus or "")).strip(),
+                max_queries=3, per_query=3, timeout=20)
+        except Exception as _he:                          # noqa: BLE001
+            paper_meta["harvest_error"] = "%s: %s" % (type(_he).__name__, _he)
         q = ((exp_txt or "")[:500] + " " + (focus or "")).strip()
         recalled = papervec.search(q, top_k=6, only_unevaluated=True) if q else []
         fresh = [i for i in flat if str(i.get("source") or "") == "arXiv"][:5]
@@ -1692,6 +1897,23 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
     # 这项新技术，然后记得需要跟用户说明为什么」。原来 features 只展示、永不执行，
     # 这里把它转成可执行动作，和 bug 修复走同一条链路（同四道护栏）。
     feats = [f for f in (data.get("features") or []) if isinstance(f, dict)]
+    # ★ 两阶段闭环第二步（2026-11-15 用户要求「主动根据潜在需求去寻找可能有用的
+    #   论文并且参考构思」）：模型先想功能，再拿功能去论文库真检索，然后用**真实
+    #   论文**回头校准 theory / how / assert_code。
+    #   开关：设置里 feature_paper_enrich=false 可关掉（会省一次 LLM 调用）。
+    enrich_meta = {"ok": False, "skipped": True}
+    try:
+        _on = load_settings().get("feature_paper_enrich")
+        if _on is None or _on:
+            set_stage("enrich", "拿 %d 条候选功能去论文库检索…" % len(feats))
+            feats, enrich_meta = _enrich_features_with_papers(feats)
+            if enrich_meta.get("papers"):
+                set_stage("enrich", "召回 %d 篇，已校准 %d 处"
+                          % (enrich_meta["papers"], enrich_meta.get("changed") or 0))
+    except Exception as e:                              # noqa: BLE001
+        enrich_meta = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        logger.warning("功能论文校准失败（不影响主流程）：%s", enrich_meta["error"])
+    paper_meta["enrich"] = enrich_meta
     feat_actions = []
     try:
         feat_actions = _features_to_actions(
@@ -1731,11 +1953,25 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
     d["items"] = d["items"][:60]          # 最多留 60 次
     save_plans(d)
 
+    # ★ 2026-11-15 接线 record_round：把本轮结构化摘要记一条，
+    #   供「自主创新流水线可观测卡片」回看「每轮提了什么、论文抓到几篇」。
+    #   只记摘要（标题/数量），不记全文 —— 这文件每轮追加一行。
+    try:
+        record_round(plan)
+    except Exception:                                     # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+
     out = {"ok": True, "plan": plan, "notice": plan["notice"]}
     # 信任模式：用户要求「不用批准，自动迭代，改完提示重启」。
     # 只在真的有计划动作时才执行，避免空跑。
     if auto_execute is None:
         auto_execute = bool(load_settings().get("trust_mode"))
+    if auto_execute and is_paused():
+        # 暂停期间：计划照常生成（留着恢复后批准），但绝不自动改代码。
+        auto_execute = False
+        out["paused"] = True
+        out["notice"] = (out.get("notice") or "") + (
+            "\n\n⏸ 自动化已暂停：本轮计划已生成，但没有自动执行。")
     if auto_execute and actions:
         # 2026-11-15 用户要求：计划一确定就直接开始，但**不阻塞聊天**，
         # 并且要在聊天界面显示「正在迭代中」+ 代码卡片；已有任务在跑就排队。
@@ -1986,6 +2222,172 @@ def _plan_patch_for_action(plan, action):
     if not isinstance(patches, list) or not patches:
         return None, "模型没有给出任何 patch"
     return patches, ""
+
+
+# ------------------------------------------------------ 新功能：失败 → 自修 → 复验
+# 2026-11-15 用户要求：「加入之后要自动验证是否完全正常，并反复改到完全正常为止」。
+# 原来的流程是「断言不过 → 立刻回滚 → 放弃」，等于把「差一点就成」的功能直接判死。
+# 这里补上修复循环：把断言的失败输出喂回模型 → 产出修复 patch → 应用 → 再跑断言，
+# 直到通过或用尽轮次。轮次上限默认 3（settings.feature_repair_rounds 可调）。
+_FT_DIR_MARK = "_feature_tests"
+
+
+def _feature_assert_source(title):
+    """读回新功能的验收断言源码 —— 它是这一轮修复的「规格说明」。"""
+    try:
+        from . import selfevolve
+        p = selfevolve._test_path(title)
+        if p.is_file():
+            return p.read_text(encoding="utf-8", errors="replace")[:6000]
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return ""
+
+
+def _repair_feature(plan, action, rels, why, rounds=3, ev=None):
+    """带着验收失败原因反复改，直到断言通过或用尽轮次。
+
+    返回 {"ok":bool,"why":str,"rounds":int,"history":[...],"patches":[...]}
+
+    护栏（每条都是踩过坑才加的）：
+      · **禁止修改断言文件** —— 否则模型会把断言改成恒真，等于自己判自己及格；
+      · 每轮独立备份，某轮 patch 应用失败就回到本轮起点，不留半成品；
+      · 每轮先过语法校验，语法不过不进断言验证（省一次子进程）；
+      · 全部轮次失败 → 由调用方恢复到动作前状态，绝不留残缺功能。
+    """
+    try:
+        from . import selfevolve
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "why": "selfevolve 不可用：%s" % e,
+                "rounds": 0, "history": [], "patches": []}
+
+    title = action.get("title") or ""
+    spec = _feature_assert_source(title)
+    cap = int(globals().get("_MAX_FILES_FEATURE") or 6)
+    uniq = list(dict.fromkeys([r for r in rels if r]))
+    hist, cur_why, last_pts = [], why, []
+    # 自修轮里可能新建文件；失败时必须由调用方精确删掉，否则留孤儿
+    # （实测：自修失败后 _repair_orphan.py 仍留在项目里）。
+    made = []
+    n = max(1, min(int(rounds or 3), 6))
+
+    for i in range(n):
+        # 每轮都重读文件：模型必须看到上一轮改完的真实状态
+        ctx = []
+        for rel in uniq[:cap]:
+            body = _read_text(rel)
+            if len(body) > 12000:
+                body = body[:12000] + "\n…（后略，只针对你确定存在的片段给 find）"
+            ctx.append("### 文件：%s\n```\n%s\n```" % (rel, body))
+        tried = "\n".join("- 第%d轮：%s" % (j + 1, h) for j, h in enumerate(hist[-3:]))
+        prompt = """新功能已经写进项目了，但它的验收断言跑不过。请输出**精确的查找替换**把它修到通过。
+
+## 功能
+标题：%s
+说明：%s
+
+## 验收断言（这是规格，必须让它通过；**严禁修改这个文件**）
+```
+%s
+```
+
+## 断言当前的失败输出
+%s
+
+## 已经试过但没成功的改法
+%s
+
+## 涉及文件（当前真实内容）
+%s
+
+## 硬性要求
+1. 只输出 JSON，不要任何解释文字。
+2. find 必须与文件内容**一字不差**（含缩进换行），且在整个文件里**只出现一次**。
+3. **绝对不能修改 %s/ 下的断言文件**，也不能让它被跳过、改宽或不再执行。
+4. 改动最小化，不要顺手重构，不要删掉现有功能。
+5. 如果这个功能在当前项目里根本做不到，输出 {"skip":"原因"}，不要硬凑。
+
+## 输出格式
+{"patches":[{"file":"backend/xxx.py","find":"原文片段","replace":"替换后片段"}]}
+""" % (title, (action.get("detail") or "")[:1500],
+       spec or "（读不到断言文件）", cur_why[:700],
+       tried or "（无）", "\n\n".join(ctx), _FT_DIR_MARK)
+
+        if ev:
+            ev("step", text="%s 第%d轮自修：按失败原因重改…" % (
+                action.get("id"), i + 1))
+        txt, err = _llm_text(prompt, max_tokens=3600, temperature=0.2)
+        if err:
+            hist.append("模型调用失败：%s" % err)
+            break
+        data = _parse_json(txt)
+        if not isinstance(data, dict):
+            hist.append("模型没给出合法 JSON")
+            continue
+        if data.get("skip"):
+            hist.append("模型判断做不到：%s" % str(data.get("skip"))[:150])
+            break
+        pts = data.get("patches") or []
+        if not isinstance(pts, list) or not pts:
+            hist.append("模型没给出 patch")
+            continue
+        # 防作弊：不许碰断言文件（否则等于自己判自己及格）
+        if any(_FT_DIR_MARK in str(p.get("file") or "") for p in pts):
+            hist.append("模型试图修改断言文件，已拒绝")
+            continue
+
+        # 本轮备份（把 patch 里新出现的文件也算进来）
+        allf = list(dict.fromkeys(
+            uniq + [str(p.get("file")) for p in pts if p.get("file")]))
+        tag_r, _sv, _cr = _backup_files(
+            allf, "repair_%s_%d" % (action.get("id") or "x", i + 1))
+        bad = ""
+        for pt in pts:
+            rel = _norm_rel(pt.get("file"))
+            if not rel:
+                bad = "文件路径不合法：%s" % pt.get("file")
+                break
+            _existed = (_ROOT / rel).is_file()
+            ok, m = _apply_find_replace(rel, pt.get("find") or "",
+                                        pt.get("replace") or "")
+            if not ok:
+                bad = "%s：%s" % (rel, m)
+                break
+            if not _existed and rel not in made:
+                made.append(rel)
+            if rel not in uniq:
+                uniq.append(rel)
+        if bad:
+            _restore(tag_r)
+            hist.append("patch 没应用上（%s）" % bad[:160])
+            cur_why = bad
+            continue
+
+        # 语法先过一道，再花子进程跑断言
+        syn = ""
+        for rel in uniq:
+            ok, m = _verify(rel)
+            if not ok:
+                syn = "%s 语法错误：%s" % (rel, m)
+                break
+        if syn:
+            _restore(tag_r)
+            hist.append(syn[:160])
+            cur_why = syn
+            continue
+
+        _vr = selfevolve.verify_one(
+            title, path=((action or {}).get("assert_file") or None))
+        if _vr.get("ok"):
+            hist.append("第%d轮通过（%ss）" % (i + 1, _vr.get("seconds")))
+            return {"ok": True, "why": "", "rounds": i + 1,
+                    "history": hist, "patches": pts, "made": made}
+        cur_why = str(_vr.get("why") or "断言失败")
+        last_pts = pts
+        hist.append("第%d轮仍失败：%s" % (i + 1, cur_why[:140]))
+
+    return {"ok": False, "why": cur_why, "rounds": len(hist),
+            "history": hist, "patches": last_pts, "made": made}
 
 
 # ---------------------------------------------------------------- 修复质量闸门
@@ -2433,27 +2835,67 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
         # ★ 新功能类动作：启用它自带的验收断言并**在子进程里真跑一遍**。
         #   用户要求「需要验证所有功能是否正常」—— 通用回归里没有新功能的用例，
         #   只有它自己的断言能证明「这次改动真的让功能可用了」。
-        #   断言不过就回滚：宁可保留旧版，也不留一个连自己都证明不了的功能。
-        #   （若断言本身写错导致误回滚，note 里会留下原因，人工可复核。）
+        #   2026-11-15 用户追加要求：「加入之后要自动验证是否完全正常，
+        #   并反复改到完全正常为止」—— 所以断言不过**不再一次判死**，
+        #   而是带着失败输出自修（默认 3 轮），仍不过才回滚。
         if a.get("origin") == "feature" and a.get("assert_file"):
             try:
                 from . import selfevolve
-                selfevolve.unpark_test(a.get("title"))
-                _vr = selfevolve.verify_one(a.get("title"))
+                selfevolve.unpark_test(a.get("title"),
+                                       path=(a.get("assert_file") or None))
+                _vr = selfevolve.verify_one(
+                    a.get("title"), path=(a.get("assert_file") or None))
                 if not _vr.get("ok"):
-                    _restore(tag2)
-                    selfevolve.park_test(a.get("title"))
-                    a["status"] = "failed"
-                    a["error"] = ("新功能验收断言未通过，已回滚：%s"
-                                  % str(_vr.get("why") or "")[:200])
-                    results.append({"id": a["id"], "ok": False,
-                                    "error": a["error"], "assert": _vr})
-                    _log_act(plan, a, False, a["error"])
-                    _ev("step", text="%s 验收断言未通过，已回滚" % a.get("id"))
-                    _ev("code", **_card(a, patches, False, a["error"], True))
-                    continue
-                a["note"] = ((a.get("note") or "")
-                             + "｜验收断言通过（%ss）" % _vr.get("seconds")).strip("｜")
+                    _rp = _repair_feature(
+                        plan, a, list(dict.fromkeys(done_rels)),
+                        str(_vr.get("why") or "断言失败"),
+                        rounds=int(load_settings().get(
+                            "feature_repair_rounds") or 3),
+                        ev=_ev)
+                    a["repair"] = {"rounds": int(_rp.get("rounds") or 0),
+                                   "history": _rp.get("history") or []}
+                    if not _rp.get("ok"):
+                        _restore(tag2)
+                        # 自修可能新建了 tag2 不知道的文件，一并删掉，别留孤儿。
+                        # 实测漏过：自修轮里新建的文件只有成功时才并入 done_rels，
+                        # 失败路径必须从 _rp["made"] 里取，否则残留在项目里。
+                        _orphans = list(dict.fromkeys(
+                            [r for r in done_rels if r] +
+                            [r for r in (_rp.get("made") or []) if r]))
+                        for _r3 in _orphans:
+                            if _r3 not in rels:
+                                try:
+                                    _p3 = _ROOT / _r3
+                                    if _p3.is_file():
+                                        _p3.unlink()
+                                except Exception:       # noqa: BLE001
+                                    logger.debug("silent-except", exc_info=True)
+                        selfevolve.park_test(a.get("title"))
+                        a["status"] = "failed"
+                        a["error"] = ("新功能验收断言自修 %d 轮后仍未通过，已回滚：%s"
+                                      % (int(_rp.get("rounds") or 0),
+                                         str(_rp.get("why") or "")[:200]))
+                        results.append({"id": a["id"], "ok": False,
+                                        "error": a["error"], "assert": _vr,
+                                        "repair": a["repair"]})
+                        _log_act(plan, a, False, a["error"])
+                        _ev("step", text="%s 自修 %d 轮仍未通过，已回滚" % (
+                            a.get("id"), int(_rp.get("rounds") or 0)))
+                        _ev("code", **_card(a, patches, False, a["error"], True))
+                        continue
+                    a["note"] = ((a.get("note") or "")
+                                 + "｜验收断言经 %d 轮自修后通过"
+                                 % int(_rp.get("rounds") or 0)).strip("｜")
+                    # 自修改过的文件可能超出原 patch，补进结果，方便查看与回滚
+                    for _p2 in (_rp.get("patches") or []):
+                        _r2 = _norm_rel(_p2.get("file"))
+                        if _r2 and _r2 not in done_rels:
+                            done_rels.append(_r2)
+                    _ev("step", text="%s 自修 %d 轮后验收断言通过" % (
+                        a.get("id"), int(_rp.get("rounds") or 0)))
+                else:
+                    a["note"] = ((a.get("note") or "")
+                                 + "｜验收断言通过（%ss）" % _vr.get("seconds")).strip("｜")
             except Exception as e:                      # noqa: BLE001
                 # 断言机制本身出问题不能把已经正确的改动判死，只记录
                 a["note"] = ((a.get("note") or "")
@@ -2720,6 +3162,278 @@ def _similar_title(a, b):
     return len(ga & gb) / float(len(ga | gb)) >= 0.45
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 两阶段反思：论文回灌闭环
+#
+# 用户要求（2026-11-15）：「模型可以主动根据用户潜在需求去寻找可能有用的论文并且
+# 参考构思，然后设计出对用户有用的新功能」「即使是只出现在论文上的也可以」。
+#
+# 原来的缺口（实测确认）：features 和论文召回是**两条互不相干的线** —— 论文是用
+# 「旧痛点」召回的，而 features 是模型在同一轮里凭记忆产出的，theory 字段也只能
+# 靠它自己回忆。于是「理论上可行」这句话**没有任何依据**，编了也看不出来。
+#
+# 这里补上闭环：模型先想功能 → 拿功能去论文库真检索 → 用真实论文回头校准功能
+# （补 theory / 改 how / 写 assert_code）。召不到就如实标注，不许编。
+# ═══════════════════════════════════════════════════════════════════════════
+
+# 模型**不许**改的字段：title 是去重键，files 已经过 _norm_rel 校验（改坏了会写错
+# 文件），pain 是溯源。只允许它补理论、改做法、写断言。
+_ENRICH_LOCKED = ("title", "files", "pain")
+
+
+def _papers_for_features(feats, top_k=3):
+    """给每个候选功能召回相关论文。
+
+    返回 (按功能下标分组的命中, 全局去重扁平清单, 错误信息)。
+    ⚠️ 检索失败必须降级成「没有论文」，**不能**让整个反思挂掉 —— 论文只是锦上添花，
+    没有它功能照样能立项（只是 theory 要如实留空）。
+    """
+    grouped, flat, err = {}, [], ""
+    try:
+        from . import papervec
+    except Exception as e:                              # noqa: BLE001
+        return grouped, flat, "导入 papervec 失败：%s: %s" % (type(e).__name__, e)
+    for i, f in enumerate(feats or []):
+        if not isinstance(f, dict):
+            continue
+        q = " ".join(str(f.get(k) or "")
+                     for k in ("title", "why", "how", "pain")).strip()
+        if not q:
+            continue
+        try:
+            got = papervec.search(q[:300], top_k=top_k) or []
+        except Exception as e:                          # noqa: BLE001
+            err = "%s: %s" % (type(e).__name__, e)
+            logger.warning("功能论文召回失败（第 %d 条）：%s", i, err)
+            continue
+        keep = []
+        for it in got:
+            if not isinstance(it, dict):
+                continue
+            t = str(it.get("title") or "").strip()
+            if not t:
+                continue
+            keep.append({
+                "title": t[:200],
+                "zh_title": str(it.get("zh_title") or "")[:80],
+                "zh_points": str(it.get("zh_points") or "")[:300],
+                "summary": str(it.get("summary") or "")[:300],
+                "url": str(it.get("url") or "")[:200],
+            })
+        if keep:
+            grouped[i] = keep
+            for it in keep:
+                if not any(x["title"] == it["title"] for x in flat):
+                    flat.append(it)
+    return grouped, flat, err
+
+
+def _enrich_prompt(feats, papers):
+    """第二轮 LLM 的提示词：拿真实论文校准候选功能。"""
+    import json as _json
+    slim = []
+    for f in feats:
+        slim.append({k: f.get(k) for k in
+                     ("title", "why", "how", "pain", "anchor", "files", "risk")
+                     if f.get(k)})
+    return """你在为一个本地多模态应用做「新功能立项评审」。
+
+下面第一部分是它自己想出来的候选新功能（还没有任何理论依据）；
+第二部分是我**用每个功能的描述去论文库里真实检索到的论文**（可能为空）。
+
+请对每个功能做四件事，然后**只返回 JSON**：
+
+1. 判断理论可行性：有论文直接支撑写「有论文支撑」；纯工程可做写「工程可行」；
+   明显做不到写「不可行」——写进 theory 字段的开头。
+2. theory 字段只能引用第二部分里**真实存在的论文标题**（可以只写标题前 40 字）。
+   如果第二部分是空的，就写「（无论文，工程可行）」，**绝对不许编造论文名、
+   作者、年份或「某论文提出…」**。编出来的理论比没有更糟，会被当成依据去改代码。
+3. 如果论文里有更具体的做法，改写 how 和 anchor（要落到真实函数名上）。
+4. 补一条 assert_code：一段能直接 `python xxx.py` 跑完的断言代码，
+   用 assert 判断「这个功能做完之后成立的事」。不许 input()、不许联网、
+   不许读 data/ 以外的路径、不许超过 60 秒。
+
+硬约束（违反会被丢弃）：
+- title / files / pain 三个字段**必须原样返回**，一个字都不许改。
+- 不许新增、删除、合并功能；返回数量必须正好 %d 条。
+- 每条只允许出现下面这些字段：title, files, pain, why, how, anchor, theory, verify, assert_code, risk
+
+候选功能：
+%s
+
+检索到的真实论文：
+%s
+
+返回格式：{"features":[{...}, ...]}（正好 %d 条）""" % (
+        len(feats),
+        _json.dumps(slim, ensure_ascii=False, indent=1)[:4000],
+        _json.dumps(papers, ensure_ascii=False, indent=1)[:4000] if papers
+        else "[]（本轮没召回到相关论文）",
+        len(feats),
+    )
+
+
+def _enrich_features_with_papers(feats, timeout=90):
+    """两阶段闭环的第二步：用真实论文校准候选功能。
+
+    返回 (增强后的 features, 元信息)。任何一步失败都返回**原始 features**，
+    只把原因写进元信息 —— 宁可不增强，也不能让反思因为论文环节挂掉。
+    """
+    meta = {"ok": False, "papers": 0, "recalled": 0, "error": ""}
+    feats = [f for f in (feats or []) if isinstance(f, dict)]
+    if not feats:
+        return feats, meta
+    t0 = time.time()
+    grouped, flat, perr = _papers_for_features(feats, top_k=3)
+    meta["recalled"] = len(grouped)
+    meta["papers"] = len(flat)
+    if perr:
+        meta["error"] = perr
+    if not flat:
+        # 没有论文就不浪费一次 LLM 调用；如实标注，让前端看得见
+        meta["error"] = meta["error"] or "论文库没有召回到相关论文（theory 将留空）"
+        return feats, meta
+    try:
+        txt, err = _llm_text(_enrich_prompt(feats, flat),
+                             max_tokens=4200, temperature=0.35)
+    except Exception as e:                              # noqa: BLE001
+        meta["error"] = "%s: %s" % (type(e).__name__, e)
+        return feats, meta
+    if err:
+        meta["error"] = err
+        return feats, meta
+    data = _parse_json(txt)
+    got = (data or {}).get("features") if isinstance(data, dict) else None
+    if not isinstance(got, list) or not got:
+        meta["error"] = "模型没返回合法 features"
+        return feats, meta
+    # 按 title 对齐（title 被锁死，理论上不会变；变了就按位置兜底）
+    by_title = {}
+    for g in got:
+        if isinstance(g, dict):
+            t = str(g.get("title") or "").strip()
+            if t:
+                by_title[t] = g
+    merged, changed = [], 0
+    for i, f in enumerate(feats):
+        g = by_title.get(str(f.get("title") or "").strip())
+        if g is None and i < len(got) and isinstance(got[i], dict):
+            g = got[i]
+        if not isinstance(g, dict):
+            merged.append(f)
+            continue
+        new = dict(f)
+        for k in ("why", "how", "anchor", "theory", "verify",
+                  "assert_code", "risk"):
+            v = g.get(k)
+            if isinstance(v, str) and v.strip() and v.strip() != str(f.get(k) or "").strip():
+                if k == "risk" and v.strip().lower() not in ("low", "mid", "high"):
+                    continue
+                new[k] = v.strip() if k != "risk" else v.strip().lower()
+                changed += 1
+        merged.append(new)
+    meta["ok"] = changed > 0
+    meta["changed"] = changed
+    meta["seconds"] = round(time.time() - t0, 2)
+    if not meta["ok"]:
+        meta["error"] = meta["error"] or "模型没有提出任何改进（原样返回）"
+    return merged, meta
+
+
+def _ensure_run(code):
+    """把断言归一化成「带 run() 函数」的形式。
+
+    ⚠️ 为什么必须做（2026-11-15 实测）：selfevolve.write_test 的 check_code 硬性
+    要求代码里有 `def run(`，而模型**经常直接写顶层 assert** —— 实测 3 条候选断言
+    3 条全被「缺少 run() 函数」拒收，等于断言功能形同虚设，一个都没落盘。
+    这里自动包一层，模型两种写法都能用。
+    """
+    code = str(code or "").strip()
+    if not code:
+        return ""
+    if "def run(" in code:
+        return code
+    body = "\n".join(("    " + ln) if ln.strip() else ln
+                     for ln in code.splitlines())
+    return "def run():\n" + body
+
+
+def _runnable(code):
+    """变成「能独立跑完」的脚本：有 run() 就调它，没有就包一层再调。
+
+    ⚠️ 不这么做的话，模型写 `def run(): assert ...` 时 dryrun 只定义函数、从不调用，
+    永远 returncode 0 —— 会**假通过**，把写错的断言当成好的收下。
+    """
+    code = str(code or "").strip()
+    if not code:
+        return ""
+    return _ensure_run(code) + "\n\nrun()\n"
+
+
+def _dryrun_assert(code, timeout=25):
+    """把候选断言真跑一遍，判断它属于哪种情况。
+
+    为什么必须跑（2026-11-15 实测）：模型写的断言**自己都可能跑不过** ——
+    实测出现过 `assert h0 == h1, 'except-wrapped same behavior keeps AST hash equal'`
+    直接 AssertionError。如果这种断言直接落盘，等动作做完再 unpark，回归会永久红，
+    而且没人知道到底是功能没做好还是断言写错了。
+
+    返回 (verdict, detail)：
+      "ok"      现在就通过（纯逻辑断言，很理想）
+      "pending" 断言**执行了但不成立**，或因名字/属性/导入不存在而失败
+                —— 功能还没实现，**这是正常的**，保留并挂起
+      "broken"  断言自身写错（语法错，或 TypeError/ValueError 这类逻辑错）
+                —— 丢弃，不污染回归
+      "timeout" 超时 —— 丢弃（可能死循环）
+
+    ★ 2026-11-15 修致命设计错误：原来把 AssertionError 归进 "broken" 丢弃。
+      但 AssertionError 恰恰是「断言跑通了、功能还没做所以不成立」——这是
+      新功能的**正常待验状态**。实测后果：两条新功能的断言都因
+      「AssertionError: workspace 应有写入能力」被整条丢弃 → assert_file 为空
+      → 功能没有验收标准 → 用户要求的「加完自动验证、反复改到正常」永远不触发。
+      NameError 同理（引用了还没实现的函数名）。
+      现在只有**语法错**和 TypeError/ValueError 这类真逻辑错才算 broken。
+    """
+    import subprocess
+    import tempfile
+    code = str(code or "").strip()
+    if not code:
+        return "broken", "断言为空"
+    full = _runnable(code)
+    # 1) 先编译 —— 语法错才是「断言本身写错了」，这是唯一可以确定的 broken
+    try:
+        compile(full, "<feature_assert>", "exec")
+    except SyntaxError as e:
+        return "broken", "语法错误：第 %s 行 %s" % (e.lineno, e.msg)
+    fd, p = tempfile.mkstemp(suffix=".py")
+    os.close(fd)
+    try:
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(full)
+        r = subprocess.run([sys.executable, p], capture_output=True, text=True,
+                           timeout=timeout, cwd=str(_ROOT))
+        if r.returncode == 0:
+            return "ok", ""
+        err = (r.stderr or "")[-600:]
+        tail = err.strip().splitlines()[-1] if err.strip() else "rc=%s" % r.returncode
+        # 2) 断言执行了但不成立 / 引用了还不存在的名字 → 功能未实现，保留
+        if ("AssertionError" in err or "ImportError" in err
+                or "ModuleNotFoundError" in err or "AttributeError" in err
+                or "NameError" in err):
+            return "pending", tail[:200]
+        # 3) 其余（TypeError/ValueError…）是断言逻辑写错 → 丢弃
+        return "broken", tail[:200]
+    except subprocess.TimeoutExpired:
+        return "timeout", "超过 %ds" % timeout
+    except Exception as e:                              # noqa: BLE001
+        return "broken", "%s: %s" % (type(e).__name__, e)
+    finally:
+        try:
+            os.unlink(p)
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+
+
 def _features_to_actions(features, start=0, limit=4, existing=None):
     """把「可增加的功能」转成**可执行动作** —— 用户要求主动迭代落地新技术。
 
@@ -2753,13 +3467,25 @@ def _features_to_actions(features, start=0, limit=4, existing=None):
             logger.debug("功能与已有动作重复，跳过：%s", title[:40])
             continue
         seen.append(title)
-        files = []
+        # ★ 2026-11-15 修致命缺陷：原来这里要求 `n in exist`（文件必须已存在），
+        #   于是**新建模块类的功能 files 永远是空的** → _plan_patch_for_action 报
+        #   「没有可读的目标文件」→ 自主创新 100% 落不了地（实测：新建
+        #   backend/_verify_feature_demo.py 直接失败）。
+        #   而 _plan_patch_for_action 本来**就支持新建**（find="" + replace=全文），
+        #   只是被这一行挡住了。_norm_rel 已经做了目录白名单，保留新路径是安全的。
+        files, fresh = [], []
         for x in (f.get("files") or []):
             if not isinstance(x, str):
                 continue
             n = _norm_rel(x)
-            if n and n in exist and n not in files:
-                files.append(n)
+            if not n or n in files:
+                continue
+            files.append(n)
+            if n not in exist:
+                fresh.append(n)
+        if fresh:
+            # 明确告诉执行器/用户：这些是**新建**的，不是改已有的
+            f.setdefault("_new_files", fresh)
         why = str(f.get("why") or "").strip()
         how = str(f.get("how") or "").strip()
         anchor = str(f.get("anchor") or "").strip()
@@ -2784,6 +3510,9 @@ def _features_to_actions(features, start=0, limit=4, existing=None):
             parts.append("怎么验证：%s" % verify)
         if not files:
             parts.append("⚠️ 没给出可改的真实文件，执行时只能靠模型自己找位置。")
+        elif fresh:
+            parts.append("🆕 将新建：%s（新模块，失败会整份删掉）"
+                         % "、".join(fresh))
         # ★ 新功能必须自带**可执行**的验收断言。用户明确要求「需要验证所有功能
         #   是否正常」—— 没有断言就只能靠肉眼，等于没验证。
         #   落盘后立刻挂起（_pending_ 前缀，回归跳过）：功能还没实现，它现在必然
@@ -2791,9 +3520,24 @@ def _features_to_actions(features, start=0, limit=4, existing=None):
         tcode = str(f.get("assert_code") or "").strip()
         tfile = ""
         if tcode:
+            # ★ 落盘前真跑一遍：模型写的断言**自己都可能跑不过**（实测出现过
+            #   AssertionError）。写错了的断言一旦进回归，会永久红且分不清是
+            #   功能没做好还是断言写错了 —— 必须在落盘前就拦掉。
+            verdict, vwhy = _dryrun_assert(tcode)
+            if verdict in ("broken", "timeout"):
+                parts.append("⚠️ 模型给的断言自身跑不过（%s：%s），已丢弃 —— "
+                             "功能仍会实现，但没有自动验收，需人工确认。"
+                             % (verdict, vwhy))
+                tcode = ""
+            elif verdict == "ok":
+                parts.append("断言自测：现在就能通过（纯逻辑断言）")
+            else:
+                parts.append("断言自测：待功能实现后生效（%s）" % vwhy)
+        if tcode:
             try:
                 from . import selfevolve
-                _tok, _tp = selfevolve.write_test(title, tcode, note=pain or why)
+                _tok, _tp = selfevolve.write_test(title, _ensure_run(tcode),
+                                                  note=pain or why)
                 if _tok:
                     selfevolve.park_test(title)
                     tfile = str(_tp)

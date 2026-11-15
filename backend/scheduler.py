@@ -823,13 +823,48 @@ def update(job_id: str, **kw) -> dict:
 
 
 def remove(job_id: str) -> dict:
+    # ★ 2026-11-15 用户要求：「自检和反思这些不能删除，只能暂停」。
+    #   这四类是智能体**自我维护**的骨架（自我反思 / 代码自检 / 体验评估 / 抽空自检），
+    #   删掉之后就再也不会自动跑，用户也没有入口把它加回来。所以后端硬拦一层：
+    #   内置任务一律只允许「暂停」（update enabled=False），不给删。
+    #   前端也据此不渲染删除按钮，但后端必须自己守住 —— 前端可以被绕过。
     jobs = load_jobs()
+    hit = next((j for j in jobs if j.get("id") == job_id), None)
+    if hit is not None:
+        _k = str(hit.get("kind") or "").strip()
+        if _k:
+            _nm = str(hit.get("name") or job_id)
+            _lbl = _BUILTIN_LABEL.get(_k, "自我维护")
+            _what = _nm if _nm == _lbl else "「%s」这个%s" % (_nm, _lbl)
+            return {
+                "ok": False,
+                "builtin": True,
+                "error": "%s是内置任务，不能删除，只能暂停。"
+                         "想让它不再自动跑，点卡片上的「暂停」即可。" % _what,
+            }
     n = len(jobs)
     jobs = [j for j in jobs if j.get("id") != job_id]
     if len(jobs) == n:
         return {"ok": False, "error": "没有这个任务"}
     save_jobs(jobs)
     return {"ok": True}
+
+
+# 2026-11-15 用户要求：「自检和反思那些不要归类在自动化任务里，另外分一个类」。
+# 这四类是智能体**自我维护**用的内置任务，和用户自己建的业务任务混在一个列表里
+# 既看不清也容易误删，所以单独打标记，前端据此分两组渲染。
+# 2026-11-15 追加：「自检和反思这些不能删除，只能暂停」——
+# 内置的判定统一用「kind 非空」而不是写死这四种，以后新增内置类型不用再改判定；
+# remove() 据此拒绝删除（只允许 update enabled=False）。
+_BUILTIN_LABEL = {
+    "selfiter": "自我反思",
+    "selfaudit": "代码自检",
+    "selfexp": "体验评估",
+    "selfidle": "抽空自检",
+}
+
+# 兼容旧名字（其它地方按 _KIND_LABELS 取标签），不再单独维护一份表
+_KIND_LABELS = _BUILTIN_LABEL
 
 
 def list_jobs() -> list:
@@ -839,9 +874,16 @@ def list_jobs() -> list:
         nr = float(j.get("next_run") or 0)
         j["next_human"] = (time.strftime("%m-%d %H:%M", time.localtime(nr)) if nr else "-")
         j["period"] = describe(j)
+        # builtin=True 的归到「自我维护」，其余是用户自己的「自动化任务」
+        _k = str(j.get("kind") or "").strip()
         j["channel_hint"] = ("\u2601 " if j.get("last_channel") == "cloud"
                              else ("\U0001f4bb " if j.get("last_channel") == "local" else "")) \
                             + str(j.get("last_model") or "")
+        # ★ 2026-11-15 用户要求：「自检和反思那些不要归类在自动化任务里，另外分一个类」。
+        #   kind 非空 = 智能体内置任务（自我反思 / 代码自检 / 体验评估 / 抽空自检），
+        #   kind 为空 = 用户自己建的定时任务。前端据此分两组渲染。
+        j["builtin"] = bool(_k)
+        j["kind_label"] = _BUILTIN_LABEL.get(_k, "")
         out.append(j)
     return out
 
@@ -1006,6 +1048,8 @@ def search_jobs(query: str, top_k: int = 50) -> dict:
         for j in jobs:
             d = dict(j)
             d.update({"score": 1.0, "vec_score": 0.0, "kw_score": 0.0})
+            d["builtin"] = bool(str(j.get("kind") or "").strip())
+            d["kind_label"] = _KIND_LABELS.get(str(j.get("kind") or ""), "")
             items.append(d)
         return {"ok": True, "items": items, "backend": "all"}
 
@@ -1080,6 +1124,9 @@ def search_jobs(query: str, top_k: int = 50) -> dict:
         d["score"] = round(float(score), 4)
         d["vec_score"] = round(v, 4)
         d["kw_score"] = round(float(kw[i]), 4)
+        # 检索结果同样要带分组信息，否则内置任务会被前端当成「我的任务」
+        d["builtin"] = bool(str(j.get("kind") or "").strip())
+        d["kind_label"] = _KIND_LABELS.get(str(j.get("kind") or ""), "")
         out.append(d)
     out.sort(key=lambda x: -x["score"])
     hit = [d for d in out if d["score"] > 0.02 or d["kw_score"] > 0]

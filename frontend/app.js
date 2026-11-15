@@ -715,14 +715,26 @@
   // 刻意不引第三方库：只支持对话里真正会用到的几种，出错面小。
   function mdToHtml(text) {
     const raw = String(text == null ? "" : text);
-    let esc = escapeHtml(raw);
+    // ★ 2026-11-15 支持 <details> 折叠块（reply_gate 用它折叠长过程，替代「超长就丢弃」）。
+    //   必须在 escapeHtml **之前**整块摘出来，两个原因：
+    //     1) 否则 <details> 被转义成 &lt;details&gt;，用户看到的是一堆原始标签；
+    //     2) 它跨多行，按行渲染会被 <p> 逐行拆散，浏览器认不出折叠结构。
+    const _folds = [];
+    const _body = raw.replace(/<details\b[^>]*>[\s\S]*?<\/details>/gi, (m) => {
+      _folds.push(m);
+      return "\u0001F" + (_folds.length - 1) + "\u0001";
+    });
+    const _restore = (s) => (_folds.length
+      ? s.replace(/\u0001F(\d+)\u0001/g, (m, i) => _folds[+i])
+      : s);
+    let esc = escapeHtml(_body);
     // ★ 2026-11-08 用户要求：「简单情况下就不用 markdown 了」。
     //   没有标题/列表/粗体/引用/表格这类标记的短文本，直接按纯文本渲染
     //   （保留原来的换行观感，也不会因为 <p> 的间距显得"空荡荡"）。
     const _hasMd = /(^|\n)\s*(#{1,4}\s|[-*•]\s|\d+[.、)]\s|>\s|\|)/.test(raw)
       || /\*\*[^*\n]+\*\*/.test(raw) || /`[^`\n]+`/.test(raw) || /https?:\/\//.test(raw) || /\[[^\]\n]{1,60}\]\([^)\s]+\)/.test(raw);
     if (!_hasMd && raw.length < 400) {
-      return esc.replace(/\r?\n/g, "<br>");
+      return _restore(esc).replace(/\r?\n/g, "<br>");
     }
     // 行内：`code` / **粗** / *斜* / [文字](链接) / 裸网址 / 裸本地路径
     // ★ 2026-11-10 用户要求：回答里写的本地路径、网址要能点开
@@ -766,6 +778,8 @@
     for (const line of lines) {
       const t = line.trim();
       if (!t) { closeList(); out.push('<div class="md-gap"></div>'); continue; }
+      // <details> 折叠块占位符：整行原样输出，**不要**包 <p>（块级元素套在 p 里会被浏览器拆开）
+      if (/^\u0001F\d+\u0001$/.test(t)) { closeList(); out.push(t); continue; }
       let m = /^(#{1,4})\s+(.*)$/.exec(t);
       if (m) { closeList(); const lv = Math.min(5, m[1].length + 2); out.push('<h' + lv + ' class="md-h">' + inline(m[2]) + '</h' + lv + '>'); continue; }
       if (/^([-*_]{3,})$/.test(t)) { closeList(); out.push('<hr class="md-hr">'); continue; }
@@ -780,7 +794,7 @@
       out.push('<p class="md-p">' + inline(t) + "</p>");
     }
     closeList();
-    return out.join("");
+    return _restore(out.join(""));
   }
 
   // ★ 2026-11-15 用户要求「流式正文也按 markdown 输出」。
@@ -7606,17 +7620,38 @@
       const sc = (searching && j.score != null && j.score < 1)
         ? '<span class="sched-score" title="检索相关度">' + Math.round(j.score * 100) + '%</span>'
         : "";
+      // 2026-11-15 用户要求「自动化任务可以点击删除任务」——
+      // 原来侧栏紧凑卡片只有「看结果 / 运行」，删除必须打开大窗口才能点，这里补上。
+      // 侧栏空间窄，用 ✕ 图标版（.sched-del 只占一个图标宽），大窗口保留文字版。
+      // ★ 2026-11-15 用户要求「自检和反思这些不能删除，只能暂停」——
+      //   内置任务（j.builtin：自我反思 / 代码自检 / 体验评估 / 抽空自检）一律不给删除按钮，
+      //   那个位置换成「暂停 / 启用」。后端 remove() 也硬拦了一层，这里只是不让人误点。
+      const canDel = !j.builtin;
+      const delBtn = canDel
+        ? (compact
+          ? '<button data-act="del" class="sched-del" title="删除这个任务">✕</button>'
+          : '<button data-act="del" class="sched-del" title="删除这个任务">删除</button>')
+        : "";
+      const togBtn = '<button data-act="toggle" title="' +
+        (j.builtin ? "内置任务不能删除，只能暂停" : "暂停或启用这个任务") + '">' +
+        (j.enabled ? "暂停" : "启用") + '</button>';
       const acts = compact
         ? '<button data-act="result">看结果</button>' +
-          '<button data-act="run">运行</button>'
+          '<button data-act="run">运行</button>' +
+          (canDel ? delBtn : togBtn)
         : '<button data-act="result">看结果</button>' +
           '<button data-act="run">立即运行</button>' +
-          '<button data-act="toggle">' + (j.enabled ? "暂停" : "启用") + '</button>' +
-          '<button data-act="del">删除</button>';
+          togBtn + delBtn;
       return '<div class="sched-item' + (compact ? " compact" : "") +
         '" data-id="' + j.id + '">' +
         '<div class="sched-hd">' + st + ' <b>' + (j.name || "") + '</b>' + sc + '</div>' +
-        '<div class="sched-meta">' + (j.period || "") + ' · 下次 ' + (j.next_human || "-") +
+        // 暂停中的任务别再显示「下次 xx」—— 会让人以为还会到点跑。
+        // （调度器 scheduler._loop 里 `if not j.get("enabled"): continue` 确实会跳过，
+        //   所以这里如实写「已暂停」，和实际行为一致。）
+        '<div class="sched-meta">' +
+        (j.enabled
+          ? ((j.period || "") + ' · 下次 ' + (j.next_human || "-"))
+          : ((j.period || "") + ' · 已暂停，不会自动跑')) +
         ' · ' + last + '</div>' +
         (j.channel_hint ? '<div class="sched-meta">上次用：' + j.channel_hint + '</div>' : '') +
         prev +
@@ -7626,11 +7661,36 @@
     const EMPTY_HTML = '<div class="hint" style="padding:6px 10px">还没有定时任务。' +
       '点下面的「＋ 新建任务」，或者直接在对话里说「每天早上九点帮我总结XX」。</div>';
 
+    // ★ 2026-11-15 用户要求：「自检和反思那些不要归类在自动化任务里，另外分一个类」。
+    // 后端 list_jobs 给了 builtin 字段（kind 非空即内置任务），这里按它分两组。
+    // 2026-11-15 用户要求「自检和反思这些不能删除，只能暂停」——
+    // 内置那组只渲染「暂停 / 启用」，不渲染删除；后端 remove() 也会拒绝。
+    function groupHtml(jobs, compact, runningId) {
+      const mine = jobs.filter((j) => !j.builtin);
+      const inner = jobs.filter((j) => j.builtin);
+      let h = "";
+      if (mine.length) {
+        h += '<div class="sched-group"><span>我的任务</span>' +
+             '<i>' + mine.length + '</i></div>' +
+             mine.map((j) => itemHtml(j, compact, runningId)).join("");
+      }
+      if (inner.length) {
+        h += '<div class="sched-group inner"><span>智能体自检与反思</span>' +
+             '<i>' + inner.length + '</i></div>' +
+             inner.map((j) => itemHtml(j, compact, runningId)).join("");
+      }
+      return h;
+    }
+
     function paint(jobs, runningId) {
       if (badge) badge.textContent = String(jobs.length);
-      const h = jobs.length ? null : EMPTY_HTML;
-      if (list) list.innerHTML = h || jobs.map((j) => itemHtml(j, false, runningId)).join("");
-      if (sideList) sideList.innerHTML = h || jobs.map((j) => itemHtml(j, true, runningId)).join("");
+      if (!jobs.length) {
+        if (list) list.innerHTML = EMPTY_HTML;
+        if (sideList) sideList.innerHTML = EMPTY_HTML;
+        return;
+      }
+      if (list) list.innerHTML = groupHtml(jobs, false, runningId);
+      if (sideList) sideList.innerHTML = groupHtml(jobs, true, runningId);
     }
 
     async function load() {
@@ -7748,14 +7808,20 @@
           return;                       // 别急着把按钮恢复
         } else if (act === "toggle") {
           const cur = b.textContent === "暂停";
-          await fetch("/api/schedule/toggle", {
+          const r = await (await fetch("/api/schedule/toggle", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id, enabled: !cur }) });
+            body: JSON.stringify({ id, enabled: !cur }) })).json();
+          if (!r.ok) showToast("没能切换：" + (r.error || ""), "err");
+          else showToast(cur ? "已暂停，不会再到点自动跑" : "已启用，会按时自动跑", "ok");
         } else if (act === "del") {
           if (!confirm("删除这个定时任务？")) { b.disabled = false; return; }
-          await fetch("/api/schedule/delete", {
+          const r = await (await fetch("/api/schedule/delete", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id }) });
+            body: JSON.stringify({ id }) })).json();
+          // ★ 内置任务后端会拒绝（ok:false + builtin:true），必须把原因说出来，
+          //   否则用户点了删除没反应，会以为界面卡了。
+          if (!r.ok) showToast(r.error || "删除失败", r.builtin ? "warn" : "err");
+          else showToast("已删除", "ok");
         }
       } catch (e) { showToast("操作失败：" + e.message, "err"); }
       b.disabled = false;
@@ -12577,6 +12643,47 @@
     }
   }
 
+  // ---- 自动化暂停开关（绿灯 = 运行中，暗灯 = 已暂停）
+  // 用户要求：「可以增加一个暂停按钮，再次按下则继续，正常开启绿灯，暂停暗灯」。
+  function paintPause(paused) {
+    const box = el && el.querySelector(".iter-pause");
+    if (!box) return;
+    box.classList.toggle("off", !!paused);
+    const dot = box.querySelector(".iter-pause-dot");
+    if (dot) dot.title = paused ? "已暂停" : "运行中";
+    const t = box.querySelector(".iter-pause-t");
+    if (t) t.textContent = paused ? "已暂停" : "自动化";
+    box.title = paused
+      ? "自动化已暂停：定时反思 / 自检 / 评估 / 自动改代码都不会跑。再点一下恢复"
+      : "自动化运行中（绿灯）。点一下暂停所有自动任务";
+  }
+
+  async function syncPause() {
+    try {
+      const d = await api("/api/selfiter/pause");
+      if (d && d.ok) paintPause(d.paused);
+    } catch (e) { /* 忽略：拿不到状态就不改灯 */ }
+  }
+
+  async function togglePause() {
+    const box = el && el.querySelector(".iter-pause");
+    if (box) box.disabled = true;
+    try {
+      const d = await api("/api/selfiter/pause", {});
+      if (!d || !d.ok) {
+        say((d && d.error) || "切换暂停失败", "bad");
+        return;
+      }
+      paintPause(d.paused);
+      say(d.paused
+        ? "⏸ 自动化已暂停：定时反思、定时自检、抽空自检、自动评估、自动改代码都停了。手动操作照常。"
+        : "▶️ 自动化已恢复：绿灯亮，定时任务会照常跑。",
+        d.paused ? "warn" : "good");
+    } finally {
+      if (box) box.disabled = false;
+    }
+  }
+
   // ---- 顶栏红点：有等你批准的动作就亮
   async function refreshDot() {
     if (!dot) return;
@@ -12716,6 +12823,11 @@
       '<div class="iter-panel">' +
         '<div class="iter-head">' +
           '<span class="iter-title">🌱 AI 迭代想法</span>' +
+          '<button type="button" class="btn sm ghost iter-pause" ' +
+            'title="暂停 / 继续所有自动化（定时反思、定时自检、抽空自检、自动评估、自动改代码）">' +
+            '<span class="iter-pause-dot"></span>' +
+            '<span class="iter-pause-t">自动化</span>' +
+          '</button>' +
           '<button type="button" class="btn sm ghost iter-close">关闭</button>' +
         '</div>' +
         '<div class="iter-stats"></div>' +
@@ -12759,6 +12871,7 @@
     el.querySelector(".iter-regress-btn").onclick = runRegress;
     el.querySelector(".iter-restart-btn").onclick = doRestart;
     el.querySelector(".iter-trust-cb").onchange = onTrustToggle;
+    el.querySelector(".iter-pause").onclick = togglePause;
     el.querySelector(".iter-diag-btn").onclick = toggleDiag;
     el.querySelector(".iter-diag-go").onclick = runDiagnose;
     el.querySelector(".iter-eval-btn").onclick = function () { runEvaluate(false); };
@@ -12776,6 +12889,7 @@
   function show() {
     layer();
     render();
+    syncPause();
     load();
     loadExp();
     loadPapers();
@@ -13191,6 +13305,16 @@
       h += sec("🧩 你当下卡在哪", listHtml(p.needs, "nd"));
     }
     h += sec("💡 可以加的功能（含为什么）", listHtml(p.features, "f"));
+    // 论文回灌闭环：功能是先用真实论文校准过的（2026-11-15）
+    var en = (p.paper && p.paper.enrich) || null;
+    if (en && (en.papers || en.error)) {
+      h += '<div class="iter-enrich">' + (en.papers
+        ? "📚 已用 " + en.papers + " 篇真实论文校准，改进了 " + (en.changed || 0) + " 处" +
+          (en.seconds ? "（" + en.seconds + "s）" : "")
+        : "📚 论文库没召回到相关论文，theory 已如实留空（没有编造）") +
+        (en.error ? '<div class="iter-enrich-err">' + esc(en.error) + "</div>" : "") +
+        "</div>";
+    }
     if ((p.questions || []).length) {
       h += sec("❓ 想问你（回答会改变我下一步）", listHtml(p.questions, "q"));
     }

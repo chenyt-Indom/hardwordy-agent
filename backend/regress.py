@@ -703,3 +703,57 @@ def as_text(r):
     for i in r.get("failed_items") or []:
         lines.append("  ✗ %s —— %s" % (i["name"], i.get("why") or ""))
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- snapdiff（2026-11-15）
+@case("snapdiff.相同行为不报差异")
+def _c_snap_same():
+    from . import snapdiff
+    import types
+    m = types.ModuleType("m")
+    m.add = lambda a, b: a + b
+    before = snapdiff.snapshot(m, ["add"])
+    after = snapdiff.snapshot(m, ["add"])
+    d = snapdiff.diff(before, after)
+    assert d == [], "同样实现却报出差异：%r" % (d,)
+
+
+@case("snapdiff.行为变化必须报出来")
+def _c_snap_changed():
+    from . import snapdiff
+    import types
+    m = types.ModuleType("m")
+    m.add = lambda a, b: a + b
+    before = snapdiff.snapshot(m, ["add"])
+    m.add = lambda a, b: str(a + b)      # 返回值类型变了
+    after = snapdiff.snapshot(m, ["add"])
+    d = snapdiff.diff(before, after)
+    assert len(d) >= 1, "返回值类型变了却没报差异"
+    assert d[0]["name"] == "add", d
+
+
+# ---------------------------------------------------------------- reply_gate（2026-11-15）
+@case("reply-gate.长过程折叠且 details 闭合")
+def _c_gate_fold():
+    from .reply_gate import format_reply
+    out = format_reply("结论：已修好。", "过程。" * 500, "产物：a.diff", 4000)
+    assert "结论：已修好。" in out, "结论被弄丢了"
+    assert "<details" in out and "</details>" in out, "长过程应折叠"
+    assert out.count("<details") == out.count("</details>"), "details 没闭合"
+    assert len(out) <= 4000, "折叠后仍超限：%d" % len(out)
+
+
+@case("reply-gate.短过程不折叠")
+def _c_gate_short():
+    from .reply_gate import format_reply
+    out = format_reply("结论：ok", "短过程", "", 4000)
+    assert "<details" not in out, "短过程不该折叠"
+
+
+@case("reply-gate.超长时不留未闭合 details")
+def _c_gate_unbalanced():
+    from .reply_gate import format_reply
+    # 过程长到连折叠块都放不下：必须整块换成一行提示，不能截半截
+    out = format_reply("结论：短。", "过程" * 9000, "", 800)
+    assert out.count("<details") == out.count("</details>"), \
+        "留下了未闭合的 <details>（浏览器会把后面内容全吞掉）"

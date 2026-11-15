@@ -46,7 +46,7 @@ from . import (config, ollama_client, deepseek_client, cloud_image, image_models
                file_tools, video, web_tools,
                t2i, tools, sessions, image_library, doclib, docx_write, tts,
                workspace, actlog, chatimg, hive, hive_client, hive_p2p,
-               hive_mesh, hive_relay_link, avatar2, deploy_keys)
+               hive_mesh, hive_relay_link, avatar2, deploy_keys, reply_gate)
 
 app = FastAPI(title="hardwordy", version="1.0.0")
 
@@ -519,6 +519,46 @@ def _force_conclusion_first(reply: str, user_msg: str = "") -> str:
     return _CONCLUSION_PLACEHOLDER + "\n" + s
 # 三段标题（用于识别与保留）
 _REPLY_SECTION_HEADS = ("结论：", "改动：", "验证：")
+
+
+def _apply_reply_gate(text: str, limit: int = _REPLY_MAX_CHARS) -> str:
+    """超长回复：把「过程」折叠起来，而不是直接丢弃（2026-11-15 接线 reply_gate）。
+
+    为什么需要它
+    ------------
+    `_clip_reply` 超限时是**丢弃**过程，用户永远看不到排查细节；而用户反复
+    抱怨的正是「回复被截断、以为系统挂了」。折叠（<details>）能把信息留住、
+    视觉上又短，是从根上解决这个痛点。前端 `mdToHtml` 已同步支持 <details>。
+
+    行为约束（避免误伤）
+    --------------------
+      · **没超限就一个字不改** —— 闲聊/解释/短回答完全不受影响；
+      · 找不到「结论：/改动：/验证：」三段结构时也原样返回 —— 不硬套格式；
+      · 任何异常一律退回原文，绝不因为格式化而丢内容。
+    """
+    s = str(text or "")
+    try:
+        if limit <= 0 or len(s) <= limit:
+            return s
+        from .reply_gate import format_reply
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return s
+    try:
+        # ★ 按**段落**（空行分隔）切，不能按行贪婪扫描。
+        #   实测踩过：`结论：xxx\n` 后面紧跟一大段没有空行的过程时，行扫描会把
+        #   整段都算进「结论块」，head 变成全文、body 为空 → 永远不折叠。
+        paras = s.split("\n\n")
+        heads = [any(p.lstrip().startswith(h) for h in _REPLY_SECTION_HEADS) for p in paras]
+        head = "\n\n".join(p for p, k in zip(paras, heads) if k).strip()
+        body = "\n\n".join(p for p, k in zip(paras, heads) if not k).strip()
+        if not head or not body:
+            return s          # 没三段结构 / 没可折叠的过程 → 交回 _clip_reply
+        out = format_reply(head, body, "", limit)
+        return out if out.strip() else s
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return s
 
 
 def _clip_reply(text: str, limit: int = _REPLY_MAX_CHARS) -> str:
@@ -2278,6 +2318,21 @@ def diag_nowin():
         return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
 
 
+@app.get("/api/diag/fallback")
+def diag_fallback():
+    """云端降级通道状态：本地 Ollama 在不在、会挑哪个模型、哪些错误会触发降级。
+
+    为什么需要：2026-11-15 用户连续两轮被 DeepSeek `402 余额不足` 打断，
+    现在会自动切本地模型继续回答。但用户看不到「到底切了没有 / 本地顶不顶得住」，
+    出问题时只能猜。这个接口把判断依据直接摊开。
+    """
+    try:
+        from . import llm_fallback
+        return {"ok": True, **llm_fallback.health()}
+    except Exception as exc:                   # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+
+
 @app.get("/api/config")
 def get_config():
     return {"config": config.load_config(), "defaults": config.DEFAULT_CONFIG}
@@ -2433,6 +2488,12 @@ def selfiter_reflect(body: dict):
     from . import self_iterate as _si
     b = body or {}
     try:
+        # 暂停闸：整个跳过（连 LLM 都不调，不白花 token）。
+        # 只有前端手动点「现在反思一次」会带 force=true，定时任务不会带。
+        if not b.get("force"):
+            g = _si.paused_gate("反思")
+            if g:
+                return g
         return _si.reflect(trigger=str(b.get("trigger") or "manual"),
                            use_web=bool(b.get("use_web", True)),
                            focus=str(b.get("focus") or ""),
@@ -2563,6 +2624,37 @@ def selfiter_settings_get():
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfiter/pause")
+def selfiter_pause_get():
+    """查自动化是否暂停（前端按钮据此点亮绿灯 / 熄灯）。"""
+    from . import self_iterate as _si
+    try:
+        s = _si.get_settings()
+        paused = bool(s.get("paused"))
+        return {"ok": True, "paused": paused,
+                "label": "已暂停" if paused else "运行中"}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/pause")
+def selfiter_pause_set(body: dict):
+    """暂停 / 继续自动化。
+
+    body 里 paused 不传（或为 null）→ 翻转当前状态（按钮点一下切换）；
+    paused=true/false → 直接设为该值。
+    暂停只挡「自动触发」：定时反思、定时自检、抽空自检、自动评估、
+    信任模式自动执行；用户手动点的操作照常。
+    """
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        val = b.get("paused")
+        return _si.toggle_pause(None if val is None else bool(val))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/api/selfiter/settings")
 def selfiter_settings_set(body: dict):
     """改设置。只接受白名单字段：trust_mode / audit_after_change / audit_daily /
@@ -2586,6 +2678,11 @@ def selfiter_audit(body: dict):
     from . import self_iterate as _si
     b = body or {}
     try:
+        # 暂停闸：非手动来源（daily / idle / auto）的自检整个跳过。
+        if str(b.get("source") or "manual") != "manual":
+            g = _si.paused_gate("定时自检")
+            if g:
+                return g
         s = _si.load_settings()
         auto = b.get("auto_fix")
         if auto is None:
@@ -7283,6 +7380,13 @@ async def chat(req: ChatRequest,
         if _pre != final_text:
             logger.info("[conclusion-first] 首段是排查过程，已前置结论引导")
             final_text = _pre
+        # 过程折叠（2026-11-15 接线 reply_gate）：超长时把过程收进 <details>，
+        # 而不是像 _clip_reply 那样直接丢弃 —— 信息不丢、视觉变短。
+        # ⚠️ 必须在 _clip_reply **之前**：折叠后往往已回到上限内，就不会再被裁。
+        _gated = _apply_reply_gate(final_text)
+        if _gated != final_text:
+            logger.info("[reply-gate] 回复 %d 字超上限，过程已折叠为可展开块", len(final_text))
+            final_text = _gated
         _shown = _clip_reply(final_text)
         if len(_shown) < len(final_text):
             logger.warning("[reply-clip] 回复 %d 字超上限，展示裁到 %d 字（历史保留全文）",
@@ -8420,7 +8524,38 @@ async def chat_deepseek(req: ChatRequest,
                 while ui_events:
                     q.put(("ui", ui_events.pop(0)))
             except Exception as e:               # noqa: BLE001
-                q.put(("error", f"{type(e).__name__}: {e}"))
+                # ★ 2026-11-15 新增：云端不可用（402 余额不足 / 401 / 超时 / 5xx…）
+                #   时自动降级到本地 Ollama，**不让整轮对话直接报废**。
+                #   用户实测连续两轮被 402 打断、只能手动重发，而本地模型明明在线。
+                #   ⚠️ 降级是保命通道：不带工具循环、不追求质量，能给出回答 > 什么都没有。
+                #   ⚠️ llm_fallback.plan() 保证不抛异常；这里再包一层 try，
+                #      降级本身出任何问题都必须退回「原来的报错」，不能更糟。
+                _fell_back = False
+                try:
+                    from . import llm_fallback as _FB
+                    _has_img = any(isinstance((_m or {}).get("content"), list)
+                                   for _m in (clean or []))
+                    _fb = _FB.plan(e, has_images=_has_img)
+                    if _fb.get("ok"):
+                        logger.warning("[fallback] %s：%s → 本地 %s",
+                                       type(e).__name__, e, _fb.get("model"))
+                        q.put(("note", _fb["note"]))
+                        _fbn = 0
+                        for _fk, _fv in _FB.stream(
+                                clean, model=_fb["model"],
+                                temperature=min(1.0, max(0.0, float(temp or 0.7))),
+                                max_tokens=2048):
+                            if _fk == "content" and _fv:
+                                _fbn += len(_fv)
+                            q.put((_fk, _fv))
+                        if _fbn > 0:
+                            _fell_back = True
+                        else:
+                            logger.warning("[fallback] 本地模型没有产出正文")
+                except Exception as _fe:         # noqa: BLE001
+                    logger.warning("[fallback] 降级失败，按原错误上报", exc_info=True)
+                if not _fell_back:
+                    q.put(("error", f"{type(e).__name__}: {e}"))
             finally:
                 q.put(("__done__", None))
 

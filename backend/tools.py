@@ -1734,7 +1734,10 @@ def _schedule_schemas() -> list:
                 "required": []}}},
         {"type": "function", "function": {
             "name": "cancel_schedule",
-            "description": "按名字或 id 删除一个定时任务。",
+            "description": "按名字或 id 删除一个定时任务。"
+                           "⚠️ 内置任务（自我反思 / 代码自检 / 体验评估 / 抽空自检）"
+                           "不能删除，只能暂停 —— 对它们调用本工具会被拒绝并说明原因，"
+                           "这时应该告诉用户「只能暂停」，不要换个名字再试。",
             "parameters": {"type": "object", "properties": {
                 "name_or_id": {"type": "string", "description": "任务名或 id"}},
                 "required": ["name_or_id"]}}},

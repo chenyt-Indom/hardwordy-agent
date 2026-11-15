@@ -2432,6 +2432,25 @@ body.topbar-collapsed .top-bar.tools-bar { padding: 4px 16px 8px; }
   color: var(--muted); cursor: pointer;
 }
 .sched-acts button:hover { color: var(--text); border-color: var(--accent); }
+/* 2026-11-15 用户要求：「自检和反思那些不要归类在自动化任务里，另外分一个类」。
+   两组之间只加一行小标题，不新增面板、不改列表宽高。 */
+.sched-group {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10.5px; letter-spacing: .04em; color: var(--muted);
+  padding: 8px 10px 4px; opacity: .85; user-select: none;
+}
+.sched-group:first-child { padding-top: 2px; }
+.sched-group span { flex: 1 1 auto; min-width: 0; }
+.sched-group i {
+  flex: 0 0 auto; font-style: normal; font-size: 10px;
+  padding: 0 5px; border-radius: 999px;
+  background: var(--panel2); border: 1px solid var(--border);
+}
+/* 内置那组（自检 / 反思 / 评估）视觉上弱一档，别和用户自己的任务抢注意力 */
+.sched-group.inner { opacity: .62; }
+/* 紧凑卡片里的删除按钮：只占一个图标宽度，不换行、不撑高 */
+.sched-acts button.sched-del { padding: 3px 6px; line-height: 1; }
+.sched-acts button.sched-del:hover { color: #e5484d; border-color: #e5484d; }
 .sched-new { margin: 8px 10px 4px; }
 .sched-new summary { font-size: 12px; color: var(--muted); cursor: pointer; }
 .sched-form { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
@@ -5510,6 +5529,25 @@ html[data-theme="light"] select.pill-select option {
 .iter-msg.good { color: #1f7a45; }
 .iter-msg.bad  { color: #c0392b; }
 .iter-msg.warn { color: #b7791f; }
+/* 自动化暂停开关（2026-11-15 用户要求）：绿灯=运行中，暗灯=已暂停。
+   只加一个小圆点，不改头部布局。 */
+.iter-pause {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-left: auto; margin-right: 8px;
+}
+.iter-pause-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, .18);
+  transition: background .15s ease, box-shadow .15s ease;
+  flex: 0 0 auto;
+}
+.iter-pause.off .iter-pause-dot {
+  background: #9aa3ab;
+  box-shadow: none;
+}
+.iter-pause.off .iter-pause-t { color: #8b939b; }
+.iter-pause:disabled { opacity: .6; }
 .iter-body { flex: 1 1 auto; overflow-y: auto; padding: 12px 16px 28px; }
 .iter-sec { margin-bottom: 16px; }
 .iter-sec-t {
@@ -5554,6 +5592,8 @@ html[data-theme="light"] select.pill-select option {
 .iter-tech a { color: #2b6cb0; text-decoration: none; }
 .iter-tech a:hover { text-decoration: underline; }
 .iter-hist { font-size: 12px; color: var(--muted, #718096); line-height: 1.85; }
+.iter-enrich { font-size: 12px; color: var(--muted, #718096); background: rgba(64, 128, 255, .07); border-left: 2px solid rgba(64, 128, 255, .5); padding: 5px 9px; border-radius: 5px; margin: 4px 0 8px; line-height: 1.7; }
+.iter-enrich-err { color: #b45309; margin-top: 2px; }
 /* 反思摘要推到聊天区时保留换行（textContent 不会把 \n 变成 <br>） */
 .bubble.iter-push { white-space: pre-wrap; }
 .iter-dot {

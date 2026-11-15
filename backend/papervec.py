@@ -309,22 +309,37 @@ def search(query: str, top_k: int = 8, only_unevaluated: bool = False) -> list:
         return []
     items = [all_items[i] for i in idx]
 
-    qchars = _chars(query)
-    cov = np.asarray([_coverage(qchars, _doc_text(i)) for i in items], dtype=np.float32)
+    # ★ 2026-11-15 修：中文 query 检索**英文摘要**召回为 0。
+    #   实测：库里有 9 篇 arXiv 论文（automated program repair 等，纯英文），
+    #   而查询是「自动修复 代码」。bge-small-zh 在纯英文文本上语义分只有 0.30
+    #   上下，字面覆盖和 2-gram 更是 0 —— 三个阈值全过不了，一条都召不回。
+    #   这里把 query 做一次中文→英文扩展（need2query 的规则表），
+    #   多个 query 各算一遍**取最大值**，这样中文提问也能命中英文论文。
+    queries = [query]
+    try:
+        from . import need2query
+        queries += [q for q in need2query.to_queries(query, 3) if q not in queries]
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+
+    qchars_list = [_chars(q) for q in queries]
+    cov = np.asarray([max(_coverage(qc, _doc_text(i)) for qc in qchars_list) for i in items],
+                     dtype=np.float32)
     vec = None
     if mat is not None:
-        qv = embed.embed_texts([query], is_query=True)
-        if qv is not None and getattr(qv, "shape", (0,))[0] == 1 and len(qv[0]) == mat.shape[1]:
+        qv = embed.embed_texts(queries, is_query=True)
+        if (qv is not None and getattr(qv, "shape", (0,))[0] == len(queries)
+                and len(qv[0]) == mat.shape[1]):
             sub = mat[idx] if len(idx) != mat.shape[0] else mat
-            vec = sub @ qv[0]
+            vec = (sub @ qv.T).max(axis=1)
 
     if vec is not None:
         final = 0.75 * vec + 0.25 * cov
     else:
         final = cov.copy()
 
-    qgrams = _grams(query)
-    gram = [_gram_hits(qgrams, _doc_text(i)) for i in items]
+    qgrams_list = [_grams(q) for q in queries]
+    gram = [max(_gram_hits(qg, _doc_text(i)) for qg in qgrams_list) for i in items]
 
     picked = []
     for i in range(len(items)):
