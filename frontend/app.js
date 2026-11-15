@@ -12682,6 +12682,7 @@
     render();
     load();
     loadExp();
+    loadPapers();
     pushSignals();
   }
 
@@ -12873,6 +12874,95 @@
     await loadExp();
   }
 
+  // ---------------------------------------------------------- 论文雷达
+  // 后端：GET /api/selfiter/papers?only_high=true → {ok, items, stats}
+  // 每篇带 eval（四维分数 + verdict + plan），plan 是分步骤落地计划。
+  let papersData = null;
+
+  async function loadPapers() {
+    try {
+      const r = await api("/api/selfiter/papers?only_high=true&top_k=8");
+      if (r && r.ok) {
+        papersData = r;
+        if (el) render();     // 首次打开时数据是空的，拿到后重渲染一次
+      }
+    } catch (e) { /* 论文库拿不到不影响抽屉其它部分 */ }
+  }
+
+  function papersHtml() {
+    const pd = papersData || {};
+    const st = pd.stats || {};
+    let h = '<div class="iter-stats" style="margin-bottom:8px">' +
+      '<span class="iter-chip">累计 <b>' + (st.total || 0) + '</b> 篇</span>' +
+      '<span class="iter-chip">已评估 <b>' + (st.evaluated || 0) + '</b></span>' +
+      '<span class="iter-chip">值得做 <b>' + (st.adopted || 0) + '</b></span>' +
+      (st.vec_ready ? '' : '<span class="iter-chip">⚠️ 向量模型未就绪，已退化为关键词</span>') +
+      '</div>' +
+      '<div class="iter-act-btns" style="margin-bottom:10px">' +
+        '<button type="button" class="btn sm ghost iter-paper-eval">📡 评估未评估的论文</button>' +
+        '<input class="iter-focus iter-paper-q" maxlength="60" ' +
+          'placeholder="或按主题检索并评估（如：显存占用 / 口型同步）">' +
+      '</div>';
+    const items = pd.items || [];
+    if (!items.length) {
+      return h + '<div class="iter-li">还没有「值得做」的论文。' +
+        '点上面的按钮评一批，或先点「🔄 现在反思一次」（会顺手抓最新的 arXiv / GitHub）。<br>' +
+        '四维分是：<b>可行性</b>（本机能不能落）/ <b>创新性</b>（真新还是换皮）/ ' +
+        '<b>效益</b>（对你有没有用）/ <b>效率</b>（省不省时间）。</div>';
+    }
+    items.forEach(function (it) {
+      const ev = it.eval || {};
+      const sc = function (k) {
+        const x = ev[k] || {};
+        return (x.score === null || x.score === undefined) ? "—" : x.score;
+      };
+      h += '<div class="iter-act risk-low">' +
+        '<div class="iter-act-head">' +
+          '<span class="iter-act-t">' + esc(it.title_zh || it.title || "") + '</span>' +
+          '<span class="iter-risk">' + esc(ev.verdict || "") + '</span>' +
+          '<span class="iter-act-st">均分 ' + (it.avg == null ? "—" : it.avg) + '</span>' +
+        '</div>' +
+        '<div class="iter-act-d">可行 ' + sc("feasibility") + ' · 创新 ' + sc("novelty") +
+          ' · 效益 ' + sc("benefit") + ' · 效率 ' + sc("efficiency") + '<br>' +
+          esc(ev.verdict_reason || "") + '</div>';
+      const plan = ev.plan || [];
+      if (plan.length) {
+        h += '<div class="iter-act-f">' + plan.map(function (s, i) {
+          return (i + 1) + ". " + esc(s.step || "") +
+            '（' + esc(s.risk || "?") + '/' + esc(s.effort || "?") +
+            '，验证：' + esc(s.verify || "—") + '）';
+        }).join("<br>") + '</div>';
+      }
+      if (it.url) {
+        h += '<div class="iter-act-f"><a href="' + esc(it.url) + '" target="_blank" ' +
+          'rel="noopener">' + esc(it.url) + '</a></div>';
+      }
+      h += '</div>';
+    });
+    return h;
+  }
+
+  async function runPaperEval(query) {
+    if (busy) return;
+    busy = true;
+    say(query ? ("正在按「" + query + "」检索并做四维评估…约 20~30 秒")
+              : "正在评估未评估的论文（可行性/创新性/效益/效率 + 落地计划）…约 20~30 秒");
+    const r = await api("/api/selfiter/papers/evaluate",
+      { query: query || "", max_n: 6 });
+    busy = false;
+    if (!r || !r.ok) { say((r && r.error) || "评估失败", "bad"); return; }
+    if (!r.evaluated) {
+      say((r.msg || "没有待评估的论文") + "（先去「🔄 现在反思一次」抓一批最新的）", "warn");
+    } else {
+      const miss = (r.missed || []).length;
+      say("评估完成：" + r.evaluated + " 篇" +
+          (miss ? ("，另有 " + miss + " 篇模型没返回结果（可再点一次）") : "") +
+          "。结果已写进论文库，下次反思会用它。", "good");
+    }
+    await loadPapers();
+    if (el) render();
+  }
+
   function render() {
     if (!el) return;
     const d = data || {};
@@ -12904,7 +12994,8 @@
       body.innerHTML = h + '<div class="iter-empty">还没有反思过。<br><br>' +
         '点上面的「🔄 现在反思一次」，我会先看最近的对话和网上的新技术（arXiv / GitHub / HackerNews / 中文媒体），' +
         '然后告诉你：我哪里做得不好、你在怎么用我、可以加什么功能、以及我想改哪些代码。<br><br>' +
-        '⚠️ 想改的东西<b>不会自己动手</b>，都要你点批准。</div>';
+        '⚠️ 想改的东西<b>不会自己动手</b>，都要你点批准。</div>' +
+        sec("📡 论文雷达（向量检索 + 四维评估）", papersHtml());
       return;
     }
     h += sec("⏳ 我打算做的改动（" + (p.actions || []).length + " 条，等你批准）",
@@ -12912,6 +13003,7 @@
     h += sec("🪞 我对自己的反思", listHtml(p.weaknesses, "w"));
     h += sec("👤 我对你的观察", listHtml(p.user_insights, "u"));
     h += sec("💡 可以加的功能", listHtml(p.features, "f"));
+    h += sec("📡 论文雷达（向量检索 + 四维评估）", papersHtml());
     h += sec("🌐 网上最新动态（抓到 " + (p.tech_total || 0) + " 条）", techHtml(p));
     h += sec("📜 历史反思", (d.history || []).map(function (x) {
       return '<div class="iter-hist">' + esc(x.ts) + " · " + esc(x.summary || "") +
@@ -13076,6 +13168,12 @@
       if (t.classList.contains("iter-all-ok")) { noteFor = null; doApprove(null, ""); return; }
       if (t.classList.contains("iter-exec")) { doExecute(); return; }
       if (t.classList.contains("iter-rb")) { doRollback(); return; }
+      if (t.classList.contains("iter-paper-eval")) {
+        const box = layer();
+        const qi = box ? box.querySelector(".iter-paper-q") : null;
+        runPaperEval(qi ? (qi.value || "").trim() : "");
+        return;
+      }
       return;
     }
     const id = card.getAttribute("data-id");

@@ -858,6 +858,37 @@ def _journal_tail(n=24):
         return []
 
 
+def _file_inventory(limit: int = 90) -> str:
+    """现有可改文件的清单（只给文件名，给模型"照着挑"）。
+
+    ⚠️ 为什么必须给（2026-11-15 实测）：反思产出的动作里出现了
+    `backend/avatar_warp.py` —— 这个文件**根本不存在**（真正的是
+    `avatar_lipsync.py` / `wav2lip_engine.py`）。模型凭印象编文件名，
+    执行时要么失败、要么凭空造出一个垃圾文件。给清单是最省的办法。
+    """
+    out = []
+    for sub, exts in (("backend", (".py",)), ("frontend", (".js", ".css", ".html"))):
+        d = _ROOT / sub
+        if not d.is_dir():
+            continue
+        try:
+            names = sorted(p.name for p in d.iterdir()
+                           if p.is_file() and p.suffix.lower() in exts)
+        except Exception:
+            continue
+        names = [n for n in names
+                 if not n.endswith(".bak") and ".bak-" not in n
+                 and ".bak_" not in n and not n.endswith("_tmp")
+                 and n != "__init__.py"]
+        out.extend("%s/%s" % (sub, n) for n in names)
+    if not out:
+        return ""
+    shown = out[:limit]
+    tail = "" if len(out) <= limit else "（另有 %d 个未列出）" % (len(out) - limit)
+    return ("\n\n## 现有文件清单（**只能从这里挑**，不要编造不存在的文件名）\n"
+            + "、".join(shown) + tail)
+
+
 _PROJECT_BRIEF = """本项目是一个"本地多模态助手"（Python FastAPI 后端 + 原生 JS 前端）：
 · 对话/工具调用（联网搜索、读网页、地图、天气、图片生成/微改、文档 PPT Excel 生成、视频剪辑、语音合成、数字人）
 · 知识库检索、长期/短期记忆、技能（skill）系统、定时任务、自开发（能改自己的源码）
@@ -867,7 +898,7 @@ _PROJECT_BRIEF = """本项目是一个"本地多模态助手"（Python FastAPI �
 后端文件：backend/*.py（main.py 约1.4万行、tools.py、avatar_*.py、cloud_image.py、keyvault.py 等）"""
 
 
-def _build_reflect_prompt(signals, tech, journal, focus="", exp=""):
+def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=""):
     sig_lines = []
     for it in signals[-30:]:
         u = (it.get("user") or "").replace("\n", " ")[:220]
@@ -896,6 +927,13 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp=""):
 
 ## 最近的技术动态（真实抓取，可能与本项目无关，请自己判断相关性）
 %s
+
+## 论文/新技术的四维评估（另一条通道给出，含可行性/创新性/效益/效率打分与落地计划）
+%s
+⚠️ 这里的 verdict=skip 就是**明确不该做**，别把它再包装成 action 提一遍。
+   verdict=adopt_now / evaluate 的，它的 plan 已经是分步骤的，你要做的是判断
+   「现在值不值得插进本轮动作」——值得就把它转成 actions 里的条目（保留它的
+   验证方式），不值得就在 summary 里说一句为什么先不做。
 
 ## 你的任务
 1. **自我反思**：最近哪些地方没做好？要具体到"哪类任务/哪个环节/为什么会这样"，
@@ -929,6 +967,7 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp=""):
         "\n".join(jr) or "（暂无）",
         exp or experience_brief(),
         "\n".join(tech_lines) or "（本次没抓到，可能没联网）",
+        paper_brief or "（本轮没有可用的论文评估）",
         ("## 用户这次的额外关注点\n" + focus) if focus else "")
 
 
@@ -944,9 +983,55 @@ def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
         tech, tech_total = fetch_tech_all()
     sig = load_signals().get("items", [])
     journal = _journal_tail()
+    exp_txt = experience_brief()
+
+    # ★ 2026-11-15 用户要求：「抓取到的论文也要向量化提高召回率，并且要
+    #   主动思考可行性、创新性、效益、效率，再给出周密的自迭代计划」。
+    #   这里做三件事：
+    #     ① 本次抓到的全部入库（去重）—— 历史抓过的不会再丢；
+    #     ② 用**当前痛点**当查询，从累积库里向量召回相关论文
+    #        （两周前抓的那篇也可能正是现在需要的）；
+    #     ③ 对「新抓的 arXiv + 召回的历史」做四维评估，产出分步计划。
+    paper_brief = ""
+    paper_meta = {}
+    try:
+        from . import papervec
+        flat = [x for arr in (tech or {}).values() for x in (arr or [])]
+        if flat:
+            paper_meta["added"] = papervec.add_batch(flat)
+        q = ((exp_txt or "")[:500] + " " + (focus or "")).strip()
+        recalled = papervec.search(q, top_k=6, only_unevaluated=True) if q else []
+        fresh = [i for i in flat if str(i.get("source") or "") == "arXiv"][:5]
+        to_eval, seen_t = [], set()
+        for it in (fresh + recalled):
+            t = str(it.get("title") or "")
+            if t and t not in seen_t:
+                seen_t.add(t)
+                to_eval.append(it)
+        if to_eval:
+            brief = _PROJECT_BRIEF
+            try:
+                brief += _file_inventory(limit=70)
+            except Exception:
+                pass
+            r = papervec.evaluate(to_eval[:6], project_brief=brief,
+                                  pains=exp_txt, max_n=6)
+            paper_meta["eval"] = {"ok": r.get("ok"), "n": r.get("evaluated"),
+                                  "error": r.get("error") or ""}
+        paper_brief = papervec.brief_for_prompt(5)
+        paper_meta["stats"] = papervec.stats()
+        paper_meta["recalled"] = len(recalled)
+    except Exception as e:                              # noqa: BLE001
+        # 论文这条通道挂了不能拖垮整个反思（它只是输入之一）
+        paper_meta["error"] = "%s: %s" % (type(e).__name__, e)
 
     prompt = _build_reflect_prompt(sig, tech, journal, focus=focus,
-                                   exp=experience_brief())
+                                   exp=exp_txt, paper_brief=paper_brief)
+    # 真实文件清单：不给它，模型会编出 `avatar_warp.py` 这种不存在的路径
+    try:
+        prompt += _file_inventory()
+    except Exception:
+        pass
     txt, err = _llm_text(prompt, max_tokens=4200, temperature=0.55)
     if err:
         return {"ok": False, "error": err}
@@ -989,6 +1074,8 @@ def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
         "tech_raw": {k: (v or [])[:6] for k, v in (tech or {}).items()},
         "tech_total": tech_total,
         "signals_used": len(sig),
+        "paper": paper_meta,
+        "paper_brief": paper_brief[:2000],
     }
 
     d = load_plans()

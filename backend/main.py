@@ -2211,6 +2211,59 @@ def selfiter_experience_clear(body: dict):
         return {"ok": False, "error": str(e)}
 
 
+# ---------------------------------------------------------------- 论文情报
+@app.get("/api/selfiter/papers")
+def selfiter_papers(q: str = "", top_k: int = 12, only_high: bool = False):
+    """论文情报库：不传 q 就按时间列最新的；传 q 就走**向量检索**。
+
+    only_high=true 只返回四维评估里 verdict=adopt_now/evaluate 的高价值项。
+    """
+    from . import papervec as _pv
+    try:
+        if only_high:
+            return {"ok": True, "items": _pv.high_value(int(top_k or 12)),
+                    "stats": _pv.stats()}
+        q = str(q or "").strip()
+        if q:
+            return {"ok": True, "items": _pv.search(q, top_k=int(top_k or 12)),
+                    "stats": _pv.stats()}
+        items = sorted(_pv.load_all(), key=lambda x: float(x.get("ts") or 0),
+                       reverse=True)[:max(1, int(top_k or 12))]
+        return {"ok": True, "items": items, "stats": _pv.stats()}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/papers/evaluate")
+def selfiter_papers_evaluate(body: dict):
+    """对论文做四维评估（可行性/创新性/效益/效率）+ 落地计划。
+
+    body: query="" （空=取最新未评估的）/ max_n=6 / reindex=True
+    """
+    from . import papervec as _pv
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        n = max(1, min(12, int(b.get("max_n") or 6)))
+    except (TypeError, ValueError):
+        n = 6
+    try:
+        q = str(b.get("query") or "").strip()
+        if q:
+            items = _pv.search(q, top_k=n, only_unevaluated=bool(b.get("unevaluated")))
+        else:
+            items = [i for i in _pv.load_all() if not i.get("eval")][:n]
+        if not items:
+            return {"ok": True, "evaluated": 0,
+                    "msg": "没有待评估的论文（可以先去「现在反思一次」抓一批）"}
+        r = _pv.evaluate(items, project_brief=_si._PROJECT_BRIEF,
+                         pains=_si.experience_brief(), max_n=n)
+        r["stats"] = _pv.stats()
+        return r
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 # ---------------------------------------------------------------- 分享 / 导入
 @app.post("/api/skills/share")
 def skills_share(body: dict):
@@ -2473,6 +2526,45 @@ def _ask_mode_line(cfg: dict) -> str:
     return ("**快速了解**（当前模式）：只问**最关键的 1~3 个**问题 —— "
             "不问就会做错方向的那几个；拿到基本信息就开工，剩下的按最合理的默认做，"
             "并在结果里说明你替他假设了什么。")
+
+
+def _ask_rules_hive(cfg: dict) -> str:
+    """群聊版的「询问模式」规则（注入群聊系统提示）。
+
+    ⚠️ 为什么不能直接用 `_ask_rules`：群里**没有 ask_user 工具**
+    （`_HIVE_BAN_TOOLS` 把它剔掉了 —— 没人点弹框，任务会永久挂着）。
+    但用户 2026-11-15 明确要求「群功能也要有深度询问和快速询问」，
+    所以这里给一套**等价机制**：正文里编号提问 + 明确停下等答复。
+
+    2026-11-15 实测缺口：群聊在 13257 行只调了 `_SystemPrompt.build`，
+    而单人在 5327 / 6948 / 7646 三处都额外 `+= _ask_rules(cfg)` ——
+    群聊漏了这一步，所以群里模型压根不知道有询问模式这回事。
+    """
+    deep = str((cfg or {}).get("ask_mode") or "quick").lower() == "deep"
+    head = (
+        "\n\n【群聊里的询问模式 —— 群里没有问答弹框，只能文字提问】\n"
+        "⚠️ 群里**不能用 ask_user**（提问的人不在场就没法点，任务会一直挂着）。\n"
+        "要问就**在正文里编号列出问题**（1) 2) 3) …），最后一句明确写"
+        "「请 @我 回答上面几点，我再开始做」—— 然后**这一轮就停在这里**，"
+        "不要一边问一边硬做。\n"
+    )
+    if deep:
+        return head + (
+            "当前是**深度询问**模式（提问的人主动开了这个模式，就是要问透再动手）：\n"
+            "· 只要这一轮要产出东西（文档/PPT/表格/代码/图片/方案），"
+            "**必须先问一轮，5~7 个问题** —— 哪怕你觉得已经比较清楚；\n"
+            "· 一轮覆盖：用途/场景、目标受众、范围与篇幅、风格口径、"
+            "硬性约束与雷区、交付形式（格式/尺寸/页数）、有没有参考样例；\n"
+            "· 拿到答复后先自查还有没有会影响做法的空白，**有就再问一轮**（通常 2~3 轮）；\n"
+            "· 每一轮都要带来新的关键信息，**绝不复问已经答过的**；\n"
+            "· 问够就动手 —— 不要为了显得认真而无限追问；\n"
+            "· 只有提问的人明说「直接做 / 别问 / 你看着办」时才跳过提问。"
+        )
+    return head + (
+        "当前是**快速了解**模式：只问**最关键的 1~3 个**问题 —— "
+        "不问就会做错方向的那几个；拿到基本信息就开工，"
+        "剩下的按最合理的默认做，并在结果里说明你替他假设了什么。"
+    )
 
 
 def _ask_rules(cfg: dict) -> str:
@@ -13254,7 +13346,15 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             gmem = ""
         # ★ 2026-11-15：系统提示直接用**单人模式那一个函数**（同一份文本、同一套规范）。
         #   这是「群里和单聊里像同一个人」的根本 —— 原来群聊压根没有系统提示。
+        # ★ 2026-11-15 用户要求「群功能也要有深度询问和快速询问」。
+        #   实测缺口：群聊这里只用了 `_SystemPrompt.build`，而单人在
+        #   5327 / 6948 / 7646 三处都额外 `+= _ask_rules(cfg)` —— 群聊漏了，
+        #   所以群里模型压根不知道有「询问模式」这回事。
+        #   群里没有 ask_user 工具（`_HIVE_BAN_TOOLS`），所以用 `_ask_rules_hive`
+        #   这套等价机制（正文编号提问 + 停下等答复）。
+        cfg = config.load_config() or {}
         sys_prompt = _SystemPrompt.build(instruction, "hive:" + gid)
+        sys_prompt += _ask_rules_hive(cfg)
         msgs = _hive_chat_messages(instruction, hist, asker, gmem=gmem)
 
         # 附件：本次指令的 + 历史消息里的，一起交给模型
@@ -13266,7 +13366,6 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             msgs[-1]["content"] += ("\n\n【群里的附件（含本次指令与之前聊天里发过的）】"
                                     + attach_note)
 
-        cfg = config.load_config() or {}
         model = cfg.get("default_model") or ""
         if not model:
             raise RuntimeError("没有配置默认模型（先在设置里选一个）")

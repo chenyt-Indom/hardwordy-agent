@@ -1579,6 +1579,11 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
         # 之前它写死在基础列表里，关着联网也能搜图 —— 与"关着不联网"的约定矛盾。
         schemas = [s for s in schemas
                    if s["function"]["name"] != "web_image_search"]
+    # 群文件库检索/读取/写入（2026-11-15）。始终暴露：群聊里才有 gid，
+    # 单人对话里调用会明确回一句「当前不在群里」，不会静默出错。
+    schemas.append(_HIVE_FILES_SCHEMA)
+    # 论文/新技术雷达（2026-11-15）：向量检索累积库 + 四维评估。
+    schemas.append(_PAPER_RADAR_SCHEMA)
     # 上传到代码托管平台：属于"对外发布"，始终暴露但执行前必须问用户
     schemas.append(_GITHUB_PUSH_SCHEMA)
     # ---------- 「眼睛」：截图 / 看图（2026-11-08）----------
@@ -2493,6 +2498,77 @@ _KB_SCHEMA = {
 }
 
 
+# 群文件库（2026-11-15）—— 让模型能"按意思"找群里那份文件、读全文、往里写。
+#
+# 为什么做成**一个工具 + action 参数**而不是四个工具：系统提示已经很长，
+# 四个 schema 要多占约 800 token，而它们永远一起出现。
+_HIVE_FILES_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "hive_files",
+        "description": (
+            "群文件库操作（当前这个群里的全部文件）。**群里找资料优先用它，"
+            "不要凭记忆猜文件内容**。\n"
+            "· action=search：按**意思**检索文件内容（语义向量 + 关键词混合，块级定位），"
+            "返回最相关的片段。用户问「群里那份报价单的单价是多少」→ 用它；\n"
+            "· action=read：读某个文件的全文（name 可以只给关键词）；\n"
+            "· action=list：列出群里所有文件（含能否检索）；\n"
+            "· action=save：把内容存成一个新文件放进群文件库（会同步给群里所有人）。\n"
+            "检索是**块级**的，长文档也能定位到具体段落；一次没查准就换个说法再查，"
+            "这是正常的（换个词往往能召回不同段落）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string",
+                           "enum": ["search", "read", "list", "save"],
+                           "description": "要做哪种操作"},
+                "query": {"type": "string",
+                          "description": "检索词（action=search 必填）"},
+                "name": {"type": "string",
+                         "description": "文件名或关键词（action=read / save 必填）"},
+                "content": {"type": "string",
+                            "description": "要写入的内容（action=save 必填）"},
+                "top_k": {"type": "integer",
+                          "description": "返回几条片段，默认 6"},
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+
+# 论文雷达（2026-11-15）—— 让模型在对话里也能查/评技术论文，而不是只等反思跑。
+_PAPER_RADAR_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "paper_radar",
+        "description": (
+            "技术论文/新技术雷达（**累积库**，含历史抓过的 arXiv/GitHub/HN/中文媒体）。\n"
+            "· action=search：按主题**向量检索**论文库（换说法也能召回）；\n"
+            "· action=evaluate：对一批论文做**四维评估** —— 可行性 / 创新性 / "
+            "对用户的效益 / 效率提升，各 1~10 分并给理由，同时产出分步骤落地计划"
+            "（改哪个文件、风险、工作量、怎么验证）；\n"
+            "· action=high：列出已评估里最值得做的（verdict=adopt_now/evaluate）。\n"
+            "用户问「最近有什么新技术能用」「这篇论文对我们有用吗」→ 用它。"
+            "**不要凭记忆编论文标题或结论**，库里没有就说没有。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string",
+                           "enum": ["search", "evaluate", "high"],
+                           "description": "要做哪种操作"},
+                "query": {"type": "string",
+                          "description": "检索/评估的主题（search 必填）"},
+                "top_k": {"type": "integer", "description": "返回/评估几条，默认 6"},
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+
 # ⚠️ 兼容别名：原来是个常量 `_ASK_USER_SCHEMA`，2026-09-23 改成按询问模式生成的
 # 函数（`_ask_user_schema(mode)`）。保留这个名字，免得外部引用（测试/脚本）炸掉。
 _ASK_USER_SCHEMA = _ask_user_schema("quick")
@@ -2806,6 +2882,10 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
         return _do_search_memory(arguments)
     if name == "search_knowledge":
         return _do_search_knowledge(arguments)
+    if name == "hive_files":
+        return _do_hive_files(arguments, context)
+    if name == "paper_radar":
+        return _do_paper_radar(arguments)
     if name == "run_python":
         return _do_run_python(arguments, ui_events, context)
     if name == "library":
@@ -2819,6 +2899,184 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
     if name == "web_search":
         return _do_web_search(arguments, ui_events)
     return f"[未知工具] {name}"
+
+
+# ---------- 论文雷达：检索 / 四维评估 ----------
+def _do_paper_radar(arguments):
+    """论文雷达工具。库是累积的（反思每次抓的都会入库去重）。"""
+    from . import papervec as _pv
+    a = arguments or {}
+    act = str(a.get("action") or "search").strip().lower()
+    try:
+        n = max(1, min(12, int(a.get("top_k") or 6)))
+    except Exception:
+        n = 6
+    try:
+        if act == "high":
+            hv = _pv.high_value(n)
+            if not hv:
+                return ("[论文雷达] 还没有评估出「值得做」的论文。"
+                        "可以先用 action=evaluate 评一批。")
+            lines = ["[论文雷达] 最值得做的 %d 条：" % len(hv)]
+            for it in hv:
+                ev = it["eval"]
+                lines.append("\n· 《%s》[%s] 均分 %.1f → %s\n  结论：%s\n  计划：%s" % (
+                    it.get("zh_title") or it["title"], it.get("source"), it["avg"],
+                    ev.get("verdict"), ev.get("verdict_reason") or "",
+                    "；".join("%s（%s/%s，验证：%s）" % (
+                        s.get("step"), s.get("risk"), s.get("effort"), s.get("verify"))
+                        for s in (ev.get("plan") or []) if isinstance(s, dict)) or "无"))
+            return "\n".join(lines)
+
+        if act == "search":
+            q = str(a.get("query") or "").strip()
+            if not q:
+                return "[论文雷达] search 需要 query。"
+            hits = _pv.search(q, top_k=n)
+            if not hits:
+                st = _pv.stats()
+                return ("[论文雷达] 库里没有「%s」相关的内容（当前共 %d 篇，已评估 %d 篇）。"
+                        "可以让我跑一次「反思」去抓最新的，或换关键词再查。"
+                        % (q, st.get("total", 0), st.get("evaluated", 0)))
+            lines = ["[论文雷达] 「%s」命中 %d 条：" % (q, len(hits))]
+            for it in hits:
+                ev = it.get("eval") or {}
+                tag = ""
+                if ev:
+                    tag = "｜可行%s 创新%s 效益%s 效率%s → %s" % (
+                        (ev.get("feasibility") or {}).get("score"),
+                        (ev.get("novelty") or {}).get("score"),
+                        (ev.get("benefit") or {}).get("score"),
+                        (ev.get("efficiency") or {}).get("score"), ev.get("verdict"))
+                lines.append("\n· 《%s》[%s]%s\n  %s\n  %s" % (
+                    it.get("zh_title") or it["title"], it.get("source"), tag,
+                    it.get("url") or "", (it.get("summary") or "")[:200]))
+            return "\n".join(lines)
+
+        if act == "evaluate":
+            q = str(a.get("query") or "").strip()
+            if q:
+                items = _pv.search(q, top_k=n)
+            else:
+                items = [i for i in _pv.load_all() if not i.get("eval")][:n]
+            if not items:
+                return ("[论文雷达] 没有可评估的论文。"
+                        "先让我跑一次「反思」（会联网抓一批），或者换个 query。")
+            from . import self_iterate as _si
+            r = _pv.evaluate(items, project_brief=_si._PROJECT_BRIEF,
+                             pains=_si.experience_brief(), max_n=n)
+            if not r.get("ok"):
+                return "[论文雷达] 评估失败：%s" % r.get("error")
+            lines = ["[论文雷达] 评估了 %d 篇（四维 1~10 分）：" % r.get("evaluated", 0)]
+            for p in r.get("papers") or []:
+                ev = p["eval"]
+                lines.append(
+                    "\n· 《%s》%s\n  可行 %s / 创新 %s / 效益 %s / 效率 %s → **%s**\n  结论：%s\n  计划：%s"
+                    % (p.get("title_zh") or p["title"], p.get("source"),
+                       ev["feasibility"]["score"], ev["novelty"]["score"],
+                       ev["benefit"]["score"], ev["efficiency"]["score"],
+                       ev["verdict"], ev["verdict_reason"],
+                       "；".join("%s（%s/%s，验证：%s）" % (
+                           s.get("step"), s.get("risk"), s.get("effort"), s.get("verify"))
+                           for s in (ev.get("plan") or []) if isinstance(s, dict)) or "无"))
+            return "\n".join(lines)
+
+        return "[论文雷达] 不认识的 action：%s（可用 search / evaluate / high）" % act
+    except Exception as e:                              # noqa: BLE001
+        return "[论文雷达] 操作失败：%s: %s" % (type(e).__name__, e)
+
+
+# ---------- 群文件库：检索 / 读取 / 写入 ----------
+def _do_hive_files(arguments, context):
+    """群文件库操作（`hive_files` 工具）。
+
+    群 id 从 `context["session"]`（形如 `hive:g_xxx`）解析 ——
+    这样模型不用自己传 gid，也不会串群。
+    """
+    from . import hivevec
+    a = arguments or {}
+    act = str(a.get("action") or "search").strip().lower()
+    sess = str((context or {}).get("session") or "")
+    gid = sess[5:] if sess.startswith("hive:") else ""
+    if not gid:
+        return ("[群文件库] 当前不在群聊里 —— 这个工具只在群聊中可用。"
+                "单人对话请用 search_knowledge（知识库）或 read_file（本地文件）。")
+    try:
+        if act == "list":
+            fs = hivevec.list_files(gid)
+            if not fs:
+                return "[群文件库] 这个群里还没有文件。"
+            lines = ["[群文件库] 共 %d 个文件：" % len(fs)]
+            for f in fs[:60]:
+                lines.append("- %s（%.1f KB）%s" % (
+                    f["name"], f["size"] / 1024.0,
+                    "" if f["searchable"] else "　⚠️ 抽不出文本，检索不到"))
+            if len(fs) > 60:
+                lines.append("…还有 %d 个未列出" % (len(fs) - 60))
+            return "\n".join(lines)
+
+        if act == "search":
+            q = str(a.get("query") or "").strip()
+            if not q:
+                return "[群文件库] search 需要 query 参数。"
+            try:
+                k = max(1, min(20, int(a.get("top_k") or 6)))
+            except Exception:
+                k = 6
+            hits = hivevec.search(gid, q, top_k=k)
+            if not hits:
+                st = hivevec.status(gid)
+                if not int(st.get("chunks") or 0):
+                    return ("[群文件库] 索引里没有可检索的文本（群里可能只有图片/视频，"
+                            "或者文档都读不出文字）。可以先用 action=list 看有哪些文件。")
+                return ("[群文件库] 没检索到「%s」相关的内容。"
+                        "换个说法或换关键词再试一次（块级检索对用词敏感）；"
+                        "也可以 action=list 看清单后用 action=read 直接读全文。" % q)
+            lines = ["[群文件库] 「%s」命中 %d 条（块级检索）：" % (q, len(hits))]
+            for i, h in enumerate(hits, 1):
+                lines.append("\n【%d】%s（第 %s 块，相关度 %.2f）\n%s" % (
+                    i, h["name"], h["chunk"], h["score"], h["content"]))
+            return "\n".join(lines)
+
+        if act == "read":
+            nm = str(a.get("name") or "").strip()
+            if not nm:
+                return "[群文件库] read 需要 name 参数（文件名或关键词都行）。"
+            r = hivevec.read_text(gid, nm)
+            if not r.get("ok"):
+                return ("[群文件库] 读不出来：%s"
+                        % (r.get("error") or r.get("note") or "未知原因"))
+            note = ("　注：" + r["note"]) if r.get("note") else ""
+            return "[群文件库] %s（%d 字）%s\n\n%s" % (
+                r["name"], r["chars"], note, r.get("text") or "")
+
+        if act == "save":
+            nm = str(a.get("name") or "").strip()
+            body = a.get("content")
+            if not nm or body is None:
+                return "[群文件库] save 需要 name 和 content。"
+            from . import hive
+            m = hive.save_file(gid, nm, str(body).encode("utf-8"),
+                               mime="text/plain", tag="ai", source="hive_files 工具")
+            # 清单广播（延迟 import，避免 tools ← main 的循环导入）
+            synced = False
+            try:
+                from . import main as _main
+                r2 = _main._hive_sync_now(gid, reason="tool-save", force=True)
+                synced = bool((r2 or {}).get("ok"))
+            except Exception:
+                synced = False
+            try:
+                hivevec.build_index(gid, force=True)
+            except Exception:
+                pass
+            return "[群文件库] 已保存「%s」（%.1f KB）到群文件夹。%s" % (
+                m.get("name"), int(m.get("size") or 0) / 1024.0,
+                "已同步给群成员。" if synced else "本地已存好，清单会在下次同步时广播。")
+
+        return ("[群文件库] 不认识的 action：%s（可用 search / read / list / save）" % act)
+    except Exception as e:                              # noqa: BLE001
+        return "[群文件库] 操作失败：%s: %s" % (type(e).__name__, e)
 
 
 # ---------- 自我迭代：代码自检 / 不达标诊断 ----------
