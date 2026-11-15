@@ -2528,6 +2528,59 @@ def selfiter_actlog(limit: int = 40):
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/timeline")
+def api_timeline(session_id: str = ""):
+    """会话时间轴：本会话的自动改动记录（供前端画时间轴）。
+
+    数据源是 actlog（自动迭代/自动改动的执行日志）。无记录时返回空数组，
+    不抛 500 —— 前端首次打开会话时本来就没有记录，报错会让人以为坏了。
+    """
+    try:
+        from . import self_iterate as _si
+        rows = _si.list_actlog(limit=200) or []
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("读取 actlog 失败（时间轴返回空）", exc_info=True)
+        return {"ok": True, "items": [], "error": str(e)}
+    sid = str(session_id or "").strip()
+    items = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if sid and str(r.get("session") or r.get("session_id") or "") != sid:
+            continue
+        # ⚠️ 2026-11-16 实测修两个字段 bug（这接口是自动迭代刚生成的）：
+        #   ① `r.get("file")` —— actlog 里根本没有 `file` 这个 key，文件是
+        #      `files` **数组**，所以时间轴上的「文件」永远显示空。
+        #   ② `bool(r.get("ok", True))` —— actlog 用 `result: "ok"/"fail"`，
+        #      没有 `ok` 字段，于是默认值 True 让**失败也显示成成功**。
+        _files = [f for f in (r.get("files") or []) if f]
+        _res = str(r.get("result") or "").strip()
+        if _res:
+            _ok = (_res == "ok")
+        else:
+            _ok = bool(r.get("ok", True))
+        # 耗时没有独立字段，actlog 把它写在 detail 里（「…用时 12.3 秒」）
+        _dur = r.get("dur") or r.get("duration") or 0
+        if not _dur:
+            _m = re.search(r"(\d+(?:\.\d+)?)\s*秒", str(r.get("detail") or ""))
+            if _m:
+                try:
+                    _dur = float(_m.group(1))
+                except Exception:                       # noqa: BLE001
+                    _dur = 0
+        items.append({
+            "ts": r.get("ts") or r.get("time") or "",
+            "file": (_files[0] if len(_files) == 1
+                     else ("、".join(_files[:3]) if _files else "")),
+            "files": _files,
+            "title": r.get("title") or r.get("action") or r.get("summary") or "",
+            "ok": _ok,
+            "rollback": r.get("backup") or "",
+            "dur": _dur,
+        })
+    return {"ok": True, "items": items}
+
+
 @app.get("/api/selfdev/fail_stats")
 def selfdev_fail_stats(window: int = 100):
     """自动迭代失败分类看板：聚合 task.json 里带 fail_kind 的事件。
@@ -2702,6 +2755,24 @@ def selfloop_stats():
 
 
 @app.post("/api/selfloop/think")
+@app.post("/api/selfloop/creative")
+def selfloop_creative(body: dict = None):
+    """手动换一批创意点子（强制跳过 24 小时缓存）。
+
+    ★ 2026-11-16：原来想换点子只能去删 data/self_iterate/creative.json，
+      用户不可能知道这个路径。给个按钮，代价是一次 LLM 调用。
+    """
+    from . import self_iterate as _si
+    try:
+        r = _si._creative_seeds(force=True)
+        seeds = r.get("seeds") or []
+        return {"ok": bool(seeds), "n": len(seeds),
+                "titles": [str(s.get("title") or "") for s in seeds],
+                "error": r.get("error") or ""}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 def selfloop_think(body: dict = None):
     """手动让它现在就想一次（不受节流限制，仍受每日配额约束）。"""
     from . import selfloop as _sl

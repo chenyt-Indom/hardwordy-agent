@@ -412,7 +412,8 @@ def read(rel: str, start: int = 0, end: int = 0, inline: bool = True) -> dict:
         return {"ok": False, "error": "文件不存在：%s" % r}
     try:
         with open(p, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.read().splitlines()
+            _raw_text = f.read()          # ★ 保留原始末尾换行
+        all_lines = _raw_text.splitlines()
     except OSError as e:
         return {"ok": False, "error": "读取失败：%s" % e}
     total = len(all_lines)
@@ -429,7 +430,18 @@ def read(rel: str, start: int = 0, end: int = 0, inline: bool = True) -> dict:
     if e0 < total:
         body += ("\n（后面还有 %d 行。要看继续用 start=%d，或先用 "
                  "selfdev_grep 搜关键字再精准定位）" % (total - e0, e0 + 1))
-    return {"ok": True, "rel": r, "path": p, "text": body, "total_lines": total,
+    # ★ 2026-11-16 修致命 bug（用户要求「自主创新」时查出来的）：
+    #   上面的 text 是**给人/模型看的展示文本**（带 `    1| ` 行号 + ``` 围栏）。
+    #   而 patch() 里 `text = got["text"]` 直接拿它做 find 替换并写盘 ——
+    #   结果把带行号的展示文本写回文件，整个文件被污染。
+    #   Python 文件被 write 的语法校验挡住（报「第 1 行 invalid character」，
+    #   看起来像模型的错，其实是这里把文件写坏了）；
+    #   .txt/.css/.js 没有语法校验，**直接被写坏且无任何提示**。
+    #   这一个 bug 同时造成了历史上「find 找不到」「语法校验失败」两类失败。
+    #   所以额外返回 raw = 完整原文（不受分页影响），供 patch 等写操作使用。
+    return {"ok": True, "rel": r, "path": p, "text": body,
+            "raw": _raw_text,
+            "total_lines": total,
             "start": s0, "end": e0, "truncated": e0 < total}
 
 
@@ -670,12 +682,162 @@ def insert_after(rel: str, anchor: str, text: str, note: str = "") -> dict:
     return write(rel, "\n".join(new_lines) + "\n", note or ("insert_after: " + a[:40]))
 
 
-def patch(rel: str, find: str, replace: str, note: str = "") -> dict:
-    """精确替换（和编辑器里的"替换"一样）。找不到 / 命中多处都会拒绝。"""
+def _recent_file_changes(rel: str, hours: float = 24.0) -> int:
+    """统计该文件近 hours 小时内被改动的次数（读 selfdev journal）。
+
+    为什么要有（2026-11-11 用户要求）：
+      main.py 被自迭代连改 21 次、self_iterate.py 连改 17 次 —— 反复叠加，
+      越改越乱、根因没确认就继续叠补丁。这里在 patch 入口加一道冷却：
+      24h 内同文件改动超阈值就拒绝，逼模型先确认根因。
+    """
+    try:
+        cutoff = time.time() - float(hours) * 3600.0
+        cnt = 0
+        with open(_journal_path(), "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("rel") != rel:
+                    continue
+                if rec.get("act") not in ("write", "patch"):
+                    continue
+                ts = rec.get("ts") or ""
+                try:
+                    t = time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+                except Exception:
+                    continue
+                if t >= cutoff:
+                    cnt += 1
+        return cnt
+    except Exception:
+        return 0
+
+
+# 同文件改动冷却阈值（24h 内超过这个次数就拒绝，逼模型先确认根因）
+FILE_CHANGE_LIMIT_24H = 3
+
+
+def _guess_intent_from_diff(find: str, replace: str, description: str = "") -> str:
+    """从 patch 请求里猜一句话中文意图（给 changelog 用）。
+
+    优先级：
+      1) 请求自带的 description（模型/用户写的，最准）；
+      2) diff 首个 hunk 的注释（# ... / // ... / /* ... */）；
+      3) diff 首个 hunk 里出现的函数名（def xxx / function xxx / xxx = function）。
+    都拿不到就返回空串，由调用方兜底。
+    """
+    d = " ".join(str(description or "").split())
+    if d:
+        return d[:120]
+    # 只看首个 hunk：从 find 的第一行开始，最多 40 行
+    src = (find or "").splitlines()[:40]
+    # 2) 注释
+    for ln in src:
+        s = ln.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            t = s.lstrip("#").strip()
+            if t:
+                return t[:120]
+        if s.startswith("//"):
+            t = s.lstrip("/").strip()
+            if t:
+                return t[:120]
+        if s.startswith("/*") or s.startswith("*"):
+            t = s.strip("/* \t").strip()
+            if t and not t.startswith("🔒"):
+                return t[:120]
+    # 3) 函数名
+    import re as _re
+    for ln in src:
+        m = _re.search(r"\bdef\s+([A-Za-z_][A-Za-z0-9_]*)", ln)
+        if m:
+            return "调整函数 %s" % m.group(1)
+        m = _re.search(r"\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)", ln)
+        if m:
+            return "调整函数 %s" % m.group(1)
+        m = _re.search(r"\b([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?function", ln)
+        if m:
+            return "调整函数 %s" % m.group(1)
+    # 4) 实在没有：用 replace 的第一行非空内容当线索
+    for ln in (replace or "").splitlines()[:20]:
+        s = ln.strip()
+        if s and not s.startswith(("#", "//", "/*", "*")):
+            return "修改 %s" % s[:60]
+    return ""
+
+
+def _make_changelog(rel: str, find: str, replace: str, fail_kind: str = "",
+                    history: int = 0, description: str = "") -> str:
+    """拼一句话中文 changelog（写进 actlog.record_act 的 summary）。
+
+    模板：'修复 fail_kind=X（历史 N 次），改动 backend/yyy.py：<一句话意图>'
+    fail_kind 缺失时退化成 '改动 backend/yyy.py：<意图>'。
+    """
+    intent = _guess_intent_from_diff(find, replace, description) or "（未提供意图）"
+    fk = str(fail_kind or "").strip()
+    # ★ 2026-11-16 修小瑕疵：原来两个分支都拼了「改动」，
+    #   fail_kind 空时会输出「改动，改动 backend/x.py：…」重复一次。
+    if fk:
+        return "修复 fail_kind=%s（历史 %d 次），改动 %s：%s" % (
+            fk, int(history or 0), rel, intent)
+    return "改动 %s：%s" % (rel, intent)
+
+
+def patch(rel: str, find: str, replace: str, note: str = "",
+          description: str = "", fail_kind: str = "",
+          session: str = "") -> dict:
+    """精确替换（和编辑器里的"替换"一样）。找不到 / 命中多处都会拒绝。
+
+    成功后自动生成一句话中文 changelog，写入 actlog.record_act 的 summary 字段
+    （2026-11-16 用户要求：patch 成功要留痕，方便回看"这次改了什么"）。
+    """
     got = read(rel)
     if not got.get("ok"):
         return got
-    text = got["text"]
+    # 🧊 同文件改动冷却（2026-11-11）：24h 内同文件改动超阈值 → 拒绝并提示根因
+    try:
+        _r = safe_rel(rel)
+    except PathError as e:
+        return {"ok": False, "error": str(e)}
+    _n = _recent_file_changes(_r, 24.0)
+    if _n >= FILE_CHANGE_LIMIT_24H:
+        _msg = ("该文件已改 %d 次（近 24 小时），请先确认根因再改。\n"
+                "反复叠加补丁只会越改越乱 —— 先读代码、定位真正的问题，"
+                "在回答里说清根因和方案，再动手。" % _n)
+        journal("patch_rejected_cooldown", _r, count=_n)
+        return {"ok": False, "error": _msg}
+    # 🧪 失败真实性前置校验（2026-11-17）：改动前先查该 fail_kind 的真实计数。
+    #   计数为 0 → 说明这个"失败"根本没发生过，是模型凭空捏的幽灵修复，
+    #   直接拒绝并记 phantom，从源头压掉"改了个不存在的问题"这类回滚。
+    _fk = str(fail_kind or "").strip()
+    if _fk:
+        try:
+            from . import actlog as _actlog
+            _stats = _actlog.fail_stats() or {}
+            _real = int(_stats.get(_fk) or 0)
+        except Exception:
+            _real = -1          # 查不到就不拦（账本坏了不能挡住正常改动）
+        if _real == 0:
+            journal("patch_rejected_phantom", _r, fail_kind=_fk)
+            return {"ok": False,
+                    "error": ("拒绝：fail_kind=%s 在最近事件里真实计数为 0，"
+                              "说明这个失败并没有发生过（幽灵修复）。\n"
+                              "请先确认真正的问题再改；若确有失败，请给出复现步骤。"
+                              % _fk)}
+    # ★ 2026-11-16：必须用 raw（完整原文），不能用 text（带行号的展示文本）。
+    #   用 text 会把整个文件污染成「    1| xxx」的格式。
+    text = got.get("raw")
+    if text is None:
+        text = got["text"]
     n = text.count(find)
     if n == 0:
         return {"ok": False, "error": "没找到这段原文（空格/缩进/换行必须完全一致）"}
@@ -683,6 +845,20 @@ def patch(rel: str, find: str, replace: str, note: str = "") -> dict:
         return {"ok": False,
                 "error": "这段原文出现了 %d 次，为免改错地方，请给更长的一段上下文" % n}
     out = write(rel, text.replace(find, replace, 1), note or "patch")
+    # 📝 成功分支：自动生成一句话中文 changelog 并记到 actlog
+    if out.get("ok"):
+        try:
+            from . import actlog
+            _summary = _make_changelog(
+                _r, find, replace,
+                fail_kind=fail_kind, history=_n, description=description)
+            actlog.record(
+                session or "selfdev", "selfdev_patch",
+                args={"rel": _r, "fail_kind": fail_kind or ""},
+                ok=True, note=_summary)
+            out["summary"] = _summary
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
     return out
 
 

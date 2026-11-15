@@ -50,6 +50,7 @@ DEFAULTS = {
     "task_fail_gap": 300,   # 任务失败触发的额外间隔（秒），防自我循环
     "web_every": 3,         # 每 N 次触发才联网抓一次技术动态（其余用已入库论文）
     "slow_ratio": 2.0,      # 耗时超过历史均值这么多倍，算「明显变长」
+    "trigger_keep": 50,     # 触发原因日志保留最近多少条（前端展示最近 5 条）
 }
 
 # 寒暄词。命中且整句很短 → 判定闲聊，不触发思考。
@@ -118,6 +119,33 @@ def _roll(d):
         d["runs"] = 0
         d["slow_hits"] = 0
     return d
+
+
+def record_trigger(reason, source):
+    """记录一次触发原因（用户信号 / 定时 / 事件），供前端展示。
+
+    痛点：selfloop.json 计数为 0 但 plans.json 有 event 计划，数据不一致，
+    用户怀疑「智能体没在自动迭代」。把每次触发的原因落盘，用户能自己判断
+    机制是否在跑。保留最近 N 条（N 从 config 读，默认 50）。
+    """
+    try:
+        d = cfg()
+        n = int(d.get("trigger_keep") or 50)
+        if n < 1:
+            n = 1
+        rec = {"reason": str(reason or "")[:200],
+               "source": str(source or "")[:80],
+               "ts": _now()}
+        arr = list(d.get("trigger_log") or [])
+        arr.append(rec)
+        if len(arr) > n:
+            arr = arr[-n:]
+        d["trigger_log"] = arr
+        _save(d)
+        return rec
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return None
 
 
 def cfg():
@@ -239,6 +267,9 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None):
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
 
+    # 记录触发原因（用户信号 / 定时 / 事件），供前端活跃度面板展示
+    record_trigger(reason, source)
+
     th = threading.Thread(target=_cycle, args=(reason, focus_user, source),
                           daemon=True, name="selfloop")
     th.start()
@@ -317,12 +348,72 @@ def _cycle(reason, focus_user, source):
 
 # ------------------------------------------------------------------ 统计
 
+def _creative_brief():
+    """读「独立创意通道」的最新结果，给前端显示「今天想到了什么新点子」。
+
+    为什么要显示（2026-11-16 用户反馈「活跃度太低、看不到它在想什么」）：
+    创新通道的产出原来只藏在 prompt 里，用户完全看不到 —— 他只能从
+    「这轮改了什么」间接猜。把点子标题直接摆到界面上，活跃度才是**可感知**的。
+    """
+    try:
+        from pathlib import Path
+        from . import config
+        p = Path(config.data("data", "self_iterate", "creative.json"))
+        if not p.is_file():
+            return {}
+        d = json.loads(p.read_text(encoding="utf-8"))
+        seeds = d.get("seeds") or []
+        if not seeds:
+            return {}
+        ts = float(d.get("ts") or 0)
+        age_h = (time.time() - ts) / 3600.0 if ts else 999
+        return {
+            "n": len(seeds),
+            "titles": [str(s.get("title") or "")[:24] for s in seeds[:5]],
+            "age_h": round(age_h, 1),
+            "fresh": age_h < 24,
+        }
+    except Exception:                                   # noqa: BLE001
+        logger.debug("creative brief failed", exc_info=True)
+        return {}
+
+
+def _health():
+    """真实自动改动的健康度 —— 给用户看「放开创新后有没有搞坏东西」。
+
+    ★ 2026-11-16 用户要求「把成功率可能下降这点彻底解决」：光降低概率不够，
+      还得让用户**看得见**。这里读 actlog 的硬数据（已剔除验证用例），
+      并把「该不该担心」直接判出来，而不是让用户自己看百分比猜。
+    """
+    try:
+        from . import self_iterate as _si
+        m = _si.runtime_metrics()
+        rate = m.get("rate")
+        total = int(m.get("total") or 0)
+        if total < 12 or rate is None:
+            level, tip = "unknown", "样本还少（%d 次），先跑一阵再看" % total
+        elif rate >= 70:
+            level, tip = "good", "自动改动稳定，放心让它大胆试"
+        elif rate >= 50:
+            level, tip = "warn", "有失败但都自动回滚了，已自动把每次改动改小"
+        else:
+            level, tip = "bad", "连续失败偏多，已把单次改动压到 4 条以内"
+        return {"rate": rate, "total": total, "ok": int(m.get("ok") or 0),
+                "fail": int(m.get("fail") or 0), "rollback": int(m.get("rollback") or 0),
+                "fuse": int(m.get("fuse") or 0), "probe_n": int(m.get("probe_n") or 0),
+                "level": level, "tip": tip}
+    except Exception as e:                              # noqa: BLE001
+        return {"rate": None, "level": "unknown", "tip": "读不到：%s" % e}
+
+
 def stats():
     """给前端「🌱 迭代想法」顶部用的活跃度。"""
     try:
         d = cfg()
         return {
             "ok": True,
+            "creative": _creative_brief(),
+            "health": _health(),
             "enabled": bool(d.get("enabled")),
             "day": d.get("day"),
             "plans_today": int(d.get("plans") or 0),
@@ -334,6 +425,7 @@ def stats():
             "last_trigger": d.get("last_trigger") or {},
             "last_result": d.get("last_result") or {},
             "recent": (d.get("recent") or [])[:8],
+            "triggers": (d.get("trigger_log") or [])[-5:],
             "cfg": {k: d.get(k) for k in DEFAULTS},
         }
     except Exception as e:                              # noqa: BLE001
@@ -356,6 +448,7 @@ def think_now(focus=""):
         d["triggers"] = int(d.get("triggers") or 0) + 1
         d["last_trigger"] = {"at": _now(), "reason": "手动触发", "source": "manual"}
         _save(d)
+        record_trigger("手动触发", "manual")
         threading.Thread(target=_cycle, args=("手动触发", focus, "manual"),
                          daemon=True, name="selfloop-manual").start()
         return {"ok": True, "started": True}

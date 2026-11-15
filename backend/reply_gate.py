@@ -20,6 +20,22 @@ FOLD_PREVIEW = 120
 DEFAULT_MAX_CHARS = 4000
 
 
+# 内部调试占位符：不渲染给用户（对应「你好」那轮泄漏）
+_INTERNAL_MARKERS = ("🧠 本次没有思考内容", "本次没有思考内容", "归位")
+
+
+def _strip_internal(text: str) -> str:
+    """过滤内部调试占位符，避免泄漏给用户。"""
+    if not text:
+        return ""
+    out_lines = []
+    for line in text.split("\n"):
+        if any(m in line for m in _INTERNAL_MARKERS):
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines).strip()
+
+
 def _as_text(x) -> str:
     """把任意输入（None / str / list / dict）转成文本。"""
     if x is None:
@@ -45,6 +61,35 @@ def _fold_process(process: str) -> str:
         n, preview, n - FOLD_PREVIEW)
 
 
+def sanitize(text) -> str:
+    """回复后处理：空输出兜底 + 超长保留结论段 + 剥离内部标记。
+
+    对应两个摩擦点：
+      · 空回复硬失败 —— 用户看到一片空白，以为系统挂了；
+      · 调试信息外泄 —— 「🧠 本次没有思考内容」「归位」这类内部标记
+        不该出现在给用户看的回复里。
+
+    行为：
+      1. 剥离内部标记（复用 _strip_internal）；
+      2. 空输出 / 只有省略号 → 给一句占位，绝不留白；
+      3. 超长 → 保留结论段（首个空行前的部分），其余截断并提示。
+    """
+    s = _strip_internal(_as_text(text).strip())
+    if not s or s in ("…", "...", "。。。」"):
+        return "（本轮没有产出内容，请重试或换个说法。）"
+    if len(s) <= DEFAULT_MAX_CHARS:
+        return s
+    # 超长：保留结论段（首个空行之前），其余截断
+    head = s.split("\n\n", 1)[0].strip()
+    if not head:
+        head = s[:DEFAULT_MAX_CHARS]
+    tail = "\n\n…（回复过长，已保留结论段）"
+    room = max(0, DEFAULT_MAX_CHARS - len(tail))
+    if len(head) > room:
+        head = head[:room]
+    return head + tail
+
+
 def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX_CHARS) -> str:
     """按「结论一行 → 折叠过程 → 产物」组装回复，并保证总长不超 max_chars。
 
@@ -53,9 +98,9 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
       · 过程超阈值折叠成「N字，点开看」；
       · 整体截到 max_chars 以内，截断只发生在过程/产物尾部。
     """
-    conclusion = _as_text(conclusion).strip()
-    process = _as_text(process).strip()
-    artifacts = _as_text(artifacts).strip()
+    conclusion = _strip_internal(_as_text(conclusion).strip())
+    process = _strip_internal(_as_text(process).strip())
+    artifacts = _strip_internal(_as_text(artifacts).strip())
 
     try:
         limit = int(max_chars)
@@ -80,6 +125,15 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
         parts.append(artifacts)
 
     text = "\n\n".join(parts)
+
+    # ★ 空回复硬失败兜底：最终回复为空或只有「…」时，强制给出「已知 + 下一步」。
+    #   对应 3 次空回复硬失败 —— 宁可给一句占位，也不让用户看到空白。
+    _stripped = text.strip()
+    if not _stripped or _stripped in ("…", "...", "。。。"):
+        known = conclusion or "（本轮未产出结论）"
+        nxt = process or artifacts or "（待补充）"
+        text = "当前已知：%s；下一步要查：%s" % (known, nxt)
+
     if len(text) <= limit:
         return text
 

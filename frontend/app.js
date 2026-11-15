@@ -63,6 +63,49 @@
     d.addEventListener("toggle", () => { if (d.open) loadActLog(); });
   })();
 
+  // ---------- 会话时间轴（timeline）----------
+  // 右侧可折叠面板：拉 /api/timeline，每条一个圆点 + 一行摘要，点击展开详情。
+  // 成功绿 / 回滚红；无记录时显示「本会话暂无自动改动」。
+  async function renderTimeline() {
+    const box = $("#timelineList");
+    if (!box) return;
+    box.textContent = "加载中…";
+    try {
+      // ⚠️ 不要传 session_id：actlog.jsonl 是**全局**自动改动日志，里面没有
+      //    会话字段。后端按 session_id 过滤时会把全部记录滤掉，结果永远显示
+      //    「本会话暂无自动改动」—— 这个功能就等于没做。
+      const r = await fetch("/api/timeline");
+      const data = await r.json();
+      const items = Array.isArray(data) ? data : (data.items || data.events || []);
+      if (!items.length) { box.textContent = "本会话暂无自动改动"; return; }
+      box.innerHTML = items.map((it) => {
+        const t = it.time || it.ts || it.at || "";
+        const ok = it.ok !== false && it.success !== false && it.rollback !== true;
+        const sum = it.summary || it.title || it.action || it.msg || it.message || "";
+        const detail = it.detail || it.desc || it.description || it.result || "";
+        return `<div class="tl-item ${ok ? "ok" : "fail"}">` +
+          `<div class="tl-dot"></div>` +
+          `<div class="tl-body">` +
+          `<div class="tl-sum"><span class="tl-time">${esc(String(t))}</span>${esc(String(sum))}</div>` +
+          (detail ? `<div class="tl-detail" hidden>${esc(String(detail))}</div>` : "") +
+          `</div></div>`;
+      }).join("");
+      box.querySelectorAll(".tl-item").forEach((el) => {
+        el.addEventListener("click", () => {
+          const d = el.querySelector(".tl-detail");
+          if (d) d.hidden = !d.hidden;
+        });
+      });
+    } catch (e) {
+      box.textContent = "读取失败：" + (e && e.message ? e.message : e);
+    }
+  }
+  (function bindTimeline() {
+    const d = $("#timelineBox");
+    if (!d) return;
+    d.addEventListener("toggle", () => { if (d.open) renderTimeline(); });
+  })();
+
   // ---------- 基础工具 ----------
   function esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -13635,16 +13678,68 @@
     // ⚠️ 一开始做成 5 个独立 chip，视觉自查指出「窄面板下排布过密、横向挤压」。
     //   合并成一个 + 一个「正在思考」提示，既够看又不挤。
     const lt = L.last_trigger || {};
-    const tip = "今天触发了 " + (L.triggers_today || 0) + " 次思考，"
+    // ⚠️ 必须是 let：下面创意种子那段会 `tip += ...`。原来写成 const，
+    //    结果只要今天想到过点子（cr.n > 0），这里就抛 TypeError，
+    //    整个「迭代想法」抽屉顶部一排 chip 全都不渲染。
+    let tip = "今天触发了 " + (L.triggers_today || 0) + " 次思考，"
               + "生成 " + (L.plans_today || 0) + "/" + (L.daily_plans || 0) + " 个计划，"
               + "自动执行 " + (L.runs_today || 0) + " 个"
               + (lt.at ? "；上次 " + lt.at + "（" + (lt.reason || "") + "）" : "");
+    // 2026-11-16 用户反馈「看不到它在想什么」：把独立创意通道的点子摆上来，
+    // 否则「活跃」只是个数字，用户感知不到创新。并入现有 chip，不新增控件
+    // （窄面板下多一个 chip 就会横向挤压）。
+    const cr = L.creative || {};
+    if (cr.n) {
+      tip += "；今天想到 " + cr.n + " 个新点子：" + (cr.titles || []).join("、");
+    }
+    // ★ 2026-11-16（用户要求「把成功率可能下降这点彻底解决」）：
+    //   光有回滚不够，用户得能一眼看到「放开创新后有没有搞坏东西」。
+    //   health 由后端 runtime_metrics 算（已剔除验证用例），这里只负责显示。
+    const hl = L.health || {};
+    const lv = hl.level || "unknown";
+    const cls = lv === "good" ? "on" : (lv === "bad" ? "bad" : "warn");
+    const rateTxt = (hl.rate === null || hl.rate === undefined) ? "—" : hl.rate + "%";
     let h = '<span class="iter-chip on" title="' + esc(tip) + '">' +
               '今日 思考 <b>' + (L.triggers_today || 0) + '</b> · 计划 <b>' +
               (L.plans_today || 0) + '/' + (L.daily_plans || 0) + '</b> · 执行 <b>' +
-              (L.runs_today || 0) + '</b></span>';
+              (L.runs_today || 0) + '</b>' +
+              (cr.n ? ' · 💡 新点子 <b>' + cr.n + '</b>' : '') + '</span>';
+    h += '<span class="iter-chip ' + cls + '" title="' +
+         esc("自动改动成功率 " + rateTxt + "（" + (hl.total || 0) + " 次真实改动，已剔除 " +
+             (hl.probe_n || 0) + " 次验证用例）；回滚 " + (hl.rollback || 0) +
+             " 次、熔断 " + (hl.fuse || 0) + " 次。" + (hl.tip || "")) + '">' +
+         '成功率 <b>' + rateTxt + '</b>' +
+         (hl.rollback ? ' · 回滚 ' + hl.rollback : '') + '</span>';
+    if (cr.n) {
+      h += '<span class="iter-chip on iter-creative" title="点一下让它重新想一批新点子（花一次调用）">' +
+           '💡 换一批点子 ↻</span>';
+    }
     if (L.busy) h += '<span class="iter-chip busy">正在思考…</span>';
     return h;
+  }
+
+  // 点「换一批点子」→ 强制跳过 24 小时缓存重新生成
+  function refreshCreative(node) {
+    if (!node || node.dataset.busy === "1") return;
+    node.dataset.busy = "1";
+    const old = node.innerHTML;
+    node.innerHTML = "💡 正在想新点子…";
+    fetch("/api/selfloop/creative", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        node.innerHTML = old;
+        node.dataset.busy = "0";
+        if (d && d.ok) {
+          if (typeof toast === "function") {
+            toast("想到 " + d.n + " 个新点子：" + (d.titles || []).join("、"));
+          }
+          loadLoop();
+        } else if (typeof toast === "function") {
+          toast("没想出可用点子：" + ((d && d.error) || "未知原因"));
+        }
+      })
+      .catch(function () { node.innerHTML = old; node.dataset.busy = "0"; });
   }
 
   function render() {
@@ -14212,6 +14307,12 @@
         const box = layer();
         const qi = box ? box.querySelector(".iter-paper-q") : null;
         runPaperEval(qi ? (qi.value || "").trim() : "");
+        return;
+      }
+      // ★ 2026-11-16：点「💡 换一批点子」→ 强制跳过 24h 缓存重想一批。
+      //   原来只能去删 data/self_iterate/creative.json，用户不可能知道这路径。
+      if (t.classList.contains("iter-creative")) {
+        refreshCreative(t);
         return;
       }
       return;

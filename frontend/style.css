@@ -355,6 +355,43 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 }
 .file-preview img { max-width: 100%; border-radius: 6px; }
 
+/* ---------- 会话时间轴（timeline）---------- */
+.tlpanel { padding: 0; }
+.tl-fold > summary.tl-head {
+  cursor: pointer; padding: 10px 12px; font-size: 13px; color: var(--muted);
+  user-select: none; list-style: none;
+}
+.tl-fold > summary.tl-head::-webkit-details-marker { display: none; }
+.tl-fold[open] > summary.tl-head { border-bottom: 1px solid var(--border); }
+.tl-list {
+  padding: 8px 12px; display: flex; flex-direction: column; gap: 2px;
+  font-size: 12px; max-height: 320px; overflow-y: auto;
+}
+.tl-item {
+  position: relative; display: flex; gap: 10px; padding: 6px 0 6px 4px;
+  cursor: pointer; border-left: 2px solid var(--border); margin-left: 5px;
+}
+.tl-item:last-child { border-left-color: transparent; }
+.tl-dot {
+  position: absolute; left: -6px; top: 10px; width: 10px; height: 10px;
+  border-radius: 50%; background: var(--muted); flex-shrink: 0;
+}
+.tl-item.ok .tl-dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.tl-item.fail .tl-dot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+.tl-body { flex: 1; min-width: 0; }
+.tl-sum { line-height: 1.5; word-break: break-word; }
+.tl-time {
+  color: var(--muted); font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px; margin-right: 8px;
+}
+.tl-item.ok .tl-sum { color: var(--text); }
+.tl-item.fail .tl-sum { color: var(--danger); }
+.tl-detail {
+  margin-top: 6px; padding: 8px 10px; background: var(--panel);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--muted); line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+
 /* ---------- 最近自动执行（actlog）---------- */
 .actlog-box { margin-top: var(--space-md); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); }
 .actlog-box > summary { cursor: pointer; padding: 8px 10px; font-size: 13px; color: var(--muted); user-select: none; }
@@ -5311,6 +5348,18 @@ html[data-theme="light"] select.pill-select option {
 .iter-chip.on b { color: #276749; }
 .iter-chip.off { border-color: #e6e9ee; background: #f7f8fa; color: #9aa3af; }
 .iter-chip.busy { border-color: #90cdf4; background: #ebf8ff; color: #2b6cb0; }
+/* 成功率 chip（2026-11-16）：warn 是「有失败但都回滚了」，不是故障，
+   所以用琥珀色而不是红色 —— 红色会让用户以为系统坏了。 */
+.iter-chip.warn { border-color: #f6d365; background: #fffbea; }
+.iter-chip.warn b { color: #975a16; }
+.iter-chip.off b { color: #9aa3af; }
+/* bad 才是真该担心的（成功率 <50%，已自动把单次改动压到 4 条以内） */
+.iter-chip.bad { border-color: #feb2b2; background: #fff5f5; }
+.iter-chip.bad b { color: #c53030; }
+/* 「💡 换一批点子」：做成可点击，但保持 chip 外观，不新增按钮占位 */
+.iter-creative { cursor: pointer; border-color: #d6bcfa; background: #faf5ff; }
+.iter-creative:hover { background: #f3e8ff; border-color: #b794f4; }
+.iter-creative[data-busy="1"] { opacity: .65; cursor: default; }
 /* ---- 自我维护区块（2026-11-15 追加） ---- */
 /* 用户要求这四项「彻底成为项目的一项功能，放在迭代想法里面」，
    所以常驻抽屉顶部，每项一行：图标 名称 节律 上次 + 暂停/运行/历史 三个按钮。 */
