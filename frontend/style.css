@@ -5087,6 +5087,24 @@ html[data-theme="light"] select.pill-select option {
 }
 .av2-empty-list { text-align: center; padding: 8px 0; }
 .av2-hint { font-size: 11px; line-height: 1.55; white-space: pre-line; }
+/* 生成进度条：默认 hidden（不占高度），生成时才出现。
+   宽度用 transition 平滑推进，避免每次轮询跳一下。 */
+.av2-prog { display: flex; flex-direction: column; gap: 4px; }
+.av2-prog-bar {
+  height: 6px; border-radius: 3px; overflow: hidden;
+  background: var(--border);
+}
+.av2-prog-bar > i {
+  display: block; height: 100%; width: 0; border-radius: 3px;
+  background: var(--accent); transition: width .45s ease;
+}
+.av2-prog-txt {
+  font-size: 10.5px; line-height: 1.5; color: var(--muted);
+  word-break: break-word;
+}
+.av2-prog.done .av2-prog-bar > i { background: #3fb950; }
+.av2-prog.fail .av2-prog-bar > i { background: #e06c75; }
+.av2-prog.fail .av2-prog-txt { color: #e06c75; }
 .av2-list { display: flex; flex-direction: column; gap: 6px; }
 .av2-item {
   display: flex; align-items: center; gap: 8px;
@@ -5297,6 +5315,23 @@ html[data-theme="light"] select.pill-select option {
   color: var(--muted, #5b6472); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
 }
+/* ---- 重启自检（2026-11-16 追加）----
+   用户要求「每次自迭代重启之后自动检验」，这里显示最近一次结果。
+   注意：必须 flex-wrap:wrap + min-width:0 —— 抽屉宽度窄，不加会被挤成
+   竖排或被裁切（上一轮配置块就是这么坏的）。 */
+.iter-boot {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: 6px; padding: 5px 8px; border-radius: 8px;
+  border-top: 1px dashed var(--border, #e6e9ee);
+}
+.iter-boot-t {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 11.5px; line-height: 1.5; color: var(--muted, #5b6472);
+}
+.iter-boot .b-go { flex: 0 0 auto; font-size: 11.5px; }
+.iter-boot.pass .iter-boot-t { color: #2f855a; }
+.iter-boot.warn .iter-boot-t { color: #b7791f; }
+.iter-boot.fail .iter-boot-t { color: #c53030; }
 /* ---- 体验评估区块（2026-11-15 追加） ---- */
 /* 体验评估现在渲染进 .iter-body 顶部一起滚动，不再单独占固定区 */
 .iter-exp-empty {

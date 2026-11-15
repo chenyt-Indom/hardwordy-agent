@@ -61,6 +61,17 @@ POLL_INTERVAL = 4.0       # 轮询间隔（秒）
 POLL_TIMEOUT = 1200       # 单段最长等 20 分钟
 DOWNLOAD_TIMEOUT = 300
 
+# ---------------------------------------------------------------- 进度估算
+# ⚠ 云端接口只回 PENDING / RUNNING / SUCCEEDED / FAILED，**不返回百分比**。
+#   所以「第几段 / 共几段」是真实进度，「段内百分比」只能按已用时估。
+#   界面上一律标「≈」，不能假装是服务器给的真实进度。
+#
+# 系数来自 2026-11-16 的真实出片实测：3.63 秒音频
+#   480P → 全程 57 秒；720P → 全程 79 秒。
+# 扣掉上传/提交/下载的固定开销约 8 秒，折成「每 1 秒音频要等多少秒」。
+SEG_OVERHEAD = 8.0
+FACTOR_DEF = {"480P": 13.5, "720P": 19.6}
+
 SIGNUP_URL = "https://bailian.console.aliyun.com/"
 KEY_URL = "https://help.aliyun.com/zh/model-studio/get-api-key"
 DOC_URL = "https://help.aliyun.com/zh/model-studio/wan-s2v-api"
@@ -512,7 +523,15 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
         _src_abs = os.path.abspath(audio_path)
         tmp_files.extend([s for s in segs if os.path.abspath(s) != _src_abs])
         total = len(segs)
-        _p({"stage": "split", "total": total,
+        # 每段的真实时长：进度按「已处理音频秒数 / 总音频秒数」估，
+        # 比按段数均分准得多 —— 实测 47 秒音频切成 19 + 19 + 9，三段并不等长。
+        try:
+            segs_sec = [audio_duration(s) for s in segs]
+        except Exception:                                   # noqa: BLE001
+            logger.debug("取分段时长失败，进度退回按段数均分", exc_info=True)
+            segs_sec = [0.0] * total
+        _p({"stage": "split", "total": total, "segs_sec": segs_sec,
+            "audio_total": sum(segs_sec),
             "msg": "音频 %d 段（单段上限 %.0f 秒）" % (total, MAX_AUDIO_SEC)})
 
         # 2) 图片只需传一次
@@ -520,23 +539,39 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
         img_url = upload(image_path)
 
         # 3) 逐段生成
+        # 每段都带上「这段多长、什么时候开始、之前已经完成多少秒」，
+        # 进度条据此现算 —— 云端本身不给百分比。
         outs = []
         for i, seg in enumerate(segs, 1):
+            _sec = segs_sec[i - 1] if i - 1 < len(segs_sec) else 0.0
+            _done = sum(segs_sec[:i - 1])
             _p({"stage": "segment", "index": i, "total": total,
+                "seg_sec": _sec, "seg_t0": 0, "done_sec": _done,
                 "msg": "第 %d/%d 段：上传音频" % (i, total)})
             a_url = upload(seg)
+            _t0 = time.time()          # 段内计时的起点：上传完、开始提交
             _p({"stage": "segment", "index": i, "total": total,
+                "seg_sec": _sec, "seg_t0": _t0, "done_sec": _done,
                 "msg": "第 %d/%d 段：提交任务" % (i, total)})
             tid = submit(img_url, a_url, resolution)
             _p({"stage": "segment", "index": i, "total": total,
+                "seg_sec": _sec, "seg_t0": _t0, "done_sec": _done,
                 "msg": "第 %d/%d 段：云端生成中" % (i, total), "task_id": tid})
             r = wait(tid, on_progress=_p)
             p = os.path.join(_tmpdir(), "seg_%s_%02d.mp4" % (uuid.uuid4().hex[:6], i))
             download(r["video_url"], p)
             tmp_files.append(p)
             outs.append(p)
+            # 这一段实际花了多久 → 修正「每秒音频要等几秒」的系数，
+            # 后面几段的预计剩余时间就跟着变准（自我校正，不用我猜死）。
+            _spent = time.time() - _t0
+            _learn = 0.0
+            if _sec > 0.5 and _spent > SEG_OVERHEAD:
+                _learn = max(1.0, (_spent - SEG_OVERHEAD) / _sec)
             _p({"stage": "segment_done", "index": i, "total": total,
-                "usage": r.get("usage") or {}})
+                "seg_sec": 0, "seg_t0": 0, "done_sec": sum(segs_sec[:i]),
+                "factor": _learn, "usage": r.get("usage") or {},
+                "msg": "第 %d/%d 段完成" % (i, total)})
 
         # 4) 拼接 + 落盘
         name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
@@ -591,13 +626,111 @@ def _job_set(jid: str, **kw) -> None:
         d["updated"] = time.time()
 
 
+def _factor(d: dict) -> float:
+    """每秒音频大约要等几秒。有实测值就用实测的，没有就用默认档。"""
+    v = float(d.get("factor") or 0)
+    if v > 0:
+        return v
+    return FACTOR_DEF.get((d.get("resolution") or "480P").upper(), 14.0)
+
+
+def _progress(d: dict, now: float = None) -> dict:
+    """按任务状态现算进度 / 已用时间 / 预计剩余。
+
+    ⚠ 云端只回 PENDING / RUNNING / SUCCEEDED，**没有百分比**。
+    所以：「第几段 / 共几段」是真的，段内百分比是按已用时估的 ——
+    返回里带 pct_estimated=True，界面必须标「≈」，不能当真实进度显示。
+
+    为什么在「读的时候」算而不是后台定时写：
+      前端每 2 秒轮询一次，读时现算就能拿到新鲜的已用时间，
+      后端不用为每个任务额外起心跳线程。
+    """
+    now = time.time() if now is None else now
+    st = (d.get("status") or "pending").lower()
+    stage = d.get("stage") or ""
+    started = float(d.get("started") or now)
+    out = {
+        "elapsed": round(max(0.0, now - started), 1),
+        "pct": 0.0,
+        "eta": None,
+        "pct_estimated": True,
+    }
+
+    if st == "done":
+        out.update(pct=100.0, eta=0, pct_estimated=False)
+        return out
+    # 注意：failed **不**在这里早退。失败时也照常算到哪一步了，
+    # 否则进度条会弹回 0，看着像根本没开始跑（实测踩到过）。
+    # 只是最后把 eta 清掉 —— 失败了还说「还需 X 秒」是骗人的。
+
+    at = float(d.get("audio_total") or 0)
+    total = int(d.get("total") or 0)
+    idx = int(d.get("index") or 0)
+
+    # 还没切完段 —— 给个象征性的小值，别让条一直是 0（看着像卡住）
+    if stage == "split":
+        out["pct"] = 2.0
+        return out
+    if stage in ("", "pending"):
+        out["pct"] = 0.5
+        return out
+    if stage == "upload":
+        out["pct"] = 4.0
+        if at:
+            out["eta"] = int(round(at * _factor(d) + SEG_OVERHEAD * max(1, total)))
+        return out
+    if stage == "concat":
+        out.update(pct=97.0, eta=3)
+        return out
+
+    # 段内（stage = segment / cloud / segment_done）
+    factor = _factor(d)
+    seg_sec = float(d.get("seg_sec") or 0)
+    seg_t0 = float(d.get("seg_t0") or 0)
+    done_sec = float(d.get("done_sec") or 0)
+    frac = 0.0
+    if seg_sec > 0 and seg_t0:
+        expect = seg_sec * factor + SEG_OVERHEAD
+        frac = min(0.95, max(0.0, (now - seg_t0) / max(1.0, expect)))
+    cur = done_sec + seg_sec * frac
+
+    if at > 0:
+        out["pct"] = round(min(96.0, 5.0 + 91.0 * min(1.0, cur / at)), 1)
+        # 剩余时间分两块算：当前这段「还要等多久」+ 后面几段整段的预计耗时。
+        # 不能直接 (总音频 − 已处理) × 系数 —— 那样会漏掉当前这段已经等过的
+        # 时间，一开始显示「还需 69 秒」而实际要 79 秒（实测差 10 秒）。
+        rest = 0.0
+        if seg_sec > 0:
+            if seg_t0:
+                rest += max(0.0, (seg_sec * factor + SEG_OVERHEAD) - (now - seg_t0))
+            else:
+                # 这一段还没开始计时（正在上传音频，seg_t0 还是 0）
+                # → 按整段算。漏掉这一步会让 ETA 从 945 突然掉到 184
+                #   （实测踩到：看着像快好了，其实还有一整段要跑）。
+                rest += seg_sec * factor + SEG_OVERHEAD
+        tail = max(0.0, at - done_sec - seg_sec)
+        left = max(0, total - idx) if total else 0
+        if tail > 0:
+            rest += tail * factor + SEG_OVERHEAD * left
+        out["eta"] = int(round(rest))
+    else:
+        # 拿不到音频时长（ffprobe 失败）→ 退回按段数均分，不给 ETA（那会是瞎猜）
+        out["pct"] = round(5.0 + (91.0 * (idx - 1) / total if total else 0), 1)
+    if st == "failed":
+        out["eta"] = None
+        out["pct_estimated"] = False
+    return out
+
+
 def job(jid: str) -> dict:
-    """查任务进度/结果。"""
+    """查任务进度/结果。进度是读时现算的（见 _progress）。"""
     with _JOB_LOCK:
         d = _JOBS.get(jid)
         if not d:
             return {"ok": False, "error": "任务不存在或已过期（完成后只保留 1 小时）"}
-        return {k: v for k, v in d.items() if not k.startswith("_")}
+        snap = {k: v for k, v in d.items() if not k.startswith("_")}
+    snap.update(_progress(snap))
+    return snap
 
 
 def _gc_jobs() -> None:
@@ -614,22 +747,41 @@ def generate_async(image_path: str, audio_path: str, resolution: str = "",
     """提交后台生成，立刻返回 job_id。"""
     _gc_jobs()
     jid = uuid.uuid4().hex[:12]
+    _res = (resolution or _cfg().get("resolution") or "480P").upper()
     with _JOB_LOCK:
         _JOBS[jid] = {
             "ok": True, "job_id": jid, "status": "pending",
             "msg": "排队中", "stage": "", "total": 0, "index": 0,
             "started": time.time(), "updated": time.time(),
             "result": None, "error": "",
+            # —— 进度用（见 _progress）——
+            "resolution": _res,
+            "audio_total": 0.0,     # 全部音频共几秒
+            "done_sec": 0.0,        # 已完成几秒音频
+            "seg_sec": 0.0,         # 当前这段音频几秒
+            "seg_t0": 0.0,          # 当前这段从什么时候开始算
+            "factor": 0.0,          # 实测的「每秒音频要等几秒」，0 = 用默认
         }
 
     def _run():
         _job_set(jid, status="running", msg="开始生成")
 
         def _p(d):
-            _job_set(jid, msg=d.get("msg") or d.get("stage") or "",
-                     stage=d.get("stage") or "",
-                     total=d.get("total") or 0,
-                     index=d.get("index") or 0)
+            # ⚠ 只更新这次真的给了的字段。
+            #   原来写成 total=d.get("total") or 0，而 wait() 回调只带
+            #   {"stage":"cloud","status":...}，会把 total/index 清成 0 ——
+            #   界面上「第 2/3 段」会莫名跳回「生成中…」。实测踩到过。
+            upd = {"stage": d.get("stage") or ""}
+            for k in ("msg", "task_id"):
+                if d.get(k):
+                    upd[k] = d[k]
+            for k in ("total", "index"):
+                if d.get(k):
+                    upd[k] = int(d[k])
+            for k in ("seg_sec", "seg_t0", "done_sec", "audio_total", "factor"):
+                if k in d:
+                    upd[k] = d[k]
+            _job_set(jid, **upd)
 
         try:
             r = generate(image_path, audio_path, resolution=resolution,

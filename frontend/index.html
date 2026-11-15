@@ -211,6 +211,14 @@
           <select id="av2Voice" title="音色"></select>
           <button class="btn sm primary" id="av2Go">生成视频</button>
         </div>
+        <!-- 生成进度：云端只回 PENDING/RUNNING/SUCCEEDED，**没有百分比**。
+             所以「第几段/共几段」是真的，段内百分比按已用时估算，
+             文案里会带「≈」标明是估算，不假装是服务器给的真实进度。
+             默认 hidden，生成时才出现，空闲时完全不占高度。 -->
+        <div class="av2-prog" id="av2Prog" hidden>
+          <div class="av2-prog-bar"><i id="av2ProgFill"></i></div>
+          <div class="av2-prog-txt" id="av2ProgTxt"></div>
+        </div>
         <!-- 心情：决定 TTS 的语气/音调。「自动」按文本关键词+标点+句长做规则判断，秒出。 -->
         <div class="av2-row av2-row-mood">
           <select id="av2Mood" title="心情：影响语气与音调">

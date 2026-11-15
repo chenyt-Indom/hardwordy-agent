@@ -3051,42 +3051,72 @@
     }
 
     // —— 生成 ——
-    // —— 云端生成：提交 → 轮询 ——
-    // 一次生成 1~3 分钟（长文本后端会自动按 20 秒切段再拼接），挂 HTTP
-    // 长连接等不到结果，所以后端返回 job_id，这里每 2 秒问一次进度。
-    async function runCloud(text, base, btn) {
-      const sub = await api("/api/avatar2/cloud/speak", {
-        method: "POST",
-        body: JSON.stringify({ text: text, voice: base.voice, rate: base.rate }),
-      });
-      if (!sub.ok) {
-        if (sub.need_key) showCloudCfg(true);
-        const err = new Error(sub.error || "提交失败");
-        err.needKey = !!sub.need_key;
-        err.signup = sub.signup_url || "";
-        throw err;
+    // —— 进度条 ——
+    // 后端每次轮询给出 pct / eta / elapsed（见 avatar_cloud._progress）。
+    // ⚠ 云端本身**不返回百分比**：只有 PENDING / RUNNING / SUCCEEDED。
+    //   所以「第几段/共几段」是真的，段内百分比是按已用时估的 ——
+    //   文案里带「≈」，不假装是服务器给的真实进度。
+    function fmtDur(s) {
+      s = Math.max(0, Math.round(Number(s) || 0));
+      if (s < 60) return s + " 秒";
+      const m = Math.floor(s / 60), r = s % 60;
+      return m + " 分" + (r ? " " + r + " 秒" : "");
+    }
+
+    let progHideTimer = 0;
+
+    function progShow(on) {
+      const box = $("#av2Prog");
+      if (!box) return;
+      if (on) {
+        clearTimeout(progHideTimer);
+        box.classList.remove("done", "fail");
+        box.hidden = false;
+      } else {
+        box.hidden = true;
       }
-      const jid = sub.job_id;
-      let last = "";
-      const deadline = Date.now() + 20 * 60 * 1000;
-      while (Date.now() < deadline) {
-        await new Promise((z) => setTimeout(z, 2000));
-        let j;
-        try {
-          j = await api("/api/avatar2/cloud/job/" + encodeURIComponent(jid));
-        } catch (e) {
-          continue;            // 偶发网络抖动不该中断整轮生成
+    }
+
+    // 过一会儿自动收起来，免得跑完还挂个条占地方
+    function progHideSoon(ms) {
+      clearTimeout(progHideTimer);
+      progHideTimer = setTimeout(() => {
+        const box = $("#av2Prog");
+        if (box) box.hidden = true;
+      }, ms || 4000);
+    }
+
+    function progSet(j) {
+      const box = $("#av2Prog"), fill = $("#av2ProgFill"),
+            txt = $("#av2ProgTxt");
+      if (!box || !fill || !txt || !j) return;
+      const pct = Math.max(0, Math.min(100, Number(j.pct) || 0));
+      fill.style.width = pct.toFixed(1) + "%";
+      box.classList.toggle("done", j.status === "done");
+      box.classList.toggle("fail", j.status === "failed");
+      const bits = [];
+      if (j.msg) bits.push(j.msg);
+      bits.push((j.pct_estimated === false ? "" : "≈") + Math.round(pct) + "%");
+      const hasEta = (j.eta !== null && j.eta !== undefined);
+      if (j.elapsed) {
+        // 「已用 / 还需」并成一段，比「已用 X · 预计还需 Y」短，
+        // 侧栏只有 300 来像素宽，能少折一行
+        let t = fmtDur(j.elapsed);
+        if (j.status === "running" && hasEta && j.eta > 0) {
+          t += " / 还需 " + fmtDur(j.eta);
         }
-        const m = j.msg || "";
-        if (m && m !== last) {
-          last = m;
-          say("☁️ " + m);
-          if (j.total > 1) btn.textContent = "云端 " + (j.index || 0) + "/" + j.total;
-        }
-        if (j.status === "done") return j.result || {};
-        if (j.status === "failed") throw new Error(j.error || "云端生成失败");
+        bits.push(t);
       }
-      throw new Error("等待超时（20 分钟）");
+      if (j.status === "done") {
+        bits.push("完成");
+      } else if (j.status === "failed") {
+        bits.push("失败");
+      } else if (hasEta && j.eta === 0) {
+        // 估的时间已经用完了还没结束：明确告诉用户「还在跑、只是比预计慢」，
+        // 这正是「查看状态是否正常」要看的那个信号
+        bits.push("比预计慢，仍在跑");
+      }
+      txt.textContent = bits.join(" · ");
     }
 
     // 云端口型配置块的显示/隐藏 + 读取保存
@@ -3152,6 +3182,9 @@
       busy = true;
       btn.disabled = true;
       btn.textContent = "生成中…";
+      // 配音（TTS）也要几秒，这一步就该出现进度条，别让用户干等
+      progShow(true);
+      progSet({ status: "running", msg: "正在配音（TTS）…", pct: 0, eta: null });
       // rate 传 null 表示「用心情的建议语速」，不能传 0（那会把语速钉死）
       const rateVal = rateSel && rateSel.value !== "auto"
         ? parseInt(rateSel.value, 10) : null;
@@ -3179,13 +3212,25 @@
         }
         const jid = r0.job_id;
         let last = null;
+        let lastMsg = "";
+        progShow(true);
+        progSet({ status: "running", msg: "已提交，等云端接单…", pct: 0, eta: null });
         for (let i = 0; i < 600; i++) {           // 最多等 20 分钟
           await new Promise((res) => setTimeout(res, 2000));
-          const j = await api("/api/avatar2/cloud/job/" + encodeURIComponent(jid));
+          let j;
+          try {
+            j = await api("/api/avatar2/cloud/job/" + encodeURIComponent(jid));
+          } catch (e) {
+            continue;          // 偶发网络抖动不该中断整轮生成
+          }
+          progSet(j);
+          // 同一个提示只说一次，否则每 2 秒往提示区堆一行
+          if (j.msg && j.msg !== lastMsg) { lastMsg = j.msg; say("☁️ " + j.msg); }
           if (j.status === "done") { last = j.result || j; break; }
-          if (j.status === "failed") throw new Error(j.error || j.msg || "生成失败");
-          btn.textContent = "生成中" + (j.total ? " " + (j.index || 0) + "/" + j.total : "…");
-          if (j.msg) say(j.msg);
+          if (j.status === "failed") {
+            throw new Error(j.error || j.msg || "生成失败");
+          }
+          btn.textContent = "生成中 " + Math.round(Number(j.pct) || 0) + "%";
         }
         if (!last || !last.ok) throw new Error((last && last.error) || "生成超时（20 分钟）");
         const r = last;
@@ -3202,6 +3247,7 @@
         }
         playVideo(r.name);
         loadVideos();
+        progHideSoon(4000);
       } catch (e) {
         let msg = e.message || String(e);
         if (e.needKey) {
@@ -3209,6 +3255,15 @@
             "https://help.aliyun.com/zh/model-studio/get-api-key") +
             " 申请一个（只要 Key，不需要业务空间 ID），填进「☁️ 云端口型配置」再试。";
           showCloudCfg(true);
+        }
+        // 进度条留在原地标红、8 秒后收起。
+        // 不能跳回 0 —— 那看着像根本没开始跑（后端 _progress 也是这个原则）。
+        const pb = $("#av2Prog");
+        if (pb && !pb.hidden) {
+          pb.classList.add("fail");
+          const pt = $("#av2ProgTxt");
+          if (pt) pt.textContent = "已中断 · " + msg.slice(0, 60);
+          progHideSoon(8000);
         }
         say("生成失败：" + msg, "err");
       } finally {
@@ -12797,6 +12852,13 @@
             '<span class="iter-maint-sub">代码固有功能 · 不占定时任务</span>' +
           '</div>' +
           '<div class="iter-maint-list"></div>' +
+          // ★ 2026-11-16 用户要求：「这个自检给他弄成每次自迭代重启之后自动检验」。
+          //   它和上面四项不同：不按节律跑，而是**每次启动后自动跑一遍**；
+          //   这里只显示最近一次结果 + 一个「立刻验一次」按钮（只查不改代码）。
+          '<div class="iter-boot">' +
+            '<span class="iter-boot-t">重启自检：读取中…</span>' +
+            '<button type="button" class="btn sm ghost b-go">立刻验一次</button>' +
+          '</div>' +
         '</div>' +
         '<div class="iter-trust">' +
           '<label class="iter-sw">' +
@@ -12845,6 +12907,10 @@
     el.querySelector(".iter-eval-fix-btn").onclick = function () { runEvaluate(true); };
     el.querySelector(".iter-body").addEventListener("click", onBodyClick);
     el.querySelector(".iter-maint-list").addEventListener("click", onMaintClick);
+    el.querySelector(".iter-boot").addEventListener("click", function (e) {
+      const b = e.target.closest(".b-go");
+      if (b) runBootAudit(b);
+    });
     return el;
   }
 
@@ -12863,6 +12929,7 @@
     loadPapers();
     loadActlog();
     loadMaint();
+    loadBootAudit();
     pushSignals();
     startPoll();
     feedProbe();
@@ -13278,6 +13345,63 @@
   }
 
   async function onMaintClick(e) {
+  // ---------------------------------------------------------- 重启自检
+  // 2026-11-16 用户要求：「这个自检给他弄成每次自迭代重启之后自动检验」。
+  // 后端在每次启动 6 秒后自动跑一遍静态代码扫描（bootaudit.py），
+  // 这里只负责把最近结果读出来显示 —— 一行文字 + 一个「立刻验一次」按钮。
+  // verdict 三档上色：pass 绿 / warn 黄 / fail 红。
+  let bootData = null;
+
+  async function loadBootAudit() {
+    try {
+      const r = await api("/api/bootaudit");
+      if (r && r.ok) { bootData = r; renderBootAudit(); }
+    } catch (e) { /* 自检状态读不到不影响抽屉其它部分 */ }
+  }
+
+  function renderBootAudit() {
+    const box = el && el.querySelector(".iter-boot");
+    if (!box) return;
+    const t = box.querySelector(".iter-boot-t");
+    if (!t) return;
+    const d = bootData || {};
+    const L = d.last || {};
+    box.classList.remove("pass", "warn", "fail");
+    if (!L.ts) {
+      t.textContent = "重启自检：本次启动后还没跑完（启动 6 秒后自动跑，约 7 秒）";
+      return;
+    }
+    const v = L.verdict || "";
+    if (v) box.classList.add(v);
+    // 结果一句话：图标 + 扫描规模 + 各档数量 + 用时
+    const icon = v === "pass" ? "✅" : (v === "warn" ? "⚠️" : (v === "fail" ? "❌" : "•"));
+    const head = (v === "pass" ? "通过" : (v === "warn" ? "有警告" : (v === "fail" ? "未通过" : "已运行")));
+    const bits = [
+      String(L.ts || "").slice(5, 16),
+      "扫 " + (L.files != null ? L.files : "?") + " py / " + (L.js_files != null ? L.js_files : "?") + " js",
+      "high " + (L.high || 0) + " · mid " + (L.mid || 0) + " · low " + (L.low || 0),
+    ];
+    if (L.regress_summary) bits.push("回归 " + L.regress_summary);
+    if (L.seconds) bits.push(L.seconds + "s");
+    t.textContent = "重启自检：" + icon + " " + head + " · " + bits.join(" · ");
+    t.title = (L.text || "") + (L.reason ? "\n重启原因：" + L.reason : "");
+  }
+
+  async function runBootAudit(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "验证中…"; }
+    say("正在跑重启自检（只查不改，约 7 秒）…");
+    let r = null;
+    try { r = await api("/api/bootaudit/run", { force: true }); }
+    catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+    await loadBootAudit();
+    if (btn) { btn.disabled = false; btn.textContent = "立刻验一次"; }
+    if (!r || !r.ok) { say("重启自检失败：" + ((r && r.error) || "未知错误"), "bad"); return; }
+    const L = r.last || {};
+    if (L.verdict === "pass") say("重启自检通过（" + (L.seconds || 0) + " 秒）。", "good");
+    else if (L.verdict === "fail") say("重启自检发现问题：" + (L.text || ""), "bad");
+    else say("重启自检：" + (L.text || "完成"), "warn");
+  }
+
     const row = e.target.closest(".iter-maint-row");
     if (!row) return;
     const kind = row.getAttribute("data-kind");

@@ -46,7 +46,8 @@ from . import (config, ollama_client, deepseek_client, cloud_image, image_models
                file_tools, video, web_tools,
                t2i, tools, sessions, image_library, doclib, docx_write, tts,
                workspace, actlog, chatimg, hive, hive_client, hive_p2p,
-               hive_mesh, hive_relay_link, avatar2, deploy_keys, reply_gate)
+               hive_mesh, hive_relay_link, avatar2, deploy_keys, reply_gate,
+               bootaudit)
 
 app = FastAPI(title="hardwordy", version="1.0.0")
 
@@ -2312,6 +2313,34 @@ def api_selftest(run: int = 0, model: str = ""):
     if not r.get("total"):
         return {"ok": True, **selftest.run_all(mdl)}
     return {"ok": True, **r}
+
+
+# ---------- 重启后自检（每次重启自动跑一遍自己的代码）----------
+@app.get("/api/bootaudit")
+def api_bootaudit():
+    """读「重启后自检」的最近结果。
+
+    和 `/api/selftest` 的区别（两者互补，别混）：
+      · selftest   = 服务健康：模型能不能用、端口通不通、ffmpeg 在不在；
+      · bootaudit  = 代码本身：语法错、调用不存在的函数、前端调了删掉的路由、
+                     同名函数重复定义 —— 也就是「刚改完代码有没有把里面弄断」。
+
+    启动 6 秒后自动跑一次；这里只读结果（毫秒级）。返回里 `last.verdict`：
+      pass 通过 / warn 只有 mid / fail 有 high 或行为回归失败。
+    """
+    return bootaudit.status()
+
+
+@app.post("/api/bootaudit/run")
+def api_bootaudit_run(body: dict = None):
+    """立刻跑一次重启自检（绕过 60 秒防抖）。
+
+    ⚠️ **只查不改**：即使信任模式开着，这里也绝不自动改代码 ——
+    否则会变成「自检改代码 → 需要重启 → 重启又自检 → 又改代码」的死循环。
+    """
+    force = True if body is None else bool((body or {}).get("force", True))
+    r = bootaudit.run(reason="手动触发", force=force)
+    return {"ok": bool(r.get("ok")), **r}
 
 
 @app.get("/api/health")
@@ -9502,6 +9531,22 @@ def _warmup_on_start():
             logger.debug("silent-except", exc_info=True)
 
     threading.Thread(target=_selftest_boot, daemon=True).start()
+
+    # ★ 重启后自动自检（2026-11-16）
+    #   用户要求：「这个自检给他弄成每次自迭代重启之后自动检验」。
+    #   和上面的 _selftest_boot 不是一回事，两者互补：
+    #     · _selftest_boot（selftest.run_all）查**服务健康**：模型/端口/ffmpeg；
+    #     · 这里（bootaudit）查**代码本身**：语法、调用不存在的函数、
+    #       前端调了删掉的路由、同名函数重复定义 —— 也就是「自我迭代刚改完
+    #       代码，有没有把里面弄断」。
+    #   只查不改（auto_fix=False）、不建计划、后台线程 + 延迟 6 秒，
+    #   跑挂了也不影响服务启动。详见 backend/bootaudit.py 开头的三条铁律。
+    try:
+        _ba = bootaudit.start_delayed()
+        if _ba.get("ok"):
+            logger.info("已安排重启后自检（延迟 %s 秒）", _ba.get("delay"))
+    except Exception as e:                               # noqa: BLE001
+        logger.warning("重启后自检没安排上（不影响使用）：%s", e)
 
     # ★ 定时任务调度线程（2026-11-08）：每 20 秒看一次有没有到期的任务
     try:
