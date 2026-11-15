@@ -13238,15 +13238,23 @@
     if (!actions.length) {
       return '<div class="iter-li">这次没有提出要改代码的动作。</div>';
     }
+    // ★ 2026-11-16 用户要求：「单个批准 / 批量批准都要，拒绝也共用勾选框；
+    //   单个批准立即执行，批量批准先攒着，等你点「▶ 执行已批准的」」。
     let h = '<div class="iter-act-btns" style="margin-bottom:10px">' +
       '<button type="button" class="btn sm iter-all-ok">✓ 全部批准</button>' +
+      '<button type="button" class="btn sm ghost iter-all-no">✕ 全部拒绝</button>' +
+      '<button type="button" class="btn sm iter-sel-ok">✓ 批准选中</button>' +
+      '<button type="button" class="btn sm ghost iter-sel-no">✕ 拒绝选中</button>' +
       '<button type="button" class="btn sm ghost iter-exec">▶ 执行已批准的</button>' +
       '<button type="button" class="btn sm ghost iter-rb">↩ 回滚已执行的</button>' +
       '</div>';
     actions.forEach(function (a) {
       const risk = a.risk || "mid";
+      // done / failed 的动作已经跑完了，勾了也没用，不给勾选框。
+      const pickable = (a.status !== "done" && a.status !== "failed");
       h += '<div class="iter-act risk-' + esc(risk) + '" data-id="' + esc(a.id) + '">' +
         '<div class="iter-act-head">' +
+          (pickable ? '<input type="checkbox" class="iter-ck" title="勾选后可批量批准 / 拒绝">' : '') +
           '<span class="iter-act-t">' + esc(a.title) + '</span>' +
           '<span class="iter-risk">' + esc(RISK_LABEL[risk] || risk) + '</span>' +
           '<span class="iter-act-st">' + esc(ST_LABEL[a.status] || a.status) + '</span>' +
@@ -13315,9 +13323,15 @@
             '<button type="button" class="btn sm ghost iter-cancel">取消</button>' +
           '</div>';
       } else if (a.status === "pending" || a.status === "rejected") {
+        // 「批准并执行」—— 单条批准按你的要求立即执行。
         h += '<div class="iter-act-btns">' +
-          '<button type="button" class="btn sm iter-ok">✓ 批准</button>' +
+          '<button type="button" class="btn sm iter-ok">✓ 批准并执行</button>' +
           '<button type="button" class="btn sm ghost iter-no">✕ 拒绝</button>' +
+          '</div>';
+      } else if (a.status === "approved") {
+        // 已批准但还没执行 —— 允许单条撤回（后端 reject 支持 approved→rejected）。
+        h += '<div class="iter-act-btns">' +
+          '<button type="button" class="btn sm ghost iter-no">✕ 撤销批准</button>' +
           '</div>';
       }
       h += '</div>';
@@ -14034,13 +14048,21 @@
     await load();
   }
 
-  async function doApprove(ids, note) {
+  // execute：true = 批准后立刻执行；false = 只标记「已批准」，等你点「▶ 执行已批准的」。
+  // 用户明确要求：单个批准立即执行，批量批准先攒着。
+  async function doApprove(ids, note, execute) {
     if (busy || !data || !data.latest) return;
     busy = true; say("批准中…");
     const r = await api("/api/selfiter/approve",
       { id: data.latest.id, action_ids: ids, note: note || "" });
     busy = false; noteFor = null;
     if (!r || !r.ok) { say((r && r.error) || "批准失败", "bad"); return; }
+    const n = r.approved || 0;
+    if (execute === false) {
+      say("已批准 " + n + " 条，先攒着。点「▶ 执行已批准的」才开始改代码。", "good");
+      await load();
+      return;
+    }
     // 用户要求：手动批准时，没任务在跑就直接在聊天界面执行；有任务就排队等它结束。
     await submitToFeed(data.latest.id, "manual");
     await load();
@@ -14382,12 +14404,37 @@
   }
   document.addEventListener("click", onFeedClick);
 
+  // 收集当前勾选的动作 id（批量批准 / 拒绝共用同一批勾选）。
+  function pickedIds() {
+    const box = layer();
+    if (!box) return [];
+    const arr = Array.prototype.slice.call(box.querySelectorAll(".iter-ck"));
+    const out = [];
+    arr.forEach(function (x) {
+      if (!x.checked) return;
+      const c = x.closest ? x.closest(".iter-act") : null;
+      const id = c ? c.getAttribute("data-id") : "";
+      if (id) out.push(id);
+    });
+    return out;
+  }
+
   function onBodyClick(e) {
     const t = e.target;
     const card = t.closest ? t.closest(".iter-act") : null;
 
     if (!card) {
-      if (t.classList.contains("iter-all-ok")) { noteFor = null; doApprove(null, ""); return; }
+      // 批量操作：批量一律「先攒着」，不立刻执行（用户明确要求）。
+      if (t.classList.contains("iter-all-ok")) { noteFor = null; doApprove(null, "", false); return; }
+      if (t.classList.contains("iter-all-no")) { noteFor = null; doReject(null, ""); return; }
+      if (t.classList.contains("iter-sel-ok") || t.classList.contains("iter-sel-no")) {
+        const ids = pickedIds();
+        if (!ids.length) { say("先在动作前面勾几条，再点这个。", "warn"); return; }
+        noteFor = null;
+        if (t.classList.contains("iter-sel-ok")) doApprove(ids, "", false);
+        else doReject(ids, "");
+        return;
+      }
       if (t.classList.contains("iter-exec")) { doExecute(); return; }
       if (t.classList.contains("iter-rb")) { doRollback(); return; }
       if (t.classList.contains("iter-paper-eval")) {
@@ -14405,6 +14452,7 @@
       return;
     }
     const id = card.getAttribute("data-id");
+    if (t.classList.contains("iter-ck")) return;   // 点勾选框只改选中状态，别弹备注框
     if (t.classList.contains("iter-ok") || t.classList.contains("iter-no")) {
       noteFor = { id: id, kind: t.classList.contains("iter-ok") ? "approve" : "reject" };
       render();
@@ -14413,7 +14461,8 @@
     if (t.classList.contains("iter-confirm")) {
       const ta = card.querySelector(".iter-note");
       const note = ta ? ta.value : "";
-      if (noteFor && noteFor.kind === "approve") doApprove([id], note);
+      // 单条批准 → 立即执行（execute=true）；单条拒绝 → 只标记。
+      if (noteFor && noteFor.kind === "approve") doApprove([id], note, true);
       else doReject([id], note);
       return;
     }

@@ -497,6 +497,143 @@ def _predict_will_truncate(conclusion, process, artifacts, limit) -> bool:
     return raw_len > PREDICT_TRUNCATE_THRESHOLD or raw_len > limit
 
 
+def enforce_shape(text, user_input=None, suggested_action=None, actions=None,
+                  todos=None, max_chars=DEFAULT_MAX_CHARS) -> str:
+    """回复形态闸门（形态硬约束版）：结论前置 + 过程折叠 + 长度上限 + 空回复兜底。
+
+    与 enforce() 的区别：本函数把「回复形态」当成**硬约束**来执行，而不是
+    尽量美化。对应三个高频摩擦点：
+
+      ① 只诊断不修复 —— 回复必须以「结论：」或明确的 yes/no 开头，
+         否则在首行前强制插入「结论：」；
+      ② 空回复 —— 空文本 / 纯空白 / 只有省略号视为**硬失败**，
+         直接返回「当前已知 + 下一步要查什么」兜底模板；
+      ③ 回复被截断 —— 超过 max_chars 时截断并显式提示「已截断」，
+         且过程一律折叠到 <details>，保证结论永远在最前面。
+
+    参数
+    ----
+    text : 模型产出的原始回复（str / list / dict 均可）
+    user_input : 最近一轮用户输入（用于空回复兜底模板的「已知」部分）
+    suggested_action : 建议的下一步动作（用于空回复兜底模板的「下一步」部分）
+    actions : 本轮动作列表（用于判定「已改 X 文件」与结构小结）
+    todos : 待办（用于结构小结）
+    max_chars : 整体长度上限
+
+    返回处理后的文本；任何异常都退回原文，绝不因为格式化而丢内容。
+    """
+    raw = _as_text(text)
+    try:
+        s = _strip_internal(raw.strip())
+
+        # ③ 空回复硬失败 → 「当前已知 + 下一步要查什么」兜底
+        if not s or s in ("…", "...", "。。。"):
+            known = _summarize_user_input(user_input)
+            nxt = _as_text(suggested_action).strip() or "请重试或换个说法"
+            return "当前已知：%s；下一步要查什么：%s" % (known, nxt)
+
+        # ① 结论前置：首行必须是「结论：」或明确的 yes/no
+        s = _force_conclusion_head(s)
+
+        # ② 过程折叠：把过程口吻的段落收进 <details>
+        s = _fold_process_paragraphs(s)
+
+        # 结构小结：有 patch 动作但没交代改了哪些文件 → 补「已改文件 / 待办」
+        s = _structure_check(s, actions, todos)
+
+        # ③ 长度上限：超长截断并显式提示
+        try:
+            limit = int(max_chars)
+        except Exception:
+            limit = DEFAULT_MAX_CHARS
+        if limit <= 0:
+            limit = DEFAULT_MAX_CHARS
+        if len(s) > limit:
+            notice = "\n\n…（回复超过 %d 字，已截断；完整内容请点开过程或重试）" % limit
+            room = max(0, limit - len(notice))
+            s = s[:room].rstrip() + notice
+        return s
+    except Exception:                                   # noqa: BLE001
+        return raw
+
+
+# 明确的 yes/no 开头（结论前置的另一种合法形态）
+_YES_NO_PREFIXES = ("是", "否", "对", "不对", "可以", "不可以", "能", "不能",
+                    "Yes", "No", "YES", "NO", "yes", "no")
+
+
+def _starts_with_yes_no(text: str) -> bool:
+    """首行是否以明确的 yes/no 开头（结论前置的合法形态之一）。"""
+    s = (text or "").strip()
+    if not s:
+        return False
+    first = s.split("\n", 1)[0].strip()
+    if not first:
+        return False
+    # 允许「是的」「不是」「可以，…」「不能，因为…」这类
+    for p in _YES_NO_PREFIXES:
+        if first.startswith(p):
+            # 避免误伤「是否…」这种提问
+            if first.startswith("是否"):
+                continue
+            return True
+    return False
+
+
+def _force_conclusion_head(text: str) -> str:
+    """结论前置硬约束：首行必须是「结论：」或明确的 yes/no，否则强制补前缀。
+
+    与 _ensure_conclusion_first 的区别：本函数不做启发式/LLM 判定，
+    只做**硬性形态检查** —— 首行既不是结论类前缀、也不是 yes/no 开头，
+    就直接在首行前插入「结论：」。保证用户第一眼永远看到结论。
+    """
+    if not text:
+        return text
+    s = text.strip()
+    if not s:
+        return text
+    first_line = s.split("\n", 1)[0].strip()
+    if not first_line:
+        return text
+    # 已经是结论类前缀 → 合法
+    if first_line.startswith(_CONCLUSION_PREFIXES):
+        return text
+    # 已经是明确 yes/no 开头 → 合法
+    if _starts_with_yes_no(first_line):
+        return text
+    # 否则强制补「结论：」前缀
+    return "结论：" + s
+
+
+def _fold_process_paragraphs(text: str) -> str:
+    """把过程口吻的段落折叠到 <details>，结论段永远留在正文。
+
+    判据：段落命中过程/诊断口吻（_is_suspicious_first_para），且不是结论类前缀。
+    折叠后的过程统一收进一个 <details> 块，避免正文被过程淹没。
+    """
+    if not text:
+        return text
+    paras = text.split("\n\n")
+    head_paras = []
+    body_paras = []
+    for p in paras:
+        ps = p.strip()
+        if not ps:
+            continue
+        if _is_suspicious_first_para(ps) and not ps.startswith(_CONCLUSION_PREFIXES):
+            body_paras.append(ps)
+        else:
+            head_paras.append(ps)
+    head = "\n\n".join(head_paras).strip()
+    body = "\n\n".join(body_paras).strip()
+    if not body:
+        return head or text
+    folded = _fold_process(body, force=True)
+    if not head:
+        return folded
+    return head + "\n\n" + folded
+
+
 def enforce(text, user_input=None, suggested_action=None, actions=None, todos=None,
             max_chars=DEFAULT_MAX_CHARS) -> str:
     """回复形态闸门（单一入口）：结论前置 + 过程折叠 + 空输出兜底。

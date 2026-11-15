@@ -96,8 +96,13 @@ def mark_auto_change(files=None, note: str = "") -> dict:
     return d["auto_change"]
 
 
-def mark_restart(reason: str = "") -> dict:
+def mark_restart(reason: str = "", force: str = "") -> dict:
     """重启**前**调用：写下「这次为什么重启」，并判断是不是自动迭代导致的。
+
+    ``force``（2026-11-16 用户明确要求「只有「只重启服务」自检，其余都不自检」）：
+      · ``"skip"``  —— 一定不自检（①②③：抽屉一键重启 / 聊天区立即重启 / 横幅立即重启）
+      · ``"audit"`` —— 一定自检（④：自开发面板的「只重启服务」）
+      · ``""``      —— 老逻辑，按「30 分钟内自动迭代有没有改过代码」判
 
     返回落盘内容（方便日志）。任何异常都不往外抛 —— 闸门坏了也不能
     让重启这个主流程失败。
@@ -114,6 +119,7 @@ def mark_restart(reason: str = "") -> dict:
         d["mark"] = {"ts": time.time(),
                      "at": time.strftime("%m-%d %H:%M:%S"),
                      "reason": str(reason or "")[:160],
+                     "force": str(force or "")[:12],
                      "auto_iter": auto_iter,
                      "auto_files": list(ac.get("files") or [])[:12] if auto_iter else [],
                      "auto_age": round(ac_age, 1) if auto_iter else None}
@@ -144,15 +150,23 @@ def decide() -> dict:
     kind, why, audit = "", "", False
 
     if not mk:
-        kind, why = "cold", "冷启动（关闭后重新打开），不跑代码自检"
+        # ★ 2026-11-16 用户要求：「bootaudit 对无标记的冷启动默认不自检」。
+        #   没有标记 = 没有任何重启入口写过 mark_restart = 冷启动（关闭后
+        #   重新打开 / 崩溃后重开 / 某条重启路径漏写标记）。一律不自检。
+        kind, why = "cold", "无重启标记（冷启动或重启入口未写标记），不跑代码自检"
     else:
         try:
             age = now - float(mk.get("ts") or 0)
         except Exception:                               # noqa: BLE001
             age = 1e9
+        _force = str(mk.get("force") or "")
         if age > MARK_TTL:
             kind, why = "cold", ("上次重启标记已过期（%.0f 分钟前），按冷启动处理，不跑代码自检"
                                  % (age / 60.0))
+        elif _force == "skip":
+            # 用户要求（2026-11-16）：抽屉「一键重启」/ 聊天区「立即重启」/
+            # 横幅「立即重启」都是「改完代码要生效」的顺手重启，一律不自检。
+            kind, why = "quick", "代码改动后的「一键重启」（你要求这类重启不自检）"
         elif mk.get("auto_iter"):
             kind, why = "auto_iter", ("自动迭代改完代码后的重启（改了 %d 个文件），不跑代码自检"
                                       % len(mk.get("auto_files") or []))

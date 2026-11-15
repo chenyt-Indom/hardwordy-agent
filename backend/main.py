@@ -8231,8 +8231,11 @@ def selfdev_apply_restart():
     _mk = {}
     try:
         from . import bootgate as _bg
-        _mk = _bg.mark_restart("用户点了「立即重启」")
-        logger.info("[bootgate] 已记录重启：auto_iter=%s", _mk.get("auto_iter"))
+        # ★ 2026-11-16 用户明确要求：「只有④「只重启服务」自检，①②③都不自检」。
+        #   ①②③ 都走这个接口（抽屉一键重启 / 聊天区立即重启 / 横幅立即重启），
+        #   所以这里直接 force="skip"，不再靠「30 分钟内改没改过代码」去猜。
+        _mk = _bg.mark_restart("用户点了「立即重启」", force="skip")
+        logger.info("[bootgate] 已记录重启：force=skip（本次不自检）")
     except Exception:
         logger.warning("写重启闸门标记失败（不影响重启）", exc_info=True)
     try:
@@ -8296,6 +8299,11 @@ def selfdev_restart():
     # ⚠️ 用户明确要求：模型改完源码**不许自己重启**（会打断对话、用户不知情）。
     #    这个接口现在只做「自检 + 打标记」，真正重启只走 /api/selfdev/apply_restart。
     from . import pending as _pend
+    # ★ 2026-11-16：**这里不写重启闸门标记**。
+    #   本接口只「自检 + 打新版本就绪标记」，并不真的重启（真正重启只走
+    #   /api/selfdev/apply_restart）。原来在这里 mark_restart 会留下一个
+    #   force="" 的标记，15 分钟内用户关掉程序再打开时，decide() 会把它
+    #   当成「手动重启」→ 又跑一次自检，违背「关闭到打开不自检」。
     _v = selfdev.verify_import()
     try:
         from . import handoff as _hdz
@@ -14878,7 +14886,18 @@ def deploy_key_clear(body: dict):
 def deploy_run(body: dict):
     """一键部署到服务器（后台线程跑，日志用 /api/deploy/log 增量拉）。"""
     b = body or {}
-    return deploy_keys.start_deploy(restart_only=bool(b.get("restart_only")))
+    _ro = bool(b.get("restart_only"))
+    # ★ 2026-11-16 用户要求：「只有④「只重启服务」自检，其余都不自检」。
+    #   这是唯一一个「用户刻意重启、不是为了应用某次改动」的入口，
+    #   所以只有它写 force="audit"，启动后跑一次代码自检。
+    if _ro:
+        try:
+            from . import bootgate as _bg2
+            _bg2.mark_restart("自开发面板点了「只重启服务」", force="audit")
+            logger.info("[bootgate] 只重启服务 → 本次启动会跑一次代码自检")
+        except Exception:
+            logger.warning("写重启闸门标记失败（不影响重启）", exc_info=True)
+    return deploy_keys.start_deploy(restart_only=_ro)
 
 
 @app.get("/api/deploy/log")

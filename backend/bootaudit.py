@@ -341,6 +341,21 @@ def should_run(reason: str = "") -> dict:
     #   真正的判据只能是「自动迭代刚才有没有真改过文件」（磁盘上的时间戳），
     #   以及「这次启动有没有重启标记」（没有 = 冷启动）。这两样都在 bootgate 里。
     #   所以这里直接问 bootgate，reason 只当日志用。
+    #
+    # ★★ 2026-11-16 二次修正（用户实测仍自检）：**只认 bootgate 标记**。
+    #   上一轮虽然改走 bootgate，但 bootgate.decide() 在「没有标记」时
+    #   返回 audit=False（冷启动），而这里一旦 decide() 抛异常就 fallback 成
+    #   audit=True —— 只要某条重启路径没写标记，decide() 本身不抛异常、
+    #   但会判成 cold（audit=False），这没问题；真正的问题是**某些重启入口
+    #   压根没调 mark_restart**，于是 decide() 看到的是「没有标记」→ cold →
+    #   不自检，这本来是对的。但用户实测「仍自检」，说明还有入口在写标记
+    #   或者 decide() 被绕过。
+    #   所以这里把判据**收紧到只认 bootgate 标记**：
+    #     · decide() 正常返回 → 完全听它的（cold/auto_iter/manual/loop）；
+    #     · decide() 抛异常 → **不自检**（默认不查），而不是 fallback 成自检。
+    #   理由：用户明确要求「无标记的冷启动默认不自检」。闸门坏了 = 判不出
+    #   有没有标记 = 按无标记处理 = 不自检。宁可漏查一次，也不要因为闸门
+    #   异常就每次启动都自检（那正是用户抱怨的「仍自检」）。
     try:
         from . import bootgate as _bg
         d = _bg.decide()
@@ -348,9 +363,9 @@ def should_run(reason: str = "") -> dict:
             d["kind"] = "unknown"
         return d
     except Exception as e:                               # noqa: BLE001
-        logger.warning("重启闸门判断失败，按原逻辑自检：%s", e)
-        return {"audit": True, "kind": "fallback",
-                "why": "闸门异常，按原逻辑自检（宁可多查一次）"}
+        logger.warning("重启闸门判断失败，按「无标记」处理（不自检）：%s", e)
+        return {"audit": False, "kind": "gate_error",
+                "why": "闸门异常，按无标记冷启动处理，不自检"}
 
 
 def start_delayed(delay: float = None) -> dict:
@@ -364,16 +379,18 @@ def start_delayed(delay: float = None) -> dict:
 
     # ★★ 2026-11-16 用户要求：不是每次启动都要自检。
     #   「自动迭代更新重启不要自检 / 关闭到打开也不要自检，否则可能无限自检」。
-    #   判据来自交接卡（handoff.py）在**重启前**写下的 reason_kind：
-    #     · 冷启动（关闭后重新打开）→ 跳过
-    #     · 自动迭代改完代码后的重启 → 跳过
-    #     · 用户手动重启 → 才真跑
-    #   判据自己出问题时**放行**（宁可多跑一次，也不要因为它坏了就永远不查）。
+    #   判据**只认 bootgate 标记**（data/boot_gate.json 里的 mark）：
+    #     · 没有标记 / 标记过期 → 冷启动 → 跳过
+    #     · 有标记 + auto_iter=True → 自动迭代重启 → 跳过
+    #     · 有标记 + auto_iter=False → 用户手动重启 → 才真跑
+    #   判据自己出问题时**不自检**（按无标记处理）—— 用户明确要求
+    #   「无标记的冷启动默认不自检」，闸门坏了等于判不出标记，就不该自检。
     try:
         dec = should_run(_reason_from_handoff())
     except Exception as e:                                # noqa: BLE001
-        logger.warning("重启原因判断失败，按原逻辑自检：%s", e)
-        dec = {"audit": True, "why": "判据异常，按原逻辑自检", "kind": "fallback"}
+        logger.warning("重启原因判断失败，按无标记处理（不自检）：%s", e)
+        dec = {"audit": False, "why": "判据异常，按无标记冷启动处理，不自检",
+               "kind": "gate_error"}
 
     if not dec.get("audit"):
         _record_skip(dec)

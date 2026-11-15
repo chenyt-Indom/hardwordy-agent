@@ -185,6 +185,42 @@ def _check_failure_evidence(fail_kind: str, days: int = 7) -> dict:
             "evidence": evidence}
 
 
+def _require_real_failure(fail_kind: str, days: int = 7) -> dict:
+    """patch 入口的**硬前置**：fail_kind 必须近 days 天真实发生过。
+
+    为什么单独再包一层（2026-11-17 用户要求「不再依赖模型自觉，而是硬前置」）：
+      过去 3 次立项都栽在「模型自己觉得该修，就编一个 fail_kind 去修」上。
+      光靠提示词/自觉没用 —— 必须在**入口**用账本硬拦：
+        · fail_kind 为空 → 放行（不是针对某个失败的修复，无需证据）；
+        · 账本可读且计数为 0 → 返回 {'ok': False, 'reason': 'phantom'}，
+          并写一条 phantom 记录（journal 里 act=phantom）；
+        · 账本读不出来 → 保守放行（不能因为账本坏了挡住正常改动）。
+
+    返回 dict（与 _check_failure_evidence 同构，额外带 reason_code）：
+      ok          True=放行
+      reason      'phantom' / ''（给调用方做机器判定用）
+      reason_text 给模型看的中文拒绝原因
+      count       近 days 天命中条数
+      evidence    一句话证据
+    """
+    fk = str(fail_kind or "").strip()
+    if not fk:
+        return {"ok": True, "reason": "", "reason_text": "", "count": 0,
+                "evidence": ""}
+    ev = _check_failure_evidence(fk, days=days)
+    if ev.get("ok"):
+        return {"ok": True, "reason": "", "reason_text": "",
+                "count": int(ev.get("count") or 0),
+                "evidence": ev.get("evidence") or ""}
+    # 幽灵修复：_check_failure_evidence 内部已写 phantom 记录，这里只做转译
+    return {"ok": False, "reason": "phantom",
+            "reason_text": ev.get("reason") or
+            ("拒绝：fail_kind「%s」近 %d 天真实发生 0 次，属于幽灵修复。"
+             % (fk, int(days))),
+            "count": int(ev.get("count") or 0),
+            "evidence": ev.get("evidence") or ""}
+
+
 def locked() -> bool:
     """服务器版锁死自开发（2026-11-09）。
 
@@ -870,17 +906,19 @@ def patch(rel: str, find: str, replace: str, note: str = "",
     _fk = str(fail_kind or "").strip()
     _real = -1              # -1 = 未查/查不到（不拦）
     if _fk:
-        _ev = _check_failure_evidence(_fk, days=7)
-        if not _ev.get("ok"):
-            # _check_failure_evidence 内部已记 phantom 事件，这里直接拒绝
-            return {"ok": False, "error": _ev.get("reason") or
+        # ★ 2026-11-17 硬前置：走 _require_real_failure，不再依赖模型自觉。
+        #   不通过（reason=='phantom'）直接返回，连读文件/冷却都不做。
+        _gate = _require_real_failure(_fk, days=7)
+        if not _gate.get("ok"):
+            return {"ok": False,
+                    "error": _gate.get("reason_text") or
                     ("拒绝：fail_kind=%s 在最近 7 天里真实计数为 0，"
-                     "说明这个失败并没有发生过（幽灵修复）。" % _fk)}
-        _real = int(_ev.get("count") or 0) if not _ev.get("phantom") else 0
-        if _ev.get("phantom"):
-            _real = 0
-        elif _real <= 0:
-            # 账本不可读时 _check_failure_evidence 保守放行，count=0；
+                     "说明这个失败并没有发生过（幽灵修复）。" % _fk),
+                    "reason": _gate.get("reason") or "phantom",
+                    "evidence": _gate.get("evidence") or ""}
+        _real = int(_gate.get("count") or 0)
+        if _real <= 0:
+            # 账本不可读时 _require_real_failure 保守放行，count=0；
             # 这里保持 -1 语义（未查/查不到），避免证据卡误报「0 次」。
             _real = -1
     got = read(rel)
