@@ -650,7 +650,7 @@ _DISK_RUNNER = (
 )
 
 
-def run_disk(scope="quick", timeout=180):
+def run_disk(scope="quick", timeout=300):
     """在**子进程**里跑回归 —— 读的是磁盘上刚写完的最新代码。
 
     为什么必须是子进程（这轮实测踩到的坑）

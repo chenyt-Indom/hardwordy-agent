@@ -25,8 +25,12 @@ persistSession）。工具调用的**真实记录** —— 改了哪个文件、
 import json
 import os
 import time
+from collections import Counter
 
-from . import config
+try:
+    from . import config
+except ImportError:  # 允许作为顶层模块被直接导入（如验收断言）
+    import config
 import logging
 logger = logging.getLogger(__name__)
 
@@ -155,6 +159,47 @@ def render(session: str, n: int = SHOW) -> str:
             + "\n⚠️ 上面是**真实执行记录**，不是你的猜测。用户问「刚刚改了什么 / "
               "做到哪了」，就照它说清**文件 + 动作 + 成败**；账本里没有的事，"
               "就如实说「这一轮没动过」，不要编。")
+
+
+def fail_stats(window: int = 100, path: str = "") -> dict:
+    """聚合自动迭代的失败类型（fail_kind），按次数降序返回 {fail_kind: count}。
+
+    数据源：task.json 的 events 里带 fail_kind 字段的事件。
+    取最近 window 条（按事件顺序），忽略没有 fail_kind 的事件。
+    path 可显式指定 task.json 路径（测试用）；为空时用默认位置。
+    任何异常都吞掉 —— 看板坏了不能影响主流程。
+    """
+    try:
+        n = int(window)
+    except (TypeError, ValueError):
+        n = 100
+    if n <= 0:
+        n = 100
+    events = []
+    try:
+        p = path or os.path.join(config.data_root(), "data", "self_iterate", "task.json")
+        if os.path.isfile(p):
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                events = d.get("events") or []
+            elif isinstance(d, list):
+                events = d
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        events = []
+    if not isinstance(events, list):
+        return {}
+    kinds = []
+    for e in events:
+        if isinstance(e, dict):
+            k = e.get("fail_kind")
+            if isinstance(k, str) and k.strip():
+                kinds.append(k.strip())
+    if n and len(kinds) > n:
+        kinds = kinds[-n:]
+    c = Counter(kinds)
+    return dict(c.most_common())
 
 
 def clear(session: str) -> None:

@@ -39,6 +39,16 @@ _BACKEND = Path(__file__).resolve().parent
 _ROOT = _BACKEND.parent
 _TEST_DIR = _BACKEND / "_feature_tests"
 
+# 标准库模块名（Python 3.10+ 有 sys.stdlib_module_names；低版本退回一个够用的子集）。
+# 用途见 _looks_self_proving：import 的目标只要**不是**标准库，就认为它真的在
+# import 项目/第三方模块，不判自证式 —— 否则新建模块类功能的断言会被全堵死。
+_STDLIB_MODS = set(getattr(sys, "stdlib_module_names", ())) or {
+    "os", "sys", "json", "re", "time", "typing", "pathlib", "subprocess",
+    "ast", "collections", "itertools", "datetime", "math", "random",
+    "hashlib", "shutil", "glob", "io", "traceback", "unittest", "logging",
+    "threading", "queue", "functools", "tempfile", "textwrap", "difflib",
+}
+
 _MARK = "@@FEATTEST@@"
 
 # 起进程 / 改环境 / 联网 —— 不看上下文，命中即拒（见 _dangerous）
@@ -284,6 +294,46 @@ def _test_path(title):
     return _TEST_DIR / ("%s.py" % _slug(title))
 
 
+def _project_modules():
+    """backend/ 下的模块名集合，用来识别「对项目模块做 monkey-patch」。"""
+    try:
+        d = Path(__file__).resolve().parent
+        return {p.stem for p in d.glob("*.py") if not p.stem.startswith("_")}
+    except Exception:                                   # noqa: BLE001
+        return set()
+
+
+# `workvec.brief_for_prompt = lambda ...` 这种模块属性赋值
+_MONKEY_RE = re.compile(r"^[ \t]*([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*=(?!=)", re.M)
+
+
+def _monkey_patch(code):
+    """找出断言里对**项目模块**属性的赋值，返回 "模块.属性" 列表（最多 5 个）。
+
+    为什么必须拦（2026-11-15 实测踩到的真事故）
+    --------------------------------------------
+    回归是在**服务进程内**跑断言的。某条断言写了
+
+        workvec.brief_for_prompt = lambda q: {...}
+
+    跑完**没有恢复**，于是服务进程内存里的 brief_for_prompt 永久变成了这个
+    lambda。之后每次反思调用 `workvec.brief_for_prompt(_tq, top_n=5)` 都抛
+
+        TypeError: run.<locals>.<lambda>() got an unexpected keyword argument 'top_n'
+
+    → 工作过程/效率这条通道**整个失效**（rounds.jsonl 里连续两轮
+    paper.work_error 都是这个），而且磁盘源码看起来完全正常、静态自检也查不出，
+    只有重启服务才会恢复。这类污染必须在写断言时就拦掉。
+    """
+    mods = _project_modules()
+    hits = []
+    for m in _MONKEY_RE.finditer(str(code or "")):
+        base, attr = m.group(1), m.group(2)
+        if base in mods:
+            hits.append("%s.%s" % (base, attr))
+    return "、".join(sorted(set(hits))[:5])
+
+
 def check_code(code):
     """校验断言代码。返回 (ok, why)。ok=False 时 why 说明原因。"""
     code = str(code or "").strip()
@@ -294,6 +344,14 @@ def check_code(code):
     bad = _dangerous(code)
     if bad:
         return False, "断言代码里有危险调用（%s），拒绝写入" % bad
+    mp = _monkey_patch(code)
+    if mp:
+        return False, (
+            "断言里对项目模块做了属性赋值（%s）。回归是在服务进程内跑断言的，"
+            "这种 monkey-patch 会**永久污染全局状态** —— 实测把 "
+            "workvec.brief_for_prompt 换成 lambda 后，之后每次反思都抛 "
+            "TypeError，工作过程通道整个失效（直到重启才恢复）。"
+            "请改成 import 真实模块、调用真实接口、断言真实返回值。" % mp)
     try:
         compile(code, "<feature_test>", "exec")
     except SyntaxError as e:
@@ -371,12 +429,169 @@ def _wiring_code(code):
         "            _bad.append('%s 里的 %s 没有被任何其他模块调用（只 import 不算接线）'\n"
         "                        % (_mod, '/'.join(_fns)))\n"
         "    assert not _bad, '功能未接入主链路：' + '；'.join(_bad)\n\n"
-        "_orig_run = globals().get('run')\n"
-        "def run():\n"
-        "    if _orig_run:\n"
-        "        _orig_run()\n"
-        "    _wiring_check()\n"
+        "def _with_wiring(fn):\n"
+        "    def _wrapped():\n"
+        "        fn()\n"
+        "        _wiring_check()\n"
+        "    return _wrapped\n\n"
+        "# ⚠️ 用**装饰器包装**而不是再写一个 def run：\n"
+        "#   2026-11-15 实测，重定义 run 会被静态自检判成「同名函数定义两次」（mid），\n"
+        "#   而且模型自己若也写了 _orig_run 会互相覆盖。包装法只保留模型那一个 run。\n"
+        "if callable(globals().get('run')):\n"
+        "    run = _with_wiring(run)\n"
+        "else:\n"
+        "    def run():\n"
+        "        _wiring_check()\n"
     )
+
+
+def _backend_module_names():
+    """backend/ 下所有可导入的模块名（用于识别模型写的顶层 import）。"""
+    try:
+        return {p.stem for p in _BACKEND.glob("*.py")} - {"__init__"}
+    except Exception:                                   # noqa: BLE001
+        return set()
+
+
+def _rewrite_imports(code):
+    """把断言里的 `import workvec` 改写成 `from backend import workvec`。
+
+    为什么必须改（2026-11-15 实测）：断言文件由 regress 以
+    `backend._feature_tests.<name>` 的**包上下文**加载，而模型习惯写
+    `import workvec, self_iterate`。这样导入的是顶层模块，而 workvec 里有
+    `from . import embed`、self_iterate 有 23 处相对导入 →
+    必然抛 `ImportError: attempted relative import with no known parent package`。
+    后果不是「功能没实现」，而是**功能做对了也会被判失败**，自修 3 轮全败后
+    被回滚删除 —— 自动加功能整条路就断了。
+
+    只改写「名字确实对应 backend/xxx.py」的导入，标准库和第三方一律不动。
+    """
+    mods = _backend_module_names()
+    if not mods:
+        return code
+    out = []
+    for line in str(code or "").splitlines():
+        stripped = line.strip()
+        indent = line[:len(line) - len(line.lstrip())]
+        # import a, b  →  from backend import a, b
+        m = re.match(r"^import\s+([A-Za-z_][\w.]*(?:\s*,\s*[A-Za-z_][\w.]*)*)\s*$",
+                     stripped)
+        if m:
+            names = [n.strip() for n in m.group(1).split(",") if n.strip()]
+            hits = [n for n in names if n.split(".")[0] in mods]
+            if hits and len(hits) == len(names):
+                out.append("%sfrom backend import %s" % (indent, ", ".join(names)))
+                continue
+            if hits:
+                out.append("%sfrom backend import %s" % (indent, ", ".join(hits)))
+                rest = [n for n in names if n not in hits]
+                if rest:
+                    out.append("%simport %s" % (indent, ", ".join(rest)))
+                continue
+        # from a import b  →  from backend.a import b
+        m2 = re.match(r"^from\s+([A-Za-z_][\w.]*)\s+import\s+(.+)$", stripped)
+        if m2:
+            root_mod = m2.group(1).split(".")[0]
+            if root_mod in mods and root_mod != "backend":
+                out.append("%sfrom backend.%s import %s"
+                           % (indent, m2.group(1), m2.group(2)))
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _ensure_run(code):
+    """模型常漏写 `def run():`，这里把顶层语句自动包进去。
+
+    为什么需要（2026-11-15 实测）：prompt 明确要求「必须定义 def run():」，
+    但模型产出的两条断言**都是顶层直接 assert**，一条都没写 run()。
+    write_test 的检查会直接拒写（缺少 run() 函数）→ 功能立不了项 →
+    「自主加功能」整条路断在最后一步。
+
+    做法：把顶层里**除 def/class 之外**的语句按原顺序整体缩进进 run()。
+    import 也一起搬进去 —— 顺序完全不变，不会出现「先 import 后设 path」
+    这种错序；regress 只要求 getattr(mod, "run") 可调用，不要求加载时就 import。
+    """
+    text = str(code or "")
+    if re.search(r"^def\s+run\s*\(", text, re.M):
+        return text
+    try:
+        tree = ast.parse(text)
+    except Exception:                                   # noqa: BLE001
+        return text
+    lines = text.splitlines()
+    keep, body = [], []
+    for node in tree.body:
+        seg = lines[node.lineno - 1: node.end_lineno]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            keep.extend(seg)
+            keep.append("")
+        else:
+            body.extend(seg)
+    if not body:
+        return text
+    indented = [("    " + ln) if ln.strip() else "" for ln in body]
+    return "\n".join(keep + ["def run():"] + indented) + "\n"
+
+
+def _looks_self_proving(code):
+    """检测「自证式断言」：run() 内部自己定义了被测函数，且不 import 任何项目模块。
+
+    2026-11-15 实测踩到：模型给「反思召回三路可见」写的断言是
+        def run():
+            def build_recall_line(...): ...   # ← 被测函数在这里被自己定义
+            assert build_recall_line(...) == ...
+    这种断言**永远通过**，不管功能有没有实现 —— 留着比没有更糟：
+    它会把「没做」判成「做完了」，比完全没有断言更危险。
+
+    判据刻意保守：必须**同时**满足「run 内有嵌套 def」和「没 import 任何 backend
+    模块」。只写辅助函数、但确实 import 了真模块来断言的，不会被误伤。
+    """
+    text = str(code or "")
+    try:
+        tree = ast.parse(text)
+    except Exception:                                   # noqa: BLE001
+        return False
+    imports = False
+    for n in ast.walk(tree):
+        mods = []
+        if isinstance(n, ast.ImportFrom) and n.module:
+            mods = [n.module]
+        elif isinstance(n, ast.Import):
+            mods = [a.name for a in n.names]
+        for m in mods:
+            root_mod = m.split(".")[0]
+            # 项目模块有两种写法：
+            #   `from backend import x`（包导入，root_mod == "backend"）
+            #   `from reply_gate import f`（单模块，backend/reply_gate.py 存在）
+            if root_mod == _BACKEND.name or (_BACKEND / (root_mod + ".py")).is_file():
+                imports = True
+                break
+            # ★ 2026-11-15 修真 bug：原来只认「文件已存在」的项目模块，于是
+            #   **新建模块类功能的断言永远被判成自证式** —— 被测模块在功能实现前
+            #   必然不存在（`from _zz_exec_probe import probe_add` 找不到文件），
+            #   imports 恒为 False；只要断言里再写个辅助函数（很常见），
+            #   就被「run 内有嵌套 def」判死，write_test 直接拒绝。
+            #   实测：新建模块 + 辅助函数 → 被判自证；这正是「自主创新落地」
+            #   必经的路径，等于把新建模块类功能全堵死。
+            #   修法：导入目标**不是标准库**就认为「确实在 import 项目/第三方模块」。
+            #   纯自证式（一个 import 都没有，或只 import os/sys）仍然照拦。
+            if root_mod not in _STDLIB_MODS:
+                imports = True
+                break
+        if imports:
+            break
+    if imports:
+        return False
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "run":
+            # ⚠️ 必须用 iter_child_nodes 而不是 walk(n)：walk 会把 n 自己也算进去，
+            #    于是「run 里有嵌套 def」永远成立，全部误判成自证。
+            for sub in ast.iter_child_nodes(n):
+                for s in ast.walk(sub):
+                    if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        return True
+    return False
 
 
 def write_test(title, code, note=""):
@@ -384,9 +599,19 @@ def write_test(title, code, note=""):
 
     ⚠️ 已存在同名文件时**覆盖**——同一条功能被反复立项时，断言应该是最新那版。
     """
+    # ★ 先改写顶层导入再检查：模型写的 `import workvec` 在包上下文里必然
+    #   抛 attempted relative import，会让做对的功能被误判失败并回滚。
+    code = _rewrite_imports(code)
+    # ★ 模型实测 2/2 都漏写 def run()（只写顶层 assert），不补就直接拒写。
+    code = _ensure_run(code)
     ok, why = check_code(code)
     if not ok:
         return False, why
+    if _looks_self_proving(code):
+        return False, ("这条断言是「自证式」的：它在 run() 里自己定义了被测函数，"
+                       "又没有 import 任何项目模块 —— 不管功能有没有实现它都会通过。"
+                       "请改成 import 真实模块、断言真实行为（例如 "
+                       "from X import f; assert f(...) 成立）。")
     p = _test_path(title)
     # ★ 2026-11-15 修致命 bug（实测 f8 因此被误判失败并回滚）：
     #   断言文件落在 backend/_feature_tests/ 下，但模型写的是
@@ -445,7 +670,15 @@ def unpark_test(title, path=None):
         p = Path(path)
         if not p.is_absolute():
             p = _ROOT / str(path)
-        q = p.parent / ("_pending_%s" % p.name)
+        # ★ 2026-11-15 容错：动作里的 assert_file 可能**已经带** _pending_ 前缀
+        #   （实测就是这么写的）。原来无条件再拼一次，得到
+        #   `_pending__pending_xxx.py`，必然找不到 → unpark 静默返回 False
+        #   → 功能做完了断言却没启用，以后改坏了发现不了。
+        if p.name.startswith("_pending_"):
+            q = p
+            p = p.parent / p.name[len("_pending_"):]
+        else:
+            q = p.parent / ("_pending_%s" % p.name)
     else:
         p, q = _test_path(title), _parked_path(title)
     try:
@@ -486,9 +719,29 @@ def verify_one(title, timeout=40, path=None):
         p = Path(path)
         if not p.is_absolute():
             p = _ROOT / str(path)
+        # ★ 2026-11-15 容错：动作里的 assert_file 存的是 `_pending_xxx.py`。
+        #   执行成功时会先 unpark（把文件改名为不带前缀），此时再按带前缀的
+        #   路径去找就「断言文件不存在」→ 自修 3 轮白跑 → 把正确的实现回滚掉。
+        #   实测：新建两个模块全部正确、断言也确实通过了，却被判失败回滚。
+        if p.name.startswith("_pending_"):
+            _p2 = p.parent / p.name[len("_pending_"):]
+            if _p2.is_file():
+                p = _p2
     else:
         p = _test_path(title)
     t0 = time.time()
+    if not p.is_file():
+        # ★ 2026-11-15 实测修 bug：动作的 assert_file 指向正式名，但文件可能还挂着
+        #   _pending_ 前缀（unpark 因标题/路径不一致没成功）。原来直接返回
+        #   「断言文件不存在」→ 自修 3 轮全在同一个错上打转 → 把正确的实现回滚掉。
+        #   实测 f1（ZZ执行链路探针）连续 2 次因此失败。
+        #   这里自动找到挂起版并启用，让验证能真正跑起来。
+        _q = p.parent / ("_pending_%s" % p.name)
+        if _q.is_file():
+            try:
+                _q.replace(p)
+            except Exception:                             # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
     if not p.is_file():
         return {"ok": False, "why": "断言文件不存在：%s" % p.name,
                 "seconds": 0.0}

@@ -42,7 +42,12 @@ _pkgs = ['webview', 'sherpa_onnx', 'sounddevice', 'edge_tts',
          #   · olefile —— docread 读老式 .doc 的 OLE 复合文档
          #   两个本机都装了，但 11.13f 的包里**都没有**（那时还没模块用它们），
          #   不显式收就会在打包版上「数字人不出画面 / .doc 打不开」。
-         'cv2', 'olefile']
+         'cv2', 'olefile',
+         # ⚠️ 2026-11-15（11.15a）：backend/talkhead/phoneme.py 用 pypinyin 把
+         #   汉字转拼音，再由拼音映射音素 → 口型。本机已装 0.55.0，但它是
+         #   **函数内延迟导入**（没有拼音库时退回按字切分），不显式收就会
+         #   在打包版上「口型和字对不上」，而源码版一切正常。
+         'pypinyin']
 
 _EXCLUDE_BIG = ['torch', 'torchvision', 'diffusers', 'transformers',
                 'accelerate', 'safetensors', 'huggingface_hub',
@@ -100,6 +105,22 @@ _INPAINT_ROOT = r"E:\local-multimodal-models\sdxl-inpaint"    # 局部重绘（�
 #   改成按包含判断：文件名里出现 ".bak" 一律不要。
 all_datas += _dir_datas(os.path.join(root, "frontend"), "frontend",
                         skip_contains=(".bak",))
+
+# ⚠️ 2026-11-15（11.15a）：backend 下有两个**按路径访问的运行时目录**，
+#   它们不是模块，PyInstaller 不会自动带；少了会静默失效：
+#   · _pysite/        procwin 把它塞进子进程的 PYTHONPATH，让孙进程也不弹黑窗；
+#                     regress.py 里还有 `assert os.path.isdir(pysite)`，缺了直接断言失败。
+#   · _feature_tests/ 新功能自带的验收断言，regress 按**文件路径**动态 import；
+#                     selfevolve 还会往这个目录里写新文件（目录必须可写/可存在）。
+#   目标路径必须是 backend/<名字> —— 代码是按 dirname(__file__) 拼的。
+for _sub in ("_pysite", "_feature_tests"):
+    _p = os.path.join(root, "backend", _sub)
+    if os.path.isdir(_p):
+        _files = _dir_datas(_p, "backend/" + _sub, skip_contains=("__pycache__",))
+        all_datas += _files
+        print("[spec] 已收集 backend/%s（%d 个文件）" % (_sub, len(_files)))
+    else:
+        print("[spec] 提示：backend/%s 不存在" % _sub)
 if os.path.isdir(_SD_ROOT):
     all_datas += _dir_datas(_SD_ROOT, "sd_model", skip_suffixes=(".incomplete",))
 # 局部重绘模型（约 6.5GB）：缺了它"只在指定区域重绘"就用不了，
@@ -200,6 +221,28 @@ all_hidden += [
 all_hidden += ["backend." + _p.stem
                for _p in sorted(__import__("pathlib").Path(root, "backend").glob("*.py"))
                if _p.stem != "__init__"]
+
+# ⚠️ 2026-11-15（11.15a）：上面的 glob("*.py") **扫不到子包**。
+#   backend/talkhead/ 是一个目录（__init__ + engine / phoneme / render / viseme），
+#   漏了它打包版「说话头」整条链路直接 ImportError，而源码版毫无异常。
+#   子包一律按目录再扫一遍。
+_BACKEND_DIR = os.path.join(root, "backend")
+_subpkgs = []
+for _name in sorted(os.listdir(_BACKEND_DIR)):
+    _p = os.path.join(_BACKEND_DIR, _name)
+    if not os.path.isdir(_p) or _name.startswith((".", "__")):
+        continue
+    if not os.path.isfile(os.path.join(_p, "__init__.py")):
+        continue
+    _mods = ["backend." + _name] + [
+        "backend.%s.%s" % (_name, _f[:-3])
+        for _f in sorted(os.listdir(_p))
+        if _f.endswith(".py") and _f != "__init__.py"
+    ]
+    all_hidden += _mods
+    _subpkgs.append("%s(%d)" % (_name, len(_mods)))
+if _subpkgs:
+    print("[spec] 已收集 backend 子包：" + "、".join(_subpkgs))
 
 all_hidden += collect_submodules("uvicorn", filter=lambda n: True)
 # pywin32 的 COM 客户端（win32com.client / win32com.shell 下的子模块）

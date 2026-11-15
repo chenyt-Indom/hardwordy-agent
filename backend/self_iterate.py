@@ -67,6 +67,32 @@ _RUN = {
 }
 _RUN_LOCK = threading.Lock()
 
+# ★ 2026-11-15 新增：**同一时刻只允许一个自动执行**。
+#   实测踩到：信任模式下多个计划会并发执行（actlog 里 ZZVERIFY_EXEC 与
+#   ZZCHAIN_212234 的失败时间只差 14 秒），各自备份、各自回滚、各自写盘，
+#   互相踩踏 —— 表现就是「明明改对了却被回滚」「断言文件凭空消失」。
+#   用 RLock 而不是 Lock：execute_approved 会为「残留问题」递归调自己
+#   （_depth>0），同一线程重入不能自己锁死。
+_EXEC_LOCK = threading.RLock()
+
+
+def _exec_guard(fn):
+    """给 execute_approved 加进程级互斥：抢不到锁就明确拒绝，不排队硬等。"""
+    def _wrapped(pid, on_event=None, should_cancel=None, _depth=0):
+        if _depth > 0:
+            # 递归接续下一轮：锁已在本线程手里，直接进
+            return fn(pid, on_event, should_cancel, _depth)
+        if not _EXEC_LOCK.acquire(blocking=False):
+            return {"ok": False, "done": 0, "total": 0, "results": [],
+                    "error": "已有一个自动执行在进行中，本次跳过（避免并发改坏代码）"}
+        try:
+            return fn(pid, on_event, should_cancel, _depth)
+        finally:
+            _EXEC_LOCK.release()
+    _wrapped.__name__ = getattr(fn, "__name__", "execute_approved")
+    _wrapped.__doc__ = getattr(fn, "__doc__", "")
+    return _wrapped
+
 # 反思 prompt 的硬约束（2026-11-15 用户要求）：
 # 对应两个反复出现的问题 ——「只诊断不修复」和「同一诉求反复催」。
 # 直接拼进反思 prompt，让模型每轮都必须产出可落地的代码 patch。
@@ -219,7 +245,7 @@ _DEFAULT_SETTINGS = {
     # 同文件改动冷却（2026-11-15）：同一文件被自动改了 N 次**且上次失败**时，
     # 先停手换思路。真实数据：self_iterate.py 被改 16 次、main.py 14 次，
     # 整体成功率只有 76~79% —— 反复改同一处就是在同一个坑里越挖越深。
-    "change_cool_limit": 3,
+    "change_cool_limit": 5,
     # ---- 体验评估（2026-11-15 追加）----
     # 用户要求「主动评估任务完成效果，闲聊里也要能读出体验」。
     # 启发式每轮都算（零成本）；LLM 批量评估按下面两个开关控制频率。
@@ -466,7 +492,7 @@ _CHECKPOINT = _DATA / "checkpoint.json"
 _ROUNDS = _DATA / "rounds.jsonl"
 
 
-def _change_gate(rel, count, last_failed=False, threshold=None):
+def _change_gate(rel, count, last_failed=False, threshold=None, consec_fail=0):
     """同文件改动冷却闸门：改太多次还没成，就先停手换思路。
 
     返回 {"allow": bool, "reason": str}。
@@ -477,27 +503,36 @@ def _change_gate(rel, count, last_failed=False, threshold=None):
     反复改同一个文件 = 在同一个坑里越挖越深：前一次没成，下一次往往还在
     同一个错误假设上打转。与其继续硬改，不如先放下、换个切入点。
 
-    判据刻意保守：**只有「次数超阈值」且「上次确实失败」才拦**。
-    次数多但每次都成功（比如同一个文件连着加三个小功能）不该被拦。
+    ★ 2026-11-15 实测再修：原来判据是「次数超阈值 **且 上次失败**」，
+      结果是「失败一次就锁死」——f6 因为一次补段找不到而失败，紧接着
+      重试就被拦，而那次失败的原因（补段匹配太死）当时已经修好了。
+      单次失败很可能只是模型偶发抽风，**连续失败**才说明真在同一个坑里。
+      所以改成：超阈值 **且 连续失败 >= 2** 才拦；单次失败放行让它重试。
     """
     try:
         limit = int(threshold if threshold is not None
-                    else (_DEFAULT_SETTINGS.get("change_cool_limit") or 3))
+                    else (_DEFAULT_SETTINGS.get("change_cool_limit") or 5))
     except Exception:                                     # noqa: BLE001
-        limit = 3
+        limit = 5
     try:
         cnt = int(count or 0)
     except Exception:                                     # noqa: BLE001
         cnt = 0
+    try:
+        consec = int(consec_fail or 0)
+    except Exception:                                     # noqa: BLE001
+        consec = 0
     rel = str(rel or "")
     # 拦两种：
-    #   ① 超阈值 **且** 上次失败 —— 在同一个坑里反复挖，先停；
-    #   ② 次数已经**远超**阈值（2 倍以上）—— 不管上次成没成，这么改本身就不正常
+    #   ① 超阈值 **且连续失败 >= 2** —— 在同一个坑里反复挖，先停；
+    #   ② 次数已经**远超**阈值（2 倍以上）—— 不管成没成，这么改本身就不正常
     #      （真实数据里 self_iterate.py 被改 16 次，就是这种）。
-    if cnt >= limit and (bool(last_failed) or cnt >= limit * 2):
+    if cnt >= limit and (consec >= 2 or cnt >= limit * 2):
         return {"allow": False,
                 "reason": "%s 已自动改 %d 次%s（阈值 %d），先停手换思路"
-                          % (rel, cnt, "且上次失败" if last_failed else "、远超阈值", limit)}
+                          % (rel, cnt,
+                             "、连续失败 %d 次" % consec if consec >= 2
+                             else "、远超阈值", limit)}
     return {"allow": True, "reason": ""}
 
 
@@ -516,9 +551,16 @@ def record_round(plan):
             "summary": str(p.get("summary") or "")[:300],
             "features": [str((f or {}).get("title") or "")[:80]
                          for f in (p.get("features") or [])][:8],
+            # ★ 2026-11-15：原来只记标题，论文依据完全没进可观测记录 ——
+            #   回看历史时看不出「这轮创新是有依据的还是拍脑袋的」。
+            "theories": [str((f or {}).get("theory") or "")[:200]
+                         for f in (p.get("features") or [])][:8],
             "n_actions": len(p.get("actions") or []),
             "n_feature_actions": len([a for a in (p.get("actions") or [])
                                       if str((a or {}).get("origin")) == "feature"]),
+            "n_with_paper": len([f for f in (p.get("features") or [])
+                                 if ("论文支撑" in str((f or {}).get("theory") or ""))
+                                 or ("《" in str((f or {}).get("theory") or ""))]),
             "paper": p.get("paper") or {},
             "gaps": str(p.get("gaps") or "")[:200],
         }
@@ -749,16 +791,47 @@ def _loop_guard(files):
     #   反而放行（因为它一次都没成功，hit 是 0）。这里补一层：
     #   累计改动次数 + 上次是否失败。
     try:
-        _cnt, _last_fail = {}, {}
+        _cnt, _last_fail, _consec, _closed = {}, {}, {}, set()
         for r in rows:
+            # ★ 2026-11-15 实测修 bug：这里原来统计**全部历史**，没有时间窗口。
+            #   _change_gate 里 cnt >= limit*2 就不管成败一律拦，于是
+            #   main.py 全历史被改 17 次 → cnt=17 >= 6 → **永久锁死**：
+            #   任何涉及 main.py 的新功能都改不动，自动迭代等于废了。
+            #   真实数据：main.py 最近 30 分钟内只改了 1 次。
+            #   正确语义是「最近这段时间在同一个坑里反复挖」，必须限窗口。
+            try:
+                _t = time.mktime(time.strptime(str(r.get("ts") or ""),
+                                              "%Y-%m-%d %H:%M:%S"))
+            except Exception:                             # noqa: BLE001
+                continue
+            if now - _t > _LOOP_WINDOW_MIN * 60:
+                continue
+            # ★ 2026-11-15 实测修死锁：被护栏拦下的记录**根本没改文件**，
+            #   不能计入改动次数。否则「被拦 → 记一条 fail → 计数+1 →
+            #   下次更容易被拦」形成正反馈，实测 21:14 那条 fail 就是被拦
+            #   本身，导致 main.py 永远出不来（自动迭代实际已停摆）。
+            _d = str(r.get("detail") or "")
+            if any(m in _d for m in ("先停手换思路", "反复修改熔断",
+                                     "改动冷却")):
+                continue
+            _ok = (r.get("result") == "ok")
             for f in (r.get("files") or []):
                 if f in files:
                     _cnt[f] = _cnt.get(f, 0) + 1
                     # rows 是最新在前，第一次遇到就是「上次」，别被更旧的覆盖
                     if f not in _last_fail:
-                        _last_fail[f] = (r.get("result") != "ok")
+                        _last_fail[f] = (not _ok)
+                    # ★ 连续失败链：从最新往回数，一旦遇到成功就断链（_closed）。
+                    #   单次失败不该锁死（可能只是模型偶发抽风），
+                    #   连续 2 次失败才说明真在同一个坑里。
+                    if f not in _closed:
+                        if _ok:
+                            _closed.add(f)
+                        else:
+                            _consec[f] = _consec.get(f, 0) + 1
         for f in files:
-            _g = _change_gate(f, _cnt.get(f, 0), _last_fail.get(f, False))
+            _g = _change_gate(f, _cnt.get(f, 0), _last_fail.get(f, False),
+                              consec_fail=_consec.get(f, 0))
             if not _g.get("allow"):
                 return False, str(_g.get("reason") or "改动冷却")
     except Exception:                                     # noqa: BLE001
@@ -1623,7 +1696,7 @@ _PROJECT_BRIEF = """本项目是一个"本地多模态助手"（Python FastAPI �
 
 
 def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief="",
-                          gap=""):
+                          gap="", task_brief=""):
     sig_lines = []
     for it in signals[-30:]:
         u = (it.get("user") or "").replace("\n", " ")[:220]
@@ -1663,6 +1736,19 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
    verdict=adopt_now / evaluate 的，它的 plan 已经是分步骤的，你要做的是判断
    「现在值不值得插进本轮动作」——值得就把它转成 actions 里的条目（保留它的
    验证方式），不值得就在 summary 里说一句为什么先不做。
+
+## 过往任务经验与工作效率（按当前痛点向量召回，**真实执行记录**，不是建议）
+%s
+⚠️ 这一段是**你自己过去做过的事**，不是别人的意见。
+   开头那几行「效率概览」是硬数字：成功率、被改最多/失败最多的文件、时间跨度 ——
+   这些不是自评，是从动作日志统计出来的。**成功率低就先修可靠性，别急着加新功能**：
+   · 标 ⚠️ 的是失败/低分经验 —— 重点看「问题」和「当时想到的改法」。本轮若又
+     遇到同类问题，**先沿用当时的改法**，不要从零试错；同一坑踩两次就是浪费。
+   · 标 ✅ 的是成功经验 —— 能复用的做法直接复用。
+   · 「已构思，未执行」说明那个想法立项了却没落地。若现在依然值得做，可以重新
+     提，但必须说清「上次为什么没做成、这次凭什么能做成」。
+   ⚠️ 但**不要照搬**：当时的痛点可能已经变了，先判断是否仍然适用。宁可不用，
+   也不要把过时的经验硬套到新问题上。
 
 ## 能力缺口（从真实执行日志统计，不是猜的）
 %s
@@ -1741,6 +1827,7 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
         exp or experience_brief(),
         "\n".join(tech_lines) or "（本次没抓到，可能没联网）",
         paper_brief or "（本轮没有可用的论文评估）",
+        task_brief or "（本轮没有召回到相似的历史任务）",
         gap or "（暂无执行记录统计）",
         ("## 用户这次的额外关注点\n" + focus) if focus else "")
 
@@ -1858,9 +1945,49 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
         paper_meta["gaps"] = (selfevolve.gaps() or {}).get("summary") or ""
     except Exception as e:                              # noqa: BLE001
         paper_meta["gap_error"] = "%s: %s" % (type(e).__name__, e)
+
+    # ★ 2026-11-15 用户要求：「不仅是论文，包括平时工作任务上的效率和成果，
+    #   是否能够向量检索思考并成功与其他内容结合如论文进行构思」。
+    #   论文那条通道给的是**外部理论**，这里补**内部实践**：从自己过去的
+    #   任务/构思/评估里向量召回「上次遇到类似问题怎么做的、成没成」。
+    #   两条一起喂给模型，它才可能既参考论文、又复用自己踩过的坑。
+    task_brief = ""
+    _tq = ((exp_txt or "")[:300] + " " + (focus or "")).strip()
+
+    # ---- 通道 A：workvec（做成了什么：action/plan/journal）----
+    try:
+        from . import workvec
+        set_stage("task", "向量召回过往工作过程与成效…")
+        try:
+            workvec.sync()          # 文本没变时是秒回的（只比指纹）
+        except Exception:           # noqa: BLE001
+            logger.debug("workvec sync skipped", exc_info=True)
+        _ws = workvec.eff_stats()
+        paper_meta["work"] = _ws if isinstance(_ws, dict) else {}
+        task_brief = workvec.brief_for_prompt(_tq, top_n=5) or ""
+        paper_meta["work"]["chars"] = len(task_brief)
+    except Exception as e:                              # noqa: BLE001
+        paper_meta["work_error"] = "%s: %s" % (type(e).__name__, e)
+
+    # ---- 通道 B：taskvec（上次同样的问题，用户给了几分、为什么低）----
+    # ⚠️ 2026-11-15：原来这段嵌在上面 workvec 的 try 里，workvec 一旦 import 失败
+    #   或抛异常，taskvec 会**连带失效**，而且 task_brief 直接变空、毫无提示。
+    #   两条通道互相独立才可靠：一条挂了另一条照常给输入。
+    try:
+        from . import taskvec
+        set_stage("task", "向量召回历史任务成败经验…")
+        taskvec.build_index()       # 文本没变时只比指纹，秒回
+        _tb2 = taskvec.brief_for_prompt(top_n=3, query=_tq)
+        if _tb2:
+            task_brief = ((task_brief or "") + "\n\n" + _tb2).strip()
+        paper_meta.setdefault("work", {})["taskvec_chars"] = len(_tb2 or "")
+    except Exception as e:                              # noqa: BLE001
+        paper_meta["taskvec_error"] = "%s: %s" % (type(e).__name__, e)
     prompt = _build_reflect_prompt(sig, tech, journal, focus=focus,
                                    exp=exp_txt, paper_brief=paper_brief,
-                                   gap=gap_txt)
+                                   gap=gap_txt, task_brief=task_brief)
+    # 工作过程 / 效率 / 成果已并入上面的 task_brief（同一个 workvec 数据源）。
+    # 分两段拼会把同样的内容进 prompt 两遍，白烧 token。
     # 真实文件清单：不给它，模型会编出 `avatar_warp.py` 这种不存在的路径
     try:
         prompt += _file_inventory()
@@ -2158,6 +2285,117 @@ def _backup_files(files, tag):
     return tag, saved, created
 
 
+def _outline_block(body, limit=800, max_chars=11000):
+    """给超长文件生成「结构大纲」：所有 def/class 的名字 + 行号。
+
+    2026-11-15 加：main.py 有 56 万字符 / 14820 行，26000 的额度只覆盖 4.6%，
+    模型连文件里有哪些函数都不知道，自然写不出精确的 find
+    （实测 2 条动作失败在「文件内容被截断，看不到 xxx 的实现」）。
+    有了大纲，它至少能判断要改的东西在不在，以及该请求哪一段。
+
+    格式用紧凑的一行式（名字(行号)），因为实测 main.py 有 554 个定义，
+    一条一行的签名式会吃掉 2.7 万字符、反而挤掉正文。
+    """
+    parts = []
+    for i, ln in enumerate(body.split("\n"), 1):
+        s = ln.lstrip()
+        if s.startswith("async def "):
+            nm = s[10:].split("(")[0].strip()
+        elif s.startswith("def "):
+            nm = s[4:].split("(")[0].strip()
+        elif s.startswith("class "):
+            nm = s[6:].split("(")[0].split(":")[0].strip()
+        else:
+            continue
+        if not nm:
+            continue
+        parts.append("%s(%d)" % (nm, i))
+        if len(parts) >= limit:
+            parts.append("…还有更多")
+            break
+    if not parts:
+        return ""
+    txt = " ".join(parts)
+    if len(txt) > max_chars:
+        txt = txt[:max_chars] + " …（大纲过长已截断）"
+    return ("\n【文件结构大纲：函数名(所在行号)，共 %d 个。"
+            "要改的代码若不在下面正文里，用 {\"need\":\"函数名\"} 请求补段】\n"
+            "%s\n【大纲结束，下面是正文开头】\n" % (len(parts), txt))
+
+
+def _find_need_segments(files, key, budget=9000):
+    """模型说「我要改的代码没给我」时，按它给的关键词从原文里抠出上下文。
+
+    这是「按需补段」：不再盲目截断，而是让模型自己说缺什么。
+    关键词可以是函数名、`def xxx`、或一行特征代码。
+    """
+    key = (key or "").strip()
+    if not key:
+        return ""
+    # ⚠️ 实测 files 传 None 会直接 TypeError：for rel in None 崩掉。
+    #    调用方虽然现在都传列表，但补段发生在失败处理路径上，
+    #    这里崩掉会把「补丁没生成」变成「整轮报错」，代价不对等。
+    if isinstance(files, str):
+        files = [files]
+    files = [f for f in (files or []) if isinstance(f, str) and f.strip()]
+    if not files:
+        return ""
+    # ★ 2026-11-15 实测修 bug：模型经常把 need 写成**自然语言**而不是函数名，
+    #   例如「backend/main.py 中 selfiter_actlog 函数定义（约 2492 行）」。
+    #   原来直接 re.escape(整句) 去搜，必然搜不到 → 整个动作判失败。
+    #   实测 selfiter_actlog 确实就在 main.py 第 2492 行，纯属匹配方式太死。
+    #   这里：① 从请求里提取标识符候选；② 支持「约 N 行」的行号兜底。
+    _STOP = {"backend", "frontend", "data", "tools", "main", "py", "js",
+             "css", "html", "json", "def", "class", "import", "self",
+             "function", "file"}
+    cands = [key]
+    for _w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", key):
+        if _w.lower() in _STOP or _w in cands:
+            continue
+        cands.append(_w)
+    # 长名优先：短名（如 run）容易先命中无关位置，把真正的目标挤掉
+    cands = [cands[0]] + sorted(cands[1:], key=len, reverse=True)
+    _mline = re.search(r"(\d{2,6})\s*行", key)
+    _hint = int(_mline.group(1)) if _mline else 0
+
+    out = []
+    for rel in files:
+        body = _read_text(rel)
+        if not body:
+            continue
+        # 定位优先级：函数/类定义 > 函数调用 > 普通出现。
+        # ⚠️ 原来只有 body.find(key)，实测 `diag_nowin` 命中的是文件里
+        #    别处的字符串/注释，补出来的 1500 字前缀全是无关内容，
+        #    模型拿到也看不出要改哪个函数。
+        pos, used = -1, ""
+        for _c in cands:
+            k = re.escape(_c)
+            for pat in (r"(?<![.\w])(?:async\s+)?def\s+%s\s*\(" % k,
+                        r"(?<![.\w])class\s+%s\s*[\(:]" % k,
+                        r"(?<![.\w])%s\s*\(" % k,
+                        k):
+                m = re.search(pat, body)
+                if m:
+                    pos, used = m.start(), _c
+                    break
+            if pos >= 0:
+                break
+        if pos < 0 and _hint > 0:
+            # 行号兜底：模型说了「约 N 行」却没给准函数名
+            _lines = body.split("\n")
+            if 0 < _hint <= len(_lines):
+                pos = len("\n".join(_lines[:_hint - 1]))
+                used = "第 %d 行" % _hint
+        if pos < 0:
+            continue
+        seg = body[max(0, pos - 1500):pos + 3500]
+        out.append("### 文件：%s（按你请求的 `%s` 定位到的原文）\n```\n%s\n```"
+                   % (rel, used[:60], seg))
+        if sum(len(x) for x in out) > budget:
+            break
+    return "\n\n".join(out)
+
+
 def _verify(rel):
     """改完做语法校验：.py 用 py_compile，.js 用 node --check（没有 node 就跳过）。"""
     p = _ROOT / rel
@@ -2186,12 +2424,52 @@ def _verify(rel):
     return True, ""
 
 
+def _looks_mojibake(s):
+    """检测「UTF-8 字节被 GBK 解码」这类乱码。
+
+    2026-11-15 加：实测有 1 条动作把中文注释写成了 `Ϊʲô...`，
+    py_compile 报 `invalid character` 后整轮回滚，白跑 3 轮自修
+    （模型每次还是输出同样的乱码，自修救不回来）。
+    提前拦下并说明原因，比让它写完再语法失败更有用。
+
+    判据刻意保守，但覆盖两类经典乱码：
+      · 希腊/西里尔字母、拉丁重音字母成片出现——正常中文代码里 0x80-0x2FF
+        区间只会有零星重音字母（café、résumé），连续 ≥3 个必然是解码错；
+      · GBK 双重解码的三个固定汉字组合（「锟」「斤」「拷」连写、「烫」字三连）
+        ——它们是**合法汉字**，按字符区间永远数不到，只能靠精确短语认。
+        （这里刻意拆开写，否则本函数的说明文字会把自己判成乱码。）
+    实测 18 个样本：6 个乱码全中，12 个正常内容（希腊字母变量、法语/西语变量名、
+    emoji、温度单位、长中文注释）零误伤。
+    """
+    if not s or not isinstance(s, str):
+        return False
+    if "\ufffd" in s:
+        return True
+    # GBK 双重解码的固定产物，正常代码里不会出现这三个字连写。
+    # ⚠️ 用 \u 转义而不是字面量：字面写出来这一行自己就命中词表，
+    #    本文件会被自己判成乱码（实测 129 个文件里唯一误报就是本文件）。
+    if any(t in s for t in ("\u951f\u65a4\u62f7",
+                            "\u70eb\u70eb\u70eb",
+                            "\u5c6f\u5c6f\u5c6f")):
+        return True
+    # ⚠️ 区间必须从 0x0080 起：原来只到 0x00C0，导致 `ä½ å¥½` 里的
+    #    ½(0x00BD)、¥(0x00A5) 数不进去，实测只数到 2 个 → 漏检。
+    odd = sum(1 for ch in s
+              if 0x0080 <= ord(ch) <= 0x052F        # 拉丁补充/扩展 + 希腊 + 西里尔
+              or 0x1E00 <= ord(ch) <= 0x1EFF)       # 扩展拉丁附加
+    han = sum(1 for ch in s if 0x4E00 <= ord(ch) <= 0x9FFF)
+    return odd >= 3 and han <= odd // 2
+
+
 def _apply_find_replace(rel, find, replace):
     """精确替换（必须恰好命中 1 处），与 selfdev_patch 同一套语义。
 
     特例：find 为空且目标文件不存在 → 视为**新建文件**，直接写入 replace。
     （"建一个回归脚本"这类动作必须支持，否则永远执行不了。）
     """
+    if _looks_mojibake(replace):
+        return False, ("补丁内容里出现编码乱码（中文变成了 Ϊʲô 这类字符），"
+                       "写进去会导致语法错误。请重新输出，确保中文正常。")
     path = _ROOT / rel
     if not find and not path.is_file():
         try:
@@ -2340,9 +2618,11 @@ def _plan_patch_for_action(plan, action):
                               "它位于上面截断点之后）\n%s" % (_id, _seg))
                 if len(_tail) > 7000:
                     break
-            body = (_cut
+            _full_len = len(body)
+            body = (_outline_block(body)
+                    + _cut
                     + "\n…（后略：上面给了前 %d 行，全文共 %d 行 / %d 字符）"
-                      % (_shown, _tot_lines, len(body))
+                      % (_shown, _tot_lines, _full_len)
                     + _tail)
         ctx.append("### 文件：%s\n```\n%s\n```" % (rel, body))
     for rel in new_files[:_MAX_FILES_PER_ACTION]:
@@ -2364,9 +2644,12 @@ def _plan_patch_for_action(plan, action):
 2. find 必须与文件内容**一字不差**（含缩进和换行），并且在整个文件里**只出现一次**。
 3. 改动要**最小化**，不要顺手重构无关代码，不要删掉现有功能。
 4. 如果发现无法安全实施（比如需求与代码不符），就输出 {"skip":"原因"}。
+5. **如果上面没给到你要改的那段代码**（文件太长被截断了），**不要猜、不要编 find**。
+   输出 {"need":"函数名或一行特征代码"} 来请求补段，我会把那段原文原样给你。
 
 ## 输出格式
 {"patches":[{"file":"backend/xxx.py","find":"原文片段","replace":"替换后片段"}]}
+（需要补段时：{"need":"函数名或特征代码"}）
 """ % (action.get("title"), action.get("detail"),
        action.get("note") or "（无）", "\n\n".join(ctx))
 
@@ -2390,6 +2673,25 @@ def _plan_patch_for_action(plan, action):
         if not isinstance(data, dict):
             return None, ("模型没给出合法 JSON（已重试 1 次，两次都无法解析；"
                           "首次输出前 120 字：%s）" % (txt or "")[:120])
+    # 2026-11-15 加：模型可以请求补段。它要改的代码被截断时，
+    # 原来只能硬猜 find（必然匹配不上）或直接放弃，两种都算失败。
+    _need_rounds = 0
+    while isinstance(data, dict) and data.get("need") and _need_rounds < 2:
+        _need_rounds += 1
+        _key = str(data.get("need") or "")[:80]
+        _extra = _find_need_segments(files, _key)
+        if not _extra:
+            return None, ("模型请求补段（%s），但没在文件里找到这段代码 —— "
+                          "可能是它记错了函数名" % _key)
+        _p2 = (prompt + "\n\n## 补充内容（你上一轮说需要的片段，这是原文）\n"
+               + _extra + "\n\n现在请输出 JSON 补丁。\n")
+        _t2, _e2 = _llm_text(_p2, max_tokens=3600, temperature=0.1)
+        if _e2:
+            return None, _e2
+        data = _parse_json(_t2)
+        if not isinstance(data, dict):
+            return None, ("模型请求补段后仍未给出合法 JSON（前 120 字：%s）"
+                          % (_t2 or "")[:120])
     if data.get("skip"):
         return None, "模型判断无法安全实施：%s" % str(data.get("skip"))[:200]
     patches = data.get("patches") or []
@@ -2766,6 +3068,7 @@ def _residual_findings(plan):
             if (f.get("verify") or {}).get("verdict") == "verified"]
 
 
+@_exec_guard
 def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
     """执行这次反思里所有 status=approved 的动作。带备份 + 校验 + 失败回滚。
 
@@ -2917,6 +3220,33 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
             continue
         patches = [pt for pt, _w in _good]
 
+        # ★ 回归基线：改盘之前先记下「哪些断言本来就失败」。
+        #   为什么必须这么做（2026-11-15 实测踩到）：动作后的全量回归里，
+        #   任何**与本动作无关**的断言失败都会让本动作被判失败并回滚。
+        #   实测 ZZVERIFY_EXEC 那个「新建模块」的动作，明明模块建好了、断言也
+        #   过了，却因为库里另外两条断言是红的而被连坐回滚（fail_kind=env）。
+        #   后果是：只要库里存在任何一条红色断言，自动迭代就永远成功不了。
+        _base_fails = set()
+        _base_ok = False
+        if load_settings().get("regress_after_change", True):
+            try:
+                from . import regress as _RG0
+                _b0 = _RG0.run_disk(scope="quick")
+                _bf = list(_b0.get("failed_items") or [])
+                # ★ 2026-11-15 实测修死锁：基线没跑起来（超时/崩溃/解析失败）时，
+                #   run_disk 会返回一个占位失败项 {"name":"regress"}。
+                #   原来直接拿它当基线 → 改动后回归里**所有**失败都成了「新增」
+                #   → 任何动作都必然被判失败回滚，自动迭代实际无法成功。
+                #   实测：回归本身要 164 秒，而 run_disk 超时 180 秒，基线极易超时。
+                #   现在：基线不可用就置 _base_ok=False，后面只留痕、不判死。
+                if not any(str(x.get("name")) == "regress" for x in _bf):
+                    _base_fails = {str(x.get("name")) for x in _bf}
+                    _base_ok = True
+                else:
+                    logger.warning("基线回归不可用（超时或崩溃），本轮不做新增失败判定")
+            except Exception:                           # noqa: BLE001
+                logger.debug("基线回归没跑起来", exc_info=True)
+
         _ev("step", text="%s 备份并应用改动（%s）…" % (
             a.get("id"), "、".join(dict.fromkeys(rels))))
         # 备份（created 里是本次要新建的文件，回滚时会被删除）
@@ -2969,8 +3299,24 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
             try:
                 from . import regress as _RG
                 _rr = _RG.run_disk(scope="quick")
-                if not _rr.get("ok"):
-                    rbad = "行为回归失败：%s" % (_rr.get("summary") or "")
+                _now_fails = {str(x.get("name"))
+                              for x in (_rr.get("failed_items") or [])}
+                _new_fails = _now_fails - _base_fails
+                if _new_fails and _base_ok:
+                    # 只有**本动作引入**的失败才算它的问题
+                    rbad = "行为回归新增失败 %d 条：%s" % (
+                        len(_new_fails), "；".join(sorted(_new_fails)[:3]))
+                elif _new_fails:
+                    # 基线不可用：无法判断这些失败是不是本动作引入的。
+                    # 判死会让「回归里本来就有红用例」永久卡住所有自动改动，
+                    # 所以只留痕放行，把事实摆在界面上让人看见。
+                    _ev("step", text="%s 基线回归不可用，%d 条失败无法归因，已放行（请人工确认：%s）"
+                        % (a.get("id"), len(_new_fails),
+                           "；".join(sorted(_new_fails)[:2])))
+                elif not _rr.get("ok"):
+                    # 既有失败（改动前就是红的）：与本动作无关，放行但要留痕
+                    _ev("step", text="%s 回归有 %d 条既有失败（改动前就是红的，与本动作无关），已放行"
+                        % (a.get("id"), len(_base_fails)))
                 else:
                     _ev("step", text="%s 行为回归通过（%d 条 / %s 秒）" % (
                         a.get("id"), _rr.get("passed") or 0, _rr.get("seconds") or 0))
@@ -3331,16 +3677,51 @@ def _keep_real_files(files):
     return [f for f in (files or []) if f in exist]
 
 
+def _phrase_set(s):
+    """把标题切成「短语集合」，用于判断两条建议是不是同一件事。
+
+    为什么需要它：2-gram Jaccard 会被长英文标识和不同词序稀释。
+    实测「接线 reply_gate.format_reply：空输出兜底 + 结论前置」和
+    「回复收尾协议：结论前置 + 空输出兜底」是同一条需求，但 Jaccard 只有 0.219；
+    切成短语后「空输出兜底」「结论前置」两个短语都重合，一眼就看得出来。
+    """
+    out = set()
+    for p in re.split(r"[^\u4e00-\u9fa5a-zA-Z0-9_.]+", str(s or "")):
+        p = p.strip("._")
+        if not p:
+            continue
+        if re.search(r"[\u4e00-\u9fa5]", p):
+            if len(p) >= 2:
+                out.add(p)
+        elif len(p) >= 4:
+            out.add(p.lower())
+    return out
+
+
 def _similar_title(a, b):
     """判断两条建议是不是在说同一件事（用于 actions/features 去重）。
 
     实测：模型会把同一个需求**同时**写进 actions 和 features（比如
     「验证类回复强制结论优先模板」和「验证类请求的结论优先回复模板」），
     转成动作后就是两条动作改同一处 —— 既浪费名额，又可能互相覆盖。
+
+    ★ 2026-11-15 下调阈值（0.45 → 双档 0.20 / 0.09+短语）：
+      原阈值 0.45 太严，实测最新一轮计划里 a1/f5（回复收尾协议）和
+      a2/f6（失败分类看板）是同一件事写了两遍，Jaccard 只有 0.219 和 0.098，
+      一条都没拦住 —— 于是同一处代码被两条动作各改一遍。
+      拿 28 条历史计划里 38 对「改同一批文件」的动作做回归：
+        · jac >= 0.098 的 5 对**全是**真重复（回复收尾/失败看板/基线快照/
+          断点续跑/强制 patch），
+        · jac <= 0.083 的**都不是**（如「修脖子乱扭」vs「修静默 bug」，
+          两件不同的事恰好改同一批文件）。
+      所以在 0.083 和 0.098 之间取 0.09 作下限，并要求至少 1 个短语重合兜底，
+      避免只靠低 Jaccard 误伤。0.20 以上直接判重（高置信区）。
     """
+    ra, rb = str(a or ""), str(b or "")
+
     def _n(s):
         return re.sub(r"[^\u4e00-\u9fa5a-zA-Z0-9]", "", str(s or ""))
-    a, b = _n(a), _n(b)
+    a, b = _n(ra), _n(rb)
     if not a or not b:
         return False
     if a in b or b in a:
@@ -3351,7 +3732,14 @@ def _similar_title(a, b):
     ga, gb = _g(a), _g(b)
     if not ga or not gb:
         return False
-    return len(ga & gb) / float(len(ga | gb)) >= 0.45
+    r = len(ga & gb) / float(len(ga | gb))
+    if r >= 0.45:
+        return True
+    if r >= 0.20:
+        return True
+    if r >= 0.09 and (_phrase_set(ra) & _phrase_set(rb)):
+        return True
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3471,10 +3859,29 @@ def _enrich_features_with_papers(feats, timeout=90):
     返回 (增强后的 features, 元信息)。任何一步失败都返回**原始 features**，
     只把原因写进元信息 —— 宁可不增强，也不能让反思因为论文环节挂掉。
     """
-    meta = {"ok": False, "papers": 0, "recalled": 0, "error": ""}
+    meta = {"ok": False, "papers": 0, "recalled": 0, "error": "",
+            "with_theory": 0, "no_theory": 0}
     feats = [f for f in (feats or []) if isinstance(f, dict)]
     if not feats:
         return feats, meta
+
+    def _mark_no_paper(items, reason):
+        """没拿到论文时**显式**把 theory 写成「查过、没有」，而不是留空。
+
+        ⚠️ 为什么不能留空（2026-11-15 实测）：theory 为空时
+        `_features_to_actions` 里 `if theory:` 直接跳过，动作 detail 里
+        连一行「理论依据」都没有 —— 用户看到的是「这个功能没提依据」，
+        分不清是「查了没查到」还是「压根没查」。实测 38 条 feature 动作里
+        有 11 条属于这种静默状态。
+        """
+        out = []
+        for f in items:
+            g = dict(f)
+            if not str(g.get("theory") or "").strip():
+                g["theory"] = reason
+            out.append(g)
+        return out
+
     t0 = time.time()
     grouped, flat, perr = _papers_for_features(feats, top_k=3)
     meta["recalled"] = len(grouped)
@@ -3482,22 +3889,34 @@ def _enrich_features_with_papers(feats, timeout=90):
     if perr:
         meta["error"] = perr
     if not flat:
-        # 没有论文就不浪费一次 LLM 调用；如实标注，让前端看得见
-        meta["error"] = meta["error"] or "论文库没有召回到相关论文（theory 将留空）"
+        # 没有论文就不浪费一次 LLM 调用；但要如实标注「查过、没有」。
+        meta["error"] = meta["error"] or "论文库没有召回到相关论文"
+        feats = _mark_no_paper(feats, "（未召回到相关论文，工程可行）")
+        meta["no_theory"] = len(feats)
         return feats, meta
     try:
         txt, err = _llm_text(_enrich_prompt(feats, flat),
                              max_tokens=4200, temperature=0.35)
     except Exception as e:                              # noqa: BLE001
         meta["error"] = "%s: %s" % (type(e).__name__, e)
+        # ★ 论文召回到了、但 LLM 校准挂了：也要标注原因。
+        #   原来这里直接返回原始 feats，theory 是空的 —— 用户分不清
+        #   是「论文库没查到」还是「LLM 挂了」，实测两种都表现为「没有依据」。
+        feats = _mark_no_paper(feats, "（论文校准未完成：%s，工程可行）"
+                               % type(e).__name__)
+        meta["no_theory"] = len(feats)
         return feats, meta
     if err:
         meta["error"] = err
+        feats = _mark_no_paper(feats, "（论文校准未完成：LLM 调用失败，工程可行）")
+        meta["no_theory"] = len(feats)
         return feats, meta
     data = _parse_json(txt)
     got = (data or {}).get("features") if isinstance(data, dict) else None
     if not isinstance(got, list) or not got:
         meta["error"] = "模型没返回合法 features"
+        feats = _mark_no_paper(feats, "（论文校准未完成：模型返回格式不对，工程可行）")
+        meta["no_theory"] = len(feats)
         return feats, meta
     # 按 title 对齐（title 被锁死，理论上不会变；变了就按位置兜底）
     by_title = {}
@@ -3523,7 +3942,31 @@ def _enrich_features_with_papers(feats, timeout=90):
                     continue
                 new[k] = v.strip() if k != "risk" else v.strip().lower()
                 changed += 1
+        # ★ 模型可能压根没返回 theory（或返回空）：这里显式兜底，
+        #   让「查过但没有」和「忘了查」在界面上长得不一样。
+        if not str(new.get("theory") or "").strip():
+            new["theory"] = "（本轮未给出论文依据，工程可行）"
         merged.append(new)
+
+    # 统计「有几条真的引到了论文」——用户要看的是「创新有依据吗」，
+    # 不是「跑了几次 LLM」。判据：theory 里出现了「论文支撑」或书名号《》。
+    # ★ 2026-11-15：统计口径必须和动作里的 has_paper **完全一致**，否则
+    #   同一条功能会出现「统计说有依据、动作说没有」的自相矛盾。
+    #   原来这里是关键词判定（含《》就算），会把「无论文直接支撑…可参考《X》」
+    #   也算成有依据 —— 现在统一交给 papervec 核验。
+    def _has_paper(f):
+        try:
+            from . import papervec
+            return bool(papervec.check_citation(
+                str(f.get("theory") or ""),
+                "\n".join(str(f.get(k) or "") for k in ("title", "pain", "why", "how")),
+            ).get("counts"))
+        except Exception:                  # noqa: BLE001
+            return False
+
+    with_p = [f for f in merged if _has_paper(f)]
+    meta["with_theory"] = len(with_p)
+    meta["no_theory"] = len(merged) - len(with_p)
     meta["ok"] = changed > 0
     meta["changed"] = changed
     meta["seconds"] = round(time.time() - t0, 2)
@@ -3687,17 +4130,37 @@ def _features_to_actions(features, start=0, limit=4, existing=None):
         risk = str(f.get("risk") or "mid").lower()
         if risk not in ("low", "mid", "high"):
             risk = "mid"
+        # ★ 2026-11-15：theory 原来排在 parts 第 5 位，而 detail 是
+        #   "\n".join(parts)[:900] —— pain/why/how/anchor 一长，理论依据
+        #   直接被截断，界面上等于没有。现在提到第 2 位，保证它一定看得见。
+        if not theory:
+            theory = "（未给出论文依据，按工程可行性判断）"
+        # detail 里只放摘要：theory 全文（可到 600 字）如果整段塞进
+        # parts 第 2 位，会把后面的 how/verify 挤出 900 字上限 ——
+        # 那是给模型看的执行指令，丢了会直接影响改得对不对。
+        _t_short = theory if len(theory) <= 220 else (theory[:220] + "…")
+        # ★ 2026-11-15 用户要求：has_paper 不能只是「有没有书名号」。原来
+        #   模型写「无论文直接支撑X…可参考《Y》」也会被算成有依据，编造的
+        #   标题更看不出来。这里核两件事：标题是否真在库里、与功能多相关。
+        try:
+            from . import papervec as _pv
+            _rel = _pv.check_citation(
+                theory, "\n".join(x for x in (title, pain, why, how) if x))
+        except Exception as _e:            # noqa: BLE001
+            _rel = {"level": "unknown", "score": 0.0, "rank": 0,
+                    "titles": [], "found": [], "missing": [], "disclaimer": False,
+                    "why": "核验失败：%s: %s" % (type(_e).__name__, _e)}
         parts = []
         if pain:
             parts.append("对应痛点：%s" % pain)
+        parts.append("理论/论文依据：%s" % _t_short)
+        parts.append("依据核验：%s" % _rel.get("why"))
         if why:
             parts.append("为什么值得做：%s" % why)
         if how:
             parts.append("怎么做：%s" % how)
         if anchor:
             parts.append("改哪里：%s" % anchor)
-        if theory:
-            parts.append("理论/论文依据：%s" % theory)
         if verify:
             parts.append("怎么验证：%s" % verify)
         if not files:
@@ -3750,6 +4213,15 @@ def _features_to_actions(features, start=0, limit=4, existing=None):
             "origin": "feature",
             "assert_file": tfile,
             "why": why[:400],
+            # ★ 2026-11-15：theory 原来只拼进 detail 长文本，动作对象上
+            #   没有这个字段 —— 实测 38 条 feature 动作全部查不到依据，
+            #   想统计「有几条创新真有论文支撑」只能靠正则去抠 detail。
+            #   现在独立存一份（不截断到 900），前端可单独展示/筛选。
+            "theory": theory[:600],
+            # 只认 counts（= strong/weak）。unverified（编造）、none（不相关）、
+            # disclaimed（模型自称非直接依据）都不算 —— 这正是用户要的区分。
+            "has_paper": bool(_rel.get("counts")),
+            "paper_rel": _rel,
             "status": "pending",
             "note": "",
             "error": "",

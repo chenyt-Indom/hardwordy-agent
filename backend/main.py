@@ -388,29 +388,47 @@ def _recurrence_template_ctx() -> str:
 
 
 def _verification_card(tool_events: list) -> str:
-    """⚠️ 未接线占位，**当前不会产生任何输出**。
+    """本轮跑过验证工具时，在回复最前面加一张「结论卡片」。
 
-    2026-11-15 自检发现：这个函数从来没被调用过，而且它的参数 `tool_events`
-    在整个项目里**不存在**（grep 只在函数体内部出现）—— 也就是说即使接上也
-    没有数据源。原实现还按 pytest 的 `N passed / N failed` 解析，而本项目的
-    回归输出是中文「23 通过 / 0 失败」，本来就匹配不上。
+    2026-11-15 用户提过三个摩擦点：「结论埋在长文里」「回复被截断」
+    「只诊断不修复」。这里把工具真跑出来的验证结果提到最前面，
+    让人第一行就看到「通过 / 未通过」，不用往下翻。
 
-    保留而不是删除，是因为「结论卡片」这个想法本身是对的（直击用户提过的
-    「结论埋在长文里 / 回复被截断 / 只诊断不修复」）。真要启用，需要先给聊天
-    主链路补一个工具事件收集器，再把下面的解析改成中文格式。
+    数据源：chat_stream_with_tools 的 `("tool_result", (name, ok, text))`
+    事件（deepseek_client.py:765）。text 是工具输出的前 400 字。
+    解析同时认两种格式：
+      · 本项目的回归输出是中文「23 通过 / 0 失败」；
+      · pytest 风格是英文「5 passed / 1 failed」。
+    原来只认后者，而本项目根本不用 pytest 格式 —— 就算接上也永远匹配不上。
     """
     if not tool_events:
         return ""
-    names = {"selfdev_run", "run_python", "selfdev_patch"}
-    hits = [e for e in tool_events if str((e or {}).get("name") or "") in names]
+    names = {"selfdev_run", "run_python", "selfdev_patch", "regress", "selfiter_regress"}
+    hits = []
+    for e in tool_events:
+        if isinstance(e, dict):
+            nm, res = e.get("name"), e.get("result")
+        elif isinstance(e, (tuple, list)) and len(e) >= 3:
+            nm, res = e[0], e[2]
+        else:
+            continue
+        if str(nm or "") in names:
+            hits.append(res)
     if not hits:
         return ""
     passed = failed = 0
     fails: list = []
     log_path = ""
-    for e in hits:
-        res = e.get("result")
+    for res in hits:
         text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+        # 中文（本项目回归）：23 通过 / 0 失败
+        m = re.search(r"(\d+)\s*通过", text)
+        if m:
+            passed += int(m.group(1))
+        m = re.search(r"(\d+)\s*失败", text)
+        if m:
+            failed += int(m.group(1))
+        # 英文（pytest 风格）
         m = re.search(r"(\d+)\s*passed", text)
         if m:
             passed += int(m.group(1))
@@ -419,6 +437,14 @@ def _verification_card(tool_events: list) -> str:
             failed += int(m.group(1))
         for fm in re.finditer(r"FAILED\s+([^\s:]+)", text):
             if fm.group(1) not in fails:
+                fails.append(fm.group(1))
+        # ⚠️ 只认英文测试名（字母开头 + 至少 3 字符）。原来用 \w，
+        #    而 Python 的 \w 匹配中文 —— 工具输出里出现「X 轴」会被当成
+        #    失败项，把 failed=0 的通过结果误判成「未通过」。
+        # 要求英文/下划线开头（排除「X 轴」这类中文干扰），但后面允许中文，
+        # 否则「X clip.短文本」会被截成「clip.」。
+        for fm in re.finditer(r"X\s+([A-Za-z_][^\s]{2,})", text):
+            if fm.group(1) not in fails and len(fails) < 5:
                 fails.append(fm.group(1))
         lm = re.search(r"(?:日志|log)[:：]\s*(\S+)", text)
         if lm and not log_path:
@@ -2473,6 +2499,18 @@ def selfiter_actlog(limit: int = 40):
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfdev/fail_stats")
+def selfdev_fail_stats(window: int = 100):
+    """自动迭代失败分类看板：聚合 task.json 里带 fail_kind 的事件。
+
+    返回 {fail_kind: count}，按次数降序。用户不用再 dump task.json 追问原因。
+    """
+    try:
+        return actlog.fail_stats(window=window)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/selfiter/plan")
 def selfiter_plan(id: str = ""):
     from . import self_iterate as _si
@@ -2824,6 +2862,27 @@ def selfiter_experience_clear(body: dict):
 
 
 # ---------------------------------------------------------------- 论文情报
+@app.get("/api/selfiter/work")
+def selfiter_work(q: str = "", top_k: int = 8):
+    """工作成效库：不传 q = 效率概览 + 最近记录；传 q = 向量检索历史工作。
+
+    用户 2026-11-15 要求：「不仅是论文，包括平时工作任务上的效率以及成果，
+    是否能够向量检索思考并成功与其他内容结合如论文进行构思」。
+    这个接口让这件事**可见**：返回的效率数字是从动作日志统计出来的硬指标
+    （成功率 / 被反复改的文件 / 时间跨度），不是模型自评。
+    """
+    from . import workvec as _wv
+    try:
+        q = str(q or "").strip()
+        items = _wv.search(q, top_k=max(1, min(30, int(top_k or 8))))
+        st = _wv.status()
+        st.pop("embed", None)       # 这里不需要模型信息，省一次探测
+        return {"ok": True, "q": q, "items": items, "eff": _wv.eff_stats(),
+                "status": st}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/selfiter/papers")
 def selfiter_papers(q: str = "", top_k: int = 12, only_high: bool = False):
     """论文情报库：不传 q 就按时间列最新的；传 q 就走**向量检索**。
@@ -8453,6 +8512,7 @@ async def chat_deepseek(req: ChatRequest,
 
     loop = asyncio.get_running_loop()
     _ACC: list = []          # 本轮完整正文（收尾回填用，见 __end.answer）
+    _TOOL_EV: list = []      # 本轮工具事件（name, ok, text），给 _verification_card 用
 
     async def gen():
         if not x_deepseek_key:
@@ -8594,7 +8654,15 @@ async def chat_deepseek(req: ChatRequest,
                 # 前端据此弹工具卡片
                 yield json.dumps({"tool_start": {"name": val}}) + "\n"
             elif kind == "tool_result":
-                pass          # 结果交给模型总结，前端不需要原文
+                # 结果交给模型总结，前端不需要原文；但收尾时要用它判断
+                # 「本轮验证到底过没过」，所以留一份（2026-11-15 接上结论卡片）。
+                try:
+                    if isinstance(val, (tuple, list)) and len(val) >= 3:
+                        _TOOL_EV.append((val[0], val[1], val[2]))
+                    elif isinstance(val, dict):
+                        _TOOL_EV.append(val)
+                except Exception:                       # noqa: BLE001
+                    logger.debug("tool_result 收集失败", exc_info=True)
             elif kind == "note":
                 yield json.dumps({"note": val}) + "\n"
             elif kind == "ui":
@@ -8607,6 +8675,15 @@ async def chat_deepseek(req: ChatRequest,
         #   （切在半个 JSON 上、XHR 缓冲吞尾等），界面上就永远少那几个字。
         #   现在前端以此为准做一次回填 —— 丢字问题不依赖"猜哪里丢的"。
         _full = "".join(_ACC)
+        # ★ 2026-11-15：本轮跑过验证工具（run_python / selfdev_run / 回归）时，
+        #   把「通过 / 未通过」提到最前面 —— 用户提过「结论埋在长文里」。
+        #   ⚠️ 只随 __end.answer 回填给前端，**不拼进 _full**，否则会被写进
+        #   会话历史，下一轮又原样发给模型。
+        try:
+            _vcard = _verification_card(_TOOL_EV)
+        except Exception:                               # noqa: BLE001
+            _vcard = ""
+            logger.debug("结论卡片生成失败（忽略）", exc_info=True)
         # ★ 服务端兜底补句（2026-11-09）：前端那些兜底都依赖"先收到"，但如果模型自己
         #   在 max_tokens 边界停住、或最后一轮带工具调用导致不续写，正文就是半句。
         #   这里直接再问一次"只补缺失的结尾"，把结果接上去 —— 不依赖客户端做任何事。
@@ -8670,7 +8747,10 @@ async def chat_deepseek(req: ChatRequest,
                     logger.debug("silent-except", exc_info=True)
         except Exception:
             logger.warning("云端通道落盘失败（不影响显示）", exc_info=True)
-        yield json.dumps({"__end": True, "answer": _full}, ensure_ascii=False) + "\n"
+        # ⚠️ 卡片只加在回填用的 answer 上：磁盘里的会话历史必须是干净正文，
+        #    否则下一轮会把「结论：通过」当成自己说过的话再读回去。
+        _answer = (_vcard + _full) if _vcard else _full
+        yield json.dumps({"__end": True, "answer": _answer}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 

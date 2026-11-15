@@ -374,6 +374,332 @@ def search(query: str, top_k: int = 8, only_unevaluated: bool = False) -> list:
     return out
 
 
+# ------------------------------------------------------ 引用核验（相关性打分）
+# ⚠️ 为什么需要这一层（2026-11-15 用户要求）：原来判断「这个创新有论文依据吗」
+#    只靠 `"《" in theory` 这种字面检查，于是「（无论文直接支撑X，工程可行）
+#    可参考《Y》的…」也被算成「有论文支撑」—— 模型自己都说了不是直接依据，
+#    我们却当成背书。更糟的是它无法识别**编造的论文标题**。
+#    这里做两件事：① 标题是否真在库里（抓编造）② 与功能文本的语义相关度
+#    （抓「引了但无关」）。判据全部来自真实数据，不靠关键词猜。
+# ⚠️ 只收「明确否认自己是依据」的说法（2026-11-15 实测踩过）：
+#   最初把「未给出具体」「不提供本功能」也列进来，结果误伤了一条真实引用 ——
+#   「有论文支撑：《A Comprehensive Survey…》（可作为参考框架，但未给出具体
+#   摘要算法）」只是在**补充局限性**，却被判成「模型否认依据」。收紧后只认
+#   明确的否认句，宁可漏判也不能把真引用打成假的。
+_DISCLAIMERS = (
+    "无论文", "非本功能直接依据", "非直接依据",
+    "非针对本功能", "不针对本功能",
+)
+
+
+def _looks_like_title(s: str) -> bool:
+    """判断一段文字像不像论文标题（用来挡掉散文片段被误抽）。
+
+    ⚠️ 为什么需要（2026-11-15）：theory 里「；」后面既有第二篇论文标题，也有
+    「两者均需训练模型，工程上以规则模板近似」这种说明。若把后者当标题，它会
+    落进 missing（库里查不到），让结果凭空多出一条「疑似编造」的警告。
+    实测库里 95 篇有 90 篇英文标题，所以「ASCII 字母 >= 8 个」对英文够干净。
+    """
+    s = str(s or "").strip()
+    if len(s) < 10:
+        return False
+    return sum(1 for c in s if c.isascii() and c.isalpha()) >= 8
+
+
+# ★ 2026-11-15 补：原实现有个已知风险 —— 紧跟「论文支撑：」的第 0 段**不做**
+#   形态过滤（为了抓中文编造标题），代价是模型若在冒号后直接写散文
+#   （「有论文支撑：两者均需训练模型，工程上以规则模板近似」），那段会被当成
+#   标题去库里查，查不到就**诬告「疑似编造」**。这不是判错档位，是冤枉模型。
+#   解法：第 0 段改用「散文判定」——不像散文就当标题候选，既保住中文编造
+#   标题的检出，又不再把说明性文字当引用。
+#   判据来自真实数据标定：库里 8 条被引用的真标题**没有一条含中文逗号**，
+#   而唯一那条散文「两者均需训练模型，工程上以规则模板近似」含逗号。
+#   ⚠️ 顿号「、」**不能**当散文信号：库里真实新闻标题「推理拉满、算力翻5倍」
+#   就含顿号，实测会漏检。
+_PROSE_HEADS = (
+    "两者", "二者", "我们", "该", "这", "其", "因此", "但是", "不过",
+    "如果", "由于", "需要", "可以", "建议", "应当", "应该", "实际上",
+    "工程上", "总之", "所以", "而且", "并且", "目前", "现在", "同时",
+    "鉴于", "除非", "否则", "此项", "上述",
+)
+_PROSE_WORDS = (
+    "需要", "可以", "应当", "应该", "建议", "均可", "均需", "依赖", "近似",
+    "相当于", "意味着", "无法", "尚未", "可行", "实现", "处理",
+)
+
+
+def _looks_like_prose(s: str) -> bool:
+    """判断一段文字像不像说明性散文（而不是论文标题）。
+
+    三条判据（任一命中即判散文）：
+      ① 含中文逗号「，」—— 实测 8 条真标题 0 命中，唯一那条散文命中
+      ② 以虚词/代词/连接词开头（两者、我们、该、因此、如果…）
+      ③ 中文 >= 6 字且含谓词性词（需要、可以、建议、近似…）
+    """
+    s = str(s or "").strip()
+    if not s:
+        return False
+    if "，" in s:
+        return True
+    if any(s.startswith(h) for h in _PROSE_HEADS):
+        return True
+    cn = sum(1 for c in s if "\u4e00" <= c <= "\u9fff")
+    if cn >= 6 and any(w in s for w in _PROSE_WORDS):
+        return True
+    return False
+
+
+def _is_title_candidate(s: str, first: bool = False) -> bool:
+    """这段文字值不值得当「被引用的论文标题」去核验。
+
+    first=True 表示它紧跟「论文支撑：」，即模型明说了这是标题 —— 此时放宽形态
+    要求（只要不像散文就收），否则「完全不存在的论文 XYZ」这种只有 3 个 ASCII
+    字母的中文编造标题会被漏掉。
+    """
+    s = str(s or "").strip()
+    if not s or _looks_like_prose(s):
+        return False
+    if _looks_like_title(s):
+        return True
+    cn = sum(1 for c in s if "\u4e00" <= c <= "\u9fff")
+    if cn >= 6 and len(s) <= 60:
+        return True
+    return bool(first and len(s) >= 4)
+
+
+def _extract_cited(theory: str) -> list:
+    """从 theory 文本里抽出被引用的论文标题（去重、保序）。
+
+    真实 theory 有 4 种写法（都取自库里的真实记录）：
+      ① 有论文支撑：Title（说明）
+      ② 工程可行。检索到的《Title》提供…
+      ③ 有论文支撑：TitleA（…）；TitleB（…）   ← 多篇用「；」分隔
+      ④ （无论文直接支撑X，工程可行）可参考《Y》的…  ← 带免责声明
+    只看「有没有《》」会把 ④ 也算成有依据，所以这里必须把标题抽出来逐个核。
+    """
+    t = str(theory or "")
+    out = []
+    for m in re.finditer(r"《([^》]{3,220})》", t):
+        out.append(m.group(1).strip())
+    # ★ 2026-11-15 实测缺口：模型常写「有论文支撑：A（说明）；B（说明）」，
+    #   原来只按「；」切出第一段，**第二篇从来没被核验过**（实测一条 theory
+    #   引了 Phantom Guardrails + RESTORE，只查了前者）。现在从「论文支撑」
+    #   往后整段按 ；;。换行 切开逐个抽。
+    idx = t.find("论文支撑")
+    if idx >= 0:
+        tail = t[idx + len("论文支撑"):]
+        pieces = [x for x in re.split(r"[；;。\n]", tail) if x.strip()]
+        for n, piece in enumerate(pieces):
+            p = re.split(r"[（(]", piece.lstrip("：: ，, "), 1)[0].strip()
+            if not p:
+                continue
+            # ⚠️ 第 0 段紧跟「论文支撑：」，**不能**过 ASCII 形态判定：实测
+            #   「有论文支撑：完全不存在的论文 XYZ（编的）」只有 3 个 ASCII
+            #   字母，会被过滤掉，于是编造标题反而漏检（判成「没有引用论文」）。
+            # ⚠️ 但也不能无条件收（2026-11-15 修的风险）：模型可能写
+            #   「有论文支撑：两者均需训练模型，工程上以规则模板近似」，那段
+            #   散文会被当标题去库里查、查不到就**诬告「疑似编造」**。
+            #   现在统一走 _is_title_candidate：不像散文才当标题候选。
+            if _is_title_candidate(p, first=(n == 0)):
+                out.append(p)
+    seen, res = set(), []
+    for x in out:
+        k = x.lower()
+        if k and k not in seen:
+            seen.add(k)
+            res.append(x)
+    return res
+
+
+def _extract_segments(theory: str) -> list:
+    """抽出 theory 里**所有**候选段（不做散文过滤、不做形态判定）。
+
+    专供 check_citation 的「先查库再判形态」补救用：散文判据难免误伤含中文
+    逗号的**真实**标题（库里实测有「英伟达上演…，员工集体请愿…！」），而形态
+    判定永远不如数据可靠 —— 只要这段在库里查得到，它就是标题。
+    """
+    t = str(theory or "")
+    out = []
+    for m in re.finditer(r"《([^》]{3,220})》", t):
+        out.append(m.group(1).strip())
+    idx = t.find("论文支撑")
+    if idx >= 0:
+        tail = t[idx + len("论文支撑"):]
+        for piece in re.split(r"[；;。\n]", tail):
+            p = re.split(r"[（(]", piece.lstrip("：: ，, "), maxsplit=1)[0].strip()
+            if p and len(p) >= 4:
+                out.append(p)
+    seen, res = set(), []
+    for x in out:
+        k = x.lower()
+        if k and k not in seen:
+            seen.add(k)
+            res.append(x)
+    return res
+
+
+def _match_cited_exact(cited: str, items: list):
+    """严格匹配：只认完全相同或一方是另一方的前缀（长度 >= 12 才允许前缀）。
+
+    为什么不用 _match_cited 的「包含」判定：补救阶段要拿**散文**去库里试，
+    包含匹配会让「两者均需训练模型…」这种长句因为撞上标题片段而误命中，
+    于是把散文又当成真标题 —— 那就白改了。
+    """
+    c = str(cited or "").strip().lower()
+    if not c:
+        return None
+    for it in items:
+        tl = str(it.get("title") or "").strip().lower()
+        if tl and tl == c:
+            return it
+    if len(c) >= 12:
+        for it in items:
+            tl = str(it.get("title") or "").strip().lower()
+            if tl and (tl.startswith(c) or c.startswith(tl)):
+                return it
+    return None
+
+
+def _match_cited(cited: str, items: list):
+    """在库里找这篇被引用的论文。精确优先，其次前缀/包含（模型常省略副标题）。"""
+    c = str(cited or "").strip().lower()
+    if not c:
+        return None
+    for it in items:
+        if str(it.get("title") or "").strip().lower() == c:
+            return it
+    for it in items:
+        tl = str(it.get("title") or "").strip().lower()
+        if not tl or len(tl) < 8:
+            continue
+        if tl.startswith(c[:60]) or c.startswith(tl[:60]) or c[:40] in tl:
+            return it
+    return None
+
+
+def check_citation(theory: str, feature_text: str = "",
+                   min_strong: float = 0.60, min_weak: float = 0.50) -> dict:
+    """核验 theory 引用的论文：是否真实存在、是否与功能相关。
+
+    返回 {titles, found:[{title,score}], missing, score, level, disclaimer, why}
+    level 四档：
+      · unverified —— 引了但库里查不到（疑似编造），**不算有依据**
+      · strong     —— 真实存在且语义相关度 >= min_strong
+      · weak       —— 真实存在但相关度中等（min_weak ~ min_strong）
+      · none       —— 没引用，或引了但不相关（< min_weak）
+    """
+    th = str(theory or "")
+    titles = _extract_cited(th)
+    disclaimer = any(d in th for d in _DISCLAIMERS)
+    items = load_all()
+    # ★ 2026-11-15 补：散文判据会误伤含中文逗号的**真实**标题（库里实测有
+    #   「英伟达上演"奥特曼2.0"，员工集体请愿：让老黄回家！」）。形态判定再
+    #   精细也不如数据可靠 —— 被过滤掉的段，只要在库里严格查得到，就加回来。
+    #   编造的标题库里查不到，因此不受影响（编造仍会被报 unverified）。
+    _extra = [s for s in _extract_segments(th)
+              if s not in titles and _match_cited_exact(s, items)]
+    if _extra:
+        titles = titles + _extra
+    if not titles:
+        return {"titles": [], "found": [], "missing": [], "score": 0.0,
+                "level": "none", "rank": 0, "counts": False,
+                "fabricated": False, "disclaimer": disclaimer,
+                "why": "没有引用任何论文"}
+    found, missing = [], []
+    for c in titles[:6]:
+        it = _match_cited(c, items)
+        (found.append(it) if it else missing.append(c))
+    if not found:
+        return {"titles": titles, "found": [], "missing": missing,
+                "score": 0.0, "level": "unverified", "rank": 0, "counts": False,
+                "fabricated": True, "disclaimer": disclaimer,
+                "why": "引用的论文在库里查不到（疑似编造）：%s" % missing[0][:60]}
+
+    # 语义相关度：功能文本 vs 论文正文（标题+英文摘要+中文要点）
+    # ★ 阈值必须按真实分布标定，不能凭感觉（2026-11-15 实测 22 条真实引用）：
+    #   被引论文得分 0.542~0.720、中位 0.622，排名多为 #1~#5。
+    #   我最初拍的 0.62/0.48 会让**全部真实引用都判不成 strong** —— 因为
+    #   doc_text 是长文本，和短 query 的余弦天然被稀释。故取 0.60 / 0.50。
+    ft = str(feature_text or "").strip()
+    score, rank, scope = 0.0, 0, "cited"
+    if ft:
+        qv = None
+        try:
+            qv = embed.embed_texts([ft], is_query=True)
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        if qv is not None and len(qv) == 1:
+            arr = None
+            if _VEC.is_file():
+                try:
+                    _a = np.load(_VEC)
+                    if _a.ndim == 2 and _a.shape == (len(items), len(qv[0])):
+                        arr = _a
+                except Exception:
+                    arr = None
+            if arr is not None:
+                # 复用全库索引：一次 query embedding 就能算出**全库排名**
+                s_all = arr @ qv[0]
+                scope = "corpus"
+                for it in found:
+                    try:
+                        i = items.index(it)
+                    except ValueError:
+                        continue
+                    s = float(s_all[i])
+                    if s > score:
+                        score, rank = s, int((s_all > s).sum()) + 1
+            else:
+                dv = embed.embed_texts([_doc_text(it) for it in found])
+                if dv is not None and getattr(dv, "shape", (0,))[0] == len(found):
+                    sims = dv @ qv[0]
+                    score, rank = float(np.max(sims)), 1
+        if score <= 0:      # embedding 不可用 → 退化为字面覆盖
+            score = max(_coverage(_chars(ft), _doc_text(it)) for it in found)
+
+    rt = ("第%d名" % rank) if scope == "corpus" else ""
+    fl = [{"title": str(it.get("title") or "")[:120], "score": round(score, 4)}
+          for it in found]
+    # ★ 为什么还要看排名（2026-11-15 实测）：同一篇 Phantom Guardrails，用
+    #   计划里的原文 feature 算 0.720，换个措辞就掉到 0.587 —— **绝对分受
+    #   query 措辞影响很大**，但它始终是全库第 1 名。所以「第 1 名 + 中等分」
+    #   也应当算强依据，否则同一篇论文会因为措辞不同忽高忽低。
+    top1 = (scope == "corpus" and rank == 1)
+    rank_ok = (scope != "corpus") or rank <= 8
+    if not ft:
+        lvl, why = "weak", "未提供功能文本，仅核对了引用真实性"
+    elif disclaimer:
+        # ★ 关键一档（2026-11-15）：模型自己写了「无论文直接支撑X…可参考《Y》
+        #   非本功能直接依据」，那就是**它自己承认不是依据**。库里实测有 3 条
+        #   这种写法，旧的关键词判定全算成「有依据」—— 这正是用户说的假阳性。
+        #   它们确实相关（所以不算 none），但不能计入 has_paper。
+        lvl = "disclaimed"
+        why = "论文真实，但模型自己声明非直接依据，不算依据（相关度 %.2f %s）" % (score, rt)
+    elif (score >= min_strong and rank_ok) or (top1 and score >= min_weak):
+        lvl = "strong"
+        why = "论文真实且高度相关（%.2f %s）" % (score, rt)
+    elif score >= min_weak or (top1 and score >= 0.45):
+        lvl = "weak"
+        why = "论文真实、相关度中等（%.2f %s）" % (score, rt)
+    else:
+        lvl = "none"
+        why = "相关度不足，不构成依据（%.2f %s）" % (score, rt)
+    if missing:
+        # ⚠️ 实测有「引 1 篇真的 + 1 篇编的」的写法：真实那篇照样相关，但编造
+        #   标题说明这次引用不可全信，所以把警示放最前面，别让它埋在一句话末尾。
+        #   同时**不允许判 strong** —— 一半是编的还叫"强依据"，等于自欺。
+        if lvl == "strong":
+            lvl = "weak"
+        why = "⚠️ 有 %d 个标题在库里查不到（疑似编造）；%s" % (len(missing), why)
+    # counts 才是「能不能算有依据」的唯一口径：只有 strong / weak 算。
+    # 单独给一个布尔字段，避免调用方各自拿 level 去猜（之前 has_paper 就是这么错的）。
+    return {"titles": titles, "found": fl, "missing": missing,
+            "score": round(score, 4), "level": lvl, "rank": rank,
+            "counts": lvl in ("strong", "weak"),
+            "fabricated": bool(missing),
+            "disclaimer": disclaimer, "why": why}
+
+
 def stats() -> dict:
     items = load_all()
     ev = [i for i in items if i.get("eval")]

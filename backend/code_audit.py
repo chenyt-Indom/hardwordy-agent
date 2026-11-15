@@ -489,6 +489,36 @@ class _UndefNameVisitor(ast.NodeVisitor):
                 return True
         return False
 
+    def _visit_comp(self, node):
+        """推导式（生成器/列表/集合/字典）有自己的作用域。
+
+        2026-11-15 实测误报：`(_ for _ in ()).throw(...)` 里 `_` 是生成器
+        表达式的循环变量，但 visitor 没为推导式压栈 → 报「使用了 `_`，但本文件
+        里没有定义」（high）。target 变量只在推导式内部可见，这里压个临时作用域。
+        """
+        names = set()
+        for gen in getattr(node, "generators", []):
+            for t in ast.walk(gen.target):
+                if isinstance(t, ast.Name):
+                    names.add(t.id)
+        self.stack.append(names)
+        try:
+            self.generic_visit(node)
+        finally:
+            self.stack.pop()
+
+    def visit_GeneratorExp(self, node):
+        self._visit_comp(node)
+
+    def visit_ListComp(self, node):
+        self._visit_comp(node)
+
+    def visit_SetComp(self, node):
+        self._visit_comp(node)
+
+    def visit_DictComp(self, node):
+        self._visit_comp(node)
+
     def visit_Name(self, node):
         if not isinstance(node.ctx, ast.Load):
             return

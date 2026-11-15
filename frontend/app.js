@@ -12947,6 +12947,24 @@
         '</div>' +
         '<div class="iter-act-d">' + esc(a.detail) + '</div>' +
         '<div class="iter-act-f">' + esc((a.files || []).join(" · ") || "（未指定文件）") + '</div>';
+      // 2026-11-15：用户问「创新到底有没有论文依据」。原来只按 has_paper
+      // 分两色，而 has_paper 曾只看「有没有书名号」——模型写「无论文直接
+      // 支撑X…可参考《Y》」也被算成有依据，编造的标题更看不出来。
+      // 现在后端给出核验结果（level/score/rank/why），按四档展示：
+      //   强依据 = 真实存在且全库前列；弱依据 = 真实但相关度中等；
+      //   无依据 = 没引用或引了但不相关；引用存疑 = 库里查不到（疑似编造）。
+      if (a.theory) {
+        var pr = a.paper_rel || {};
+        var lv = pr.level || (a.has_paper ? "weak" : "none");
+        var LVL = { strong: "强依据", weak: "弱依据", disclaimed: "仅参考·非依据",
+                    none: "无依据", unverified: "引用存疑", unknown: "未核验" };
+        var lab = LVL[lv] || lv;
+        if (pr.fabricated) lab += "·含编造";
+        h += '<div class="iter-theory lv-' + esc(lv) + '">' +
+             '<b>📄 ' + esc(lab) + '：</b>' + esc(a.theory) +
+             (pr.why ? '<div class="iter-rel">核验：' + esc(pr.why) + '</div>' : '') +
+             '</div>';
+      }
       // 2026-11-15：用户要「详细说明实现了什么功能 / 改了什么」。
       // 后端从补丁归纳出「新建/修改 + 增删行 + 新增或动到的函数」，这里直接摊开讲。
       if (a.changelog && a.changelog.summary) {
