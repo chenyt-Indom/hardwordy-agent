@@ -852,11 +852,37 @@ def patch(rel: str, find: str, replace: str, note: str = "",
             _summary = _make_changelog(
                 _r, find, replace,
                 fail_kind=fail_kind, history=_n, description=description)
+            # 🧾 改动证据卡（2026-11-17 用户要求）：
+            #   用户反复问「详细说明改了什么」，而 timeline 里只有一句 summary，
+            #   看不到「针对哪个失败、改了几次、改在文件哪一行」。
+            #   这里把证据一并写进 actlog 的 evidence 字段，前端卡片直接渲染
+            #   「针对：<fail_kind> × N」。
+            #   · fail_kind：本次针对的失败分类（空则不带）
+            #   · count：该 fail_kind 的真实历史计数（幽灵修复已被上面拦掉，
+            #     这里只可能是 >=1 或 -1=查不到）
+            #   · line：find 片段在原文里的起始行号（1 基），方便点开定位
+            #   · lines：find 片段覆盖的行数
+            _evidence = {}
+            if _fk:
+                _evidence["fail_kind"] = _fk
+                _evidence["count"] = int(_real if _real > 0 else 0)
+            try:
+                _idx = text.find(find)
+                if _idx >= 0:
+                    _evidence["line"] = text.count("\n", 0, _idx) + 1
+                    _evidence["lines"] = max(1, find.count("\n") + 1)
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+            _args = {"rel": _r, "fail_kind": fail_kind or ""}
+            if _evidence:
+                _args["evidence"] = _evidence
             actlog.record(
                 session or "selfdev", "selfdev_patch",
-                args={"rel": _r, "fail_kind": fail_kind or ""},
+                args=_args,
                 ok=True, note=_summary)
             out["summary"] = _summary
+            if _evidence:
+                out["evidence"] = _evidence
         except Exception:
             logger.debug("silent-except", exc_info=True)
     return out

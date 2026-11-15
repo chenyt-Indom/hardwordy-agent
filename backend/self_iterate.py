@@ -777,6 +777,74 @@ def _is_probe(plan, act):
         return False
 
 
+def _verify_failure_real(fail_kind, days=7):
+    """校验 fail_kind 是否真实存在（反幽灵修复）。
+
+    背景（arXiv:2611.17336v1 Phantom Guardrails）：模型会「修复」一个
+    根本不存在的失败类型 —— 幽灵修复。实测成功率只有 66%，其中相当一部分
+    是「修了一个从未发生过的 fail_kind」。
+
+    做法：从 actlog 统计该 fail_kind 近 days 天的真实计数。
+      · 计数 > 0 → 真实，放行；
+      · 计数 = 0 → 幽灵，拒绝立项，并往 actlog 记一条 phantom 事件留痕。
+
+    返回 {"ok": bool, "count": int, "reason": str}。
+    任何异常都按「放行」处理 —— 校验坏了不能把整个迭代锁死。
+    """
+    fk = str(fail_kind or "").strip()
+    if not fk:
+        return {"ok": True, "count": 0, "reason": "fail_kind 为空，跳过校验"}
+    try:
+        n_days = float(days)
+    except (TypeError, ValueError):
+        n_days = 7.0
+    if n_days <= 0:
+        n_days = 7.0
+    cutoff = time.time() - n_days * 86400.0
+    count = 0
+    try:
+        rows = list_actlog(500)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        rows = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        # 只认失败记录，且 fail_kind 要精确匹配
+        if str(r.get("result") or "") != "fail":
+            continue
+        if str(r.get("fail_kind") or "").strip() != fk:
+            continue
+        try:
+            t = time.mktime(time.strptime(str(r.get("ts") or "")[:19],
+                                          "%Y-%m-%d %H:%M:%S"))
+        except Exception:                               # noqa: BLE001
+            continue
+        if t >= cutoff:
+            count += 1
+    if count > 0:
+        return {"ok": True, "count": count,
+                "reason": "%s 近 %d 天真实失败 %d 次" % (fk, int(n_days), count)}
+    # 幽灵：记一条 phantom 到 actlog 留痕，方便回看「拦下了哪些幽灵修复」
+    try:
+        _actlog({"ts": _now(),
+                 "plan_id": "",
+                 "action": "phantom_guard",
+                 "title": "拒绝幽灵修复：%s" % fk[:60],
+                 "files": [],
+                 "result": "fail",
+                 "fail_kind": fk,
+                 "phantom": True,
+                 "detail": "%s 近 %d 天真实计数为 0，拒绝立项" % (fk, int(n_days)),
+                 "probe": False,
+                 "auto": False})
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return {"ok": False, "count": 0,
+            "reason": "%s 近 %d 天真实计数为 0（幽灵修复），拒绝立项"
+                      % (fk, int(n_days))}
+
+
 def _log_act(plan, act, ok, detail=""):
     """记录一条动作执行日志（用户可查「到底改没改」）。"""
     _actlog({"ts": _now(),

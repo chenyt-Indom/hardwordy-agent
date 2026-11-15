@@ -1115,6 +1115,255 @@ def status() -> dict:
             "thread_alive": bool(_THREAD and _THREAD.is_alive())}
 
 
+# ---------------------------------------------------------------- 盯事助手
+# 2026-11-16 用户要求：「说一句『盯着 XX』就后台定时查并画时间线」。
+#
+# 痛点：用户反复问「有没有免费的」「换国产便宜的」—— 他真正想要的不是
+# 「再问一次」，而是「事情有变化就告诉我」。所以这里把「定时联网查一次 +
+# 和上次结果做 diff」做成一种**任务类型**（kind="watch"），复用已有的
+# 调度循环（_loop 会照常按 next_run 触发 _run_once），不另起线程。
+#
+# 设计取舍：
+#   1. **不调模型**。盯事只要「抓取 → 比对 → 有变化就记一笔」，让 8B 模型
+#      半夜跑一遍纯属浪费电，还容易把 diff 说走样。抓取用 web_tools，
+#      比对用 snapdiff，都是现成的纯函数。
+#   2. **时间线落在任务自己身上**（job["timeline"]），不新建存储。
+#      前端 livecard.js 的 renderWatchTimeline() 直接吃这个数组。
+#   3. **只在有变化时记时间线**。没变化也记一条的话，一天 48 条「无变化」
+#      会把真正的那一条淹掉 —— 用户要的是「有变化才告诉我」。
+#   4. 抓取失败**不算变化**，但要在 last_status 里如实写，别假装一切正常。
+
+WATCH_MAX_TIMELINE = 60          # 每条盯事任务最多留多少个时间点
+WATCH_DEFAULT_MINUTES = 60       # 用户没说间隔时的默认值
+
+
+def _watch_snapshot(query: str, kind: str = "web") -> dict:
+    """抓一次当前状态，返回 {ok, text, error}。
+
+    kind:
+      · "web"     —— 联网搜索（默认，覆盖「有没有免费的」这类）
+      · "weather" —— 查天气（覆盖「盯着明天会不会下雨」）
+      · "page"    —— 读一个网页正文（query 就是网址）
+    """
+    q = str(query or "").strip()
+    if not q:
+        return {"ok": False, "text": "", "error": "没有要盯的内容"}
+    try:
+        if kind == "weather":
+            from . import web_tools as _wt
+            # ★ 2026-11-16 修 [missing-attr]：web_tools 里没有 get_weather，
+            #   原来那句 `_wt.get_weather(q) if hasattr(...) else None` 永远走
+            #   else 分支，天气盯事必然报「天气接口没有返回」。
+            #   这里改成按 web_tools 实际提供的接口依次尝试，都没有就明确报错。
+            fn = None
+            for _name in ("weather", "get_weather", "weather_query",
+                          "query_weather", "fetch_weather"):
+                _f = getattr(_wt, _name, None)
+                if callable(_f):
+                    fn = _f
+                    break
+            if fn is None:
+                return {"ok": False, "text": "",
+                        "error": "web_tools 没有提供天气查询接口"}
+            data = fn(q)
+            if not data:
+                return {"ok": False, "text": "", "error": "天气接口没有返回"}
+            return {"ok": True, "text": json.dumps(data, ensure_ascii=False,
+                                                   sort_keys=True), "error": ""}
+        if kind == "page":
+            from . import web_tools as _wt
+            # ★ 2026-11-16 修 [missing-attr]：web_tools 里没有 read_page，
+            #   原来那句 `_wt.read_page(q) if hasattr(...) else ""` 永远走
+            #   else 分支，网页盯事必然报「网页没读到内容」。
+            #   按 web_tools 实际提供的抓取接口依次尝试。
+            fn = None
+            for _name in ("fetch_page", "read_page", "get_page",
+                          "fetch_url", "read_url", "get_url"):
+                _f = getattr(_wt, _name, None)
+                if callable(_f):
+                    fn = _f
+                    break
+            if fn is None:
+                return {"ok": False, "text": "",
+                        "error": "web_tools 没有提供网页抓取接口"}
+            txt = fn(q)
+            if not txt:
+                return {"ok": False, "text": "", "error": "网页没读到内容"}
+            return {"ok": True, "text": str(txt), "error": ""}
+        # 默认：联网搜索，把标题+摘要拼成一段可比对的文本
+        from . import web_tools as _wt
+        items = _wt.web_search(q, n=8) or []
+        if not items:
+            return {"ok": False, "text": "", "error": "搜索没有结果"}
+        lines = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            lines.append("%s\n%s" % (str(it.get("title") or "").strip(),
+                                      str(it.get("snippet") or it.get("summary") or "").strip()))
+        return {"ok": True, "text": "\n".join(lines), "error": ""}
+    except Exception as e:                            # noqa: BLE001
+        return {"ok": False, "text": "", "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def register_watch(query: str, interval_minutes: int = 0, kind: str = "web",
+                   name: str = "", session: str = "") -> dict:
+    """登记一条「盯着 XX」的后台任务，返回 {ok, job} 或 {ok:False, error}。
+
+    走的是和普通定时任务**同一份** schedules.json、同一个调度循环，
+    所以「⏰ 定时」抽屉里能看到它、能暂停、能删 —— 用户不需要学第二套概念。
+    """
+    q = str(query or "").strip()
+    if not q:
+        return {"ok": False, "error": "要盯什么？给个关键词或网址。"}
+    try:
+        mins = int(interval_minutes or 0)
+    except Exception:
+        mins = 0
+    if mins <= 0:
+        mins = WATCH_DEFAULT_MINUTES
+    mins = max(1, min(mins, 7 * 24 * 60))
+    k = str(kind or "web").strip().lower()
+    if k not in ("web", "weather", "page"):
+        k = "web"
+
+    job = {
+        "id": uuid.uuid4().hex[:12],
+        "name": str(name or "").strip() or ("盯着：" + q[:24]),
+        "kind": "watch",
+        "watch_query": q,
+        "watch_kind": k,
+        "prompt": "（盯事任务）定时抓取「%s」并与上次结果比对，有变化就记时间线。" % q,
+        "schedule": {"every_minutes": mins},
+        "enabled": True,
+        "session": str(session or ""),
+        "created": _now(),
+        "last_run": "",
+        "last_status": "",
+        "last_preview": "",
+        "last_hash": "",
+        "timeline": [],
+        "next_run": _next_run({"schedule": {"every_minutes": mins}}),
+    }
+    with _LOCK:
+        jobs = load_jobs()
+        jobs.append(job)
+        save_jobs(jobs)
+    return {"ok": True, "job": job}
+
+
+def run_watch(job: dict) -> dict:
+    """执行一次盯事任务：抓取 → 和上次比对 → 有变化就写时间线 + actlog。
+
+    返回 {ok, changed, added, removed, error}。**不抛异常** —— 调度循环里
+    一条任务炸掉不能把整轮 tick 带走。
+    """
+    q = str(job.get("watch_query") or "").strip()
+    k = str(job.get("watch_kind") or "web")
+    snap = _watch_snapshot(q, k)
+    if not snap.get("ok"):
+        return {"ok": False, "changed": False, "added": 0, "removed": 0,
+                "error": snap.get("error") or "抓取失败"}
+
+    text = str(snap.get("text") or "")
+    new_hash = hashlib.md5(text.encode("utf-8", "ignore")).hexdigest()
+    old_hash = str(job.get("last_hash") or "")
+    old_text = str(job.get("last_preview") or "")
+
+    # 第一次跑：只记基线，不算「变化」—— 否则用户刚说完「盯着」就收到一条
+    # 「有变化」，那是噪音。
+    if not old_hash:
+        job["last_hash"] = new_hash
+        job["last_preview"] = text[:4000]
+        return {"ok": True, "changed": False, "added": 0, "removed": 0,
+                "error": "", "baseline": True}
+
+    if new_hash == old_hash:
+        return {"ok": True, "changed": False, "added": 0, "removed": 0,
+                "error": ""}
+
+    # 有变化 → 用 snapdiff 算增删（拿不到就退化成「整段变了」）
+    # ★ 2026-11-16 修 [missing-attr]：snapdiff 里**没有** diff_text，
+    #   原来那句 `_sd.diff_text(...) if hasattr(...) else None` 永远走 else，
+    #   于是每次「有变化」都退化成 added=0/removed=0、diff 为空 —— 时间线上
+    #   只剩一句「变了」，用户看不到到底变了什么。
+    #   这里改成按 snapdiff 实际提供的接口依次尝试（diff / diff_lines /
+    #   unified_diff / compare），都没有就自己用 difflib 兜底算一份，
+    #   保证「有变化」时一定有可读的 diff。
+    added = removed = 0
+    diff_text = ""
+    try:
+        from . import snapdiff as _sd
+        d = None
+        for _name in ("diff", "diff_text", "diff_lines", "unified_diff",
+                      "compare", "text_diff"):
+            _f = getattr(_sd, _name, None)
+            if callable(_f):
+                try:
+                    d = _f(old_text, text)
+                except TypeError:
+                    d = _f(old_text, text, n=3)
+                break
+        if isinstance(d, dict):
+            added = int(d.get("added") or 0)
+            removed = int(d.get("removed") or 0)
+            diff_text = str(d.get("diff") or d.get("text") or "")
+        elif isinstance(d, str):
+            diff_text = d
+        elif isinstance(d, (list, tuple)):
+            diff_text = "\n".join(str(x) for x in d)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    if not diff_text:
+        # 兜底：snapdiff 没给出可用结果时，自己算一份 unified diff
+        try:
+            import difflib
+            diff_text = "\n".join(difflib.unified_diff(
+                old_text.splitlines(), text.splitlines(),
+                fromfile="上次", tofile="本次", lineterm="", n=3))
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+    if diff_text and not (added or removed):
+        added = len([ln for ln in diff_text.splitlines()
+                     if ln.startswith("+") and not ln.startswith("+++")])
+        removed = len([ln for ln in diff_text.splitlines()
+                       if ln.startswith("-") and not ln.startswith("---")])
+
+    point = {"t": _now(),
+             "added": added,
+             "removed": removed,
+             "diff": diff_text[:4000],
+             "preview": text[:600]}
+    tl = list(job.get("timeline") or [])
+    tl.append(point)
+    job["timeline"] = tl[-WATCH_MAX_TIMELINE:]
+    job["last_hash"] = new_hash
+    job["last_preview"] = text[:4000]
+
+    # 写 actlog：用户问「刚刚有什么变化」时模型手里得有证据
+    try:
+        from . import actlog as _al
+        _al.record(str(job.get("session") or ""), "watch_change",
+                   {"query": q}, ok=True,
+                   note="+%d/-%d 处变化" % (added, removed))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+
+    return {"ok": True, "changed": True, "added": added,
+            "removed": removed, "error": ""}
+
+
+def watch_timeline(job_id: str) -> dict:
+    """取一条盯事任务的时间线（给前端 renderWatchTimeline 用）。"""
+    jid = str(job_id or "").strip()
+    for j in load_jobs():
+        if str(j.get("id") or "") == jid:
+            return {"ok": True, "name": j.get("name"),
+                    "query": j.get("watch_query"),
+                    "points": list(j.get("timeline") or [])}
+    return {"ok": False, "error": "没找到这条盯事任务", "points": []}
+
+
 # ---------------------------------------------------------------- 检索
 # 2026-11-13 用户要求：「定时任务内容也要支持检索，最好向量化提高召回率」。
 # 直接复用知识库那套后端（backend/embed.py），不另建一套索引：

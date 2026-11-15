@@ -1097,6 +1097,71 @@ def _history_digest(dropped: list, per_msg: int = 90, cap: int = 1500) -> str:
 MIN_HISTORY_TOKENS = 2500
 
 
+def _build_artifacts(reply_text: str, tool_events: list = None) -> list:
+    """把一条 assistant 回复拆成「画布卡片」用的 artifacts 数组。
+
+    为什么需要（2026-11-16 用户要求）：
+      当前回复是一整段文字流，用户想改其中某一段只能**整段重发** ——
+      用户原话「同一需求被重复发送 20 次」。画布让每块内容各自成卡片，
+      可以圈选单块说「就这块再改改」，也可以连两块让它合并。
+
+    做法：
+      · 有工具产物（图片 / 文件 / 网页）→ 每份产物一张卡；
+      · 正文按空行切成若干段 → 每段一张 text 卡（太短的段落并进上一张，
+        避免把一句话拆成七八张碎卡）；
+      · 每张卡带稳定 id（`a1`/`a2`…），前端圈选后回传的就是这个 id。
+
+    ⚠️ 纯函数、不碰 IO：前端 `renderCanvas()` 和自测断言都直接吃它的输出。
+    """
+    arts = []
+    seq = [0]
+
+    def _nid():
+        seq[0] += 1
+        return "a%d" % seq[0]
+
+    # ① 工具产物优先（图片 / 文件 / 网页），它们本来就是「一块一块」的
+    for ev in (tool_events or []):
+        if not isinstance(ev, dict):
+            continue
+        kind = str(ev.get("type") or ev.get("kind") or "").lower()
+        if kind in ("image", "img", "picture"):
+            arts.append({"id": _nid(), "type": "image",
+                         "content": ev.get("url") or ev.get("path") or "",
+                         "label": ev.get("label") or "生成图",
+                         "source": ev.get("tool") or "image"})
+        elif kind in ("ppt", "pptx", "slide"):
+            arts.append({"id": _nid(), "type": "ppt",
+                         "content": ev.get("url") or ev.get("path") or "",
+                         "label": ev.get("label") or "演示文稿",
+                         "source": ev.get("tool") or "ppt"})
+        elif kind in ("web", "url", "link"):
+            arts.append({"id": _nid(), "type": "web",
+                         "content": ev.get("url") or "",
+                         "label": ev.get("label") or "网页",
+                         "source": ev.get("tool") or "web"})
+        elif kind in ("file", "doc", "docx", "text"):
+            arts.append({"id": _nid(), "type": "text",
+                         "content": ev.get("text") or ev.get("path") or "",
+                         "label": ev.get("label") or "文件",
+                         "source": ev.get("tool") or "file"})
+
+    # ② 正文按空行切段；过短的段落并进上一张，避免碎成一片
+    body = str(reply_text or "").strip()
+    if body:
+        chunks = [c.strip() for c in re.split(r"\n\s*\n", body) if c.strip()]
+        merged = []
+        for c in chunks:
+            if merged and len(c) < 24:
+                merged[-1] = merged[-1] + "\n\n" + c
+            else:
+                merged.append(c)
+        for c in merged:
+            arts.append({"id": _nid(), "type": "text", "content": c,
+                         "label": "", "source": "reply"})
+    return arts
+
+
 def _recent_turns_index(messages: list, rounds: int = 8,
                         user_chars: int = 60, bot_chars: int = 110) -> str:
     """把最近几轮压成一份「速览」，专治多轮对话里的指代失忆。
