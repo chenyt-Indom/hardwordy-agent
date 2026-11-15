@@ -404,30 +404,44 @@ _REPLY_MAX_CHARS = 6000
 # 直击「结论埋在长文里」「确认型答非所问」：模型常以「让我确认/我先检查/找到线索」
 # 开头，用户翻到最后才知道结果。这里在组装回复时兜底补一行结论占位。
 _CONFIRM_INTENTS = ("confirm", "fix", "repair", "debug", "troubleshoot")
-_CONFIRM_OPENERS = ("让我确认", "我先检查", "找到线索")
-_CONCLUSION_PLACEHOLDER = "结论：待补（本轮为确认/修复型，请以实际结果为准）"
+# 用户消息里出现这些词 → 判定为「在问确认/修复结果」（不需要额外的意图分类器）
+_CONFIRM_WORDS = (
+    "好了吗", "好没好", "是否", "能不能", "有没有", "怎么样", "正常吗", "对不对",
+    "行不行", "检查", "验证", "修好", "解决了吗", "还在吗", "可以吗", "无误",
+)
+_CONFIRM_OPENERS = ("让我确认", "我先检查", "找到线索", "我这就查", "先查一下")
+_CONCLUSION_PLACEHOLDER = "结论：见下方（首段是排查过程，可直接跳过）"
 
 
-def _force_conclusion_first(reply: str, intent: str = "") -> str:
-    """确认型/修复型意图的回复强制首行加「结论：」前缀。
+def _force_conclusion_first(reply: str, user_msg: str = "") -> str:
+    """确认型回复强制结论前置：首段是「排查过程」时，把真实结论顶上来。
 
-    规则：
-      1. 仅对确认型/修复型意图生效（intent 命中 _CONFIRM_INTENTS）；
-      2. 回复首行已是「结论：」→ 原样返回；
-      3. 回复以「让我确认/我先检查/找到线索」开头且无结论行 → 自动前置结论占位并标记待补；
-      4. 其它情况 → 原样返回（不强行改写闲聊/解释类回复）。
+    ⚠️ 2026-11-15：原来这个函数只定义、从没被调用（自检报 dead-func）。
+    根因是它依赖 `intent` 参数，而系统里**根本没有意图分类器** —— 接了也是空转。
+    现在改成**从用户消息自己判定**，并且只做「不新增内容」的最小干预：
+
+      1. 用户消息命中确认/修复词（好了吗/是否/能不能/检查…）才生效；
+      2. 回复首行已是「结论：」→ 原样；
+      3. 首段是过程话术（让我确认/我先检查/找到线索…）且后面还有正文
+         → 在最前面加一行**诚实的**引导（不编造结论），让人一眼知道往哪看；
+      4. 其它情况（闲聊/解释/寒暄）→ 原样返回，绝不套格式。
     """
     s = str(reply or "")
     if not s.strip():
         return s
-    if str(intent or "").strip().lower() not in _CONFIRM_INTENTS:
+    u = str(user_msg or "")
+    if not any(w in u for w in _CONFIRM_WORDS):
         return s
-    first_line = s.lstrip().splitlines()[0] if s.lstrip() else ""
+    body = s.lstrip()
+    first_line = body.splitlines()[0] if body else ""
     if first_line.lstrip().startswith("结论："):
         return s
-    if any(first_line.lstrip().startswith(op) for op in _CONFIRM_OPENERS):
-        return _CONCLUSION_PLACEHOLDER + "\n" + s
-    return s
+    if not any(first_line.lstrip().startswith(op) for op in _CONFIRM_OPENERS):
+        return s
+    # 只有过程话术、后面没正文 → 别硬加引导（那会变成两句话都没内容）
+    if len([ln for ln in body.splitlines()[1:] if ln.strip()]) < 1:
+        return s
+    return _CONCLUSION_PLACEHOLDER + "\n" + s
 # 三段标题（用于识别与保留）
 _REPLY_SECTION_HEADS = ("结论：", "改动：", "验证：")
 
@@ -7160,6 +7174,14 @@ async def chat(req: ChatRequest,
         # 超限时优先整块保住「结论：/改动：/验证：」三段，其余按行累加，
         # 并在句末标点处收尾 —— 避免在「开始修」「等于」这类半句处硬切。
         # 注意：只裁「展示文本」，落盘的 `full` 仍是完整正文（历史不被破坏）。
+        # 结论前置（2026-11-15 接线）：`_force_conclusion_first` 以前也只定义没调用。
+        # 只在「用户问的是确认句（好了吗/是否正常/检查…）」且「模型以『让我确认』开头」时生效，
+        # 且只加一行**诚实**的引导，不编造结论 —— 闲聊/解释类完全不受影响。
+        # ⚠️ 必须在 _clip_reply 之前做：否则刚加到首行的引导会被长度裁剪切掉。
+        _pre = _force_conclusion_first(final_text, last_user)
+        if _pre != final_text:
+            logger.info("[conclusion-first] 首段是排查过程，已前置结论引导")
+            final_text = _pre
         _shown = _clip_reply(final_text)
         if len(_shown) < len(final_text):
             logger.warning("[reply-clip] 回复 %d 字超上限，展示裁到 %d 字（历史保留全文）",

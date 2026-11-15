@@ -303,6 +303,69 @@ def _c_l9():
         "range(len(x)-1) 的级别/条数不对：%s" % out
 
 
+@case("audit.logic.滑窗不报、真 off-by-one 仍报")
+def _c_l9b():
+    """降噪不能降成「瞎了」：2-gram 滑窗放过，真漏遍历必须还报。
+
+    ⚠️ 必须用**真实文件**测：`_near_slide` 要读源码上下文，
+    用 `_trees_of` 那种假路径读不到文件，会一律当成「没有滑窗特征」→ 测不出降噪。
+    """
+    import shutil
+    import tempfile
+
+    from . import code_audit as CA
+    d = tempfile.mkdtemp(prefix="slide_")
+    # ⚠️ 必须是 Path 对象：code_audit._read 调 p.read_text()，
+    #    传字符串会 AttributeError，而 _near_slide 的 except 会把它当成「没有滑窗特征」，
+    #    于是降噪**静默失效**、用例误报失败（踩过一次）。
+    p = Path(d) / "_probe_slide.py"
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(
+                "def bigram(ch):\n"
+                "    out = []\n"
+                "    for i in range(len(ch) - 1):\n"
+                "        out.append(ch[i:i + 2])\n"
+                "    return out\n"
+                "\n"
+                "def adj(x):\n"
+                "    for i in range(len(x) - 1):\n"
+                "        if x[i] > x[i + 1]:\n"
+                "            return True\n"
+                "    return False\n"
+                "\n"
+                "def real_offbyone(items):\n"
+                "    s = 0\n"
+                "    for i in range(len(items) - 1):\n"
+                "        s += items[i]\n"
+                "    return s\n")
+        with open(p, encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename=p)
+        out = CA._check_range_len_minus({"backend/_probe_slide.py": (p, tree)})
+        lines = [x["line"] for x in out]
+        assert len(out) == 1, "滑窗降噪不对：报了 %d 条（行 %s）" % (len(out), lines)
+        assert lines[0] == 15, "该报第 15 行（真 off-by-one），实际报 %s" % lines
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+@case("conclusion.闲聊/解释类不套结论引导")
+def _c_conf():
+    """结论前置只对「用户问确认句 + 模型以排查过程开头」生效，闲聊绝不能被改。"""
+    M = _clip_cases()
+    f = getattr(M, "_force_conclusion_first", None)
+    assert f is not None, "_force_conclusion_first 不见了（它必须被接线）"
+    body = "让我确认一下当前状态。\n\n检查完了，一切正常。"
+    # ① 用户问确认句 + 过程话术开头 → 前置引导
+    got = f(body, "好了吗")
+    assert got != body and got.startswith("结论："), "确认句没有前置结论引导：%r" % got[:60]
+    # ② 用户只是打招呼 → 一个字都不许改
+    assert f(body, "你好") == body, "闲聊轮次被套上了结论引导（正是要避免的过度格式化）"
+    # ③ 已有结论 → 不重复加
+    s2 = "结论：正常。\n\n细节略。"
+    assert f(s2, "好了吗") == s2, "已经有「结论：」却又加了一遍"
+
+
 @case("audit.logic.索引偏移越界")
 def _c_l10():
     from . import code_audit as CA

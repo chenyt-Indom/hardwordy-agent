@@ -392,6 +392,33 @@ def _check_subprocess_nowin(trees):
     return out
 
 
+# ---------------------------------------------------------------- 4a-3. 全局补丁检测
+
+def _has_global_nowin_patch(trees):
+    """main.py 里是否调用了 procwin.install_nowin_patch()。
+
+    装了之后，整个进程的 Popen.__init__ / _execute_child / _winapi.CreateProcess
+    都被打了 STARTF_USESHOWWINDOW + SW_HIDE —— 那么「某个文件没 import procwin」
+    就不再意味着会弹黑窗（实测：装了补丁的进程里跑 py_compile / node --check /
+    回归子进程，窗口数均为 0）。
+    所以有这个全局兜底时，subprocess 告警只作提示、不逐处报 high/mid，
+    否则一个项目就是几十条误报，信任模式还会照着去改 —— 那是真危险。
+    """
+    for rel, (p, tree) in trees.items():
+        src = _read(p)
+        if "install_nowin_patch" not in src:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if isinstance(fn, ast.Attribute) and fn.attr == "install_nowin_patch":
+                return True
+            if isinstance(fn, ast.Name) and fn.id == "install_nowin_patch":
+                return True
+    return False
+
+
 # ---------------------------------------------------------------- 4b. 使用未定义的名字
 
 def _star_imports(tree):
@@ -1065,6 +1092,24 @@ def _check_self_compare(trees):
     return out
 
 
+# 滑窗/相邻比较特征：`x[i:i + 2]`、`x[i + 1]`
+# 出现这些时，`range(len(x) - 1)` 是**必须**的写法（否则切片越界），不是 off-by-one。
+_SLIDE_RE = re.compile(
+    r"\[\s*\w+\s*:\s*\w+\s*\+\s*[1-9]\s*\]"
+    r"|\[\s*\w+\s*\+\s*1\s*\]")
+
+
+def _near_slide(p, lineno, span=4):
+    """命中行附近是否出现滑窗切片 / 相邻索引。"""
+    try:
+        lines = _read(p).splitlines()
+    except Exception:
+        return False
+    lo = max(0, lineno - 1 - span)
+    hi = min(len(lines), lineno - 1 + span + 1)
+    return bool(_SLIDE_RE.search("\n".join(lines[lo:hi])))
+
+
 def _check_range_len_minus(trees):
     """`range(len(x) - 1)` —— 少遍历最后一个元素的经典 off-by-one 写法。"""
     out = []
@@ -1088,6 +1133,11 @@ def _check_range_len_minus(trees):
                     #   ② 中文 bigram 切分 `ch[i:i+2]`（必须到 len-1，否则越界）
                     # 静态分不出「刻意少一个」和「写错少一个」，所以降到 info：
                     # 只作参考提示，不进 low 统计、更不会变成可执行动作。
+                    # ★ 三次降噪（2026-11-15）：既然上面两种形态都是**必须**这么写，
+                    #   就干脆识别出来不报 —— 上下文里有 `x[i:i+N]` 或 `x[i+1]` 即判定为
+                    #   滑窗/相邻比较。这样真实代码从 13 条 → 0 条，只剩真可疑的。
+                    if _near_slide(p, node.lineno):
+                        continue
                     out.append(_finding(
                         "info", "range-len-minus", rel, node.lineno,
                         "`range(len(...) - 1)` 少遍历最后一个元素 —— 若是在比较相邻元素或做"
@@ -1176,6 +1226,30 @@ def audit(deep_files=None):
     findings += _check_self_compare(trees)
     findings += _check_range_len_minus(trees)
     findings += _check_index_shift(trees)
+    # ⚠️ 2026-11-15 补：这两个检查器早就写好了，但 audit() 里一直没调用 ——
+    #    等于黑窗口那类问题从来没被静态检查覆盖过。补上接线。
+    #    ★ 但直接接上会炸出 38 条告警（21 high + 17 mid），全是误报：
+    #      判据是「本文件没 import procwin」，而 main.py 里 install_nowin_patch()
+    #      是**全局**补丁，整个进程的子进程都被兜住了。所以先看有没有全局补丁：
+    #      有 → 合并成 1 条 info 提示（不自动改）；没有 → 保持原级别（这时才是真风险）。
+    _sub = _check_subprocess_bypass(trees) + _check_subprocess_nowin(trees)
+    if _has_global_nowin_patch(trees):
+        _seen, _locs = set(), []
+        for _f in _sub:
+            _k = (_f["file"], _f["line"])
+            if _k in _seen:
+                continue
+            _seen.add(_k)
+            _locs.append("%s:%d" % (Path(str(_f["file"])).name, _f["line"]))
+        if _locs:
+            findings.append(_finding(
+                "info", "subprocess-global-patched", "backend/main.py", 76,
+                "检测到 %d 处 subprocess 直接调用，但 procwin.install_nowin_patch() 已全局兜住"
+                "（实测窗口数 0），故不逐处报 high/mid" % len(_locs),
+                "显式传 creationflags=procwin.NOWIN 更稳妥；位置：" + ", ".join(_locs[:10])
+                + ("…" if len(_locs) > 10 else "")))
+    else:
+        findings += _sub
     findings += _check_js_syntax()
 
     # 去重（同文件同种类同位置同描述只留一条）
