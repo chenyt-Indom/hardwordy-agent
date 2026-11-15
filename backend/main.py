@@ -11263,7 +11263,8 @@ def avatar2_cloud_estimate(body: dict):
     from . import avatar_cloud as ac
     return ac.estimate(str(body.get("text") or ""),
                        resolution=str(body.get("resolution") or ""),
-                       rate=body.get("rate"))
+                       rate=body.get("rate"),
+                       mode=str(body.get("mode") or ""))
 
 
 @app.post("/api/avatar2/cloud/speak")
@@ -11284,7 +11285,9 @@ def avatar2_cloud_speak(body: dict):
     r = avatar2.speak_async(text,
                             voice=str(body.get("voice") or ""),
                             rate=rate, style=style,
-                            resolution=str(body.get("resolution") or ""))
+                            resolution=str(body.get("resolution") or ""),
+                            mode=str(body.get("mode") or ""),
+                            force_base=bool(body.get("force_base")))
     if r.get("ok"):
         r.update({"mood": cfg.get("key", "calm"),
                   "mood_label": cfg.get("label", "平静"),
@@ -11308,6 +11311,51 @@ def avatar2_cloud_cancel(jid: str):
     """
     from . import avatar_cloud as ac
     return ac.cancel(jid)
+
+
+# ---------------------------------------------------------------- 数字人 · 省钱档基础视频
+# VideoRetalk 只吃「视频 + 音频」，所以省钱档要先有一条基础视频。
+# 这是**一次性**成本（720P × 5 秒 ≈ 1 元），做好之后每次配音都复用。
+@app.get("/api/avatar2/cloud/base")
+def avatar2_cloud_base_info():
+    """基础视频状态：有没有、多大、多少秒。"""
+    from . import avatar_cloud as ac
+    c = ac.config()
+    return {
+        "ok": True,
+        "ready": bool(c.get("base_ready")),
+        "bytes": c.get("base_bytes") or 0,
+        "resolution": c.get("base_resolution"),
+        "sec": ac.BASE_VIDEO_SEC,
+        "path": ac._base_path(),
+        "price_per_sec": ac.PRICE["i2v_flash"],
+        "est_cost": round(ac.BASE_VIDEO_SEC
+                          * ac.PRICE["i2v_flash"].get(c.get("base_resolution") or "720P", 0.20), 2),
+    }
+
+
+@app.post("/api/avatar2/cloud/base")
+def avatar2_cloud_base_make(body: dict = None):
+    """生成或重做基础视频（约 1 元、30~60 秒）。
+
+    同步返回 —— 前端在按钮上显示「生成中」即可。失败会把原因原样带回去，
+    不吞掉（欠费/权限这类问题用户必须看到原文才知道怎么处理）。
+    """
+    from . import avatar_cloud as ac
+    from . import avatar2 as av2
+    body = body or {}
+    p = av2._img_path()
+    if not os.path.isfile(p):
+        raise HTTPException(status_code=400, detail="还没有数字人形象，请先上传一张图")
+    if not (ac._cfg().get("api_key") or "").strip():
+        raise HTTPException(status_code=400, detail="还没填 API Key，去百炼控制台拿一个")
+    try:
+        r = ac.make_base_video(p, resolution=str(body.get("resolution") or ""))
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("基础视频生成失败", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e).strip() or type(e).__name__)
+    return {"ok": True, "path": r.get("path"), "sec": r.get("sec"),
+            "resolution": r.get("resolution"), "bytes": os.path.getsize(r["path"])}
 
 
 @app.get("/api/avatar2/raw")

@@ -270,7 +270,8 @@ def speak_cloud(text: str, voice: str = "", rate=None, style: str = "",
 
 
 def speak_async(text: str, voice: str = "", rate=None, style: str = "",
-                resolution: str = "") -> dict:
+                resolution: str = "", mode: str = "",
+                force_base: bool = False) -> dict:
     """云端生成的异步版：立刻返回 job_id，前端轮询进度。
 
     一次生成 1~3 分钟（长文本切多段更久），挂在 HTTP 长连接上很容易被中间层
@@ -294,7 +295,8 @@ def speak_async(text: str, voice: str = "", rate=None, style: str = "",
     if not a.get("ok"):
         return {"ok": False, "error": "配音失败：%s" % a.get("error")}
 
-    jid = ac.generate_async(_img_path(), a.get("path") or "", resolution=resolution)
+    jid = ac.generate_async(_img_path(), a.get("path") or "", resolution=resolution,
+                            mode=mode, force_base=force_base)
     return {"ok": True, "job_id": jid}
 
 

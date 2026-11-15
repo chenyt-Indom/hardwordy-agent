@@ -236,6 +236,15 @@ def _record(rec: dict) -> None:
         runs.append(rec)
         d["runs"] = runs[-_HIST_MAX:]
         _save(d)
+    # 再同步一份到「迭代想法 → 自我维护 → 重启自检」那一项。
+    # 界面上的「上次运行 / 历史 / 立即运行」都是从 selfmaint 读的，
+    # 不写过去的话，用户会看到「还没跑过」，而实际刚跑完。
+    # 放在 _LOCK 外面：两把锁不嵌套，避免以后有人反向调用时死锁。
+    try:
+        from . import selfmaint as _sm
+        _sm.record_boot(rec)
+    except Exception:                                    # noqa: BLE001
+        logger.debug("同步到自我维护失败（不影响自检结果）", exc_info=True)
 
 
 def last() -> dict:

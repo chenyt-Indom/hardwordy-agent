@@ -54,10 +54,18 @@ _DEF = {
     "api_key": "",
     "resolution": "480P",
     "model": "wan2.2-s2v",
+    # mode：两档价格差 11 倍，由用户自己切（2026-11-16 加）
+    #   cheap = 基础视频 + VideoRetalk，0.08 元/秒，有 1800 秒免费额度
+    #   hd    = Wan2.2-S2V 单图直出，0.5/0.9 元/秒，无免费额度
+    "mode": "cheap",
+    "base_resolution": "720P",   # 基础视频分辨率（VideoRetalk 输出 = 输入分辨率）
 }
 # 说明：旧配置里可能还留着 workspace_id，读取时忽略即可，不做迁移。
 
 MAX_AUDIO_SEC = 19.0      # 官方限制 <20 秒，留 1 秒余量
+# VideoRetalk 官方限制「2 秒 < 时长 < 120 秒」，取 100 秒留足余量：
+# 它同时只允许 1 个任务在跑（RPS 1 / 并发 1），切得越少越快。
+MAX_RETALK_SEC = 100.0
 POLL_INTERVAL = 4.0       # 轮询间隔（秒）
 POLL_TIMEOUT = 1200       # 单段最长等 20 分钟
 DOWNLOAD_TIMEOUT = 300
@@ -72,6 +80,10 @@ DOWNLOAD_TIMEOUT = 300
 # 扣掉上传/提交/下载的固定开销约 8 秒，折成「每 1 秒音频要等多少秒」。
 SEG_OVERHEAD = 8.0
 FACTOR_DEF = {"480P": 13.5, "720P": 19.6}
+# VideoRetalk 只做口型替换，不逐帧重绘整张脸，比 S2V 快得多。
+# 这个 3.0 是**初值**（没有实测样本），每段跑完会用真实耗时自我校正
+# （见 generate 里的 _learn），所以第一段之后就会变准。
+FACTOR_RETALK = 3.0
 
 # ---------------------------------------------------------------- 并行生成
 # 为什么并行：接口硬限制单段 <20 秒，60 秒音频要切 4 段。原来是一段跑完
@@ -143,19 +155,35 @@ def config() -> dict:
     """给前端读的配置视图。api_key 只回脱敏值，绝不回明文。"""
     c = _cfg()
     k = (c.get("api_key") or "").strip()
+    _mode = (c.get("mode") or "cheap").lower()
+    if _mode not in ("cheap", "hd"):
+        _mode = "cheap"
+    bp = _base_path()
+    has_base = os.path.isfile(bp) and os.path.getsize(bp) > 10000
     return {
         "ok": True,
         "has_key": bool(k),
         "api_key": _mask(k),
         "resolution": c.get("resolution") or "480P",
         "model": c.get("model") or "wan2.2-s2v",
+        "mode": _mode,
+        "base_resolution": (c.get("base_resolution") or "720P").upper(),
+        "base_ready": has_base,
+        "base_bytes": os.path.getsize(bp) if has_base else 0,
         "ready": bool(k),
-        "max_audio_sec": MAX_AUDIO_SEC,
+        "max_audio_sec": (MAX_RETALK_SEC if _mode == "cheap" else MAX_AUDIO_SEC),
         "signup_url": SIGNUP_URL,
         "key_url": KEY_URL,
         "doc_url": DOC_URL,
         "price_url": PRICE_URL,
         "missing": [] if k else ["API Key"],
+        # 单价与免费额度：必须让用户在界面上看得见。
+        # 原来这两个数只写在代码注释里，用户只能靠猜「贵不贵」。
+        # 数值来自 PRICE 表（官方计费页 2026-11-16 核对，不是估的）。
+        "price_per_sec": (PRICE["retalk"] if _mode == "cheap"
+                          else PRICE["s2v"].get(
+                              (c.get("resolution") or "480P").upper(), 0.5)),
+        "free_seconds": (1800 if _mode == "cheap" else 0),
     }
 
 
@@ -192,6 +220,18 @@ def set_config(d: dict) -> dict:
         v = str(d.get("model") or "").strip()
         if v:
             c["model"] = v
+    if "mode" in d:
+        v = str(d.get("mode") or "").strip().lower()
+        if v in ("cheap", "hd"):
+            c["mode"] = v
+        elif v:
+            return {"ok": False, "error": "档位只能是 cheap（省钱）或 hd（高清）"}
+    if "base_resolution" in d:
+        v = str(d.get("base_resolution") or "").strip().upper()
+        if v in ("480P", "720P", "1080P"):
+            c["base_resolution"] = v
+        elif v:
+            return {"ok": False, "error": "基础视频分辨率只能是 480P / 720P / 1080P"}
     _save_cfg(c)
     out = config()
     out["saved"] = True
@@ -437,6 +477,147 @@ def download(url: str, out_path: str) -> str:
     return out_path
 
 
+# ---------------------------------------------------------------- 省钱档：基础视频 + VideoRetalk
+# 为什么换（2026-11-16，官方计费页实测）
+#   wan2.2-s2v：480P 0.5 元/秒、720P 0.9 元/秒，**无免费额度**；
+#   videoretalk：0.08 元/秒，**免费额度 1800 秒（30 分钟）** —— 差 11 倍。
+#   代价：VideoRetalk 只吃「视频 + 音频」，不吃单张图片，所以要先做基础视频。
+#
+# 基础视频是一次性成本：wan2.2-i2v-flash 720P 0.2 元/秒 × 固定 5 秒 ≈ 1 元，
+# 存下来之后每次配音都复用（除非用户点「重做基础视频」）。
+#
+# 为什么不用 wan2.6-i2v-flash：它带「智能分镜」，可能切成多镜头。
+# 数字人最怕镜头跳，wan2.2-i2v-flash 是单镜头、固定 5 秒，最稳。
+
+BASE_VIDEO_SEC = 5
+BASE_PROMPT = (
+    "人物正面面对镜头，自然呼吸，偶尔眨眼，头部有非常轻微的点动，"
+    "表情放松自然，嘴唇自然闭合保持安静，身体基本静止，"
+    "镜头固定不动，光线均匀柔和，画面清晰稳定"
+)
+
+
+def _base_path() -> str:
+    return os.path.join(_dir(), "base_video.mp4")
+
+
+def make_base_video(image_path: str, resolution: str = "", on_progress=None,
+                    cancel=None) -> dict:
+    """图生视频 → 一条 5 秒基础视频（人物呼吸/眨眼/轻微点头，不说话）。"""
+    res = (resolution or _cfg().get("base_resolution") or "720P").upper()
+    if not os.path.isfile(image_path):
+        raise RuntimeError("形象图不存在：%s" % os.path.basename(image_path))
+    if cancel is not None and cancel.is_set():
+        raise Cancelled("已停止生成")
+
+    def _p(d):
+        if on_progress:
+            try:
+                on_progress(d)
+            except Exception:                               # noqa: BLE001
+                logger.debug("progress 回调失败", exc_info=True)
+
+    _p({"stage": "base", "msg": "生成基础视频（只做一次，之后复用）"})
+    img_url = upload(image_path, model="wan2.2-i2v-flash")
+    payload = {
+        "model": "wan2.2-i2v-flash",
+        "input": {"prompt": BASE_PROMPT, "img_url": img_url},
+        "parameters": {"resolution": res, "duration": BASE_VIDEO_SEC,
+                       "prompt_extend": False, "watermark": False},
+    }
+    body = _post(_base() + "/services/aigc/video-generation/video-synthesis", payload)
+    tid = (body.get("output") or {}).get("task_id") or ""
+    if not tid:
+        raise RuntimeError("基础视频没拿到 task_id：%s" % str(body)[:300])
+    if cancel is not None and cancel.is_set():
+        raise Cancelled("已停止生成")
+    r = wait(tid, cancel=cancel)
+    out = _base_path()
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    download(r["video_url"], out)
+    _p({"stage": "base_done", "msg": "基础视频已就绪"})
+    return {"path": out, "resolution": res, "sec": audio_duration(out)}
+
+
+def ensure_base_video(image_path: str, force: bool = False, on_progress=None,
+                      cancel=None) -> dict:
+    """有缓存就用缓存；没有（或用户要求重做）才花钱生成。"""
+    p = _base_path()
+    if not force and os.path.isfile(p) and os.path.getsize(p) > 10000:
+        return {"path": p, "cached": True, "sec": audio_duration(p)}
+    return make_base_video(image_path, on_progress=on_progress, cancel=cancel)
+
+
+def _fit_video(src: str, target_sec: float, out_path: str) -> str:
+    """把基础视频做成 target_sec 秒。
+
+    VideoRetalk 要求视频和音频时长一致：音频长了会被截断、视频长了
+    输出也就那么长。所以先自己把长度对上。
+
+    做法是 pingpong（正放-倒放-正放…）循环：呼吸、眨眼这类往复动作
+    本来就该来回，看不出接缝，比硬循环（跳帧）自然得多。
+    """
+    exe = _ffmpeg()
+    src_sec = audio_duration(src)
+    if src_sec <= 0:
+        raise RuntimeError("读不出基础视频时长：%s" % os.path.basename(src))
+    if target_sec <= src_sec + 0.05:
+        p = subprocess.run([exe, "-y", "-hide_banner", "-loglevel", "error",
+                            "-i", src, "-t", "%.3f" % target_sec,
+                            "-an", "-c:v", "libx264", "-preset", "veryfast",
+                            "-crf", "18", "-pix_fmt", "yuv420p", out_path],
+                           capture_output=True, timeout=300)
+        if p.returncode != 0:
+            raise RuntimeError("裁剪基础视频失败：%s"
+                               % (p.stderr or b"")[:300].decode("utf-8", "ignore"))
+        return out_path
+
+    # 先做一个「正放 + 倒放」的循环单元（长度 = 2 × 原长）
+    unit = out_path + ".unit.mp4"
+    p = subprocess.run([exe, "-y", "-hide_banner", "-loglevel", "error", "-i", src,
+                        "-filter_complex",
+                        "[0:v]split[a][b];[b]reverse[r];[a][r]concat=n=2:v=1[out]",
+                        "-map", "[out]", "-an", "-c:v", "libx264",
+                        "-preset", "veryfast", "-crf", "18",
+                        "-pix_fmt", "yuv420p", unit],
+                       capture_output=True, timeout=600)
+    if p.returncode != 0:
+        raise RuntimeError("生成 pingpong 循环单元失败：%s"
+                           % (p.stderr or b"")[:300].decode("utf-8", "ignore"))
+    try:
+        p2 = subprocess.run([exe, "-y", "-hide_banner", "-loglevel", "error",
+                             "-stream_loop", "-1", "-i", unit,
+                             "-t", "%.3f" % target_sec, "-an",
+                             "-c:v", "libx264", "-preset", "veryfast",
+                             "-crf", "18", "-pix_fmt", "yuv420p", out_path],
+                            capture_output=True, timeout=600)
+        if p2.returncode != 0:
+            raise RuntimeError("扩展基础视频失败：%s"
+                               % (p2.stderr or b"")[:300].decode("utf-8", "ignore"))
+    finally:
+        try:
+            os.remove(unit)
+        except OSError:
+            pass
+    return out_path
+
+
+def submit_retalk(video_url: str, audio_url: str) -> str:
+    """提交一个 VideoRetalk 任务（视频 + 音频 → 对口型视频）。"""
+    payload = {
+        "model": "videoretalk",
+        "input": {"video_url": video_url, "audio_url": audio_url},
+        # video_extension=False：我们自己把视频做成和音频一样长，
+        # 不让它再叠一层「倒放-正放」扩展，避免两个机制打架。
+        "parameters": {"video_extension": False},
+    }
+    body = _post(_base() + "/services/aigc/image2video/video-synthesis", payload)
+    tid = (body.get("output") or {}).get("task_id") or ""
+    if not tid:
+        raise RuntimeError("VideoRetalk 没拿到 task_id：%s" % str(body)[:300])
+    return tid
+
+
 # ---------------------------------------------------------------- 音频切段 / 视频拼接
 def _ffmpeg() -> str:
     """复用 avatar2 的查找逻辑（PATH 里没有也能找到打包自带的）。"""
@@ -539,15 +720,21 @@ def concat_videos(paths: list, out_path: str) -> str:
 
 # ---------------------------------------------------------------- 主流程
 def generate(image_path: str, audio_path: str, resolution: str = "",
-             on_progress=None, keep_tmp: bool = False, cancel=None) -> dict:
+             on_progress=None, keep_tmp: bool = False, cancel=None,
+             mode: str = "", force_base: bool = False) -> dict:
     """一张图 + 一段音频 → 说话视频。
 
-    长音频会切成多段分别生成再拼接，因为接口硬限制单次 <20 秒。
+    两种档位（价格差 11 倍，见文件头注释）：
+      mode="cheap" 基础视频 + VideoRetalk，0.08 元/秒，单段可到 100 秒
+      mode="hd"    Wan2.2-S2V 单图直出，0.5/0.9 元/秒，单段 <20 秒
 
     cancel：threading.Event。用户点「停止」后，会在**下一个检查点**退出：
     每段开始前、每次轮询时各查一次，所以最多 2 秒响应。
     """
     c = _cfg()
+    _mode = (mode or c.get("mode") or "cheap").lower()
+    if _mode not in ("cheap", "hd"):
+        _mode = "cheap"
     if not (c.get("api_key") or "").strip():
         return {
             "ok": False, "need_key": True,
@@ -573,7 +760,10 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
         # ⚠ 短音频不需要切段时，split_audio 返回的就是**原始输入文件**。
         #   如果把它也塞进 tmp_files，finally 里就会把用户的音频删掉
         #   （实测踩到：8 秒的测试音频跑完就没了）。所以只清理自己新建的段。
-        segs = split_audio(audio_path)
+        # VideoRetalk 单段可到 100 秒（官方 <120 秒），S2V 只能 19 秒 ——
+        # 所以同样一段 60 秒音频，省钱档 1 段就够，高清档要切 4 段。
+        _seg_max = MAX_RETALK_SEC if _mode == "cheap" else MAX_AUDIO_SEC
+        segs = split_audio(audio_path, _seg_max)
         _src_abs = os.path.abspath(audio_path)
         tmp_files.extend([s for s in segs if os.path.abspath(s) != _src_abs])
         total = len(segs)
@@ -586,17 +776,31 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
             segs_sec = [0.0] * total
         _p({"stage": "split", "total": total, "segs_sec": segs_sec,
             "audio_total": sum(segs_sec),
-            "msg": "音频 %d 段（单段上限 %.0f 秒）" % (total, MAX_AUDIO_SEC)})
+            "msg": "音频 %d 段（单段上限 %.0f 秒）" % (total, _seg_max)})
 
-        # 2) 图片只需传一次
-        _p({"stage": "upload", "msg": "上传形象图"})
-        img_url = upload(image_path)
+        # 2) 素材准备
+        img_url = ""
+        base = None
+        if _mode == "cheap":
+            # 基础视频有缓存就复用（不花钱）；没有才生成一次（约 1 元）
+            base = ensure_base_video(image_path, force=force_base,
+                                     on_progress=_p, cancel=cancel)
+            _p({"stage": "upload", "total": total, "segs_sec": segs_sec,
+                "audio_total": sum(segs_sec),
+                "msg": "基础视频就绪（%s）" % ("复用已有" if base.get("cached")
+                                              else "刚生成")})
+        else:
+            _p({"stage": "upload", "msg": "上传形象图"})
+            img_url = upload(image_path)
 
         # 3) 并行生成
         # 分两步：先「上传 + 提交」全部段（每段 1~2 秒，串行更快也更稳 ——
         # 并发提交最容易撞配额），再**同时等**。等待占了总耗时的 95% 以上，
         # 所以并行等待就是全部的提速来源。
-        workers = max(1, min(PARALLEL_WORKERS, total))
+        # ⚠ VideoRetalk 官方写明「同时处理中任务数量：1」（RPS 1）——
+        # 并行提交只会排队，进度反而更难估，所以省钱档固定单路。
+        # 好在它单段能到 100 秒，通常 1~2 段就完事，并行本来也没多少收益。
+        workers = 1 if _mode == "cheap" else max(1, min(PARALLEL_WORKERS, total))
         _p({"stage": "submit_all", "index": 0, "total": total,
             "audio_total": sum(segs_sec), "segs_sec": segs_sec,
             "workers": workers, "done_sec": 0.0,
@@ -614,7 +818,23 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
             a_url = upload(seg)
             if cancel is not None and cancel.is_set():
                 raise Cancelled("已停止生成（第 %d/%d 段未提交）" % (i, total))
-            tid = submit(img_url, a_url, resolution)
+            if _mode == "cheap":
+                # 基础视频只有 5 秒，这段音频多长就把视频 pingpong 到多长，
+                # 否则 VideoRetalk 会把音频截断（它按视频长度出片）。
+                _len = _sec or audio_duration(seg)
+                vpath = os.path.join(_tmpdir(), "fit_%s_%02d.mp4"
+                                     % (uuid.uuid4().hex[:6], i))
+                _fit_video(base["path"], _len, vpath)
+                tmp_files.append(vpath)
+                _p({"stage": "submit_all", "index": i, "total": total,
+                    "segs_sec": segs_sec, "workers": workers,
+                    "msg": "上传第 %d/%d 段视频" % (i, total)})
+                v_url = upload(vpath, model="videoretalk")
+                if cancel is not None and cancel.is_set():
+                    raise Cancelled("已停止生成（第 %d/%d 段未提交）" % (i, total))
+                tid = submit_retalk(v_url, a_url)
+            else:
+                tid = submit(img_url, a_url, resolution)
             jobs.append({"i": i, "tid": tid, "sec": _sec, "t0": time.time()})
 
         # 并行等待。⚠ 某段失败时**不立刻抛**：其余段已经提交、钱已经花了，
@@ -703,9 +923,14 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
             "duration": round(dur, 2),
             "segments": total,
             "elapsed": round(time.time() - t0, 1),
-            "engine": "cloud:wan2.2-s2v",
-            "resolution": (resolution or c.get("resolution") or "480P").upper(),
-            "lipsync_label": "云端扩散模型口型（Wan2.2-S2V）",
+            "mode": _mode,
+            "engine": ("cloud:videoretalk" if _mode == "cheap"
+                       else "cloud:wan2.2-s2v"),
+            "resolution": ((base or {}).get("resolution")
+                           if _mode == "cheap"
+                           else (resolution or c.get("resolution") or "480P").upper()),
+            "lipsync_label": ("云端口型替换（VideoRetalk · 省钱档）" if _mode == "cheap"
+                              else "云端扩散模型口型（Wan2.2-S2V · 高清档）"),
         }
     except Cancelled as e:
         # 用户主动停止 —— 这不是错误，不要打 warning 日志，也不该报红
@@ -751,6 +976,8 @@ def _factor(d: dict) -> float:
     v = float(d.get("factor") or 0)
     if v > 0:
         return v
+    if (d.get("mode") or "").lower() == "cheap":
+        return FACTOR_RETALK
     return FACTOR_DEF.get((d.get("resolution") or "480P").upper(), 14.0)
 
 
@@ -793,6 +1020,11 @@ def _progress(d: dict, now: float = None) -> dict:
         return out
     if stage in ("", "pending"):
         out["pct"] = 0.5
+        return out
+    if stage in ("base", "base_done"):
+        # 省钱档第一次要先做基础视频（约 1 元、几十秒）。这一步没有音频
+        # 时长可参考，只能给个象征值 —— 别让它显示 0.5% 像卡死了。
+        out["pct"] = 3.0 if stage == "base" else 5.0
         return out
     if stage == "upload":
         out["pct"] = 4.0
@@ -933,6 +1165,9 @@ def generate_async(image_path: str, audio_path: str, resolution: str = "",
     _gc_jobs()
     jid = uuid.uuid4().hex[:12]
     _res = (resolution or _cfg().get("resolution") or "480P").upper()
+    _mode = str(kw.get("mode") or _cfg().get("mode") or "cheap").lower()
+    if _mode not in ("cheap", "hd"):
+        _mode = "cheap"
     with _JOB_LOCK:
         _JOBS[jid] = {
             "ok": True, "job_id": jid, "status": "pending",
@@ -941,6 +1176,7 @@ def generate_async(image_path: str, audio_path: str, resolution: str = "",
             "result": None, "error": "",
             # —— 进度用（见 _progress）——
             "resolution": _res,
+            "mode": _mode,
             "audio_total": 0.0,     # 全部音频共几秒
             "done_sec": 0.0,        # 已完成几秒音频
             "seg_sec": 0.0,         # 当前这段音频几秒
@@ -1008,9 +1244,21 @@ def generate_async(image_path: str, audio_path: str, resolution: str = "",
 CHARS_PER_SEC = 4.5
 
 
-def estimate(text: str, resolution: str = "", rate=None) -> dict:
-    """不调用任何外部接口，纯本地算：几段、大概等多久。"""
+# 官方计费页（2026-11-16 核对）的真实单价，单位「元/秒」。
+# 界面上的预估花费就是按这张表算的 —— 不是猜的。
+PRICE = {
+    "retalk": 0.08,                                   # videoretalk
+    "s2v": {"480P": 0.5, "720P": 0.9},                # wan2.2-s2v
+    "i2v_flash": {"480P": 0.10, "720P": 0.20, "1080P": 0.48},  # 基础视频
+}
+
+
+def estimate(text: str, resolution: str = "", rate=None, mode: str = "") -> dict:
+    """不调用任何外部接口，纯本地算：几段、大概等多久、大概花多少钱。"""
     c = _cfg()
+    _mode = (mode or c.get("mode") or "cheap").lower()
+    if _mode not in ("cheap", "hd"):
+        _mode = "cheap"
     res = (resolution or c.get("resolution") or "480P").upper()
     t = (text or "").strip()
     if not t:
@@ -1028,28 +1276,58 @@ def estimate(text: str, resolution: str = "", rate=None) -> dict:
         speed = CHARS_PER_SEC
     sec = units / speed
 
-    # 按并行分批算等待：每批取最长那段
-    f = FACTOR_DEF.get(res, 14.0)
-    left = sec
-    segs = []
-    while left > 0:
-        s = min(MAX_AUDIO_SEC, left)
-        segs.append(s)
-        left -= s
-    wk = max(1, min(PARALLEL_WORKERS, len(segs)))
+    # 切段与等待：两档的单段上限和速度完全不同
+    if _mode == "cheap":
+        seg_max = MAX_RETALK_SEC
+        f = FACTOR_RETALK
+        segs = []
+        left = sec
+        while left > 0:
+            s = min(seg_max, left)
+            segs.append(s)
+            left -= s
+        wk = 1                      # VideoRetalk 云端并发只有 1
+    else:
+        seg_max = MAX_AUDIO_SEC
+        f = FACTOR_DEF.get(res, 14.0)
+        segs = []
+        left = sec
+        while left > 0:
+            s = min(seg_max, left)
+            segs.append(s)
+            left -= s
+        wk = max(1, min(PARALLEL_WORKERS, len(segs)))
     wait = 0.0
     for k in range(0, len(segs), wk):
         batch = segs[k:k + wk]
         wait += max(s * f + SEG_OVERHEAD for s in batch)
+
+    # 花费：按官方单价算，不含任何优惠/免费额度
+    base_res = (c.get("base_resolution") or "720P").upper()
+    if _mode == "cheap":
+        cost = sec * PRICE["retalk"]
+        base_cost = BASE_VIDEO_SEC * PRICE["i2v_flash"].get(base_res, 0.20)
+        have_base = os.path.isfile(_base_path()) and os.path.getsize(_base_path()) > 10000
+        if not have_base:
+            cost += base_cost
+            wait += 40.0        # 首次还要多做一条基础视频，约 40 秒
+    else:
+        cost = sec * PRICE["s2v"].get(res, 0.9)
+        base_cost = 0.0
+        have_base = True
     return {
         "ok": True,
+        "mode": _mode,
         "text_len": len(t),
         "est_sec": round(sec, 1),
         "segments": len(segs),
         "workers": wk,
-        "resolution": res,
+        "resolution": (base_res if _mode == "cheap" else res),
         "est_wait": int(round(wait)),
-        "max_audio_sec": MAX_AUDIO_SEC,
+        "est_cost": round(cost, 2),
+        "base_cost": round(base_cost, 2),
+        "base_cached": bool(have_base),
+        "max_audio_sec": seg_max,
         "chars_per_sec": CHARS_PER_SEC,
         "note": "按 %.1f 字/秒估算，实际以配音后的真实时长为准" % CHARS_PER_SEC,
     }
@@ -1062,13 +1340,24 @@ def status() -> dict:
         ff = True
     except Exception:                                       # noqa: BLE001
         ff = False
+    bp = _base_path()
+    has_base = os.path.isfile(bp) and os.path.getsize(bp) > 10000
+    _mode = (c.get("mode") or "cheap").lower()
     return {
         "ok": True,
         "ready": c["ready"],
         "has_key": c["has_key"],
         "resolution": c["resolution"],
         "model": c["model"],
-        "max_audio_sec": MAX_AUDIO_SEC,
+        "mode": _mode,
+        "base_resolution": c.get("base_resolution") or "720P",
+        "base_ready": has_base,
+        "base_bytes": os.path.getsize(bp) if has_base else 0,
+        "base_sec": round(audio_duration(bp), 1) if has_base else 0,
+        "max_audio_sec": (MAX_RETALK_SEC if _mode == "cheap" else MAX_AUDIO_SEC),
+        "price": {"retalk": PRICE["retalk"],
+                  "s2v": PRICE["s2v"],
+                  "i2v_flash": PRICE["i2v_flash"]},
         "ffmpeg": ff,
         "note": ("已配置，可以生成" if c["ready"]
                  else "缺：" + "、".join(c["missing"])),

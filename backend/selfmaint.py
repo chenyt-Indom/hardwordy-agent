@@ -69,9 +69,9 @@ _DEFS = (
      "desc": "评估最近几轮对话的完成度与效率，不好就想怎么改",
      "at_time": "", "every_minutes": 120, "gate": False,
      "legacy_name": "定时体验评估"},
-    {"kind": "selfidle", "name": "抽空自检", "icon": "🌙",
-     "desc": "闲下来才跑一遍自检，不打扰你",
-     "at_time": "", "every_minutes": 20, "gate": True,
+    {"kind": "selfidle", "name": "重启自检", "icon": "🌙",
+     "desc": "每次重启后扫一遍自己的代码，只查不改",
+     "at_time": "", "every_minutes": 0, "gate": False, "on_boot": True,
      "legacy_name": "抽空代码自检"},
 )
 
@@ -106,6 +106,10 @@ def _parse_hhmm(s: str):
 def next_run(it: dict, base: float = None) -> float:
     """算下一次该跑的时间戳（0 = 不排期）。逻辑与 scheduler._next_run 一致。"""
     base = time.time() if base is None else base
+    # 重启触发项（on_boot）不排期：返回 0 = 永不自动到点，
+    # 由启动钩子调 bootaudit 来触发，见 record_boot()。
+    if it.get("on_boot"):
+        return 0
     if it.get("every_minutes"):
         try:
             mins = max(1, int(it["every_minutes"]))
@@ -126,6 +130,8 @@ def next_run(it: dict, base: float = None) -> float:
 
 
 def describe(it: dict) -> str:
+    if it.get("on_boot"):
+        return "每次重启后"
     if it.get("every_minutes"):
         return "每 %s 分钟" % it["every_minutes"]
     if it.get("at_time"):
@@ -137,6 +143,7 @@ def describe(it: dict) -> str:
 def _blank_item(d: dict) -> dict:
     it = {"kind": d["kind"], "enabled": True,
           "at_time": d["at_time"], "every_minutes": d["every_minutes"],
+          "on_boot": bool(d.get("on_boot")),
           "last_run": "", "last_status": "", "last_preview": "",
           "last_seconds": 0, "next_run": 0, "runs": []}
     it["next_run"] = next_run(it)
@@ -174,6 +181,17 @@ def _ensure(raw: dict = None) -> dict:
         if not isinstance(cur.get("runs"), list):
             cur["runs"] = []
             changed = True
+        # 2026-11-16：selfidle 从「每 20 分钟」改成「每次重启后」。
+        # 老数据里存着 every_minutes=20 和排好的 next_run，光改 _DEFS 不生效
+        # （_ensure 的规矩是「已存在的值不动」），所以这里显式纠正一次：
+        # 节律归零 → due_items / catchup 都不会再自动调度它。
+        if d.get("on_boot"):
+            if cur.get("every_minutes"):
+                cur["every_minutes"] = 0
+                changed = True
+            if cur.get("next_run"):
+                cur["next_run"] = 0
+                changed = True
     out = dict(raw)
     out["items"] = items
     if changed:
@@ -460,6 +478,33 @@ def _record(kind: str, ok: bool, preview: str, seconds: float,
         _save(st)
 
 
+def record_boot(rec: dict) -> None:
+    """把「重启后自检」（bootaudit）的结果记到 selfidle 这一项上。
+
+    为什么要有这个函数
+    ----------------
+    selfidle 原来是「每 20 分钟定时跑一遍 run_audit」。用户 2026-11-16 说
+    「太频繁了，改成每次迭代重启后再自检」。执行体换成了 bootaudit.py
+    （每次启动 6 秒后自动跑，只查不改），但**界面上的「上次运行 / 历史」
+    还是从 selfmaint 的状态里读**，所以这里做一次桥接：
+    bootaudit 跑完 → 调本函数 → selfidle 项就有记录了。
+
+    只写状态，不触发任何执行 —— 跑是调用方（bootaudit）的事。
+    """
+    try:
+        v = str(rec.get("verdict") or "")
+        # fail 才算失败；warn（只有 mid）和 pass 都记成 ok
+        ok = bool(rec.get("ok", True)) and v != "fail"
+        text = str(rec.get("text") or "")
+        if not text:
+            text = "重启自检：%s" % (rec.get("error") or v or "完成")
+        _record("selfidle", ok, text[:300], float(rec.get("seconds") or 0),
+                status_text=(v or ("ok" if ok else "error")))
+    except Exception:                                    # noqa: BLE001
+        # 记录失败绝不能反过来影响自检本身
+        logger.debug("record_boot 写入失败（不影响自检）", exc_info=True)
+
+
 def run_item(kind: str, trigger: str = "manual", force: bool = False) -> dict:
     """真跑一次某一项。
 
@@ -485,10 +530,39 @@ def run_item(kind: str, trigger: str = "manual", force: bool = False) -> dict:
         except Exception:                                # noqa: BLE001
             logger.debug("silent-except", exc_info=True)
 
+    # selfidle（重启自检）的执行体在 bootaudit.py，不走 scheduler。
+    # 这样「自动（重启后）」和「手动点立即运行」走的是同一段代码，
+    # 行为完全一致：只查不改、不建计划，避免出现
+    # 「手动点一下就被改了代码」这种意料之外的事。
+    if kind == "selfidle":
+        from . import bootaudit as _ba
+        t0 = time.time()
+        try:
+            r = _ba.run(reason="手动点「立即运行」", force=True)
+        except Exception as e:                           # noqa: BLE001
+            sec = time.time() - t0
+            msg = "%s: %s" % (type(e).__name__, e)
+            _record(kind, False, msg, sec, status_text="error: %s" % e)
+            return {"ok": False, "error": msg, "kind": kind,
+                    "name": d["name"], "seconds": round(sec, 1)}
+        sec = time.time() - t0
+        if r.get("skipped"):
+            return {"ok": True, "skipped": True, "kind": kind, "name": d["name"],
+                    "reason": str(r.get("reason") or ""), "seconds": round(sec, 1)}
+        if not r.get("ok"):
+            return {"ok": False, "error": str(r.get("error") or "自检失败"),
+                    "kind": kind, "name": d["name"], "seconds": round(sec, 1)}
+        # 注意：结果已由 bootaudit.run() 内部通过 record_boot 写进本项，
+        # 这里不能再 _record 一次（会重复记两条历史）。
+        last = r.get("last") or {}
+        text = str(last.get("text") or "")
+        return {"ok": True, "kind": kind, "name": d["name"],
+                "answer": text, "seconds": round(sec, 1), "preview": text[:300]}
+
     from . import scheduler as _sch          # 延迟导入，避免循环
     job = {"id": "maint_%s" % kind, "name": "自我维护·%s" % d["name"],
            "kind": kind, "prompt": "", "session": "", "focus": "",
-           # force=True 让 selfexp / selfidle 内部那些「到点才跑」的闸放行
+           # force=True 让 selfexp 内部那些「到点才跑」的闸放行
            "force": bool(force or trigger == "manual"),
            "schedule": {}}
 

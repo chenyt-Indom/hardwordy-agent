@@ -209,7 +209,17 @@
                   placeholder="让数字人说什么…（长文会自动按句分段生成再合并）"></textarea>
         <!-- 分辨率：720P 的帧像素量是 480P 的 3.71 倍（720²@30fps vs 512²@16fps），
              画质更好但慢约 45%。让用户自己按需切，别替他定死。 -->
-        <div class="av2-res" id="av2Res">
+        <!-- 档位：两档单价差 11 倍（官方计费页核对：videoretalk 0.08 元/秒、
+             wan2.2-s2v 720P 0.9 元/秒）。省钱档要先做一条基础视频（一次性约 1 元），
+             之后每次都只花 0.08 元/秒，还有 1800 秒免费额度。 -->
+        <div class="av2-res" id="av2Mode">
+          <button class="btn sm ghost" data-mode="cheap"
+                  title="VideoRetalk 口型替换：0.08 元/秒，有 1800 秒免费额度。首次要做一条基础视频（约 1 元，之后复用）">💰 省钱</button>
+          <button class="btn sm ghost" data-mode="hd"
+                  title="Wan2.2-S2V 单图直出：0.5~0.9 元/秒，无免费额度，但人物不会有多余动作">✨ 高清</button>
+        </div>
+        <!-- 分辨率只对高清档有意义（省钱档的分辨率由基础视频决定），默认收起 -->
+        <div class="av2-res" id="av2Res" hidden>
           <button class="btn sm ghost" data-res="480P"
                   title="512×512 / 16fps：快、便宜，预览够用">480P 快</button>
           <button class="btn sm ghost" data-res="720P"
@@ -1329,5 +1339,8 @@
     })();
   </script>
   </script>
+
+
+
 </body>
 </html>

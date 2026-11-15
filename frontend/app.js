@@ -3132,7 +3132,12 @@
     // 720P 的帧像素量是 480P 的 3.71 倍（720²@30fps vs 512²@16fps），
     // 画质好但慢约 45%。默认跟随后端配置，点一下就存回去。
     let curRes = "480P";
+    // 档位：cheap = 基础视频 + VideoRetalk（0.08 元/秒，有 1800 秒免费额度）
+    //       hd    = Wan2.2-S2V 单图直出（0.5~0.9 元/秒）
+    // 官方计费页核对过，两档差 11 倍，所以默认省钱档。
+    let curMode = "cheap";
     const resBox = $("#av2Res");
+    const modeBox = $("#av2Mode");
     const estBox = $("#av2Est");
     let estTimer = null;
 
@@ -3157,6 +3162,30 @@
       });
     }
 
+    // —— 档位切换（省钱 / 高清）——
+    // 省钱档的分辨率由「基础视频」决定，所以高清档才显示分辨率按钮。
+    function applyMode(mode, save) {
+      curMode = (String(mode || "cheap").toLowerCase() === "hd") ? "hd" : "cheap";
+      if (modeBox) {
+        modeBox.querySelectorAll("button").forEach((b) => {
+          b.classList.toggle("on", (b.dataset.mode || "") === curMode);
+        });
+      }
+      if (resBox) resBox.hidden = (curMode !== "hd");
+      if (save) {
+        api("/api/avatar2/cloud/config", {
+          method: "POST",
+          body: JSON.stringify({ mode: curMode }),
+        }).catch(() => {});
+      }
+      updEst();
+    }
+    if (modeBox) {
+      modeBox.querySelectorAll("button").forEach((b) => {
+        b.onclick = () => applyMode(b.dataset.mode, true);
+      });
+    }
+
     // —— 生成前预告 ——
     // 纯本地按字数估（后端不调外部接口、不花钱），所以边输入边问也没事。
     // 防抖 600ms：否则每敲一个字都发一次请求。
@@ -3171,13 +3200,22 @@
             ? parseInt(rateSel.value, 10) : null;
           const e = await api("/api/avatar2/cloud/estimate", {
             method: "POST",
-            body: JSON.stringify({ text: t, resolution: curRes, rate: rv }),
+            body: JSON.stringify({ text: t, resolution: curRes, rate: rv, mode: curMode }),
           });
           if (!e.ok) { estBox.hidden = true; return; }
           const w = Number(e.est_wait) || 0;
           const wtxt = w >= 60 ? (w / 60).toFixed(1) + " 分钟" : w + " 秒";
           let s = "预计 <b>" + e.est_sec + " 秒</b>音频 · <b>" +
                   e.segments + " 段</b> · 约等 <b>" + wtxt + "</b>";
+          // 花费按官方单价算（后端 PRICE 表），不是拍脑袋估的。
+          // 省钱档第一次还要多做一条基础视频，那个是一次性的，单独标出来。
+          if (e.est_cost !== undefined && e.est_cost !== null) {
+            s += " · 约 <b>" + Number(e.est_cost).toFixed(2) + " 元</b>";
+            if (curMode === "cheap" && !e.base_cached && Number(e.base_cost) > 0) {
+              s += ' <span class="warn">含首次 '
+                 + Number(e.base_cost).toFixed(2) + " 元</span>";
+            }
+          }
           if (w >= 300) s += ' · <span class="warn">较久，可先试短句</span>';
           estBox.innerHTML = s;
           estBox.hidden = false;
@@ -3209,6 +3247,7 @@
         // 只回脱敏值：已有 Key 时显示掩码，不把明文塞回输入框
         if (k) k.value = c.has_key ? (c.api_key || "") : "";
         if (c.resolution) applyRes(c.resolution, false);
+        applyMode(c.mode || "cheap", false);
         const help = $("#av2CloudHelp");
         if (help && !c.ready) {
           help.innerHTML = '只要一个 API Key，不用业务空间 ID。' +
@@ -3217,8 +3256,16 @@
             '再到 <a href="' + esc(c.key_url || "") +
             '" target="_blank" rel="noopener">API Key 页面</a> 复制一个（建议用「华北2（北京）」地域）。';
         } else if (help) {
+          // 把「单价 / 60 秒多少钱 / 还剩多少免费额度」直接写出来。
+          // 用户原来的困惑就是「不知道贵不贵」，光写上限多少秒没用。
+          const pps = Number(c.price_per_sec || 0);
+          const free = Number(c.free_seconds || 0);
           help.textContent = "单次音频上限 " + (c.max_audio_sec || 19) +
-            " 秒，超长会自动切段再拼接。";
+            " 秒，超长自动切段。" +
+            (pps > 0 ? " 单价 " + pps + " 元/秒（60 秒约 " +
+                       (pps * 60).toFixed(1) + " 元）" : "") +
+            (free > 0 ? "，另有 " + Math.round(free / 60) + " 分钟免费额度" : "") +
+            "。";
         }
         return c;
       } catch (e) {
@@ -3288,9 +3335,12 @@
         mood: moodSel ? moodSel.value : "auto",
         rate: rateVal,
         resolution: curRes,
+        mode: curMode,
       };
       try {
-        say("正在配音 → 提交云端生成（Wan2.2-S2V）…一次约 1~3 分钟");
+        say(curMode === "cheap"
+          ? "正在配音 → 提交云端口型替换（VideoRetalk · 省钱档）…"
+          : "正在配音 → 提交云端生成（Wan2.2-S2V · 高清档）…一次约 1~3 分钟");
         const r0 = await api("/api/avatar2/cloud/speak", {
           method: "POST",
           body: JSON.stringify(body),
@@ -12971,13 +13021,6 @@
             '<span class="iter-maint-sub">代码固有功能 · 不占定时任务</span>' +
           '</div>' +
           '<div class="iter-maint-list"></div>' +
-          // ★ 2026-11-16 用户要求：「这个自检给他弄成每次自迭代重启之后自动检验」。
-          //   它和上面四项不同：不按节律跑，而是**每次启动后自动跑一遍**；
-          //   这里只显示最近一次结果 + 一个「立刻验一次」按钮（只查不改代码）。
-          '<div class="iter-boot">' +
-            '<span class="iter-boot-t">重启自检：读取中…</span>' +
-            '<button type="button" class="btn sm ghost b-go">立刻验一次</button>' +
-          '</div>' +
         '</div>' +
         '<div class="iter-trust">' +
           '<label class="iter-sw">' +
@@ -13026,10 +13069,6 @@
     el.querySelector(".iter-eval-fix-btn").onclick = function () { runEvaluate(true); };
     el.querySelector(".iter-body").addEventListener("click", onBodyClick);
     el.querySelector(".iter-maint-list").addEventListener("click", onMaintClick);
-    el.querySelector(".iter-boot").addEventListener("click", function (e) {
-      const b = e.target.closest(".b-go");
-      if (b) runBootAudit(b);
-    });
     return el;
   }
 
@@ -13048,7 +13087,6 @@
     loadPapers();
     loadActlog();
     loadMaint();
-    loadBootAudit();
     pushSignals();
     startPoll();
     feedProbe();
@@ -13464,63 +13502,6 @@
   }
 
   async function onMaintClick(e) {
-  // ---------------------------------------------------------- 重启自检
-  // 2026-11-16 用户要求：「这个自检给他弄成每次自迭代重启之后自动检验」。
-  // 后端在每次启动 6 秒后自动跑一遍静态代码扫描（bootaudit.py），
-  // 这里只负责把最近结果读出来显示 —— 一行文字 + 一个「立刻验一次」按钮。
-  // verdict 三档上色：pass 绿 / warn 黄 / fail 红。
-  let bootData = null;
-
-  async function loadBootAudit() {
-    try {
-      const r = await api("/api/bootaudit");
-      if (r && r.ok) { bootData = r; renderBootAudit(); }
-    } catch (e) { /* 自检状态读不到不影响抽屉其它部分 */ }
-  }
-
-  function renderBootAudit() {
-    const box = el && el.querySelector(".iter-boot");
-    if (!box) return;
-    const t = box.querySelector(".iter-boot-t");
-    if (!t) return;
-    const d = bootData || {};
-    const L = d.last || {};
-    box.classList.remove("pass", "warn", "fail");
-    if (!L.ts) {
-      t.textContent = "重启自检：本次启动后还没跑完（启动 6 秒后自动跑，约 7 秒）";
-      return;
-    }
-    const v = L.verdict || "";
-    if (v) box.classList.add(v);
-    // 结果一句话：图标 + 扫描规模 + 各档数量 + 用时
-    const icon = v === "pass" ? "✅" : (v === "warn" ? "⚠️" : (v === "fail" ? "❌" : "•"));
-    const head = (v === "pass" ? "通过" : (v === "warn" ? "有警告" : (v === "fail" ? "未通过" : "已运行")));
-    const bits = [
-      String(L.ts || "").slice(5, 16),
-      "扫 " + (L.files != null ? L.files : "?") + " py / " + (L.js_files != null ? L.js_files : "?") + " js",
-      "high " + (L.high || 0) + " · mid " + (L.mid || 0) + " · low " + (L.low || 0),
-    ];
-    if (L.regress_summary) bits.push("回归 " + L.regress_summary);
-    if (L.seconds) bits.push(L.seconds + "s");
-    t.textContent = "重启自检：" + icon + " " + head + " · " + bits.join(" · ");
-    t.title = (L.text || "") + (L.reason ? "\n重启原因：" + L.reason : "");
-  }
-
-  async function runBootAudit(btn) {
-    if (btn) { btn.disabled = true; btn.textContent = "验证中…"; }
-    say("正在跑重启自检（只查不改，约 7 秒）…");
-    let r = null;
-    try { r = await api("/api/bootaudit/run", { force: true }); }
-    catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
-    await loadBootAudit();
-    if (btn) { btn.disabled = false; btn.textContent = "立刻验一次"; }
-    if (!r || !r.ok) { say("重启自检失败：" + ((r && r.error) || "未知错误"), "bad"); return; }
-    const L = r.last || {};
-    if (L.verdict === "pass") say("重启自检通过（" + (L.seconds || 0) + " 秒）。", "good");
-    else if (L.verdict === "fail") say("重启自检发现问题：" + (L.text || ""), "bad");
-    else say("重启自检：" + (L.text || "完成"), "warn");
-  }
-
     const row = e.target.closest(".iter-maint-row");
     if (!row) return;
     const kind = row.getAttribute("data-kind");
