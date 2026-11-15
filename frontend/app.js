@@ -2305,7 +2305,9 @@
     const fileIn = $("#av2File"), textIn = $("#av2Text");
     const voiceSel = $("#av2Voice"), hint = $("#av2Hint");
     const video = $("#av2Video"), list = $("#av2List");
-    const cal = $("#av2Cal"), my = $("#av2MY"), mw = $("#av2MW");
+    // 本地渲染已删除，嘴位标定控件不存在了。用一个空壳对象兜住老代码里的
+    // my.value / mw.value / cal.hidden 读写 —— 否则这里全是 null 异常。
+    const cal = { hidden: true }, my = { value: 0 }, mw = { value: 0 };
     const pinBtn = $("#av2Pin");
     const PIN_KEY = "avatar2_pin";
     let busy = false, voicesLoaded = false;
@@ -2830,22 +2832,9 @@
       } catch (e) { say("设置失败：" + e.message, "err"); }
     };
 
-    // —— 自动定位嘴部 ——
-    $("#av2Detect").onclick = async () => {
-      say("正在检测人脸…");
-      try {
-        const r = await api("/api/avatar2/detect_mouth", { method: "POST", body: "{}" });
-        if (!r.ok) { say("没检测到人脸：" + (r.error || "未知"), "err"); return; }
-        my.value = r.mouth.y;
-        mw.value = r.mouth.w;
-        mouthState.x = +r.mouth.x || 0.5;
-        mouthState.y = +r.mouth.y || 0.5;
-        mouthState.w = +r.mouth.w || 0.2;
-        mouthState.h = +r.mouth.h || 0.05;
-        paintMouthBox();
-        say("已重新定位嘴部（置信度 " + r.score + "）");
-      } catch (e) { say("检测失败：" + e.message, "err"); }
-    };
+    // —— 自动定位嘴部已删除 ——
+    // 云端 Wan2.2-S2V 自己处理整张图，不需要嘴位标定；
+    // /api/avatar2/detect_mouth 接口也已随本地渲染一起删掉。
 
     // —— 手动校准（拖动时防抖，220ms 才落盘） ——
     let calTimer = null;
@@ -3109,13 +3098,6 @@
     async function loadCloudCfg() {
       try {
         const c = await api("/api/avatar2/cloud");
-        // 2026-11-15：云端（Wan2.2-S2V）已整体移除，后端返回 {removed:true}。
-        // 这里直接隐藏整个配置块 —— 否则会显示成「缺：」让用户以为还得填东西。
-        if (c && c.removed) {
-          const box = $("#av2Cloud");
-          if (box) { box.hidden = true; box.innerHTML = ""; }
-          return null;
-        }
         const st = $("#av2CloudState");
         if (st) {
           st.textContent = c.ready ? "已配置" : ("缺：" + (c.missing || []).join("、"));
@@ -3126,16 +3108,15 @@
         const k = $("#av2CloudKey");
         // 只回脱敏值：已有 Key 时显示掩码，不把明文塞回输入框
         if (k) k.value = c.has_key ? (c.api_key || "") : "";
-        const ws = $("#av2CloudWs");
-        if (ws) ws.value = c.workspace_id || "";
         const rs = $("#av2CloudRes");
         if (rs && c.resolution) rs.value = c.resolution;
         const help = $("#av2CloudHelp");
         if (help && !c.ready) {
-          help.innerHTML = '去 <a href="' + esc(c.signup_url || "") +
+          help.innerHTML = '只要一个 API Key，不用业务空间 ID。' +
+            '去 <a href="' + esc(c.signup_url || "") +
             '" target="_blank" rel="noopener">百炼控制台</a> 开通，' +
             '再到 <a href="' + esc(c.key_url || "") +
-            '" target="_blank" rel="noopener">API Key 页面</a> 创建（必须是「华北2（北京）」地域）。';
+            '" target="_blank" rel="noopener">API Key 页面</a> 复制一个（建议用「华北2（北京）」地域）。';
         } else if (help) {
           help.textContent = "单次音频上限 " + (c.max_audio_sec || 19) +
             " 秒，超长会自动切段再拼接。";
@@ -3148,11 +3129,9 @@
 
     async function saveCloudCfg() {
       const k = ($("#av2CloudKey") && $("#av2CloudKey").value || "").trim();
-      const ws = ($("#av2CloudWs") && $("#av2CloudWs").value || "").trim();
       const rs = $("#av2CloudRes") ? $("#av2CloudRes").value : "480P";
       const body = { resolution: rs };
       if (k) body.api_key = k;
-      if (ws) body.workspace_id = ws;
       const r = await api("/api/avatar2/cloud/config", {
         method: "POST",
         body: JSON.stringify(body),
@@ -3176,140 +3155,60 @@
       // rate 传 null 表示「用心情的建议语速」，不能传 0（那会把语速钉死）
       const rateVal = rateSel && rateSel.value !== "auto"
         ? parseInt(rateSel.value, 10) : null;
-      // 渲染模式：2d = 只有嘴动；p25d = 伪3D（深度位移 + 头姿）；3d = 真网格重画
-      const modeSel2 = $("#av2Mode");
-      const mode = modeSel2 ? modeSel2.value : "2d";
-      const speakUrl = mode === "v3" ? "/api/talkhead/speak"
-        : mode === "w2l" ? "/api/avatar_lipsync/speak"
-          : mode === "3d" ? "/api/avatar3d/speak"
-            : mode === "p25d" ? "/api/avatar25d/speak"
-              : "/api/avatar2/speak";
-      const base = {
+      // 2026-11-15：只剩云端一条路（本地渲染整体删除）。
+      // 走「提交 → 轮询」而不是一次长请求：一次生成 1~3 分钟，长连接会被
+      // 中间层掐断，也拿不到「第几段」的进度。
+      // 切段由后端做（单段音频必须 <20 秒），前端不用管。
+      const body = {
+        text: text,
         voice: voiceSel.value,
         mood: moodSel ? moodSel.value : "auto",
         rate: rateVal,
-        amp: syncAmp(),
       };
-      // 输出分辨率只对 Wav2Lip 有意义（其它模式走各自的原生尺寸）
-      const resSel = $("#av2Res");
-      if (mode === "w2l" && resSel) {
-        base.max_side = parseInt(resSel.value, 10) || 1024;
-        // 一次出两版让用户自己挑：
-        //   · 画风优先 = 只用口型时序、像素全来自原图（卡通/3D 不违和）
-        //   · 口型优先 = 贴 Wav2Lip 生成像素（真人更自然）
-        // 实测卡通形象下两者差别很大（客观分 7.8 vs 5.8，嘴部清晰度比
-        // 1.31 vs 0.54），值得都看一眼。真人两版差别小，但多花的时间
-        // 也就几秒，一起给更省事。
-        base.variants = true;
-        base.review = true;
-      }
-      // 人物动作强度：0 静止 / 1 自然 / 1.6 活跃。
-      // Wav2Lip 与伪3D 都支持；2D 和真3D 没有这套动作层，不传。
-      const moSel = $("#av2Motion");
-      if (moSel && (mode === "w2l" || mode === "p25d")) {
-        const mv = parseFloat(moSel.value);
-        base.motion = isNaN(mv) ? 1 : mv;
-        try { localStorage.setItem("avatar2_motion", String(base.motion)); } catch (e) {}
-      }
-      // 眨眼：单图没有「闭眼后」的眼皮纹理，合成出来是一块糊的皮肤，
-      // 所以默认不勾。只有用户主动勾了才传 true。
-      const blChk = $("#av2Blink");
-      if (blChk && (mode === "w2l" || mode === "p25d")) {
-        base.blink = !!blChk.checked;
-        try { localStorage.setItem("avatar2_blink", base.blink ? "1" : "0"); } catch (e) {}
-      }
-      // 每帧耗时的实测值：2D ≈ 12ms、伪3D ≈ 36ms、真3D ≈ 150ms，
-      // 所以分段长度按模式递减，保证每段都在请求超时窗口内。
-      // Wav2Lip 实测 138 字 = 29 秒语音 = 37.7 秒渲染，接近超时线，
-      // 所以按 90 字分段（每段约 19 秒语音、约 24 秒渲染），更稳
-      // v3 实测 13.5 秒渲染出 4.34 秒视频（约 3.1 秒渲染 / 秒语音），
-      // 60 字约 12 秒语音 → 约 37 秒渲染，留在请求超时窗口内。
-      const segLen = (mode === "3d" || mode === "v3") ? 60
-        : (mode === "p25d" || mode === "w2l") ? 90 : 120;
       try {
-        // 2026-11-15：云端（Wan2.2-S2V）分支已整体删除 —— 后端 avatar_cloud
-        // 模块与路由都已移除。v3 引擎走下面的通用同步分段逻辑即可（实测
-        // 13.5 秒出 4.34 秒视频，比云端快一个量级，且不需要任何 Key）。
-        // 长文本切成多段分别生成，每段都在请求超时窗口内，最后合并成一个视频。
-        // 之前一次性发整篇，字数一多就渲染超时（用户反馈的那个问题）。
-        // 120 字约 25 秒语音、渲染约 25 秒；实测 260 字要渲染 55 秒，
-        // 太长仍可能被中间层掐断，所以取 120 更稳（段多但每段都快）。
-        const parts = splitSpeech(text, segLen);
-        let r;
-        if (parts.length <= 1) {
-          say(mode === "v3" ? "正在配音 → 拼音音素对齐 → 6 维口型渲染，约 10 秒…"
-            : mode === "w2l" ? "正在配音 → Wav2Lip 生成嘴型 → 合成，约 10 秒…"
-              : mode === "3d" ? "正在 3D 重建 → 网格渲染 → 合成，约 30 秒…"
-                : mode === "p25d" ? "正在配音 → 深度位移 + 头姿 → 合成，约 10 秒…"
-                  : "正在配音 → 口型对齐 → 合成，约 10 秒…");
-          r = await api(speakUrl, {
-            method: "POST",
-            body: JSON.stringify(Object.assign({}, base, { text: parts[0] || text })),
-          });
-          if (!r.ok) throw new Error(r.error || "生成失败");
-        } else {
-          const names = [];
-          let lastOk = null;
-          for (let i = 0; i < parts.length; i++) {
-            btn.textContent = "生成中 " + (i + 1) + "/" + parts.length;
-            say("长文本已切成 " + parts.length + " 段，正在生成第 " + (i + 1) +
-                "/" + parts.length + " 段（" + parts[i].length + " 字）…");
-            const seg = await api(speakUrl, {
-              method: "POST",
-              body: JSON.stringify(Object.assign({}, base, { text: parts[i] })),
-            });
-            if (!seg.ok) throw new Error("第 " + (i + 1) + " 段失败：" + (seg.error || "未知错误"));
-            names.push(seg.name);
-            lastOk = seg;
-          }
-          btn.textContent = "合并中…";
-          say("已生成 " + names.length + " 段，正在合并…");
-          const c = await api("/api/avatar2/concat", {
-            method: "POST",
-            body: JSON.stringify({ names: names }),
-          });
-          if (!c.ok) throw new Error(c.error || "合并失败");
-          // 合并后碎片没用了，清掉免得视频列表里堆一堆小段
-          for (const n of names) {
-            try {
-              await api("/api/avatar2/video/delete", {
-                method: "POST",
-                body: JSON.stringify({ name: n, scope: "avatar" }),
-              });
-            } catch (e) {}
-          }
-          r = Object.assign({}, lastOk, {
-            name: c.name, duration: c.duration, parts: c.parts,
-            align: "已合并 " + c.parts + " 段",
-          });
+        say("正在配音 → 提交云端生成（Wan2.2-S2V）…一次约 1~3 分钟");
+        const r0 = await api("/api/avatar2/cloud/speak", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        if (!r0.ok) {
+          const err = new Error(r0.error || "提交失败");
+          err.needKey = !!r0.need_key;
+          err.keyUrl = r0.key_url || "";
+          throw err;
         }
+        const jid = r0.job_id;
+        let last = null;
+        for (let i = 0; i < 600; i++) {           // 最多等 20 分钟
+          await new Promise((res) => setTimeout(res, 2000));
+          const j = await api("/api/avatar2/cloud/job/" + encodeURIComponent(jid));
+          if (j.status === "done") { last = j.result || j; break; }
+          if (j.status === "failed") throw new Error(j.error || j.msg || "生成失败");
+          btn.textContent = "生成中" + (j.total ? " " + (j.index || 0) + "/" + j.total : "…");
+          if (j.msg) say(j.msg);
+        }
+        if (!last || !last.ok) throw new Error((last && last.error) || "生成超时（20 分钟）");
+        const r = last;
         let tail = "";
-        if (r.fallback_from) {
-          tail = "（真口型失败已回退：" + (r.fallback_reason || "") + "）";
-        } else if (r.lipsync_label) {
-          tail = " · " + r.lipsync_label;
-        }
         if (r.mood_label) {
           tail += " · 心情" + r.mood_label + (r.mood_auto ? "(自动)" : "") +
                   " 语速" + (r.rate >= 0 ? "+" : "") + r.rate;
         }
-        say("已生成 " + r.duration + " 秒 · " + (r.size || []).join("×") +
-            " · " + (r.align || "") + tail, r.fallback_from ? "err" : "");
+        say("已生成 " + (r.duration || "?") + " 秒 · " +
+            Math.round((r.bytes || 0) / 1024) + "KB · 云端 Wan2.2-S2V" + tail);
         // 自动判心情时把依据也说清楚，别让用户觉得是黑盒
         if (r.mood_auto && (r.mood_why || []).length) {
           say(hint.textContent + "\n判定依据：" + r.mood_why.slice(0, 3).join("；"));
         }
-        renderVersions(r);
-        renderTune(r);
         playVideo(r.name);
         loadVideos();
       } catch (e) {
-        // 2026-11-15：云端已移除，不再有「缺 Key」这条路。原来的提示会让
-        // 用户去找一个不存在的配置块，改成如实说明 + 指向 v3 引擎。
         let msg = e.message || String(e);
         if (e.needKey) {
-          msg += "　→ 云端方案已移除。把上方引擎换成「🎯 v3 音素口型」"
-            + "即可生成，不需要任何 API Key。";
+          msg += "　→ 去 " + (e.keyUrl ||
+            "https://help.aliyun.com/zh/model-studio/get-api-key") +
+            " 申请一个（只要 Key，不需要业务空间 ID），填进「☁️ 云端口型配置」再试。";
+          showCloudCfg(true);
         }
         say("生成失败：" + msg, "err");
       } finally {
@@ -3324,14 +3223,10 @@
     (function initCloudCfg() {
       const saveBtn = $("#av2CloudSave");
       if (saveBtn) saveBtn.onclick = () => { saveCloudCfg(); };
-      const ms = $("#av2Mode");
-      if (ms) {
-        ms.addEventListener("change", () => showCloudCfg(ms.value === "cloud"));
-      }
-      loadCloudCfg().then(() => {
-        // 默认就是云端，所以一进来就把配置块露出来 —— 缺 Key 时用户要能直接填
-        if (ms && ms.value === "cloud") showCloudCfg(true);
-      });
+      // 本地引擎已全部删除，只剩云端一条路，所以配置块一进来就露出来 ——
+      // 缺 Key 时用户要能直接填，不用先去找开关。
+      showCloudCfg(true);
+      loadCloudCfg();
     })();
 
     loadInfo().then(() => {
@@ -3339,81 +3234,6 @@
     });
     setPin(localStorage.getItem(PIN_KEY) === "1");
 
-    // 多版本对比：一次生成两版（画风优先 / 口型优先），各自有质检分，
-    // 用户点哪个就播哪个。默认播分数高的那一版。
-    function renderVersions(r) {
-      const box = $("#av2Versions");
-      if (!box) return;
-      const vs = (r && r.versions) || [];
-      if (vs.length <= 1) { box.hidden = true; box.innerHTML = ""; return; }
-      const num = (v) => (v === null || v === undefined || isNaN(v)) ? "-" : v;
-      box.hidden = false;
-      box.innerHTML = '<div class="av2-ver-head">已生成 ' + vs.length +
-        " 个版本，挑一个你喜欢的（默认播分数最高的）：</div>" +
-        vs.map((v) => {
-          if (!v.ok) {
-            return '<div class="av2-ver-item"><span class="loc-warn">' +
-              esc(v.mode || "?") + " 失败：" + esc(v.error || "") + "</span></div>";
-          }
-          const q = v.qa || {};
-          const o = q.detail_objective || {};
-          const sel = v.name === r.name;
-          return '<div class="av2-ver-item' + (sel ? " on" : "") + '">' +
-            '<div class="av2-ver-t">' + esc(v.label || v.mode) + (sel ? " · 已选" : "") + "</div>" +
-            '<div class="av2-ver-s">质量 ' + num(v.qa_score) + " 分（像素指标 " +
-            num(q.score_objective) + " / 模型 " + num(q.score_llm) + "）· 清晰度比 " +
-            num(o.sharp_ratio) + " · " + Math.round((v.bytes || 0) / 1024) + "KB</div>" +
-            '<button class="btn sm ghost" data-play="' + esc(v.name) + '">▶ 播放这版</button>' +
-            "</div>";
-        }).join("");
-      box.querySelectorAll("[data-play]").forEach((b) => {
-        b.onclick = () => playVideo(b.getAttribute("data-play"));
-      });
-    }
-
-    // AI 口型调参结果展示（只读）。
-    // 参数是 LLM 按形象自己定的，用户有权看到「到底调了什么」——
-    // 否则就是黑盒，出了问题也说不清是哪一项不合适。
-    function renderTune(r) {
-      const box = $("#av2Tune");
-      if (!box) return;
-      const t = (r && r.tune) || null;
-      if (!t || !t.params) { box.hidden = true; box.innerHTML = ""; return; }
-      const LABEL = {
-        open_gain: "口型幅度", k_min: "最小开合", open_sigma: "口型平滑",
-        mask_sigma: "清晰度平滑", temporal_mild: "稳帧", temporal_strength: "跳变修正",
-        ell_w: "贴回宽", ell_h: "贴回高", ell_cy: "贴回位置", feather: "羽化",
-        detail: "纹理回注", dark_gain: "口腔加深", round: "圆唇",
-        mask_lo: "闭嘴替换", mask_hi: "张嘴替换", crf: "编码画质",
-      };
-      const DEF = {
-        open_gain: 1, k_min: 0.78, open_sigma: 0.9, mask_sigma: 2, temporal_mild: 0.1,
-        temporal_strength: 0.88, ell_w: 0.29, ell_h: 0.175, ell_cy: 0.75, feather: 1,
-        detail: 0.75, dark_gain: 40, round: 0.26, mask_lo: 0.1, mask_hi: 0.9, crf: 16,
-      };
-      const fmt = (v) => String(Math.round(+v * 100) / 100);
-      const kv = Object.keys(t.params).filter((k) =>
-        DEF[k] !== undefined && Math.abs(+t.params[k] - DEF[k]) > 1e-6
-      ).map((k) => '<span class="tune-kv">' + esc(LABEL[k] || k) + " " +
-        fmt(DEF[k]) + "→" + fmt(t.params[k]) + "</span>");
-      const src = t.source === "llm" ? "AI 看图定参"
-        : t.source === "cache" ? "AI 参数（已缓存）" : "预设参数（AI 未参与）";
-      box.hidden = false;
-      box.innerHTML = '<div class="tune-head">🎛 ' + esc(src) +
-        (t.style ? " · 识别为 " + esc(t.style) : "") + "</div>" +
-        (kv.length ? kv.join("")
-          : '<span class="tune-why">本次全部落在默认值上</span>') +
-        // 用户亲手拖了「口型幅度」时，说清它盖掉了 AI 的哪个值 ——
-        // 否则面板里显示的和滑块对不上，会让人以为滑块又没生效。
-        ((t.amp_override && t.amp_override.to) ?
-          '<div class="tune-why">口型幅度：手动 ' + fmt(t.amp_override.to) +
-          "×（覆盖 AI 的 " + fmt(t.amp_override.from != null ? t.amp_override.from : 1) +
-          "×）</div>" : "") +
-        (t.reason ? '<div class="tune-why">依据：' +
-          esc(String(t.reason).slice(0, 150)) + "</div>" : "") +
-        ((t.notes || []).length
-          ? '<div class="tune-warn">' + esc(t.notes.join("；")) + "</div>" : "");
-    }
   })();
 
   (function initFoldablePanels() {

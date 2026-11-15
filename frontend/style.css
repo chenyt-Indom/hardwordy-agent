@@ -5000,34 +5000,12 @@ html[data-theme="light"] select.pill-select option {
   display: flex; align-items: center; justify-content: center;
 }
 .av2-stage img { width: 100%; height: 100%; object-fit: contain; display: block; }
-/* 嘴部定位框：拖「嘴位 / 嘴宽」滑块时实时跟着动，让人看得见改到哪 */
-.av2-mbox {
-  position: absolute; pointer-events: none; box-sizing: border-box;
-  border: 1.5px dashed #ff5c8a; border-radius: 4px;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3), inset 0 0 0 1px rgba(255, 255, 255, 0.5);
-}
-.av2-mbox span {
-  position: absolute; left: -1px; top: -15px;
-  font-size: 10px; line-height: 1; padding: 2px 4px;
-  background: #ff5c8a; color: #fff; border-radius: 3px 3px 3px 0;
-  white-space: nowrap;
-}
 .av2-empty {
   color: #9aa4b8; font-size: 12px; text-align: center;
   line-height: 1.7; padding: 12px;
 }
 .av2-acts { display: flex; gap: 6px; }
 .av2-acts .btn { flex: 1; min-width: 0; }
-.av2-cal { display: flex; flex-direction: column; gap: 5px; }
-.av2-cal label {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 11px; color: var(--muted);
-}
-.av2-cal input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
-.av2-cal-tip {
-  font-size: 10px; line-height: 1.5; color: var(--muted);
-  opacity: 0.85; padding-left: 2px;
-}
 .av2panel textarea#av2Text {
   width: 100%; box-sizing: border-box; resize: vertical;
   min-height: 62px; line-height: 1.55; padding: 8px 10px;
@@ -5049,134 +5027,8 @@ html[data-theme="light"] select.pill-select option {
 /* 心情 / 语速 / 视频目录：各占一行。侧栏只有 300px，
    两个下拉并排会把「心情：自动判断」截成「心情：」 */
 .av2-row-mood, .av2-row-rate, .av2-row-scope { margin-top: 4px; }
-/* 口型幅度：标签 + 滑块 + 数值一行排开。
-   侧栏内宽约 240px，标签 56px + 数值 34px，滑块 flex 吃掉剩余，
-   实测滑块仍有 130px 以上可拖，不会挤成一根细线。 */
-.av2-row-amp { margin-top: 6px; }
-/* ⚠ 必须带 .av2panel 前缀：全局有 `.panel label { display: block }`（权重 0,1,1），
-   单写 `.av2-amp`（0,1,0）会被它盖掉，实测三个子元素纵向堆成 67px 高。 */
-.av2panel .av2-amp {
-  display: flex; align-items: center; gap: 6px; width: 100%;
-  font-size: 12px; color: var(--muted);
-}
-.av2-amp-lb { flex: 0 0 auto; white-space: nowrap; }
-.av2-amp input[type="range"] {
-  flex: 1 1 auto; min-width: 0; height: 16px; accent-color: var(--accent);
-  cursor: pointer;
-}
-.av2-amp-v {
-  flex: 0 0 auto; min-width: 34px; text-align: right;
-  font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600;
-}
-.av2-row-blink { margin-top: 6px; }
-/* 同上：必须带 .av2panel 前缀，否则被 `.panel label{display:block}` 盖掉 */
-.av2panel .av2-blink {
-  display: flex; align-items: center; gap: 6px; width: 100%;
-  font-size: 12px; color: var(--muted); cursor: pointer;
-}
-.av2-blink input[type="checkbox"] {
-  flex: 0 0 auto; width: 14px; height: 14px; margin: 0;
-  accent-color: var(--accent); cursor: pointer;
-}
-.av2-blink span { flex: 1 1 auto; min-width: 0; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; }
-.av2-blink-hint { opacity: 0.72; }
 .av2-acts-doc { margin-top: 2px; }
 .av2-acts-doc .btn { flex: 1 1 auto; }
-/* 闭嘴基准 / 打开文件夹 / 复制路径：三个按钮挤一行，字小一号 */
-.av2-acts-mouth { margin-top: 2px; gap: 5px; }
-.av2-acts-mouth .btn { flex: 1 1 auto; font-size: 11.5px; padding: 4px 6px; }
-/* 闭嘴预览：先看效果再决定。图片按面板宽度缩，限高免得把侧栏撑长 */
-.av2-closed {
-  margin: 6px 0 2px;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: rgba(99, 197, 138, .10);
-  border: 1px solid rgba(99, 197, 138, .35);
-  font-size: 11.5px;
-  line-height: 1.55;
-  color: var(--fg, #d8dee9);
-}
-.av2-closed-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 6px;
-}
-.av2-closed-tag {
-  margin-left: 6px; padding: 1px 6px; border-radius: 999px;
-  background: rgba(224, 169, 74, .22); color: #e0a94a; font-size: 10.5px;
-}
-.av2-closed img {
-  display: block; margin-top: 6px; width: 100%; max-height: 220px;
-  object-fit: contain; border-radius: 6px; background: rgba(0, 0, 0, .25);
-}
-.av2-closed-ai {
-  margin-top: 6px; padding-top: 5px;
-  border-top: 1px dashed rgba(99, 197, 138, .28);
-  font-size: 10.8px; line-height: 1.5;
-  color: var(--muted, #93a1b5);
-  word-break: break-word;
-}
-.av2-locate {
-  margin: 6px 0 2px;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: rgba(90, 160, 255, .10);
-  border: 1px solid rgba(90, 160, 255, .35);
-  font-size: 11.5px;
-  line-height: 1.55;
-  color: var(--fg, #d8dee9);
-}
-.av2-locate .loc-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.av2-locate .loc-tag {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: rgba(90, 160, 255, .22);
-  font-size: 10.5px;
-}
-.av2-locate .loc-warn { color: #e0a94a; }
-.av2-locate .loc-ok { color: #63c58a; }
-.av2-locate .btn { margin-top: 5px; }
-.av2-versions {
-  margin: 6px 0 2px;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: rgba(120, 200, 140, .08);
-  border: 1px solid rgba(120, 200, 140, .30);
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-.av2-versions .av2-ver-head { margin-bottom: 5px; opacity: .8; }
-.av2-versions .av2-ver-item {
-  padding: 5px 7px;
-  border-radius: 6px;
-  margin-bottom: 4px;
-  background: rgba(255, 255, 255, .03);
-}
-.av2-versions .av2-ver-item.on { background: rgba(120, 200, 140, .16); }
-.av2-versions .av2-ver-t { font-weight: 600; }
-.av2-versions .av2-ver-s { opacity: .72; margin: 2px 0 4px; }
-.av2-versions .btn { padding: 2px 8px; font-size: 11px; }
-/* AI 口型调参：只读展示这次按形象挑了哪些参数 */
-.av2-tune {
-  margin: 6px 0 2px;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: rgba(120, 160, 230, .08);
-  border: 1px solid rgba(120, 160, 230, .28);
-  font-size: 11.5px;
-  line-height: 1.55;
-}
-.av2-tune .tune-head { font-weight: 600; margin-bottom: 3px; }
-.av2-tune .tune-why { opacity: .74; margin-bottom: 4px; }
-.av2-tune .tune-kv {
-  display: inline-block;
-  margin: 0 8px 2px 0;
-  padding: 1px 5px;
-  border-radius: 5px;
-  background: rgba(255, 255, 255, .05);
-  font: 11px/1.4 ui-monospace, Consolas, monospace;
-}
-.av2-tune .tune-warn { color: #e0a94a; }
 /* 路径显示：等宽、可换行、可选文本（方便手动复制） */
 .av2-path {
   font: 11px/1.5 ui-monospace, Consolas, monospace;
@@ -5371,18 +5223,6 @@ html[data-theme="light"] select.pill-select option {
 .dp-log .dp-err { color: #ff8a7a; }
 .dp-hint { font-size: 11.5px; color: var(--muted); line-height: 1.6; margin-top: 6px; }
 
-/* 3D 网格开关（数字人面板）。前缀 .av2panel 是为了压过 .panel label{display:block} */
-.av2panel .av2-3d {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12.5px;
-  color: var(--muted, #9aa3ad);
-  cursor: pointer;
-  user-select: none;
-}
-.av2panel .av2-3d input { margin: 0; cursor: pointer; accent-color: #4a90d9; }
-.av2panel .av2-row-3d { margin: 2px 0 6px; }
 
 /* =====================================================================
    AI 自我迭代抽屉（2026-11-15）—— 右侧滑入，不遮挡主对话

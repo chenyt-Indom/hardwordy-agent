@@ -174,76 +174,46 @@
       </div>
     </section>
 
-    <!-- 🎭 数字人（2026-11-13）：
-         一张图 + 一段话 → 会说话的视频。
-         口型走本项目的声学特征形变：按音频的音量/过零率/频谱质心驱动唇部张合，
-         位置准、不崩、可叠字级对齐。神经网络口型方案已整体移除
-         （96x96 模型在正脸证件照上嘴位整体偏移、口腔糊成色块，观感不如形变）。 -->
+    <!-- 🎭 数字人（2026-11-15 改为云端）：
+         一张图 + 一段话 → 会说话的视频，走阿里云百炼 Wan2.2-S2V。
+         它**重绘整张脸**，自带真实牙齿、舌头和口腔深度，而不是在静态图上拉扯像素。
+         本地那三条路（2D 形变 / Wav2Lip 96x96 / SadTalker 256）都只能重绘很小的
+         一张嘴，贴回原图必然糊，已整体删除。
+         所以这里不再需要嘴位标定、闭嘴基准、动作强度、眨眼、口型幅度这些本地
+         形变参数 —— 模型自己处理整张图，只要一个 API Key。 -->
     <section class="panel av2panel" id="av2Panel">
       <div class="sec-head">
         <h2>🎭 数字人</h2>
         <span class="head-acts">
-          <button class="btn sm ghost ico" id="av2Detect" title="重新自动定位嘴部（人脸检测）">🎯</button>
           <button class="btn sm ghost ico" id="av2Pin" title="常驻右下角 / 取消常驻">📌</button>
         </span>
       </div>
       <div class="av2-body">
         <div class="av2-stage" id="av2Stage">
           <img id="av2Img" alt="数字人形象" hidden />
-          <div class="av2-mbox" id="av2MouthBox" hidden><span>嘴</span></div>
           <div class="av2-empty" id="av2Empty">还没有形象<br />上传一张人物图</div>
         </div>
         <div class="av2-acts">
           <button class="btn sm" id="av2UploadBtn">📁 上传</button>
           <button class="btn sm ghost" id="av2LatestBtn"
-                  title="把最近生成的那张图设为形象（先在对话里让我画一张）">🖼 用最新生成图</button>
+                  title="把最近生成的那张图设为形象（先在对话里让我画一张）">🖼 最新图</button>
           <input type="file" id="av2File" accept="image/*" hidden />
         </div>
-        <div class="av2-cal" id="av2Cal" hidden>
-          <label>嘴位 <input type="range" id="av2MY" min="0.20" max="0.95"
-                          step="0.005" /></label>
-          <label>嘴宽 <input type="range" id="av2MW" min="0.04" max="0.50"
-                          step="0.005" /></label>
-          <div class="av2-cal-tip" id="av2CalTip"></div>
-        </div>
-        <!-- 卡通 / 非人类形象自动检测不到人脸，只能手动框嘴：直接在预览图上拖一个框 -->
-        <div class="av2-acts av2-acts-mouth">
-          <button class="btn sm ghost" id="av2Locate"
-                  title="用图像算法 + 多模态模型自动识别脸和嘴的位置（卡通、动物、插画都能用）">🔍 AI 识别五官</button>
-          <button class="btn sm ghost" id="av2Close"
-                  title="源图嘴本来就是张开的时，先合成一张闭嘴基准图（否则念「一二三」时嘴合不拢）">👄 闭嘴基准</button>
+        <div class="av2-acts">
           <button class="btn sm ghost" id="av2Folder"
                   title="在系统资源管理器里打开数字人视频目录">📁 打开文件夹</button>
           <button class="btn sm ghost" id="av2CopyPath" title="复制视频目录的完整路径">📋 复制路径</button>
         </div>
         <div class="av2-path" id="av2Path" hidden></div>
-        <!-- 闭嘴预览：先看效果再决定。预览是独立文件，主形象和已生效基准都不动 -->
-        <div class="av2-closed" id="av2ClosedPrev" hidden>
-          <div class="av2-closed-head">
-            <span>👄 闭嘴预览<span class="av2-closed-tag" id="av2ClosedTag">未生效</span></span>
-            <span class="head-acts">
-              <button class="btn sm primary" id="av2ClosedUse"
-                      title="把这张设为闭嘴基准，之后生成就用它">✓ 用这个</button>
-              <button class="btn sm ghost ico" id="av2ClosedDrop"
-                      title="丢掉预览，什么都不改">✕</button>
-            </span>
-          </div>
-          <img id="av2ClosedImg" alt="闭嘴效果预览" />
-          <div class="av2-closed-ai" id="av2ClosedAI" hidden></div>
-        </div>
-        <div class="av2-locate" id="av2LocateOut" hidden></div>
-        <div class="av2-versions" id="av2Versions" hidden></div>
-        <div class="av2-tune" id="av2Tune" hidden></div>
         <textarea id="av2Text" rows="3"
                   placeholder="让数字人说什么…（长文会自动按句分段生成再合并）"></textarea>
         <div class="av2-row">
           <select id="av2Voice" title="音色"></select>
           <button class="btn sm primary" id="av2Go">生成视频</button>
         </div>
-        <!-- 心情：决定 TTS 的语气/音调，以及面部微表情幅度。
-             「自动」按文本关键词+标点+句长做规则判断，秒出。 -->
+        <!-- 心情：决定 TTS 的语气/音调。「自动」按文本关键词+标点+句长做规则判断，秒出。 -->
         <div class="av2-row av2-row-mood">
-          <select id="av2Mood" title="心情：影响语气、音调与表情幅度">
+          <select id="av2Mood" title="心情：影响语气与音调">
             <option value="auto">🤖 心情：自动判断</option>
           </select>
         </div>
@@ -257,59 +227,8 @@
             <option value="20">语速：很快</option>
           </select>
         </div>
-        <!-- 输出分辨率：Wav2Lip 只在 96x96 上生成嘴部，所以 1024 是原生最优；
-             更高只是把画面插值放大（看起来更大，细节不变），已如实写进文案。 -->
-        <div class="av2-row av2-row-res">
-          <select id="av2Res" title="输出分辨率（1024 为原生最佳，更高只是放大画面）">
-            <option value="720">720p · 最快（预览用）</option>
-            <option value="1024" selected>1024 · 原生最佳（推荐）</option>
-            <option value="1536">1536 · 画面更大（插值放大）</option>
-            <option value="1920">1920 · 最大画面（插值放大）</option>
-          </select>
-        </div>
-        <!-- 动作强度：头部旋转/点头/眨眼都由音频能量驱动，这里调整体幅度。
-             实测同一段语音（25.5 秒）头部位移：1.0 时 ±13px、1.6 时 ±20px。
-             静止档只保留嘴部，适合做固定机位播报。 -->
-        <div class="av2-row av2-row-motion">
-          <select id="av2Motion" title="人物动作强度：头部转动、点头、眨眼的整体幅度">
-            <option value="0">动作：静止（只有嘴动）</option>
-            <option value="0.6">动作：轻微</option>
-            <option value="1">动作：自然</option>
-            <option value="1.6">动作：活跃</option>
-          </select>
-        </div>
-        <!-- 眨眼：单图没有「闭眼后」的眼皮纹理，任何合成都是把上方皮肤拉下来，
-             视觉复核三轮都判「斜线 + 内眼角尖角 + 涂抹感」。这是单图方案的
-             物理上限，不是参数没调好，所以默认关闭、把选择权交给用户。 -->
-        <div class="av2-row av2-row-blink">
-          <label class="av2-blink" title="眨眼：单图合成，闭眼处会像一块模糊皮肤；想要更干净就保持不勾">
-            <input type="checkbox" id="av2Blink" />
-            <span>眨眼<span class="av2-blink-hint">（单图合成，效果一般，默认关）</span></span>
-          </label>
-        </div>
-        <!-- 口型幅度：增益作用在「张口曲线」上，不是硬拉伸。
-             实测同一段语音：1.0 时最大开口 31px、1.6 时 56px，张开帧比例也翻倍。
-             往右更明显但有代价（嘴角张力、唇纹拉伸），交给用户自己权衡。 -->
-        <div class="av2-row av2-row-amp">
-          <label class="av2-amp" title="口型幅度：觉得嘴张得太小就往右拖；太夸张就往左">
-            <span class="av2-amp-lb">口型幅度</span>
-            <input type="range" id="av2Amp" min="0.6" max="2" step="0.05" value="1.2" />
-            <b class="av2-amp-v" id="av2AmpVal">1.2×</b>
-          </label>
-        </div>
-        <!-- 渲染模式：伪3D 用 3DMM 拟合出的深度图驱动原图像素位移，
-             既保留原图细节，又有头部体积感；真 3D 是重画网格，观感反而更假。 -->
-        <div class="av2-row av2-row-3d">
-          <select id="av2Mode"
-                  title="v3 是音素驱动（按拼音声母/韵母定唇形，6 维口型：开口/圆唇/展唇/齿露/下唇/闭唇）；2D 是旧的声学驱动">
-            <option value="v3" selected>🎯 v3 音素口型（本地 · 免费 · 无需配置）</option>
-            <option value="2d">标准 2D（本地 · 旧版声学驱动）</option>
-            <option value="p25d">伪 3D（本地 · 头会动）</option>
-            <option value="w2l">Wav2Lip 生成口型（本地 · 嘴位易偏移）</option>
-            <option value="3d">真 3D 网格（本地 · 可转头 · 慢）</option>
-          </select>
-        </div>
-        <!-- 云端配置：Key 只回脱敏值，前端不会拿到明文。
+        <!-- 云端配置：只要一个 API Key（走通用域名，不需要业务空间 ID）。
+             Key 只回脱敏值，前端不会拿到明文。
              生成走「提交 → 轮询」，因为一次要 1~3 分钟，长连接会被中间层掐断。 -->
         <div class="av2-cloud" id="av2Cloud" hidden>
           <div class="av2-cloud-head">
@@ -319,8 +238,6 @@
           <div class="av2-cloud-fields">
             <input type="password" id="av2CloudKey"
                    placeholder="API Key（sk- 开头）" autocomplete="off" />
-            <input type="text" id="av2CloudWs"
-                   placeholder="业务空间 ID（llm-xxxxxxxx）" autocomplete="off" />
             <select id="av2CloudRes" title="分辨率：480P 更快更省，720P 更清楚">
               <option value="480P" selected>480P</option>
               <option value="720P">720P</option>

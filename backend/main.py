@@ -11191,42 +11191,53 @@ def avatar2_status():
 
 
 # ---------------------------------------------------------------- 数字人 · 云端口型
-_CLOUD_GONE = {
-    "ok": False,
-    "removed": True,
-    "engine": "talkhead",
-    "error": "云端 Wan2.2-S2V 方案已移除（要 API Key + 业务空间 ID，配置麻烦）。"
-             "改用「数字人 v3」引擎即可，不需要任何 Key。",
-    "use_instead": "/api/talkhead/speak",
-}
-
-
-# 2026-11-15 二次确认：avatar_cloud.py 已整体删除，但下面 4 个路由留着会在
-# 每次调用时 ModuleNotFoundError → 500（前端点「保存云端配置」就炸）。
-# 现在统一返回 ok=False + removed=True，让前端能优雅降级到 v3 引擎，
-# 而不是抛 500 让用户以为程序坏了。
+# 2026-11-15：云端 Wan2.2-S2V 是唯一引擎（本地渲染已整体删除）。
+# 只需要一个 API Key —— 走通用域名 dashscope.aliyuncs.com，不需要业务空间 ID。
 @app.get("/api/avatar2/cloud")
 def avatar2_cloud_cfg():
-    """云端口型已移除 —— 返回提示而不是 500，供前端降级判断。"""
-    return dict(_CLOUD_GONE)
+    """云端配置视图（api_key 只回脱敏值，绝不回明文）。"""
+    from . import avatar_cloud as ac
+    return ac.config()
 
 
 @app.post("/api/avatar2/cloud/config")
-def avatar2_cloud_set(body: dict):                          # noqa: ARG001
-    """云端口型已移除（保留路由只为前端优雅降级）。"""
-    return dict(_CLOUD_GONE)
+def avatar2_cloud_set(body: dict):
+    """保存云端配置。body: {api_key?, resolution?}"""
+    from . import avatar_cloud as ac
+    return ac.set_config(body or {})
 
 
 @app.post("/api/avatar2/cloud/speak")
-def avatar2_cloud_speak(body: dict):                        # noqa: ARG001
-    """云端生成已移除 —— 请改调 /api/talkhead/speak。"""
-    return dict(_CLOUD_GONE)
+def avatar2_cloud_speak(body: dict):
+    """提交云端生成，立刻返回 job_id（生成要 1~3 分钟，前端轮询进度）。
+
+    body: {text, voice?, rate?, style?, mood?, resolution?}
+    """
+    body = body or {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 不能为空")
+    # 心情 + 语速：与本地版一致，走同一个解析器
+    cfg = avatar2._resolve_mood(str(body.get("mood") or ""),
+                                body.get("rate"), text)
+    rate = int(cfg.get("rate", 0))
+    style = str(body.get("style") or "").strip() or str(cfg.get("style") or "")
+    r = avatar2.speak_async(text,
+                            voice=str(body.get("voice") or ""),
+                            rate=rate, style=style,
+                            resolution=str(body.get("resolution") or ""))
+    if r.get("ok"):
+        r.update({"mood": cfg.get("key", "calm"),
+                  "mood_label": cfg.get("label", "平静"),
+                  "rate": rate, "style": style})
+    return r
 
 
 @app.get("/api/avatar2/cloud/job/{jid}")
-def avatar2_cloud_job(jid: str):                            # noqa: ARG001
-    """云端任务轮询已移除。"""
-    return dict(_CLOUD_GONE)
+def avatar2_cloud_job(jid: str):
+    """查云端生成进度。返回 status=pending/running/done/failed + msg + 进度。"""
+    from . import avatar_cloud as ac
+    return ac.job(jid)
 
 
 @app.get("/api/avatar2/raw")
@@ -11276,178 +11287,9 @@ def avatar2_from_library(body: dict):
     return r
 
 
-@app.post("/api/avatar2/mouth")
-def avatar2_mouth(body: dict):
-    """手动校准嘴部矩形（前端拖动）。body: {x,y,w,h}，归一化 0~1。"""
-    return {"ok": True, "mouth": avatar2.set_mouth(body or {})}
-
-
-@app.post("/api/avatar2/detect_mouth")
-def avatar2_detect_mouth():
-    """重新自动定位嘴部（手动拖偏了点一下复位）。"""
-    r = avatar2.detect_mouth(avatar2._img_path())
-    if r.get("ok"):
-        avatar2.set_mouth(r["mouth"])
-        return {"ok": True, "mouth": avatar2.mouth(), "score": r.get("score")}
-    return r
-
-
 @app.post("/api/avatar2/reset")
 def avatar2_reset():
     return avatar2.reset()
-
-
-@app.get("/api/avatar2/closed")
-def avatar2_closed():
-    """闭嘴基准图的预览。"""
-    p = avatar2._img_closed_path()
-    if not os.path.isfile(p):
-        raise HTTPException(status_code=404, detail="还没有闭嘴基准")
-    return FileResponse(p, media_type="image/png",
-                        headers={"Content-Disposition": "inline",
-                                 "Cache-Control": "no-store"})
-
-
-@app.get("/api/avatar2/closed_preview")
-def avatar2_closed_preview():
-    """闭嘴**预览**图：只给用户看，不参与渲染。"""
-    p = avatar2._img_closed_preview_path()
-    if not os.path.isfile(p):
-        raise HTTPException(status_code=404, detail="还没有预览图")
-    return FileResponse(p, media_type="image/png",
-                        headers={"Content-Disposition": "inline",
-                                 "Cache-Control": "no-store"})
-
-
-@app.post("/api/avatar2/close_mouth")
-def avatar2_close_mouth(body: dict = None,
-                        x_image_key: str = Header(default="")):
-    """把「张嘴」的源图变成闭嘴基准。
-
-    body: {force?, preview?, method?, use_llm?}
-      · preview=true 只生成预览图，不动已生效基准、不改 meta ——
-        用户先在界面上看效果，满意了再调 /closed_apply 转正。
-      · force=true 开孔占比太小时也强制处理。
-      · method="cloud"（默认）走云端 image2.5 生成式重绘（低配机可用）；
-        "sdxl_hires" 走本机 SDXL；"lip_shift"/"mirror" 是确定性像素法。
-      · use_llm=false 时不调 LLM（省 token，用内置 prompt、不选片）。
-    图片 API Key 由前端放在 X-Image-Key 头里传（和 🎨 面板同一个）。
-    """
-    body = body or {}
-    try:
-        r = avatar2.close_mouth(
-            force=bool(body.get("force")),
-            preview=bool(body.get("preview")),
-            method=str(body.get("method") or "cloud"),
-            image_key=x_image_key,
-            use_llm=bool(body.get("use_llm", True)),
-            max_rounds=int(body.get("max_rounds") or 2))
-    except Exception as e:                                       # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail="闭嘴合成失败：%s: %s" % (type(e).__name__, e))
-    if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r.get("error") or "处理失败")
-    r["info"] = avatar2.info()
-    return r
-
-
-@app.post("/api/avatar2/closed_apply")
-def avatar2_closed_apply():
-    """把预览图转正成正式基准（用户点「用这个」时调用）。"""
-    r = avatar2.apply_closed_preview()
-    if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r.get("error") or "转正失败")
-    return r
-
-
-@app.post("/api/avatar2/closed_drop")
-def avatar2_closed_drop():
-    """丢弃预览图，已生效基准与主形象都不动。"""
-    r = avatar2.drop_closed_preview()
-    r["info"] = avatar2.info()
-    return r
-
-
-@app.post("/api/avatar2/close_preview")
-def avatar2_close_preview(body: dict = None):
-    """用 SDXL 局部重绘生成闭嘴预览候选（只重绘嘴部方块，主形象零改动）。
-
-    body: {n?: 1~4, style?: natural|smile|neutral|mix, steps?: 28}
-    ⚠ 每张约 20~30 秒（GPU）；这是一次性操作，选定后日常渲染仍走轻量形变。
-    """
-    body = body or {}
-    try:
-        r = avatar2.preview_closed_inpaint(
-            n=int(body.get("n") or 3),
-            style=str(body.get("style") or "mix"),
-            steps=int(body.get("steps") or 28),
-        )
-    except Exception as e:                                       # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail="生成闭嘴预览失败：%s: %s" % (type(e).__name__, e))
-    if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r.get("error") or "生成失败")
-    r["all"] = avatar2.closed_candidates()
-    return r
-
-
-@app.get("/api/avatar2/closed_candidate/{name}")
-def avatar2_closed_candidate(name: str):
-    """看某一张候选图。"""
-    p = os.path.join(avatar2._closed_cand_dir(), os.path.basename(name))
-    if not os.path.isfile(p):
-        raise HTTPException(status_code=404, detail="没有这张候选")
-    return FileResponse(p, media_type="image/png",
-                        headers={"Content-Disposition": "inline",
-                                 "Cache-Control": "no-store"})
-
-
-@app.post("/api/avatar2/close_apply")
-def avatar2_close_apply(body: dict = None):
-    """选定某张候选作为闭嘴基准（body: {id}）。"""
-    body = body or {}
-    r = avatar2.apply_closed_candidate(str(body.get("id") or ""))
-    if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r.get("error") or "选定失败")
-    r["info"] = avatar2.info()
-    return r
-
-
-@app.post("/api/avatar2/locate")
-def avatar2_locate(body: dict = None):
-    """用「图像算法 + 多模态 LLM」自动识别形象的五官位置。
-
-    body: {apply?: true, use_llm?: true, model?: "qwen2.5vl:3b"}
-      apply=true 时把识别到的嘴部直接写进 mouth.json（前端在用户确认后调用）。
-
-    返回 mouth/face/eyes 都是 0~1 归一化坐标，前端叠加在图上给用户看/微调。
-    """
-    body = body or {}
-    try:
-        from . import avatar_vision as AV
-    except Exception as e:                                      # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail="视觉模块加载失败：%s: %s" % (type(e).__name__, e))
-    p = avatar2._img_path()
-    if not os.path.isfile(p):
-        raise HTTPException(status_code=400, detail="还没有形象图，请先上传一张")
-    model = str(body.get("model") or AV.MODEL_FAST)
-    try:
-        r = AV.locate(p, model=model, use_llm=bool(body.get("use_llm", True)))
-    except Exception as e:                                      # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail="识别失败：%s: %s" % (type(e).__name__, e))
-    if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r.get("error") or "识别失败")
-    if body.get("apply") and r.get("mouth"):
-        m = r["mouth"]
-        avatar2.set_mouth({"x": (m[0] + m[2]) / 2.0,
-                           "y": (m[1] + m[3]) / 2.0,
-                           "w": max(0.02, (m[2] - m[0])),
-                           "h": max(0.015, (m[3] - m[1]))})
-        r["applied"] = True
-        r["info"] = avatar2.info()
-    return r
 
 
 @app.post("/api/avatar2/reveal")
@@ -11534,341 +11376,17 @@ def avatar2_speak(body: dict):
                          amp=_amp)
 
 
-# 2026-11-15 回退：云端 Wan2.2-S2V 方案已整体移除（要 API Key + 业务空间 ID，
-# 配置麻烦且效果未验证）。数字人回到本地 2D 形变，口型由「拼音音素 + 声学」驱动。
-@app.get("/api/talkhead/info")
-def talkhead_info():
-    """数字人 v3（音素驱动口型）能力自检。"""
-    from . import talkhead
-    from .talkhead import engine as th_engine
-    return {
-        "ok": True,
-        "version": talkhead.__version__,
-        "engine": "phoneme-driven viseme",
-        "dims": ["open", "round", "spread", "teeth", "lower", "press"],
-        "fps": th_engine.FPS,
-        "max_seconds": th_engine.MAX_SECONDS,
-        "align": "静音锚点 + 音节权重（不依赖 whisper）",
-        "cpu_ok": True,
-        "note": "纯 CPU 可跑，无神经网络推理；牙齿/口腔为程序化合成，"
-                "自然度受形象素材限制（闭嘴单张照片无法凭空长出真实口腔）",
-    }
-
-
-@app.post("/api/talkhead/speak")
-def talkhead_speak(body: dict):
-    """文本 → 配音 → 音素对齐 → 渲染 → mp4。
-
-    body: {text, voice, rate, style, engine}
-    ⚠️ 同步路由，FastAPI 丢线程池跑；10 秒片子约 4~8 秒渲染完。
-    """
-    body = body or {}
-    text = str(body.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text 不能为空")
-    if len(text) > 6000:
-        raise HTTPException(status_code=400, detail="单次最多 6000 字")
-    from . import avatar2 as _av
-    from .talkhead import engine as th_engine
-    img = _av._img_path()
-    if not os.path.isfile(img):
-        raise HTTPException(status_code=400,
-                            detail="还没有数字人形象，请先上传一张图")
-    try:
-        rate = int(body.get("rate") or 0)
-    except Exception:                                # noqa: BLE001
-        rate = 0
-    r = th_engine.render_text(
-        text, img,
-        voice=str(body.get("voice") or ""),
-        rate=rate,
-        style=str(body.get("style") or ""),
-        engine=str(body.get("engine") or "auto"),
-    )
-    if r.get("ok") and r.get("path"):
-        name = os.path.basename(r["path"])
-        r["name"] = name
-        r["url"] = "/api/avatar2/video/" + quote(name)
-    return r
-
-
-@app.get("/api/avatar3d/info")
-def avatar3d_info():
-    """3D 数字人能力自检：模型是否就绪、能做什么。"""
-    try:
-        from . import face3d
-        ok = face3d.available()
-        # 只查 face3d 不够：avatar3d 里一旦有导入错误，info 仍会显示可用，
-        # 用户点生成才报错（上一版就是这样，表现为「3D 模块加载失败」）。
-        from . import avatar3d as _a3d                          # noqa: F401
-    except Exception as e:                                  # noqa: BLE001
-        return {"ok": False, "available": False,
-                "error": "%s: %s" % (type(e).__name__, e)}
-    return {
-        "ok": True,
-        "available": bool(ok),
-        "engine": "3dmm",
-        "verts": 38365,
-        "tris": 76073,
-        "features": ["真 3D 人脸网格", "头部偏航/俯仰", "张嘴（含下颌）", "眨眼"],
-        "limits": [
-            "单图重建：侧面没有纹理，转头幅度建议 ≤12°",
-            "口型为网格微张，不是生成式重绘，大张口会失真",
-        ],
-    }
-
-
-@app.post("/api/avatar3d/speak")
-def avatar3d_speak(body: dict):
-    """文本 → TTS → 3D 网格渲染 → mp4。body: {text, voice, rate, style, engine, amp, size, head_move}"""
-    body = body or {}
-    text = str(body.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text 不能为空")
-    if len(text) > 2000:
-        raise HTTPException(status_code=400,
-                            detail="3D 模式单次最多 2000 字（渲染较慢，建议分段）")
-    try:
-        from . import avatar3d, face3d
-    except Exception as e:                                  # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail="3D 模块加载失败：%s: %s" % (type(e).__name__, e))
-    if not face3d.available():
-        raise HTTPException(status_code=400,
-                            detail="3D 模型没就绪（data/models/face3d 缺少文件）")
-
-    _r = body.get("rate")
-    rate = None
-    if _r not in (None, ""):
-        try:
-            rate = int(_r)
-        except Exception:                                   # noqa: BLE001
-            rate = None
-    try:
-        amp = min(2.0, max(0.6, float(body.get("amp") or 1.4)))
-    except Exception:                                       # noqa: BLE001
-        amp = 1.4
-    try:
-        size = int(body.get("size") or 512)
-    except Exception:                                       # noqa: BLE001
-        size = 512
-    size = max(256, min(1024, size))
-    try:
-        head_move = float(body.get("head_move", 1.0))
-    except Exception:                                       # noqa: BLE001
-        head_move = 1.0
-
-    from . import tts as tts_mod
-    a = tts_mod.synth(text, voice=str(body.get("voice") or ""), rate=rate or 0,
-                      engine=str(body.get("engine") or "auto"),
-                      style=str(body.get("style") or ""))
-    if not a.get("ok"):
-        raise HTTPException(status_code=400, detail="配音失败：%s" % a.get("error"))
-    wav = avatar2._to_wav16k(a.get("path") or "")
-    words = avatar2._asr_words(wav)
-
-    import time as _time
-    import uuid as _uuid
-    name = ("avatar3d_" + _time.strftime("%Y%m%d_%H%M%S") + "_"
-            + _uuid.uuid4().hex[:4] + ".mp4")
-    out = os.path.join(avatar2._vdir(), name)
-    try:
-        r = avatar3d.render(avatar2._img_path(), wav, out, words=words,
-                            amp=amp, size=size, head_move=head_move)
-    except Exception as e:                                  # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail="3D 渲染失败：%s: %s" % (type(e).__name__, e))
-    from urllib.parse import quote
-    return {
-        "ok": True,
-        "name": name,
-        "url": "/api/avatar2/video/" + quote(name),
-        "path": out,
-        "duration": r["duration"],
-        "size": r["size"],
-        "frames": r["frames"],
-        "amp": amp,
-        "head_move": head_move,
-        "lipsync_label": "3D 网格口型",
-        "audio_url": a.get("url") or "",
-        "align": ("字级对齐 %d 字" % len(words)) if words else "声学驱动",
-        "text": text[:200],
-    }
-
-
+# 2026-11-15：云端 Wan2.2-S2V 是唯一引擎（本地渲染整体删除）。
+# 长文本由前端按句子切成多段分别生成，最后用下面这个路由合并。
 @app.post("/api/avatar2/concat")
-@app.get("/api/avatar25d/info")
-def avatar25d_info():
-    """伪3D 数字人能力自检。"""
-    try:
-        from . import avatar25d as _a25                          # noqa: F401
-    except Exception as e:                                       # noqa: BLE001
-        return {"ok": False, "available": False,
-                "error": "%s: %s" % (type(e).__name__, e)}
-    return _a25.info()
-
-
-@app.post("/api/avatar25d/speak")
-def avatar25d_speak(body: dict):
-    """文本 → TTS → 伪3D（深度位移 + 音频驱动头姿）→ mp4。
-
-    body: {text, voice, rate, style, engine, amp, motion, blink}
-    """
-    body = body or {}
-    text = str(body.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text 不能为空")
-    if len(text) > 2000:
-        raise HTTPException(status_code=400,
-                            detail="单次最多 2000 字（渲染较慢，建议分段）")
-    try:
-        from . import avatar25d
-    except Exception as e:                                       # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail="伪3D 模块加载失败：%s: %s" % (type(e).__name__, e))
-    if not avatar25d.available():
-        raise HTTPException(status_code=400,
-                            detail="3D 模型没就绪（data/models/face3d 缺少文件）")
-
-    _r = body.get("rate")
-    rate = None
-    if _r not in (None, ""):
-        try:
-            rate = int(_r)
-        except Exception:                                        # noqa: BLE001
-            rate = None
-    try:
-        amp = min(2.0, max(0.6, float(body.get("amp") or 1.2)))
-    except Exception:                                            # noqa: BLE001
-        amp = 1.2
-    try:
-        motion = min(2.0, max(0.0, float(body.get("motion", 1.0))))
-    except Exception:                                            # noqa: BLE001
-        motion = 1.0
-    # 眨眼默认关：单图没有闭眼后的眼皮纹理，任何合成都是把上方皮肤拉下来
-    # （视觉复核三次都判「斜线 + 内眼角尖角 + 涂抹感」）。这是单图方案的
-    # 物理上限，不是参数没调好。留着开关让用户自己选。
-    blink = bool(body.get("blink", False))
-
-    try:
-        r = avatar25d.speak(text, voice=str(body.get("voice") or ""),
-                            rate=rate, style=str(body.get("style") or ""),
-                            engine=str(body.get("engine") or "auto"),
-                            amp=amp, motion=motion, blink=blink)
-    except Exception as e:                                       # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail="伪3D 渲染失败：%s: %s" % (type(e).__name__, e))
-    if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r.get("error") or "渲染失败")
-    return r
-
-
-@app.get("/api/avatar_lipsync/info")
-def avatar_lipsync_info():
-    """Wav2Lip 生成式口型能力自检。"""
-    try:
-        from . import avatar_lipsync as _al                     # noqa: F401
-        from . import wav2lip_engine as _we                     # noqa: F401
-        from . import face_detect_scrfd as _fd                  # noqa: F401
-    except Exception as e:                                      # noqa: BLE001
-        return {"ok": False, "available": False,
-                "error": "%s: %s" % (type(e).__name__, e)}
-    return _al.info()
-
-
-@app.post("/api/avatar_lipsync/speak")
-def avatar_lipsync_speak(body: dict):
-    """文本 → TTS → Wav2Lip 生成式口型 → mp4。
-
-    body: {text, voice, rate, style, engine, blink, head}
-    """
-    body = body or {}
-    text = str(body.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text 不能为空")
-    if len(text) > 2000:
-        raise HTTPException(status_code=400,
-                            detail="单次最多 2000 字（渲染较慢，建议分段）")
-    try:
-        from . import avatar_lipsync
-    except Exception as e:                                      # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail="Wav2Lip 模块加载失败：%s: %s" % (type(e).__name__, e))
-    if not avatar_lipsync.available():
-        raise HTTPException(status_code=400,
-                            detail="Wav2Lip 模型没就绪（data/models/wav2lip 缺少文件）")
-    _r = body.get("rate")
-    rate = None
-    if _r not in (None, ""):
-        try:
-            rate = int(_r)
-        except Exception:                                       # noqa: BLE001
-            rate = None
-    _ms = body.get("max_side")
-    try:
-        _ms = int(_ms) if _ms not in (None, "") else 1024
-    except Exception:                                           # noqa: BLE001
-        _ms = 1024
-    _ms = max(480, min(1920, _ms))
-    # 头部动作强度：0 = 完全不动，1 = 标准，1.6 = 活跃（夹在 0~2）
-    # ⚠️ 2026-11-15：兜底默认从 1.0 改成 0.0（静止，只有嘴动）。
-    #   动作层（avatar25d._warp）会做整头 yaw/pitch/roll + 缩放，
-    #   实测改动 9.43% 全图像素 —— 就是用户说的「整个脸都变形了」。
-    #   用户想要头动，前端下拉框里显式选「轻微/自然/活跃」即可。
-    _mo = body.get("motion", 0.0)
-    try:
-        _mo = float(_mo) if _mo not in (None, "") else 0.0
-    except Exception:                                           # noqa: BLE001
-        _mo = 0.0
-    _mo = max(0.0, min(2.0, _mo))
-    # 口型幅度：前端滑块的 0.6~2.0，映射到 open_gain（最大开口相对源图的倍率）。
-    # 2026-11-15：这个字段原来在路由层就被丢掉了，滑块等于死控件。
-    _amp = body.get("amp")
-    if _amp not in (None, ""):
-        try:
-            _amp = max(0.6, min(2.0, float(_amp)))
-        except Exception:                                       # noqa: BLE001
-            _amp = None
-    else:
-        _amp = None
-    try:
-        r = avatar_lipsync.speak(
-            text, voice=str(body.get("voice") or ""), rate=rate,
-            style=str(body.get("style") or ""),
-            engine=str(body.get("engine") or "auto"),
-            blink=bool(body.get("blink", False)),
-            head=bool(body.get("head", True)),
-            max_side=_ms, motion=_mo,
-            mode=str(body.get("mode") or "auto"),
-            variants=bool(body.get("variants", False)),
-            review=bool(body.get("review", True)),
-            amp=_amp,
-        )
-    except Exception as e:                                      # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail="Wav2Lip 渲染失败：%s: %s" % (type(e).__name__, e))
-    if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r.get("error") or "渲染失败")
-    return r
-
-
 def avatar2_concat(body: dict):
-    """把多段数字人视频拼成一个。body: {names: [...], out_name?}
-
-    长文本朗读时前端按句子切成多段分别生成（每段都在超时窗口内），
-    最后调这里合并 —— 避免"字数一多就超时"。
-    """
+    """把多段数字人视频按顺序拼成一个。body: {names:[...], out_name?}"""
     body = body or {}
-    names = body.get("names") or []
+    names = body.get("names") or body.get("parts") or []
     if not isinstance(names, list) or not names:
         raise HTTPException(status_code=400, detail="names 不能为空")
-    if len(names) > 200:
-        raise HTTPException(status_code=400, detail="分段太多（上限 200 段）")
-    r = avatar2.concat_videos([str(n) for n in names],
-                              out_name=str(body.get("out_name") or ""))
-    if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r.get("error") or "拼接失败")
-    return r
+    return avatar2.concat_videos([str(n) for n in names],
+                                 out_name=str(body.get("out_name") or ""))
 
 
 @app.get("/api/avatar2/videos")

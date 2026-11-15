@@ -61,10 +61,6 @@ def case(name, scope="quick"):
     return deco
 
 
-def _skip():
-    return "skip"
-
-
 # ---------------------------------------------------------------- 回复裁剪
 def _clip_cases():
     from . import main as M
@@ -443,72 +439,6 @@ def _c_clip_edge():
     got = M._clip_reply(s, limit=600)
     assert got == s, "刚好等于上限也被裁了（%d → %d 字）" % (len(s), len(got))
 
-
-# ---------------------------------------------------------------- 嘴部几何
-@case("mouth.几何顺序与派生量自洽")
-def _c_mouth():
-    """嘴部几何的**不变量**：只验顺序与派生量，不绑死具体像素。
-
-    这样换一张形象图也不会误报，但一旦几何逻辑被改坏（顺序错乱、
-    衰减终点跑到衣服上、开口高度和上下界对不上）立刻能抓住。
-    """
-    img_p = _ROOT / "data" / "avatar2" / "avatar.png"
-    cfg_p = _ROOT / "data" / "avatar2" / "mouth.json"
-    if not img_p.is_file() or not cfg_p.is_file():
-        return _skip()
-    import cv2
-    from . import avatar_mouth as AM
-    img = cv2.imread(str(img_p))
-    if img is None:
-        return _skip()
-    h, w = img.shape[:2]
-    cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
-    if not cfg.get("y"):
-        return _skip()
-    r = AM.analyze(img, cfg)
-    if not r:
-        raise AssertionError("analyze 返回了空结果")
-    ys = float(r.get("y_split") or 0)
-    yh = float(r.get("y_hole_bot") or 0)
-    yl = float(r.get("y_lip_bot") or 0)
-    yf = float(r.get("y_fade") or 0)
-    oh = float(r.get("open_h") or 0)
-    mh = max(8.0, float(cfg["h"]) * h)
-
-    assert ys < yh <= yl < yf, (
-        "几何顺序错乱：唇缝 %.1f / 口腔底 %.1f / 下唇底 %.1f / 衰减终点 %.1f"
-        "（必须严格递增）" % (ys, yh, yl, yf))
-    assert abs(oh - (yh - ys)) < 0.01, (
-        "开口高度与上下界对不上：open_h=%.2f，但 y_hole_bot-y_split=%.2f"
-        % (oh, yh - ys))
-    assert 0 <= ys and yf <= h, (
-        "几何越出图像边界：y_split=%.1f / y_fade=%.1f，图高 %d" % (ys, yf, h))
-    assert yf - ys < mh * 6, (
-        "形变纵向跨度 %.1fpx 超过嘴高 %.1fpx 的 6 倍 —— 会拖到下巴/衣服上"
-        % (yf - ys, mh))
-
-
-@case("mouth.闭嘴基准判为闭合")
-def _c_mouth_closed():
-    img_p = _ROOT / "data" / "avatar2" / "avatar_closed.png"
-    cfg_p = _ROOT / "data" / "avatar2" / "mouth.json"
-    if not img_p.is_file() or not cfg_p.is_file():
-        return _skip()
-    import cv2
-    from . import avatar_mouth as AM
-    img = cv2.imread(str(img_p))
-    if img is None:
-        return _skip()
-    cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
-    if not cfg.get("y"):
-        return _skip()
-    r = AM.analyze(img, cfg)
-    if not r:
-        raise AssertionError("analyze 返回了空结果")
-    # 历史 bug：判据太松，闭嘴图被判成张嘴 → warp 版被选中 → 嘴根本不动。
-    assert r.get("source_open") is False, (
-        "闭嘴基准被判成「张着嘴」（open_h=%s），会导致 warp 版被选中但嘴不动"
-        % r.get("open_h"))
 
 
 # ---------------------------------------------------------------- 全量（full）

@@ -1322,17 +1322,15 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
                 "name": "avatar_speak",
                 "description": (
                     "【数字人说话视频】把一张人物图片 + 一段文字，做成**会说话的 mp4 视频**：\n"
-                    "先用 TTS 配音，再由**拼音音素**驱动 6 维口型（开口/圆唇/展唇/齿露/"
-                    "下唇/闭唇）—— 声母决定该不该闭唇（b/p/m 闭）、韵母决定唇形"
-                    "（u/o 圆、i/e 扁），字与字之间做协同发音过渡，最后用 ffmpeg 合成。\n"
-                    "引擎是本地 v3（backend/talkhead/），纯 CPU、免费、不需要任何 API Key。\n"
+                    "先用 TTS 配音，再送阿里云百炼 Wan2.2-S2V 生成口型 —— 它**重绘整张脸**，"
+                    "自带真实牙齿、舌头和口腔深度，不是把静态图拉扯变形。\n"
                     "用户说「让这个形象说话」「做个数字人视频」「用这张图念这段话」"
                     "「数字人播报」时用它。\n"
+                    "⚠️ 需要先配 API Key：没配会返回申请地址，把那个地址告诉用户即可"
+                    "（只要一个 Key，不需要业务空间 ID）。\n"
                     "⚠️ 需要先有形象：传 image 参数（本地图片路径），或用户已在「数字人」"
                     "面板里设过形象（不传 image 就用现有的）。\n"
-                    "⚠️ 局限要如实说：这是**参数化口型**（形变渲染，不是神经网络重绘），"
-                    "闭唇/圆唇/扁唇这类唇形是对的，但舌位、齿位、下颌开合不会变。\n"
-                    "⚠️ 生成要 8~15 秒，先发一条 status 让界面有反馈。"
+                    "⚠️ 生成要 1~3 分钟（长文本切多段更久），先发一条 status 让界面有反馈。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -4520,18 +4518,17 @@ def _do_tts_speak(arguments, ui_events, context):
 
 
 def _do_avatar_speak(arguments, ui_events, context):
-    """数字人说话视频：图 + 文字 → mp4（v3 音素驱动引擎）。
+    """数字人说话视频：图 + 文字 → mp4（云端 Wan2.2-S2V）。
 
-    ⚠️ 渲染 8~15 秒，先发 status 别让界面看着像卡死。
-    ⚠️ 返回里必须写清"参数化口型"这个局限。
+    ⚠️ 生成要 1~3 分钟（长文本会切多段，更久），先发 status 别让界面像卡死。
+    ⚠️ 需要先配 API Key；没配就把申请地址告诉用户，别只说"失败了"。
     """
     from . import avatar2
-    from .talkhead import engine as th_engine
 
     text = str(arguments.get("text") or "").strip()
     if not text:
         return "错误：text 是空的。把要让数字人念的文字给我。"
-    if len(text) > 6000:      # 与 /api/talkhead/speak 一致；再长请分段
+    if len(text) > 6000:      # 与 /api/avatar2/speak 一致；再长请分段
         text = text[:6000]
 
     img = str(arguments.get("image") or "").strip()
@@ -4546,46 +4543,41 @@ def _do_avatar_speak(arguments, ui_events, context):
                 "或者用 generate_image 生成一张再让我用。")
 
     _ui(ui_events, {"type": "status",
-                    "text": "正在生成数字人视频（配音 → 口型 → 合成）…约 10 秒"})
+                    "text": "正在生成数字人视频（配音 → 云端口型 → 合成）…约 1~3 分钟"})
     try:
         rate = int(arguments.get("rate") or 0)
     except Exception:
         rate = 0
-    # 2026-11-15：主引擎换成 v3（backend/talkhead/，音素驱动 6 维口型）。
-    # 旧 avatar2.speak 是声学驱动 —— 它只知道「此刻多响」，分不出「爸」和「大」
-    # 该闭唇还是张嘴，这是原理性缺陷，所以降级为备用。
-    # ⚠️ v3 没有 amp（幅度增益）参数：它的张口幅度由音素本身决定，不需要用户调。
-    r = th_engine.render_text(
-        text, avatar2._img_path(),
+    # 2026-11-15：本地渲染整体删除，统一走云端 Wan2.2-S2V。
+    # 本地三条路（2D 形变 / Wav2Lip 96x96 / SadTalker 256）都只能重绘很小的嘴，
+    # 贴回原图必然糊；生成式模型重绘整张脸，自带真实牙齿和口腔深度。
+    r = avatar2.speak(
+        text,
         voice=str(arguments.get("voice") or ""),
         rate=rate,
         style=str(arguments.get("style") or ""),
+        mood=str(arguments.get("mood") or ""),
     )
     if not r.get("ok"):
+        if r.get("need_key"):
+            return ("数字人视频生成失败：还没配置 API Key。\n"
+                    "去 %s 申请一个（只要 Key，不需要业务空间 ID），"
+                    "填进数字人面板的「云端口型配置」再试。"
+                    % (r.get("key_url") or "https://help.aliyun.com/zh/model-studio/get-api-key"))
         return "数字人视频生成失败：%s" % (r.get("error") or "未知原因")
 
-    # v3 只回 path，没有 name/url，这里自己拼播放地址（产物落在同一个 videos 目录）
-    path = r.get("path") or ""
-    name = os.path.basename(path) if path else ""
-    from urllib.parse import quote
-    url = ("/api/avatar2/video/" + quote(name)) if name else ""
-    lines = [
+    name = r.get("name") or ""
+    url = r.get("url") or ""
+    out = [
         "数字人视频已生成：**%s**" % name,
-        "时长 %.1f 秒 · %dx%d · %d 帧 · %.0f KB"
-        % (float(r.get("duration") or 0),
-           int((r.get("size") or [0, 0])[0]), int((r.get("size") or [0, 0])[1]),
-           int(r.get("frames") or 0), float(r.get("bytes") or 0) / 1024.0),
-        "口型：音素驱动 · %d 个音节 · 对齐 %d 字"
-        % (int(r.get("syllables") or 0), int(r.get("aligned") or 0)),
+        "时长 %.1f 秒 · %d 帧 · %.0f KB"
+        % (float(r.get("duration") or 0), int(r.get("frames") or 0),
+           float(r.get("bytes") or 0) / 1024.0),
+        "引擎：阿里云百炼 Wan2.2-S2V（生成式重绘，自带真实口腔结构）",
         "[播放视频](%s)" % url,
         "[下载视频](%s)" % url,
-        "",
-        "说明：口型由**拼音音素**驱动——按声母/韵母算出 6 维口型"
-        "（开口/圆唇/展唇/齿露/下唇/闭唇），b/p/m 会真的闭唇、"
-        "u/o 圆唇、i/e 扁唇。仍是参数化形变而非神经网络重绘，"
-        "舌位和齿位不会变。",
     ]
-    return "\n".join(lines)
+    return "\n".join(out)
 
 
 def _do_video_edit(arguments, ui_events, context):

@@ -51,10 +51,10 @@ logger = logging.getLogger(__name__)
 _CFG = "cloud.json"
 _DEF = {
     "api_key": "",
-    "workspace_id": "",
     "resolution": "480P",
     "model": "wan2.2-s2v",
 }
+# 说明：旧配置里可能还留着 workspace_id，读取时忽略即可，不做迁移。
 
 MAX_AUDIO_SEC = 19.0      # 官方限制 <20 秒，留 1 秒余量
 POLL_INTERVAL = 4.0       # 轮询间隔（秒）
@@ -119,21 +119,19 @@ def config() -> dict:
     """给前端读的配置视图。api_key 只回脱敏值，绝不回明文。"""
     c = _cfg()
     k = (c.get("api_key") or "").strip()
-    ws = (c.get("workspace_id") or "").strip()
     return {
         "ok": True,
         "has_key": bool(k),
         "api_key": _mask(k),
-        "workspace_id": ws,
         "resolution": c.get("resolution") or "480P",
         "model": c.get("model") or "wan2.2-s2v",
-        "ready": bool(k and ws),
+        "ready": bool(k),
         "max_audio_sec": MAX_AUDIO_SEC,
         "signup_url": SIGNUP_URL,
         "key_url": KEY_URL,
         "doc_url": DOC_URL,
         "price_url": PRICE_URL,
-        "missing": [x for x, v in (("API Key", k), ("业务空间 ID", ws)) if not v],
+        "missing": [] if k else ["API Key"],
     }
 
 
@@ -160,20 +158,6 @@ def set_config(d: dict) -> dict:
                              "请确认完整复制" % len(v)}
         else:
             c["api_key"] = v
-    if "workspace_id" in d:
-        v = str(d.get("workspace_id") or "").strip()
-        if "…" in v:
-            pass                      # 前端回传的脱敏值，这一项不改
-        elif "*" in v:
-            return {"ok": False,
-                    "error": "业务空间 ID 里含 * 号，说明没复制全。"
-                             "请到百炼控制台 → 业务空间 复制（形如 llm-xxxxxxxx）"}
-        elif v and not v.startswith("llm-"):
-            return {"ok": False,
-                    "error": "业务空间 ID 形如 llm-xxxxxxxx，"
-                             "在百炼控制台左侧「业务空间」里复制"}
-        else:
-            c["workspace_id"] = v
     if "resolution" in d:
         v = str(d.get("resolution") or "").strip().upper()
         if v in ("480P", "720P"):
@@ -192,10 +176,14 @@ def set_config(d: dict) -> dict:
 
 # ---------------------------------------------------------------- HTTP 底座
 def _base() -> str:
-    ws = (_cfg().get("workspace_id") or "").strip()
-    if not ws:
-        raise RuntimeError("还没填业务空间 ID（百炼控制台 → 业务空间，形如 llm-xxxxxxxx）")
-    return "https://%s.cn-beijing.maas.aliyuncs.com/api/v1" % ws
+    """百炼的**通用域名**（不需要业务空间 ID）。
+
+    官方文档写明「业务空间专属域名」是建议迁移项，但「现有域名仍可正常使用」。
+    实测（2026-11-15）：用假 Key 真连 dashscope.aliyuncs.com 返回
+    401 InvalidApiKey —— 说明接口路径有效、只差一个有效的 Key。
+    所以只填 API Key 就能用，不必再让用户去控制台翻业务空间 ID。
+    """
+    return "https://dashscope.aliyuncs.com/api/v1"
 
 
 def _auth() -> dict:
@@ -484,11 +472,10 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
     长音频会切成多段分别生成再拼接，因为接口硬限制单次 <20 秒。
     """
     c = _cfg()
-    miss = [x for x, v in (("API Key", c.get("api_key")), ("业务空间 ID", c.get("workspace_id"))) if not (v or "").strip()]
-    if miss:
+    if not (c.get("api_key") or "").strip():
         return {
             "ok": False, "need_key": True,
-            "error": "还没配置%s，去百炼控制台拿一下填进来" % "、".join(miss),
+            "error": "还没填 API Key，去百炼控制台拿一下填进来",
             "signup_url": SIGNUP_URL, "key_url": KEY_URL,
         }
     if not os.path.isfile(image_path):
@@ -663,7 +650,6 @@ def status() -> dict:
         "ok": True,
         "ready": c["ready"],
         "has_key": c["has_key"],
-        "workspace_id": c["workspace_id"],
         "resolution": c["resolution"],
         "model": c["model"],
         "max_audio_sec": MAX_AUDIO_SEC,
