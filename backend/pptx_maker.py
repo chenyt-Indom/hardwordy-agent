@@ -1042,7 +1042,8 @@ def _add_chart(prs, th, st, sl, page_no):
     ch.has_legend = bool(spec.get("legend", len(series) > 1))
     try:
         ch.font.size = Pt(float(st.get("body_size") or 12))
-        ch.font.name = st.get("font") or _CN_FONT
+        ch.font.name = FONTS.get(str(st.get("font") or "").strip().lower(),
+                                 FONTS[DEFAULT_FONT])
     except Exception:
         pass
 

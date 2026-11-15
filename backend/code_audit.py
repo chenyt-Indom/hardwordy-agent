@@ -266,6 +266,223 @@ def _check_undefined_call(trees):
     return out
 
 
+# ---------------------------------------------------------------- 4b. 使用未定义的名字
+
+def _star_imports(tree):
+    """有 `from x import *` 时无法推断有哪些名字，整个文件跳过。"""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name == "*":
+                    return True
+    return False
+
+
+def _scope_bound_body(nodes):
+    """收集「这一层作用域」绑定的名字（不进入嵌套函数/类体）。"""
+    bound = set()
+    stack = list(nodes)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(n.name)
+            for d in getattr(n, "decorator_list", []) or []:
+                stack.append(d)
+            continue
+        if isinstance(n, ast.Lambda):
+            continue
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            bound.add(n.id)
+            continue
+        if isinstance(n, ast.arg):
+            bound.add(n.arg)
+            continue
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                bound.add(a.asname or a.name.split(".")[0])
+            continue
+        if isinstance(n, ast.ExceptHandler):
+            # ⚠️ 不能 continue：`except ... as e:` 的**块体**里还有赋值，
+            # 跳过它会把块内的变量误判成「未定义」（实测踩过 iter_runner 的 tb）。
+            if n.name:
+                bound.add(n.name)
+            for ch in ast.iter_child_nodes(n):
+                stack.append(ch)
+            continue
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            bound.update(n.names)
+            continue
+        for ch in ast.iter_child_nodes(n):
+            stack.append(ch)
+    return bound
+
+
+class _UndefNameVisitor(ast.NodeVisitor):
+    """按作用域栈检查 `Name` 是不是真的从没被绑定过。
+
+    保守策略：**只在「整个作用域链里都找不到这个名字」时报**，
+    宁可漏报也不误报（误报多了这个功能就没人看了）。
+    """
+
+    def __init__(self, module_names, rel):
+        self.stack = [set(module_names) | _BUILTIN_NAMES]
+        self.rel = rel
+        self.out = []
+        self.seen = set()
+
+    def _known(self, nm):
+        for s in reversed(self.stack):
+            if nm in s:
+                return True
+        return False
+
+    def visit_Name(self, node):
+        if not isinstance(node.ctx, ast.Load):
+            return
+        nm = node.id
+        if nm.startswith("__") and nm.endswith("__"):
+            return
+        if self._known(nm):
+            return
+        key = (getattr(node, "lineno", 0), nm)
+        if key in self.seen:
+            return
+        self.seen.add(key)
+        self.out.append(_finding(
+            "high", "undefined-name", self.rel, getattr(node, "lineno", 0),
+            "使用了 `%s`，但本文件里没有定义 / 赋值 / import 过它" % nm,
+            "运行到这一行会抛 NameError"))
+
+    def visit_Call(self, node):
+        fn = node.func
+        if isinstance(fn, ast.Name):
+            # `foo(...)` 由 _check_undefined_call 负责，这里不重复报
+            for a in node.args:
+                self.visit(a)
+            for k in node.keywords:
+                self.visit(k.value)
+            return
+        self.generic_visit(node)
+
+    def _enter_func(self, node):
+        a = node.args
+        # 装饰器与默认值在外层作用域求值
+        for d in getattr(node, "decorator_list", []) or []:
+            self.visit(d)
+        for d in (getattr(a, "defaults", None) or []):
+            self.visit(d)
+        for d in (getattr(a, "kw_defaults", None) or []):
+            if d is not None:
+                self.visit(d)
+        scope = set()
+        for arg in ((getattr(a, "posonlyargs", None) or []) + (a.args or [])
+                    + (getattr(a, "kwonlyargs", None) or [])):
+            scope.add(arg.arg)
+        if getattr(a, "vararg", None):
+            scope.add(a.vararg.arg)
+        if getattr(a, "kwarg", None):
+            scope.add(a.kwarg.arg)
+        globals_decl = set()
+        for n in ast.walk(node):
+            if isinstance(n, ast.Global):
+                globals_decl.update(n.names)
+        scope |= (_scope_bound_body(node.body) - globals_decl)
+        self.stack.append(scope)
+        try:
+            for st in node.body:
+                self.visit(st)
+        finally:
+            self.stack.pop()
+
+    def visit_FunctionDef(self, node):
+        self._enter_func(node)
+
+    def visit_AsyncFunctionDef(self, node):
+        self._enter_func(node)
+
+    def visit_Lambda(self, node):
+        a = node.args
+        for d in (getattr(a, "defaults", None) or []):
+            self.visit(d)
+        scope = set()
+        for arg in ((getattr(a, "posonlyargs", None) or []) + (a.args or [])
+                    + (getattr(a, "kwonlyargs", None) or [])):
+            scope.add(arg.arg)
+        if getattr(a, "vararg", None):
+            scope.add(a.vararg.arg)
+        if getattr(a, "kwarg", None):
+            scope.add(a.kwarg.arg)
+        self.stack.append(scope)
+        try:
+            self.visit(node.body)
+        finally:
+            self.stack.pop()
+
+    def visit_ClassDef(self, node):
+        for d in node.decorator_list or []:
+            self.visit(d)
+        for b in node.bases:
+            self.visit(b)
+        self.stack.append(_scope_bound_body(node.body))
+        try:
+            for st in node.body:
+                self.visit(st)
+        finally:
+            self.stack.pop()
+
+
+def _check_undefined_name(trees):
+    """用了一个本文件从没定义 / 赋值 / import 过的名字（NameError）。"""
+    out = []
+    for rel, (p, tree) in trees.items():
+        if _star_imports(tree):
+            continue
+        known = _scope_bound_body(tree.body)
+        v = _UndefNameVisitor(known, rel)
+        try:
+            for st in tree.body:
+                v.visit(st)
+        except RecursionError:
+            continue
+        out.extend(v.out)
+    return out
+
+
+_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _check_dead_private_func(trees):
+    """私有函数定义了却全项目只有定义处出现一次 —— 典型「加了函数没接线」。
+
+    ⚠️ 保守规则：只看**模块级、以下划线开头、没有装饰器**的函数。
+    带装饰器的可能被框架注册（路由/事件），按名字找不到调用点属正常；
+    注释或字符串里提到过也算「出现过」，宁可漏报。
+    """
+    counter = {}
+    for rel, (p, tree) in trees.items():
+        for w in _WORD_RE.findall(_read(p)):
+            counter[w] = counter.get(w, 0) + 1
+
+    out = []
+    for rel, (p, tree) in trees.items():
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            nm = node.name
+            if not nm.startswith("_") or nm.startswith("__"):
+                continue
+            if node.decorator_list:
+                continue
+            if counter.get(nm, 0) > 1:
+                continue
+            out.append(_finding(
+                # ⚠️ 刻意用 low：接线要理解上下文，不能让信任模式自动改。
+                "low", "dead-func", rel, getattr(node, "lineno", 0),
+                "私有函数 `%s` 定义了，但全项目再没出现过这个名字" % nm,
+                "很可能是「加了函数没接线」——改动看着成功其实没生效；接上调用点或删掉"))
+    return out
+
+
 # ---------------------------------------------------------------- 5. 裸 except / 静默吞异常
 
 def _check_except(trees):
@@ -492,6 +709,8 @@ def audit(deep_files=None):
     findings += _check_syntax(paths)
     findings += _check_cross_module(trees, sym)
     findings += _check_undefined_call(trees)
+    findings += _check_undefined_name(trees)
+    findings += _check_dead_private_func(trees)
     findings += _check_except(trees)
     findings += _check_duplicate_def(trees)
     findings += _check_routes(trees)

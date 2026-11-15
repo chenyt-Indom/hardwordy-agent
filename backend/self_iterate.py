@@ -1286,14 +1286,26 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None):
     if auto_execute is None:
         auto_execute = bool(load_settings().get("trust_mode"))
     if auto_execute and actions:
-        set_stage("exec", "自动执行 %d 条动作…" % len(actions))
-        out["auto"] = auto_approve_and_execute(plan["id"])
-        out["need_restart"] = bool((out.get("auto") or {}).get("need_restart"))
-        # 执行走的是重新 load 的一份 plan，这里刷新回去，
-        # 否则前端会显示「待批准」而实际已经改完了。
+        # 2026-11-15 用户要求：计划一确定就直接开始，但**不阻塞聊天**，
+        # 并且要在聊天界面显示「正在迭代中」+ 代码卡片；已有任务在跑就排队。
+        # 所以这里只「批准 + 提交队列」，真正的执行在 iter_runner 的后台线程里。
+        set_stage("exec", "把 %d 条动作提交到迭代队列…" % len(actions))
+        pre = auto_approve_only(plan["id"])
         _d2, _p2 = _find_plan(plan["id"])
         if _p2:
             out["plan"] = _p2
+        try:
+            from . import iter_runner as _ir
+            sub = _ir.submit(plan["id"], source="auto",
+                             title=(plan.get("title") or "")[:80])
+            out["auto"] = {"submitted": True, "queue": sub,
+                           "auto_approved": pre.get("approved") or 0,
+                           "high_risk": pre.get("high_risk") or []}
+            out["task"] = sub
+            out["need_restart"] = False
+        except Exception as e:                          # noqa: BLE001
+            out["auto"] = {"submitted": False,
+                           "error": "%s: %s" % (type(e).__name__, e)}
     return out
 
 
@@ -1462,10 +1474,22 @@ def _apply_find_replace(rel, find, replace):
 def _plan_patch_for_action(plan, action):
     """让 LLM 针对这一条动作产出具体 patch（此时才读相关文件内容）。"""
     want = [f for f in (action.get("files") or []) if isinstance(f, str)]
+    if not want:
+        # 兜底（2026-11-15）：模型产出的动作常常只在标题/说明里写路径，
+        # 不填 files 字段 —— 那样执行必然报「没有可读的目标文件」，白排一次队。
+        # 这里从文本里把路径抠出来。**只认已存在的文件**：凭空造新文件风险太大，
+        # 新建类动作必须显式写 files，否则宁可报错让人看见。
+        _blob = "%s %s %s" % (action.get("title") or "",
+                              action.get("detail") or "",
+                              action.get("note") or "")
+        _cand = re.findall(
+            r"((?:backend|frontend|data|tools)/[\w./\-]+\.(?:py|js|css|html|json|md))",
+            _blob)
+        want = [c for c in dict.fromkeys(_cand) if (_ROOT / c).is_file()][:3]
     files = [f for f in want if (_ROOT / f).is_file()]
     new_files = [f for f in want if not (_ROOT / f).is_file()]
     if not files and not new_files:
-        return None, "没有可读的目标文件"
+        return None, "没有可读的目标文件（动作里没写 files，文本里也没找到已存在的路径）"
     ctx = []
     for rel in files[:_MAX_FILES_PER_ACTION]:
         body = _read_text(rel)
@@ -1511,8 +1535,30 @@ def _plan_patch_for_action(plan, action):
     return patches, ""
 
 
-def execute_approved(pid):
-    """执行这次反思里所有 status=approved 的动作。带备份 + 校验 + 失败回滚。"""
+def execute_approved(pid, on_event=None, should_cancel=None):
+    """执行这次反思里所有 status=approved 的动作。带备份 + 校验 + 失败回滚。
+
+    2026-11-15 用户要求「迭代要像普通对话一样在聊天界面跑、能看到详细操作、
+    能随时终止」—— 所以加了两个可选回调：
+      on_event(kind, **kw)  进度事件（step / code），由 iter_runner 收集成事件流；
+      should_cancel()       返回 True 时，**当前动作跑完（含校验/回滚）后**停下，
+                            剩余动作退回 pending。绝不中途打断 patch。
+    """
+    def _ev(kind, **kw):
+        if on_event:
+            try:
+                on_event(kind, **kw)
+            except Exception:                           # noqa: BLE001
+                pass
+
+    def _stop():
+        if not should_cancel:
+            return False
+        try:
+            return bool(should_cancel())
+        except Exception:                               # noqa: BLE001
+            return False
+
     d, plan = _find_plan(pid)
     if not plan:
         return {"ok": False, "error": "找不到这次反思"}
@@ -1520,15 +1566,48 @@ def execute_approved(pid):
     if not todo:
         return {"ok": False, "error": "这次反思没有已批准的动作"}
 
+    def _card(a, patches, ok, error="", rolled_back=False, files=None, backup=""):
+        """把一次动作的结果整理成前端代码卡片要的数据。
+
+        patches 里的 find/replace 本身就是 diff 的原料 —— 不在后端算 diff，
+        前端用现成的逐行对比渲染更省事，也不会因为行尾空白对不齐。
+        """
+        by_file, seen = [], {}
+        for pt in (patches or []):
+            rel = _norm_rel(pt.get("file")) or str(pt.get("file") or "")
+            if rel not in seen:
+                seen[rel] = {"rel": rel, "hunks": []}
+                by_file.append(seen[rel])
+            seen[rel]["hunks"].append({
+                "find": str(pt.get("find") or "")[:2400],
+                "replace": str(pt.get("replace") or "")[:2400],
+            })
+        return {"action_id": a.get("id"), "title": a.get("title"),
+                "risk": a.get("risk") or "mid",
+                "ok": bool(ok), "error": str(error or ""),
+                "rolled_back": bool(rolled_back),
+                "files": by_file,
+                "changed": list(files or []),
+                "backup": backup or a.get("backup") or ""}
+
     results = []
-    for a in todo:
+    cancelled = False
+    skipped = 0
+    for _i, a in enumerate(todo):
+        if _stop():
+            cancelled = True
+            skipped = len(todo) - _i
+            _ev("step", text="收到终止请求，剩余 %d 条动作不再执行" % skipped)
+            break
         tag = "%s_%s_%s" % (pid, a["id"], _pid())
+        _ev("step", text="%s %s · 正在生成改动方案…" % (a.get("id"), a.get("title")))
         patches, err = _plan_patch_for_action(plan, a)
         if err:
             a["status"] = "failed"
             a["error"] = err
             results.append({"id": a["id"], "ok": False, "error": err})
             _log_act(plan, a, False, err)
+            _ev("code", **_card(a, [], False, err))
             continue
 
         # 校验所有目标文件都在白名单内
@@ -1545,14 +1624,18 @@ def execute_approved(pid):
             a["error"] = bad
             results.append({"id": a["id"], "ok": False, "error": bad})
             _log_act(plan, a, False, bad)
+            _ev("code", **_card(a, patches, False, bad))
             continue
         if len(set(rels)) > _MAX_FILES_PER_ACTION:
             a["status"] = "failed"
             a["error"] = "一次动作涉及文件过多（上限 %d）" % _MAX_FILES_PER_ACTION
             results.append({"id": a["id"], "ok": False, "error": a["error"]})
             _log_act(plan, a, False, a["error"])
+            _ev("code", **_card(a, patches, False, a["error"]))
             continue
 
+        _ev("step", text="%s 备份并应用改动（%s）…" % (
+            a.get("id"), "、".join(dict.fromkeys(rels))))
         # 备份（created 里是本次要新建的文件，回滚时会被删除）
         tag2, saved, created = _backup_files(list(dict.fromkeys(rels)), tag)
         a["backup"] = tag2
@@ -1573,6 +1656,8 @@ def execute_approved(pid):
             a["error"] = fail_msg + "（已自动回滚）"
             results.append({"id": a["id"], "ok": False, "error": a["error"]})
             _log_act(plan, a, False, a["error"])
+            _ev("step", text="%s 应用失败，已自动回滚" % a.get("id"))
+            _ev("code", **_card(a, patches, False, a["error"], True))
             continue
 
         # 语法校验
@@ -1588,6 +1673,8 @@ def execute_approved(pid):
             a["error"] = vbad + "（已自动回滚）"
             results.append({"id": a["id"], "ok": False, "error": a["error"]})
             _log_act(plan, a, False, a["error"])
+            _ev("step", text="%s 语法校验没通过，已自动回滚" % a.get("id"))
+            _ev("code", **_card(a, patches, False, a["error"], True))
             continue
 
         a["status"] = "done"
@@ -1595,11 +1682,22 @@ def execute_approved(pid):
         results.append({"id": a["id"], "ok": True, "files": list(dict.fromkeys(done_rels)),
                         "backup": tag2})
         _log_act(plan, a, True, "改了：" + "、".join(dict.fromkeys(done_rels)))
+        _ev("step", text="%s 完成（%s）" % (
+            a.get("id"), "、".join(dict.fromkeys(done_rels))))
+        _ev("code", **_card(a, patches, True, "", False,
+                            list(dict.fromkeys(done_rels)), tag2))
 
+    if cancelled:
+        # 被用户终止：没跑的那些退回「待批准」，下次还能接着批，不会丢
+        for a in (plan.get("actions") or []):
+            if a.get("status") == "approved":
+                a["status"] = "pending"
+                a["error"] = "上一轮被终止，尚未执行"
     save_plans(d)
     ok_n = sum(1 for r in results if r["ok"])
     out = {"ok": ok_n > 0, "done": ok_n, "total": len(results), "results": results,
            "plan": plan,
+           "cancelled": cancelled, "skipped": skipped,
            "need_restart": ok_n > 0}
 
     # 用户要求：每次代码被改完就自动跑一次自检。
@@ -1887,15 +1985,16 @@ def audit_overview():
 
 # ---------------------------------------------------------------- 信任模式
 
-def auto_approve_and_execute(pid, max_n=0):
-    """信任模式：把待批准的动作全部标成 approved，并立刻执行。
+def auto_approve_only(pid, max_n=0):
+    """信任模式：把待批准的动作全部标成 approved，**不执行**。
 
     用户明确要求「全部自动，包括高风险；高风险也自动进行，但会在前端跟用户
     说一声」—— 所以这里不按风险过滤，只把高风险挑出来放进返回值，让前端提示。
+
+    2026-11-15 拆出来：执行改由 iter_runner 的队列负责（要排队、要能终止、
+    要在聊天界面出代码卡片），这里只负责「批准」这一步。
     """
     s = load_settings()
-    if not s.get("trust_mode"):
-        return {"ok": False, "error": "没开信任模式，不能免批准执行"}
     d, plan = _find_plan(pid)
     if not plan:
         return {"ok": False, "error": "找不到这次计划"}
@@ -1909,13 +2008,29 @@ def auto_approve_and_execute(pid, max_n=0):
             a["auto"] = True
             picked.append(a)
     save_plans(d)
-    if not picked:
-        return {"ok": False, "error": "没有待执行的动作（可能已经处理过了）"}
+    return {"ok": bool(picked), "approved": len(picked),
+            "plan": plan,
+            "high_risk": [{"id": a.get("id"), "title": a.get("title")}
+                          for a in picked if str(a.get("risk") or "mid") == "high"]}
+
+
+def auto_approve_and_execute(pid, max_n=0):
+    """信任模式：批准 + 立刻执行（同步，兼容老调用方）。
+
+    ⚠️ 新流程（2026-11-15 起）不再走这里 —— 用户要求迭代要在聊天界面里跑、
+    要排队、要能终止，所以改由 iter_runner.submit() 提交到队列。
+    这个函数留着是为了兼容可能还在直接调它的地方，行为不变。
+    """
+    s = load_settings()
+    if not s.get("trust_mode"):
+        return {"ok": False, "error": "没开信任模式，不能免批准执行"}
+    pre = auto_approve_only(pid, max_n=max_n)
+    if not pre.get("ok"):
+        return {"ok": False, "error": pre.get("error") or "没有待执行的动作（可能已经处理过了）"}
     r = execute_approved(pid)
-    r["auto_approved"] = len(picked)
+    r["auto_approved"] = pre.get("approved")
     r["trust"] = True
-    r["high_risk"] = [{"id": a.get("id"), "title": a.get("title")}
-                      for a in picked if str(a.get("risk") or "mid") == "high"]
+    r["high_risk"] = pre.get("high_risk") or []
     return r
 
 

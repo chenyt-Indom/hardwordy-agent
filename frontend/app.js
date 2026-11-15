@@ -12780,6 +12780,7 @@
     loadActlog();
     pushSignals();
     startPoll();
+    feedProbe();
   }
 
   // ---------------------------------------------------------- 渲染
@@ -13166,6 +13167,14 @@
     busy = false;
     if (!r || !r.ok) { say((r && r.error) || "反思失败", "bad"); return; }
     say("反思完成：" + ((r.plan && r.plan.summary) || ""), "good");
+    // 信任模式下，后端已经把动作提交到迭代队列 —— 立刻在聊天界面开卡片。
+    if (r.task && r.task.ok) {
+      feedStart();
+      if (r.task.state === "waiting") {
+        say("已有迭代在跑，这次计划排在第 " + (r.task.ahead || 1) +
+            " 位，前面的结束后会自动接着执行。", "warn");
+      }
+    }
     if (r.need_restart) showRestart(true);
     await load();
   }
@@ -13253,8 +13262,32 @@
       { id: data.latest.id, action_ids: ids, note: note || "" });
     busy = false; noteFor = null;
     if (!r || !r.ok) { say((r && r.error) || "批准失败", "bad"); return; }
-    say("已批准 " + (r.approved || 0) + " 条。点「▶ 执行已批准的」我才会真的改代码。", "good");
+    // 用户要求：手动批准时，没任务在跑就直接在聊天界面执行；有任务就排队等它结束。
+    await submitToFeed(data.latest.id, "manual");
     await load();
+  }
+
+  // 把计划提交到迭代队列 —— 没任务在跑立刻开跑，有任务在跑就排队（会自动接续）。
+  async function submitToFeed(pid, source) {
+    if (!pid) return null;
+    let r;
+    try {
+      r = await api("/api/selfiter/enqueue", { id: pid, source: source || "manual" });
+    } catch (e) {
+      say("提交执行失败：" + (e && e.message ? e.message : e), "bad");
+      return null;
+    }
+    if (!r || !r.ok) {
+      say((r && r.error) || "提交执行失败", "bad");
+      return null;
+    }
+    feedStart();
+    if (r.state === "waiting") {
+      say("已有迭代在跑，这个计划排在第 " + (r.ahead || 1) + " 位，前面的结束后会自动接着执行。", "warn");
+    } else {
+      say("开始迭代：在聊天界面里跑，显示详细操作和代码卡片；随时可以点「终止」。", "good");
+    }
+    return r;
   }
 
   async function doReject(ids, note) {
@@ -13270,16 +13303,9 @@
 
   async function doExecute() {
     if (busy || !data || !data.latest) return;
-    busy = true;
-    say("执行中…会先备份原文件，改完做语法校验，失败自动回滚");
-    const r = await api("/api/selfiter/execute", { id: data.latest.id });
-    busy = false;
-    if (!r || !r.ok) { say((r && r.error) || "执行失败", "bad"); await load(); return; }
-    const bad = (r.results || []).filter(function (x) { return !x.ok; });
-    let msg = "执行完成：" + (r.done || 0) + "/" + (r.total || 0) + " 成功。";
-    if (bad.length) msg += " 失败 " + bad.length + " 条：" + (bad[0].error || "");
-    if (r.need_restart) msg += " ⚠️ 改了代码，需要重启后端才生效。";
-    say(msg, bad.length ? "warn" : "good");
+    // 2026-11-15 用户要求：执行要在聊天界面里跑（有「正在迭代中」和代码卡片），
+    // 所以不再走同步的 /execute，改成提交到迭代队列。
+    await submitToFeed(data.latest.id, "manual");
     await load();
   }
 
@@ -13293,6 +13319,289 @@
     say("已回滚 " + (r.rolled_back || 0) + " 条。", "good");
     await load();
   }
+
+  // ================= 聊天界面里的迭代执行卡片 =================
+  // 用户 2026-11-15 要求：迭代要像平时对话一样在聊天界面里跑 ——
+  //   · 显示「正在迭代中」+ 详细操作 + 代码卡片；
+  //   · 不阻塞聊天，随时可点「终止」；
+  //   · 跑完收起成一条摘要（改了哪些文件 + 成败），点开看详情；
+  //   · 已有任务在跑时，新任务显示「正在等待执行」并自动接续。
+  // 实现：轮询 /api/selfiter/task?since=N 拿事件增量，按 tid 分组成卡片。
+  let feedSeq = 0;
+  let feedTimer = null;
+  let feedRunningTid = null;
+
+  function ifEsc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function feedRoot() { return document.getElementById("messages"); }
+
+  function feedEnsure(tid) {
+    const root = feedRoot();
+    if (!root || !tid) return null;
+    let el = root.querySelector('.iter-feed[data-tid="' + tid + '"]');
+    if (el) return el;
+    el = document.createElement("div");
+    el.className = "msg bot iter-feed";
+    el.setAttribute("data-tid", tid);
+    el.setAttribute("data-state", "running");
+    el.innerHTML =
+      '<div class="bubble">' +
+        '<div class="if-head">' +
+          '<span class="if-dot"></span>' +
+          '<span class="if-title">正在迭代中…</span>' +
+          '<span class="if-elapsed"></span>' +
+          '<span class="if-queue"></span>' +
+          '<span class="if-btns">' +
+            '<button type="button" class="btn sm ghost if-stop">⏹ 终止</button>' +
+            '<button type="button" class="btn sm ghost if-fold">▴ 收起</button>' +
+          '</span>' +
+        '</div>' +
+        '<div class="if-body">' +
+          '<div class="if-steps"></div>' +
+          '<div class="if-cards"></div>' +
+        '</div>' +
+      '</div>';
+    root.appendChild(el);
+    root.scrollTop = root.scrollHeight;
+    return el;
+  }
+
+  function feedStep(el, text) {
+    const box = el.querySelector(".if-steps");
+    if (!box || !text) return;
+    const d = document.createElement("div");
+    d.className = "if-step";
+    d.textContent = "· " + text;
+    box.appendChild(d);
+    while (box.children.length > 60) box.removeChild(box.firstChild);
+  }
+
+  function feedStatus(el, text, state) {
+    const t = el.querySelector(".if-title");
+    if (t && text) t.textContent = text;
+    if (!state) return;
+    // 排队中被提上来时（waiting → running）必须把外观也改回 running，
+    // 否则这一条跑完了还挂着「正在等待执行」的样式，看起来像卡住了。
+    el.setAttribute("data-state", state);
+    if (state !== "running") {
+      const stop = el.querySelector(".if-stop");
+      if (stop) stop.hidden = true;
+    } else {
+      const stop = el.querySelector(".if-stop");
+      if (stop) stop.hidden = false;
+    }
+  }
+
+  function feedCard(el, ev) {
+    const box = el.querySelector(".if-cards");
+    if (!box) return;
+    const files = ev.files || [];
+    let add = 0, del = 0;
+    const names = [];
+    files.forEach(function (f) {
+      if (names.indexOf(f.rel) < 0) names.push(f.rel);
+      (f.hunks || []).forEach(function (h) {
+        const a = (h.replace || "").split("\n").length;
+        if (!h.find) { add += a; }
+        else { add += a; del += (h.find || "").split("\n").length; }
+      });
+    });
+    const card = document.createElement("div");
+    card.className = "if-card " + (ev.ok ? "ok" : "bad");
+    const stat = (add || del)
+      ? '<span class="if-diff"><b>+' + add + '</b> <i>−' + del + '</i></span>' : "";
+    card.innerHTML =
+      '<div class="if-card-head">' +
+        '<span class="if-card-ttl">' + ifEsc(ev.action_id || "") + " · " + ifEsc(ev.title || "") + "</span>" +
+        stat +
+        '<span class="if-card-files">' + ifEsc(names.join("、") || "（无目标文件）") + "</span>" +
+        (ev.rolled_back ? '<span class="if-flag">已自动回滚</span>' : "") +
+        (ev.ok ? '<span class="if-ok">✓ 完成</span>' : '<span class="if-bad">✕ 失败</span>') +
+        '<span class="if-card-toggle">▸</span>' +
+      '</div>' +
+      (ev.error ? '<div class="if-err">' + ifEsc(ev.error) + "</div>" : "") +
+      '<div class="if-card-body" hidden></div>';
+    const body = card.querySelector(".if-card-body");
+    files.forEach(function (f) {
+      (f.hunks || []).forEach(function (h) {
+        const d = document.createElement("div");
+        d.className = "if-hunk";
+        const minus = h.find ? h.find.split("\n").map(function (l) { return "- " + l; }).join("\n") : "";
+        const plus = h.replace ? h.replace.split("\n").map(function (l) { return "+ " + l; }).join("\n") : "";
+        d.innerHTML = '<div class="if-file-name">' + ifEsc(f.rel) + "</div>" +
+          '<pre class="if-code">' + ifEsc([minus, plus].filter(Boolean).join("\n")) + "</pre>";
+        body.appendChild(d);
+      });
+    });
+    if (!body.children.length) {
+      body.innerHTML = '<div class="if-hunk"><div class="if-file-name">（这次没有产出改动内容）</div></div>';
+    }
+    card.querySelector(".if-card-head").onclick = function () {
+      body.hidden = !body.hidden;
+      const tg = card.querySelector(".if-card-toggle");
+      if (tg) tg.textContent = body.hidden ? "▸" : "▾";
+    };
+    // 记下这个任务改过哪些文件 —— 跑完收起成摘要时要写进标题
+    el.__files = el.__files || [];
+    names.forEach(function (n) { if (el.__files.indexOf(n) < 0) el.__files.push(n); });
+    box.appendChild(card);
+  }
+
+  function feedFold(el, fold) {
+    const body = el.querySelector(".if-body");
+    const btn = el.querySelector(".if-fold");
+    if (!body) return;
+    body.hidden = !!fold;
+    if (btn) btn.textContent = fold ? "▾ 展开" : "▴ 收起";
+  }
+
+  // 改完代码后，在卡片里留一行「需要重启 + 立即重启」。
+  // 原来只有抽屉里的按钮，抽屉没打开就完全看不到提示。
+  function feedRestartHint(el, files) {
+    // 挂在 bubble 上而不是 .if-body 里 —— 跑完会把详情收起，
+    // 挂在里面的话「需要重启」这条提示会跟着被藏掉。
+    const box = el.querySelector(".bubble") || el;
+    if (box.querySelector(".if-restart-hint")) return;
+    const d = document.createElement("div");
+    d.className = "if-restart-hint";
+    d.innerHTML =
+      '<span class="if-rh-txt">⚠️ 改了 ' + (files.length || 0) +
+      ' 个文件，需要重启才生效</span>' +
+      '<button type="button" class="btn sm if-restart">立即重启</button>';
+    box.appendChild(d);
+    const root = feedRoot();
+    if (root) root.scrollTop = root.scrollHeight;
+  }
+
+  let feedFirst = true;
+
+  async function feedPoll() {
+    let r;
+    try {
+      r = await api("/api/selfiter/task?since=" + feedSeq);
+    } catch (e) { return; }
+    if (!r || !r.ok) return;
+    const evs = r.events || [];
+    feedSeq = r.seq || feedSeq;
+    // 首次拉取（刷新页面后）：只重建**最近一个**任务的卡片，
+    // 否则几天前的历史会被一次性铺满聊天区。
+    let only = null;
+    if (feedFirst) {
+      feedFirst = false;
+      if (evs.length) only = evs[evs.length - 1].tid;
+    }
+    evs.forEach(function (ev) {
+      if (only && ev.tid !== only) return;
+      const el = feedEnsure(ev.tid);
+      if (!el) return;
+      if (ev.kind === "status") feedStatus(el, ev.text, ev.state);
+      else if (ev.kind === "step") feedStep(el, ev.text);
+      else if (ev.kind === "code") feedCard(el, ev);
+      else if (ev.kind === "error") feedStep(el, "错误：" + ev.text);
+      else if (ev.kind === "restart") {
+        // 改完要提示重启（用户明确要求）。抽屉可能没开着，所以除了
+        // 抽屉里的按钮，也在聊天区留一条提示。
+        feedStep(el, ev.text || "改了代码，需要重启才生效");
+        el.setAttribute("data-restart", "1");
+        feedRestartHint(el, ev.files || []);
+        try { showRestart(true); } catch (e) { /* 抽屉没打开就算了 */ }
+      }
+    });
+    const run = r.running;
+    if (run) {
+      feedRunningTid = run.tid;
+      const el = feedEnsure(run.tid);
+      if (el) {
+        const e2 = el.querySelector(".if-elapsed");
+        if (e2) e2.textContent = run.elapsed + "s";
+        const q = el.querySelector(".if-queue");
+        if (q) q.textContent = r.queue_len ? "（后面还有 " + r.queue_len + " 个任务等待）" : "";
+      }
+    }
+    if (r.state === "idle" && !run) {
+      // 全部跑完：把还在「running」外观的卡片收成摘要
+      const root = feedRoot();
+      if (root) {
+        Array.prototype.forEach.call(
+          root.querySelectorAll('.iter-feed[data-state="running"], ' +
+                               '.iter-feed[data-state="waiting"], ' +
+                               '.iter-feed[data-state="done"], ' +
+                               '.iter-feed[data-state="cancelled"], ' +
+                               '.iter-feed[data-state="error"]'),
+          function (el) {
+            if (el.__folded) return;
+            el.__folded = true;
+            const st = el.getAttribute("data-state");
+            if (st === "running") el.setAttribute("data-state", "done");
+            // 收起成摘要：标题里补上「改了哪些文件」，一眼能看出动了什么
+            const t = el.querySelector(".if-title");
+            const files = el.__files || [];
+            if (t && files.length && t.textContent.indexOf("改了") < 0) {
+              t.textContent += " · 改了 " + files.slice(0, 3).join("、") +
+                (files.length > 3 ? " 等 " + files.length + " 个文件" : "");
+            }
+            feedFold(el, true);
+            const stop = el.querySelector(".if-stop");
+            if (stop) stop.hidden = true;
+          });
+      }
+      feedRunningTid = null;
+      feedStop();
+      if (data && data.latest) load();
+    }
+  }
+
+  function feedStart() {
+    if (feedTimer) return;
+    feedTimer = setInterval(feedPoll, 1200);
+    feedPoll();
+  }
+
+  // 低频探测：用户可能根本没打开抽屉（比如定时任务触发了反思），
+  // 只要后端有任务在跑/在排队，就把聊天区的卡片轮询打开。
+  // ⚠️ 探测**不推进** feedSeq —— 否则事件会被"消费掉"，真正轮询时就拿不到了。
+  function feedProbe() {
+    if (feedTimer || document.hidden) return;
+    api("/api/selfiter/task?since=" + feedSeq).then(function (r) {
+      if (r && r.ok && (r.running || r.queue_len)) feedStart();
+    }).catch(function () {});
+  }
+  setInterval(feedProbe, 15000);
+  setTimeout(feedProbe, 4000);
+
+  function feedStop() {
+    if (feedTimer) { clearInterval(feedTimer); feedTimer = null; }
+  }
+
+  function onFeedClick(e) {
+    const t = e.target;
+    const el = t.closest ? t.closest(".iter-feed") : null;
+    if (!el) return;
+    if (t.classList.contains("if-stop")) {
+      e.preventDefault();
+      const tid = el.getAttribute("data-tid");
+      api("/api/selfiter/cancel", { tid: tid }).then(function (r) {
+        if (r && r.ok) say("已请求终止：当前这条动作做完就停（不会留改了一半的文件）", "warn");
+        else say((r && r.error) || "终止失败", "bad");
+      });
+      return;
+    }
+    if (t.classList.contains("if-fold")) {
+      e.preventDefault();
+      feedFold(el, !el.querySelector(".if-body").hidden);
+      return;
+    }
+    if (t.classList.contains("if-restart")) {
+      e.preventDefault();
+      doRestart();
+      return;
+    }
+  }
+  document.addEventListener("click", onFeedClick);
 
   function onBodyClick(e) {
     const t = e.target;

@@ -2331,6 +2331,63 @@ def selfiter_execute(body: dict):
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfiter/task")
+def selfiter_task(since: int = 0):
+    """迭代队列状态 + since 之后的新事件（前端每 1.5 秒轮询拿增量）。"""
+    from . import iter_runner as _ir
+    try:
+        return _ir.snapshot(since=since)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/enqueue")
+def selfiter_enqueue(body: dict):
+    """把手动批准的计划提交到迭代队列。
+
+    没任务在跑 → 立刻开始；有任务在跑 → 排队，等它结束自动接着跑。
+    """
+    from . import iter_runner as _ir
+    b = body or {}
+    try:
+        return _ir.submit(str(b.get("id") or b.get("plan_id") or ""),
+                          source=str(b.get("source") or "manual"),
+                          title=str(b.get("title") or ""))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/cancel")
+def selfiter_cancel(body: dict):
+    """终止当前迭代（当前动作做完就停，不会留下改了一半的文件）。"""
+    from . import iter_runner as _ir
+    b = body or {}
+    try:
+        return _ir.cancel(str(b.get("tid") or ""))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfiter/task_events")
+def selfiter_task_events(tid: str = ""):
+    """取某个任务的完整事件流（跑完收起成摘要后，点开看详情用）。"""
+    from . import iter_runner as _ir
+    try:
+        return {"ok": True, "tid": tid, "events": _ir.task_events(tid)}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/queue_clear")
+def selfiter_queue_clear():
+    """清空等待队列（不影响正在跑的那个）。"""
+    from . import iter_runner as _ir
+    try:
+        return _ir.queue_clear()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/api/selfiter/rollback")
 def selfiter_rollback(body: dict):
     from . import self_iterate as _si
