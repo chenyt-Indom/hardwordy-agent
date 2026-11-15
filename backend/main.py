@@ -2008,6 +2008,17 @@ def selfiter_overview():
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfiter/actlog")
+def selfiter_actlog(limit: int = 40):
+    """信任模式执行日志：每条动作改了什么、成功还是失败、备份在哪。"""
+    from . import self_iterate as _si
+    try:
+        rows = _si.list_actlog(limit=limit)
+        return {"ok": True, "count": len(rows), "items": rows}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/selfiter/plan")
 def selfiter_plan(id: str = ""):
     from . import self_iterate as _si

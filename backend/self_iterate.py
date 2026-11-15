@@ -170,6 +170,54 @@ def save_plans(d):
     _write_json(_PLANS, d)
 
 
+def _actlog(entry):
+    """信任模式自动执行时写一条 actlog，供用户查「有没有在改代码」。"""
+    try:
+        p = _DATA / "actlog.jsonl"
+        _ensure()
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def _log_act(plan, act, ok, detail=""):
+    """记录一条动作执行日志（用户可查「到底改没改」）。"""
+    _actlog({"ts": _now(),
+             "plan_id": (plan or {}).get("id"),
+             "action": (act or {}).get("id"),
+             "title": str((act or {}).get("title") or "")[:90],
+             "files": (act or {}).get("files") or [],
+             "result": "ok" if ok else "fail",
+             "detail": str(detail or "")[:500],
+             "backup": (act or {}).get("backup") or "",
+             "auto": bool((act or {}).get("auto"))})
+
+
+def list_actlog(limit=40):
+    """读执行日志（倒序），供前端/工具查询。
+
+    返回信任模式自动执行记录（时间、文件、成功/失败），
+    供 /api/selfiter/actlog 与前端「最近自动执行」区块消费。
+    """
+    p = _DATA / "actlog.jsonl"
+    if not p.is_file():
+        return []
+    out = []
+    try:
+        for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except Exception:                           # noqa: BLE001
+                continue
+    except Exception:                                   # noqa: BLE001
+        return []
+    return out[-int(limit):][::-1]
+
+
 def load_signals():
     d = _read_json(_SIGNALS, {"items": []})
     if isinstance(d, list):
@@ -1091,6 +1139,11 @@ def reflect(trigger="manual", use_web=True, focus="", auto_execute=None):
     if auto_execute and actions:
         out["auto"] = auto_approve_and_execute(plan["id"])
         out["need_restart"] = bool((out.get("auto") or {}).get("need_restart"))
+        # 执行走的是重新 load 的一份 plan，这里刷新回去，
+        # 否则前端会显示「待批准」而实际已经改完了。
+        _d2, _p2 = _find_plan(plan["id"])
+        if _p2:
+            out["plan"] = _p2
     return out
 
 
@@ -1325,6 +1378,7 @@ def execute_approved(pid):
             a["status"] = "failed"
             a["error"] = err
             results.append({"id": a["id"], "ok": False, "error": err})
+            _log_act(plan, a, False, err)
             continue
 
         # 校验所有目标文件都在白名单内
@@ -1340,11 +1394,13 @@ def execute_approved(pid):
             a["status"] = "failed"
             a["error"] = bad
             results.append({"id": a["id"], "ok": False, "error": bad})
+            _log_act(plan, a, False, bad)
             continue
         if len(set(rels)) > _MAX_FILES_PER_ACTION:
             a["status"] = "failed"
             a["error"] = "一次动作涉及文件过多（上限 %d）" % _MAX_FILES_PER_ACTION
             results.append({"id": a["id"], "ok": False, "error": a["error"]})
+            _log_act(plan, a, False, a["error"])
             continue
 
         # 备份（created 里是本次要新建的文件，回滚时会被删除）
@@ -1366,6 +1422,7 @@ def execute_approved(pid):
             a["status"] = "failed"
             a["error"] = fail_msg + "（已自动回滚）"
             results.append({"id": a["id"], "ok": False, "error": a["error"]})
+            _log_act(plan, a, False, a["error"])
             continue
 
         # 语法校验
@@ -1380,12 +1437,14 @@ def execute_approved(pid):
             a["status"] = "failed"
             a["error"] = vbad + "（已自动回滚）"
             results.append({"id": a["id"], "ok": False, "error": a["error"]})
+            _log_act(plan, a, False, a["error"])
             continue
 
         a["status"] = "done"
         a["error"] = ""
         results.append({"id": a["id"], "ok": True, "files": list(dict.fromkeys(done_rels)),
                         "backup": tag2})
+        _log_act(plan, a, True, "改了：" + "、".join(dict.fromkeys(done_rels)))
 
     save_plans(d)
     ok_n = sum(1 for r in results if r["ok"])
