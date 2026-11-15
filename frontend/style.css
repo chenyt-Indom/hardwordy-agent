@@ -5761,6 +5761,9 @@ html[data-theme="light"] select.pill-select option {
 
 /* ── 数字人云端口型配置（2026-11-15 重构：本地形变 → 云端 Wan2.2-S2V） ── */
 .av2-cloud {
+  /* 这个块同时带着 .av2-row（display:flex 横排），必须显式改回竖排，
+     否则 head/fields/help 三个子块会被挤成一行，标题竖排、输入框溢出面板 */
+  display: block;
   border: 1px solid var(--line, #e5e7eb);
   border-radius: 10px;
   padding: 10px 12px;
@@ -5773,6 +5776,7 @@ html[data-theme="light"] select.pill-select option {
 }
 .av2-cloud-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
