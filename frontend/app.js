@@ -12632,7 +12632,6 @@
             'placeholder="这次想让我重点关注什么？（可留空）">' +
         '</div>' +
         '<div class="iter-msg"></div>' +
-        '<div class="iter-exp"></div>' +
         '<div class="iter-restart" hidden>' +
           '<span>代码已改动，需要重启后端才生效。</span>' +
           '<button type="button" class="btn sm iter-restart-btn">🔁 一键重启</button>' +
@@ -12791,16 +12790,12 @@
     return '<b class="iter-sc' + cls + '">' + n.toFixed(1) + '</b>';
   }
 
-  function renderExp() {
-    if (!el) return;
-    const box = el.querySelector(".iter-exp");
-    if (!box) return;
+  function expHtml() {
     const e = expData;
     if (!e || !e.count) {
-      box.innerHTML = '<div class="iter-exp-empty">🎯 还没有体验评估。' +
+      return '<div class="iter-exp-empty">🎯 还没有体验评估。' +
         '点上面「📊 评估体验」，我会给最近几轮打分：任务完成度、过程效率、你的情绪，' +
         '并找出让你不爽的环节。</div>';
-      return;
     }
     let h = '<div class="iter-sec"><div class="iter-sec-t">🎯 体验评估（已评 ' +
       e.count + ' 次）</div>' +
@@ -12828,13 +12823,13 @@
       });
     }
     h += '</div>';
-    box.innerHTML = h;
+    return h;
   }
 
   async function loadExp() {
     const r = await api("/api/selfiter/experience");
     if (r && r.ok) expData = r;
-    renderExp();
+    render();
   }
 
   async function runEvaluate(improve) {
@@ -12868,7 +12863,6 @@
 
   function render() {
     if (!el) return;
-    renderExp();
     const d = data || {};
     const st = d.stats || {};
     el.querySelector(".iter-stats").innerHTML =
@@ -12892,15 +12886,15 @@
     }
 
     const body = el.querySelector(".iter-body");
+    let h = expHtml();
     const p = d.latest;
     if (!p) {
-      body.innerHTML = '<div class="iter-empty">还没有反思过。<br><br>' +
+      body.innerHTML = h + '<div class="iter-empty">还没有反思过。<br><br>' +
         '点上面的「🔄 现在反思一次」，我会先看最近的对话和网上的新技术（arXiv / GitHub / HackerNews / 中文媒体），' +
         '然后告诉你：我哪里做得不好、你在怎么用我、可以加什么功能、以及我想改哪些代码。<br><br>' +
-        '⚠️ 想改的东西**不会自己动手**，都要你点批准。</div>';
+        '⚠️ 想改的东西<b>不会自己动手</b>，都要你点批准。</div>';
       return;
     }
-    let h = "";
     h += sec("⏳ 我打算做的改动（" + (p.actions || []).length + " 条，等你批准）",
              actionsHtml(p.actions));
     h += sec("🪞 我对自己的反思", listHtml(p.weaknesses, "w"));
