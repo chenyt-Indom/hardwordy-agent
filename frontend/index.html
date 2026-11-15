@@ -301,12 +301,39 @@
              既保留原图细节，又有头部体积感；真 3D 是重画网格，观感反而更假。 -->
         <div class="av2-row av2-row-3d">
           <select id="av2Mode"
-                  title="伪3D：按真实深度做位移，头会跟着说话轻微摆动，画面仍是原图 → 最自然。标准：只有嘴动。真3D：重画网格，能大角度转头但质感偏假、慢 3 倍">
-            <option value="w2l" selected>Wav2Lip 生成口型（最像真人 · 推荐）</option>
-            <option value="2d">标准 2D（最快 · 只有嘴动）</option>
-            <option value="p25d">伪 3D（头会动）</option>
-            <option value="3d">真 3D 网格（可转头 · 慢）</option>
+                  title="云端：扩散模型逐帧重绘，口型由音频真正驱动（能做出闭唇/圆唇，需要 API Key）。本地那几种是 2D 形变，原理上做不出 b/p/m 闭唇，仅供对比">
+            <option value="cloud" selected>☁️ 云端 Wan2.2-S2V（口型最准 · 推荐）</option>
+            <option value="w2l">Wav2Lip 生成口型（本地 · 不推荐）</option>
+            <option value="2d">标准 2D（本地 · 只有嘴动）</option>
+            <option value="p25d">伪 3D（本地 · 头会动）</option>
+            <option value="3d">真 3D 网格（本地 · 可转头 · 慢）</option>
           </select>
+        </div>
+        <!-- 云端口型配置：API Key 只存本机 data/avatar2/cloud.json，不回传明文 -->
+        <div class="av2-row av2-cloud" id="av2CloudBox">
+          <div class="av2-cloud-head">
+            <span>☁️ 云端口型配置</span>
+            <span class="av2-cloud-state" id="av2CloudState">读取中…</span>
+          </div>
+          <div class="av2-cloud-fields">
+            <input id="av2CloudKey" type="password" placeholder="API Key（sk- 开头）"
+                   autocomplete="off" spellcheck="false" />
+            <input id="av2CloudWs" placeholder="业务空间 ID（如 llm-xxxxxxxx）"
+                   autocomplete="off" spellcheck="false" />
+            <select id="av2CloudRes" title="480P 更快更便宜；720P 更清晰">
+              <option value="480P">480P 快</option>
+              <option value="720P">720P 清晰</option>
+            </select>
+            <button class="btn sm" id="av2CloudSave">保存</button>
+          </div>
+          <div class="av2-cloud-help">
+            没配过？
+            <a id="av2CloudSignup" href="https://bailian.console.aliyun.com/" target="_blank"
+               rel="noopener">打开百炼控制台</a> ·
+            <a id="av2CloudDoc" href="https://help.aliyun.com/zh/model-studio/wan-s2v-api"
+               target="_blank" rel="noopener">接口文档</a>
+            <span class="av2-cloud-tip">Key 只存在本机，不联网校验以外不上传</span>
+          </div>
         </div>
         <div class="av2-acts av2-acts-doc">
           <button class="btn sm ghost" id="av2DocBtn"

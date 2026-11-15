@@ -2159,13 +2159,18 @@ def render(img_path: str, wav_path: str, out_mp4: str, words: list = None,
 def speak(text: str, voice: str = "", rate=None, style: str = "",
           engine: str = "auto", mood: str = "", expr: bool = False,
           amp: float = 1.0) -> dict:
-    """文本 → TTS → 口型对齐 → mp4。这是给工具/前端调的主入口。
+    """文本 → TTS → 云端 Wan2.2-S2V → mp4。这是给工具/前端调的主入口。
 
-    engine  = TTS 引擎（auto/edge/sapi）
-    mood    = 心情：auto/""（按语境自动判断）/ happy/calm/serious/gentle/
-              sad/excited/surprise/worried/confident
-    rate    = 语速 -50~50；None 表示用心情的建议值
-    expr    = 是否叠加微表情（整头轻动 + 眉眼带轻形变）
+    2026-11-15 重构：本地 2D 形变已**整体停用**，改走阿里云百炼 Wan2.2-S2V。
+    原因是形变原理上做不出 b/p/m 闭唇、舌位、牙齿，怎么调参都是橡皮嘴；
+    云端是扩散模型逐帧重绘，口型由音频真正驱动。
+
+    参数现在的实际作用（都只影响配音，不再影响口型渲染）：
+      engine = TTS 引擎（auto/edge/sapi）
+      mood   = 心情：auto/""（按语境自动判断）/ happy/calm/serious/gentle/
+               sad/excited/surprise/worried/confident
+      rate   = 语速 -50~50；None 表示用心情的建议值
+      expr / amp = 本地渲染时代的参数，云端不再使用，保留只为兼容老调用方
     """
     t = (text or "").strip()
     if not t:
@@ -2173,12 +2178,24 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
     if not os.path.isfile(_img_path()):
         return {"ok": False, "error": "还没有数字人形象，请先上传一张图或用 AI 生成一张"}
 
+    # ---- 云端没配好就早退，把「缺什么、去哪拿」直接告诉调用方
+    from . import avatar_cloud as cl
+    cstat = cl.status()
+    if not cstat.get("ready"):
+        c = cl.config()
+        return {
+            "ok": False, "need_key": True,
+            "error": "云端口型还没配置：缺%s" % "、".join(c.get("missing") or ["API Key"]),
+            "signup_url": c.get("signup_url"), "key_url": c.get("key_url"),
+            "doc_url": c.get("doc_url"),
+        }
+
     # ---- 心情 + 语速解析（auto 时走规则，拿不准的标记交给调用方决定）
+    # 注意：这两个现在只影响 TTS 配音，不影响口型（口型由云端模型按音频重绘）
     from . import avatar2_expr as ex
     cfg = ex.resolve(mood, rate, t)
     final_rate = int(cfg.get("rate", 0))
     final_style = (style or "").strip() or str(cfg.get("style") or "")
-    expr_cfg = cfg if expr else None
 
     from . import tts as tts_mod
     a = tts_mod.synth(t, voice=voice or "", rate=final_rate,
@@ -2186,28 +2203,24 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
     if not a.get("ok"):
         return {"ok": False, "error": "配音失败：%s" % a.get("error")}
     audio = a.get("path") or ""
-    try:
-        wav = _to_wav16k(audio)
-    except Exception as e:                              # noqa: BLE001
-        return {"ok": False, "error": "音频转码失败：%s: %s" % (type(e).__name__, e)}
 
-    words = _asr_words(wav)
-    name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
-    out = os.path.join(_vdir(), name)
-    _amp = float(np.clip(amp, 0.60, 2.00))
-    r = render(_img_path(), wav, out, words=words, expr=expr_cfg, amp=_amp)
+    # ---- 云端生成（内部会按 <20 秒自动切段，再拼接）
+    r = cl.generate(_img_path(), audio)
     if not r.get("ok"):
         return r
     from urllib.parse import quote
     return {
         "ok": True,
-        "name": name,
-        "url": "/api/avatar2/video/" + quote(name),
-        "path": out,
-        "duration": r["duration"],
-        "size": r["size"],
-        "frames": r["frames"],
-        "bytes": r["bytes"],
+        "name": r["name"],
+        "url": "/api/avatar2/video/" + quote(r["name"]),
+        "path": r["path"],
+        "duration": r.get("duration"),
+        "bytes": r.get("bytes"),
+        "segments": r.get("segments"),
+        "elapsed": r.get("elapsed"),
+        "engine": r.get("engine"),
+        "resolution": r.get("resolution"),
+        "lipsync_label": r.get("lipsync_label"),
         "mood": cfg.get("key", "calm"),
         "mood_label": cfg.get("label", "平静"),
         "mood_auto": bool(cfg.get("auto")),
@@ -2215,44 +2228,83 @@ def speak(text: str, voice: str = "", rate=None, style: str = "",
         "mood_why": cfg.get("auto_why") or [],
         "rate": final_rate,
         "style": final_style,
-        "expr": bool(expr),
-        "amp": _amp,
-        "lipsync_label": ("音素+声学口型" if words else "声学形变口型"),
         "audio_url": a.get("url") or "",
         "audio_engine": a.get("engine") or "",
-        "align": ("字级对齐 %d 字" % len(words)) if words else "声学驱动（未找到 ASR 模型）",
         "text": t[:200],
     }
 
 
+def speak_async(text: str, voice: str = "", rate=None, style: str = "",
+                engine: str = "auto", mood: str = "") -> dict:
+    """提交云端生成任务，立刻返回 job_id（前端轮询进度用）。
+
+    为什么要有异步版：一次生成 1~3 分钟（长音频还要多段），挂在 HTTP
+    长连接上容易被中间层掐断，前端也拿不到「第几段」的进度。
+    """
+    t = (text or "").strip()
+    if not t:
+        return {"ok": False, "error": "文本是空的"}
+    if not os.path.isfile(_img_path()):
+        return {"ok": False, "error": "还没有数字人形象，请先上传一张图或用 AI 生成一张"}
+
+    from . import avatar_cloud as cl
+    c = cl.config()
+    if not c.get("ready"):
+        return {"ok": False, "need_key": True,
+                "error": "云端口型还没配置：缺%s" % "、".join(c.get("missing") or ["API Key"]),
+                "signup_url": c.get("signup_url"), "key_url": c.get("key_url")}
+
+    from . import avatar2_expr as ex
+    cfg = ex.resolve(mood, rate, t)
+    final_rate = int(cfg.get("rate", 0))
+    final_style = (style or "").strip() or str(cfg.get("style") or "")
+
+    from . import tts as tts_mod
+    a = tts_mod.synth(t, voice=voice or "", rate=final_rate,
+                      engine=engine or "auto", style=final_style)
+    if not a.get("ok"):
+        return {"ok": False, "error": "配音失败：%s" % a.get("error")}
+
+    jid = cl.generate_async(_img_path(), a.get("path") or "")
+    return {"ok": True, "job_id": jid,
+            "audio_url": a.get("url") or "",
+            "audio_engine": a.get("engine") or "",
+            "rate": final_rate, "style": final_style,
+            "mood": cfg.get("key", "calm"),
+            "mood_label": cfg.get("label", "平静"),
+            "text": t[:200]}
+
+
 def status() -> dict:
-    """能力自检：让前端如实告诉用户现在能做什么、缺什么。"""
-    exe = ffmpeg()
-    asr = _find_asr()
-    torch_ok = False
-    torch_ver = ""
+    """能力自检：让前端如实告诉用户现在能做什么、缺什么。
+
+    2026-11-15：本地形变已停用，这里报的是**云端配置**状态。
+    字段尽量兼容老前端（ffmpeg / has_image 仍保留）。
+    """
+    from . import avatar_cloud as cl
+    c = cl.status()
     try:
-        import torch  # noqa: F401
-        torch_ok = True
-        torch_ver = getattr(torch, "__version__", "")
+        exe = ffmpeg()
     except Exception:                                   # noqa: BLE001
-        torch_ok = False
+        exe = ""
     return {
         "ok": True,
+        "engine": "cloud",
+        "engine_label": "阿里云百炼 Wan2.2-S2V",
+        "ready": bool(c.get("ready")),
+        "has_key": bool(c.get("has_key")),
+        "workspace_id": c.get("workspace_id") or "",
+        "resolution": c.get("resolution") or "480P",
+        "model": c.get("model") or "wan2.2-s2v",
+        "max_audio_sec": c.get("max_audio_sec"),
         "ffmpeg": bool(exe),
-        "ffmpeg_path": exe,
-        "asr": bool(asr),
-        "asr_dir": asr,
-        "torch": torch_ok,
-        "torch_version": torch_ver,
-        "fps": FPS,
-        "max_seconds": MAX_SECONDS,
-        "max_side": MAX_SIDE,
+        "ffmpeg_path": exe or "",
         "has_image": os.path.isfile(_img_path()),
-        "engines": ["param"],
-        "note": "参数化口型"
-                + ("（拼音音素驱动唇形 + 声学驱动节奏，已启用字级对齐）"
-                   if asr else "（声学特征驱动；未找到 ASR 模型，无法按拼音校正 b/p/m 闭唇）"),
+        "engines": ["cloud"],
+        "note": c.get("note") or "",
+        "signup_url": cl.SIGNUP_URL,
+        "key_url": cl.KEY_URL,
+        "doc_url": cl.DOC_URL,
     }
 
 

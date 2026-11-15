@@ -1,0 +1,651 @@
+# -*- coding: utf-8 -*-
+"""数字人云端生成：阿里云百炼 Wan2.2-S2V（2026-11-15 重构）
+
+为什么整条换掉本地渲染
+----------------------
+本地那套是「2D 弹性形变」：嘴张多大由音量决定、唇形由频谱推断。
+原理上就做不出 b/p/m 闭唇、舌位、牙齿，怎么调参都是橡皮嘴——
+上一轮加了拼音音素层，也只是把唇形轮廓补对，口腔内部照样是一团糊。
+Wan2.2-S2V 是扩散模型逐帧重绘，口型真正由音频驱动，效果不在一个量级。
+
+官方文档：https://help.aliyun.com/zh/model-studio/wan-s2v-api
+
+接口
+----
+提交  POST {base}/services/aigc/image2video/video-synthesis
+      Header: X-DashScope-Async: enable / Authorization: Bearer sk-xxx
+      Body:   {"model": "wan2.2-s2v",
+               "input": {"image_url": ..., "audio_url": ...},
+               "parameters": {"resolution": "480P" | "720P"}}
+      → {"output": {"task_id": ..., "task_status": "PENDING"}}
+
+查询  GET  {base}/tasks/{task_id}
+      → output.task_status: PENDING / RUNNING / SUCCEEDED / FAILED
+      → output.results.video_url  ⚠ 仅 24 小时有效，必须立刻下载
+
+三条硬限制（不处理就直接报错，都是官方文档写明的）
+  1. 单次音频必须 < 20 秒 → 超长自动切段、逐段生成、再拼接
+  2. 仅华北2（北京）地域，必须用该地域的 API Key
+  3. image_url / audio_url 必须公网可访问 → 本机文件走 DashScope 临时上传
+
+存的东西
+--------
+  data/avatar2/cloud.json   配置（API Key / 业务空间 ID / 分辨率）
+  data/avatar2/videos/      成片（与本地方案同一目录，前端不用改）
+  data/avatar2/_cloud_tmp/  切段音频、分段视频、下载缓存（用完清）
+"""
+from __future__ import annotations
+
+import json
+import mimetypes
+import os
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+
+import logging
+logger = logging.getLogger(__name__)
+
+_CFG = "cloud.json"
+_DEF = {
+    "api_key": "",
+    "workspace_id": "",
+    "resolution": "480P",
+    "model": "wan2.2-s2v",
+}
+
+MAX_AUDIO_SEC = 19.0      # 官方限制 <20 秒，留 1 秒余量
+POLL_INTERVAL = 4.0       # 轮询间隔（秒）
+POLL_TIMEOUT = 1200       # 单段最长等 20 分钟
+DOWNLOAD_TIMEOUT = 300
+
+SIGNUP_URL = "https://bailian.console.aliyun.com/"
+KEY_URL = "https://help.aliyun.com/zh/model-studio/get-api-key"
+DOC_URL = "https://help.aliyun.com/zh/model-studio/wan-s2v-api"
+PRICE_URL = "https://help.aliyun.com/zh/model-studio/models"
+
+
+# ---------------------------------------------------------------- 目录与配置
+def _root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _dir() -> str:
+    d = os.path.join(_root(), "data", "avatar2")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _tmpdir() -> str:
+    d = os.path.join(_dir(), "_cloud_tmp")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _cfg_path() -> str:
+    return os.path.join(_dir(), _CFG)
+
+
+def _cfg() -> dict:
+    d = dict(_DEF)
+    try:
+        with open(_cfg_path(), "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            d.update(raw)
+    except FileNotFoundError:
+        pass
+    except Exception:                                       # noqa: BLE001
+        logger.warning("cloud.json 读不出来，用默认值", exc_info=True)
+    return d
+
+
+def _save_cfg(d: dict) -> None:
+    with open(_cfg_path(), "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+
+
+def _mask(k: str) -> str:
+    if not k:
+        return ""
+    if len(k) <= 10:
+        return k[:3] + "***"
+    return k[:6] + "…" + k[-4:]
+
+
+def config() -> dict:
+    """给前端读的配置视图。api_key 只回脱敏值，绝不回明文。"""
+    c = _cfg()
+    k = (c.get("api_key") or "").strip()
+    ws = (c.get("workspace_id") or "").strip()
+    return {
+        "ok": True,
+        "has_key": bool(k),
+        "api_key": _mask(k),
+        "workspace_id": ws,
+        "resolution": c.get("resolution") or "480P",
+        "model": c.get("model") or "wan2.2-s2v",
+        "ready": bool(k and ws),
+        "max_audio_sec": MAX_AUDIO_SEC,
+        "signup_url": SIGNUP_URL,
+        "key_url": KEY_URL,
+        "doc_url": DOC_URL,
+        "price_url": PRICE_URL,
+        "missing": [x for x, v in (("API Key", k), ("业务空间 ID", ws)) if not v],
+    }
+
+
+def set_config(d: dict) -> dict:
+    """保存配置。传脱敏值（含「…」）时视为「不改这一项」。"""
+    c = _cfg()
+    if "api_key" in d:
+        v = str(d.get("api_key") or "").strip()
+        if "…" in v or "***" in v:
+            pass                      # 前端回传的脱敏值，忽略
+        elif v and not v.startswith("sk-"):
+            return {"ok": False, "error": "API Key 应该以 sk- 开头（百炼控制台里复制）"}
+        else:
+            c["api_key"] = v
+    if "workspace_id" in d:
+        v = str(d.get("workspace_id") or "").strip()
+        if "…" not in v:
+            c["workspace_id"] = v
+    if "resolution" in d:
+        v = str(d.get("resolution") or "").strip().upper()
+        if v in ("480P", "720P"):
+            c["resolution"] = v
+        elif v:
+            return {"ok": False, "error": "分辨率只能是 480P 或 720P"}
+    if "model" in d:
+        v = str(d.get("model") or "").strip()
+        if v:
+            c["model"] = v
+    _save_cfg(c)
+    out = config()
+    out["saved"] = True
+    return out
+
+
+# ---------------------------------------------------------------- HTTP 底座
+def _base() -> str:
+    ws = (_cfg().get("workspace_id") or "").strip()
+    if not ws:
+        raise RuntimeError("还没填业务空间 ID（百炼控制台 → 业务空间，形如 llm-xxxxxxxx）")
+    return "https://%s.cn-beijing.maas.aliyuncs.com/api/v1" % ws
+
+
+def _auth() -> dict:
+    k = (_cfg().get("api_key") or "").strip()
+    if not k:
+        raise RuntimeError("还没填 API Key")
+    return {"Authorization": "Bearer " + k}
+
+
+def _friendly(code: int, text: str) -> str:
+    """把阿里云的错误码翻成用户能照着做的提示。
+
+    实测：用假 Key 真连过一次，返回 401 InvalidApiKey —— 说明路径和鉴权头
+    都对，只是 Key 不行。这种错必须说清「去哪重拿」，否则用户只会看到
+    一大串 JSON 不知道该干嘛。
+    """
+    t = text or ""
+    if code == 401 or "InvalidApiKey" in t:
+        return ("API Key 无效（401）。请到百炼控制台重新复制，"
+                "并确认是**华北2（北京）**地域的 Key —— 别的地域的 Key 调不了这个模型")
+    if code == 403:
+        return ("没有权限（403）：可能还没开通 wan2.2-s2v 模型，"
+                "或 Key 与业务空间 ID 不匹配")
+    if code == 429 or "Throttling" in t:
+        return "调用过于频繁（429），等几十秒再试"
+    if "WorkspaceId" in t or "workspace" in t.lower():
+        return "业务空间 ID 不对：请到百炼控制台 → 业务空间 复制，形如 llm-xxxxxxxx"
+    return "HTTP %s：%s" % (code, t[:300])
+
+
+def _post(url: str, payload: dict, timeout: int = 60) -> dict:
+    import requests
+    h = _auth()
+    h["Content-Type"] = "application/json"
+    h["X-DashScope-Async"] = "enable"
+    r = requests.post(url, json=payload, headers=h, timeout=timeout)
+    try:
+        body = r.json()
+    except Exception:                                       # noqa: BLE001
+        body = {"_raw": r.text[:600]}
+    if r.status_code != 200:
+        msg = (body.get("message") or body.get("code")
+               or body.get("_raw") or "") if isinstance(body, dict) else ""
+        raise RuntimeError(_friendly(r.status_code, str(msg)))
+    return body if isinstance(body, dict) else {}
+
+
+def _get(url: str, timeout: int = 60) -> dict:
+    import requests
+    r = requests.get(url, headers=_auth(), timeout=timeout)
+    try:
+        body = r.json()
+    except Exception:                                       # noqa: BLE001
+        body = {"_raw": r.text[:600]}
+    if r.status_code != 200:
+        msg = (body.get("message") or body.get("code")
+               or body.get("_raw") or "") if isinstance(body, dict) else ""
+        raise RuntimeError(_friendly(r.status_code, str(msg)))
+    return body if isinstance(body, dict) else {}
+
+
+# ---------------------------------------------------------------- 素材上传
+def upload(path: str, model: str = "") -> str:
+    """本机文件 → DashScope 临时 OSS，返回 oss://xxx（可直接当 image_url/audio_url）。
+
+    DashScope 的文件上传是两步：先拿 OSS 直传凭证，再 multipart 直传。
+    """
+    import requests
+    c = _cfg()
+    mdl = model or c.get("model") or "wan2.2-s2v"
+    if not os.path.isfile(path):
+        raise RuntimeError("文件不存在：%s" % path)
+    r = requests.get(
+        "https://dashscope.aliyuncs.com/api/v1/uploads",
+        params={"action": "getPolicy", "model": mdl},
+        headers=_auth(), timeout=40,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(_friendly(r.status_code, r.text))
+    data = (r.json() or {}).get("data") or {}
+    host = data.get("upload_host") or ""
+    updir = data.get("upload_dir") or ""
+    if not (host and updir):
+        raise RuntimeError("上传凭证字段缺失：%s" % str(data)[:300])
+
+    fn = os.path.basename(path)
+    obj = updir.rstrip("/") + "/" + fn
+    fields = {
+        "OSSAccessKeyId": data.get("oss_access_key_id") or "",
+        "policy": data.get("policy") or "",
+        "Signature": data.get("signature") or "",
+        "key": obj,
+        "x-oss-object-acl": data.get("x_oss_object_acl") or "private",
+        "x-oss-forbid-overwrite": data.get("x_oss_forbid_overwrite") or "true",
+    }
+    ctype = mimetypes.guess_type(fn)[0] or "application/octet-stream"
+    with open(path, "rb") as f:
+        r2 = requests.post(host, data=fields,
+                           files={"file": (fn, f, ctype)}, timeout=180)
+    if r2.status_code not in (200, 203, 204):
+        raise RuntimeError(_friendly(r2.status_code, r2.text))
+    return "oss://" + obj
+
+
+# ---------------------------------------------------------------- 任务
+def submit(image_url: str, audio_url: str, resolution: str = "") -> str:
+    c = _cfg()
+    res = (resolution or c.get("resolution") or "480P").upper()
+    payload = {
+        "model": c.get("model") or "wan2.2-s2v",
+        "input": {"image_url": image_url, "audio_url": audio_url},
+        "parameters": {"resolution": res},
+    }
+    body = _post(_base() + "/services/aigc/image2video/video-synthesis", payload)
+    out = body.get("output") or {}
+    tid = out.get("task_id") or ""
+    if not tid:
+        raise RuntimeError("没拿到 task_id：%s" % str(body)[:400])
+    return tid
+
+
+def fetch(task_id: str) -> dict:
+    body = _get(_base() + "/tasks/" + str(task_id))
+    out = body.get("output") or {}
+    st = (out.get("task_status") or "").upper()
+    res = out.get("results") or {}
+    return {
+        "status": st,
+        "video_url": res.get("video_url") or "",
+        "code": out.get("code") or "",
+        "message": out.get("message") or "",
+        "usage": body.get("usage") or {},
+    }
+
+
+def wait(task_id: str, on_progress=None, timeout: float = POLL_TIMEOUT) -> dict:
+    """轮询到出结果。超时抛异常，由调用方决定怎么提示。"""
+    t0 = time.time()
+    last = ""
+    while True:
+        r = fetch(task_id)
+        st = r["status"]
+        if st and st != last:
+            last = st
+            if on_progress:
+                try:
+                    on_progress({"stage": "cloud", "status": st, "task_id": task_id})
+                except Exception:                           # noqa: BLE001
+                    logger.debug("progress 回调失败", exc_info=True)
+        if st == "SUCCEEDED":
+            if not r["video_url"]:
+                raise RuntimeError("任务成功但没给 video_url")
+            return r
+        if st == "FAILED":
+            raise RuntimeError("云端任务失败：%s %s"
+                               % (r.get("code") or "", r.get("message") or ""))
+        if time.time() - t0 > timeout:
+            raise RuntimeError("等待超时（%d 秒），任务可能还在跑，task_id=%s"
+                               % (int(timeout), task_id))
+        time.sleep(POLL_INTERVAL)
+
+
+def download(url: str, out_path: str) -> str:
+    """video_url 只有 24 小时有效，拿到就立刻下载到本地。"""
+    import requests
+    r = requests.get(url, timeout=DOWNLOAD_TIMEOUT, stream=True)
+    if r.status_code != 200:
+        raise RuntimeError("下载视频失败 HTTP %s" % r.status_code)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    n = 0
+    with open(out_path, "wb") as f:
+        for chunk in r.iter_content(1 << 16):
+            if chunk:
+                f.write(chunk)
+                n += len(chunk)
+    if n < 1000:
+        raise RuntimeError("下载到的视频只有 %d 字节，不像是有效文件" % n)
+    return out_path
+
+
+# ---------------------------------------------------------------- 音频切段 / 视频拼接
+def _ffmpeg() -> str:
+    """复用 avatar2 的查找逻辑（PATH 里没有也能找到打包自带的）。"""
+    try:
+        from . import avatar2
+        p = avatar2.ffmpeg()
+        if p:
+            return p
+    except Exception:                                       # noqa: BLE001
+        logger.debug("avatar2.ffmpeg 不可用", exc_info=True)
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    raise RuntimeError("找不到 ffmpeg，无法切分音频/拼接视频")
+
+
+def audio_duration(path: str) -> float:
+    """用 ffmpeg -i 的 stderr 解析时长（不依赖 ffprobe 是否单独存在）。"""
+    exe = _ffmpeg()
+    try:
+        p = subprocess.run([exe, "-hide_banner", "-i", path],
+                           capture_output=True, timeout=60)
+    except Exception:                                       # noqa: BLE001
+        return 0.0
+    txt = (p.stderr or b"").decode("utf-8", "ignore")
+    for line in txt.splitlines():
+        if "Duration:" in line:
+            seg = line.split("Duration:")[1].split(",")[0].strip()
+            try:
+                h, m, s = seg.split(":")
+                return int(h) * 3600 + int(m) * 60 + float(s)
+            except Exception:                               # noqa: BLE001
+                return 0.0
+    return 0.0
+
+
+def split_audio(src: str, max_sec: float = MAX_AUDIO_SEC) -> list:
+    """超过 max_sec 就等长切段；不超就原样返回一条。
+
+    官方限制「单次音频 < 20 秒，超了任务直接报错」，所以这是硬需求。
+    切点按固定间隔，不做静音对齐——短句被切断的影响由后续拼接吸收。
+    """
+    dur = audio_duration(src)
+    if dur <= 0:
+        raise RuntimeError("读不出音频时长：%s" % os.path.basename(src))
+    if dur <= max_sec + 0.05:
+        return [src]
+
+    exe = _ffmpeg()
+    stem = os.path.splitext(os.path.basename(src))[0]
+    tag = uuid.uuid4().hex[:6]
+    pat = os.path.join(_tmpdir(), "%s_%s_%%03d%s" % (stem, tag, os.path.splitext(src)[1] or ".mp3"))
+    cmd = [exe, "-y", "-hide_banner", "-loglevel", "error", "-i", src,
+           "-f", "segment", "-segment_time", "%.2f" % max_sec,
+           "-reset_timestamps", "1"]
+    ext = os.path.splitext(src)[1].lower()
+    if ext in (".mp3", ".m4a", ".aac"):
+        cmd += ["-c:a", "libmp3lame", "-q:a", "4"]
+    elif ext == ".wav":
+        cmd += ["-c:a", "pcm_s16le"]
+    else:
+        cmd += ["-c:a", "libmp3lame", "-q:a", "4"]
+    cmd.append(pat)
+    p = subprocess.run(cmd, capture_output=True, timeout=300)
+    if p.returncode != 0:
+        raise RuntimeError("音频切段失败：%s"
+                           % (p.stderr or b"")[:300].decode("utf-8", "ignore"))
+    parts = sorted(x for x in os.listdir(_tmpdir())
+                   if x.startswith("%s_%s_" % (stem, tag)))
+    if not parts:
+        raise RuntimeError("音频切段后没有产出文件")
+    return [os.path.join(_tmpdir(), x) for x in parts]
+
+
+def concat_videos(paths: list, out_path: str) -> str:
+    """把多段视频按顺序拼成一个。只有一段时直接复制。"""
+    if not paths:
+        raise RuntimeError("没有可拼接的视频")
+    if len(paths) == 1:
+        shutil.copyfile(paths[0], out_path)
+        return out_path
+    exe = _ffmpeg()
+    lst = os.path.join(_tmpdir(), "concat_%s.txt" % uuid.uuid4().hex[:8])
+    with open(lst, "w", encoding="utf-8") as f:
+        for p in paths:
+            f.write("file '%s'\n" % os.path.abspath(p).replace("\\", "/").replace("'", "'\\''"))
+    p = subprocess.run([exe, "-y", "-hide_banner", "-loglevel", "error",
+                        "-f", "concat", "-safe", "0", "-i", lst,
+                        "-c", "copy", out_path],
+                       capture_output=True, timeout=600)
+    try:
+        os.remove(lst)
+    except OSError:
+        pass
+    if p.returncode != 0 or not os.path.isfile(out_path):
+        raise RuntimeError("视频拼接失败：%s"
+                           % (p.stderr or b"")[:300].decode("utf-8", "ignore"))
+    return out_path
+
+
+# ---------------------------------------------------------------- 主流程
+def generate(image_path: str, audio_path: str, resolution: str = "",
+             on_progress=None, keep_tmp: bool = False) -> dict:
+    """一张图 + 一段音频 → 说话视频。
+
+    长音频会切成多段分别生成再拼接，因为接口硬限制单次 <20 秒。
+    """
+    c = _cfg()
+    miss = [x for x, v in (("API Key", c.get("api_key")), ("业务空间 ID", c.get("workspace_id"))) if not (v or "").strip()]
+    if miss:
+        return {
+            "ok": False, "need_key": True,
+            "error": "还没配置%s，去百炼控制台拿一下填进来" % "、".join(miss),
+            "signup_url": SIGNUP_URL, "key_url": KEY_URL,
+        }
+    if not os.path.isfile(image_path):
+        return {"ok": False, "error": "形象图不存在：%s" % os.path.basename(image_path)}
+    if not os.path.isfile(audio_path):
+        return {"ok": False, "error": "音频不存在：%s" % os.path.basename(audio_path)}
+
+    t0 = time.time()
+    tmp_files = []
+    try:
+        def _p(d):
+            if on_progress:
+                try:
+                    on_progress(d)
+                except Exception:                           # noqa: BLE001
+                    logger.debug("progress 回调失败", exc_info=True)
+
+        # 1) 切段（长音频）
+        # ⚠ 短音频不需要切段时，split_audio 返回的就是**原始输入文件**。
+        #   如果把它也塞进 tmp_files，finally 里就会把用户的音频删掉
+        #   （实测踩到：8 秒的测试音频跑完就没了）。所以只清理自己新建的段。
+        segs = split_audio(audio_path)
+        _src_abs = os.path.abspath(audio_path)
+        tmp_files.extend([s for s in segs if os.path.abspath(s) != _src_abs])
+        total = len(segs)
+        _p({"stage": "split", "total": total,
+            "msg": "音频 %d 段（单段上限 %.0f 秒）" % (total, MAX_AUDIO_SEC)})
+
+        # 2) 图片只需传一次
+        _p({"stage": "upload", "msg": "上传形象图"})
+        img_url = upload(image_path)
+
+        # 3) 逐段生成
+        outs = []
+        for i, seg in enumerate(segs, 1):
+            _p({"stage": "segment", "index": i, "total": total,
+                "msg": "第 %d/%d 段：上传音频" % (i, total)})
+            a_url = upload(seg)
+            _p({"stage": "segment", "index": i, "total": total,
+                "msg": "第 %d/%d 段：提交任务" % (i, total)})
+            tid = submit(img_url, a_url, resolution)
+            _p({"stage": "segment", "index": i, "total": total,
+                "msg": "第 %d/%d 段：云端生成中" % (i, total), "task_id": tid})
+            r = wait(tid, on_progress=_p)
+            p = os.path.join(_tmpdir(), "seg_%s_%02d.mp4" % (uuid.uuid4().hex[:6], i))
+            download(r["video_url"], p)
+            tmp_files.append(p)
+            outs.append(p)
+            _p({"stage": "segment_done", "index": i, "total": total,
+                "usage": r.get("usage") or {}})
+
+        # 4) 拼接 + 落盘
+        name = "avatar_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4] + ".mp4"
+        out = os.path.join(_dir(), "videos", name)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        _p({"stage": "concat", "msg": "拼接 %d 段" % len(outs)})
+        concat_videos(outs, out)
+
+        dur = audio_duration(out)
+        return {
+            "ok": True,
+            "name": name,
+            "path": out,
+            "bytes": os.path.getsize(out),
+            "duration": round(dur, 2),
+            "segments": total,
+            "elapsed": round(time.time() - t0, 1),
+            "engine": "cloud:wan2.2-s2v",
+            "resolution": (resolution or c.get("resolution") or "480P").upper(),
+            "lipsync_label": "云端扩散模型口型（Wan2.2-S2V）",
+        }
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("云端生成失败", exc_info=True)
+        # 只回用户看得懂的那句，不把 "RuntimeError: " 前缀甩到界面上
+        msg = str(e).strip() or type(e).__name__
+        return {"ok": False, "error": msg,
+                "elapsed": round(time.time() - t0, 1)}
+    finally:
+        if not keep_tmp:
+            for p in tmp_files:
+                try:
+                    if os.path.isfile(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+
+
+# ---------------------------------------------------------------- 后台任务
+# 一次生成要 1~3 分钟（多段更久）。挂在 HTTP 长连接上很容易被中间层掐断，
+# 前端也拿不到进度。所以统一走「提交 → 轮询」：submit 立刻返回 job_id。
+_JOBS = {}
+_JOB_LOCK = threading.Lock()
+JOB_KEEP = 3600          # 完成的任务保留 1 小时，够前端取结果
+
+
+def _job_set(jid: str, **kw) -> None:
+    with _JOB_LOCK:
+        d = _JOBS.get(jid)
+        if d is None:
+            return
+        d.update(kw)
+        d["updated"] = time.time()
+
+
+def job(jid: str) -> dict:
+    """查任务进度/结果。"""
+    with _JOB_LOCK:
+        d = _JOBS.get(jid)
+        if not d:
+            return {"ok": False, "error": "任务不存在或已过期（完成后只保留 1 小时）"}
+        return {k: v for k, v in d.items() if not k.startswith("_")}
+
+
+def _gc_jobs() -> None:
+    now = time.time()
+    with _JOB_LOCK:
+        for k in [k for k, v in _JOBS.items()
+                  if v.get("status") in ("done", "failed")
+                  and now - v.get("updated", now) > JOB_KEEP]:
+            _JOBS.pop(k, None)
+
+
+def generate_async(image_path: str, audio_path: str, resolution: str = "",
+                   **kw) -> str:
+    """提交后台生成，立刻返回 job_id。"""
+    _gc_jobs()
+    jid = uuid.uuid4().hex[:12]
+    with _JOB_LOCK:
+        _JOBS[jid] = {
+            "ok": True, "job_id": jid, "status": "pending",
+            "msg": "排队中", "stage": "", "total": 0, "index": 0,
+            "started": time.time(), "updated": time.time(),
+            "result": None, "error": "",
+        }
+
+    def _run():
+        _job_set(jid, status="running", msg="开始生成")
+
+        def _p(d):
+            _job_set(jid, msg=d.get("msg") or d.get("stage") or "",
+                     stage=d.get("stage") or "",
+                     total=d.get("total") or 0,
+                     index=d.get("index") or 0)
+
+        try:
+            r = generate(image_path, audio_path, resolution=resolution,
+                         on_progress=_p, **kw)
+        except Exception as e:                              # noqa: BLE001
+            logger.warning("后台生成异常", exc_info=True)
+            r = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        if r.get("ok"):
+            _job_set(jid, status="done", msg="完成", result=r, error="")
+        else:
+            _job_set(jid, status="failed", msg=r.get("error") or "生成失败",
+                     result=r, error=r.get("error") or "生成失败")
+
+    th = threading.Thread(target=_run, name="avatar-cloud-" + jid, daemon=True)
+    with _JOB_LOCK:
+        _JOBS[jid]["_thread"] = th
+    th.start()
+    return jid
+
+
+def status() -> dict:
+    c = config()
+    try:
+        _ffmpeg()
+        ff = True
+    except Exception:                                       # noqa: BLE001
+        ff = False
+    return {
+        "ok": True,
+        "ready": c["ready"],
+        "has_key": c["has_key"],
+        "workspace_id": c["workspace_id"],
+        "resolution": c["resolution"],
+        "model": c["model"],
+        "max_audio_sec": MAX_AUDIO_SEC,
+        "ffmpeg": ff,
+        "note": ("已配置，可以生成" if c["ready"]
+                 else "缺：" + "、".join(c["missing"])),
+    }

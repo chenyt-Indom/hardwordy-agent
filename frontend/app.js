@@ -2669,9 +2669,12 @@
     async function loadStatus() {
       try {
         const st = await api("/api/avatar2/status");
-        const bits = [st.ffmpeg ? "ffmpeg ✓" : "ffmpeg ✗",
-                      st.asr ? "字级对齐 ✓" : "仅声学驱动"];
-        say(bits.join(" · ") + "。口型为声学形变。");
+        // 2026-11-15：本地形变已停用，这里要报云端配置状态。
+        // 老字段 st.asr 已经不存在了，再按它拼文案就会显示「仅声学驱动」——
+        // 和实际实现对不上，属于会骗人的提示。
+        const bits = [st.ready ? "云端口型 ✓" : "云端未配置",
+                      st.ffmpeg ? "ffmpeg ✓" : "ffmpeg ✗"];
+        say(bits.join(" · ") + "。" + (st.note || ""));
       } catch (e) { /* 状态读不到不影响用 */ }
     }
 
@@ -3118,6 +3121,41 @@
       // 所以按 90 字分段（每段约 19 秒语音、约 24 秒渲染），更稳
       const segLen = mode === "3d" ? 60 : (mode === "p25d" || mode === "w2l") ? 90 : 120;
       try {
+        // ☁️ 云端模式：切段/拼接都在服务端做（20 秒限制是服务端的知识），
+        // 前端只负责提交 + 轮询进度。所以这里直接 return，不走下面的分段逻辑。
+        if (mode === "cloud") {
+          say("正在提交云端生成（口型由音频驱动，约 1~3 分钟）…");
+          const st = await api("/api/avatar2/cloud/speak", {
+            method: "POST",
+            body: JSON.stringify({
+              text: text, voice: base.voice, mood: base.mood, rate: base.rate,
+            }),
+          });
+          if (!st.ok) {
+            const err = new Error(st.error || "提交失败");
+            err.needKey = !!st.need_key;
+            err.signup = st.signup_url || "";
+            throw err;
+          }
+          let done = null;
+          for (let i = 0; i < 600; i++) {      // 2 秒一次，最多等 20 分钟
+            await new Promise((r2) => setTimeout(r2, 2000));
+            const j = await api("/api/avatar2/cloud/job/" + encodeURIComponent(st.job_id));
+            if (!j || !j.ok) throw new Error((j && j.error) || "任务丢失（服务可能重启过）");
+            if (j.msg) btn.textContent = String(j.msg).slice(0, 20);
+            if (j.status === "done") { done = j.result; break; }
+            if (j.status === "failed") {
+              throw new Error(j.error || j.msg || "云端生成失败");
+            }
+          }
+          if (!done) throw new Error("等待超时（20 分钟），任务可能还在云端跑");
+          say("已生成 " + done.duration + " 秒 · " + (done.segments || 1) +
+              " 段 · " + (done.resolution || "") + " · 耗时 " + done.elapsed + " 秒" +
+              (done.lipsync_label ? " · " + done.lipsync_label : ""), "");
+          playVideo(done.name);
+          loadVideos();
+          return;
+        }
         // 长文本切成多段分别生成，每段都在请求超时窗口内，最后合并成一个视频。
         // 之前一次性发整篇，字数一多就渲染超时（用户反馈的那个问题）。
         // 120 字约 25 秒语音、渲染约 25 秒；实测 260 字要渲染 55 秒，
@@ -3191,7 +3229,14 @@
         playVideo(r.name);
         loadVideos();
       } catch (e) {
-        say("生成失败：" + e.message, "err");
+        // 缺 Key 是最常见的失败：直接把「缺什么 + 去哪拿」说清楚，
+        // 不要只丢一句「生成失败」，用户会以为程序坏了。
+        let msg = e.message || String(e);
+        if (e.needKey) {
+          msg += "　→ 在下面「☁️ 云端口型配置」里填 Key，或去百炼控制台申请"
+            + (e.signup ? "：" + e.signup : "");
+        }
+        say("生成失败：" + msg, "err");
       } finally {
         busy = false;
         btn.disabled = false;
@@ -3199,8 +3244,53 @@
       }
     };
 
+    // —— 云端口型配置 ——
+    // Key 只存在本机 data/avatar2/cloud.json，后端回给前端的永远是脱敏值，
+    // 所以这里「显示脱敏值 + 不覆盖」是正常行为，不是 bug。
+    async function loadCloud() {
+      try {
+        const c = await api("/api/avatar2/cloud");
+        if (!c || !c.ok) return;
+        const kEl = $("#av2CloudKey"), wEl = $("#av2CloudWs"), rEl = $("#av2CloudRes");
+        if (kEl && c.api_key) kEl.value = c.api_key;
+        if (wEl) wEl.value = c.workspace_id || "";
+        if (rEl && c.resolution) rEl.value = c.resolution;
+        const st = $("#av2CloudState");
+        if (st) {
+          st.textContent = c.ready ? "✓ 已配置" : ("缺 " + (c.missing || []).join("、"));
+          st.className = "av2-cloud-state " + (c.ready ? "on" : "off");
+        }
+        const box = $("#av2CloudBox");
+        if (box) box.classList.toggle("ok", !!c.ready);
+      } catch (e) { /* 拿不到就不改界面 */ }
+    }
+    const cloudSave = $("#av2CloudSave");
+    if (cloudSave) cloudSave.onclick = async () => {
+      cloudSave.disabled = true;
+      try {
+        const r = await api("/api/avatar2/cloud/config", {
+          method: "POST",
+          body: JSON.stringify({
+            api_key: ($("#av2CloudKey") || {}).value || "",
+            workspace_id: ($("#av2CloudWs") || {}).value || "",
+            resolution: ($("#av2CloudRes") || {}).value || "480P",
+          }),
+        });
+        if (!r || !r.ok) { say((r && r.error) || "保存失败", "err"); return; }
+        say(r.ready ? "云端口型已就绪，可以生成了"
+          : "已保存，还缺：" + (r.missing || []).join("、"), r.ready ? "" : "err");
+        await loadCloud();
+      } catch (e) {
+        say("保存失败：" + e.message, "err");
+      } finally {
+        cloudSave.disabled = false;
+      }
+    };
+
     // —— 启动 ——
-    loadInfo().then(() => { loadStatus(); loadVoices(); loadMoods(); loadVideos(); });
+    loadInfo().then(() => {
+      loadStatus(); loadVoices(); loadMoods(); loadVideos(); loadCloud();
+    });
     setPin(localStorage.getItem(PIN_KEY) === "1");
 
     // 多版本对比：一次生成两版（画风优先 / 口型优先），各自有质检分，
@@ -12831,6 +12921,17 @@
           '<button type="button" class="btn sm ghost iter-close">关闭</button>' +
         '</div>' +
         '<div class="iter-stats"></div>' +
+        // ★ 2026-11-15 用户要求：「反思自检评估以及抽空代码自检彻底成为这个项目的
+        //   一项功能，不要放在自动化里面，而是放在迭代想法里面」。
+        //   所以这四项不再出现在定时任务列表，常驻在这里：每项一行 ——
+        //   节律 / 上次运行与摘要 / 暂停重启 / 立即运行 / 历史。
+        '<div class="iter-maint">' +
+          '<div class="iter-maint-h">' +
+            '<span class="iter-maint-t">🛠 自我维护</span>' +
+            '<span class="iter-maint-sub">代码固有功能 · 不占定时任务</span>' +
+          '</div>' +
+          '<div class="iter-maint-list"></div>' +
+        '</div>' +
         '<div class="iter-trust">' +
           '<label class="iter-sw">' +
             '<input type="checkbox" class="iter-trust-cb">' +
@@ -12877,6 +12978,7 @@
     el.querySelector(".iter-eval-btn").onclick = function () { runEvaluate(false); };
     el.querySelector(".iter-eval-fix-btn").onclick = function () { runEvaluate(true); };
     el.querySelector(".iter-body").addEventListener("click", onBodyClick);
+    el.querySelector(".iter-maint-list").addEventListener("click", onMaintClick);
     return el;
   }
 
@@ -12894,6 +12996,7 @@
     loadExp();
     loadPapers();
     loadActlog();
+    loadMaint();
     pushSignals();
     startPoll();
     feedProbe();
@@ -13271,6 +13374,94 @@
         if (el) render();
       }
     } catch (e) { /* 日志拿不到不影响抽屉其它部分 */ }
+  }
+
+  // ---------------------------------------------------------- 自我维护
+  // 反思 / 自检 / 体验评估 / 抽空自检 —— 用户要求它们「彻底成为这个项目的
+  // 一项功能，放在迭代想法里面」，所以常驻在这个抽屉，不占定时任务列表。
+  let maintData = [];
+
+  async function loadMaint() {
+    const r = await api("/api/selfiter/maint");
+    if (r && r.ok) { maintData = r.items || []; renderMaint(); }
+  }
+
+  function renderMaint() {
+    const box = el && el.querySelector(".iter-maint-list");
+    if (!box) return;
+    const rows = maintData || [];
+    if (!rows.length) { box.innerHTML = '<div class="iter-li">读取失败，稍后重试。</div>'; return; }
+    box.innerHTML = rows.map(function (x) {
+      const on = !!x.enabled;
+      const last = x.last_run
+        ? String(x.last_run).slice(5) + (x.last_seconds ? " · " + x.last_seconds + "s" : "")
+        : "还没跑过";
+      return '<div class="iter-maint-row' + (on ? "" : " off") + '" data-kind="' + esc(x.kind) + '">' +
+        '<span class="iter-maint-i">' + esc(x.icon || "·") + '</span>' +
+        '<span class="iter-maint-n">' + esc(x.name) + '</span>' +
+        '<span class="iter-maint-r">' + esc(x.rhythm) + '</span>' +
+        '<span class="iter-maint-l">' + esc(last) + '</span>' +
+        '<button type="button" class="btn sm ghost m-sw" title="暂停 / 重启这一项">' +
+          (on ? "运行中" : "已暂停") + '</button>' +
+        '<button type="button" class="btn sm ghost m-go">立即运行</button>' +
+        '<button type="button" class="btn sm ghost m-his">历史</button>' +
+        '<div class="iter-maint-p">' + esc(x.last_preview || x.desc) + '</div>' +
+        '<div class="iter-maint-hr-list" hidden></div>' +
+      '</div>';
+    }).join("");
+  }
+
+  async function onMaintClick(e) {
+    const row = e.target.closest(".iter-maint-row");
+    if (!row) return;
+    const kind = row.getAttribute("data-kind");
+    const cur = (maintData || []).filter(function (x) { return x.kind === kind; })[0] || {};
+
+    if (e.target.closest(".m-sw")) {
+      const r = await api("/api/selfiter/maint/toggle", { kind: kind, enabled: !cur.enabled });
+      if (r && r.ok) { await loadMaint(); }
+      else { say((r && r.error) || "切换失败", "bad"); }
+      return;
+    }
+
+    if (e.target.closest(".m-go")) {
+      const btn = row.querySelector(".m-go");
+      btn.disabled = true; btn.textContent = "运行中…";
+      say("正在运行「" + (cur.name || kind) + "」，可能要几十秒…");
+      const r = await api("/api/selfiter/maint/run", { kind: kind, force: true });
+      await loadMaint();
+      const btn2 = row.querySelector(".m-go");
+      if (btn2) { btn2.disabled = false; btn2.textContent = "立即运行"; }
+      if (!r || !r.ok) { say("「" + (cur.name || kind) + "」失败：" + ((r && r.error) || ""), "bad"); }
+      else if (r.skipped) { say("「" + (cur.name || kind) + "」跳过：" + (r.reason || ""), "warn"); }
+      else { say("「" + (cur.name || kind) + "」完成（" + (r.seconds || 0) + " 秒）。", "good"); }
+      return;
+    }
+
+    if (e.target.closest(".m-his")) {
+      const box = row.querySelector(".iter-maint-hr-list");
+      if (!box.hidden) { box.hidden = true; return; }
+      box.hidden = false;
+      box.textContent = "读取中…";
+      const r = await api("/api/selfiter/maint/history?kind=" + encodeURIComponent(kind) + "&limit=8");
+      const runs = (r && r.runs) || [];
+      const files = (r && r.files) || [];
+      if (!runs.length && !files.length) { box.textContent = "还没有历史记录。"; return; }
+      let h2 = runs.map(function (x) {
+        return '<div class="iter-maint-hr">' +
+          '<span class="t">' + esc(String(x.ts || "").slice(5)) + '</span>' +
+          '<span class="' + (x.ok ? "ok" : "bad") + '">' + esc(x.status || "") + '</span>' +
+          '<span class="p">' + esc(x.preview || "") + '</span>' +
+        '</div>';
+      }).join("");
+      // 完整正文落盘在 data/schedule_logs（含以前作为定时任务跑的那些），
+      // 用户要求「历史保留、能翻到」，所以把文件名也列出来。
+      if (files.length) {
+        h2 += '<div class="iter-maint-hr"><span class="t">完整记录</span>' +
+          '<span class="p">' + esc(files.map(function (f) { return f.name; }).join(" · ")) + '</span></div>';
+      }
+      box.innerHTML = h2;
+    }
   }
 
   function actlogHtml() {

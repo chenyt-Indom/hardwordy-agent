@@ -2693,6 +2693,70 @@ def selfiter_pause_set(body: dict):
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfiter/maint")
+def selfiter_maint_status():
+    """「自我维护」四项的状态（反思 / 自检 / 体验评估 / 抽空自检）。
+
+    ★ 2026-11-15 用户要求：这四项「彻底成为这个项目的一项功能，不要放在
+      自动化里面，而是放在迭代想法里面」。所以它们不在定时任务列表里了，
+      状态从这里取 —— 每项带：启停、节律、上次运行时间、结果摘要、
+      下次运行时间、历史条数。
+    """
+    from . import selfmaint as _sm
+    try:
+        return _sm.status()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/maint/run")
+def selfiter_maint_run(body: dict):
+    """立刻跑一次某一项自我维护。body: kind（必填）、force。
+
+    手动触发一律跳过「暂停」和「空闲」这些闸 —— 用户就是现在要它跑。
+    """
+    from . import selfmaint as _sm
+    b = body or {}
+    kind = str(b.get("kind") or "")
+    if not kind:
+        return {"ok": False, "error": "缺少 kind"}
+    try:
+        return _sm.run_item(kind, trigger="manual",
+                            force=bool(b.get("force", True)))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+@app.post("/api/selfiter/maint/toggle")
+def selfiter_maint_toggle(body: dict):
+    """暂停 / 重启某一项自我维护。body: kind、enabled、at_time、every_minutes。
+
+    用户明确要「可以选择暂停或重启」，所以逐项给开关（总开关仍保留）。
+    """
+    from . import selfmaint as _sm
+    b = body or {}
+    kind = str(b.get("kind") or "")
+    if not kind:
+        return {"ok": False, "error": "缺少 kind"}
+    try:
+        return _sm.set_item(kind,
+                            enabled=b.get("enabled"),
+                            at_time=b.get("at_time"),
+                            every_minutes=b.get("every_minutes"))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfiter/maint/history")
+def selfiter_maint_history(kind: str = "", limit: int = 10):
+    """某一项的运行历史（用户要求「以前跑出来的历史结果保留、能翻到」）。"""
+    from . import selfmaint as _sm
+    try:
+        return _sm.history(kind, limit=int(limit or 10))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/api/selfiter/settings")
 def selfiter_settings_set(body: dict):
     """改设置。只接受白名单字段：trust_mode / audit_after_change / audit_daily /
@@ -11429,6 +11493,67 @@ def avatar2_speak(body: dict):
                          #   需要生动感时前端显式传 expr:true 即可。
                          expr=bool(body.get("expr", False)),
                          amp=_amp)
+
+
+# ---------------------------------------------------------------- 云端口型（2026-11-15 重构）
+# 本地 2D 形变做不出 b/p/m 闭唇、舌位、牙齿，怎么调都是橡皮嘴，
+# 整条换成阿里云百炼 Wan2.2-S2V（扩散模型逐帧重绘，口型由音频真正驱动）。
+@app.get("/api/avatar2/cloud")
+def avatar2_cloud_cfg():
+    """云端口型配置状态。api_key 只回脱敏值，绝不回明文。"""
+    from . import avatar_cloud
+    return avatar_cloud.config()
+
+
+@app.post("/api/avatar2/cloud/config")
+def avatar2_cloud_set(body: dict):
+    """保存 API Key / 业务空间 ID / 分辨率。传脱敏值表示「不改这一项」。"""
+    from . import avatar_cloud
+    return avatar_cloud.set_config(body or {})
+
+
+@app.post("/api/avatar2/cloud/speak")
+def avatar2_cloud_speak(body: dict):
+    """提交云端生成，立刻返回 job_id（生成要 1~3 分钟，不能挂长连接）。
+
+    body: {text, voice, rate, style, engine, mood}
+    """
+    body = body or {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 不能为空")
+    if len(text) > 6000:
+        raise HTTPException(status_code=400,
+                            detail="单次最多 6000 字；更长的文本请分段生成")
+    _r = body.get("rate")
+    if _r is None or _r == "":
+        rate = None
+    else:
+        try:
+            rate = int(_r)
+        except Exception:
+            rate = None
+    return avatar2.speak_async(
+        text,
+        voice=str(body.get("voice") or ""),
+        rate=rate,
+        style=str(body.get("style") or ""),
+        engine=str(body.get("engine") or "auto"),
+        mood=str(body.get("mood") or ""),
+    )
+
+
+@app.get("/api/avatar2/cloud/job/{jid}")
+def avatar2_cloud_job(jid: str):
+    """轮询生成进度；完成后把 result 里的播放地址补上。"""
+    from . import avatar_cloud
+    r = avatar_cloud.job(jid)
+    if r.get("ok") and r.get("status") == "done" and isinstance(r.get("result"), dict):
+        from urllib.parse import quote
+        res = dict(r["result"])
+        res["url"] = "/api/avatar2/video/" + quote(res.get("name") or "")
+        r["result"] = res
+    return r
 
 
 @app.get("/api/talkhead/info")

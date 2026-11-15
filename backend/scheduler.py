@@ -52,92 +52,50 @@ def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-# ★ 2026-11-15 用户要求：「让自检以及自我反思成为这份代码里的真正一部分，
-#   这和自己增加的那些自动化任务大不相同」。
-#   现状是：四个内置任务的**执行逻辑**（_run_selfiter / _run_selfaudit /
-#   _run_selfexp / _run_selfidle）本来就写死在代码里，但「这些任务存在」这件事
-#   只写在 data/schedules.json —— 文件丢了、或换机器只拷了 exe 没拷 data 目录，
-#   load_jobs() 直接返回 []，四个内置任务静默消失（日志里连错都不报）。
-#   所以把**任务定义**也搬进代码：下面这份清单是权威来源，
-#   schedules.json 只承担「运行状态」和「用户改过的时间」两个角色，
-#   缺了就用这里的默认值补回（_ensure_builtins），用户自己建的任务一概不碰。
-_BUILTIN_DEFS = (
-    {"kind": "selfiter",  "name": "每日自我反思", "at_time": "04:30"},
-    {"kind": "selfaudit", "name": "每日代码自检", "at_time": "05:10"},
-    {"kind": "selfexp",   "name": "定时体验评估", "every_minutes": 120},
-    {"kind": "selfidle",  "name": "抽空代码自检", "every_minutes": 20},
-)
-
-# 补回失败时的节流时间戳（只读文件系统/磁盘满时，别每 20 秒重试一次刷日志）
-_ENSURE_FAIL_AT = [0.0]
-# 自愈写盘的互斥锁（load_jobs 会被多个线程同时调用，而自愈要写盘）
-_ENSURE_LOCK = threading.Lock()
+# ★ 2026-11-15 用户要求：「反思自检评估以及抽空代码自检这些内容彻底成为这个
+#   项目的一项功能，不要放在自动化里面，而是放在迭代想法里面」。
+#
+#   所以原先住在这里的四条「内置任务」（_BUILTIN_DEFS / _builtin_job /
+#   _ensure_builtins）**整体搬到了 backend/selfmaint.py**：
+#     · 它们的定义、节律、启停、上次结果、历史，都在 selfmaint 里，
+#       状态存 data/self_maint.json，与用户的 schedules.json 彻底分开；
+#     · 入口在「🌱 AI 迭代想法」抽屉的「自我维护」区块；
+#     · 执行体仍是本文件的 _run_selfiter / _run_selfaudit / _run_selfexp /
+#       _run_selfidle（会写会话 + 写 schedule_logs 的 md，历史能翻到），
+#       由 selfmaint 延迟 import 本模块后调用，不重复实现一份；
+#     · 本文件只剩一件事：load_jobs() 把旧文件里遗留的 kind 任务**迁移一次**
+#       过去，然后从定时任务列表里移除（用户要「只留我自己建的任务」）。
+#   保留 _LEGACY_KINDS 只为迁移时识别旧数据，不参与任何新建/自愈逻辑。
+_LEGACY_KINDS = ("selfiter", "selfaudit", "selfexp", "selfidle")
 
 
-def _builtin_job(d: dict) -> dict:
-    """按代码里的定义造一条内置任务记录（只用于「缺失时补回」）。"""
-    sch = {}
-    if d.get("at_time"):
-        sch["at_time"] = d["at_time"]
-    elif d.get("every_minutes"):
-        sch["every_minutes"] = int(d["every_minutes"])
-    return {"id": uuid.uuid4().hex[:8],
-            "name": d["name"], "prompt": "", "schedule": sch,
-            "session": "", "model": "", "kind": d["kind"], "focus": "",
-            "enabled": True, "created": _now(), "builtin_auto": True,
-            "last_run": "", "last_status": "", "last_preview": "",
-            "next_run": _next_run({"schedule": sch})}
-
-
-def _ensure_builtins(jobs: list) -> tuple:
-    """补齐缺失的内置任务，返回 (jobs, 补回的 kind 列表)。
-
-    · 只补「kind 在 _BUILTIN_DEFS 里、但 jobs 里一条都没有」的；
-    · 已经存在的一律不动 —— 包括用户暂停了的（enabled=False）、改过时间的。
-      所以「暂停」不会被自愈悄悄恢复成启用，这是必须守住的一条；
-    · 用户自己建的业务任务（kind 为空）完全不参与。
-    """
-    have = {str(j.get("kind") or "") for j in jobs}
-    added = []
-    for d in _BUILTIN_DEFS:
-        if d["kind"] in have:
-            continue
-        jobs.append(_builtin_job(d))
-        added.append(d["kind"])
-    return jobs, added
-
-
-def load_jobs() -> list:
+def load_jobs_raw() -> list:
+    """只读 schedules.json，**不做任何自愈 / 迁移**（给 selfmaint 迁移用）。"""
     try:
         with open(_jobs_path(), "r", encoding="utf-8") as f:
             d = json.load(f)
-        jobs = d if isinstance(d, list) else []
+        return d if isinstance(d, list) else []
     except Exception:
-        jobs = []
-    # 内置任务自愈：文件丢了 / 被清空了，这里把它补回来并落盘
+        return []
+
+
+def load_jobs() -> list:
+    """读用户的定时任务。
+
+    ★ 2026-11-15 用户要求：「反思自检评估以及抽空代码自检彻底成为这个项目的
+      一项功能，不要放在自动化里面，而是放在迭代想法里面」。
+      所以这里**不再自愈补回内置任务**——它们已经搬到 backend/selfmaint.py，
+      定义写在代码里，与 schedules.json 无关。
+      这里只做一件事：如果旧文件里还留着 kind 任务，**迁移一次**到 selfmaint
+      并从本文件移除（用户要「定时任务列表里只留我自己建的任务」）。
+      迁移是幂等的：搬完就找不到 kind 任务，之后再调是空操作。
+    """
+    jobs = load_jobs_raw()
     try:
-        jobs, added = _ensure_builtins(list(jobs))
-        if added and time.time() - _ENSURE_FAIL_AT[0] > 60:
-            # ★ 加锁 + 双检：load_jobs 会被调度线程（每 20 秒）和各个接口同时调用，
-            #   而自愈要写盘。两个线程都发现缺失时，如果不锁就会同时写同一个
-            #   schedules.json.tmp，可能交错出半个文件。拿锁后重读一遍，
-            #   别人已经补好了就直接用他的结果。
-            with _ENSURE_LOCK:
-                try:
-                    with open(_jobs_path(), "r", encoding="utf-8") as f:
-                        _d = json.load(f)
-                    _cur = _d if isinstance(_d, list) else []
-                except Exception:
-                    _cur = []
-                _cur, _added = _ensure_builtins(list(_cur))
-                if _added:
-                    try:
-                        save_jobs(_cur)
-                        logger.warning("内置任务缺失，已自动补回：%s", ",".join(_added))
-                    except Exception:
-                        _ENSURE_FAIL_AT[0] = time.time()
-                        logger.debug("补回内置任务写盘失败", exc_info=True)
-                jobs = _cur
+        from . import selfmaint as _sm
+        if any(str(j.get("kind") or "") in _sm.KINDS for j in jobs):
+            _sm.migrate_from_schedules()
+            jobs = load_jobs_raw()
     except Exception:
         logger.debug("silent-except", exc_info=True)
     return jobs
@@ -463,7 +421,7 @@ def _run_selfiter(job: dict) -> dict:
         old = sessions.get_messages(sid) or []
         stamp = _now()
         old.append({"role": "user", "ts": stamp,
-                    "content": "【定时任务·%s】每日自我反思" % (job.get("name") or "自我迭代")})
+                    "content": "【%s】" % (job.get("name") or "自我维护·自我反思")})
         old.append({"role": "assistant", "ts": stamp, "content": answer})
         sessions.save_messages(sid, old)
     except Exception:                                   # noqa: BLE001
@@ -528,7 +486,7 @@ def _run_selfaudit(job: dict) -> dict:
         old = sessions.get_messages(sid) or []
         stamp = _now()
         old.append({"role": "user", "ts": stamp,
-                    "content": "【定时任务·%s】每日代码自检" % (job.get("name") or "代码自检")})
+                    "content": "【%s】" % (job.get("name") or "自我维护·代码自检")})
         old.append({"role": "assistant", "ts": stamp, "content": answer})
         sessions.save_messages(sid, old)
     except Exception:                                   # noqa: BLE001
@@ -554,7 +512,9 @@ def _run_selfexp(job: dict) -> dict:
     """
     from . import self_iterate as _si
     s = _si.load_settings()
-    if not s.get("evaluate_periodic", True):
+    # 自动触发时尊重「关掉定时评估」的设置；用户在迭代想法里手动点
+    # 「立即运行」时（job.force）照样跑一次 —— 手动操作不该被定时开关挡住。
+    if not s.get("evaluate_periodic", True) and not job.get("force"):
         return {"answer": "【体验评估】已在设置里关闭定时评估，本次跳过。",
                 "model": "selfexp", "channel": "builtin",
                 "session": str(job.get("session") or "")}
@@ -615,7 +575,7 @@ def _run_selfexp(job: dict) -> dict:
         old = sessions.get_messages(sid) or []
         stamp = _now()
         old.append({"role": "user", "ts": stamp,
-                    "content": "【定时任务·%s】体验评估" % (job.get("name") or "体验评估")})
+                    "content": "【%s】" % (job.get("name") or "自我维护·体验评估")})
         old.append({"role": "assistant", "ts": stamp, "content": answer})
         sessions.save_messages(sid, old)
     except Exception:                                   # noqa: BLE001
@@ -645,6 +605,10 @@ def _run_selfidle(job: dict) -> dict:
     from . import self_iterate as _si
     s = _si.load_settings()
     gate = _si.idle_gate(s)
+    # 手动点「立即运行」时越过空闲闸 —— 用户就是现在要它跑，
+    # 再拿「你是不是在忙」把他挡回去没有意义。
+    if job.get("force"):
+        gate = {"ok": True, "reason": "手动触发"}
     if not gate.get("ok"):
         return {"answer": "", "model": "selfidle", "channel": "builtin",
                 "session": "", "skipped": True,
@@ -666,7 +630,8 @@ def _run_selfidle(job: dict) -> dict:
     auto_r = r.get("auto") or {}
 
     # 干干净净又没改代码 → 不打扰用户（记录在 audits.json，抽屉里能查到）
-    if total <= 0 and not auto_r:
+    # 手动运行时即使「没问题」也要给个明确结果，不能静默跳过
+    if total <= 0 and not auto_r and not job.get("force"):
         return {"answer": "", "model": "selfidle", "channel": "builtin",
                 "session": "", "skipped": True,
                 "reason": "空档自检完成，没有发现问题（%s 秒）" % a.get("seconds")}
@@ -697,7 +662,7 @@ def _run_selfidle(job: dict) -> dict:
         old = sessions.get_messages(sid) or []
         stamp = _now()
         old.append({"role": "user", "ts": stamp,
-                    "content": "【定时任务·%s】抽空自检" % (job.get("name") or "代码自检")})
+                    "content": "【%s】" % (job.get("name") or "自我维护·抽空自检")})
         old.append({"role": "assistant", "ts": stamp, "content": answer})
         sessions.save_messages(sid, old)
     except Exception:                                   # noqa: BLE001
@@ -1002,6 +967,40 @@ def latest_result(job_id: str, limit: int = 4000) -> str:
 
 
 # ---------------------------------------------------------------- 后台循环
+# 自我维护是否正在跑（防止上一轮还没跑完又被下一个 tick 触发）
+_MAINT_BUSY = [False]
+
+
+def _maint_tick() -> None:
+    """自我维护的一次 tick：到点就跑。
+
+    ★ 单独开线程跑，**不占调度循环** —— 一次反思要 60~100 秒，如果直接
+      在 _loop 里跑，用户自己建的定时任务会被拖后一两分钟。
+    """
+    if _MAINT_BUSY[0]:
+        return
+    try:
+        from . import selfmaint as _sm
+        if not _sm.due_items():
+            return
+        _MAINT_BUSY[0] = True
+        try:
+            done = _sm.run_all_due()
+            if done:
+                _STATE["last_maint"] = done
+                logger.warning("自我维护自动执行：%s",
+                               ", ".join("%s(%s)" % (d.get("kind"),
+                                                     "跳过" if d.get("skipped")
+                                                     else ("ok" if d.get("ok")
+                                                           else "失败"))
+                                         for d in done))
+        finally:
+            _MAINT_BUSY[0] = False
+    except Exception:
+        _MAINT_BUSY[0] = False
+        logger.debug("silent-except", exc_info=True)
+
+
 def _loop() -> None:
     while True:
         try:
@@ -1049,6 +1048,13 @@ def _loop() -> None:
                     _STATE["running"] = ""
                     save_jobs(jobs)
             _STATE["last_tick"] = now
+            # 自我维护（反思 / 自检 / 体验评估 / 抽空自检）：到点就跑，
+            # 开独立线程，不阻塞用户自己建的任务
+            try:
+                threading.Thread(target=_maint_tick, daemon=True,
+                                 name="maint-tick").start()
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
         except Exception:
             logger.debug("silent-except", exc_info=True)
         time.sleep(20)
@@ -1066,31 +1072,25 @@ def _catchup_builtins() -> list:
       · 只补 enabled 的（用户暂停了就尊重，不自作主张）；
       · 过期不到 5 分钟的不算「错过」，交给 _loop 正常处理，不插队。
     """
-    jobs = load_jobs()
-    now = time.time()
-    due = []
-    for j in jobs:
-        if not j.get("enabled"):
-            continue
-        if not str(j.get("kind") or ""):
-            continue
-        nr = float(j.get("next_run") or 0)
-        if nr and nr < now - 300:
-            j["next_run"] = now
-            j["catchup"] = True
-            due.append(str(j.get("kind")))
-    if due:
-        save_jobs(jobs)
-    return due
+    # ★ 2026-11-15：内置任务已迁到 backend/selfmaint.py，补跑交给它做。
+    try:
+        from . import selfmaint as _sm
+        return _sm.catchup()
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return []
 
 
 def start() -> dict:
     global _THREAD
     if _THREAD and _THREAD.is_alive():
         return {"ok": True, "already": True}
-    # ★ 启动先自愈一次：schedules.json 丢了也能把四个内置任务补回来
+    # ★ 启动先跑一次 load_jobs：它会把 schedules.json 里遗留的内置任务
+    #   迁到 selfmaint（幂等），并保证 selfmaint 的状态文件存在。
     try:
         load_jobs()
+        from . import selfmaint as _sm
+        _sm.status()                 # 触发一次自愈：状态文件丢了就重建默认
     except Exception:
         logger.debug("silent-except", exc_info=True)
     # ★ 再补跑关机期间错过的（只对内置任务）
