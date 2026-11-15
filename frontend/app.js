@@ -13254,8 +13254,11 @@
 
   // ---------------------------------------------------------- 渲染
   const RISK_LABEL = { low: "低风险", mid: "中风险", high: "高风险" };
+  // ★ 2026-11-16 用户报「这么多个失败」：熔断拦下的动作原来标成 failed，
+  //   一片红且没有出路。现在熔断 = need_review（待人工复核），可以点按钮放行。
   const ST_LABEL = { pending: "待批准", approved: "已批准·待执行",
-                     rejected: "已拒绝", done: "已执行", failed: "失败" };
+                     rejected: "已拒绝", done: "已执行", failed: "失败",
+                     need_review: "⚠ 待人工复核" };
 
   function sec(title, inner) {
     return '<div class="iter-sec"><div class="iter-sec-t">' + esc(title) + '</div>' +
@@ -13299,7 +13302,9 @@
       const risk = a.risk || "mid";
       // done / failed 的动作已经跑完了，勾了也没用，不给勾选框。
       const pickable = (a.status !== "done" && a.status !== "failed");
-      h += '<div class="iter-act risk-' + esc(risk) + '" data-id="' + esc(a.id) + '">' +
+      // 待人工复核也算「可勾选」——勾上后点「批准选中」就是批量放行。
+      h += '<div class="iter-act risk-' + esc(risk) + ' st-' + esc(a.status) +
+        '" data-id="' + esc(a.id) + '">' +
         '<div class="iter-act-head">' +
           (pickable ? '<input type="checkbox" class="iter-ck" title="勾选后可批量批准 / 拒绝">' : '') +
           '<span class="iter-act-t">' + esc(a.title) + '</span>' +
@@ -13375,6 +13380,16 @@
           '<button type="button" class="btn sm iter-ok">✓ 批准并执行</button>' +
           '<button type="button" class="btn sm ghost iter-no">✕ 拒绝</button>' +
           '</div>';
+      } else if (a.status === "need_review") {
+        // ★ 2026-11-16 用户要求：「如果要人工复核就在前端一个审核的按钮」。
+        //   熔断拦下的动作不是失败，是「等你点头」。点这个按钮 → 放行 + 重置该文件
+        //   的熔断计数 + 立刻执行。想放弃就点「✕ 不做」。
+        h += '<div class="iter-act-btns">' +
+          '<button type="button" class="btn sm iter-force">✔ 复核通过并执行</button>' +
+          '<button type="button" class="btn sm ghost iter-no">✕ 不做</button>' +
+          '</div>' +
+          '<div class="iter-act-hint">这是护栏在拦（同一文件 60 分钟内被改太多次），' +
+          '不是出故障。确认没问题就放行。</div>';
       } else if (a.status === "approved") {
         // 已批准但还没执行 —— 允许单条撤回（后端 reject 支持 approved→rejected）。
         h += '<div class="iter-act-btns">' +
@@ -14206,14 +14221,51 @@
 
   // execute：true = 批准后立刻执行；false = 只标记「已批准」，等你点「▶ 执行已批准的」。
   // 用户明确要求：单个批准立即执行，批量批准先攒着。
+  // ★ 2026-11-16 用户要求「如果要人工复核就在前端一个审核的按钮」。
+  //   熔断拦下的动作 = 待人工复核，点这里放行：后端会重置这些文件的熔断计数，
+  //   否则放行了执行时还会被同一道闸拦住。
+  async function doForce(ids) {
+    if (busy || !data || !data.latest) return;
+    const pid = data.latest.id;
+    busy = true; say("复核通过，正在放行…");
+    let r;
+    try {
+      r = await api("/api/selfiter/force",
+        { id: pid, action_ids: ids || null, execute: false });
+    } catch (e) {
+      busy = false;
+      say("放行失败：" + (e && e.message ? e.message : e), "bad");
+      return;
+    }
+    busy = false;
+    if (!r || !r.ok) { say((r && r.error) || "放行失败", "bad"); return; }
+    const n = (r.forced || []).length;
+    say("已放行 " + n + " 条（熔断计数已重置），开始执行…", "good");
+    await submitToFeed(pid, "manual");
+    await load();
+  }
+
   async function doApprove(ids, note, execute) {
     if (busy || !data || !data.latest) return;
+    // ★ 勾选里含「待人工复核」的动作 → 先放行（重置熔断计数），
+    //   否则批了也会在执行时被同一道闸拦下，用户看到的还是「失败」。
+    const need = (data.latest.actions || []).filter(function (a) {
+      return a.status === "need_review" && (!ids || ids.indexOf(a.id) >= 0);
+    }).map(function (a) { return a.id; });
+    if (need.length) {
+      busy = true; say("正在放行待复核的 " + need.length + " 条…");
+      const rf = await api("/api/selfiter/force",
+        { id: data.latest.id, action_ids: need, execute: false });
+      busy = false;
+      if (!rf || !rf.ok) { say((rf && rf.error) || "放行失败", "bad"); return; }
+    }
     busy = true; say("批准中…");
     const r = await api("/api/selfiter/approve",
       { id: data.latest.id, action_ids: ids, note: note || "" });
     busy = false; noteFor = null;
     if (!r || !r.ok) { say((r && r.error) || "批准失败", "bad"); return; }
-    const n = r.approved || 0;
+    // 刚放行的那些已经是 approved，approve 不会再计一次，这里补上
+    const n = (r.approved || 0) + need.length;
     if (execute === false) {
       say("已批准 " + n + " 条，先攒着。点「▶ 执行已批准的」才开始改代码。", "good");
       await load();
@@ -14647,6 +14699,8 @@
       render();
       return;
     }
+    // ★ 2026-11-16：熔断动作的人工放行（单条）
+    if (t.classList.contains("iter-force")) { doForce([id]); return; }
     if (t.classList.contains("iter-confirm")) {
       const ta = card.querySelector(".iter-note");
       const note = ta ? ta.value : "";

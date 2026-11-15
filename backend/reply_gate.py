@@ -18,6 +18,13 @@ FOLD_THRESHOLD = 600
 FOLD_PREVIEW = 120
 # 默认整体上限
 DEFAULT_MAX_CHARS = 4000
+# 硬上限：回复超过这个字数一律截断（对应「回复被截断 18 次」的直接对策）。
+# 与 DEFAULT_MAX_CHARS 的区别：DEFAULT_MAX_CHARS 是「组装时的软预算」，
+# HARD_MAX_CHARS 是「出口处的最后一道闸」—— 无论调用方传什么 max_chars，
+# 最终返回给用户的文本都不会超过这个长度。
+HARD_MAX_CHARS = 6000
+# 截断提示语：告诉用户「已截断，回复『继续』看剩余」
+_TRUNCATE_NOTICE = "\n\n…（已截断，回复『继续』看剩余）"
 # 回复超过这个字数就强制「结论前置 + 过程折叠」形态（对应「回复被截断」）
 FORCE_CONCLUSION_THRESHOLD = 800
 # 长度预判阈值：预估输出超过这个字数时，强制先输出「结论 + 已改文件 + 待办」
@@ -470,6 +477,52 @@ def _ensure_conclusion_label(conclusion: str) -> str:
     return "结论：" + s
 
 
+def _enforce_hard_cap(text: str, hard_limit: int = HARD_MAX_CHARS) -> str:
+    """出口硬上限：无论上游怎么组装，最终文本绝不超过 hard_limit 字。
+
+    对应「回复被截断 18 次」的直接对策 —— 与其让平台/前端在任意位置
+    硬截断（用户拿到半截过程、零信息），不如由闸门自己截断，并在末尾
+    附一句明确的「已截断，回复『继续』看剩余」，让用户知道怎么拿剩余内容。
+
+    行为：
+      · 未超限 → 原样返回；
+      · 超限 → 截到 hard_limit 以内，末尾附 _TRUNCATE_NOTICE；
+      · 截断点尽量落在段落边界（\n\n），避免把一句话砍成半截；
+      · 若截断点落在 <details> 块内，整块丢弃并换成一行纯文本提示，
+        避免留下未闭合的 <details> 把后续内容吞掉。
+    """
+    if not text:
+        return text
+    try:
+        hard_limit = int(hard_limit)
+    except Exception:                                   # noqa: BLE001
+        hard_limit = HARD_MAX_CHARS
+    if hard_limit <= 0:
+        hard_limit = HARD_MAX_CHARS
+    if len(text) <= hard_limit:
+        return text
+
+    notice = _TRUNCATE_NOTICE
+    room = max(0, hard_limit - len(notice))
+    if room <= 0:
+        return text[:hard_limit]
+
+    cut = text[:room]
+    # 尽量在段落边界截断，避免半句话
+    para_cut = cut.rfind("\n\n")
+    if para_cut > room // 2:
+        cut = cut[:para_cut]
+
+    # 若截断点落在未闭合的 <details> 块内，整块丢弃并换成纯文本提示
+    if cut.count("<details") > cut.count("</details>"):
+        last_open = cut.rfind("<details")
+        if last_open > 0:
+            cut = cut[:last_open].rstrip()
+            cut = cut + "\n\n（过程过长，已省略）"
+
+    return cut.rstrip() + notice
+
+
 def _build_tail(actions=None, todos=None) -> str:
     """结尾固定输出「已改文件 / 待办」两行（无内容时给明确占位）。
 
@@ -590,6 +643,8 @@ def enforce_shape(text, user_input=None, suggested_action=None, actions=None,
             notice = "\n\n…（回复超过 %d 字，已截断；完整内容请点开过程或重试）" % limit
             room = max(0, limit - len(notice))
             s = s[:room].rstrip() + notice
+        # 出口硬上限：无论上游怎么组装，最终绝不超过 HARD_MAX_CHARS
+        s = _enforce_hard_cap(s)
         return s
     except Exception:                                   # noqa: BLE001
         return raw
@@ -757,6 +812,8 @@ def enforce(text, user_input=None, suggested_action=None, actions=None, todos=No
                     out = head + "\n\n" + folded[:budget]
             else:
                 out = head[:limit]
+        # 出口硬上限：无论上游怎么组装，最终绝不超过 HARD_MAX_CHARS
+        out = _enforce_hard_cap(out)
         return out
     except Exception:                                   # noqa: BLE001
         return raw
@@ -849,7 +906,8 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
             text = text.rstrip() + _build_tail(actions, todos)
 
     if len(text) <= limit:
-        return text
+        # 出口硬上限：即使组装结果没超软预算，也绝不超过 HARD_MAX_CHARS
+        return _enforce_hard_cap(text)
 
     # 超长：优先砍产物，再砍过程，结论不动。
     # 长度预判命中时，三行摘要已经占了 parts[0]，结论已并入摘要，head 为空，
@@ -884,4 +942,5 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
         budget = 0
 
     out = "\n\n".join([head] + kept) if head else "\n\n".join(kept)
-    return out[:limit]
+    # 出口硬上限：软预算截断后再过一道硬闸，保证最终不超过 HARD_MAX_CHARS
+    return _enforce_hard_cap(out[:limit])

@@ -1130,13 +1130,10 @@ body.dragging .drop-overlay,
   flex: 0 0 auto; width: 16px; height: 16px; margin: 0 6px 0 0;
   accent-color: var(--accent); cursor: pointer; vertical-align: middle;
 }
-/* 动作行：勾选框 + 标题 + 右侧按钮，标题可收缩但绝不把勾选框挤走 */
-.iter-act { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.iter-act > .iter-title,
-.iter-act > .iter-sum {
-  flex: 1 1 auto; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
+/* ⚠️ 2026-11-16：这里原来有一条 `.iter-act { display:flex; align-items:center }`，
+   配套的 `.iter-title` / `.iter-sum` 在全项目里**一处都不存在**（死规则），
+   但它把 5565 行那套卡片样式（标题/说明/文件/按钮纵向排）覆盖成了横向 flex，
+   导致卡片内容被挤成竖条、按钮溢出容器。已删除。 */
 /* 批量操作条：勾选计数 + 批量按钮，按钮在没勾选时置灰 */
 .iter-pickbar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -4392,7 +4389,7 @@ html[data-theme="light"] select.pill-select option {
    产物可能有几十个，撑高后关闭按钮会被顶出屏幕。 */
 .hive-art-list {
   max-height: 46vh; overflow: auto; margin: 6px 0 10px;
-  border: 1px solid var(--line); border-radius: 10px; background: var(--bg2);
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg2);
 }
 .hive-art-list:empty::after {
   content: "还没有产物 —— 在群里 @hd 让它画张图或写个文档试试";
@@ -4403,7 +4400,7 @@ html[data-theme="light"] select.pill-select option {
 .hive-art-drop {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
   padding: 12px 14px; margin: 8px 0 6px;
-  /* ⚠️ 不能写 var(--line) / var(--bg2)：这两个变量在本项目里**根本没定义**，
+  /* ⚠️ 2026-11-16：这里原来写的是一个**从未定义**的边框变量（--line），回退成透明，
      CSS 变量未定义会让整条声明失效 → border 变成 none，框子完全看不见（实测过）。 */
   border: 1.5px dashed rgba(127, 140, 160, .55); border-radius: 10px;
   background: rgba(127, 140, 160, .08); font-size: 12.5px; color: #8a93a6;
@@ -4432,7 +4429,7 @@ html[data-theme="light"] select.pill-select option {
 
 .hive-art-item {
   display: flex; align-items: center; gap: 10px;
-  padding: 9px 11px; border-bottom: 1px solid var(--line);
+  padding: 9px 11px; border-bottom: 1px solid var(--border);
 }
 .hive-art-item:last-child { border-bottom: 0; }
 .hive-art-ico { flex: 0 0 auto; font-size: 17px; line-height: 1; }
@@ -5563,6 +5560,7 @@ html[data-theme="light"] select.pill-select option {
 }
 .iter-empty { color: var(--muted, #7a8494); font-size: 13px; line-height: 1.75; padding: 20px 4px; }
 .iter-act {
+  display: block;                       /* 卡片是纵向的：标题 / 说明 / 文件 / 按钮各占一行 */
   border: 1px solid var(--border, #e6e9ee); border-radius: 10px;
   padding: 10px 12px; margin-bottom: 8px; background: var(--bg, #fff);
 }
@@ -5579,6 +5577,14 @@ html[data-theme="light"] select.pill-select option {
 }
 .iter-risk { background: #fef3c7; color: #975a16; }
 .iter-act-st { background: #edf2f7; color: #4a5568; }
+/* 2026-11-16 用户报「这么多个失败」：熔断动作原来是红的「失败」，
+   现在改成琥珀色「待人工复核」—— 是等你点头，不是出故障。 */
+.iter-act.st-need_review { border-left-color: #d69e2e; }
+.iter-act.st-need_review .iter-act-st { background: #fef3c7; color: #975a16; }
+.iter-act-hint {
+  font-size: 11.5px; line-height: 1.6; color: #975a16; background: #fffaf0;
+  border-radius: 6px; padding: 4px 8px; margin-top: 6px; word-break: break-word;
+}
 .iter-act-d { font-size: 12.5px; line-height: 1.65; margin-bottom: 6px; color: var(--muted, #4a5568); }
 .iter-act-f { font-size: 11.5px; color: #8a94a6; margin-bottom: 8px; word-break: break-all; }
 /* 2026-11-15：用户问「创新有没有论文依据」——theory 单独一行，有论文支撑时高亮 */

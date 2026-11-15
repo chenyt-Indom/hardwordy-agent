@@ -80,15 +80,20 @@ _EXEC_LOCK = threading.RLock()
 
 def _exec_guard(fn):
     """给 execute_approved 加进程级互斥：抢不到锁就明确拒绝，不排队硬等。"""
-    def _wrapped(pid, on_event=None, should_cancel=None, _depth=0):
+    def _wrapped(*args, **kw):
+        # ★ 2026-11-16：原来是写死的四个位置参数，导致 execute_approved 新增的
+        #   force 参数一传就报「unexpected keyword argument」。改成透传。
+        _depth = kw.get("_depth", 0)
+        if len(args) >= 4:
+            _depth = args[3]
         if _depth > 0:
             # 递归接续下一轮：锁已在本线程手里，直接进
-            return fn(pid, on_event, should_cancel, _depth)
+            return fn(*args, **kw)
         if not _EXEC_LOCK.acquire(blocking=False):
             return {"ok": False, "done": 0, "total": 0, "results": [],
                     "error": "已有一个自动执行在进行中，本次跳过（避免并发改坏代码）"}
         try:
-            return fn(pid, on_event, should_cancel, _depth)
+            return fn(*args, **kw)
         finally:
             _EXEC_LOCK.release()
     _wrapped.__name__ = getattr(fn, "__name__", "execute_approved")
@@ -661,12 +666,39 @@ def load_checkpoint():
     return d if isinstance(d, dict) else {}
 
 
+def _fix_review_states(items):
+    """读时迁移：把历史上因熔断被判成 failed 的动作改成 need_review。
+
+    ★ 2026-11-16 实测踩到：迁移脚本把磁盘改完（42 条），**正在运行的后端进程**
+      几分钟后又用内存里的旧数据把它覆盖回 failed。所以迁移必须放进读取路径 ——
+      无论谁写回，读出来的时候都是对的；下一次 save 就会把正确状态写回磁盘。
+    """
+    n = 0
+    for pl in (items or []):
+        if not isinstance(pl, dict):
+            continue
+        for a in (pl.get("actions") or []):
+            if not isinstance(a, dict) or a.get("status") != "failed":
+                continue
+            err = str(a.get("error") or "")
+            if not any(m in err for m in _REVIEW_MARKS):
+                continue
+            a["status"] = "need_review"
+            a["review_reason"] = err
+            n += 1
+    return n
+
+
 def load_plans():
     d = _read_json(_PLANS, {"items": []})
     if isinstance(d, list):
         d = {"items": d}
     if not isinstance(d.get("items"), list):
         d["items"] = []
+    try:
+        _fix_review_states(d.get("items"))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
     return d
 
 
@@ -905,6 +937,45 @@ _LOOP_WINDOW_MIN = 60       # 观察窗口（分钟）
 _LOOP_MAX_HITS = 10         # 窗口内同一文件被自动改成功的上限
 
 
+def _count_fail_kind(kind, days=7):
+    """统计最近 days 天内某个 fail_kind 的**真实**失败次数（读 actlog.jsonl）。
+
+    ★ 2026-11-16 静态自检报的 high：`_count_fail_kind` 在 `_change_summary` 里
+      被调用，但**本文件从来没定义过它**，外面套着 except 于是静默失效 ——
+      「幽灵修复检测」（针对 fail_kind=X 共 N 次，N 为 0 就说明这次改动没有
+      真实失败依据）实际上永远拿不到计数，等于不存在。这里补上实现。
+    """
+    kind = str(kind or "")
+    if not kind:
+        return {}
+    try:
+        rows = list_actlog(500)
+    except Exception:                                   # noqa: BLE001
+        return {}
+    now = time.time()
+    n = 0
+    for r in rows:
+        if r.get("result") != "fail":
+            continue
+        # actlog 里没有 fail_kind 字段，按 detail 归类（与前端显示同一套判据）
+        try:
+            if classify_fail(r.get("detail")) != kind:
+                continue
+        except Exception:                               # noqa: BLE001
+            continue
+        if r.get("probe") or _is_probe({"id": r.get("plan_id")},
+                                       {"title": r.get("title")}):
+            continue                                    # 验证用例不算
+        try:
+            t = time.mktime(time.strptime(str(r.get("ts") or "")[:19],
+                                          "%Y-%m-%d %H:%M:%S"))
+        except Exception:                               # noqa: BLE001
+            continue
+        if now - t <= float(days) * 86400:
+            n += 1
+    return {kind: n}
+
+
 def _count_recent_file_changes(rel, hours=24):
     """统计 rel 在最近 hours 小时内被**真实**自动改动过几次。
 
@@ -940,6 +1011,141 @@ def _count_recent_file_changes(rel, hours=24):
     return n
 
 
+_LOOP_RESET = _DATA / "loop_reset.json"
+
+
+def _loop_reset_map():
+    """人工复核通过的时间点：{文件: ts}。
+
+    ★ 2026-11-16 用户报「这么多个失败，彻底解决」——截图里 7 条动作全被
+      「反复修改熔断：frontend/app.js 最近 60 分钟内已改成功 10 次」拦死。
+      熔断本身是对的（真被改乱过），但**没有出口**：人工看完觉得没问题，
+      也没有任何办法让它继续，那个文件就永久锁死了。
+      所以加这个文件：用户点「复核通过」后记一个时间点，
+      之后统计只数这个时间点**之后**的记录 —— 等于重新计数。
+    """
+    d = _read_json(_LOOP_RESET, {})
+    return d if isinstance(d, dict) else {}
+
+
+def reset_loop(files):
+    """人工复核通过 → 从此刻起重新计数，不让旧记录继续把文件锁死。"""
+    files = [str(f or "") for f in (files or []) if f]
+    if not files:
+        return
+    try:
+        d = _loop_reset_map()
+        now = time.time()
+        for f in files:
+            d[f] = now
+        _write_json(_LOOP_RESET, d)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+
+
+_REVIEW_MARKS = ("反复修改熔断", "先停手")
+
+# 待人工复核队列（2026-11-16 用户要求）：熔断命中不再直接判失败，
+# 而是把动作挂到这里，前端「审核」按钮读它、点「复核通过」后放行。
+_REVIEW_QUEUE = _DATA / "review_queue.json"
+
+
+def is_review_reason(why):
+    """这条拦截是「改太多次、需要人看一眼」还是「模型质量差」？
+
+    前者可以转人工复核（用户点头就放行）；后者复核也没用，仍然判失败。
+    """
+    s = str(why or "")
+    return any(m in s for m in _REVIEW_MARKS)
+
+
+def _review_queue_read():
+    """读待人工复核队列。返回 {"items": [...]}，损坏时给空队列。"""
+    d = _read_json(_REVIEW_QUEUE, {"items": []})
+    if isinstance(d, list):
+        d = {"items": d}
+    if not isinstance(d, dict) or not isinstance(d.get("items"), list):
+        d = {"items": []}
+    return d
+
+
+def _review_queue_write(d):
+    try:
+        _write_json(_REVIEW_QUEUE, d)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+
+
+def push_review(pid, action, reason=""):
+    """把一条被熔断拦下的动作挂进待人工复核队列（幂等：同 id 覆盖）。
+
+    用户要求（2026-11-16）：「如果要人工复核就在前端一个审核的按钮」。
+    这里只负责**记录**，不执行任何改动 —— 真正放行仍然要人点。
+    """
+    try:
+        a = action or {}
+        aid = str(a.get("id") or "")
+        if not aid:
+            return {"ok": False, "error": "动作没有 id，无法挂复核"}
+        d = _review_queue_read()
+        items = [x for x in d.get("items") or []
+                 if not (isinstance(x, dict)
+                         and str(x.get("action_id") or "") == aid
+                         and str(x.get("plan_id") or "") == str(pid or ""))]
+        items.insert(0, {
+            "plan_id": str(pid or ""),
+            "action_id": aid,
+            "title": str(a.get("title") or "")[:200],
+            "risk": str(a.get("risk") or "mid"),
+            "files": [str(f) for f in (a.get("files") or []) if f],
+            "reason": str(reason or "")[:400],
+            "ts": _now(),
+            "_ts": time.time(),
+        })
+        d["items"] = items[:200]
+        _review_queue_write(d)
+        return {"ok": True, "queued": aid}
+    except Exception as e:                              # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def list_review_queue(limit=100):
+    """给前端读：当前有哪些动作在等人工复核。"""
+    d = _review_queue_read()
+    items = [x for x in (d.get("items") or []) if isinstance(x, dict)]
+    try:
+        items.sort(key=lambda x: float(x.get("_ts") or 0), reverse=True)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return {"ok": True, "items": items[:int(limit or 100)],
+            "total": len(items)}
+
+
+def clear_review(plan_id="", action_id=""):
+    """复核处理完（通过或拒绝）后从队列里摘掉。"""
+    try:
+        d = _review_queue_read()
+        pid, aid = str(plan_id or ""), str(action_id or "")
+        keep = []
+        for x in (d.get("items") or []):
+            if not isinstance(x, dict):
+                continue
+            if pid and str(x.get("plan_id") or "") != pid:
+                keep.append(x)
+                continue
+            if aid and str(x.get("action_id") or "") != aid:
+                keep.append(x)
+                continue
+            # 命中要摘掉的那条
+        d["items"] = keep
+        _review_queue_write(d)
+        return {"ok": True, "left": len(keep)}
+    except Exception as e:                              # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 def _loop_guard(files, root_cause=""):
     """反复修改熔断。返回 (allow, why)。读不到日志时放行（不误伤）。
 
@@ -957,6 +1163,7 @@ def _loop_guard(files, root_cause=""):
         logger.debug("silent-except", exc_info=True)
         return True, ""
     now = time.time()
+    _rst = _loop_reset_map()
     hit = {}
     for r in rows:
         if r.get("result") != "ok":
@@ -970,6 +1177,9 @@ def _loop_guard(files, root_cause=""):
             continue
         for f in (r.get("files") or []):
             if f in files:
+                _since = _rst.get(f)
+                if _since and t <= float(_since):
+                    continue        # 人工复核通过之前的不算，别把文件永久锁死
                 hit[f] = hit.get(f, 0) + 1
 
     # ★ 2026-11-15 接线 _change_gate：上面只数「最近 N 分钟内**成功**改了几次」，
@@ -1003,6 +1213,9 @@ def _loop_guard(files, root_cause=""):
             _ok = (r.get("result") == "ok")
             for f in (r.get("files") or []):
                 if f in files:
+                    _since2 = _rst.get(f)
+                    if _since2 and _t <= float(_since2):
+                        continue    # 同上：人工复核通过后重新计数
                     _cnt[f] = _cnt.get(f, 0) + 1
                     # rows 是最新在前，第一次遇到就是「上次」，别被更旧的覆盖
                     if f not in _last_fail:
@@ -2862,7 +3075,13 @@ def approve(pid, action_ids=None, note=""):
     for a in p.get("actions") or []:
         if action_ids and a["id"] not in action_ids:
             continue
-        if a["status"] in ("pending", "rejected"):
+        if a["status"] in ("pending", "rejected", "need_review"):
+            if a["status"] == "need_review":
+                # 批量批准时也要能放行熔断动作，否则它们永远出不去
+                a["error"] = ""
+                a["reviewed"] = _now()
+                p["_force"] = list(dict.fromkeys(
+                    list(p.get("_force") or []) + [str(a.get("id"))]))
             a["status"] = "approved"
             a["note"] = str(note or "")[:800]
             hit += 1
@@ -2884,6 +3103,37 @@ def reject(pid, action_ids=None, note=""):
             hit += 1
     save_plans(d)
     return {"ok": True, "rejected": hit, "plan": p}
+
+
+def force_execute(pid, action_ids=None):
+    """人工复核通过：把「待人工复核」的动作放行，并重置这些文件的熔断计数。
+
+    用户要求（2026-11-16）：「这么多个失败，彻底解决这个问题，如果要人工复核
+    就给我在前端一个审核的按钮或方框」。熔断是护栏、不是故障，所以出路必须是
+    「人看一眼、点一下、继续做」，而不是让那个文件被永久锁死。
+    """
+    d, p = _find_plan(pid)
+    if not p:
+        return {"ok": False, "error": "找不到这次反思"}
+    want = set(str(x) for x in (action_ids or []) if x)
+    ids, files = [], []
+    for a in (p.get("actions") or []):
+        if a.get("status") != "need_review":
+            continue
+        if want and str(a.get("id")) not in want:
+            continue
+        a["status"] = "approved"
+        a["error"] = ""
+        a["reviewed"] = _now()
+        ids.append(str(a.get("id")))
+        files.extend([str(f) for f in (a.get("files") or []) if f])
+    if not ids:
+        return {"ok": False, "error": "没有待人工复核的动作"}
+    p["_force"] = list(dict.fromkeys(list(p.get("_force") or []) + ids))
+    save_plans(d)
+    reset_loop(files)
+    return {"ok": True, "forced": ids,
+            "files": list(dict.fromkeys(files)), "plan": p}
 
 
 # ---------------------------------------------------------------- 执行（带备份/校验/回滚）
@@ -2989,7 +3239,7 @@ def _change_summary(patches, fail_kind=""):
                 counts = _counter(days=7) or {}
             else:
                 counts = _count_fail_kind(fk, days=7)
-            n = int(counts.get(fk) or 0)
+            n = int((counts or {}).get(fk) or 0)
             fk_info["count"] = n
             if n > 0:
                 parts.append("针对 fail_kind=%s 共 %d 次" % (fk, n))
@@ -3847,8 +4097,11 @@ def _residual_findings(plan):
 
 
 @_exec_guard
-def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
+def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=None):
     """执行这次反思里所有 status=approved 的动作。带备份 + 校验 + 失败回滚。
+
+    `force`：人工复核放行的动作 id —— 这些跳过「反复修改熔断」这一道。
+    用户要求（2026-11-16）：「如果要人工复核就在前端一个审核的按钮」。
 
     2026-11-15 用户要求「迭代要像普通对话一样在聊天界面跑、能看到详细操作、
     能随时终止」—— 所以加了两个可选回调：
@@ -3877,6 +4130,9 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
     todo = [a for a in (plan.get("actions") or []) if a.get("status") == "approved"]
     if not todo:
         return {"ok": False, "error": "这次反思没有已批准的动作"}
+    # 人工复核放行名单：本次调用传进来的 + 计划里持久化的（重启后仍然有效）
+    _force = set(str(x) for x in (force or []))
+    _force |= set(str(x) for x in (plan.get("_force") or []))
 
     # 动手前最后一道复核：确认这些问题现在还真的存在
     precheck, _pre_note, _base = _precheck_actions(todo)
@@ -3927,7 +4183,22 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0):
         _lk, _lwhy = _loop_guard(
             a.get("files"),
             root_cause=(a.get("root_cause") or a.get("detail") or ""))
-        if not _lk:
+        if not _lk and str(a.get("id")) not in _force:
+            # ★ 2026-11-16 用户报「这么多个失败」：截图里 7 条动作全是红的，
+            #   原因清一色「反复修改熔断：app.js 最近 60 分钟已改成功 10 次」。
+            #   熔断的本意就是「先停手**等人工确认**」，原来却直接判 failed ——
+            #   既看不出这是护栏正常动作（不是故障），也没有任何出路。
+            #   现在：熔断 → 待人工复核（不是失败），前端给「复核通过并执行」按钮。
+            if is_review_reason(_lwhy):
+                a["status"] = "need_review"
+                a["error"] = _lwhy
+                a["review_reason"] = _lwhy
+                results.append({"id": a["id"], "ok": False, "need_review": True,
+                                "error": _lwhy})
+                _log_act(plan, a, False, "待人工复核：" + _lwhy)
+                _ev("step", text="%s 待人工复核：%s" % (a.get("id"), _lwhy))
+                _ev("code", **_card(a, [], False, _lwhy))
+                continue
             a["status"] = "failed"
             a["error"] = _lwhy
             results.append({"id": a["id"], "ok": False, "error": _lwhy})

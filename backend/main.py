@@ -2763,6 +2763,29 @@ def selfiter_execute(body: dict):
         return {"ok": False, "error": str(e)}
 
 
+@app.post("/api/selfiter/force")
+def selfiter_force(body: dict):
+    """人工复核通过：放行被「反复修改熔断」拦下的动作，并立即执行。
+
+    用户要求（2026-11-16）：「这么多个失败……如果要人工复核就在前端给一个
+    审核的按钮或方框」。熔断动作现在是 need_review（不是 failed），
+    点这个接口就放行 + 重置该文件的熔断计数。
+    """
+    from . import self_iterate as _si
+    b = body or {}
+    pid = str(b.get("id") or "")
+    try:
+        r = _si.force_execute(pid, b.get("action_ids") or None)
+        if r.get("ok") and b.get("execute", True):
+            try:
+                r["exec"] = _si.execute_approved(pid, force=r.get("forced") or None)
+            except Exception as e:                      # noqa: BLE001
+                r["exec_error"] = str(e)
+        return r
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/selfiter/task")
 def selfiter_task(since: int = 0):
     """迭代队列状态 + since 之后的新事件（前端每 1.5 秒轮询拿增量）。"""
