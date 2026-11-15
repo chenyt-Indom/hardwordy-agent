@@ -824,16 +824,18 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
 
     # ★ 空回复硬失败兜底：最终回复为空或只有「…」时，强制给出「已知 + 下一步」。
     #   对应 3 次空回复硬失败 —— 宁可给一句占位，也不让用户看到空白。
+    #   出口检查：空串 / 纯空白 / 只有省略号一律视为硬失败，绝不让空串直接返回。
     _stripped = text.strip()
-    if not _stripped or _stripped in ("…", "...", "。。。"):
-        # 优先用「最近一轮用户输入摘要 + 建议动作」生成模板；
-        # 未传 user_input 时退化为「结论/过程/产物」兜底，保持向后兼容。
-        if user_input is not None or suggested_action is not None:
-            text = _empty_output_fallback(user_input, suggested_action)
-        else:
-            known = conclusion or "（本轮未产出结论）"
-            nxt = process or artifacts or "（待补充）"
-            text = "当前已知：%s；下一步要查：%s" % (known, nxt)
+    if not _stripped or _stripped in ("…", "...", "。。。", "。。", "···", "⋯"):
+        # 用「当前轮已收集到的工具结果 + 待办/建议动作」拼最小结论：
+        #   「目前查到 X，还没确认 Y，下一步查 Z」
+        # 工具结果优先（信息量最大），没有则回退到用户输入摘要。
+        text = _empty_output_fallback(
+            user_input=user_input,
+            suggested_action=suggested_action,
+            tool_result=artifacts or process,
+            todos=todos,
+        )
 
     # ★ 结论前置闸门：首段不像结论时，插入「结论：」前缀重排。
     #   放在长度截断之前，保证重排后的结论段不会被截掉。

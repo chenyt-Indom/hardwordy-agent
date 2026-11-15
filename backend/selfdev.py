@@ -923,6 +923,18 @@ def patch(rel: str, find: str, replace: str, note: str = "",
             # 账本不可读时 _require_real_failure 保守放行，count=0；
             # 这里保持 -1 语义（未查/查不到），避免证据卡误报「0 次」。
             _real = -1
+        # ★ 2026-11-17 幽灵修复闸门（本次改动）：不再给 count 赋常量，
+        #   而是用 _require_real_failure 返回的**真实计数**做硬断言。
+        #   计数 >0 才放行；计数为 0 已在上面被拒绝（phantom）。
+        #   这里再断言一次，防止未来有人把上面的 return 改掉而静默放行。
+        assert _real > 0, (
+            "幽灵修复闸门失效：fail_kind=%s 计数=%r，应为 >0" % (_fk, _real))
+        # 把 fail_kind + 真实计数写进改动记录（journal），供事后审计。
+        try:
+            journal("gate_pass", rel, fail_kind=_fk, count=int(_real),
+                    days=7, evidence=_evidence[:200])
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
     got = read(rel)
     if not got.get("ok"):
         return got
