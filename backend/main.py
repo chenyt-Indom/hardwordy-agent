@@ -805,8 +805,50 @@ def _dedupe_paragraphs(text: str, threshold: float = 0.85) -> str:
     return "\n\n".join(p for p, _ in kept).strip()
 
 
+_THINK_PLACEHOLDERS = (
+    "🧠 本次没有思考内容",
+    "本次没有思考内容",
+    "（本次没有思考内容）",
+    "(本次没有思考内容)",
+    "🧠 无思考内容",
+    "无思考内容",
+)
+
+
+def _strip_think_placeholders(text: str) -> str:
+    """去掉「🧠 本次没有思考内容」这类**占位符**，别让它漏进正文。
+
+    2026-11-16 用户报「你好」那轮低分：模型没思考时，前端/后端会塞一句
+    「🧠 本次没有思考内容」当占位，结果它被当成正文显示出来 —— 用户看到的是
+    一句毫无信息量的废话，还占了一整块思考框。
+
+    这里做两件事：
+      1. 整行就是占位符 → 整行删掉（连同它前后的空行）；
+      2. 占位符夹在正文里 → 就地抹掉，不留空壳。
+    只认**明确的**占位符字面量，绝不误伤正常提到「思考」的句子。
+    """
+    s = str(text or "")
+    if not s:
+        return s
+    # ① 整行占位符：整行删掉
+    lines = s.splitlines()
+    kept = []
+    for ln in lines:
+        t = ln.strip()
+        if t and any(t == p or t == p + "。" or t == p + "…" for p in _THINK_PLACEHOLDERS):
+            continue
+        kept.append(ln)
+    s = "\n".join(kept)
+    # ② 夹在正文里的占位符：就地抹掉
+    for p in _THINK_PLACEHOLDERS:
+        s = s.replace(p, "")
+    # ③ 抹完可能留下连续空行 / 行首空白，收一下
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
 def _postprocess_reply(text: str) -> str:  # noqa: dead-func 非流式通道预留
-    """回复组装前的轻量后处理：去过渡语 + 段落去重。
+    """回复组装前的轻量后处理：去占位符 + 去过渡语 + 段落去重。
 
     ⚠️ 2026-11-15 现状：**当前没有调用点**，这是有意的。
 
@@ -820,7 +862,7 @@ def _postprocess_reply(text: str) -> str:  # noqa: dead-func 非流式通道预�
     （原 `_finalize_reply` 已于 2026-11-15 删除：它会给**每一条**回复强制套
       「结论：/验证：」头，闲聊也会被套上，且同样无法在流式里生效。）
     """
-    return _dedupe_paragraphs(_strip_transitions(text))
+    return _dedupe_paragraphs(_strip_transitions(_strip_think_placeholders(text)))
 
 
 def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
@@ -8180,9 +8222,23 @@ def selfdev_pending():
 @app.post("/api/selfdev/apply_restart")
 def selfdev_apply_restart():
     """用户点了「立即重启」才走到这里 —— 唯一真正重启的入口。"""
+    # ★ 重启闸门：把「这次为什么重启」写进磁盘，下次启动据此决定要不要自检。
+    #   用户要求（2026-11-16）：「自动迭代更新重启不要自检，其他情况重启才需要
+    #   自检；关闭到打开也不要自检，否则可能会无限自检下去」。
+    #   必须**在真正重启之前**写 —— pending 是内存状态，新进程里读不到。
+    #   先判再写交接卡：这样交接卡里的 reason_kind 能记成真实的类别
+    #   （selfdev_iterate / user_restart），而不是一律「用户手动重启」。
+    _mk = {}
+    try:
+        from . import bootgate as _bg
+        _mk = _bg.mark_restart("用户点了「立即重启」")
+        logger.info("[bootgate] 已记录重启：auto_iter=%s", _mk.get("auto_iter"))
+    except Exception:
+        logger.warning("写重启闸门标记失败（不影响重启）", exc_info=True)
     try:
         from . import handoff as _hdy
-        _hdy.snapshot(str(globals().get("_LAST_SESSION") or ""), "用户点了「立即重启」")
+        _hdy.snapshot(str(globals().get("_LAST_SESSION") or ""), "用户点了「立即重启」",
+                      kind=("selfdev_iterate" if _mk.get("auto_iter") else "user_restart"))
     except Exception:
         logger.warning("重启前写交接卡失败（不影响重启）", exc_info=True)
     # 重启前自动打一次版本快照（用户要求：改完能一键回到上一版）
@@ -9734,7 +9790,9 @@ def _warmup_on_start():
     #   跑挂了也不影响服务启动。详见 backend/bootaudit.py 开头的三条铁律。
     try:
         _ba = bootaudit.start_delayed()
-        if _ba.get("ok"):
+        if _ba.get("skipped"):
+            logger.info("本次不自检：%s", _ba.get("why"))
+        elif _ba.get("ok"):
             logger.info("已安排重启后自检（延迟 %s 秒）", _ba.get("delay"))
     except Exception as e:                               # noqa: BLE001
         logger.warning("重启后自检没安排上（不影响使用）：%s", e)

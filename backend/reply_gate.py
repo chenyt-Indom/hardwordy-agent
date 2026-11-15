@@ -18,6 +18,10 @@ FOLD_THRESHOLD = 600
 FOLD_PREVIEW = 120
 # 默认整体上限
 DEFAULT_MAX_CHARS = 4000
+# 回复超过这个字数就强制「结论前置 + 过程折叠」形态（对应「回复被截断」）
+FORCE_CONCLUSION_THRESHOLD = 800
+# 结尾固定输出的「已改文件 / 待办」分隔线
+_TAIL_SEP = "\n\n---\n"
 
 
 # 内部调试占位符：不渲染给用户（对应「你好」那轮泄漏）
@@ -78,14 +82,21 @@ def _as_text(x) -> str:
     return str(x)
 
 
-def _fold_process(process: str) -> str:
-    """过程超阈值就折叠成「N字，点开看」；短过程原样保留。"""
+def _fold_process(process: str, force: bool = False) -> str:
+    """过程超阈值就折叠成「N字，点开看」；短过程原样保留。
+
+    force=True 时（回复整体过长、需要强制结论前置形态）即使没到
+    FOLD_THRESHOLD 也折叠 —— 保证长回复里过程永远不占正文。
+    """
     if not process:
         return ""
     n = len(process)
-    if n <= FOLD_THRESHOLD:
+    if n <= FOLD_THRESHOLD and not force:
         return process
     preview = process[:FOLD_PREVIEW].replace("\n", " ").strip()
+    if n <= FOLD_PREVIEW:
+        return "<details><summary>过程 %d 字，点开看</summary>\n\n%s\n\n</details>" % (
+            n, preview)
     return "<details><summary>过程 %d 字，点开看</summary>\n\n%s\n\n…（其余 %d 字已折叠）\n\n</details>" % (
         n, preview, n - FOLD_PREVIEW)
 
@@ -117,6 +128,155 @@ def sanitize(text) -> str:
     if len(head) > room:
         head = head[:room]
     return head + tail
+
+
+# ── 结论前置闸门（首段结论句判定）────────────────────────────────
+# 首段长度区间：太短不像结论，太长不像「一行结论」
+_CONCLUSION_MIN_LEN = 10
+_CONCLUSION_MAX_LEN = 120
+# 首段以这些标点结尾，视为「陈述句结尾」（结论句的典型形态）
+_STATEMENT_ENDINGS = ("。", "！", "!", ".", "；", ";", "）", ")", "」", "”", "\"")
+# 首段命中这些开头，说明已经是结论/小结形态，无需重排
+_CONCLUSION_PREFIXES = ("结论", "小结", "总结", "结果", "已完成", "已修复", "已改")
+# 首段出现这些「过程/诊断」口吻，视为可疑（需要 LLM 复核）
+_PROCESS_TAIL_HINTS = ("我看一下", "我看下", "我看看", "我先看看", "我先看一下",
+                       "让我", "接下来", "先分析", "先看", "正在", "稍等")
+
+
+def _looks_like_conclusion(first_para: str) -> bool:
+    """轻量启发式：首段是否已经是一句合格的「结论句」。
+
+    判定条件（全部满足才算合格）：
+      · 不含问号（结论不该是提问）；
+      · 长度在 10~120 字之间；
+      · 以陈述句标点结尾（。！；等），或以结论类前缀开头。
+
+    返回 True 表示「看起来像结论」，False 表示「可疑，需要复核」。
+    """
+    s = (first_para or "").strip()
+    if not s:
+        return False
+    if "?" in s or "？" in s:
+        return False
+    n = len(s)
+    if n < _CONCLUSION_MIN_LEN or n > _CONCLUSION_MAX_LEN:
+        return False
+    if s.startswith(_CONCLUSION_PREFIXES):
+        return True
+    if s.endswith(_STATEMENT_ENDINGS):
+        return True
+    return False
+
+
+def _is_suspicious_first_para(first_para: str) -> bool:
+    """首段是否「可疑」——命中过程/诊断口吻，或明显不像结论。"""
+    s = (first_para or "").strip()
+    if not s:
+        return False
+    if any(h in s for h in _PROCESS_TAIL_HINTS):
+        return True
+    return not _looks_like_conclusion(s)
+
+
+def _llm_judge_conclusion(first_para: str) -> bool:
+    """可疑首段走一次 LLM 判定：它是不是一句合格的结论句。
+
+    设计为「可插拔 + 安全降级」：
+      · 若环境里配置了 reply_gate 的 LLM 判定回调（set_conclusion_judge），
+        就调用它；回调返回 True 表示「是结论」，False 表示「不是」；
+      · 未配置回调 / 回调抛异常 → 降级为启发式结果（_looks_like_conclusion），
+        绝不因为 LLM 不可用而卡住回复。
+    """
+    judge = _CONCLUSION_JUDGE
+    if judge is None:
+        return _looks_like_conclusion(first_para)
+    try:
+        return bool(judge(first_para))
+    except Exception:                                   # noqa: BLE001
+        return _looks_like_conclusion(first_para)
+
+
+# LLM 判定回调（由调用方注入；None 表示只用启发式）
+_CONCLUSION_JUDGE = None
+
+
+def set_conclusion_judge(fn) -> None:
+    """注入「首段是否结论句」的 LLM 判定回调（可选）。
+
+    回调签名：fn(first_para: str) -> bool
+      True  = 是结论句；False = 不是（需要重排）。
+    传 None 可恢复为纯启发式。
+    """
+    global _CONCLUSION_JUDGE
+    _CONCLUSION_JUDGE = fn
+
+
+def _ensure_conclusion_first(text: str) -> str:
+    """结论前置闸门：首段不像结论时，在首段前插入「结论：」前缀重排。
+
+    流程：
+      1. 取首段（首个空行之前）；
+      2. 启发式判定 —— 像结论就直接返回；
+      3. 可疑 → 走一次 LLM 判定（未配置则降级启发式）；
+      4. 仍不通过 → 在首段前插入「结论：」前缀，让结论先行。
+
+    注意：只加前缀、不删原文，保证信息不丢；已带「结论」前缀的不重复加。
+    """
+    if not text:
+        return text
+    s = text.strip()
+    if not s:
+        return text
+    # 已经以结论类前缀开头 → 无需处理
+    if s.startswith(_CONCLUSION_PREFIXES):
+        return text
+    # 取首段（首个空行之前）
+    parts = s.split("\n\n", 1)
+    first_para = parts[0].strip()
+    if not first_para:
+        return text
+    # 启发式：像结论 → 直接返回
+    if _looks_like_conclusion(first_para):
+        return text
+    # 可疑 → LLM 复核
+    if not _is_suspicious_first_para(first_para):
+        return text
+    if _llm_judge_conclusion(first_para):
+        return text
+    # 不通过 → 首段前插入「结论：」前缀重排
+    rest = parts[1] if len(parts) > 1 else ""
+    new_first = "结论：" + first_para
+    if rest:
+        return new_first + "\n\n" + rest
+    return new_first
+
+
+# 空输出兜底模板：已知 + 下一步
+_EMPTY_FALLBACK_TEMPLATE = "已知：%s；下一步：%s"
+# 最近一轮用户输入摘要的最大长度（避免兜底模板本身过长）
+_EMPTY_FALLBACK_SUMMARY_MAX = 80
+
+
+def _summarize_user_input(user_input) -> str:
+    """把最近一轮用户输入压成一句短摘要（用于空输出兜底模板）。"""
+    s = _as_text(user_input).strip()
+    if not s:
+        return "（本轮无用户输入）"
+    # 压成单行
+    s = " ".join(s.split())
+    if len(s) > _EMPTY_FALLBACK_SUMMARY_MAX:
+        s = s[:_EMPTY_FALLBACK_SUMMARY_MAX].rstrip() + "…"
+    return s
+
+
+def _empty_output_fallback(user_input=None, suggested_action=None) -> str:
+    """空输出兜底：输出为空或纯空白时，强制返回「已知 + 下一步」模板。
+
+    对应「空回复硬失败」—— 宁可给一句有信息量的占位，也不让用户看到空白。
+    """
+    known = _summarize_user_input(user_input)
+    nxt = _as_text(suggested_action).strip() or "请重试或换个说法"
+    return _EMPTY_FALLBACK_TEMPLATE % (known, nxt)
 
 
 # 本轮动作里出现这些关键字，视为「有 selfdev_patch 动作」
@@ -254,15 +414,134 @@ def _structure_check(text: str, actions=None, todos=None) -> str:
     return out
 
 
+def _ensure_conclusion_label(conclusion: str) -> str:
+    """结论段统一加「结论：」前缀（已带结论类前缀的不重复加）。
+
+    对应「结论前置」硬约束：长回复的首段必须一眼看出是结论，
+    而不是「我看一下…」这种过程口吻。
+    """
+    s = (conclusion or "").strip()
+    if not s:
+        return s
+    if s.startswith(_CONCLUSION_PREFIXES):
+        return s
+    return "结论：" + s
+
+
+def _build_tail(actions=None, todos=None) -> str:
+    """结尾固定输出「已改文件 / 待办」两行（无内容时给明确占位）。
+
+    对应摩擦点「只诊断不修复」：每轮结尾都必须让用户一眼看到
+    「到底改了哪些文件」「下一步做什么」，不能只留一段分析就结束。
+    """
+    files = _collect_changed_files(actions)
+    file_line = "、".join(files) if files else "（本轮未改动文件）"
+    todo_line = _as_text(todos).strip() if todos else ""
+    if not todo_line:
+        todo_line = "验证改动是否生效；如未生效，下一轮继续修"
+    return _TAIL_SEP + "**已改文件**：%s\n**待办**：%s" % (file_line, todo_line)
+
+
+def enforce(text, user_input=None, suggested_action=None, actions=None, todos=None,
+            max_chars=DEFAULT_MAX_CHARS) -> str:
+    """回复形态闸门（单一入口）：结论前置 + 过程折叠 + 空输出兜底。
+
+    这是给 main.py 回复出口调用的**统一闸门**，把三件事一次做完：
+
+      ① 首行强制是结论（通过 / 未通过 / 已改 X 文件）—— 没有就补一行；
+      ② 超过 800 字的探查过程折叠到 <details>；
+      ③ 空输出或只有「…」时返回「当前已知 + 下一步要查什么」兜底。
+
+    对应三个高频摩擦点：只诊断不修复 / 空回复 / 回复被截断。
+
+    参数
+    ----
+    text : 模型产出的原始回复（str / list / dict 均可）
+    user_input : 最近一轮用户输入（用于空输出兜底模板）
+    suggested_action : 建议的下一步动作（用于空输出兜底模板）
+    actions : 本轮动作列表（用于判定「已改 X 文件」与结构小结）
+    todos : 待办（用于结构小结）
+    max_chars : 整体长度上限
+
+    返回处理后的文本；任何异常都退回原文，绝不因为格式化而丢内容。
+    """
+    raw = _as_text(text)
+    try:
+        s = _strip_internal(raw.strip())
+        # ③ 空输出 / 只有省略号 → 「已知 + 下一步」兜底
+        if not s or s in ("…", "...", "。。。"):
+            return _empty_output_fallback(user_input, suggested_action)
+
+        # ② 过程折叠：把「过程口吻」的段落收进 <details>。
+        #    判据：整体超 FORCE_CONCLUSION_THRESHOLD，或存在明显的过程段。
+        paras = s.split("\n\n")
+        head_paras = []
+        body_paras = []
+        for p in paras:
+            ps = p.strip()
+            if not ps:
+                continue
+            if _is_suspicious_first_para(ps) and not ps.startswith(_CONCLUSION_PREFIXES):
+                body_paras.append(ps)
+            else:
+                head_paras.append(ps)
+        head = "\n\n".join(head_paras).strip()
+        body = "\n\n".join(body_paras).strip()
+
+        # ① 首行强制结论：没有结论就补一行
+        if not head:
+            # 全是过程 → 用过程首句当结论占位，并把过程折叠
+            first = body.split("\n", 1)[0].strip() if body else ""
+            head = _ensure_conclusion_label(first or "本轮已处理")
+        elif not head.startswith(_CONCLUSION_PREFIXES):
+            head = _ensure_conclusion_label(head)
+
+        # ② 过程折叠：body 超阈值就折叠
+        folded = _fold_process(body, force=len(body) > FORCE_CONCLUSION_THRESHOLD)
+
+        parts = [head]
+        if folded:
+            parts.append(folded)
+        out = "\n\n".join(parts)
+
+        # 结构小结：有 patch 动作但没交代改了哪些文件 → 补「已改文件 / 待办」
+        out = _structure_check(out, actions, todos)
+
+        # 长度上限：结论不动，只砍过程尾部
+        try:
+            limit = int(max_chars)
+        except Exception:
+            limit = DEFAULT_MAX_CHARS
+        if limit <= 0:
+            limit = DEFAULT_MAX_CHARS
+        if len(head) > limit:
+            limit = len(head)
+        if len(out) > limit:
+            budget = limit - len(head) - (2 if head else 0)
+            if budget <= 0:
+                return head[:limit]
+            if folded:
+                if folded.startswith("<details"):
+                    out = head + "\n\n（过程过长，已省略）"
+                else:
+                    out = head + "\n\n" + folded[:budget]
+            else:
+                out = head[:limit]
+        return out
+    except Exception:                                   # noqa: BLE001
+        return raw
+
+
 def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX_CHARS,
-                 actions=None, todos=None) -> str:
-    """按「结论一行 → 折叠过程 → 产物」组装回复，并保证总长不超 max_chars。
+                 actions=None, todos=None, user_input=None, suggested_action=None) -> str:
+    """按「结论一行 → 折叠过程 → 产物 → 已改文件/待办」组装回复。
 
     硬约束：
       · 结论永远在最前面，且**不会被截断**（结论本身超长时整体放宽到结论长度）；
-      · 过程超阈值折叠成「N字，点开看」；
+      · 回复超过 FORCE_CONCLUSION_THRESHOLD 时强制首段为「结论：…」，
+        过程/代码块一律折叠（即使没到 FOLD_THRESHOLD）；
       · 整体截到 max_chars 以内，截断只发生在过程/产物尾部；
-      · 每轮结尾强制输出「结论 + 已改文件 + 待办」结构（见 _structure_check）。
+      · 结尾固定输出「已改文件 / 待办」（见 _build_tail）。
 
     参数 actions / todos 可选：传了本轮动作列表和待办，就能做结构检查；
     不传则退化为纯形态组装（向后兼容）。
@@ -282,11 +561,19 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
     if len(conclusion) > limit:
         limit = len(conclusion)
 
+    # ★ 长回复强制形态：结论前置 + 过程折叠。
+    #   判据用「结论+过程+产物」的原始总长，避免折叠后反而漏判。
+    raw_len = len(conclusion) + len(process) + len(artifacts)
+    force_form = raw_len > FORCE_CONCLUSION_THRESHOLD
+
+    if force_form:
+        conclusion = _ensure_conclusion_label(conclusion)
+
     parts = []
     if conclusion:
         parts.append(conclusion)
 
-    folded = _fold_process(process)
+    folded = _fold_process(process, force=force_form)
     if folded:
         parts.append(folded)
 
@@ -299,9 +586,24 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
     #   对应 3 次空回复硬失败 —— 宁可给一句占位，也不让用户看到空白。
     _stripped = text.strip()
     if not _stripped or _stripped in ("…", "...", "。。。"):
-        known = conclusion or "（本轮未产出结论）"
-        nxt = process or artifacts or "（待补充）"
-        text = "当前已知：%s；下一步要查：%s" % (known, nxt)
+        # 优先用「最近一轮用户输入摘要 + 建议动作」生成模板；
+        # 未传 user_input 时退化为「结论/过程/产物」兜底，保持向后兼容。
+        if user_input is not None or suggested_action is not None:
+            text = _empty_output_fallback(user_input, suggested_action)
+        else:
+            known = conclusion or "（本轮未产出结论）"
+            nxt = process or artifacts or "（待补充）"
+            text = "当前已知：%s；下一步要查：%s" % (known, nxt)
+
+    # ★ 结论前置闸门：首段不像结论时，插入「结论：」前缀重排。
+    #   放在长度截断之前，保证重排后的结论段不会被截掉。
+    text = _ensure_conclusion_first(text)
+
+    # ★ 结尾固定输出「已改文件 / 待办」：长回复或本轮有 patch 动作时必带。
+    #   放在截断之前，保证这两行永远在（截断只砍过程/产物尾部）。
+    if force_form or _has_patch_action(actions):
+        if "**已改文件**" not in text and "已改文件：" not in text:
+            text = text.rstrip() + _build_tail(actions, todos)
 
     if len(text) <= limit:
         return text

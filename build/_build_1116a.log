@@ -1,0 +1,36 @@
+189 INFO: PyInstaller: 6.21.0, contrib hooks: 2026.6
+189 INFO: Python: 3.14.4
+234 INFO: Platform: Windows-11-10.0.26200-SP0
+234 INFO: Python environment: C:\Users\19853\AppData\Local\Programs\Python\Python314
+169 WARNING: Failed to collect submodules for 'webview.platforms.android' because importing 'webview.platforms.android' raised: ModuleNotFoundError: No module named 'android'
+3857 WARNING: collect_data_files - skipping data collection for module 'sounddevice' as it is not a package.
+3857 WARNING: collect_dynamic_libs - skipping library collection for module 'sounddevice' as it is not a package.
+2056 WARNING: Failed to collect submodules for 'onnxruntime.quantization.neural_compressor' because importing 'onnxruntime.quantization.neural_compressor' raised: ModuleNotFoundError: No module named 'onnx_ir'
+21802 INFO: Module search paths (PYTHONPATH):
+['D:\\local-multimodal-src',
+ 'D:\\workbuddy\\resources\\app.asar.unpacked\\cli\\vendor\\shim',
+ 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\python314.zip',
+ 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\DLLs',
+ 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\Lib',
+ 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314',
+ 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages',
+ 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\win32',
+ 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\win32\\lib',
+ 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\pythonwin',
+ 'D:\\local-multimodal-src']
+22726 INFO: Appending 'binaries' from .spec
+22727 INFO: Appending 'datas' from .spec
+22781 INFO: checking Analysis
+22781 INFO: Building Analysis because Analysis-00.toc is non existent
+22781 INFO: Looking for Python shared library...
+22781 INFO: Using Python shared library: C:\Users\19853\AppData\Local\Programs\Python\Python314\python314.dll
+22781 INFO: Running Analysis Analysis-00.toc
+22781 INFO: Target bytecode optimization level: 0
+22781 INFO: Initializing module dependency graph...
+22783 INFO: Initializing module graph hook caches...
+22811 INFO: Analyzing modules for base_library.zip ...
+24940 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\PyInstaller\\hooks'
+25673 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\PyInstaller\\hooks'
+25815 INFO: Processing standard module hook 'hook-math.py' from 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\PyInstaller\\hooks'
+25897 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\PyInstaller\\hooks'
+25907 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\19853\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\PyInstaller\\hooks'

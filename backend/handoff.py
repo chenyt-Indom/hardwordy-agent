@@ -48,6 +48,57 @@ LIVE_DEBOUNCE = 3    # 同一会话两次实时落盘至少隔几秒（避免每
 _LAST_TOUCH = {"session": "", "ts": 0.0}
 
 
+# =====================================================================
+#  重启原因白名单（2026-11-16）
+# =====================================================================
+# 为什么需要：自我迭代改完代码 → 重启 → 重启后自检 → 自检又触发迭代 →
+# 又重启…… 用户看到的就是「程序被反复修改、反复重启」。
+# 切断点：**只有用户手动重启才自检**，自动迭代 / 冷启动一律跳过。
+REASON_SELFDEV = "selfdev_iterate"   # 自我迭代改完代码后的重启 → 不自检
+REASON_USER = "user_restart"         # 用户手动点「立即重启」   → 自检
+REASON_COLD = "cold_start"           # 冷启动 / 关闭后重新打开   → 不自检
+
+# 按 reason 文本猜类别时用的关键词（宁漏勿误：猜不出就当 user_restart，
+# 因为「多跑一次自检」比「该查却没查」安全 —— 自检本身只查不改）。
+_KIND_HINTS = (
+    (REASON_SELFDEV, ("自我迭代", "自迭代", "selfdev", "self_iterate",
+                      "自动迭代", "改完代码", "迭代改完", "apply_restart")),
+    (REASON_COLD, ("冷启动", "cold", "关闭后", "重新打开", "首次启动",
+                   "开机", "startup")),
+    (REASON_USER, ("用户", "手动", "立即重启", "user_restart", "user restart")),
+)
+
+
+def _classify_reason(reason: str = "", kind: str = "") -> str:
+    """把「重启原因」归到白名单里的三类之一。
+
+    优先用调用方显式给的 `kind`（最准）；没给就按 reason 文本猜；
+    都判不出来时返回 `user_restart` —— 宁可多跑一次自检，也不要漏查。
+    """
+    k = str(kind or "").strip().lower()
+    if k in (REASON_SELFDEV, REASON_USER, REASON_COLD):
+        return k
+    t = str(reason or "").lower()
+    if t:
+        for name, words in _KIND_HINTS:
+            if any(w.lower() in t for w in words):
+                return name
+    return REASON_USER
+
+
+def reason_kind() -> str:
+    """读交接卡里记下的「这次重启的原因类别」（没记录时返回空串）。"""
+    try:
+        d = _read()
+        k = str(d.get("reason_kind") or "").strip().lower()
+        if k in (REASON_SELFDEV, REASON_USER, REASON_COLD):
+            return k
+        # 老版本交接卡没有 reason_kind 字段 → 按 reason 文本补判一次
+        return _classify_reason(str(d.get("reason") or ""))
+    except Exception:
+        return ""
+
+
 def _now_str() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -190,11 +241,19 @@ def touch(session: str = "", reason: str = "") -> None:
 # =====================================================================
 #  3) 重启前快照
 # =====================================================================
-def snapshot(session: str = "", reason: str = "") -> dict:
+def snapshot(session: str = "", reason: str = "", kind: str = "") -> dict:
     """重启前调用：把「改动清单 + 最近几轮对话」落盘。
 
     返回落盘后的内容（方便调用方打日志）。任何异常都不往外抛 ——
     交接卡是"锦上添花"，绝不能因为它导致重启失败。
+
+    ★ 2026-11-16：`reason` 现在会被 bootaudit 当作「这次要不要自检」的判据，
+      所以除了自由文本，还会额外落一个**结构化**的 `reason_kind`：
+        · selfdev_iterate —— 自我迭代改完代码后的重启（**不自检**）
+        · user_restart    —— 用户手动点「立即重启」（**自检**）
+        · cold_start      —— 冷启动 / 关闭后重新打开（**不自检**）
+      判据优先看调用方显式传入的 `kind`，其次按 reason 文本猜。
+      这样即使调用方只传了中文 reason，也能被正确归类。
     """
     try:
         d = _read()
@@ -203,6 +262,8 @@ def snapshot(session: str = "", reason: str = "") -> dict:
             d["dialog_session"] = _clean(session, 64)
         if reason:
             d["reason"] = _clean(reason, 120)
+        # ★ 结构化原因：bootaudit 靠它决定跑不跑自检（见 bootaudit.should_run）
+        d["reason_kind"] = _classify_reason(reason, kind)
         d["ts"] = time.time()
         d["restarted_at"] = _now_str()
         dlg = _dialog_digest(str(d.get("session") or ""))

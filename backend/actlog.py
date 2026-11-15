@@ -161,6 +161,52 @@ def render(session: str, n: int = SHOW) -> str:
               "就如实说「这一轮没动过」，不要编。")
 
 
+def _load_events(path: str = "") -> list:
+    """读 task.json 里的 events 列表；读不到/格式不对一律返回 []。"""
+    try:
+        p = path or os.path.join(config.data_root(), "data", "self_iterate", "task.json")
+        if os.path.isfile(p):
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                ev = d.get("events") or []
+            elif isinstance(d, list):
+                ev = d
+            else:
+                ev = []
+            return ev if isinstance(ev, list) else []
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    return []
+
+
+def _event_ts(e) -> float:
+    """把事件里的时间戳尽量解析成 epoch 秒；解析不出来返回 0。
+
+    兼容几种常见写法：ts 是数字（秒/毫秒）、ts 是 'YYYY-mm-dd HH:MM:SS'、
+    t 是 'mm-dd HH:MM'（actlog 那种短格式，缺年份按今年算）。
+    """
+    if not isinstance(e, dict):
+        return 0.0
+    v = e.get("ts") or e.get("t") or e.get("time") or e.get("at") or 0
+    if isinstance(v, (int, float)):
+        x = float(v)
+        return x / 1000.0 if x > 1e11 else x
+    s = str(v or "").strip()
+    if not s:
+        return 0.0
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                "%m-%d %H:%M:%S", "%m-%d %H:%M"):
+        try:
+            t = time.strptime(s, fmt)
+            if fmt.startswith("%m"):
+                t = time.struct_time((time.localtime().tm_year,) + tuple(t)[1:])
+            return time.mktime(t)
+        except Exception:
+            continue
+    return 0.0
+
+
 def fail_stats(window: int = 100, path: str = "") -> dict:
     """聚合自动迭代的失败类型（fail_kind），按次数降序返回 {fail_kind: count}。
 
@@ -175,21 +221,7 @@ def fail_stats(window: int = 100, path: str = "") -> dict:
         n = 100
     if n <= 0:
         n = 100
-    events = []
-    try:
-        p = path or os.path.join(config.data_root(), "data", "self_iterate", "task.json")
-        if os.path.isfile(p):
-            with open(p, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            if isinstance(d, dict):
-                events = d.get("events") or []
-            elif isinstance(d, list):
-                events = d
-    except Exception:
-        logger.debug("silent-except", exc_info=True)
-        events = []
-    if not isinstance(events, list):
-        return {}
+    events = _load_events(path)
     kinds = []
     for e in events:
         if isinstance(e, dict):
@@ -200,6 +232,69 @@ def fail_stats(window: int = 100, path: str = "") -> dict:
         kinds = kinds[-n:]
     c = Counter(kinds)
     return dict(c.most_common())
+
+
+def count_fail_kind(fail_kind: str, days: int = 7, path: str = "") -> int:
+    """统计某个 fail_kind 在最近 days 天内的真实发生次数。
+
+    为什么单独开一个（2026-11-17 用户要求「改动证据卡」）：
+      selfdev.patch 在动手前要确认「这个失败真的发生过」。fail_stats() 只按
+      **条数**截断（最近 100 条），跟时间无关 —— 一个 3 个月前反复出现的
+      fail_kind 会一直算作「有」，幽灵修复照样放行。这里按**时间窗**过滤，
+      计数为 0 就说明近 7 天根本没发生过，属于凭空捏的失败。
+
+    参数：
+      fail_kind  失败分类名（空 → 直接返回 0，调用方据此跳过校验）
+      days       时间窗（天），<=0 表示不限时间（退化成 fail_stats 的语义）
+      path       显式指定 task.json 路径（测试用）
+
+    返回：命中条数（int）。任何异常都返回 0 —— 账本坏了不能挡住正常改动，
+          但调用方要能区分「查不到」和「真的是 0」，所以另给 count_fail_kind_ex。
+    """
+    n, _ok = count_fail_kind_ex(fail_kind, days=days, path=path)
+    return n
+
+
+def count_fail_kind_ex(fail_kind: str, days: int = 7, path: str = "") -> tuple:
+    """同 count_fail_kind，但返回 (count, ok)。
+
+    ok=False 表示**账本读不出来**（文件缺失/损坏），此时 count 恒为 0，
+    调用方应当**放行**而不是当成幽灵修复拒绝 —— 账本坏了不能挡住正常改动。
+    ok=True 且 count==0 才是真正的「近 N 天没发生过」。
+    """
+    fk = str(fail_kind or "").strip()
+    if not fk:
+        return 0, True
+    try:
+        p = path or os.path.join(config.data_root(), "data", "self_iterate", "task.json")
+        if not os.path.isfile(p):
+            return 0, False
+        events = _load_events(p)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return 0, False
+    try:
+        d = int(days)
+    except (TypeError, ValueError):
+        d = 7
+    cutoff = 0.0
+    if d > 0:
+        cutoff = time.time() - d * 86400.0
+    hit = 0
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        k = e.get("fail_kind")
+        if not isinstance(k, str) or k.strip() != fk:
+            continue
+        if cutoff > 0:
+            ts = _event_ts(e)
+            # 时间戳解析不出来（0）时按「算它一次」处理：宁可放行也不要
+            # 因为格式不认识就把真实失败判成幽灵修复。
+            if ts and ts < cutoff:
+                continue
+        hit += 1
+    return hit, True
 
 
 def clear(session: str) -> None:

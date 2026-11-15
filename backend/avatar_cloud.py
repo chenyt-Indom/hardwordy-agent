@@ -1189,6 +1189,7 @@ def generate_async(image_path: str, audio_path: str, resolution: str = "",
     def _run():
         _job_set(jid, status="running", msg="开始生成")
         ev = _JOBS.get(jid, {}).get("_cancel")
+        _t0 = time.time()
 
         def _p(d):
             # ⚠ 只更新这次真的给了的字段。
@@ -1219,15 +1220,46 @@ def generate_async(image_path: str, audio_path: str, resolution: str = "",
         except Exception as e:                              # noqa: BLE001
             logger.warning("后台生成异常", exc_info=True)
             r = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        _elapsed = time.time() - _t0
         if r.get("cancelled"):
             # 用户主动停止 → status=cancelled，前端显示「已停止」而不是报红
             _job_set(jid, status="cancelled", msg="已停止",
                      result=r, error=r.get("error") or "已停止生成")
         elif r.get("ok"):
             _job_set(jid, status="done", msg="完成", result=r, error="")
+            # 合成耗时打点写进 actlog：厂商、耗时、音频时长。
+            # 有了数字才能谈优化 —— 用户原话「数字人合成太慢了」。
+            try:
+                from . import actlog
+                _sec = float(r.get("audio_sec") or 0.0)
+                _vendor = "videoretalk" if _mode == "cheap" else "wan2.2-s2v"
+                actlog.record(
+                    "avatar_cloud", "avatar_synth",
+                    args={"vendor": _vendor, "mode": _mode,
+                          "resolution": _res},
+                    ok=True,
+                    note="耗时 %.1fs / 音频 %.1fs（%.2fx）"
+                         % (_elapsed, _sec,
+                            (_elapsed / _sec) if _sec > 0 else 0.0),
+                )
+            except Exception:                               # noqa: BLE001
+                logger.debug("actlog 打点失败", exc_info=True)
         else:
             _job_set(jid, status="failed", msg=r.get("error") or "生成失败",
                      result=r, error=r.get("error") or "生成失败")
+            try:
+                from . import actlog
+                _vendor = "videoretalk" if _mode == "cheap" else "wan2.2-s2v"
+                actlog.record(
+                    "avatar_cloud", "avatar_synth",
+                    args={"vendor": _vendor, "mode": _mode,
+                          "resolution": _res},
+                    ok=False,
+                    note="失败，耗时 %.1fs：%s"
+                         % (_elapsed, (r.get("error") or "")[:60]),
+                )
+            except Exception:                               # noqa: BLE001
+                logger.debug("actlog 打点失败", exc_info=True)
 
     th = threading.Thread(target=_run, name="avatar-cloud-" + jid, daemon=True)
     with _JOB_LOCK:

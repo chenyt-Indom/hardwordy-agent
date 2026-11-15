@@ -175,6 +175,22 @@ if os.path.isdir(_W2L_ROOT) and any(f.endswith(".onnx") for f in os.listdir(_W2L
 else:
     print("[spec] 提示：本机无 Wav2Lip 权重（正常）—— 唇形同步走 avatar2 形变方案")
 
+# —— 离线 SadTalker 的源码骨架（2026-11-16 / 11.16a）——
+#   本版数字人主线改成云端生成（avatar_cloud），backend/sadtalker_cpu.py 留作
+#   离线兜底：它把 <程序根>/_sadtalker_src 插进 sys.path 再 import src.*，
+#   还需要 <程序根>/data/models/sadtalker 里的两份权重。
+#   按「模块宁可多不能少」：源码骨架（393KB）打进去；权重（2.8GB，其中 1.4GB
+#   是合并中间产物 _seg2）**不带** —— available() 会返回 False，功能显示为不可用，
+#   不会报错，用户想用自己把权重放进 data/models/sadtalker 即可。
+_ST_ROOT = os.path.join(root, "_sadtalker_src")
+if os.path.isdir(_ST_ROOT):
+    _st = _dir_datas(_ST_ROOT, "_sadtalker_src",
+                     skip_suffixes=(".zip",), skip_contains=("__pycache__",))
+    all_datas += _st
+    print("[spec] 已收集 _sadtalker_src 源码骨架（%d 个文件，不含权重）" % len(_st))
+else:
+    print("[spec] 提示：没有 _sadtalker_src —— 离线 SadTalker 兜底不可用（正常）")
+
 # —— 后端模块的显式收集 ——
 all_hidden += [
     "backend.main", "backend.config", "backend.ollama_client", "backend.tools",

@@ -264,6 +264,14 @@ def _worker(item):
         # 2026-11-15 用户要求「改完之后就提示重启」。
         # 只有**真的改了文件**才提示 —— 一条都没改成却让人重启是噪音。
         if changed and ok_n:
+            # ★ 2026-11-16：自动迭代真的改了文件 → 告诉重启闸门「这次重启
+            #   是自动迭代引起的」。用户要求这种重启不要自检，否则会
+            #   「自检 → 修复 → 重启 → 又自检」无限套娃。
+            try:
+                from . import bootgate as _bg
+                _bg.mark_auto_change(changed, note="自动迭代：%s" % str(item.get("title") or "")[:60])
+            except Exception:                            # noqa: BLE001
+                logger.debug("标记自动迭代改动失败（不影响迭代）", exc_info=True)
             _emit(tid, "restart",
                   text="这次改了 %d 个文件，需要重启才生效" % len(changed),
                   files=changed[:12])

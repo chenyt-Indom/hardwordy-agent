@@ -231,6 +231,7 @@ def run(reason: str = "", force: bool = False) -> dict:
 def _record(rec: dict) -> None:
     with _LOCK:
         d = _load()
+        d.pop("skip", None)      # 真的跑过了，「本次未自检」就不再成立
         d["last"] = rec
         runs = list(d.get("runs") or [])
         runs.append(rec)
@@ -270,9 +271,32 @@ def status() -> dict:
         「重启自检：✅ 通过 · 0 high / 0 mid · 6.7 秒」
     """
     l = last()
-    return {"ok": True, "last": l, "history": history(10),
+    try:
+        skip = dict(_load().get("skip") or {})
+    except Exception:                                     # noqa: BLE001
+        skip = {}
+    return {"ok": True, "last": l, "history": history(10), "skip": skip,
             "debounce_sec": DEBOUNCE_SEC, "delay_sec": DELAY_SEC,
             "text": l.get("text") or "还没跑过重启自检"}
+
+
+def _record_skip(dec: dict) -> None:
+    """记下「这次启动没自检，以及为什么」。
+
+    ⚠️ 故意**不走 _record**：那个会写 last/runs 并同步给 selfmaint，
+    界面上就会显示成「刚运行过」—— 明明没跑却显示跑过，是骗人。
+    单独存一个 skip 字段，前端读它显示「本次未自检：冷启动」。
+    """
+    try:
+        with _LOCK:
+            d = _load()
+            d["skip"] = {"ts": time.time(),
+                         "at": _now(),
+                         "kind": str(dec.get("kind") or ""),
+                         "why": str(dec.get("why") or "")[:200]}
+            _save(d)
+    except Exception:                                     # noqa: BLE001
+        logger.debug("记录「本次未自检」失败（不影响启动）", exc_info=True)
 
 
 def _reason_from_handoff() -> str:
@@ -289,6 +313,46 @@ def _reason_from_handoff() -> str:
         return ""
 
 
+def should_run(reason: str = "") -> dict:
+    """★ 2026-11-16 重启原因白名单：**只有用户手动重启才自检**。
+
+    为什么：自我迭代改完代码 → 重启 → 重启后自检 → 自检又触发迭代 →
+    又重启…… 用户看到的就是「程序被反复修改、反复重启」。
+    切断点就在这里：自动迭代 / 冷启动一律跳过，只有用户手动重启才真跑。
+
+    参数
+    ----
+    reason : 重启原因类别（selfdev_iterate / user_restart / cold_start）。
+             传空串时自动从交接卡读（handoff.reason_kind()）。
+
+    返回
+    ----
+    dict：``{"audit": bool, "kind": str, "why": str}``
+      · audit=True  → 该跑自检
+      · audit=False → 跳过（why 里写清为什么）
+
+    ⚠️ 判不出来时**放行**（audit=True）：宁可多跑一次自检，也不要因为
+       判据坏了就永远不查 —— 自检本身只查不改，多跑一次没有副作用。
+    """
+    # ⚠️⚠️ 2026-11-16 修正：原来这里按 handoff 的 reason 文本判类别，但
+    #   **自动迭代改完代码后的重启，交接卡里的 reason 也是「用户点了「立即重启」」**
+    #   （apply_restart 里就是这么写的），文本上根本分不出来 —— 实测结果是
+    #   每次都判成 user_restart，功能等于没做。
+    #   真正的判据只能是「自动迭代刚才有没有真改过文件」（磁盘上的时间戳），
+    #   以及「这次启动有没有重启标记」（没有 = 冷启动）。这两样都在 bootgate 里。
+    #   所以这里直接问 bootgate，reason 只当日志用。
+    try:
+        from . import bootgate as _bg
+        d = _bg.decide()
+        if not d.get("kind"):
+            d["kind"] = "unknown"
+        return d
+    except Exception as e:                               # noqa: BLE001
+        logger.warning("重启闸门判断失败，按原逻辑自检：%s", e)
+        return {"audit": True, "kind": "fallback",
+                "why": "闸门异常，按原逻辑自检（宁可多查一次）"}
+
+
 def start_delayed(delay: float = None) -> dict:
     """启动钩子里调用：起一个后台线程，延迟几秒后跑一次自检。
 
@@ -297,6 +361,26 @@ def start_delayed(delay: float = None) -> dict:
     if _ONCE.get("started"):
         return {"ok": True, "already": True}
     _ONCE["started"] = True
+
+    # ★★ 2026-11-16 用户要求：不是每次启动都要自检。
+    #   「自动迭代更新重启不要自检 / 关闭到打开也不要自检，否则可能无限自检」。
+    #   判据来自交接卡（handoff.py）在**重启前**写下的 reason_kind：
+    #     · 冷启动（关闭后重新打开）→ 跳过
+    #     · 自动迭代改完代码后的重启 → 跳过
+    #     · 用户手动重启 → 才真跑
+    #   判据自己出问题时**放行**（宁可多跑一次，也不要因为它坏了就永远不查）。
+    try:
+        dec = should_run(_reason_from_handoff())
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("重启原因判断失败，按原逻辑自检：%s", e)
+        dec = {"audit": True, "why": "判据异常，按原逻辑自检", "kind": "fallback"}
+
+    if not dec.get("audit"):
+        _record_skip(dec)
+        logger.info("[bootaudit] 本次不自检：%s", dec.get("why"))
+        return {"ok": True, "skipped": True, "kind": dec.get("kind"),
+                "why": dec.get("why")}
+
     d = DELAY_SEC if delay is None else float(delay)
 
     def _worker() -> None:

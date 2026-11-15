@@ -767,8 +767,22 @@
       _folds.push(m);
       return "\u0001F" + (_folds.length - 1) + "\u0001";
     });
+    // ★ 折叠块渲染：<details>/<summary> 是 reply_gate 折叠长过程用的结构。
+    //   这里把它转成受控 HTML（summary 里的文字仍走 escapeHtml），
+    //   并给 <details> 挂上 class，方便 CSS 做展开/收起动画与样式。
+    const _renderFold = (block) => {
+      const m = /^<details\b[^>]*>([\s\S]*)<\/details>$/i.exec(block);
+      if (!m) return escapeHtml(block);
+      const inner = m[1];
+      const sm = /<summary\b[^>]*>([\s\S]*?)<\/summary>/i.exec(inner);
+      const summary = sm ? sm[1] : "点开看";
+      const rest = sm ? inner.slice(sm.index + sm[0].length) : inner;
+      return '<details class="md-fold"><summary class="md-fold-sum">' +
+        escapeHtml(summary) + '</summary><div class="md-fold-body">' +
+        escapeHtml(rest).replace(/\r?\n/g, "<br>") + '</div></details>';
+    };
     const _restore = (s) => (_folds.length
-      ? s.replace(/\u0001F(\d+)\u0001/g, (m, i) => _folds[+i])
+      ? s.replace(/\u0001F(\d+)\u0001/g, (m, i) => _renderFold(_folds[+i]))
       : s);
     let esc = escapeHtml(_body);
     // ★ 2026-11-08 用户要求：「简单情况下就不用 markdown 了」。
@@ -1702,8 +1716,40 @@
     } catch (e) { return false; }
   }
 
+  // ★ 2026-11-16 空输出兜底：模型偶尔会返回空正文（或只有空白），
+  //   以前直接把空串塞进气泡，用户看到的就是一个空气泡 / 只剩思考框的「归位」按钮。
+  //   这里统一兜底成「当前已知 / 下一步要查」两行，并把这次空输出记为硬失败写 actlog。
+  const EMPTY_FALLBACK = "当前已知：这一轮模型没有返回任何正文内容。\n下一步要查：请重试一次；若反复出现，检查模型是否被截断或工具调用后未收尾。";
+  function isEmptyAnswer(text) {
+    const s = String(text == null ? "" : text);
+    // 去掉 markdown 装饰、空白、零宽字符后判断是否真的没内容
+    return s.replace(/[\s\u200b\u200c\u200d\ufeff]/g, "").replace(/[*_`#>\-]/g, "").length === 0;
+  }
+  // 把「空输出」记为硬失败写进 actlog（后端 /api/actlog 支持 POST 追加）
+  function logEmptyAnswer(userText) {
+    try {
+      const body = JSON.stringify({
+        session_id: sessionId || "",
+        name: "empty_answer",
+        ok: false,
+        result: "模型返回空正文",
+        note: "用户输入：" + String(userText || "").slice(0, 80),
+      });
+      fetch("/api/actlog", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      }).catch(() => { /* 记账失败不影响对话 */ });
+    } catch (e) { /* 忽略 */ }
+  }
+
   function renderFinal(bubble, text, userText, silent) {
-    const raw = String(text == null ? "" : text);
+    let raw = String(text == null ? "" : text);
+    // ★ 空输出兜底：正文为空 → 换成可读的兜底文案，并记一次硬失败
+    if (isEmptyAnswer(raw)) {
+      raw = EMPTY_FALLBACK;
+      if (!silent) logEmptyAnswer(userText);
+    }
     if (isPlainMode()) {
       bubble.textContent = raw;
       bubble.style.whiteSpace = "pre-wrap";
@@ -13248,6 +13294,13 @@
         h += '<div class="iter-li iter-fail fk-' + esc(fk) + '">' +
              '<b class="iter-fk-t" style="color:' + f.c + '">' +
              esc(f.t) + '</b>' + esc(a.error) + '</div>';
+        // 2026-11-16：把失败分类与累计次数摊开显示，方便判断是偶发还是反复踩坑。
+        // count 为 0 或缺失时不渲染（老数据没有这个字段）。
+        const fkCount = Number(a.count);
+        if (a.fail_kind && fkCount > 0) {
+          h += '<div class="iter-li iter-fk-meta">针对：' +
+               esc(String(a.fail_kind)) + ' ×' + esc(String(fkCount)) + '</div>';
+        }
       }
       if (a.note) {
         h += '<div class="iter-li">你的备注：' + esc(a.note) + '</div>';
@@ -13539,11 +13592,29 @@
   let maintData = [];
 
   async function loadMaint() {
+    // 同时问一次重启自检：如果这次启动被闸门跳过（冷启动 / 自动迭代重启），
+    // 把原因显示在「重启自检」那一行，否则用户只会看到「还没跑过」而不知道为啥。
+    let skipWhy = "";
+    try {
+      const b = await api("/api/bootaudit");
+      const sk = (b && b.ok && b.skip) || null;
+      if (sk && sk.why) skipWhy = String(sk.why);
+    } catch (e) { skipWhy = ""; }
     const r = await api("/api/selfiter/maint");
-    if (r && r.ok) { maintData = r.items || []; renderMaint(); }
+    if (r && r.ok) { maintData = r.items || []; renderMaint(skipWhy); }
   }
 
-  function renderMaint() {
+  // 把「本次未自检」的长原因压成 6~10 字，保证说明行不超过两行
+  function shortSkip(w) {
+    const s = String(w || "");
+    if (s.indexOf("冷启动") >= 0) return "冷启动";
+    if (s.indexOf("自动迭代") >= 0) return "自动迭代后重启";
+    if (s.indexOf("熔断") >= 0 || s.indexOf("已自检") >= 0) return "反复重启，已熔断";
+    if (s.indexOf("过期") >= 0) return "按冷启动处理";
+    return s.length > 12 ? s.slice(0, 12) + "…" : s;
+  }
+
+  function renderMaint(skipWhy) {
     const box = el && el.querySelector(".iter-maint-list");
     if (!box) return;
     const rows = maintData || [];
@@ -13553,6 +13624,11 @@
       const last = x.last_run
         ? String(x.last_run).slice(5) + (x.last_seconds ? " · " + x.last_seconds + "s" : "")
         : "还没跑过";
+      // 只有「重启自检」这一项会被启动闸门跳过，把原因跟在说明后面。
+      // ⚠️ 说明行有 max-height:3em + overflow:hidden（约两行），
+      //    所以这里必须用**短文案**，否则后半截会被裁掉（实测踩过）。
+      const skipTip = (x.kind === "selfidle" && skipWhy)
+        ? "　· 本次未自检：" + shortSkip(skipWhy) : "";
       return '<div class="iter-maint-row' + (on ? "" : " off") + '" data-kind="' + esc(x.kind) + '">' +
         '<span class="iter-maint-i">' + esc(x.icon || "·") + '</span>' +
         '<span class="iter-maint-n">' + esc(x.name) + '</span>' +
@@ -13562,7 +13638,7 @@
           (on ? "运行中" : "已暂停") + '</button>' +
         '<button type="button" class="btn sm ghost m-go">立即运行</button>' +
         '<button type="button" class="btn sm ghost m-his">历史</button>' +
-        '<div class="iter-maint-p">' + esc(x.last_preview || x.desc) + '</div>' +
+        '<div class="iter-maint-p">' + esc((x.last_preview || x.desc) + skipTip) + '</div>' +
         '<div class="iter-maint-hr-list" hidden></div>' +
       '</div>';
     }).join("");

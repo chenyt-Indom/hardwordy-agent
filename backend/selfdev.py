@@ -31,7 +31,12 @@ import subprocess
 import sys
 import time
 
-from . import config
+try:
+    from . import config
+    from . import actlog
+except ImportError:  # 允许作为顶层模块被直接导入（如验收断言）
+    import config
+    import actlog
 import logging
 logger = logging.getLogger(__name__)
 
@@ -137,6 +142,47 @@ def _check_locked_blocks(rel: str, old: str, new: str) -> str:
                         "如需调整，请先在回答里说明改动原因，由用户手动解除锁定后再改。"
                         % (k, b))
     return ""
+
+
+def _check_failure_evidence(fail_kind: str, days: int = 7) -> dict:
+    """改动前校验「这个失败真的发生过」（2026-11-17 改动证据卡）。
+
+    对应 weakness「幽灵修复」：模型幻觉出一个不存在的失败，然后加护栏去修它。
+    做法：从 actlog 聚合该 fail_kind 近 days 天的真实计数，为 0 就拒绝并记 phantom。
+
+    返回 dict：
+      ok        True=放行（计数>0，或账本读不出来时保守放行）
+      count     近 days 天命中条数
+      phantom   True=判定为幽灵修复（账本可读且计数为 0）
+      reason    拒绝原因（ok=False 时非空）
+      evidence  给改动卡片展示的一句话证据
+    """
+    fk = str(fail_kind or "").strip()
+    if not fk:
+        return {"ok": True, "count": 0, "phantom": False, "reason": "",
+                "evidence": ""}
+    try:
+        n, readable = actlog.count_fail_kind_ex(fk, days=days)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        n, readable = 0, False
+    evidence = "针对 fail_kind: %s，近 %d 天 %d 次" % (fk, int(days), int(n))
+    if not readable:
+        # 账本坏了不能挡住正常改动 —— 保守放行，但证据里说明查不到
+        return {"ok": True, "count": 0, "phantom": False, "reason": "",
+                "evidence": evidence + "（账本不可读，未拦截）"}
+    if int(n) <= 0:
+        reason = ("拒绝：fail_kind「%s」近 %d 天真实发生 0 次，属于幽灵修复。\n"
+                  "请先确认这个失败真的出现过（actlog / task.json 里有记录），"
+                  "再动手改代码。" % (fk, int(days)))
+        try:
+            journal("phantom", "", fail_kind=fk, days=int(days), count=0)
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        return {"ok": False, "count": 0, "phantom": True, "reason": reason,
+                "evidence": evidence}
+    return {"ok": True, "count": int(n), "phantom": False, "reason": "",
+            "evidence": evidence}
 
 
 def locked() -> bool:
@@ -794,45 +840,124 @@ def _make_changelog(rel: str, find: str, replace: str, fail_kind: str = "",
 
 def patch(rel: str, find: str, replace: str, note: str = "",
           description: str = "", fail_kind: str = "",
-          session: str = "") -> dict:
+          session: str = "", root_cause: str = "") -> dict:
     """精确替换（和编辑器里的"替换"一样）。找不到 / 命中多处都会拒绝。
 
     成功后自动生成一句话中文 changelog，写入 actlog.record_act 的 summary 字段
     （2026-11-16 用户要求：patch 成功要留痕，方便回看"这次改了什么"）。
+
+    🧊 同文件改动冷却（2026-11-11 用户要求，2026-11-17 强化）：
+      24h 内同一文件改动 ≥ FILE_CHANGE_LIMIT_24H 次时，**必须**附带
+      root_cause 字段（引用 actlog 证据说明根因），否则拒绝。
+      背景：main.py 28 次、self_iterate.py 24 次、app.js 20 次反复改，
+      越改越乱 —— 冷却不是为了拦改动，而是逼模型先确认根因再动手。
     """
+    # 🧪 失败真实性前置校验（2026-11-17）：改动前先查该 fail_kind 的真实计数。
+    #   计数为 0 → 说明这个"失败"根本没发生过，是模型凭空捏的幽灵修复，
+    #   直接拒绝并记 phantom，从源头压掉"改了个不存在的问题"这类回滚。
+    #   ★ 2026-11-17 调整：把这道拦截提到 patch 入口最前面（在 read/冷却之前），
+    #     幽灵修复连读文件都不必做，直接拒绝，省一次 IO 也避免被 read 的失败
+    #     掩盖掉真正的拒绝原因。
+    #   ★ 2026-11-17 二次调整（改动证据卡）：改用 count_fail_kind_ex 按**近 7 天**
+    #     时间窗统计，而不是 fail_stats 的「最近 100 条」。原因：fail_stats 只按
+    #     条数截断，3 个月前反复出现的 fail_kind 会一直算作「有」，幽灵修复照样
+    #     放行。现在只有「近 7 天真的发生过」才放行，证据卡上展示的也是这个数。
+    _fk = str(fail_kind or "").strip()
+    _real = -1              # -1 = 未查/查不到（不拦）
+    if _fk:
+        try:
+            from . import actlog as _actlog
+            _cnt, _ok = _actlog.count_fail_kind_ex(_fk, days=7)
+            _real = int(_cnt) if _ok else -1
+        except Exception:
+            _real = -1          # 查不到就不拦（账本坏了不能挡住正常改动）
+        if _real == 0:
+            # 写一条 phantom 事件：含 kind、时间、拒绝原因，便于事后审计
+            try:
+                journal("patch_rejected_phantom", str(rel or ""),
+                        fail_kind=_fk,
+                        reason="fail_kind 近 7 天真实计数为 0（幽灵修复）",
+                        ts=time.strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+            return {"ok": False,
+                    "error": ("拒绝：fail_kind=%s 在最近 7 天里真实计数为 0，"
+                              "说明这个失败并没有发生过（幽灵修复）。\n"
+                              "请先确认真正的问题再改；若确有失败，请给出复现步骤。"
+                              % _fk)}
     got = read(rel)
     if not got.get("ok"):
         return got
-    # 🧊 同文件改动冷却（2026-11-11）：24h 内同文件改动超阈值 → 拒绝并提示根因
+    # 🧊 同文件改动冷却（2026-11-11 用户要求，2026-11-17 强化）：
+    #   24h 内同文件改动 ≥ FILE_CHANGE_LIMIT_24H 次时，patch **必须**附带
+    #   root_cause 字段（引用 actlog 证据说明根因），否则拒绝。
+    #   为什么：main.py 28 次、self_iterate.py 24 次、app.js 20 次反复改，
+    #   越改越乱 —— 冷却不是为了拦改动，而是逼模型先确认根因再动手。
     try:
         _r = safe_rel(rel)
     except PathError as e:
         return {"ok": False, "error": str(e)}
     _n = _recent_file_changes(_r, 24.0)
     if _n >= FILE_CHANGE_LIMIT_24H:
-        _msg = ("该文件已改 %d 次（近 24 小时），请先确认根因再改。\n"
-                "反复叠加补丁只会越改越乱 —— 先读代码、定位真正的问题，"
-                "在回答里说清根因和方案，再动手。" % _n)
-        journal("patch_rejected_cooldown", _r, count=_n)
-        return {"ok": False, "error": _msg}
-    # 🧪 失败真实性前置校验（2026-11-17）：改动前先查该 fail_kind 的真实计数。
-    #   计数为 0 → 说明这个"失败"根本没发生过，是模型凭空捏的幽灵修复，
-    #   直接拒绝并记 phantom，从源头压掉"改了个不存在的问题"这类回滚。
-    _fk = str(fail_kind or "").strip()
-    if _fk:
+        _rc = " ".join(str(root_cause or "").split())
+        if not _rc:
+            _msg = ("该文件已改 %d 次（近 24 小时），请先确认根因再改。\n"
+                    "反复叠加补丁只会越改越乱 —— 先读代码、定位真正的问题，"
+                    "在回答里说清根因和方案，再动手。\n"
+                    "⚠️ 冷却已触发：本次 patch 必须附带 root_cause 字段"
+                    "（引用 actlog 证据说明根因），否则拒绝。" % _n)
+            journal("patch_rejected_cooldown", _r, count=_n,
+                    reason="缺少 root_cause")
+            return {"ok": False, "error": _msg}
+        # 有 root_cause：记一条冷却放行事件（含根因摘要），便于事后审计
+        journal("patch_cooldown_override", _r, count=_n,
+                root_cause=_rc[:300])
+    # ★ 2026-11-16：必须用 raw（完整原文），不能用 text（带行号的展示文本）。
+    #   用 text 会把整个文件污染成「    1| xxx」的格式。
+    text = got.get("raw")
+    if text is None:
+        text = got["text"]
+    n = text.count(find)
+    if n == 0:
+        return {"ok": False, "error": "没找到这段原文（空格/缩进/换行必须完全一致）"}
+    if n > 1:
+        return {"ok": False,
+                "error": "这段原文出现了 %d 次，为免改错地方，请给更长的一段上下文" % n}
+    out = write(rel, text.replace(find, replace, 1), note or "patch")
+    # 📝 成功分支：自动生成一句话中文 changelog 并记到 actlog
+    if out.get("ok"):
         try:
-            from . import actlog as _actlog
-            _stats = _actlog.fail_stats() or {}
-            _real = int(_stats.get(_fk) or 0)
+            from . import actlog
+            _summary = _make_changelog(
+                _r, find, replace,
+                fail_kind=fail_kind, history=_n, description=description)
+            # 🧾 改动证据卡（2026-11-17 用户要求）：
+            #   用户反复问「详细说明改了什么」，而 timeline 里只有一句 summary，
+            #   看不到「针对哪个失败、改了几次、改在文件哪一行」。
+            #   这里把证据一并写进 actlog 的 evidence 字段，前端卡片直接渲染
+            #   「针对：<fail_kind> × N」。
+            #   · fail_kind：本次针对的失败分类（空则不带）
+            #   · count：该 fail_kind 的真实计数（-1 表示未查/查不到）
+            #   · history：该文件近 24h 改动次数（冷却依据）
+            #   · root_cause：冷却触发时模型给出的根因说明（空则不带）
+            _evidence = {"rel": _r, "history": int(_n)}
+            if _fk:
+                _evidence["fail_kind"] = _fk
+                _evidence["count"] = int(_real)
+            _rc2 = " ".join(str(root_cause or "").split())
+            if _rc2:
+                _evidence["root_cause"] = _rc2[:300]
+            try:
+                actlog.record(session or "default", "selfdev_patch",
+                              {"rel": _r}, ok=True,
+                              note=_summary, evidence=_evidence)
+            except TypeError:
+                # 兼容旧版 actlog.record（无 evidence 参数）
+                actlog.record(session or "default", "selfdev_patch",
+                              {"rel": _r}, ok=True, note=_summary)
         except Exception:
-            _real = -1          # 查不到就不拦（账本坏了不能挡住正常改动）
-        if _real == 0:
-            journal("patch_rejected_phantom", _r, fail_kind=_fk)
-            return {"ok": False,
-                    "error": ("拒绝：fail_kind=%s 在最近事件里真实计数为 0，"
-                              "说明这个失败并没有发生过（幽灵修复）。\n"
-                              "请先确认真正的问题再改；若确有失败，请给出复现步骤。"
-                              % _fk)}
+            logger.debug("silent-except", exc_info=True)
+    return out
     # ★ 2026-11-16：必须用 raw（完整原文），不能用 text（带行号的展示文本）。
     #   用 text 会把整个文件污染成「    1| xxx」的格式。
     text = got.get("raw")
