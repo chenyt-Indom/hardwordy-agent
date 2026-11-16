@@ -329,10 +329,21 @@ def _record_stage_safe(si_mod, plan_id: str = "", stage: str = "",
 
 
 def _score(v) -> int:
+    """把模型给的分归一化到 1~10；**没给就返回 0（未评估），不编 5 分**。
+
+    ★ 2026-11-16 用户问「为什么有些推荐的没有价值/新颖/可行这三项指标」时查出：
+      原来缺失一律 return 5，前端又把 0/缺失也兜成 5，结果「模型没打分」
+      在界面上看起来就是「价值 5 新颖 5 可行 5」—— 一个假分数。
+      宁可显示「未评估」，也不能让用户以为这是模型真的评过。
+    """
+    if v is None or v == "":
+        return 0
     try:
         n = int(float(v))
     except (TypeError, ValueError):
-        return 5
+        return 0
+    if n <= 0:
+        return 0
     return max(1, min(10, n))
 
 
@@ -632,6 +643,13 @@ def approve(iid: str, note: str = "", execute: bool = True) -> dict:
                 "state": "approved",
                 "note": it.get("note") or "",
                 "origin": "feature",
+                # ★ 2026-11-16 用户问「为什么有些推荐的没有价值/新颖/可行三项指标」：
+                #   根因就在这儿 —— 造动作时只带了 title/detail/risk/files，
+                #   三项评分留在 feat_radar.json 里没跟过来，于是「待批准的新功能」
+                #   卡片上一片空白。现在原样带下去，列表接口再透传给前端。
+                "value": _score(it.get("value")),
+                "novelty": _score(it.get("novelty")),
+                "feasibility": _score(it.get("feasibility")),
             }],
             trigger="featradar",
         )

@@ -264,6 +264,14 @@
         '<span class="fr-tag">待你决定</span>' +
         (review ? '<span class="fr-tag fr-tag-warn">⚠ 待人工复核</span>' : '') +
       '</div>' +
+      // ★ 2026-11-16 用户问「为什么有些推荐的没有价值/新颖/可行」：
+      //   这张卡片原来压根没渲染这三项（数据也没从 feat_radar 带过来）。
+      //   现在补齐，未评估的显示「—」而不是假分数。
+      '<div class="fr-scores">' +
+        scoreChip("价值", a.value) +
+        scoreChip("新颖", a.novelty, "fr-s-n") +
+        scoreChip("可行", a.feasibility, "fr-s-f") +
+      '</div>' +
       (a.why ? '<div class="fr-kv"><span class="fr-k">为什么</span>' +
         '<span class="fr-v">' + esc(a.why) + '</span></div>' : '') +
       (a.detail ? '<div class="fr-kv"><span class="fr-k">怎么做</span>' +
@@ -349,10 +357,16 @@
   }
   window.__refreshSuggestBadge = renderBadge;
 
+  // 2026-11-16：原来 parseInt(v)||5 —— 缺失/0 一律变成 5，于是「模型没打分」
+  // 在界面上显示成「价值 5 新颖 5 可行 5」，是个假分数，用户以为评过了。
+  // 现在 0/缺失/非法一律显示「未评估」（灰底），不编数字。
   function scoreChip(label, v, cls) {
-    const n = Math.max(1, Math.min(10, parseInt(v, 10) || 5));
-    return '<span class="fr-score ' + (cls || "") + '" title="' + esc(label) + ' ' + n + '/10">' +
-      '<i>' + esc(label) + '</i><b>' + n + '</b></span>';
+    const raw = parseInt(v, 10);
+    const has = Number.isFinite(raw) && raw >= 1;
+    const n = has ? Math.max(1, Math.min(10, raw)) : 0;
+    return '<span class="fr-score ' + (cls || "") + (has ? "" : " fr-score-na") +
+      '" title="' + esc(label) + (has ? ' ' + n + '/10' : '：未评估') + '">' +
+      '<i>' + esc(label) + '</i><b>' + (has ? n : "—") + '</b></span>';
   }
 
   function featCardHtml(it) {

@@ -2471,7 +2471,7 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
   "user_insights": [{"title":"短标题","detail":"观察+证据","suggestion":"可以怎么改进"}],
   "forecast": [{"biz":"用户未来可能处理的业务","evidence":"依据（原话/重复出现的模式）","confidence":"high|mid|low","prepare":"可以提前准备什么"}],
   "needs": [{"pain":"当下遇到的问题","evidence":"证据","impact":"影响了什么"}],
-  "features": [{"title":"功能名","why":"为什么值得做（必须说清）","pain":"对应哪个痛点或预判","how":"大概怎么做","effort":"S|M|L","files":["backend/xxx.py","frontend/xxx.js"],"anchor":"改哪个函数","risk":"low|mid|high","verify":"怎么验证有效","theory":"理论/论文依据，没有就留空","assert_code":"必填，见下方说明"}],
+  "features": [{"title":"功能名","why":"为什么值得做（必须说清）","pain":"对应哪个痛点或预判","how":"大概怎么做","effort":"S|M|L","files":["backend/xxx.py","frontend/xxx.js"],"anchor":"改哪个函数","risk":"low|mid|high","verify":"怎么验证有效","theory":"理论/论文依据，没有就留空","assert_code":"必填，见下方说明","value":1-10 的整数,"novelty":1-10 的整数,"feasibility":1-10 的整数}],
   "questions": [{"q":"想问用户的一句话","why":"为什么这个信息会改变做法","options":["选项1","选项2"]}],
   "tech_takeaways": [{"title":"技术名","source":"来源","url":"链接","takeaway":"一句话要点","applicable":"对本项目有没有用，怎么用"}],
   "actions": [{"title":"短标题","why":"为什么要动这个（原因 + 证据，1~2 句）","detail":"解决方案：具体改哪个文件、怎么改、改完怎么验证","risk":"low|mid|high","files":["backend/xxx.py"]}]
@@ -2482,6 +2482,16 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
 · why 必须写清「为什么要动」——是哪个真实问题、哪条证据触发的，不要写「为了更好」这类空话；
 · detail 必须写清「怎么改」——改哪个文件、改成什么样、改完怎么验证，要能让用户看懂并判断；
 · 两段都要具体，不许互相复述。
+
+⚠️ features 里的 value / novelty / feasibility 是**三个 1~10 的整数**，会原样显示在
+【推荐新功能】和【待批准的新功能】卡片上给用户看，用来判断值不值得做。按下面的
+标准真打分，**不许一律给 8 分糊过去**，也不要留空：
+· value（对他的价值）—— 能省多少事：每天都要用的给 8~10；偶尔用一次 4~6；
+  只是理论上更好的给 1~3。
+· novelty（有多新）—— 照搬市面现成做法、别处早有的给 1~3；本应用已有类似能力
+  的给 4~5；真没这个概念、需要自己想出来的给 8~10。
+· feasibility（做出来的把握）—— 用现有模块拼一下就行的给 8~10；要动核心链路
+  （会话/执行器/前端渲染）但路径清楚的给 5~7；需要引入新依赖或重写架构的给 1~4。
 
 %s""" % (_PROJECT_BRIEF,
         "\n".join(sig_lines) or "（暂无）",
@@ -5491,7 +5501,8 @@ def _enrich_prompt(feats, papers):
 硬约束（违反会被丢弃）：
 - title / files / pain 三个字段**必须原样返回**，一个字都不许改。
 - 不许新增、删除、合并功能；返回数量必须正好 %d 条。
-- 每条只允许出现下面这些字段：title, files, pain, why, how, anchor, theory, verify, assert_code, risk
+- 每条只允许出现下面这些字段：title, files, pain, why, how, anchor, theory, verify, assert_code, risk, value, novelty, feasibility
+- value / novelty / feasibility 三个评分**必须原样保留**（1~10 的整数），一个字都不许改。
 
 候选功能：
 %s
@@ -5724,6 +5735,23 @@ def _dryrun_assert(code, timeout=25):
             logger.debug("silent-except", exc_info=True)
 
 
+def _sc10(v) -> int:
+    """把模型给的 1~10 评分归一化；**没给就返回 0（未评估），不编 5/8 分**。
+
+    2026-11-16 用户问「为什么有些推荐的没有价值/新颖/可行三项指标」时定的规则：
+    宁可让界面显示「未评估」，也不能拿一个假分数冒充模型真的评过。
+    """
+    if v is None or v == "":
+        return 0
+    try:
+        n = int(float(v))
+    except (TypeError, ValueError):
+        return 0
+    if n <= 0:
+        return 0
+    return max(1, min(10, n))
+
+
 def _features_to_actions(features, start=0, limit=4, existing=None):
     """把「可增加的功能」转成**可执行动作** —— 用户要求主动迭代落地新技术。
 
@@ -5877,6 +5905,13 @@ def _features_to_actions(features, start=0, limit=4, existing=None):
             # disclaimed（模型自称非直接依据）都不算 —— 这正是用户要的区分。
             "has_paper": bool(_rel.get("counts")),
             "paper_rel": _rel,
+            # ★ 2026-11-16 用户问「为什么有些推荐的没有价值/新颖/可行三项指标」：
+            #   根因就在这儿 —— features 里模型给了分（prompt 也要求了），
+            #   但转成动作时没带过来，于是 plans.json 里 100% 缺这三个键。
+            #   0 表示「模型没给 / 给了非法值」，前端显示「未评估」而不是假分数。
+            "value": _sc10(f.get("value")),
+            "novelty": _sc10(f.get("novelty")),
+            "feasibility": _sc10(f.get("feasibility")),
             "status": "pending",
             "note": "",
             "error": "",
@@ -6666,6 +6701,15 @@ def list_pending_actions(days: int = 0, limit: int = 300,
                     "note": str(a.get("note") or "")[:800],
                     "error": str(a.get("error") or "")[:300],
                     "origin": str(a.get("origin") or ""),
+                    # ★ 2026-11-16 用户报「待批准的新功能没有价值/新颖/可行」：
+                    #   动作里本来就没这三个键（featradar 造动作时漏带，已修），
+                    #   这里也必须透传，否则前端拿不到。
+                    #   0 表示「未评估」——不编默认分。
+                    #   ⚠️ 必须走 _sc10：老数据里这三个键可能是字符串/None，
+                    #   直接 int() 会抛 ValueError，整个待批准列表都会挂掉。
+                    "value": _sc10(a.get("value")),
+                    "novelty": _sc10(a.get("novelty")),
+                    "feasibility": _sc10(a.get("feasibility")),
                 })
             if not acts:
                 continue
