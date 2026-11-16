@@ -290,6 +290,44 @@ def think(force: bool = False, reason: str = "") -> dict:
         return {"ok": True, "added": len(added), "items": added}
 
 
+def _record_stage_safe(si_mod, plan_id: str = "", stage: str = "",
+                       reason: str = "") -> None:
+    """安全地记录执行阶段 —— 兼容 self_iterate 里可能不存在的 record_stage。
+
+    ★ 2026-11-16 用户报「批准了没反应」排查时发现：这里直接调
+      `_si.record_stage(...)`，但 self_iterate.py 里根本没有 record_stage
+      这个函数 → 每次都抛 AttributeError。外面套了 except 就静默失效，
+      阶段日志一条都没写下来，排查时看不到「已进队列 / 被拦下」的痕迹。
+
+    这里做三件事：
+      ① 先 getattr 探测，没有就退化成写 logger（至少日志里能看到）；
+      ② 有的话按签名调用，参数不匹配也不炸；
+      ③ 任何异常都吞掉但记 debug —— 阶段记录是辅助信息，绝不能影响主流程。
+    """
+    # ★ 2026-11-17 修：原来只在 `si_mod`（= self_iterate）上找 `record_stage`，
+    #   但那个函数真正住在 **actlog**（actlog.record_stage(plan_id, stage, detail)），
+    #   所以 getattr 永远拿不到 → 每次都只写一行 logger，「已进队列 / 被拦下」
+    #   一条阶段流水都没落盘，时间线卡片永远是空的。
+    #   这里改成：优先 actlog，si_mod 只作兜底（万一以后 self_iterate 也导出同名函数）。
+    fn = None
+    try:
+        from . import actlog as _actlog
+        fn = getattr(_actlog, "record_stage", None)
+    except Exception:                               # noqa: BLE001
+        logger.debug("actlog 导入失败", exc_info=True)
+    if not callable(fn):
+        fn = getattr(si_mod, "record_stage", None)
+    if not callable(fn):
+        logger.info("featradar stage=%s plan=%s reason=%s（找不到 record_stage，仅记日志）",
+                    stage or "-", plan_id or "-", reason or "-")
+        return
+    try:
+        # actlog 的签名是 (plan_id, stage, detail="")，按位置传最稳
+        fn(plan_id, stage, reason)
+    except Exception:                               # noqa: BLE001
+        logger.debug("record_stage 调用失败（已忽略）", exc_info=True)
+
+
 def _score(v) -> int:
     try:
         n = int(float(v))
@@ -557,6 +595,21 @@ def approve(iid: str, note: str = "", execute: bool = True) -> dict:
                         _x3["files"] = _act_files
                     save(_d3)
                 logger.info("featradar 定位到文件：%s", _act_files)
+        # ★ 2026-11-16 用户要求：动作 files=[] 时直接拒绝提交，并写 blocked 阶段。
+        #   没有目标文件，执行器必然白跑（读不到任何文件内容），与其提交后
+        #   等 15 分钟超时，不如当场拦下，让用户看到「缺少目标文件」。
+        if not _act_files:
+            with _LOCK:
+                _d4 = load()
+                _x4 = _find(_d4, iid)
+                if _x4:
+                    _x4.update({"state": "blocked", "finished_at": _now(),
+                                "error": "缺少目标文件"})
+                save(_d4)
+            _record_stage_safe(_si, plan_id="", stage="blocked",
+                               reason="缺少目标文件")
+            return {"ok": False, "error": "缺少目标文件", "item": it,
+                    "submitted": False}
         plan = _si.create_plan(
             summary="新功能：%s" % it.get("title"),
             actions=[{
@@ -588,6 +641,10 @@ def approve(iid: str, note: str = "", execute: bool = True) -> dict:
         sub = _ir.submit(pid, source="featradar",
                          title="新功能：%s" % it.get("title"))
         _sub_ok = bool((sub or {}).get("ok"))
+        # ★ 2026-11-16 用户要求：提交到 iter_runner 后立即写 queued 阶段。
+        #   这样前端/日志能立刻看到「已进队列」，而不是等执行器真跑起来才有动静。
+        if _sub_ok:
+            _record_stage_safe(_si, plan_id=pid, stage="queued")
         if not _sub_ok:
             # ★ 2026-11-16 修 bug：原来不管提交成没成，都标 done + executed_at，
             #   于是卡片显示「已提交执行」，实际队列根本没接住 —— 用户看到的就是
@@ -671,3 +728,92 @@ def stats() -> dict:
         "total": len(items),
         "last_think": d.get("last_think") or "",
     }
+
+
+# ------------------------------------------------------------------ 前端接口
+
+def unread_count() -> dict:
+    """返回未读推荐数 —— 供前端「推荐新功能」按钮的角标使用。
+
+    这里的「未读」= 还没被用户处理过的推荐，也就是 state == "pending"。
+    用户批准 / 拒绝 / 删除之后就不再计入，角标自然消失。
+
+    返回结构刻意做得很轻（只有数字 + 时间戳），前端可以高频轮询而不心疼：
+      {"ok": True, "count": 3, "last_think": "2026-11-16 12:00:00"}
+
+    任何异常都吞掉并返回 count=0 —— 角标是辅助信息，绝不能因为读盘失败
+    把整个前端页面搞崩。
+    """
+    try:
+        d = load()
+        items = d.get("items") or []
+        n = sum(1 for x in items if x.get("state") == "pending")
+        return {"ok": True, "count": n,
+                "last_think": d.get("last_think") or ""}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("featradar unread_count failed", exc_info=True)
+        return {"ok": False, "count": 0, "last_think": ""}
+
+
+def recommend_list(state: str = "", limit: int = 50) -> dict:
+    """返回推荐条目列表 —— 供前端「推荐新功能」面板使用。
+
+    和 list_items 的区别：
+      · list_items 是给内部 / 调试用的，字段全、会顺手纠正 done 状态；
+      · recommend_list 是给前端面板用的，**只吐前端真正要渲染的字段**，
+        并且默认按「待批准优先、时间倒序」排好，前端拿到直接渲染即可。
+
+    参数：
+      state: 可选，按状态过滤（pending / approved / submitted / done /
+             failed / rejected / blocked）。留空 = 全部。
+      limit: 最多返回多少条，默认 50。
+
+    返回：
+      {"ok": True, "items": [...], "total": N, "pending": M,
+       "last_think": "..."}
+
+    每条 item 只保留前端要用的字段，避免把 how / scene 这类长文本
+    一股脑塞给前端（面板里点开详情再单独取也行，这里先给摘要）。
+    """
+    try:
+        d = load()
+        items = d.get("items") or []
+        if state:
+            items = [x for x in items if x.get("state") == state]
+
+        # 排序：pending 排最前（用户最该先看），其余按时间倒序。
+        # 用 (是否 pending 取反, 时间戳) 做 key —— pending 的排前面。
+        def _sort_key(x):
+            is_pending = 0 if x.get("state") == "pending" else 1
+            return (is_pending, str(x.get("ts") or ""))
+
+        try:
+            items = sorted(items, key=_sort_key)
+        except Exception:                               # noqa: BLE001
+            logger.debug("featradar recommend_list 排序失败（忽略）", exc_info=True)
+
+        out = []
+        for x in items[:max(0, int(limit))]:
+            out.append({
+                "id": x.get("id") or "",
+                "title": x.get("title") or "",
+                "idea": x.get("idea") or "",
+                "why": x.get("why") or "",
+                "value": x.get("value"),
+                "novelty": x.get("novelty"),
+                "feasibility": x.get("feasibility"),
+                "state": x.get("state") or "",
+                "note": x.get("note") or "",
+                "ts": x.get("ts") or "",
+                "files": x.get("files") or [],
+                "error": x.get("error") or "",
+            })
+
+        pend = sum(1 for x in (d.get("items") or [])
+                   if x.get("state") == "pending")
+        return {"ok": True, "items": out, "total": len(items),
+                "pending": pend, "last_think": d.get("last_think") or ""}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("featradar recommend_list failed", exc_info=True)
+        return {"ok": False, "items": [], "total": 0, "pending": 0,
+                "last_think": ""}

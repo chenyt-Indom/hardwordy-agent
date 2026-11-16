@@ -37,9 +37,20 @@ sys.path.insert(0, ROOT)
 TMP = tempfile.mkdtemp(prefix="mm_codecont_")
 CFG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
 # 关掉会**额外调用模型**的功能，保证桩只服务被测的那条路径
+# ⚠️ 2026-11-17 修：真实 config.json 里 default_model=deepseek-flash（**云端**），
+#    而本测试的 FakeResp 桩只拦**本地 Ollama** 的流式接口 —— 于是所有对话请求
+#    都绕开桩跑去云端，桩一次都没被调用，第②组「工具轮次用满 → 收尾轮」
+#    全部报「0 轮 / 收尾轮 0 次」（不是功能坏了，是测试根本没走到被测路径）。
+#    这里强制切回本地模型，恢复测试本来的意图。
 CFG.update({"web_enabled": False, "rag_enabled": False,
             "memory_enabled": False, "auto_memorize": False,
-            "code_auto_route": False, "code_model": ""})
+            "code_auto_route": False, "code_model": "",
+            "default_model": "qwen3-vl:8b", "code_backend": "local",
+            "code_model_choice": "", "code_model_ds": "",
+            # ⚠️ 2026-11-17：运行时真正生效的是 config.max_tool_rounds（用户配了 500），
+            #    而下面 ROUNDS 读的是模块常量（120）—— 两者对不上，断言必然失败。
+            #    这里在测试配置里写死一个小值，既确定又快。
+            "max_tool_rounds": 10})
 json.dump(CFG, open(os.path.join(TMP, "config.json"), "w", encoding="utf-8"),
           ensure_ascii=False)
 os.environ["MM_DATA_DIR"] = TMP
@@ -186,7 +197,8 @@ def test_code_continue():
 # =====================================================================
 #  ② 工具轮次用满 → 必须补一个收尾轮，而不是静默退场
 # =====================================================================
-ROUNDS = M.MAX_TOOL_ROUNDS
+# 运行时真正生效的是 config.max_tool_rounds（不是模块常量），必须读同一个来源
+ROUNDS = int(CFG.get("max_tool_rounds") or M.MAX_TOOL_ROUNDS)
 WRAP = "已完成：demo.py 里写了 add/sub 两个函数。还差：没有写测试。下一步：补单元测试。"
 
 

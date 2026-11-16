@@ -92,7 +92,15 @@ def main():
     # ---------------- ③ 上限 ----------------
     print("\n③ 一次性计算的上限")
     check("默认上限已提高（不再是 25 秒）", T.RUN_TIMEOUT >= 60, "RUN_TIMEOUT=%s" % T.RUN_TIMEOUT)
-    check("run_timeout() 可读 config", T.run_timeout() == 60, "得到 %s" % T.run_timeout())
+    # ⚠️ 2026-11-17 修：原来写死 `== 60`（默认值）。用户 config.run_timeout=600，
+    #    这条断言的意图是「能读到 config」，写死默认值反而与意图相反。
+    try:
+        _cfg_rt = int(json.load(open(os.path.join(ROOT, "config.json"),
+                                     encoding="utf-8")).get("run_timeout") or T.RUN_TIMEOUT)
+    except Exception:
+        _cfg_rt = T.RUN_TIMEOUT
+    check("run_timeout() 可读 config（与 config.run_timeout 一致）",
+          T.run_timeout() == _cfg_rt, "得到 %s，config=%s" % (T.run_timeout(), _cfg_rt))
     check("冒烟窗口比上限短", 0 < T.RUN_PROBE < T.RUN_TIMEOUT, "RUN_PROBE=%s" % T.RUN_PROBE)
 
     # ---------------- ② 真跑番茄钟（走模型工具那条路）----------------

@@ -137,9 +137,13 @@ def main() -> int:
           str(opts.get("repeat_last_n")))
     check("top_p 传进去了（顶栏「🎛 采样」第二条滑条就是它）",
           opts.get("top_p") == cfg.get("top_p"), str(opts.get("top_p")))
+    # ⚠️ 2026-11-17 修：`num_ctx` 会被 `num_ctx_override` 覆盖（perf.py 的既定行为），
+    #    用户当前 num_ctx=40960 但 override=362496 —— 直接拿 raw num_ctx 比，
+    #    这条断言必然红。这里改成比「实际生效值」。
+    _eff_ctx = int(cfg.get("num_ctx_override") or 0) or int(cfg.get("num_ctx") or 0)
     check("原有的 temperature / num_ctx / num_predict 没被改坏",
           opts.get("temperature") == cfg.get("temperature")
-          and opts.get("num_ctx") == cfg.get("num_ctx")
+          and opts.get("num_ctx") == _eff_ctx
           and opts.get("num_predict") == cfg.get("max_tokens"),
           "temp=%s ctx=%s predict=%s" % (opts.get("temperature"),
                                          opts.get("num_ctx"), opts.get("num_predict")))
@@ -172,7 +176,19 @@ def main() -> int:
     # ⚠️ 别断言"正文非空"：这是思考型模型，配额小的时候会全部花在思考上
     #    （项目里踩过：num_predict=300 时 content 一个字都没有）。
     import requests
-    payload = {"model": C.load_config()["default_model"],
+    # ⚠️ 2026-11-17 修：原来直接拿 `config.default_model`（用户配的是**云端** deepseek-flash）
+    #    去问**本地 Ollama**，必然 404 "model not found" —— 这条断言永远红，
+    #    而且红的原因跟「参数不被接受」毫无关系，只会误导排查方向。
+    #    改成：从本地 /api/tags 里挑一个真实存在的模型来探。
+    _base = C.load_config()["ollama_url"]
+    try:
+        _tags = requests.get(_base + "/api/tags", timeout=8).json()
+        _avail = [m.get("name") for m in (_tags.get("models") or []) if m.get("name")]
+    except Exception:
+        _avail = []
+    _probe_model = next((m for m in _avail if "qwen3-vl" in m),
+                        _avail[0] if _avail else "qwen3-vl:8b")
+    payload = {"model": _probe_model,
                "messages": [{"role": "user", "content": "只回答一个数字：1+1=?"}],
                "stream": False,
                "options": {"temperature": 0.7, "num_ctx": 24576, "num_predict": 64,

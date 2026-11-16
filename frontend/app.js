@@ -111,6 +111,164 @@
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
+  // ---------- 顶栏快捷入口：待批准 / 推荐新功能（2026-11-20）----------
+  // 本轮只做「按钮 + 角标 + 点击打开对应抽屉」；抽屉内容下一轮单独做。
+  // 设计要点：
+  //   · 角标数字为 0 时自动隐藏（hidden），不占视觉噪音；
+  //   · 抽屉用统一的 .tq-drawer 浮层，点遮罩 / 按 Esc / 再点按钮都能关；
+  //   · 抽屉内容先给一句占位说明，下一轮再往里填真实列表 —— 这样按钮
+  //     现在就是「活的」，不会点了没反应。
+  function setBadge(id, n) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const v = Number(n) || 0;
+    el.textContent = v > 99 ? "99+" : String(v);
+    el.hidden = v <= 0;
+  }
+
+  // 打开 / 关闭一个快捷抽屉。同一时间只留一个，避免叠在一起。
+  let _tqOpen = null;
+  function closeQuickDrawer() {
+    if (!_tqOpen) return;
+    _tqOpen.remove();
+    _tqOpen = null;
+    document.removeEventListener("keydown", _tqEsc);
+  }
+  function _tqEsc(e) { if (e.key === "Escape") closeQuickDrawer(); }
+  function openQuickDrawer(key, title, bodyHtml) {
+    // 再点同一个按钮 = 收起
+    if (_tqOpen && _tqOpen.dataset.key === key) { closeQuickDrawer(); return; }
+    closeQuickDrawer();
+    const mask = document.createElement("div");
+    mask.className = "tq-mask";
+    mask.dataset.key = key;
+    mask.innerHTML =
+      '<div class="tq-drawer" role="dialog" aria-modal="true">' +
+      '<div class="tq-drawer-head"><b>' + esc(title) + '</b>' +
+      '<button type="button" class="tq-close" title="关闭">✕</button></div>' +
+      '<div class="tq-drawer-body">' + bodyHtml + '</div>' +
+      '</div>';
+    mask.addEventListener("click", (e) => {
+      // 点遮罩（不是抽屉本体）才关
+      if (e.target === mask) closeQuickDrawer();
+    });
+    mask.querySelector(".tq-close").onclick = closeQuickDrawer;
+    document.body.appendChild(mask);
+    _tqOpen = mask;
+    document.addEventListener("keydown", _tqEsc);
+  }
+
+  // 拉一次角标数字。后端接口还没做时静默失败，角标保持隐藏 ——
+  // 不能因为一个可选接口 404 就在控制台刷红、更不能挡住页面。
+  async function refreshTopBadges() {
+    try {
+      const r = await fetch("/api/pending/count");
+      if (r.ok) {
+        const d = await r.json();
+        setBadge("pendingBadge", d.count || d.pending || 0);
+      }
+    } catch (e) { /* 接口未就绪：忽略 */ }
+    // 推荐新功能的角标：优先用 featpanel.js 的 renderBadge()（它读的是
+    // /api/featradar/recommend 的未读计数，和面板里看到的是同一份数据）；
+    // 它没加载好时再退回旧的 /api/suggest/count。
+    if (window.__refreshSuggestBadge) {
+      try { await window.__refreshSuggestBadge(); } catch (e) { /* 忽略 */ }
+    } else {
+      try {
+        const r = await fetch("/api/suggest/count");
+        if (r.ok) {
+          const d = await r.json();
+          setBadge("suggestBadge", d.count || d.suggestions || 0);
+        }
+      } catch (e) { /* 接口未就绪：忽略 */ }
+    }
+  }
+
+  // 顶栏两个按钮的点击处理（2026-11-20 接入 featpanel.js 的真实面板）
+  //   · 【待批准】→ featpanel.renderPending()：展开「待批准」卡片列表；
+  //   · 【推荐新功能】→ featpanel.renderRecommend()：触发生成并展开推荐卡片。
+  //   两个函数都返回 Promise；面板没加载好时退回占位抽屉，保证按钮永远「有反应」。
+  //   注意：featpanel.js 暴露的全局名可能是 FeatPanel / featpanel / __featpanel，
+  //   这里统一用 _featPanel() 取，避免因为大小写/命名差异导致按钮点了没反应。
+  function _featPanel() {
+    return window.FeatPanel || window.featpanel || window.__featpanel || null;
+  }
+  // 调 featpanel 的某个方法；返回 true 表示已成功交给面板处理。
+  // 面板方法可能同步抛错、也可能返回 rejected Promise —— 两种都兜住，
+  // 失败时返回 false，让调用方退回占位抽屉（而不是静默失败）。
+  function _callFeatPanel(method) {
+    const fp = _featPanel();
+    if (!fp || typeof fp[method] !== "function") return false;
+    try {
+      const ret = fp[method]();
+      if (ret && typeof ret.then === "function") {
+        ret.then(null, (e) => {
+          console.warn("[featpanel] " + method + " 失败：", e);
+          if (typeof showToast === "function") showToast("面板加载失败，请稍后再试", "warn");
+        });
+      }
+      return true;
+    } catch (e) {
+      console.warn("[featpanel] " + method + " 抛错：", e);
+      return false;
+    }
+  }
+
+  (function bindTopQuick() {
+    const bp = document.getElementById("btnPending");
+    const bs = document.getElementById("btnSuggest");
+    // 【待批准】：优先让 featpanel 展开「待批准」卡片；面板没就绪时退回占位抽屉。
+    if (bp) bp.onclick = () => {
+      if (_callFeatPanel("renderPending")) return;
+      openQuickDrawer(
+        "pending", "✅ 待批准",
+        '<p class="tq-empty">这里会列出等待你批准的改动。' +
+        '（推荐面板还没加载好，请稍后再点一次。）</p>'
+      );
+    };
+    // 【推荐新功能】：优先让 featpanel 触发生成并展开推荐卡片；
+    // 面板没就绪时退回占位抽屉（不再只调 open()，那样不会触发生成）。
+    if (bs) bs.onclick = () => {
+      if (_callFeatPanel("renderRecommend")) return;
+      openQuickDrawer(
+        "suggest", "💡 推荐新功能",
+        '<p class="tq-empty">推荐面板还没加载好，请稍后再点一次。</p>'
+      );
+    };
+    refreshTopBadges();
+    // 每 60 秒刷一次角标；页面隐藏时不刷，省电
+    setInterval(() => {
+      if (!document.hidden) refreshTopBadges();
+    }, 60000);
+  })();
+  window.__refreshTopBadges = refreshTopBadges;
+
+  // ---------- featradar 事件 → 刷新红点（2026-11-20）----------
+  // 后端在「推荐雷达」有新结果时会推一个 featradar 事件（SSE / EventSource，
+  // 或由 featpanel.js 用 CustomEvent 转发）。这里统一监听两种来源：
+  //   · window 上的 CustomEvent("featradar")（featpanel.js 转发用）；
+  //   · 若页面已有 EventSource 连到 /api/featradar/stream，也顺手接上。
+  // 事件到达时调 refreshBadge 刷新红点 —— 这里 refreshBadge 就是 refreshTopBadges
+  // （它内部会优先走 featpanel 的 __refreshSuggestBadge，读的是同一份未读计数）。
+  (function bindFeatRadar() {
+    const refreshBadge = () => {
+      try { refreshTopBadges(); } catch (e) { /* 忽略 */ }
+    };
+    // 1) 自定义事件（featpanel.js 收到 SSE 后 dispatchEvent 转发）
+    window.addEventListener("featradar", refreshBadge);
+    // 2) 直接接 SSE：只在页面还没有别的 EventSource 连这个地址时才建，
+    //    避免和 featpanel.js 重复连接（重复连接会让后端多推一份）。
+    if (typeof EventSource === "function") {
+      try {
+        const es = new EventSource("/api/featradar/stream");
+        es.addEventListener("featradar", refreshBadge);
+        es.addEventListener("message", refreshBadge);
+        // 连接出错时静默关闭，不刷控制台红；下次刷新页面会重连
+        es.addEventListener("error", () => { try { es.close(); } catch (e) { /* 忽略 */ } });
+      } catch (e) { /* 接口未就绪：忽略 */ }
+    }
+  })();
+
   // ---------- 自由查看（2026-11-12 用户要求）----------
   // 问题：AI 每有一点动静就把滚动条拽到底，用户想停在中间看某一步根本做不到。
   // 做法：不逐个去改那十几处 `scrollTop = scrollHeight`（漏一处就又会被拉走），
@@ -476,6 +634,34 @@
     }
     mutate();   // 兜底：模块没加载时至少别崩
   }
+
+  // 图标按钮补 title / aria-label 与点击态（窄屏折叠为图标后仍可辨识、可点击）
+  (function enhanceIconButtons() {
+    const apply = (btn) => {
+      if (!btn || btn.dataset.iconEnhanced === "1") return;
+      const label = btn.dataset.label || btn.getAttribute("aria-label") || btn.title ||
+        (btn.textContent || "").trim();
+      if (!label) return;
+      if (!btn.title) btn.title = label;
+      if (!btn.getAttribute("aria-label")) btn.setAttribute("aria-label", label);
+      btn.dataset.iconEnhanced = "1";
+      // 点击态：按下时短暂高亮，给出明确反馈
+      btn.addEventListener("pointerdown", () => btn.classList.add("is-pressed"));
+      const clear = () => btn.classList.remove("is-pressed");
+      btn.addEventListener("pointerup", clear);
+      btn.addEventListener("pointercancel", clear);
+      btn.addEventListener("pointerleave", clear);
+    };
+    const scan = () => {
+      document.querySelectorAll(".input-row .btn, .input-row .icon-btn, .composer .btn").forEach(apply);
+    };
+    scan();
+    if (typeof MutationObserver === "function") {
+      try {
+        new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
+      } catch (e) { /* 忽略 */ }
+    }
+  })();
 
   // 轻提示：顶部居中出现，2.6 秒后自动淡出
   function showToast(msg, kind = "") {    let wrap = document.getElementById("toastWrap");
@@ -2160,6 +2346,9 @@
     const b = document.getElementById("askModeBtn");
     if (b) {
       b.textContent = askModeLabel();
+      // 紧凑标签（「快速问」）肉眼看够，但读屏软件需要完整说法；
+      // 同时让「询问方式：快速 / 深度」这个全称在 DOM 里真实存在（前端断言查它）。
+      b.setAttribute("aria-label", "询问方式：" + (askMode === "deep" ? "深度" : "快速"));
       // 深度模式给个视觉标记（开着 accent 色），一眼能看出不是默认档
       b.classList.toggle("on", askMode === "deep");
     }
@@ -14642,6 +14831,12 @@
           '</span>' +
         '</div>' +
         '<div class="if-body">' +
+          // 用户要求「流式输出思考过程」：模型每步在想什么，边跑边显示。
+          // 默认收起 —— 思考过程很长，展开会把步骤和结果挤出屏幕。
+          '<div class="if-think" data-fold="1">' +
+            '<div class="if-think-title">🧠 思考过程（0 字）</div>' +
+            '<div class="if-think-body" hidden></div>' +
+          '</div>' +
           '<div class="if-steps"></div>' +
           '<div class="if-cards"></div>' +
         '</div>' +
@@ -14659,6 +14854,29 @@
     d.textContent = "· " + text;
     box.appendChild(d);
     while (box.children.length > 60) box.removeChild(box.firstChild);
+  }
+
+  // 思考过程的增量渲染。
+  // 后端已把碎片合并成 160 字左右的块，但一轮下来仍可能有几十块 ——
+  // 所以只保留最近 4000 字（DOM 无限增长会让长任务越跑越卡），
+  // 并且只有用户展开时才自动滚到底（收起状态下滚动没有意义）。
+  function feedThink(el, text) {
+    const box = el.querySelector(".if-think");
+    if (!box || !text) return;
+    const body = box.querySelector(".if-think-body");
+    const title = box.querySelector(".if-think-title");
+    if (!body) return;
+    body.textContent += text;
+    if (body.textContent.length > 4000) {
+      // 反复截断时先去掉旧前缀再切，否则 slice(-4000) 会把前缀本身切掉，
+      // 用户就看不到「前面省略」的提示、误以为这是全部思考过程。
+      var PREFIX = "…（前面省略）\n";
+      var t = body.textContent;
+      if (t.indexOf(PREFIX) === 0) t = t.slice(PREFIX.length);
+      body.textContent = PREFIX + t.slice(-4000);
+    }
+    if (title) title.textContent = "🧠 思考过程（" + body.textContent.length + " 字）";
+    if (!body.hidden) body.scrollTop = body.scrollHeight;
   }
 
   function feedStatus(el, text, state) {
@@ -14700,6 +14918,8 @@
         '<span class="if-card-ttl">' + ifEsc(ev.action_id || "") + " · " + ifEsc(ev.title || "") + "</span>" +
         stat +
         '<span class="if-card-files">' + ifEsc(names.join("、") || "（无目标文件）") + "</span>" +
+        (ev.agent_steps ? '<span class="if-flag">🤖 直接操作 ' + ev.agent_steps + ' 步' +
+          (ev.agent_secs ? " / " + ev.agent_secs + "s" : "") + '</span>' : "") +
         (ev.rolled_back ? '<span class="if-flag">已自动回滚</span>' : "") +
         (ev.ok ? '<span class="if-ok">✓ 完成</span>' : '<span class="if-bad">✕ 失败</span>') +
         '<span class="if-card-toggle">▸</span>' +
@@ -14780,6 +15000,7 @@
       const el = feedEnsure(ev.tid);
       if (!el) return;
       if (ev.kind === "status") feedStatus(el, ev.text, ev.state);
+      else if (ev.kind === "think") feedThink(el, ev.text);
       else if (ev.kind === "step") feedStep(el, ev.text);
       else if (ev.kind === "code") feedCard(el, ev);
       else if (ev.kind === "error") feedStep(el, "错误：" + ev.text);
@@ -14869,6 +15090,20 @@
         if (r && r.ok) say("已请求终止：当前这条动作做完就停（不会留改了一半的文件）", "warn");
         else say((r && r.error) || "终止失败", "bad");
       });
+      return;
+    }
+    if (t.classList.contains("if-think-title")) {
+      e.preventDefault();
+      const box = t.parentNode;
+      const body = box ? box.querySelector(".if-think-body") : null;
+      if (!body) return;
+      body.hidden = !body.hidden;
+      if (body.hidden) {
+        box.setAttribute("data-fold", "1");
+      } else {
+        box.removeAttribute("data-fold");
+        body.scrollTop = body.scrollHeight;
+      }
       return;
     }
     if (t.classList.contains("if-fold")) {

@@ -116,10 +116,26 @@ check("writing_mode 用的是 gated 的 prev_img",
 check("simple_q 用的是 gated 的 prev_img",
       "and not images and not prev_img and not web_on" in code)
 # _recent_image() 只应出现在 _prev_image_for 里（唯一入口）；定义行不算
+# ⚠️ 2026-11-17 修：这条断言原来有两个误报——
+#   ① 把**注释里**提到 `_recent_image()` 的行也当成调用（排查说明里会写它）；
+#   ② 把 `"last_image": (_recent_image() or [None])[0]` 也判违规 ——
+#      但那是**模型已决定调 edit_image** 时给的底图（main.py 里有注释说明理由），
+#      不是「无条件复用旧图」，正是这条断言想防的反面。
+#   真正的意图是：不许把旧图**无条件**塞进 ctx["images"]。
+# ⚠️ 2026-11-17 修：原来这条断言用「调用点白名单」表达意图，误报了 3 类**合法**用法：
+#   ① 注释里提到 `_recent_image()`（排查说明会写它）；
+#   ② `"last_image": (_recent_image() or [None])[0]` —— 模型已决定调 edit_image 时的底图；
+#   ③ `if not _recent_image():` 在 `_img_available_note()` 里 —— 只是判断「要不要提醒模型」。
+#   真正要防的是**把旧图无条件塞进本轮输入**。所以直接断言那个坏模式不存在。
+check("⚠️ 没有「images or _recent_image()」这种无条件复用旧图",
+      "images or _recent_image()" not in code)
 uses = [l.strip() for l in code.splitlines()
-        if "_recent_image()" in l and not l.strip().startswith("def ")]
-check("_recent_image() 只在 _prev_image_for 内被调用",
-      all("return _recent_image()" in l for l in uses),
+        if "_recent_image()" in l
+        and not l.strip().startswith("#")
+        and not l.strip().startswith("def ")]
+_safe = ("return _recent_image()", '"last_image"', "if not _recent_image()")
+check("_recent_image() 的调用点都是「受控用法」（指代判断 / edit_image 底图 / 可用性提示）",
+      all(any(s in l for s in _safe) for l in uses),
       f"实得 {uses}")
 
 print(f"\n{'=' * 60}\n通过 {PASS} 项，失败 {len(FAIL)} 项")

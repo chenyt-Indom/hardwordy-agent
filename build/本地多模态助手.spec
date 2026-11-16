@@ -75,7 +75,13 @@ for _p in _meta_pkgs:
 
 # —— 前端与自带 SD 模型（只读打包资源）——
 def _dir_datas(src_root, dst_root, skip_suffixes=(), skip_contains=()):
-    """把目录展开为 (文件, 目标目录) 列表；可跳过指定后缀/关键词的残余文件。"""
+    """把目录展开为 (文件, 目标目录) 列表；可跳过指定后缀/关键词的残余文件。
+
+    ⚠️ 2026-11-16（11.16a）记录一次**决定**：曾想把 `__pycache__/*.pyc` 一并过滤
+    （它们只是字节码缓存，删掉只会让 Python 首次导入时重编一次，功能零影响），
+    但用户明确要求「宁多勿缺」—— 所以这里**保持原样，照样收进去**（约 459KB）。
+    真要清理时再单独处理，别在打包路径上做减法。
+    """
     out = []
     for dirpath, _dirnames, filenames in os.walk(src_root):
         for fn in filenames:
@@ -174,6 +180,30 @@ if os.path.isdir(_W2L_ROOT) and any(f.endswith(".onnx") for f in os.listdir(_W2L
     print("[spec] 已收集 Wav2Lip 权重（跳过 .pth 导出权重）")
 else:
     print("[spec] 提示：本机无 Wav2Lip 权重（正常）—— 唇形同步走 avatar2 形变方案")
+
+# ⚠️⚠️ 2026-11-16（11.16a）：这两个大目录**一直没写进 spec**，是打包时手工拷进
+#   dist 的（11.15a 之前的做法），于是每次「重建 dist」它们就丢 —— 11.16a 第一次
+#   重建后体积从 4.5GB 掉到 1.9GB、文件数 7608 → 1912，就是这么来的。
+#   现在改成 spec 显式收集，以后重建不会再丢：
+#     · models/rembg   抠图模型（BiRefNet general + portrait，1.9GB）—— 离线抠图用，
+#                      源码树里没有，放在 E: 的模型集中目录；
+#     · vendor/        内置 code-server（网页版 VS Code，871MB、5469 个文件）——
+#                      代码区/内置编辑器靠它，在项目根目录，.gitignore 里。
+_REMBG_ROOT = r"E:\local-multimodal-models\rembg"
+if os.path.isdir(_REMBG_ROOT):
+    _rb = _dir_datas(_REMBG_ROOT, "models/rembg")
+    all_datas += _rb
+    print("[spec] 已收集抠图模型 models/rembg（%d 个文件）" % len(_rb))
+else:
+    print("[spec] 提示：没找到抠图模型 %s —— 离线抠图将不可用" % _REMBG_ROOT)
+
+_VENDOR_ROOT = os.path.join(root, "vendor")
+if os.path.isdir(_VENDOR_ROOT):
+    _vd = _dir_datas(_VENDOR_ROOT, "vendor", skip_contains=("__pycache__",))
+    all_datas += _vd
+    print("[spec] 已收集内置 code-server vendor（%d 个文件）" % len(_vd))
+else:
+    print("[spec] 提示：没找到 vendor/ —— 内置编辑器将不可用")
 
 # —— 离线 SadTalker 的源码骨架（2026-11-16 / 11.16a）——
 #   本版数字人主线改成云端生成（avatar_cloud），backend/sadtalker_cpu.py 留作

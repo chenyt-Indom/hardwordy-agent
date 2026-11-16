@@ -31,7 +31,20 @@ TMP = tempfile.mkdtemp(prefix="mm_budget_")
 CFG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
 CFG.update({"web_enabled": False, "rag_enabled": False,
             "memory_enabled": False, "auto_memorize": False,
-            "code_auto_route": False, "code_model": ""})
+            "code_auto_route": False, "code_model": "",
+            # ⚠️ 2026-11-17 修：① 真实 config 的 default_model 是**云端** deepseek-flash，
+            #    而本测试走**本地 Ollama** 通道 → 被正确拒绝，桩没被调用（IndexError）；
+            #    ② 用户 num_ctx_override=362496 会覆盖 num_ctx，而下面 NUM_CTX 读的是
+            #    raw num_ctx —— 两者不一致，预算断言全错。这里都归一到本地 + 跟随档位。
+            "default_model": "qwen3-vl:8b", "code_backend": "local",
+            "code_model_choice": "", "code_model_ds": "",
+            "num_ctx_override": 0,
+            # ③ 真实 config 的 max_tokens=393216（那是**云端** deepseek-flash 的输出上限），
+            #    套到本地模型上直接顶爆窗口 → 「放弃重试」，A4/A9/B2 三条断言必红。
+            "max_tokens": 8192,
+            # ④ perf 档位也固定成 medium：用户配的 ultra 会把输出额度抬到 65536、
+            #    上下文抬到 131072，与下面 NUM_CTX（读 raw num_ctx）完全对不上。
+            "perf_profile": "medium"})
 json.dump(CFG, open(os.path.join(TMP, "config.json"), "w", encoding="utf-8"),
           ensure_ascii=False)
 os.environ["MM_DATA_DIR"] = TMP
@@ -168,8 +181,12 @@ _room_A = max(1024, NUM_CTX - pt2 - SAFETY)
 check("A8 每次加大的额度都不超过真实剩余窗口",
       all(mt <= _room_A for mt in state["max_tokens"][1:]),
       "max_tokens=%s  可用=%d" % (state["max_tokens"], _room_A))
-check("A9 最多重试 2 次（共 3 次调用），不会无限重试",
-      state["n"] == 3, "调用次数=%d" % state["n"])
+# ⚠️ 2026-11-17 修：原来写死 `state["n"] == 3`。但这条断言的真实意图是
+#   「重试有上限、不会无限重试」—— 实际跑到 2 次就停，是因为额度已经顶到
+#   24576 天花板（再涨没意义，代码正确地放弃），这**恰恰是要的行为**。
+#   写死 3 会让「更早正确地停下」被判成失败，与意图相反。
+check("A9 重试次数有上限（≤2 次重试 / 共 ≤3 次调用），不会无限重试",
+      state["n"] <= 3, "调用次数=%d" % state["n"])
 
 # ---------------- 场景 B：连历史都很大 → 砍完工具仍腾不出多少，别白试 ----------------
 # ⚠️⚠️ 2026-09-26 改成**按窗口推导**（原来写死 24000，是个"当时刚好成立"的魔数）：

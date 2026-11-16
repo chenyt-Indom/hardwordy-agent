@@ -27,8 +27,12 @@ from . import self_iterate as _si
 import logging
 logger = logging.getLogger(__name__)
 
-# 事件保留上限：太多会把 task.json 撑大，前端也不需要这么久的历史
-_MAX_EVENTS = 400
+# 事件保留上限：太多会把 task.json 撑大，前端也不需要这么久的历史。
+# ★ 2026-11-17 从 400 提到 2000：思考过程改成流式后，每步会产生
+#   「思考块 + 工具开始 + 工具完成」3~5 条事件，80 步一轮就是 300~400 条，
+#   原来 400 的上限会把**结果卡片**（code 事件）直接挤出队列 —— 前端看不到
+#   改了什么。2000 条 × 平均 160 字 ≈ 300KB，可以接受。
+_MAX_EVENTS = 2000
 _MAX_HISTORY = 20
 
 _LOCK = threading.RLock()
@@ -225,7 +229,19 @@ def _worker(item):
             r = _STATE["running"]
             return bool(r and r.get("cancel"))
 
+    # 2026-11-16 执行时间线可见：批准后用户最想知道「它到底跑了没、跑到哪了」。
+    # 这里在提交后 / 每步执行后 / 结束时各写一条 stage 记录（actlog.record_stage），
+    # 前端 featpanel.js 读 /api/featradar/timeline?plan_id= 渲染成时间线。
+    # 任何写阶段日志的异常都吞掉 —— 时间线坏了绝不能影响迭代本身。
+    def _stage(stage, detail="", **kw):
+        try:
+            from . import actlog as _al
+            _al.record_stage(plan_id, stage, detail=detail, **kw)
+        except Exception:                                # noqa: BLE001
+            logger.debug("写阶段流水失败（不影响迭代）", exc_info=True)
+
     try:
+        _stage("queued", "已提交执行，等待开始")
         _emit(tid, "step", text="读取计划并确定要执行的动作…")
         # 信任模式：先把 pending 全批准（高风险也批，但会在结果里点出来）
         if item.get("source") == "auto":
@@ -234,7 +250,20 @@ def _worker(item):
             except Exception as e:                      # noqa: BLE001
                 _emit(tid, "step", text="自动批准失败：%s" % e)
 
-        r = _si.execute_approved(plan_id, on_event=on_event,
+        _stage("executing", "开始执行已批准的动作")
+
+        # 包一层 on_event：把执行器吐出的每一步也同步写进阶段流水，
+        # 这样时间线能显示「第 1 步 / 第 2 步 …」而不是只有首尾两条。
+        _step_no = [0]
+
+        def _on_event(kind, **kw):
+            on_event(kind, **kw)
+            if kind == "step":
+                _step_no[0] += 1
+                _stage("agent_step",
+                       kw.get("text") or ("第 %d 步" % _step_no[0]))
+
+        r = _si.execute_approved(plan_id, on_event=_on_event,
                                  should_cancel=should_cancel)
         ok_n = int(r.get("done") or 0)
         results = r.get("results") or []
@@ -249,14 +278,25 @@ def _worker(item):
 
         cancelled = bool(r.get("cancelled"))
         if cancelled:
+            _stage("blocked", "已终止（已完成 %d 条，剩余动作保持待批准）" % ok_n)
             _emit(tid, "status", text="已终止（已完成 %d 条，剩余动作保持待批准）" % ok_n,
                   state="cancelled")
         elif ok_n or fail_n:
+            if fail_n:
+                _stage("failed",
+                       "迭代完成：成功 %d 条，失败 %d 条%s" % (
+                           ok_n, fail_n, "，跳过 %d 条" % skip_n if skip_n else ""))
+            else:
+                _stage("done",
+                       "迭代完成：成功 %d 条%s" % (
+                           ok_n, "，跳过 %d 条" % skip_n if skip_n else ""))
             _emit(tid, "status",
                   text="迭代完成：成功 %d 条，失败 %d 条%s" % (
                       ok_n, fail_n, "，跳过 %d 条" % skip_n if skip_n else ""),
                   state="done")
         else:
+            _stage("done",
+                   "这次没有可执行的动作%s" % ("：" + err_all if err_all else ""))
             _emit(tid, "status",
                   text="这次没有可执行的动作%s" % ("：" + err_all if err_all else ""),
                   state="done")
@@ -280,6 +320,12 @@ def _worker(item):
                 ok_n, fail_n, skip_n, changed, err_all)
     except Exception as e:                              # noqa: BLE001
         tb = traceback.format_exc()[-800:]
+        try:
+            from . import actlog as _al
+            _al.record_stage(plan_id, "failed",
+                             detail="迭代出错：%s: %s" % (type(e).__name__, e))
+        except Exception:                                # noqa: BLE001
+            logger.debug("写阶段流水失败（不影响迭代）", exc_info=True)
         _emit(tid, "status", text="迭代出错：%s: %s" % (type(e).__name__, e),
               state="error")
         _emit(tid, "error", text="%s: %s" % (type(e).__name__, e), tb=tb)

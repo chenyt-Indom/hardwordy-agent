@@ -1,0 +1,1388 @@
+"""迭代执行器：**LLM 直接动手改代码**（工具循环），不再是「模型出补丁、系统代劳」。
+
+用户 2026-11-17 原话：「我是要迭代时由 LLM 直接上手操作，而不是辅助」。
+配套要求（同一轮答复里明确的）：
+  · 允许执行任意命令（pip install / git / 起进程等）；
+  · 一次最多 80 步 / 约 20 分钟，复杂功能也放它自己做完；
+  · **全部**迭代动作都走这条路（含自动反思产生的）；
+  · 改坏了回滚，但**把它的改动和失败原因存下来**给人看；
+  · 模型不写死 —— 跟随当前配置/对话所用的模型。
+
+和旧流程（`self_iterate._plan_patch_for_action`）的本质区别
+------------------------------------------------------------
+旧：模型只被允许「输出 find/replace JSON」→ 系统应用 → 系统跑校验 →
+    失败就回滚（模型全程看不见文件系统，改一次就结束）。
+新：模型拿到 8 个工具，自己 read → edit → run_check → 再改 →
+    自己决定何时 finish。系统只在**最后**做一次独立复核（语法 / 导入 /
+    回归 / 功能断言），失败才回滚。
+
+安全边界（这些是硬护栏，模型改不动）
+------------------------------------
+· 只能写 `backend/` `frontend/` 下的源码后缀（沿用 self_iterate._norm_rel）；
+· 护栏文件（selfdev.py / regress.py / _feature_tests/）拒绝写，且**事后校验哈希**
+  —— 就算它用 shell 绕过去改了，也会被发现并整条回滚；
+· 动手前对整个源码树做快照，回滚时精确还原（含删掉它新建的文件）。
+"""
+
+from __future__ import annotations
+
+import difflib
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+logger = logging.getLogger("iter_agent")
+
+_ROOT = Path(__file__).resolve().parent.parent
+
+# 允许模型写的源码后缀（与 self_iterate 的白名单保持一致）
+_EXTS = (".py", ".js", ".css", ".html", ".json", ".md", ".txt")
+
+# 快照/扫描时跳过的目录（体积大、与迭代无关，或本身是缓存）
+_SKIP_DIRS = {
+    "__pycache__", "_pysite", "node_modules", ".git", "backups",
+    "image_library", "models", "sessions", "data", "logs",
+}
+
+# 护栏：这些文件**不许改**（模型改不动；用 shell 绕过也会被事后校验抓到）
+_GUARD_FILES = (
+    "backend/selfdev.py",       # 回撤机制自身（改坏了就退不回来）
+    "backend/regress.py",       # 行为回归的断言来源（改了等于自己判自己及格）
+    "backend/iter_agent.py",    # 本模块（它不该改自己的护栏）
+)
+_GUARD_DIRS = ("backend/_feature_tests/",)
+
+# 明显会毁机器的命令：拒绝执行（其余命令放行 —— 用户明确要求「任意命令」）
+_CMD_DENY = (
+    r"\bformat\b", r"\bdiskpart\b", r"\bshutdown\b", r"\breboot\b",
+    r"rm\s+-rf\s+/(\s|$)", r"rd\s+/s\s+/q\s+[a-z]:\\?\s*$",
+    r"\bgit\s+push\b", r"\bdel\s+/f\s+/s\s+/q\s+[a-z]:\\?\s*$",
+)
+
+
+# ---------------------------------------------------------------- 小工具
+
+def _now_tag():
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def _settings():
+    """读自迭代的设置（失败就给空 dict，绝不让设置读取挡住迭代）。"""
+    try:
+        from . import self_iterate as _SI
+        return _SI.load_settings() or {}
+    except Exception:                                       # noqa: BLE001
+        logger.debug("读设置失败", exc_info=True)
+        return {}
+
+
+def _data(*parts):
+    """执行日志 / 快照的存放目录。
+
+    ⚠️ 2026-11-17 修：原来用 `config.data("iter_agent", ...)`，而
+    `config.data_root()` 返回的其实是**项目根**（不是 data/）—— 实测一次动作
+    就在项目根下生成 `iter_agent/` 里 146 个文件 / 5MB，几次就把源码目录撑脏，
+    而且 `_scan_files()` 还会把它当项目内容扫进来。
+    现在统一放到 `data/self_iterate/agent/`，和其它迭代数据待在一起。
+    """
+    try:
+        from . import self_iterate as _SI
+        base = Path(_SI._DATA) / "agent"
+    except Exception:                                       # noqa: BLE001
+        from . import config
+        base = Path(config.data("self_iterate", "agent"))
+    p = base.joinpath(*parts)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:                                       # noqa: BLE001
+        logger.debug("建目录失败：%s", p.parent, exc_info=True)
+    return p
+
+
+def _prune_snapshots(keep=6):
+    """只留最近几次快照 —— 一次约 5MB，不清理迟早把磁盘堆满。"""
+    try:
+        root = _data("snapshots")
+        if not root.is_dir():
+            return 0
+        subs = sorted([d for d in root.iterdir() if d.is_dir()],
+                      key=lambda d: d.stat().st_mtime, reverse=True)
+        gone = 0
+        for d in subs[keep:]:
+            shutil.rmtree(d, ignore_errors=True)
+            gone += 1
+        return gone
+    except Exception:                                       # noqa: BLE001
+        logger.debug("清理旧快照失败", exc_info=True)
+        return 0
+
+
+def _norm(rel):
+    """规范化路径（只允许 backend/ frontend/ 下的源码），不合法返回空串。"""
+    try:
+        from . import self_iterate as _SI
+        return _SI._norm_rel(rel)
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def _is_guard(rel):
+    r = str(rel or "").replace("\\", "/").lstrip("./")
+    if r in _GUARD_FILES:
+        return True
+    return any(r.startswith(d) for d in _GUARD_DIRS)
+
+
+def _read_text(rel):
+    try:
+        return (_ROOT / rel).read_text(encoding="utf-8", errors="replace")
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def _sha(path):
+    try:
+        h = hashlib.sha256()
+        h.update(Path(path).read_bytes())
+        return h.hexdigest()[:16]
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def _scan_files():
+    """列出可迭代的源码文件（相对路径）。"""
+    out = []
+    for base in ("backend", "frontend"):
+        d = _ROOT / base
+        if not d.is_dir():
+            continue
+        for p in d.rglob("*"):
+            if not p.is_file():
+                continue
+            if any(part in _SKIP_DIRS for part in p.parts):
+                continue
+            if p.suffix.lower() not in _EXTS:
+                continue
+            if p.name.endswith(".pyc_tmp"):
+                continue
+            out.append(p.relative_to(_ROOT).as_posix())
+    return sorted(out)
+
+
+# ---------------------------------------------------------------- 快照 / 回滚
+
+def _snapshot(tag):
+    """动手前把整个源码树拷一份。返回 {"tag","dir","files":{rel:sha},"guards":{rel:sha}}。"""
+    dst = _data("snapshots", tag)
+    dst.mkdir(parents=True, exist_ok=True)
+    files, guards = {}, {}
+    for rel in _scan_files():
+        src = _ROOT / rel
+        out = dst / rel.replace("/", "__")
+        try:
+            shutil.copy2(src, out)
+            files[rel] = _sha(src)
+            if _is_guard(rel):
+                guards[rel] = files[rel]
+        except Exception:                                   # noqa: BLE001
+            logger.debug("快照失败：%s", rel, exc_info=True)
+    try:
+        (dst / "_manifest.json").write_text(
+            json.dumps({"tag": tag, "files": files, "guards": guards,
+                        "ts": time.strftime("%Y-%m-%d %H:%M:%S")},
+                       ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:                                       # noqa: BLE001
+        logger.debug("写快照清单失败", exc_info=True)
+    _prune_snapshots(6)
+    return {"tag": tag, "dir": dst, "files": files, "guards": guards}
+
+
+def _changed_files(snap):
+    """对比快照，返回 (修改过的, 新建的, 被删掉的)。"""
+    mod, new, gone = [], [], []
+    for rel, sha in (snap.get("files") or {}).items():
+        p = _ROOT / rel
+        if not p.is_file():
+            gone.append(rel)
+        elif _sha(p) != sha:
+            mod.append(rel)
+    known = set((snap.get("files") or {}).keys())
+    for rel in _scan_files():
+        if rel not in known:
+            new.append(rel)
+    return sorted(mod), sorted(new), sorted(gone)
+
+
+def _restore(snap):
+    """精确还原：改过的写回、删掉的补回、新建的删掉。返回还原了哪些。"""
+    done = []
+    for rel, sha in (snap.get("files") or {}).items():
+        src = snap["dir"] / rel.replace("/", "__")
+        if not src.is_file():
+            continue
+        p = _ROOT / rel
+        try:
+            if p.is_file() and _sha(p) == sha:
+                continue
+            p.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, p)
+            done.append(rel)
+        except Exception:                                   # noqa: BLE001
+            logger.debug("还原失败：%s", rel, exc_info=True)
+    mod, new, _gone = _changed_files(snap)
+    for rel in new:
+        try:
+            (_ROOT / rel).unlink()
+            done.append("-" + rel)
+        except Exception:                                   # noqa: BLE001
+            logger.debug("删除新建文件失败：%s", rel, exc_info=True)
+    return done
+
+
+def _compat_backup(snap, mod, new, tag):
+    """再做一份 **self_iterate 格式** 的备份（`data/backups/<tag>/`）。
+
+    为什么需要：`self_iterate.rollback()` 和「自检问题变多就回滚最后一个改动」
+    都靠 `_restore(tag)`，它读的是 `_BACKUPS/<tag>/_manifest.json`
+    和 `_BACKUPS/<tag>/<rel 里的 / 换成 __>`。这里按同一格式写一份，
+    让「用户手动回滚」和「护栏自动回滚」对这个动作同样有效。
+    """
+    try:
+        from . import self_iterate as _SI
+        dst = Path(_SI._BACKUPS) / tag
+        dst.mkdir(parents=True, exist_ok=True)
+        for rel in mod:
+            src = snap["dir"] / rel.replace("/", "__")
+            if src.is_file():
+                shutil.copy2(src, dst / rel.replace("/", "__"))
+        (dst / "_manifest.json").write_text(json.dumps(
+            {"files": list(mod), "created": list(new), "ts": time.time(),
+             "tag": tag, "by": "iter_agent"}, ensure_ascii=False, indent=1),
+            encoding="utf-8")
+        return tag
+    except Exception:                                       # noqa: BLE001
+        logger.debug("写兼容备份失败", exc_info=True)
+        return ""
+
+
+def _hunks(old, new):
+    """把改动整理成前端代码卡片能渲染的 find/replace 对。"""
+    a, b = (old or "").splitlines(), (new or "").splitlines()
+    out = []
+    try:
+        sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == "equal":
+                continue
+            out.append({"find": "\n".join(a[i1:i2])[:2400],
+                        "replace": "\n".join(b[j1:j2])[:2400]})
+    except Exception:                                       # noqa: BLE001
+        logger.debug("算 diff 失败", exc_info=True)
+    return out[:40]
+
+
+def _diff_text(snap, rels):
+    """给日志/评审用的 unified diff。"""
+    chunks = []
+    for rel in rels:
+        old = ""
+        src = snap["dir"] / rel.replace("/", "__")
+        try:
+            if src.is_file():
+                old = src.read_text(encoding="utf-8", errors="replace")
+        except Exception:                                   # noqa: BLE001
+            old = ""
+        new = _read_text(rel)
+        if old == new:
+            continue
+        d = difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                 fromfile="a/" + rel, tofile="b/" + rel,
+                                 lineterm="", n=2)
+        chunks.append("\n".join(list(d)[:400]))
+    return "\n".join(chunks)
+
+
+# ---------------------------------------------------------------- 工具实现
+
+class _Ctx:
+    """一次动作的执行上下文（工具共享）。"""
+
+    def __init__(self, plan, action, ev, stop, steps, seconds, snap, base_fails, base_ok):
+        self.plan = plan
+        self.action = action
+        self.ev = ev
+        self.stop = stop
+        self.steps = steps
+        self.seconds = seconds
+        self.snap = snap
+        self.base_fails = base_fails
+        self.base_ok = base_ok
+        self.t0 = time.time()
+        self.n_calls = 0
+        self.log = []          # [{name, args, result}]
+        self.finished = False
+        self.finish_args = {}
+        self.touched = []      # 动过的文件（写/编辑）
+        self.last_check = ""   # 最近一次 run_check 的结果（收尾复核用）
+        self.stopped = False   # 用户点了「终止」
+
+    # --- 预算 ---
+    def elapsed(self):
+        return time.time() - self.t0
+
+    def over(self):
+        if self.elapsed() > self.seconds:
+            return "时间预算已用完（已跑 %d 秒，上限 %d 秒）" % (
+                int(self.elapsed()), int(self.seconds))
+        if self.n_calls >= self.steps:
+            return "步数预算已用完（上限 %d 步）" % int(self.steps)
+        return ""
+
+    def emit(self, text, kind="step"):
+        if self.ev:
+            try:
+                self.ev(kind, text=text)
+            except Exception:                               # noqa: BLE001
+                logger.debug("事件回调失败", exc_info=True)
+
+    def record(self, name, args, result):
+        self.n_calls += 1
+        self.log.append({
+            "n": self.n_calls, "tool": name,
+            "args": {k: (str(v)[:200]) for k, v in (args or {}).items()},
+            "result": str(result)[:400],
+            "seconds": round(self.elapsed(), 1),
+        })
+
+
+def _t_read(ctx, args):
+    rel = _norm(args.get("path"))
+    if not rel:
+        return "拒绝：路径不在可改范围（只能读 backend/ frontend/ 下的源码）"
+    p = _ROOT / rel
+    if not p.is_file():
+        # 允许读存在的非源码文件（配置文件等），方便它自己排查
+        raw = str(args.get("path") or "").replace("\\", "/").lstrip("./")
+        if not raw or ".." in raw:
+            return "文件不存在：%s" % args.get("path")
+        p2 = _ROOT / raw
+        try:
+            p2.resolve().relative_to(_ROOT.resolve())
+        except Exception:                                   # noqa: BLE001
+            return "拒绝：路径越界"
+        if not p2.is_file():
+            return "文件不存在：%s" % raw
+        p, rel = p2, raw
+    body = _read_text(rel)
+    lines = body.split("\n")
+    total = len(lines)
+    start = int(args.get("start") or 1)
+    end = int(args.get("end") or 0)
+    if end <= 0 or end > total:
+        end = total
+    start = max(1, min(start, total))
+    seg = lines[start - 1:end]
+    head = "（%s 共 %d 行，下面是第 %d~%d 行）\n" % (rel, total, start, end)
+    return head + "\n".join("%5d| %s" % (i, s) for i, s in enumerate(seg, start))
+
+
+def _t_write(ctx, args):
+    rel = _norm(args.get("path"))
+    if not rel:
+        return "拒绝：只能写 backend/ frontend/ 下的源码文件"
+    if _is_guard(rel):
+        return "拒绝：%s 是护栏文件，禁止修改" % rel
+    content = args.get("content")
+    if not isinstance(content, str):
+        return "拒绝：content 必须是字符串（整份文件内容）"
+    if rel.endswith(".py"):
+        try:
+            compile(content, rel, "exec")
+        except SyntaxError as e:
+            return ("语法错误，没有写入：第 %s 行 %s" % (e.lineno, e.msg))
+    p = _ROOT / rel
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    except Exception as e:                                  # noqa: BLE001
+        return "写入失败：%s: %s" % (type(e).__name__, e)
+    if rel not in ctx.touched:
+        ctx.touched.append(rel)
+    return "已写入 %s（%d 字符）" % (rel, len(content))
+
+
+def _t_edit(ctx, args):
+    rel = _norm(args.get("path"))
+    if not rel:
+        return "拒绝：只能改 backend/ frontend/ 下的源码文件"
+    if _is_guard(rel):
+        return "拒绝：%s 是护栏文件，禁止修改" % rel
+    p = _ROOT / rel
+    if not p.is_file():
+        return "文件不存在：%s（新建请用 write_file）" % rel
+    body = _read_text(rel)
+    find = args.get("find")
+    repl = args.get("replace")
+    if not isinstance(find, str) or not find:
+        return "拒绝：find 不能为空（要整份重写请用 write_file）"
+    if not isinstance(repl, str):
+        return "拒绝：replace 必须是字符串"
+    cnt = body.count(find)
+    if cnt == 0:
+        return "没找到要替换的原文（find 必须与文件内容一字不差，含缩进）"
+    if cnt > 1:
+        return "find 在文件里出现了 %d 次，无法确定改哪一处，请写得更具体" % cnt
+    new = body.replace(find, repl, 1)
+    if rel.endswith(".py"):
+        try:
+            compile(new, rel, "exec")
+        except SyntaxError as e:
+            return ("改完会有语法错误，没有写入：第 %s 行 %s" % (e.lineno, e.msg))
+    try:
+        p.write_text(new, encoding="utf-8")
+    except Exception as e:                                  # noqa: BLE001
+        return "写入失败：%s: %s" % (type(e).__name__, e)
+    if rel not in ctx.touched:
+        ctx.touched.append(rel)
+    return "已修改 %s（替换 1 处，净变化 %+d 字符）" % (rel, len(new) - len(body))
+
+
+def _t_list(ctx, args):
+    base = str(args.get("path") or "backend").replace("\\", "/").strip("/")
+    d = _ROOT / base
+    try:
+        d.resolve().relative_to(_ROOT.resolve())
+    except Exception:                                       # noqa: BLE001
+        return "拒绝：路径越界"
+    if not d.is_dir():
+        return "目录不存在：%s" % base
+    rows = []
+    for p in sorted(d.iterdir()):
+        if p.name in _SKIP_DIRS or p.name == "__pycache__":
+            continue
+        if p.is_dir():
+            rows.append("  %s/" % p.name)
+        else:
+            try:
+                n = sum(1 for _ in p.open("rb"))
+            except Exception:                               # noqa: BLE001
+                n = 0
+            rows.append("  %s  (%d 行, %d KB)" % (p.name, n, max(1, p.stat().st_size // 1024)))
+        if len(rows) >= 120:
+            rows.append("  …（还有更多，已截断）")
+            break
+    return "%s/ 下共 %d 项：\n%s" % (base, len(rows), "\n".join(rows))
+
+
+def _t_grep(ctx, args):
+    pat = str(args.get("pattern") or "")
+    if not pat:
+        return "pattern 不能为空"
+    base = str(args.get("path") or "backend").replace("\\", "/").strip("/")
+    d = _ROOT / base
+    try:
+        d.resolve().relative_to(_ROOT.resolve())
+    except Exception:                                       # noqa: BLE001
+        return "拒绝：路径越界"
+    limit = max(1, min(int(args.get("limit") or 40), 200))
+    try:
+        rx = re.compile(pat)
+    except re.error:
+        rx = re.compile(re.escape(pat))
+    hits = []
+    files = [d] if d.is_file() else sorted(d.rglob("*"))
+    for p in files:
+        if not p.is_file() or p.suffix.lower() not in _EXTS:
+            continue
+        if any(x in _SKIP_DIRS for x in p.parts):
+            continue
+        try:
+            for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").split("\n"), 1):
+                if rx.search(line):
+                    hits.append("%s:%d: %s" % (p.relative_to(_ROOT).as_posix(), i, line.strip()[:180]))
+                    if len(hits) >= limit:
+                        break
+        except Exception:                                   # noqa: BLE001
+            continue
+        if len(hits) >= limit:
+            break
+    return ("命中 %d 处：\n%s" % (len(hits), "\n".join(hits))) if hits else "没有命中"
+
+
+def _t_cmd(ctx, args):
+    cmd = str(args.get("command") or "").strip()
+    if not cmd:
+        return "command 不能为空"
+    low = cmd.lower()
+    for pat in _CMD_DENY:
+        if re.search(pat, low):
+            return "拒绝执行：这条命令有毁坏机器的风险（%s）" % pat
+    timeout = max(5, min(int(args.get("timeout") or 120), 600))
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, shell=True, cwd=str(_ROOT),
+                           capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "命令超时（%d 秒），已终止：%s" % (timeout, cmd[:120])
+    except Exception as e:                                  # noqa: BLE001
+        return "命令执行失败：%s: %s" % (type(e).__name__, e)
+    out = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
+    return "退出码 %d（%.1f 秒）\n%s" % (
+        r.returncode, time.time() - t0, out[-6000:] or "（无输出）")
+
+
+def _t_check(ctx, args):
+    """跑真实验证：syntax / import / regress / all。"""
+    kind = str(args.get("kind") or "all").lower()
+    rels = list(dict.fromkeys(ctx.touched + [
+        r for r in (args.get("files") or []) if isinstance(r, str)]))
+    out = []
+
+    if kind in ("syntax", "all"):
+        from . import self_iterate as _SI
+        bad = []
+        for rel in rels:
+            ok, msg = _SI._verify(rel)
+            if not ok:
+                bad.append("%s：%s" % (rel, msg))
+        out.append("【语法】%s" % ("全部通过（%d 个文件）" % len(rels) if not bad
+                                  else "失败：\n" + "\n".join(bad[:6])))
+
+    if kind in ("import", "all"):
+        code = ("import sys;sys.path.insert(0,r'%s');"
+                "import backend.main;print('IMPORT_OK')" % str(_ROOT))
+        try:
+            r = subprocess.run([sys.executable, "-c", code], cwd=str(_ROOT),
+                               capture_output=True, timeout=180)
+            o = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
+            ok = "IMPORT_OK" in o and r.returncode == 0
+            out.append("【导入】%s" % ("backend.main 可以正常导入"
+                                      if ok else "失败：\n" + o[-1500:]))
+        except Exception as e:                              # noqa: BLE001
+            out.append("【导入】跑不起来：%s: %s" % (type(e).__name__, e))
+
+    if kind in ("regress", "all"):
+        try:
+            from . import regress as _RG
+            r = _RG.run_disk(scope="quick")
+            fails = {str(x.get("name")) for x in (r.get("failed_items") or [])}
+            new = fails - (ctx.base_fails or set())
+            if new and ctx.base_ok:
+                out.append("【回归】新增失败 %d 条：%s" % (len(new), "；".join(sorted(new)[:6])))
+            elif new:
+                out.append("【回归】%d 条失败（基线不可用，无法归因）：%s"
+                           % (len(new), "；".join(sorted(new)[:4])))
+            elif not r.get("ok"):
+                out.append("【回归】%d 条既有失败（改动前就是红的，与你无关）"
+                           % len(ctx.base_fails or ()))
+            else:
+                out.append("【回归】全部通过（%s 条 / %s 秒）"
+                           % (r.get("passed"), r.get("seconds")))
+        except Exception as e:                              # noqa: BLE001
+            out.append("【回归】跑不起来：%s: %s" % (type(e).__name__, e))
+
+    txt = "\n".join(out)
+    ctx.last_check = txt
+    return txt
+
+
+def _t_finish(ctx, args):
+    ctx.finished = True
+    ctx.finish_args = dict(args or {})
+    return "收到完成信号。系统接下来会独立复核（语法 / 导入 / 回归 / 功能断言）。"
+
+
+_DISPATCH = {
+    "read_file": _t_read,
+    "write_file": _t_write,
+    "edit_file": _t_edit,
+    "list_dir": _t_list,
+    "grep": _t_grep,
+    "run_cmd": _t_cmd,
+    "run_check": _t_check,
+    "finish": _t_finish,
+}
+
+
+def _step_brief(name, args, res):
+    """把一次工具调用压成一句人话，给 record_stage('agent_step') 用。
+
+    只挑「用户真正关心」的动作（读/写/改/跑命令/自检），其余（list_dir/grep/finish）
+    返回空串不记 —— 否则日志会被定位类调用刷屏。
+    """
+    name = str(name or "")
+    args = args if isinstance(args, dict) else {}
+    res = str(res or "")
+    ok = not res.startswith(("拒绝", "没找到", "文件不存在", "工具异常", "命令执行失败",
+                             "命令超时", "语法错误", "改完会有语法错误", "写入失败"))
+    if name == "read_file":
+        return "读 %s" % (args.get("path") or "?")
+    if name == "write_file":
+        return "%s %s" % ("写入" if ok else "写入失败", args.get("path") or "?")
+    if name == "edit_file":
+        return "%s %s" % ("修改" if ok else "修改失败", args.get("path") or "?")
+    if name == "run_cmd":
+        cmd = str(args.get("command") or "").strip().replace("\n", " ")
+        return "跑命令：%s" % (cmd[:100] or "?")
+    if name == "run_check":
+        return "自检 %s：%s" % (args.get("kind") or "all",
+                                "通过" if ok else "有问题")
+    return ""
+
+
+def _exec(ctx, name, args):
+    """工具总入口：统一记录 + 预算拦截 + 异常兜底。"""
+    name = str(name or "")
+    args = args if isinstance(args, dict) else {}
+    # 用户点了「终止」→ 立刻让模型收手（旧流程是「当前动作跑完再停」，
+    # 但现在是模型自己在多轮里改代码，等到最后才停等于白改一堆）。
+    try:
+        if ctx.stop and ctx.stop() and name != "finish":
+            ctx.stopped = True
+            res = "⏹ 用户已终止本次迭代。请立刻调用 finish 收尾，不要再改任何文件。"
+            ctx.record(name, args, res)
+            return res
+    except Exception:                                       # noqa: BLE001
+        logger.debug("终止检查失败", exc_info=True)
+    over = ctx.over()
+    if over and name != "finish":
+        res = "⏰ %s —— 不要再调工具了，立刻调用 finish 收尾。" % over
+        ctx.record(name, args, res)
+        return res
+    fn = _DISPATCH.get(name)
+    if not fn:
+        return "没有这个工具：%s（可用：%s）" % (name, "、".join(_DISPATCH))
+    if name in ("write_file", "edit_file"):
+        ctx.emit("%s %s" % (name, args.get("path") or "?"))
+    elif name == "run_cmd":
+        ctx.emit("跑命令：%s" % str(args.get("command") or "")[:80])
+    elif name == "run_check":
+        ctx.emit("自检：%s" % (args.get("kind") or "all"))
+    try:
+        res = fn(ctx, args)
+    except Exception as e:                                  # noqa: BLE001
+        res = "工具异常：%s: %s" % (type(e).__name__, e)
+        logger.debug("工具异常：%s", name, exc_info=True)
+    ctx.record(name, args, res)
+    # 每步工具调用都记一句人话，让用户实时看到 LLM 在动哪个文件 / 跑什么。
+    # ⚠️ 2026-11-17 修 high bug：这里原来调用 `record_stage(ctx.plan, ...)`，
+    #    但**全项目从来没有 record_stage 这个函数** —— 每次调用都抛 NameError，
+    #    又被外层 `except Exception` 吞掉，于是「每步在改哪个文件」一次都没显示过，
+    #    静态自检也只在把 except 当成正常逻辑时才没报。
+    #    改成真实存在的两条路径：
+    #      ① 写进 plan（前端轮询 run_status / 动作卡片可读）；
+    #      ② 推进全局阶段提示 set_stage（self_iterate 里真实存在，延迟 import 防循环依赖）。
+    try:
+        _step_summary = _step_brief(name, args, res)
+        if _step_summary:
+            ctx.plan["_agent_step"] = _step_summary
+            ctx.plan["_agent_step_n"] = int(ctx.plan.get("_agent_step_n") or 0) + 1
+            # ② 落进 actlog 的阶段流水（时间线卡片按 plan_id 读它）。
+            #    ⚠️ record_stage 真正住在 actlog 里，签名是 (plan_id, stage, detail)；
+            #    原来既没 import，又把 plan **字典**当成了 plan_id，双错。
+            try:
+                from . import actlog as _actlog
+                _pid = str((ctx.plan or {}).get("id") or (ctx.plan or {}).get("plan_id")
+                           or (ctx.plan or {}).get("pid") or "")
+                _actlog.record_stage(_pid, "agent_step", _step_summary)
+            except Exception:                               # noqa: BLE001
+                logger.debug("actlog.record_stage 不可用，跳过阶段流水", exc_info=True)
+            try:
+                from .self_iterate import set_stage as _set_stage
+                _set_stage("exec", _step_summary)
+            except Exception:                               # noqa: BLE001
+                logger.debug("set_stage 不可用，跳过阶段提示", exc_info=True)
+    except Exception:                                       # noqa: BLE001
+        logger.debug("记录 agent_step 失败", exc_info=True)
+    return res
+
+
+# ---------------------------------------------------------------- 工具 schema
+
+def _schemas():
+    def f(name, desc, props, required=()):
+        return {"type": "function", "function": {
+            "name": name, "description": desc,
+            "parameters": {"type": "object", "properties": props,
+                           "required": list(required)}}}
+
+    return [
+        f("read_file", "读文件内容（带行号）。大文件请用 start/end 分段读。",
+          {"path": {"type": "string", "description": "相对路径，如 backend/self_iterate.py"},
+           "start": {"type": "integer", "description": "起始行（从 1 开始）"},
+           "end": {"type": "integer", "description": "结束行，0=读到末尾"}},
+          ["path"]),
+        f("write_file", "整份写入/新建文件。会先做 Python 语法检查，语法错不落盘。",
+          {"path": {"type": "string"},
+           "content": {"type": "string", "description": "完整文件内容"}},
+          ["path", "content"]),
+        f("edit_file", "精确替换：find 必须与原文一字不差且全文只出现一次。",
+          {"path": {"type": "string"}, "find": {"type": "string"},
+           "replace": {"type": "string"}},
+          ["path", "find", "replace"]),
+        f("list_dir", "列目录（文件名 + 行数），先看清有哪些文件。",
+          {"path": {"type": "string", "description": "如 backend / frontend"}}),
+        f("grep", "按正则搜代码，返回 文件:行号: 内容。",
+          {"pattern": {"type": "string"}, "path": {"type": "string"},
+           "limit": {"type": "integer"}},
+          ["pattern"]),
+        f("run_cmd", "在本机执行任意命令（pip / git / python / node 等），返回退出码与输出。",
+          {"command": {"type": "string"}, "timeout": {"type": "integer"}},
+          ["command"]),
+        f("run_check", "跑真实验证：syntax(语法) / import(能启动) / regress(行为回归) / all。"
+                       "改完**必须**至少跑一次 all 再 finish。",
+          {"kind": {"type": "string", "enum": ["syntax", "import", "regress", "all"]},
+           "files": {"type": "array", "items": {"type": "string"}}}),
+        f("finish", "宣布做完了。调用前必须已经跑过 run_check(all) 并且结果正常。",
+          {"summary": {"type": "string", "description": "做了什么，一句话"},
+           "files": {"type": "array", "items": {"type": "string"},
+                     "description": "改了/新建了哪些文件"}},
+          ["summary"]),
+    ]
+
+
+# ---------------------------------------------------------------- 提示词
+
+_SYS = """你是一个**直接动手**的工程师：在用户这个项目里实现一条已批准的改动。
+你**不是**给建议、也不是输出补丁 —— 你有工具，自己读代码、自己改、自己验证。
+
+工作方式（必须照做）：
+1. 先 `list_dir` / `grep` 定位，再 `read_file` 读**真实代码**。不许凭印象写。
+2. 用 `edit_file`（精确替换）或 `write_file`（整份写）落地。改动要**完整**：
+   半截实现比不实现更糟；新增功能要连前端、路由、数据结构一起接上。
+3. 改完**必须** `run_check(kind="all")`。有失败就照真实报错继续改，再跑，直到通过。
+4. 全部通过后调用 `finish(summary, files)` 收尾。**没跑过 run_check(all) 不许 finish。**
+
+硬约束（违反会被系统回滚，白干）：
+· 只能写 backend/ 与 frontend/ 下的源码；**不许**碰 data/ models/ sessions/ image_library/。
+· **不许**修改 backend/selfdev.py、backend/regress.py、backend/_feature_tests/ 下的断言文件
+  —— 那是护栏，改了等于自己判自己及格（系统会比对哈希，发现即整条回滚）。
+· 不要动与需求无关的函数。这个项目 backend/main.py 有 1.5 万行、backend/tools.py 有 7 千行，
+  它们常常只是"顺带被列进候选"；除非需求明确要求，一个字都别改。
+  实测教训：为了"存套路"顺手改了 main.py 的 _clip_reply，6 条回归断言全红、整条回滚。
+· 需求与代码不符、确实做不到 → 直接 `finish(summary="做不到：原因")`，不要硬凑。
+"""
+
+_TASK = """## 要做的改动
+标题：{title}
+说明：{detail}
+用户备注（★ 与上面的说明冲突时，**一律以这条备注为准**）：{note}
+动作里点名的文件：{files}
+风险等级：{risk}
+
+## 项目结构（源码文件 + 行数，先看这里决定读哪个）
+{inventory}
+
+## 预算
+最多 {steps} 步、约 {minutes} 分钟。到点会被强制收尾。
+{prev}
+现在开始：先定位、再读、再改，改完跑 run_check(all)，通过后 finish。
+"""
+
+# 重试时插进任务描述的一段。用户要求「迭代受阻 LLM 要自己解决直到成功」——
+# 光重跑一遍没用（模型不知道上次错在哪），必须把系统复核的真实原因给它。
+_PREV_FAIL = """
+## ⚠️ 上一次尝试失败了（第 {n} 次重试，代码已回滚到改动前）
+
+系统复核给出的原因：
+{why}
+
+请**先针对这个原因修正**，再继续做完整件事：
+· 如果是「语法校验失败」→ 把那个文件读出来，改到能编译为止；
+· 如果是「backend.main 无法导入」→ 通常是引用了不存在的函数/变量/导入，先 grep 确认再改；
+· 如果是「行为回归新增失败」→ 你改坏了别处的行为，用 grep 找到被影响的地方，改成不影响原有行为；
+· 如果是「LLM 评审拒绝」→ 说明改动偏离需求或误伤了无关代码，缩小改动范围；
+· 如果是「没有改动任何文件」→ 你只说了没做，这次必须真的 write_file/edit_file。
+不要换个地方乱改，也不要放弃 —— 除非确实做不到（那就 finish 说明原因）。
+"""
+
+
+def _inventory(limit=90):
+    rows = []
+    for rel in _scan_files():
+        try:
+            n = sum(1 for _ in (_ROOT / rel).open("rb"))
+        except Exception:                                   # noqa: BLE001
+            n = 0
+        if n < 5:
+            continue
+        rows.append((n, rel))
+    rows.sort(reverse=True)
+    txt = "\n".join("- %s（%d 行）" % (rel, n) for n, rel in rows[:limit])
+    return txt or "（扫不到源码文件）"
+
+
+# ---------------------------------------------------------------- 模型调用
+
+def _pick_model():
+    """跟随当前配置的模型（不写死）。
+
+    优先级：
+      1. 设置里显式给了 `iter_agent_model`（用户想固定就用它）；
+      2. 用户在前端选的**代码模型**（`code_model_choice`，非 auto）——
+         自我迭代本来就是写代码，用户选了就照他选的；
+      3. 其余：有 DeepSeek Key 走 `code_model_ds`（默认 deepseek-flash），
+         没 Key 走本机 `default_model`（即当前对话用的本地模型）。
+    """
+    cfg = {}
+    try:
+        from . import config
+        cfg = config.load_config() or {}
+    except Exception:                                       # noqa: BLE001
+        cfg = {}
+    st = _settings()
+    force = str(st.get("iter_agent_model") or "").strip()
+    try:
+        from . import keyvault
+        key = keyvault.get_key() or ""
+    except Exception:                                       # noqa: BLE001
+        key = ""
+    if force.startswith("local:"):
+        return "local", force.split(":", 1)[1], key
+    if force:
+        return "cloud", force, key
+    try:
+        from . import tools as _T
+        kind, model = _T.code_model_pick(cfg, {"ds_key": key})
+    except Exception:                                       # noqa: BLE001
+        kind, model = ("cloud", "deepseek-flash") if key else ("local", "")
+    if kind == "local" and not model:
+        model = str(cfg.get("default_model") or "")
+    if kind == "cloud" and not key:
+        kind, model = "local", str(cfg.get("default_model") or "")
+    return kind, model, key
+
+
+def _run_cloud(ctx, sys_prompt, task_prompt, steps, model, key, on_note=None):
+    """云端：走 deepseek_client 自带的工具循环（它会自己回填 tool_calls）。"""
+    from .deepseek_client import chat_stream_with_tools, DeepSeekError
+
+    def _executor(name, args):
+        return _exec(ctx, name, args)
+
+    def _guard(used, final_text):
+        # 「光说不做」兜底：没调过任何改文件的工具就想收工 → 退回一轮
+        if ctx.finished:
+            return None
+        if not ({"write_file", "edit_file"} & set(used or ())):
+            return ("（系统提示）你还没有真正改动任何文件。"
+                    "请按需求动手改代码，改完跑 run_check(all)，再 finish。")
+        if "run_check" not in set(used or ()):
+            return ("（系统提示）你改了代码但没跑 run_check。"
+                    "请先跑 run_check(kind=\"all\")，确认语法/导入/回归都正常再 finish。")
+        return None
+
+    # ★ 2026-11-17 用户要求：「一样需要流式输出思考过程」。
+    #   原来这里写死 thinking=False，模型的思维链被完全丢掉 —— 界面上只能看到
+    #   「工具 read_file 完成」这种结果，看不到它在想什么。
+    #   但 thinking 增量是**碎片**（几个字一条），逐条 emit 会把事件队列刷爆
+    #   （前端每 700ms 拉一次增量，一轮上万条会卡死）。所以攒够 160 字
+    #   或隔了 0.35 秒才发一次，既流畅又不会淹掉队列。
+    _buf = {"t": "", "ts": time.time()}
+
+    def _flush(force=False):
+        t = _buf["t"]
+        if not t:
+            return
+        if not force and len(t) < 160 and (time.time() - _buf["ts"]) < 0.35:
+            return
+        ctx.emit(t, "think")
+        _buf["t"] = ""
+        _buf["ts"] = time.time()
+
+    msgs = [{"role": "user", "content": task_prompt}]
+    for kind, txt in chat_stream_with_tools(
+            msgs, model, key, _schemas(), _executor,
+            max_rounds=max(4, steps), temperature=0.25, max_tokens=4096,
+            thinking=True, system_prompt=sys_prompt, guard=_guard):
+        if kind == "thinking" or kind == "content":
+            _buf["t"] += str(txt)
+            _flush()
+        elif kind == "tool_start":
+            _flush(True)
+            ctx.emit("准备调用 %s" % str(txt), "step")
+        elif kind == "tool_result":
+            _flush(True)
+            name, ok, text = txt
+            ctx.emit("工具 %s %s" % (name, "完成" if ok else "失败"), "step")
+        elif kind == "note":
+            _flush(True)
+            if on_note:
+                on_note(str(txt))
+    _flush(True)
+
+
+def _run_local(ctx, sys_prompt, task_prompt, steps, model, on_note=None):
+    """本机 Ollama：自己实现工具循环（流式，边想边推给前端）。
+
+    ★ 用户要求「流式输出思考过程」。原来这里是 `stream=False` 一轮一返，
+      只有整轮结束才把 thinking 一次性 emit 出去，界面上看起来像卡住。
+      现在改成 `stream=True`，逐块读 NDJSON：
+        · 每个 chunk 里的 `message.thinking` → 攒进缓冲，按长度/时间节流
+          通过 on_note 推给前端（和云端 _run_cloud 的节奏保持一致）；
+        · `message.content` 同样处理（有些模型不吐 thinking 只吐 content）；
+        · `message.tool_calls` 在流末尾才完整，攒齐后统一执行。
+      拿不到流式（老版本 Ollama / 报错）时自动退回非流式，功能不丢。
+    """
+    from . import main as _main
+
+    msgs = [{"role": "system", "content": sys_prompt},
+            {"role": "user", "content": task_prompt}]
+
+    # 思考片段的节流缓冲（与 _run_cloud 里同一套策略：攒够 160 字或隔 0.35 秒发一次）
+    _buf = {"t": "", "ts": time.time()}
+
+    def _flush(force=False):
+        t = _buf["t"]
+        if not t:
+            return
+        if not force and len(t) < 160 and (time.time() - _buf["ts"]) < 0.35:
+            return
+        if on_note:
+            try:
+                on_note(t)
+            except Exception:                               # noqa: BLE001
+                logger.debug("on_note 回调失败", exc_info=True)
+        else:
+            ctx.emit(t, "think")
+        _buf["t"] = ""
+        _buf["ts"] = time.time()
+
+    def _push(text):
+        if not text:
+            return
+        _buf["t"] += str(text)
+        _flush()
+
+    def _chat_once(stream):
+        """跑一轮对话。stream=True 时逐块消费并把思考推出去，返回 (msg, calls)。"""
+        resp = _main.client.chat(msgs, model=model, stream=stream,
+                                 params={"temperature": 0.25, "max_tokens": 4096,
+                                         "think": True})
+        if not stream:
+            data = resp.json() if hasattr(resp, "json") else resp
+            msg = (data or {}).get("message") or {}
+            _push(str(msg.get("thinking") or ""))
+            _push(str(msg.get("content") or ""))
+            _flush(True)
+            return msg, (msg.get("tool_calls") or [])
+
+        # --- 流式：逐行读 NDJSON ---
+        think_acc, content_acc, calls = [], [], []
+        try:
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", "replace")
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:                           # noqa: BLE001
+                    continue
+                m = (obj or {}).get("message") or {}
+                th = m.get("thinking")
+                if th:
+                    think_acc.append(str(th))
+                    _push(str(th))
+                ct = m.get("content")
+                if ct:
+                    content_acc.append(str(ct))
+                    _push(str(ct))
+                tc = m.get("tool_calls")
+                if tc:
+                    calls.extend(tc)
+                if (obj or {}).get("done"):
+                    break
+        except Exception:                                   # noqa: BLE001
+            logger.debug("流式读取中断，退回非流式", exc_info=True)
+            _flush(True)
+            return _chat_once(False)
+        _flush(True)
+        msg = {"thinking": "".join(think_acc), "content": "".join(content_acc)}
+        return msg, calls
+
+    for _ in range(max(4, steps)):
+        over = ctx.over()
+        if over and not ctx.finished:
+            msgs.append({"role": "user", "content": "⏰ %s，请立刻调用 finish 收尾。" % over})
+        try:
+            msg, calls = _chat_once(True)
+        except Exception as e:                              # noqa: BLE001
+            # 流式整体失败（比如服务端不支持 stream）→ 退回非流式再试一次
+            logger.debug("流式对话失败，退回非流式：%s", e, exc_info=True)
+            msg, calls = _chat_once(False)
+        calls = msg.get("tool_calls") or []
+        if not calls:
+            # 没有工具调用 = 它想收工。没 finish 就催一次。
+            if ctx.finished:
+                break
+            msgs.append({"role": "assistant", "content": msg.get("content") or ""})
+            msgs.append({"role": "user", "content": (
+                "（系统提示）你还没有调用 finish。请继续：要么把活干完并 "
+                "run_check(all)，要么 finish 说明为什么做不到。")})
+            continue
+        msgs.append({"role": "assistant", "content": msg.get("content") or "",
+                     "tool_calls": calls})
+        for c in calls:
+            fn = (c or {}).get("function") or {}
+            name = str(fn.get("name") or "")
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args or "{}")
+                except Exception:                           # noqa: BLE001
+                    args = {}
+            res = _exec(ctx, name, args if isinstance(args, dict) else {})
+            msgs.append({"role": "tool", "content": str(res)[:12000]})
+            if ctx.finished:
+                break
+        if ctx.finished:
+            break
+
+
+# ---------------------------------------------------------------- 独立复核
+
+def _final_verify(ctx, snap):
+    """系统自己的复核（不信模型自述）。返回 (ok, 原因, 细节)。"""
+    mod, new, gone = _changed_files(snap)
+    changed = mod + new
+    if not changed and not gone:
+        return False, "模型没有改动任何文件（它可能只是说了说）", {}
+
+    # ① 护栏文件有没有被动过（包括用 shell 绕过去改的）
+    bad = [r for r, sha in (snap.get("guards") or {}).items()
+           if _sha(_ROOT / r) != sha]
+    if bad:
+        return False, "护栏文件被修改（不允许）：%s" % "、".join(bad[:3]), {}
+
+    # ② 语法
+    from . import self_iterate as _SI
+    for rel in changed:
+        ok, msg = _SI._verify(rel)
+        if not ok:
+            return False, "%s 语法校验失败：%s" % (rel, msg), {}
+
+    # ③ 能启动（backend.main 导入）
+    code = ("import sys;sys.path.insert(0,r'%s');import backend.main;print('IMPORT_OK')"
+            % str(_ROOT))
+    try:
+        r = subprocess.run([sys.executable, "-c", code], cwd=str(_ROOT),
+                           capture_output=True, timeout=240)
+        o = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
+        if "IMPORT_OK" not in o or r.returncode != 0:
+            return False, "backend.main 无法导入（程序起不来）：\n" + o[-1200:], {}
+    except Exception as e:                                  # noqa: BLE001
+        return False, "导入检查跑不起来：%s: %s" % (type(e).__name__, e), {}
+
+    # ④ 行为回归（只算「本次新增的失败」）
+    detail = {}
+    if _settings().get("regress_after_change", True):
+        try:
+            from . import regress as _RG
+            # ★ 用户要求「弄完之后验证**所有功能**是否完全正常」——
+            #   quick 只有 38 条快用例；full 会追加「全量自检无 high」+
+            #   「全模块可导入」两项（约 10 秒）。这里用 full。
+            rr = _RG.run_disk(scope="full")
+            fails = {str(x.get("name")) for x in (rr.get("failed_items") or [])}
+            new_fails = fails - (ctx.base_fails or set())
+            detail["regress"] = {"passed": rr.get("passed"), "seconds": rr.get("seconds"),
+                                 "new_fails": sorted(new_fails)[:8]}
+            if new_fails and ctx.base_ok:
+                return False, "行为回归新增失败 %d 条：%s" % (
+                    len(new_fails), "；".join(sorted(new_fails)[:4])), detail
+        except Exception as e:                              # noqa: BLE001
+            return False, "行为回归跑不起来，无法确认改动安全：%s: %s" % (
+                type(e).__name__, e), detail
+
+    # ⑤ 新功能自带验收断言
+    act = ctx.action
+    if act.get("origin") == "feature" and act.get("assert_file"):
+        try:
+            from . import selfevolve
+            selfevolve.unpark_test(act.get("title"), path=(act.get("assert_file") or None))
+            vr = selfevolve.verify_one(act.get("title"), path=(act.get("assert_file") or None))
+            detail["assert"] = {"ok": bool(vr.get("ok")), "why": str(vr.get("why") or "")[:300]}
+            if not vr.get("ok"):
+                return False, "功能验收断言没过：%s" % str(vr.get("why") or "")[:300], detail
+        except Exception as e:                              # noqa: BLE001
+            detail["assert"] = {"ok": False, "why": str(e)[:200]}
+
+    return True, "", detail
+
+
+def _save_log(tag, payload):
+    """把这一轮的完整过程落盘（用户要求「把改动和失败原因存下来给人看」）。"""
+    try:
+        p = _data("logs", "%s.json" % tag)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        md = _data("logs", "%s.md" % tag)
+        lines = ["# 迭代执行记录 %s" % tag, "",
+                 "- 结果：%s" % ("成功" if payload.get("ok") else "失败"),
+                 "- 动作：%s（%s）" % (payload.get("title"), payload.get("action_id")),
+                 "- 模型：%s" % payload.get("model"),
+                 "- 步数 / 用时：%s 步 / %s 秒" % (payload.get("steps"), payload.get("seconds")),
+                 "- 失败原因：%s" % (payload.get("error") or "（无）"),
+                 "- 改动文件：%s" % ("、".join(payload.get("changed") or []) or "（无）"),
+                 "", "## 工具调用"]
+        for it in (payload.get("log") or [])[:200]:
+            lines.append("%d. `%s` %s → %s" % (it.get("n"), it.get("tool"),
+                                               json.dumps(it.get("args"), ensure_ascii=False)[:160],
+                                               str(it.get("result"))[:200]))
+        if payload.get("diff"):
+            lines += ["", "## 改动 diff", "```diff", payload["diff"][:20000], "```"]
+        md.write_text("\n".join(lines), encoding="utf-8")
+        return str(p)
+    except Exception:                                       # noqa: BLE001
+        logger.debug("写执行日志失败", exc_info=True)
+        return ""
+
+
+# ---------------------------------------------------------------- 对外入口
+
+def _run_once(plan, action, ev=None, stop=None, prev_fail="", attempt=0):
+    """跑**一次**尝试。失败重试由外层 `run_action` 负责（用户要求
+    「迭代受阻 LLM 要自己解决直到成功，不到万不得已不能失败」）。
+
+    返回 dict：
+      ok      是否成功（系统独立复核通过）
+      error   失败原因（已回滚时带「已回滚」）
+      changed 改动/新建的文件
+      hunks   {rel: [{find, replace}]} 供前端代码卡片渲染
+      log     过程日志路径
+      steps / seconds / model
+    """
+    act = action or {}
+    aid = str(act.get("id") or "?")
+    st = _settings()
+    if not st.get("iter_agent_enabled", True):
+        return {"ok": False, "error": "「LLM 直接操作」已关闭（设置里打开 iter_agent_enabled）",
+                "skipped": True}
+    steps = int(st.get("iter_agent_steps") or 80)
+    seconds = int(st.get("iter_agent_seconds") or 1200)
+    kind, model, key = _pick_model()
+    if kind == "cloud" and not key:
+        return {"ok": False, "error": "没有可用的 DeepSeek Key，无法调用云端模型"}
+
+    # tag 带上尝试序号：每次重试都换一个快照目录 / 日志文件，
+    # 否则第 2 次的快照会把第 1 次的覆盖掉，出问题就查不回去了。
+    tag = "agent_%s_a%d_%s" % (aid, int(attempt), _now_tag())
+
+    def _emit(text, k="step"):
+        if ev:
+            try:
+                ev(k, text="%s %s" % (aid, text))
+            except Exception:                               # noqa: BLE001
+                logger.debug("事件失败", exc_info=True)
+    if attempt:
+        _emit("第 %d 次重试（上一轮失败已回滚，这次带着失败原因重做）" % (attempt + 1))
+    _emit("准备快照（LLM 直接操作模式，最多 %d 步 / %d 分钟，模型 %s）"
+          % (steps, max(1, seconds // 60), model))
+
+    snap = _snapshot(tag)
+
+    # 基线回归：先记下「本来就红的」断言，免得连坐
+    base_fails, base_ok = set(), False
+    if st.get("regress_after_change", True):
+        try:
+            from . import regress as _RG
+            # 基线必须与最终复核**同一范围**（full）—— 否则 full 里那两项
+            # 「全量自检 / 全模块导入」会被当成「本次新增失败」，把每条动作判死。
+            b0 = _RG.run_disk(scope="full")
+            bf = list(b0.get("failed_items") or [])
+            if not any(str(x.get("name")) == "regress" for x in bf):
+                base_fails = {str(x.get("name")) for x in bf}
+                base_ok = True
+        except Exception:                                   # noqa: BLE001
+            logger.debug("基线回归不可用", exc_info=True)
+
+    ctx = _Ctx(plan, act, ev, stop, steps, seconds, snap, base_fails, base_ok)
+    _prev = ""
+    if prev_fail:
+        try:
+            _prev = _PREV_FAIL.format(n=int(attempt) + 1, why=str(prev_fail)[:1200])
+        except Exception:                                   # noqa: BLE001
+            _prev = "\n## 上一次尝试失败原因\n%s\n" % str(prev_fail)[:1200]
+    task_prompt = _TASK.format(
+        title=act.get("title") or "",
+        detail=(act.get("detail") or "")[:2000],
+        note=act.get("note") or "（无）",
+        files="、".join([f for f in (act.get("files") or []) if isinstance(f, str)]) or "（未指定，自己定位）",
+        risk=act.get("risk") or "未标注",
+        inventory=_inventory(),
+        prev=_prev,
+        steps=steps, minutes=max(1, seconds // 60))
+
+    err = ""
+    try:
+        if kind == "cloud":
+            # on_note 原来定义了却没传进来 —— 客户端吐的「输出被截断，正在续写」
+            # 这类过程提示全被丢掉，界面上看起来像卡住。现在接上。
+            _run_cloud(ctx, _SYS, task_prompt, steps, model, key,
+                       on_note=lambda s: ctx.emit(s, "step"))
+        else:
+            _run_local(ctx, _SYS, task_prompt, steps, model,
+                       on_note=lambda s: ctx.emit(s, "think"))
+    except Exception as e:                                  # noqa: BLE001
+        err = "模型调用失败：%s: %s" % (type(e).__name__, e)
+        logger.warning("iter_agent 调用失败", exc_info=True)
+
+    # 用户点了终止
+    cancelled = False
+    try:
+        cancelled = bool(stop and stop())
+    except Exception:                                       # noqa: BLE001
+        cancelled = False
+
+    mod, new, gone = _changed_files(snap)
+    changed = mod + new
+    hunks = {}
+    for rel in changed:
+        old = ""
+        src = snap["dir"] / rel.replace("/", "__")
+        try:
+            if src.is_file():
+                old = src.read_text(encoding="utf-8", errors="replace")
+        except Exception:                                   # noqa: BLE001
+            old = ""
+        hunks[rel] = _hunks(old, _read_text(rel))
+    diff = _diff_text(snap, changed)
+
+    ok, why, detail = False, err, {}
+    if not err:
+        ok, why, detail = _final_verify(ctx, snap)
+
+    # ⑥ LLM 评审**真实 diff**。
+    #   旧流程里的评审门禁（self_iterate._llm_review_action）在「生成改动之前」
+    #   就跑，那时 action["diff"] 是空的 —— 它实际只能看标题和说明，
+    #   「会不会误伤无关函数」根本判断不了。现在模型已经改完，拿真 diff 去评才有意义。
+    #   fail-open：评审自身出错一律放行（它只是多一道把关，不能反过来卡死迭代）。
+    if ok:
+        try:
+            from . import self_iterate as _SI2
+            _a2 = dict(act)
+            _a2["diff"] = diff[:4000]
+            _a2["files"] = changed
+            _rv = _SI2._llm_review_action(plan or {}, _a2)
+            if not _rv.get("ok"):
+                ok = False
+                why = ("LLM 评审拒绝（针对真实 diff）：%s"
+                       % str(_rv.get("reason") or "")[:200])
+        except Exception:                                   # noqa: BLE001
+            logger.debug("评审失败（放行）", exc_info=True)
+
+    # 成功时留一份 self_iterate 格式的备份（供手动回滚 / 退化回滚使用）
+    _btag = _compat_backup(snap, mod, new, tag) if ok else ""
+
+    # 全部失败 → 回滚（用户要求：回滚，但把改动和原因存下来）
+    rolled = []
+    if not ok:
+        if not why:
+            why = "未通过系统复核"
+        rolled = _restore(snap)
+        why = why + "（已自动回滚：%s）" % ("、".join(rolled[:4]) or "无改动可回滚")
+
+    payload = {
+        "tag": tag, "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "action_id": aid, "title": act.get("title"),
+        "model": "%s:%s" % (kind, model), "ok": bool(ok), "error": why,
+        "steps": ctx.n_calls, "seconds": round(ctx.elapsed(), 1),
+        "changed": changed, "rolled_back": rolled, "verify": detail,
+        "summary": (ctx.finish_args or {}).get("summary") or "",
+        "finished": ctx.finished, "cancelled": cancelled,
+        "log": ctx.log, "diff": diff,
+    }
+    log_path = _save_log(tag, payload)
+    return {"ok": bool(ok), "error": why, "changed": changed, "hunks": hunks,
+            "log": log_path, "steps": ctx.n_calls,
+            "seconds": round(ctx.elapsed(), 1),
+            "model": "%s:%s" % (kind, model), "backup_tag": _btag,
+            "summary": payload["summary"], "rolled_back": rolled,
+            "cancelled": cancelled, "diff": diff}
+
+
+# ------------------------------------------------------------ 对外入口（带重试）
+
+def run_action(plan, action, ev=None, stop=None):
+    """让 LLM 直接动手做完这一条动作；**失败会自动重试**。
+
+    用户要求（2026-11-17）：
+      「如果说迭代受阻 LLM 需要解决这个问题直到成功迭代且完全正常，
+        一般不到万不得已不能迭代失败」
+
+    所以不再是「跑一次、失败就回滚收工」，而是：
+        跑一次 → 失败就回滚 → 把**系统复核给出的真实原因**喂回模型 → 再跑
+        → 最多重试 iter_agent_retries 次（默认 2，即最多共 3 次尝试）
+        → 用户点终止 / 总耗时超预算 → 立刻停，不硬撑。
+
+    为什么要有上限：模型在同一处反复失败，多半是需求本身做不到（或触及
+    护栏文件）。无限重试只会烧 token、把代码反复改坏。所以设上限，但把
+    **每一次**的失败原因都落盘（tries），便于人接手判断。
+    """
+    act = action or {}
+    aid = str(act.get("id") or "?")
+    st = _settings()
+    if not st.get("iter_agent_enabled", True):
+        return {"ok": False,
+                "error": "「LLM 直接操作」已关闭（设置里打开 iter_agent_enabled）",
+                "skipped": True}
+
+    try:
+        retries = int(st.get("iter_agent_retries", 2))
+    except Exception:                                       # noqa: BLE001
+        retries = 2
+    retries = max(0, min(6, retries))
+    try:
+        total_budget = int(st.get("iter_agent_total_seconds") or 2400)
+    except Exception:                                       # noqa: BLE001
+        total_budget = 2400
+
+    def _note(text):
+        if ev:
+            try:
+                ev("step", text=text)
+            except Exception:                               # noqa: BLE001
+                logger.debug("事件失败", exc_info=True)
+
+    t0 = time.time()
+    prev, last, tries = "", {}, []
+    for n in range(retries + 1):
+        if n:
+            try:
+                if stop and stop():
+                    _note("%s 已终止，不再重试" % aid)
+                    break
+            except Exception:                               # noqa: BLE001
+                pass
+            if total_budget > 0 and (time.time() - t0) > total_budget:
+                _note("%s 总耗时超过 %d 秒，不再重试" % (aid, total_budget))
+                break
+            _note("%s 第 %d 次重试（上一轮：%s）" % (aid, n, prev[:100]))
+        last = _run_once(plan, action, ev=ev, stop=stop,
+                         prev_fail=prev, attempt=n) or {}
+        tries.append({"attempt": n + 1, "ok": bool(last.get("ok")),
+                      "error": str(last.get("error") or "")[:300]})
+        if last.get("ok") or last.get("skipped") or last.get("cancelled"):
+            break
+        prev = str(last.get("error") or "")
+        # 失败原因里带着「过程记录：路径」，重试时模型不该看到这句噪音
+        if "｜过程记录：" in prev:
+            prev = prev.split("｜过程记录：", 1)[0]
+
+    if tries:
+        last["tries"] = tries
+        last["attempts"] = len(tries)
+        if len(tries) > 1 and not last.get("ok"):
+            _note("%s 连续 %d 次都没做成，已停在最后一次（每次都回滚了，代码是干净的）"
+                  % (aid, len(tries)))
+    return last

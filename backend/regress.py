@@ -635,6 +635,57 @@ def as_text(r):
     return "\n".join(lines)
 
 
+def dump_clip_failures(scope="quick", timeout=300):
+    """跑一遍回归，把 clip.* 用例的真实失败信息 dump 出来。
+
+    为什么单独开一个（2026-11-17 用户问「为什么又失败了」）：
+      上一轮只查到「clip 6 条断言失败」的位置，没真跑 —— 于是只能猜原因。
+      这里直接执行 run_disk()，把每条 clip.* 用例的 name + why 原样返回，
+      调用方写进 actlog 的 fail_kind，用户下次能看到真实报错而不是猜测。
+
+    返回：
+      {
+        "ok": bool,              # 所有 clip.* 用例是否全过
+        "total": int,            # clip.* 用例总数
+        "failed": int,           # 失败条数
+        "items": [{"name":..., "why":...}, ...],   # 失败明细（why 已截断）
+        "summary": str,          # 一行摘要，可直接写进 fail_kind
+        "raw": dict,             # run_disk 的完整结果（便于排查）
+      }
+    任何异常都返回 ok=False 且 summary 带异常信息 —— 不能因为 dump 失败
+    就让调用方以为「全过了」。
+    """
+    try:
+        raw = run_disk(scope=scope, timeout=timeout)
+    except Exception as e:                                  # noqa: BLE001
+        return {"ok": False, "total": 0, "failed": 1,
+                "items": [{"name": "regress", "why": "%s: %s" % (
+                    type(e).__name__, e)}],
+                "summary": "回归没跑起来：%s: %s" % (type(e).__name__, e),
+                "raw": {}}
+    all_items = raw.get("items") or []
+    clip_items = [i for i in all_items if str(i.get("name") or "").startswith("clip.")]
+    failed = [i for i in clip_items if not i.get("ok")]
+    if not clip_items:
+        # 一条 clip 用例都没跑到 —— 说明回归本身没跑起来，不能当成「全过」
+        return {"ok": False, "total": 0, "failed": 1,
+                "items": [{"name": "clip.*", "why": raw.get("summary") or "没跑到 clip 用例"}],
+                "summary": "没跑到 clip 用例：%s" % (raw.get("summary") or "未知原因"),
+                "raw": raw}
+    if not failed:
+        return {"ok": True, "total": len(clip_items), "failed": 0,
+                "items": [],
+                "summary": "clip %d 条全过" % len(clip_items),
+                "raw": raw}
+    detail = [{"name": i.get("name"), "why": str(i.get("why") or "")[:400]}
+              for i in failed]
+    summary = "clip %d/%d 失败：%s" % (
+        len(failed), len(clip_items),
+        "；".join("%s（%s）" % (d["name"], d["why"][:80]) for d in detail[:3]))
+    return {"ok": False, "total": len(clip_items), "failed": len(failed),
+            "items": detail, "summary": summary, "raw": raw}
+
+
 # ---------------------------------------------------------------- snapdiff（2026-11-15）
 @case("snapdiff.相同行为不报差异")
 def _c_snap_same():

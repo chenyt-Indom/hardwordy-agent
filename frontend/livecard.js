@@ -446,6 +446,161 @@ window.LiveCard = (function () {
     };
   }
 
+  // ------------------------------------------------- 4.5 时间线卡片
+  // 会话时间轴（actlog.timeline）的竖向卡片渲染。
+  // 每条显示 ts / status / summary，点击展开 diff_summary 与 regress_pass。
+  //
+  // 为什么放在 LiveCard 里：时间轴和实时卡片是同一套视觉语言（圆点 + 竖线），
+  // 而且它要在单聊/群聊两个界面里都能用 —— 放这里就天然只有一份实现。
+  //
+  // opts:
+  //   container  要渲染进去的容器节点（必填）
+  //   items      actlog.timeline 返回的数组；不传则从 window.actlog 现取
+  //   emptyText  空态提示文案
+  //   onItemClick(item)  可选，点击某条时的额外回调（默认只做展开/收起）
+  //
+  // 返回 { render(items), refresh(), count() }，方便外部重新拉取。
+  function renderTimeline(opts) {
+    opts = opts || {};
+    const box = opts.container;
+    if (!box) return null;
+
+    const EMPTY = opts.emptyText || "本会话暂无自动改动";
+
+    // 状态 → 视觉档位。后端可能给 ok/fail/rollback 或 success/error 等别名，
+    // 这里统一归一化，避免「同一个失败态在时间轴里显示成两种颜色」。
+    function statusClass(st) {
+      const s = String(st == null ? "" : st).toLowerCase();
+      if (s === "ok" || s === "success" || s === "done" || s === "pass") return "ok";
+      if (s === "fail" || s === "failed" || s === "error" || s === "err") return "fail";
+      if (s === "rollback" || s === "revert" || s === "reverted") return "rollback";
+      return "";
+    }
+    function statusText(st) {
+      const c = statusClass(st);
+      if (c === "ok") return "成功";
+      if (c === "fail") return "失败";
+      if (c === "rollback") return "回滚";
+      return String(st == null ? "" : st) || "—";
+    }
+
+    // ts 可能是秒级/毫秒级时间戳，也可能是已经格式化好的字符串。
+    function fmtTs(ts) {
+      if (ts == null || ts === "") return "";
+      if (typeof ts === "string" && !/^\d+$/.test(ts)) return ts;
+      let n = Number(ts);
+      if (!isFinite(n)) return String(ts);
+      if (n < 1e12) n *= 1000;          // 秒 → 毫秒
+      const d = new Date(n);
+      if (isNaN(d.getTime())) return String(ts);
+      const p = (x) => (x < 10 ? "0" + x : "" + x);
+      return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " +
+             p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+    }
+
+    function buildItem(it) {
+      it = it || {};
+      const cls = statusClass(it.status);
+
+      const row = document.createElement("div");
+      row.className = "tl-item" + (cls ? " " + cls : "");
+
+      const dot = document.createElement("span");
+      dot.className = "tl-dot";
+      row.appendChild(dot);
+
+      const body = document.createElement("div");
+      body.className = "tl-body";
+
+      const sum = document.createElement("div");
+      sum.className = "tl-sum";
+      const time = fmtTs(it.ts);
+      if (time) {
+        const t = document.createElement("span");
+        t.className = "tl-time";
+        t.textContent = time;
+        sum.appendChild(t);
+      }
+      const st = document.createElement("span");
+      st.className = "tl-status";
+      st.textContent = statusText(it.status);
+      sum.appendChild(st);
+      const txt = document.createElement("span");
+      txt.className = "tl-text";
+      txt.textContent = " " + String(it.summary == null ? "" : it.summary);
+      sum.appendChild(txt);
+      body.appendChild(sum);
+
+      // 详情：diff_summary 与 regress_pass。两者都没有就不做展开，
+      // 免得点一下只弹出一个空盒子。
+      const hasDiff = it.diff_summary != null && String(it.diff_summary).trim() !== "";
+      const hasReg = it.regress_pass != null && it.regress_pass !== "";
+      if (hasDiff || hasReg) {
+        const det = document.createElement("div");
+        det.className = "tl-detail";
+        det.hidden = true;
+
+        if (hasDiff) {
+          const d = document.createElement("div");
+          d.className = "tl-diff";
+          d.textContent = String(it.diff_summary);
+          det.appendChild(d);
+        }
+        if (hasReg) {
+          const r = document.createElement("div");
+          r.className = "tl-regress";
+          const pass = it.regress_pass === true || it.regress_pass === "true" ||
+                       it.regress_pass === 1 || it.regress_pass === "1";
+          r.textContent = "回归测试：" + (pass ? "通过 ✓" : "未通过 ✗");
+          r.classList.add(pass ? "ok" : "fail");
+          det.appendChild(r);
+        }
+        body.appendChild(det);
+
+        row.classList.add("expandable");
+        row.onclick = () => {
+          det.hidden = !det.hidden;
+          row.classList.toggle("open", !det.hidden);
+          if (typeof opts.onItemClick === "function") opts.onItemClick(it);
+        };
+      } else if (typeof opts.onItemClick === "function") {
+        row.onclick = () => opts.onItemClick(it);
+      }
+
+      row.appendChild(body);
+      return row;
+    }
+
+    const api = {
+      render(items) {
+        let list = items;
+        if (!Array.isArray(list)) {
+          try {
+            list = (window.actlog && typeof window.actlog.timeline === "function")
+              ? window.actlog.timeline() : [];
+          } catch (e) { list = []; }
+        }
+        box.textContent = "";
+        if (!list || !list.length) {
+          const empty = document.createElement("div");
+          empty.className = "tl-empty";
+          empty.textContent = EMPTY;
+          box.appendChild(empty);
+          return 0;
+        }
+        // 新的在上：时间轴通常按时间正序返回，倒过来更符合「最近发生了什么」
+        const arr = list.slice().reverse();
+        arr.forEach((it) => box.appendChild(buildItem(it)));
+        return arr.length;
+      },
+      refresh() { return api.render(); },
+      count() { return box.querySelectorAll(".tl-item").length; },
+    };
+
+    api.render(opts.items);
+    return api;
+  }
+
   // --------------------------------------------------------- 5. 看门狗
   // 后端可能卡在工具里（比如等一个没人回答的确认框），这段时间界面看起来
   // "活着"其实什么都没发生。这里给两条线：长时间无事件提示 + 硬上限中断。
@@ -492,6 +647,7 @@ window.LiveCard = (function () {
   }
 
   // --------------------------------------------- 6. 会话卡（整轮，唯一一份）
+  // （时间线卡片见上面的 renderTimeline，它不依赖会话卡，可单独调用）
   // 单聊与群聊【唯一】的一轮卡片：思考卡 → 工具小条 → 媒体 → 正文 → 🛠 代码改动。
   //
   // 为什么要有它：上面 5 个只是零件。「按什么顺序拼、什么时候展开、标题怎么写、

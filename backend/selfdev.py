@@ -216,24 +216,29 @@ def _require_real_failure(fail_kind: str, days: int = 7) -> dict:
     #       但 evidence 里明确标注「账本不可读，未拦截」，让前端卡片能看出来。
     #   上次「改动证据卡」失败是因为给未定义的 count 赋常量；这次改为从 actlog
     #   真实聚合，且计数为 0 直接拒绝，不再占位。
+    #   ★ 2026-11-17 最小可验证版（用户要求）：时间窗固定为近 24h，不再用 7 天。
+    #     理由：7 天窗口太宽，一个上周偶发的 fail_kind 也能放行本周的改动，
+    #     幽灵修复照样漏过。24h 窗口更严格，且与「本次迭代」的时间尺度一致。
+    #     同时把「计数为 0 → 拒绝 + 写 phantom」这条路径做成**唯一**的拒绝路径，
+    #     不再有「账本不可读就放行」之外的任何分支，逻辑单步可验证。
     try:
-        n, readable = actlog.count_fail_kind_ex(fk, days=days)
+        n, readable = actlog.count_fail_kind_ex(fk, days=1)
     except Exception:
         logger.debug("silent-except", exc_info=True)
         n, readable = 0, False
     n = int(n or 0)
-    evidence = "针对 fail_kind: %s，近 %d 天 %d 次" % (fk, int(days), n)
+    evidence = "针对 fail_kind: %s，近 24h %d 次" % (fk, n)
     if not readable:
         # 账本坏了不能挡住正常改动 —— 保守放行，但证据里说明查不到
         return {"ok": True, "reason": "", "reason_text": "", "count": 0,
                 "evidence": evidence + "（账本不可读，未拦截）"}
     if n <= 0:
         # 幽灵修复：计数为 0 直接拒绝，并写 phantom 记录（act=phantom）
-        reason_text = ("拒绝：fail_kind「%s」近 %d 天真实发生 0 次，属于幽灵修复。\n"
+        reason_text = ("拒绝：fail_kind「%s」近 24h 真实发生 0 次，属于幽灵修复。\n"
                        "请先确认这个失败真的出现过（actlog / task.json 里有记录），"
-                       "再动手改代码。" % (fk, int(days)))
+                       "再动手改代码。" % fk)
         try:
-            journal("phantom", "", fail_kind=fk, days=int(days), count=0)
+            journal("phantom", "", fail_kind=fk, days=1, count=0)
         except Exception:
             logger.debug("silent-except", exc_info=True)
         return {"ok": False, "reason": "phantom",
@@ -975,6 +980,32 @@ def patch(rel: str, find: str, replace: str, note: str = "",
     #       · 单步可验证 —— 闸门逻辑独立成函数，可单独断言；
     #       · 与 write()/insert_after() 复用同一套判定，避免两处口径漂移；
     #       · 拒绝原因/证据文案集中一处，前端卡片直接吃 evidence 字段。
+    # 🛡️ 篡改分类器拦截（2026-11-17 用户要求「保证程序不会被改坏」）：
+    #   在 patch 入口调用 code_audit.audit_tamper 做两轴分类：
+    #     轴一 · 框架功能角色（授权/来源/完整性/度量/能力）
+    #     轴二 · 篡改方式（删除/弱化/替换/注入/绕过）
+    #   命中「度量篡改」或「授权绕过」→ 直接拒绝并记录原因，不进执行器。
+    #   对应论文 Auditing Harness Tampering。
+    try:
+        from . import code_audit as _ca
+        _tamper = _ca.audit_tamper(rel, find, replace, session=session)
+        if _tamper.get("blocked"):
+            try:
+                journal("tamper_blocked", rel,
+                        roles=_tamper.get("roles"),
+                        modes=_tamper.get("modes"),
+                        reason=_tamper.get("reason", "")[:300])
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+            return {"ok": False,
+                    "error": _tamper.get("reason") or "篡改分类器拒绝：命中度量篡改或授权绕过",
+                    "reason": "tamper",
+                    "tamper": _tamper}
+    except ImportError:
+        logger.debug("code_audit 不可用，跳过篡改分类", exc_info=True)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+
     _fk = str(fail_kind or "").strip()
     _real = -1              # -1 = 未查/查不到（不拦）
     _evidence = ""          # 改动证据卡：一句话证据（写进 journal / 返回给前端）

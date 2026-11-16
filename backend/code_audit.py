@@ -318,6 +318,235 @@ def _check_undefined_call(trees):
 _SUBPROC_ATTRS = {"Popen", "run", "call", "check_output", "check_call"}
 
 
+# ---------------------------------------------------------------- 4z. 篡改分类器（两轴）
+#
+# 对应论文 Auditing Harness Tampering。用户要求「保证程序不会被改坏」：
+# 在 selfdev 的 patch 入口拦截「度量篡改」和「授权绕过」两类改动。
+#
+# 两轴：
+#   轴一 · 框架功能角色（role）：授权 / 来源 / 完整性 / 度量 / 能力
+#   轴二 · 篡改方式（mode）：删除 / 弱化 / 替换 / 注入 / 绕过
+#
+# 输出结构化 JSON 写 actlog，供 selfdev 入口判定是否拒绝。
+
+# 轴一：框架功能角色
+ROLE_AUTH = "authorization"      # 授权：谁能做什么
+ROLE_PROVENANCE = "provenance"   # 来源：东西从哪来
+ROLE_INTEGRITY = "integrity"     # 完整性：东西有没有被改
+ROLE_METRIC = "metric"           # 度量：计数/统计/阈值
+ROLE_CAPABILITY = "capability"   # 能力：能做什么
+
+# 轴二：篡改方式
+MODE_DELETE = "delete"           # 删除
+MODE_WEAKEN = "weaken"           # 弱化（放宽条件/降低阈值）
+MODE_REPLACE = "replace"         # 替换
+MODE_INJECT = "inject"           # 注入
+MODE_BYPASS = "bypass"           # 绕过
+
+# 命中这两类角色 → selfdev 入口直接拒绝
+BLOCKED_ROLES = {ROLE_METRIC, ROLE_AUTH}
+
+# 角色识别关键词（在 find/replace 片段里出现即视为该角色）
+_ROLE_PATTERNS = {
+    ROLE_AUTH: [
+        r"\bPROTECTED\b", r"\bDENY_DIRS\b", r"\bDENY_EXT\b",
+        r"\bsafe_rel\b", r"\blocked\s*\(", r"\benabled\s*\(",
+        r"\bpermission", r"\bauthoriz", r"\bauthenticat",
+        r"\ballow(?:ed)?\b", r"\bdeny\b", r"\bforbid",
+        r"\bMM_DISABLE_SELFDEV\b", r"\bself_dev_full_access\b",
+        r"\bPathError\b", r"\b越界\b", r"\b禁止\b", r"\b权限\b",
+    ],
+    ROLE_PROVENANCE: [
+        r"\bbackup", r"\bmirror_dir\b", r"\brestore", r"\brollback",
+        r"\bjournal\b", r"\bactlog\b", r"\bprovenance", r"\bsource\b",
+        r"\b备份\b", r"\b回滚\b", r"\b来源\b",
+    ],
+    ROLE_INTEGRITY: [
+        r"\b_check_syntax\b", r"\bverify_import\b", r"\bhash\b",
+        r"\bchecksum\b", r"\bsha256\b", r"\bmd5\b", r"\bintegrity\b",
+        r"\b校验\b", r"\b完整性\b",
+    ],
+    ROLE_METRIC: [
+        r"\bcount_fail_kind", r"\bfail_stats\b", r"\b_count_fail_kind\b",
+        r"\bFILE_CHANGE_LIMIT", r"\bBATCH_WINDOW\b", r"\b_MAX_SILENT",
+        r"\b_MAX_BYTES\b", r"\bMAX_READ\b", r"\bMAX_WRITE\b",
+        r"\bthreshold\b", r"\blimit\b", r"\bquota\b", r"\bmetric\b",
+        r"\bcount\b", r"\b统计\b", r"\b阈值\b", r"\b计数\b",
+    ],
+    ROLE_CAPABILITY: [
+        r"\bdef\s+\w+", r"\bclass\s+\w+", r"\bfunction\b",
+        r"\bcapability\b", r"\b能力\b",
+    ],
+}
+
+# 篡改方式识别关键词
+_MODE_PATTERNS = {
+    MODE_DELETE: [r"^\s*$", r"\bdel\b", r"\bremove\b", r"\b删除\b"],
+    MODE_WEAKEN: [
+        r">=\s*\d+\s*[-+*/]?\s*\d*", r"<=\s*\d+", r"\bTrue\b",
+        r"\bpass\b", r"\b放宽\b", r"\b弱化\b", r"\b降低\b",
+    ],
+    MODE_REPLACE: [r"\breplace\b", r"\b替换\b", r"\bsub\b"],
+    MODE_INJECT: [r"\bexec\b", r"\beval\b", r"\b__import__\b", r"\b注入\b"],
+    MODE_BYPASS: [
+        r"\bbypass\b", r"\bskip\b", r"\b绕过\b", r"\b跳过\b",
+        r"\breturn\s+True\b", r"\breturn\s+\{\s*['\"]ok['\"]\s*:\s*True",
+    ],
+}
+
+
+def _match_roles(text: str) -> list:
+    """返回文本命中的角色列表（去重、保序）。"""
+    t = text or ""
+    out = []
+    for role, pats in _ROLE_PATTERNS.items():
+        for pat in pats:
+            try:
+                if re.search(pat, t):
+                    out.append(role)
+                    break
+            except re.error:
+                continue
+    return out
+
+
+def _match_modes(text: str) -> list:
+    """返回文本命中的篡改方式列表（去重、保序）。"""
+    t = text or ""
+    out = []
+    for mode, pats in _MODE_PATTERNS.items():
+        for pat in pats:
+            try:
+                if re.search(pat, t, re.MULTILINE):
+                    out.append(mode)
+                    break
+            except re.error:
+                continue
+    return out
+
+
+def _diff_lines(find: str, replace: str) -> tuple:
+    """把 find/replace 拆成「被删的行」和「新增的行」。
+
+    为什么要拆（2026-11-17）：两轴分类器如果只看整段文本，
+    `find` 里原本就有的 `count` / `limit` 之类关键词会把**任何**改动
+    都判成「度量篡改」—— 实测误报率极高，等于把分类器做废。
+    真正该看的是「这次改动**新增/删除了什么**」：
+      · 删掉一行 `if count > LIMIT: raise` → 这是弱化度量，该拦；
+      · 只是把 `count` 那行原样保留、改别处 → 不该拦。
+    所以这里做一次极简的行级 diff：只保留「新增行」和「被删行」，
+    供角色/方式匹配使用。
+    """
+    f_lines = (find or "").splitlines()
+    r_lines = (replace or "").splitlines()
+    # 用集合差做粗粒度 diff（不追求 LCS 精度，够用且不会误伤）
+    f_set = {}
+    for ln in f_lines:
+        f_set[ln] = f_set.get(ln, 0) + 1
+    r_set = {}
+    for ln in r_lines:
+        r_set[ln] = r_set.get(ln, 0) + 1
+    removed = []
+    for ln, n in f_set.items():
+        extra = n - r_set.get(ln, 0)
+        if extra > 0:
+            removed.extend([ln] * extra)
+    added = []
+    for ln, n in r_set.items():
+        extra = n - f_set.get(ln, 0)
+        if extra > 0:
+            added.extend([ln] * extra)
+    return removed, added
+
+
+def classify_tamper(rel: str, find: str, replace: str) -> dict:
+    """两轴分类器：判断一次 patch 是否属于篡改。
+
+    返回结构化 dict：
+      {
+        "rel": 文件相对路径,
+        "roles": [命中的框架功能角色],
+        "modes": [命中的篡改方式],
+        "blocked": True/False（是否应被 selfdev 入口拒绝）,
+        "reason": 拒绝原因（blocked=True 时非空）,
+        "axes": {"role": [...], "mode": [...]},
+        "added": [新增行], "removed": [被删行]
+      }
+
+    判定规则（★ 2026-11-17 修正：只看**改动本身**，不看未改动的上下文）：
+      · 命中「度量篡改」= 新增/删除行里含度量角色 且 方式非空 → 拒绝
+      · 命中「授权绕过」= 新增/删除行里含授权角色 且 方式含 bypass/weaken → 拒绝
+      · 其余放行（但记录到 actlog 供审计）
+
+    为什么改成只看 diff：
+      原实现把 find+replace 整段拼起来匹配角色，于是「find 里本来就有
+      `count` 这个词」的普通改动全被判成度量篡改 —— 分类器一上线就会
+      把正常自迭代全拦死。改成只看新增/删除行后，只有**真的动了**
+      度量/授权代码才会命中。
+    """
+    f = find or ""
+    r = replace or ""
+    removed, added = _diff_lines(f, r)
+    # 角色：只看「新增行 + 被删行」—— 未改动的上下文不算
+    changed_text = "\n".join(added + removed)
+    roles = _match_roles(changed_text)
+    # 方式：主要看新增行（新内容怎么改的）；纯删除时记为 delete
+    modes = _match_modes("\n".join(added))
+    if not modes and removed and not added:
+        modes = [MODE_DELETE]
+    # 删除度量/授权代码本身也是一种「弱化」—— 补上
+    if removed and not added and not modes:
+        modes = [MODE_DELETE]
+
+    blocked = False
+    reason = ""
+    # 度量篡改：动了度量相关代码，且方式非空
+    if ROLE_METRIC in roles and modes:
+        blocked = True
+        reason = ("命中「度量篡改」：改动涉及度量/计数/阈值（%s），"
+                  "方式为 %s。度量被改会让审计失真，拒绝。"
+                  % (", ".join(roles), ", ".join(modes)))
+    # 授权绕过：动了授权相关代码，且方式是绕过/弱化/删除
+    if ROLE_AUTH in roles and (MODE_BYPASS in modes or MODE_WEAKEN in modes
+                               or MODE_DELETE in modes):
+        blocked = True
+        reason = ("命中「授权绕过」：改动涉及授权/权限（%s），"
+                  "方式为 %s。授权被绕过会让护栏失效，拒绝。"
+                  % (", ".join(roles), ", ".join(modes)))
+
+    return {
+        "rel": rel,
+        "roles": roles,
+        "modes": modes,
+        "blocked": blocked,
+        "reason": reason,
+        "axes": {"role": roles, "mode": modes},
+        "added": added,
+        "removed": removed,
+    }
+
+
+def audit_tamper(rel: str, find: str, replace: str, session: str = "") -> dict:
+    """分类 + 写 actlog。返回分类结果（含 blocked）。
+
+    selfdev.patch 入口调用此函数：blocked=True 直接拒绝，不进执行器。
+    """
+    result = classify_tamper(rel, find, replace)
+    try:
+        from . import actlog
+        actlog.record(
+            session or "selfdev", "tamper_audit",
+            args={"rel": rel, "roles": result["roles"],
+                  "modes": result["modes"], "blocked": result["blocked"],
+                  "added": len(result.get("added") or []),
+                  "removed": len(result.get("removed") or [])},
+            ok=not result["blocked"],
+            note=result["reason"] or "篡改分类：放行")
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    return result
+
+
 def _check_subprocess_bypass(trees):
     """backend/*.py 里直接调 subprocess.Popen/run/call/check_output，
     但同文件没有 import procwin（也没走封装）—— 会弹黑窗口，报 high。

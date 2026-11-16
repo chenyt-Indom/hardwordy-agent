@@ -147,12 +147,18 @@
       : risk === "low" ? '' : '<span class="fr-tag fr-tag-mid">中风险</span>';
     return '<div class="fr-card" data-pid="' + esc(pid) + '" data-aid="' + esc(a.id) + '">' +
       '<div class="fr-c-head"><b>' + esc(a.title || a.id) + '</b>' + tag + rtag + '</div>' +
-      (a.detail ? '<div class="fr-c-detail">' + esc(a.detail) + '</div>' : '') +
+      // 用户要求「放到待批准并说明原因以及解决方案」：
+      //   为什么 = a.why（模型给的原因），怎么改 = a.detail（解决方案）。
+      (a.why ? '<div class="fr-kv"><span class="fr-k">为什么</span>' +
+        '<span class="fr-v">' + esc(a.why) + '</span></div>' : '') +
+      (a.detail ? '<div class="fr-kv"><span class="fr-k">怎么改</span>' +
+        '<span class="fr-v">' + esc(a.detail) + '</span></div>' : '') +
       (a.error ? '<div class="fr-c-err">' + esc(a.error) + '</div>' : '') +
       (a.files && a.files.length
         ? '<div class="fr-c-files">📄 ' + a.files.map(esc).join(" · ") + '</div>' : '') +
-      '<textarea class="fr-note" rows="2" placeholder="备注（可选）：想怎么微调这条？' +
-        '写在这儿，执行时会按你的话做">' + esc(a.note || '') + '</textarea>' +
+      '<textarea class="fr-note" rows="2" maxlength="800" ' +
+        'placeholder="备注（可选）：想怎么微调这条？' +
+        '写在这儿，执行时会按你的话做（最多 800 字）">' + esc(a.note || '') + '</textarea>' +
       '<div class="fr-c-btns">' +
         '<button type="button" class="fr-btn fr-ok" data-act="ok">✓ 批准并执行</button>' +
         '<button type="button" class="fr-btn fr-no" data-act="no">✕ 不做</button>' +
@@ -163,14 +169,16 @@
   function renderPending() {
     const d = pendData || {};
     const groups = d.groups || [];
-    setSub(PEND, "共 " + (d.total || 0) + " 条待执行 · 按计划分组 · 备注会带进执行");
+    setSub(PEND, "共 " + (d.total || 0) + " 条待执行 · 只含改进/修复 · 按计划分组");
     setTools(PEND,
       '<button type="button" class="fr-tbtn" data-act="reload">🔄 刷新</button>' +
       '<button type="button" class="fr-tbtn fr-tbtn-main" data-act="all">✓ 全部批准</button>' +
-      '<span class="fr-tip">「待人工复核」= 被护栏拦下的（改太频繁），批准后自动解除</span>');
+      '<span class="fr-tip">「待人工复核」= 被护栏拦下的（改太频繁），批准后自动解除。' +
+      '新功能不在这里，去「💡 推荐新功能」里批准</span>');
     if (!groups.length) {
-      setBody(PEND, '<div class="fr-empty">现在没有待批准的任务 🎉<br>' +
-        '<span class="fr-dim">它自动改代码时会先攒到这里，等你点头。</span></div>');
+      setBody(PEND, '<div class="fr-empty">现在没有待批准的改进任务 🎉<br>' +
+        '<span class="fr-dim">信任模式关闭时，它想改代码会先攒到这里等你点头；<br>' +
+        '想出来的「新功能」在「💡 推荐新功能」里单独列，不混在这里。</span></div>');
       return;
     }
     setBody(PEND, groups.map(function (g) {
@@ -178,9 +186,12 @@
         '<div class="fr-g-head">' +
           '<div class="fr-g-sum">' + esc(g.summary || "(无摘要)") + '</div>' +
           '<div class="fr-g-meta">' + esc(g.ts) + ' · ' + g.n + ' 条' +
+            (g.trigger_zh ? ' · ' + esc(g.trigger_zh) : '') +
             (g.n_review ? ' · <b class="fr-warn">' + g.n_review + ' 待复核</b>' : '') +
           '</div>' +
         '</div>' +
+        // 「为什么这条没自动执行」——信任模式关闭时用户最需要看到这句
+        (g.hold_reason ? '<div class="fr-g-hold">' + esc(g.hold_reason) + '</div>' : '') +
         g.actions.map(function (a) { return pendActionHtml(g.plan_id, a); }).join("") +
       '</div>';
     }).join(""));
@@ -217,8 +228,11 @@
     toast("正在整批批准…");
     let ok = 0, bad = 0;
     for (const g of (pendData.groups || [])) {
-      await api("/api/selfiter/force", { id: g.plan_id, execute: false });
-      const r = await api("/api/selfiter/approve", { id: g.plan_id });
+      // 只批这一组里**列出来的**动作 id。不传 id 会把同一计划里的新功能动作
+      // 一起批掉 —— 那正好违反「两个类别分开」。
+      const ids = (g.actions || []).map(function (a) { return a.id; });
+      await api("/api/selfiter/force", { id: g.plan_id, action_ids: ids, execute: false });
+      const r = await api("/api/selfiter/approve", { id: g.plan_id, action_ids: ids });
       if (r && r.ok) {
         ok += (r.approved || 0);
         await api("/api/selfiter/enqueue", { id: g.plan_id, source: "manual" });
@@ -233,13 +247,116 @@
   // ============================================================ 推荐新功能
   const FEAT = "frFeat";
   let featData = null;
+  // 2026-11-16 用户要求：「待批准里不能有新功能的批准，两个类别得分开」。
+  // 所以这里单独拉 /api/selfiter/pending_features —— 自动反思里想出来的新功能
+  // （origin=="feature"）以及 featradar 造的计划，全部归到这张面板。
+  let featPendData = null;
+
+  async function loadFeatPending() {
+    const d = await api("/api/selfiter/pending_features");
+    featPendData = d || { groups: [], total: 0 };
+  }
+
+  function featPendCardHtml(pid, a) {
+    const review = a.status === "need_review";
+    return '<div class="fr-card" data-ppid="' + esc(pid) + '" data-faid="' + esc(a.id) + '">' +
+      '<div class="fr-c-head"><b>' + esc(a.title || a.id) + '</b>' +
+        '<span class="fr-tag">待你决定</span>' +
+        (review ? '<span class="fr-tag fr-tag-warn">⚠ 待人工复核</span>' : '') +
+      '</div>' +
+      (a.why ? '<div class="fr-kv"><span class="fr-k">为什么</span>' +
+        '<span class="fr-v">' + esc(a.why) + '</span></div>' : '') +
+      (a.detail ? '<div class="fr-kv"><span class="fr-k">怎么做</span>' +
+        '<span class="fr-v">' + esc(a.detail) + '</span></div>' : '') +
+      (a.files && a.files.length
+        ? '<div class="fr-c-files">📄 ' + a.files.map(esc).join(" · ") + '</div>' : '') +
+      '<textarea class="fr-note" rows="2" placeholder="备注（可选）：想怎么微调这个功能？' +
+        '写在这儿，执行时会按你的话做">' + esc(a.note || '') + '</textarea>' +
+      '<div class="fr-c-btns">' +
+        '<button type="button" class="fr-btn fr-ok" data-act="pok">✓ 批准并执行</button>' +
+        '<button type="button" class="fr-btn fr-no" data-act="pno">✕ 不要</button>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function featPendHtml() {
+    const d = featPendData || {};
+    const groups = d.groups || [];
+    if (!groups.length) return "";
+    return '<div class="fr-sec">📋 待批准的新功能 · ' + (d.total || 0) + ' 条' +
+        '<span class="fr-sec-tip">这些是自动反思里想出来的新功能，批准后才动手</span></div>' +
+      groups.map(function (g) {
+        return '<div class="fr-group">' +
+          '<div class="fr-g-head">' +
+            '<div class="fr-g-sum">' + esc(g.summary || "(无摘要)") + '</div>' +
+            '<div class="fr-g-meta">' + esc(g.ts) + ' · ' + g.n + ' 条' +
+              (g.trigger_zh ? ' · ' + esc(g.trigger_zh) : '') + '</div>' +
+          '</div>' +
+          (g.hold_reason ? '<div class="fr-g-hold">' + esc(g.hold_reason) + '</div>' : '') +
+          (g.actions || []).map(function (a) { return featPendCardHtml(g.plan_id, a); }).join("") +
+        '</div>';
+      }).join("");
+  }
+
+  async function featPendApprove(pid, aid) {
+    const card = cardOf(FEAT, "data-faid", aid);
+    const note = noteOf(card);
+    toast("批准中…");
+    await api("/api/selfiter/force", { id: pid, action_ids: [aid], execute: false });
+    const r = await api("/api/selfiter/approve", { id: pid, action_ids: [aid], note: note });
+    if (!r || !r.ok) { toast((r && r.error) || "批准失败", "bad"); return; }
+    const e = await api("/api/selfiter/enqueue", { id: pid, source: "manual" });
+    toast((e && e.ok) ? "已批准并提交执行，去聊天区看进度"
+      : "已批准，但提交队列失败：" + ((e && e.error) || "未知"),
+      (e && e.ok) ? "good" : "bad");
+    await loadFeat();
+    refreshDots();
+    renderBadge();
+  }
+
+  async function featPendReject(pid, aid) {
+    const note = noteOf(cardOf(FEAT, "data-faid", aid));
+    const r = await api("/api/selfiter/reject", { id: pid, action_ids: [aid], note: note });
+    if (!r || !r.ok) { toast((r && r.error) || "拒绝失败", "bad"); return; }
+    toast("已标记不要", "good");
+    await loadFeat();
+    refreshDots();
+    renderBadge();
+  }
 
   async function loadFeat() {
     setBody(FEAT, '<div class="fr-empty">加载中…</div>');
     const d = await api("/api/featradar/items");
     featData = d || { items: [] };
+    await loadFeatPending();
     renderFeat();
   }
+
+  // ---- 角标（2026-11-20 用户要求）
+  // 顶栏「推荐新功能」按钮上的未读数。数据源是 /api/featradar/recommend
+  // 返回的 unread 计数（后端 unread_count() 算的是 state=="pending" 的条数）。
+  // 设计要点：
+  //   · 数字为 0 时隐藏角标，不制造视觉噪音；
+  //   · 接口没就绪 / 读盘失败时静默失败，角标保持隐藏 —— 不能因为一个
+  //     可选接口 404 就在控制台刷红，更不能挡住页面；
+  //   · 采纳 / 拒绝 / 删除之后立刻重算，用户能马上看到数字减一。
+  async function renderBadge() {
+    const el = document.getElementById("suggestBadge");
+    if (!el) return;
+    let n = 0;
+    try {
+      const r = await fetch("/api/featradar/recommend");
+      if (r.ok) {
+        const d = await r.json();
+        // 后端可能给 unread / count / pending 三种字段名，都兼容一下
+        n = Number(d.unread != null ? d.unread
+          : (d.count != null ? d.count : (d.pending || 0))) || 0;
+      }
+    } catch (e) { /* 接口未就绪：忽略，角标保持隐藏 */ }
+    el.textContent = n > 99 ? "99+" : String(n);
+    el.hidden = n <= 0;
+  }
+  window.__refreshSuggestBadge = renderBadge;
 
   function scoreChip(label, v, cls) {
     const n = Math.max(1, Math.min(10, parseInt(v, 10) || 5));
@@ -273,8 +390,10 @@
       (it.how ? '<div class="fr-kv"><span class="fr-k">大致怎么做</span>' +
         '<span class="fr-v">' + esc(it.how) + '</span></div>' : '') +
       (it.paper ? '<div class="fr-c-files">📄 参考：' + esc(it.paper) + '</div>' : '') +
-      '<textarea class="fr-note" rows="2" placeholder="备注（可选）：想怎么改这个功能？' +
-        '写在这儿，批准后会按你的话做"' + (editable ? '' : ' disabled') + '>' +
+      '<textarea class="fr-note" rows="2" maxlength="800" ' +
+        'placeholder="备注（可选）：想怎么改这个功能？' +
+        '写在这儿，批准后会按你的话做（最多 800 字）"' +
+        (editable ? '' : ' disabled') + '>' +
         esc(it.note || '') + '</textarea>' +
       (st === "failed" && it.error
         ? '<div class="fr-c-files fr-err">失败原因：' + esc(String(it.error).slice(0, 200)) + '</div>'
@@ -304,18 +423,23 @@
     const d = featData || {};
     const items = d.items || [];
     const pend = items.filter(function (x) { return x.state === "pending"; }).length;
-    setSub(FEAT, pend ? "有 " + pend + " 条新功能等你决定" : "还没有待决定的新功能");
+    const pendPlan = (featPendData && featPendData.total) || 0;
+    const n = pend + pendPlan;
+    setSub(FEAT, n ? "有 " + n + " 条新功能等你决定（其中 " + pendPlan + " 条来自自动反思）"
+      : "还没有待决定的新功能");
     setTools(FEAT,
       '<button type="button" class="fr-tbtn fr-tbtn-main" data-act="think">✨ 现在想一批</button>' +
       '<button type="button" class="fr-tbtn" data-act="reload">🔄 刷新</button>' +
-      '<span class="fr-tip">先想「你哪件事最费劲」→ 再构思功能。约 30~60 秒</span>');
-    if (!items.length) {
+      '<span class="fr-tip">先想「你哪件事最费劲」→ 再构思功能。约 30~60 秒。' +
+      '改进/修复类不在这里，去「📋 待批准」</span>');
+    const pendHtml = featPendHtml();
+    if (!items.length && !pendHtml) {
       setBody(FEAT, '<div class="fr-empty">还没有推荐的新功能。<br>' +
         '<span class="fr-dim">点上面的「✨ 现在想一批」让它现想 ——<br>' +
         '它会先想你现在哪件事最费劲，再想什么功能能省掉这个动作。</span></div>');
       return;
     }
-    setBody(FEAT, items.map(featCardHtml).join(""));
+    setBody(FEAT, pendHtml + items.map(featCardHtml).join(""));
     // 有「执行中」的就盯到出结果，省得用户手动刷新
     if (items.some(function (x) { return x.state === "submitted"; })) watchRun();
   }
@@ -336,6 +460,7 @@
     else toast("想到 " + (r.added || 0) + " 个新功能", (r.added ? "good" : ""));
     await loadFeat();
     refreshDots();
+    renderBadge();
   }
 
   async function featApprove(fid) {
@@ -346,6 +471,7 @@
     toast(r.submitted ? "已交给执行器，正在改代码…" : "已批准（排队中）", "good");
     await loadFeat();
     refreshDots();
+    renderBadge();
     watchRun();
   }
 
@@ -374,6 +500,7 @@
     toast("已标记不要", "good");
     await loadFeat();
     refreshDots();
+    renderBadge();
   }
 
   async function featSaveNote(fid) {
@@ -389,6 +516,173 @@
     if (!r || !r.ok) { toast("删除失败：" + ((r && r.error) || "未知"), "bad"); return; }
     await loadFeat();
     refreshDots();
+    renderBadge();
+  }
+
+  // ---- 对外暴露：让顶栏按钮 / app.js 能直接打开这张抽屉
+  // 用户要求「功能有计划时就在上面那个按钮中提示有推荐新功能」——
+  // 顶栏那颗按钮点开就该是这张完整的推荐面板，而不是另做一个占位浮层。
+  window.FeatPanel = {
+    open: function () {
+      ensurePanel(FEAT, "💡 推荐新功能", "模型想出来的、能提高体验的全新功能");
+      openPanel(FEAT);
+      loadFeat();
+    },
+    close: function () { closePanel(FEAT); },
+    refreshBadge: renderBadge,
+  };
+
+  // ============================================================ 对外 API
+  // 2026-11-16 用户要求：把 renderPending / renderRecommend / refreshBadge
+  // 三个渲染入口显式暴露出去，方便 app.js / 顶栏按钮 / 其它模块直接调用。
+  //   · renderPending   —— 画「待批准」卡片（标题+理由+备注输入框+批准/拒绝）
+  //   · renderRecommend —— 画「推荐新功能」卡片（标题+why+how+采纳按钮）
+  //   · refreshBadge    —— 拉两个接口更新红点计数
+  // 三者都做了「面板未创建时自动 ensurePanel」的兜底，避免调用方先手动
+  // 建面板；同时保持幂等，重复调用不会重复建 DOM。
+  function ensurePendingPanel() {
+    ensurePanel(PEND, "📋 待批准", "所有还没执行的自动迭代任务");
+  }
+  function ensureFeatPanel() {
+    ensurePanel(FEAT, "💡 推荐新功能", "模型想出来的、能提高体验的全新功能");
+  }
+
+  // renderPending：画待审卡片。数据源是 /api/selfiter/pending。
+  // 备注输入框绑定 approve 的 note 字段，上限 800 字（见 pendActionHtml）。
+  async function renderPendingPanel() {
+    ensurePendingPanel();
+    await loadPending();
+  }
+
+  // renderRecommend：画推荐卡片。数据源是 /api/featradar/items。
+  // 每条卡片展示 标题 + why(scene) + how + 采纳按钮，备注同样上限 800 字。
+  async function renderRecommendPanel() {
+    ensureFeatPanel();
+    await loadFeat();
+  }
+
+  // refreshBadge：拉 /api/selfiter/pending 与 /api/featradar/stats 两个接口，
+  // 更新顶栏红点计数。与 refreshDots 同源，但这里额外把「推荐新功能」按钮
+  // 上的 suggestBadge 也一起刷新，保证两个角标始终一致。
+  async function refreshBadgeAll() {
+    await refreshDots();
+    await renderBadge();
+  }
+
+  window.FeatPanel.renderPending = renderPendingPanel;
+  window.FeatPanel.renderRecommend = renderRecommendPanel;
+  window.FeatPanel.refreshBadge = refreshBadgeAll;
+  // 兼容旧调用：window.__refreshSuggestBadge 仍指向 renderBadge
+  window.__refreshSuggestBadge = renderBadge;
+
+  // ============================================================ 执行时间线
+  // 2026-11-16：读 get_stages 结果，渲染成时间线卡片。
+  // 复用 .if-flag 样式（不新增布局），只把每个 stage 的标题/状态/耗时/说明
+  // 排成一条竖向时间线。数据源：/api/selfiter/get_stages（按 plan_id 取）。
+  const STAGES = "frStages";
+  let stagesData = null;
+  let stagesPlanId = null;
+
+  async function loadStages(planId) {
+    stagesPlanId = planId || stagesPlanId;
+    setBody(STAGES, '<div class="fr-empty">加载中…</div>');
+    const url = "/api/selfiter/get_stages" +
+      (stagesPlanId ? "?id=" + encodeURIComponent(stagesPlanId) : "");
+    const d = await api(url);
+    stagesData = d || { stages: [] };
+    renderStages();
+  }
+
+  function stageStateTag(st) {
+    const s = String((st && st.state) || "").toLowerCase();
+    if (s === "done" || s === "ok" || s === "success")
+      return '<span class="if-flag if-flag-ok">✓ 完成</span>';
+    if (s === "running" || s === "doing")
+      return '<span class="if-flag if-flag-run">⏳ 进行中</span>';
+    if (s === "failed" || s === "error")
+      return '<span class="if-flag if-flag-bad">✕ 失败</span>';
+    if (s === "skipped")
+      return '<span class="if-flag if-flag-off">— 跳过</span>';
+    return '<span class="if-flag">' + esc(s || "待执行") + '</span>';
+  }
+
+  function fmtDur(ms) {
+    const n = Number(ms);
+    if (!isFinite(n) || n <= 0) return "";
+    if (n < 1000) return n + "ms";
+    if (n < 60000) return (n / 1000).toFixed(1) + "s";
+    const m = Math.floor(n / 60000);
+    const s = Math.round((n % 60000) / 1000);
+    return m + "m" + (s ? s + "s" : "");
+  }
+
+  function stageCardHtml(st, i, total) {
+    const title = st.title || st.name || st.stage || ("步骤 " + (i + 1));
+    const dur = fmtDur(st.duration_ms != null ? st.duration_ms : st.ms);
+    const detail = st.detail || st.summary || st.message || "";
+    const err = st.error || "";
+    const last = i === total - 1;
+    return '<div class="fr-card fr-stage" data-sidx="' + i + '">' +
+      '<div class="fr-c-head"><b>' + esc(title) + '</b>' + stageStateTag(st) +
+        (dur ? '<span class="if-flag">' + esc(dur) + '</span>' : '') +
+      '</div>' +
+      (detail ? '<div class="fr-c-detail">' + esc(detail) + '</div>' : '') +
+      (err ? '<div class="fr-c-err">' + esc(err) + '</div>' : '') +
+      (last ? '' : '<div class="fr-stage-line"></div>') +
+    '</div>';
+  }
+
+  function renderStages() {
+    const d = stagesData || {};
+    const stages = d.stages || d.items || [];
+    const pid = d.plan_id || stagesPlanId || "";
+    setSub(STAGES, pid ? ("计划 " + pid + " · " + stages.length + " 个阶段")
+      : (stages.length + " 个阶段"));
+    setTools(STAGES,
+      '<button type="button" class="fr-tbtn" data-act="reload">🔄 刷新</button>' +
+      '<span class="fr-tip">数据来自 get_stages，按执行顺序排成时间线</span>');
+    if (!stages.length) {
+      setBody(STAGES, '<div class="fr-empty">还没有执行阶段记录。<br>' +
+        '<span class="fr-dim">任务开始执行后，这里会按时间线显示每一步。</span></div>');
+      return;
+    }
+    setBody(STAGES, '<div class="fr-timeline">' +
+      stages.map(function (st, i) { return stageCardHtml(st, i, stages.length); }).join("") +
+      '</div>');
+  }
+
+  // ============================================================ 失败分类看板
+  const FAILK = "frFailKinds";
+  let failkData = null;
+
+  async function loadFailKinds() {
+    setBody(FAILK, '<div class="fr-empty">加载中…</div>');
+    const d = await api("/api/actlog/top_fail_kinds?n=10");
+    failkData = d || { items: [] };
+    renderFailKinds();
+  }
+
+  function renderFailKinds() {
+    const d = failkData || {};
+    const items = d.items || [];
+    setSub(FAILK, items.length ? "共 " + items.length + " 类失败 · 按次数降序" : "暂无失败记录");
+    setTools(FAILK,
+      '<button type="button" class="fr-tbtn" data-act="reload">🔄 刷新</button>' +
+      '<span class="fr-tip">数据来自 actlog 里已有的 fail_kind 字段，纯聚合不调模型</span>');
+    if (!items.length) {
+      setBody(FAILK, '<div class="fr-empty">还没有失败记录 🎉<br>' +
+        '<span class="fr-dim">自动迭代失败时会记下 fail_kind，这里按次数排给你看。</span></div>');
+      return;
+    }
+    const max = items.reduce(function (m, x) { return Math.max(m, x.count || 0); }, 1);
+    setBody(FAILK, items.map(function (x) {
+      const pct = Math.max(4, Math.round((x.count || 0) / max * 100));
+      return '<div class="fr-card fr-failk">' +
+        '<div class="fr-c-head"><b>' + esc(x.fail_kind) + '</b>' +
+          '<span class="fr-tag fr-tag-bad">' + (x.count || 0) + ' 次</span></div>' +
+        '<div class="fr-bar"><i style="width:' + pct + '%"></i></div>' +
+      '</div>';
+    }).join(""));
   }
 
   // ============================================================ 红点
@@ -404,9 +698,15 @@
     } catch (e) { /* 忽略 */ }
     try {
       const f = await api("/api/featradar/stats");
+      // 2026-11-16：新功能从【待批准】挪到【推荐新功能】后，红点必须把
+      // 「自动反思里想出来、还没批的新功能」也算上，否则用户看不到提示。
+      let n = (f && f.pending) || 0;
+      try {
+        const fp = await api("/api/selfiter/pending_features");
+        n += (fp && fp.total) || 0;
+      } catch (e) { /* 忽略 */ }
       const fd = document.getElementById("featDot");
       if (fd) {
-        const n = (f && f.pending) || 0;
         fd.hidden = !n;
         fd.title = n ? n + " 条新功能等你决定" : "";
       }
@@ -421,6 +721,16 @@
       ensurePanel(PEND, "📋 待批准", "所有还没执行的自动迭代任务");
       openPanel(PEND);
       loadPending();
+    });
+  }
+
+  const failkBtn = document.getElementById("failkBtn");
+  if (failkBtn) {
+    failkBtn.addEventListener("click", function (e) {
+      e.preventDefault();
+      ensurePanel(FAILK, "📊 失败分类", "自动迭代失败类型 Top 10（按次数）");
+      openPanel(FAILK);
+      loadFailKinds();
     });
   }
 
@@ -451,12 +761,26 @@
       return;
     }
 
+    if (t.closest("#" + FAILK)) {
+      const act = t.getAttribute("data-act");
+      if (act === "reload") { loadFailKinds(); return; }
+      return;
+    }
+
     if (t.closest("#" + FEAT)) {
       const act = t.getAttribute("data-act");
       if (act === "reload") { loadFeat(); return; }
       if (act === "think") { featThink(t); return; }
       const card = t.closest(".fr-card");
       if (!card) return;
+      // 待批准的新功能（来自自动反思的计划动作）走 selfiter 的批准/拒绝
+      const ppid = card.getAttribute("data-ppid");
+      if (ppid) {
+        const faid = card.getAttribute("data-faid");
+        if (act === "pok") { featPendApprove(ppid, faid); return; }
+        if (act === "pno") { featPendReject(ppid, faid); return; }
+        return;
+      }
       const fid = card.getAttribute("data-fid");
       if (act === "ok") { featApprove(fid); return; }
       if (act === "no") { featReject(fid); return; }
@@ -468,7 +792,7 @@
 
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
-    [PEND, FEAT].forEach(function (id) {
+    [PEND, FEAT, FAILK].forEach(function (id) {
       const box = document.getElementById(id);
       if (box && !box.hidden) closePanel(id);
     });

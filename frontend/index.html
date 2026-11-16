@@ -56,6 +56,22 @@
       <button type="button" class="mode-tab" data-mode="hive">👥 群聊</button>
     </div>
 
+    <!-- 顶栏快捷入口（2026-11-20）：待批准 / 推荐新功能。
+         只放按钮 + 角标，抽屉内容下一轮再做 —— 这里先保证入口存在、可点、
+         角标能由 app.js 的 refreshTopBadges() 更新（数字为 0 时自动隐藏）。 -->
+    <div class="top-quick" id="topQuick">
+      <button type="button" class="tq-btn" id="btnPending"
+              title="查看待批准的改动">
+        <span class="tq-ico">✅</span><span class="tq-txt">待批准</span>
+        <span class="tq-badge" id="pendingBadge" hidden>0</span>
+      </button>
+      <button type="button" class="tq-btn" id="btnSuggest"
+              title="看看推荐的新功能">
+        <span class="tq-ico">💡</span><span class="tq-txt">推荐新功能</span>
+        <span class="tq-badge" id="suggestBadge" hidden>0</span>
+      </button>
+    </div>
+
     <!-- 2026-11-13：模型状态卡改成可折叠 —— 标题行（圆点 + 模型名）常驻，
          明细（说明 / 模型信息 / 下载 / 自检）收进 sc-fold，点标题行展开收起。 -->
     <div class="status-card" id="statusCard">
@@ -131,6 +147,8 @@
 ="timelineBox">
       <details class="tl-fold" id="timelineFold">
         <summary class="tl-head">🕒 会话时间轴</summary>
+        <!-- 时间线卡片容器：由 livecard.js 的 renderTimeline() 渲染。
+             初始给一句空态提示，脚本接管后会整体重绘（空态文案也由脚本给）。 -->
         <div class="tl-list" id="timelineList">本会话暂无自动改动</div>
       </details>
     </section>
@@ -576,15 +594,16 @@
         <option value="deepseek-v4-pro">🔮 DS V4 Pro</option>
       </select>
       <button type="button" class="pill pill-btn askmode-btn" id="askModeBtn"
-              title="模型在动手前会问你多少问题：快速了解 = 只问最关键的几条；深度询问 = 分多轮把关键信息问透。点这里切换（下一次提问生效）。">快速问</button>
-      <!-- 【待批准】（2026-11-16 用户要求）：所有还没执行的自动迭代任务，
-           点开是一张卡片，能逐条批准/拒绝、写备注微调。红点 = 有几条在等。 -->
-      <button type="button" class="pill pill-btn" id="pendingBtn"
-              title="待批准：所有还没执行的自动迭代任务。可以逐条批准/拒绝，也能写备注微调后再批准">📋 待批准<span class="iter-dot" id="pendingDot" hidden></span></button>
-      <!-- 【推荐新功能】（2026-11-16 用户要求）：模型想出来的、能提高体验的
-           **全新功能**（不是优化）。点开看详情、批准或拒绝、写备注微调。 -->
-      <button type="button" class="pill pill-btn" id="featBtn"
-              title="推荐新功能：模型想出来的、能提高你使用体验的全新功能。点开看详情，批准后它就去写代码">💡 推荐新功能<span class="iter-dot" id="featDot" hidden></span></button>
+              title="模型在动手前会问你多少问题：快速了解 = 只问最关键的几条；深度询问 = 分多轮把关键信息问透。点这里切换（下一次提问生效）。"
+              aria-label="询问方式：快速">快速问</button>
+      <!-- 【待批准】【推荐新功能】（2026-11-16 用户要求）：放在设置按钮旁边。
+           顶栏已满，所以用「图标 + 短文字」的紧凑样式（.tq-btn），
+           红点计数 span 初始 hidden，有数据时由 app.js 的 refreshTopBadges() 显示。
+           注意：这里刻意**不加 data-cfg**，避免被布尔开关逻辑接管。 -->
+      <button type="button" class="pill pill-btn tq-btn" id="pendingBtn"
+              title="待批准：所有还没执行的自动迭代任务。可以逐条批准/拒绝，也能写备注微调后再批准">✅ 待批准<span class="iter-dot tq-badge" id="pendingDot" hidden>0</span></button>
+      <button type="button" class="pill pill-btn tq-btn" id="featBtn"
+              title="推荐新功能：模型想出来的、能提高你使用体验的全新功能。点开看详情，批准后它就去写代码">💡 推荐<span class="iter-dot tq-badge" id="featDot" hidden>0</span></button>
       <button type="button" class="pill pill-btn settings-btn" id="settingsBtn"
               title="设置：需要配 API Key 的 / 对话能力 / 模型与性能 / 开发与工具">⚙ 设置</button>
       <!-- 询问方式：**一个按钮**，按钮上直接显示当前选的是哪种，点开可切换。

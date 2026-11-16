@@ -34,7 +34,13 @@ CFG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
 # 关掉会**额外调用模型**的功能，保证脚本里的桩只服务本轮对话
 CFG.update({"web_enabled": False, "rag_enabled": False,
             "memory_enabled": False, "auto_memorize": False,
-            "code_auto_route": False, "code_model": ""})
+            "code_auto_route": False, "code_model": "",
+            # ⚠️ 2026-11-17 修：真实 config 的 default_model 是**云端** deepseek-flash，
+            #    而本测试走的是**本地 Ollama** 通道 —— 应用会正确拒绝并返回
+            #    「本地通道却配了云端模型」，于是桩一次都没被调用，8 条断言全红。
+            #    强制切回本地模型，测试才真的走到被测分支。
+            "default_model": "qwen3-vl:8b", "code_backend": "local",
+            "code_model_choice": "", "code_model_ds": ""})
 json.dump(CFG, open(os.path.join(TMP, "config.json"), "w", encoding="utf-8"),
           ensure_ascii=False)
 os.environ["MM_DATA_DIR"] = TMP

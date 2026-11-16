@@ -42,6 +42,91 @@ PREDICT_TRUNCATE_THRESHOLD = 700
 # 结尾固定输出的「已改文件 / 待办」分隔线
 _TAIL_SEP = "\n\n---\n"
 
+# ── 免确认语句识别（对应摩擦点「过度确认」×5）────────────────────
+# 用户已经明确授权「随便搞」时，不该再 ask_user 反复确认。
+# 命中下列模式即视为「已授权直接执行」，直接给计划并动手。
+_AUTO_APPROVE_PATTERNS = (
+    "权限给到最高",
+    "权限开到最高",
+    "权限拉满",
+    "权限全开",
+    "想怎么搞就怎么搞",
+    "想怎么改就怎么改",
+    "想怎么做就怎么做",
+    "随便怎么搞",
+    "随便改",
+    "随便弄",
+    "你看着办",
+    "你决定就行",
+    "你定就行",
+    "不用问我",
+    "别问我",
+    "不用确认",
+    "无需确认",
+    "不用再确认",
+    "直接干",
+    "直接搞",
+    "直接改",
+    "直接执行",
+    "放手去做",
+    "尽管去做",
+    "尽管改",
+    "只要不搞坏就行",
+    "只要不搞坏",
+    "别搞坏就行",
+    "不要搞坏就行",
+    "不搞坏就行",
+    "别弄坏就行",
+    "别改坏就行",
+    "全权交给你",
+    "全权授权",
+    "完全授权",
+    "我授权你",
+    "授权给你",
+)
+
+
+def is_auto_approved(user_input) -> bool:
+    """判断用户输入是否属于「免确认语句」——已明确授权直接执行。
+
+    对应摩擦点「过度确认」×5：用户已经说「权限给到最高」「想怎么搞就怎么搞」
+    「只要不搞坏就行」这类话时，系统还在 ask_user 反复确认，非常烦人。
+
+    命中任一模式即返回 True，调用方据此跳过 ask_user，直接给计划并执行。
+    空输入 / 非文本一律返回 False（保守：没授权就按原流程走）。
+    """
+    s = _as_text(user_input).strip()
+    if not s:
+        return False
+    # 压成单行，避免换行把关键词拆开导致漏判
+    flat = " ".join(s.split())
+    return any(p in flat for p in _AUTO_APPROVE_PATTERNS)
+
+
+def auto_approve_plan(user_input, plan=None) -> str:
+    """命中免确认语句时，生成「已授权 → 直接执行」的计划说明。
+
+    对应摩擦点「过度确认」：不再 ask_user，而是明确告诉用户
+    「已识别到你的授权，直接按下面计划执行」，让用户知道系统听懂了。
+
+    参数 plan 可选：本轮计划（str / list / dict 均可），会压成列表展示；
+    不传则给一句通用计划占位。
+    """
+    head = "已识别到你的授权（免确认），直接执行，不再追问。"
+    plan_text = _as_text(plan).strip() if plan else ""
+    if not plan_text:
+        return head + "\n\n**执行计划**：按你的要求直接动手；完成后汇报改动文件与验证方式。"
+    # 计划压成列表：按行/分号切，去掉空项
+    items = []
+    for line in plan_text.replace("；", "\n").replace(";", "\n").split("\n"):
+        line = line.strip().lstrip("-*·0123456789.、) ")
+        if line:
+            items.append(line)
+    if not items:
+        return head + "\n\n**执行计划**：按你的要求直接动手；完成后汇报改动文件与验证方式。"
+    body = "\n".join("- " + it for it in items)
+    return head + "\n\n**执行计划**：\n" + body
+
 
 # 内部调试占位符：不渲染给用户（对应「你好」那轮泄漏）
 # 说明：这些是思考块/调试面板的内部标记，一旦出现在正文里就是泄漏。
@@ -485,49 +570,6 @@ def _ensure_conclusion_label(conclusion: str) -> str:
     return "结论：" + s
 
 
-def _fold_middle_process(text: str, max_chars: int = MAX_REPLY_CHARS) -> str:
-    """单轮硬长度上限：超限时保留「结论段 + 最后一段」，中间过程折叠。
-
-    对应「回复被截断」：与其让平台在任意位置硬截断（用户拿到半截过程、
-    零信息），不如由闸门自己把中间过程折叠成一行提示 —— 结论段和最后一段
-    （通常是「下一步 / 验证方式」）永远保留，信息不丢。
-
-    行为：
-      · 未超限 → 原样返回；
-      · 超限 → 保留首段（结论段）+ 末段，中间折叠为「…（过程已折叠，共 N 字）」；
-      · 段落不足 3 段（无法折叠中间）→ 原样返回，交给 _enforce_hard_cap 兜底；
-      · 折叠后仍超限 → 交给 _enforce_hard_cap 做最后一道截断。
-    """
-    if not text:
-        return text
-    try:
-        max_chars = int(max_chars)
-    except Exception:                                   # noqa: BLE001
-        max_chars = MAX_REPLY_CHARS
-    if max_chars <= 0:
-        max_chars = MAX_REPLY_CHARS
-    if len(text) <= max_chars:
-        return text
-
-    # 按空行切段；段落不足 3 段时无法「保留首尾、折叠中间」
-    paras = text.split("\n\n")
-    if len(paras) < 3:
-        return text
-
-    head = paras[0].strip()
-    tail = paras[-1].strip()
-    middle = "\n\n".join(paras[1:-1])
-    if not middle.strip():
-        return text
-
-    folded = _FOLDED_PROCESS_NOTICE % len(middle)
-    out = head + "\n\n" + folded + "\n\n" + tail
-    # 折叠后仍超限 → 交给硬上限兜底（会附「已截断」提示）
-    if len(out) > max_chars:
-        return _enforce_hard_cap(out, max_chars)
-    return out
-
-
 def _enforce_hard_cap(text: str, hard_limit: int = HARD_MAX_CHARS) -> str:
     """出口硬上限：无论上游怎么组装，最终文本绝不超过 hard_limit 字。
 
@@ -848,224 +890,228 @@ def _predict_will_truncate(conclusion, process, artifacts, limit) -> bool:
 
 # 超过这个字数，正文部分折叠进 <details>（结论段永远留在外面）
 SHAPE_FOLD_THRESHOLD = 1200
-# 结尾「下一步 / 验证方式」缺失时补的兜底文案
-_SHAPE_NEXT_STEP_FALLBACK = "下一步：按上面的结论执行；验证方式：跑一遍相关命令/用例确认结果符合预期。"
-# 结尾判定：出现这些字样视为已经交代了「下一步 / 验证方式」
-_NEXT_STEP_MARKERS = ("下一步", "验证方式", "验证：", "验证方法", "接下来",
-                      "后续步骤", "如何验证", "怎么验证")
-# 结论段判定：首段命中这些前缀视为「已经是结论」
-_SHAPE_CONCLUSION_PREFIXES = _CONCLUSION_PREFIXES + (
-    "结论", "已完成", "未完成", "已修复", "未修复", "已改", "未改",
-    "通过", "未通过", "成功", "失败", "是", "否", "对", "不对",
-    "可以", "不可以", "能", "不能", "Yes", "No", "YES", "NO", "yes", "no",
-)
+# 单条消息字符硬上限：超过这个字数就截断，并提示「内容较长，已拆为多段」，
+# 下一轮继续输出剩余内容。
+# 与 HARD_MAX_CHARS 的区别：HARD_MAX_CHARS 是「整体出口闸」（6000 字，兜底用），
+# MAX_MESSAGE_CHARS 是「单条消息闸」（3000 字，主动拆轮）—— 与其让平台/前端
+# 在任意位置硬截断（用户拿到半截过程、零信息），不如由闸门自己拆成多段，
+# 每段都带明确的「回复『继续』看剩余」提示，让用户知道怎么拿剩余内容。
+MAX_MESSAGE_CHARS = 3000
+# 拆轮提示模板：告诉用户「内容较长，已拆为多段，回复『继续』看剩余」
+_SPLIT_NOTICE = "\n\n…（内容较长，已拆为多段，回复『继续』看剩余）"
+
+# ── postprocess：出口后处理层（结论前置 + 过程折叠 + 长度上限）──────
+# 说明：这是叠加在现有闸门之上的「最后一层」后处理，不改动任何现有闸门逻辑。
+# 对应历史失败 3 次：回复形态不稳定 —— 结论不在最前、过程太长、单轮超长。
+# 三个动作按顺序执行：
+#   ① 结论前置：首段不是结论句时，把最后一段结论提到最前；
+#   ② 过程折叠：超过 4000 字的思考块折叠成「▸ 展开」；
+#   ③ 长度上限：单轮硬上限 8000 字，超出截断并提示「继续请说下一轮」。
+
+# 思考块折叠阈值：单个思考块超过这个字数就折叠
+POSTPROCESS_THINK_FOLD_THRESHOLD = 4000
+# 单轮硬上限：postprocess 出口处最终文本绝不超过这个字数
+POSTPROCESS_HARD_CAP = 8000
+# 结论句关键词：首段命中任一即视为「已经是结论句」
+_CONCLUSION_KEYWORDS = ("结论", "已", "完成", "通过", "失败")
+# 思考块识别标记（成对出现时按块处理）
+_THINK_OPEN_MARKERS = ("<details>", "<details ", "🧠", "思考块", "思考内容")
+# 折叠后的思考块提示（用户点开才看）
+_THINK_FOLDED_NOTICE = "▸ 展开"
+# 截断提示（postprocess 专用，与 _TRUNCATE_NOTICE 区分）
+_POSTPROCESS_TRUNCATE_NOTICE = "…（已截断，继续请说「下一轮」）"
 
 
-def _shape_first_para(text: str) -> str:
-    """取首段（首个空行之前）作为「结论段」候选。"""
-    s = (text or "").strip()
-    if not s:
+def _first_para(text: str) -> str:
+    """取首段（首个空行之前），用于结论句判定。"""
+    if not text:
         return ""
-    return s.split("\n\n", 1)[0].strip()
+    return text.split("\n\n", 1)[0].strip()
 
 
-def _shape_is_conclusion(first_para: str) -> bool:
-    """首段是否已经是合格的「结论」：含 yes/no，或「已完成/未完成」类前缀。
-
-    比 _looks_like_conclusion 更宽松也更硬：只要首段以结论类前缀开头，
-    或首行以明确 yes/no 开头，就算合格 —— 这是「形态闸门」而不是「文风评分」。
-    """
-    s = (first_para or "").strip()
-    if not s:
-        return False
-    first_line = s.split("\n", 1)[0].strip()
-    if not first_line:
-        return False
-    if first_line.startswith(_SHAPE_CONCLUSION_PREFIXES):
-        return True
-    if _starts_with_yes_no(first_line):
-        return True
-    return False
-
-
-def _shape_has_next_step(text: str) -> bool:
-    """结尾是否已经交代了「下一步 / 验证方式」。"""
-    s = (text or "").strip()
-    if not s:
-        return False
-    # 只看最后 1/3，避免正文里出现「下一步」被误判
-    tail = s[-max(200, len(s) // 3):]
-    return any(m in tail for m in _NEXT_STEP_MARKERS)
-
-
-def _shape_fold_body(body: str) -> str:
-    """把超长正文折叠进 <details>；短正文原样返回。
-
-    与 _fold_process 的区别：这里不挑「过程口吻」，而是**按长度硬折叠** ——
-    超过 SHAPE_FOLD_THRESHOLD 的部分一律收进折叠块，保证正文永远短。
-    """
-    if not body:
+def _last_para(text: str) -> str:
+    """取最后一段（最后一个空行之后），用于「把结论提到最前」。"""
+    if not text:
         return ""
-    n = len(body)
-    if n <= SHAPE_FOLD_THRESHOLD:
-        return body
-    preview = body[:FOLD_PREVIEW].replace("\n", " ").strip()
-    return ("<details><summary>详细过程 %d 字，点开看</summary>\n\n%s\n\n"
-            "…（其余 %d 字已折叠）\n\n</details>") % (n, preview, n - FOLD_PREVIEW)
+    parts = text.rsplit("\n\n", 1)
+    if len(parts) < 2:
+        return ""
+    return parts[1].strip()
 
 
-def enforce_shape(text, user_input=None, suggested_action=None, actions=None,
-                  todos=None, max_chars=DEFAULT_MAX_CHARS) -> str:
-    """回复形态闸门（形态硬约束版）：结论前置 + 过程折叠 + 长度上限 + 空回复兜底。
+def _is_conclusion_para(para: str) -> bool:
+    """判断一段是否「结论句」：命中结论关键词即视为结论。
 
-    与 enforce() 的区别：本函数把「回复形态」当成**硬约束**来执行，而不是
-    尽量美化。对应三个高频摩擦点：
-
-      ① 只诊断不修复 —— 回复必须以「结论：」或明确的 yes/no 开头，
-         否则在首行前强制插入「结论：」；
-      ② 空回复 —— 空文本 / 纯空白 / 只有省略号视为**硬失败**，
-         直接返回「当前已知 + 下一步要查什么」兜底模板；
-      ③ 回复被截断 —— 超过 max_chars 时截断并显式提示「已截断」，
-         且过程一律折叠到 <details>，保证结论永远在最前面。
-
-    参数
-    ----
-    text : 模型产出的原始回复（str / list / dict 均可）
-    user_input : 最近一轮用户输入（用于空回复兜底模板的「已知」部分）
-    suggested_action : 建议的下一步动作（用于空回复兜底模板的「下一步」部分）
-    actions : 本轮动作列表（用于判定「已改 X 文件」与结构小结）
-    todos : 待办（用于结构小结）
-    max_chars : 整体长度上限
-
-    返回处理后的文本；任何异常都退回原文，绝不因为格式化而丢内容。
+    比 _looks_like_conclusion 更宽松 —— 这里只做「是不是结论」的粗判，
+    用于 postprocess 的结论前置，不追求严格形态。
     """
-    raw = _as_text(text)
-    try:
-        s = _strip_internal(raw.strip())
-
-        # ③ 空回复硬失败 → 「当前已知 + 下一步要查什么」兜底
-        if not s or s in ("…", "...", "。。。"):
-            known = _summarize_user_input(user_input)
-            nxt = _as_text(suggested_action).strip() or "请重试或换个说法"
-            return "当前已知：%s；下一步要查什么：%s" % (known, nxt)
-
-        # ① 结论前置：首行必须是「结论：」或明确的 yes/no
-        s = _force_conclusion_head(s)
-
-        # ② 过程折叠：把过程口吻的段落收进 <details>
-        s = _fold_process_paragraphs(s)
-
-        # ②b 长度硬折叠：正文超过 SHAPE_FOLD_THRESHOLD 的部分一律折叠，
-        #     保证「结论段」永远在正文最前面、不被长过程淹没。
-        first_para = _shape_first_para(s)
-        if first_para and len(s) > SHAPE_FOLD_THRESHOLD:
-            rest = s[len(first_para):].lstrip("\n")
-            if rest:
-                folded_rest = _shape_fold_body(rest)
-                s = first_para + "\n\n" + folded_rest
-
-        # 结构小结：有 patch 动作但没交代改了哪些文件 → 补「已改文件 / 待办」
-        s = _structure_check(s, actions, todos)
-
-        # ③ 结尾必须有「下一步 / 验证方式」—— 没有就补一句兜底
-        if not _shape_has_next_step(s):
-            s = s.rstrip() + "\n\n" + _SHAPE_NEXT_STEP_FALLBACK
-
-        # ③ 长度上限：超长截断并显式提示
-        try:
-            limit = int(max_chars)
-        except Exception:
-            limit = DEFAULT_MAX_CHARS
-        if limit <= 0:
-            limit = DEFAULT_MAX_CHARS
-        if len(s) > limit:
-            notice = "\n\n…（回复超过 %d 字，已截断；完整内容请点开过程或重试）" % limit
-            room = max(0, limit - len(notice))
-            s = s[:room].rstrip() + notice
-        # 单轮硬长度上限：超限时保留结论段 + 最后一段，中间过程折叠
-        s = _fold_middle_process(s, MAX_REPLY_CHARS)
-        # 出口硬上限：无论上游怎么组装，最终绝不超过 HARD_MAX_CHARS
-        s = _enforce_hard_cap(s)
-        return s
-    except Exception:                                   # noqa: BLE001
-        return raw
-
-
-# 明确的 yes/no 开头（结论前置的另一种合法形态）
-_YES_NO_PREFIXES = ("是", "否", "对", "不对", "可以", "不可以", "能", "不能",
-                    "Yes", "No", "YES", "NO", "yes", "no")
-
-
-def _starts_with_yes_no(text: str) -> bool:
-    """首行是否以明确的 yes/no 开头（结论前置的合法形态之一）。"""
-    s = (text or "").strip()
+    s = (para or "").strip()
     if not s:
         return False
-    first = s.split("\n", 1)[0].strip()
-    if not first:
-        return False
-    # 允许「是的」「不是」「可以，…」「不能，因为…」这类
-    for p in _YES_NO_PREFIXES:
-        if first.startswith(p):
-            # 避免误伤「是否…」这种提问
-            if first.startswith("是否"):
-                continue
-            return True
-    return False
+    return any(k in s for k in _CONCLUSION_KEYWORDS)
 
 
-def _force_conclusion_head(text: str) -> str:
-    """结论前置硬约束：首行必须是「结论：」或明确的 yes/no，否则强制补前缀。
+def _promote_conclusion(text: str) -> str:
+    """① 结论前置：首段不是结论句时，把最后一段结论提到最前。
 
-    与 _ensure_conclusion_first 的区别：本函数不做启发式/LLM 判定，
-    只做**硬性形态检查** —— 首行既不是结论类前缀、也不是 yes/no 开头，
-    就直接在首行前插入「结论：」。保证用户第一眼永远看到结论。
+    行为：
+      · 首段已含结论关键词 → 原样返回；
+      · 最后一段含结论关键词 → 把最后一段提到最前，其余保持原序；
+      · 最后一段也不含结论关键词 → 原样返回（不硬造结论，避免信息失真）。
     """
     if not text:
         return text
     s = text.strip()
     if not s:
         return text
-    first_line = s.split("\n", 1)[0].strip()
-    if not first_line:
+    first = _first_para(s)
+    if _is_conclusion_para(first):
         return text
-    # 已经是结论类前缀 → 合法
-    if first_line.startswith(_CONCLUSION_PREFIXES):
+    last = _last_para(s)
+    if not last or not _is_conclusion_para(last):
         return text
-    # 已经是明确 yes/no 开头 → 合法
-    if _starts_with_yes_no(first_line):
+    # 把最后一段提到最前，其余部分（去掉最后一段）保持原序
+    parts = s.rsplit("\n\n", 1)
+    body = parts[0].strip() if len(parts) > 1 else ""
+    if not body:
         return text
-    # 否则强制补「结论：」前缀
-    return "结论：" + s
+    return last + "\n\n" + body
 
 
-def _fold_process_paragraphs(text: str) -> str:
-    """把过程口吻的段落折叠到 <details>，结论段永远留在正文。
+def _fold_think_blocks(text: str) -> str:
+    """② 过程折叠：超过 4000 字的思考块折叠成「▸ 展开」。
 
-    判据：段落命中过程/诊断口吻（_is_suspicious_first_para），且不是结论类前缀。
-    折叠后的过程统一收进一个 <details> 块，避免正文被过程淹没。
+    识别两类思考块：
+      · <details>…</details> 块：整块超过阈值就折叠；
+      · 以 🧠 / 思考块 / 思考内容 开头的段落：超过阈值就折叠。
+    折叠后只留一行「▸ 展开」，不丢内容（原文仍在，只是收进提示）。
     """
     if not text:
         return text
-    paras = text.split("\n\n")
-    head_paras = []
-    body_paras = []
+    out = text
+    # 处理 <details> 块：逐个匹配，超阈值折叠
+    try:
+        import re as _re
+        def _fold_details(m):
+            block = m.group(0)
+            if len(block) <= POSTPROCESS_THINK_FOLD_THRESHOLD:
+                return block
+            return _THINK_FOLDED_NOTICE
+        out = _re.sub(r"<details[^>]*>.*?</details>", _fold_details, out, flags=_re.S)
+    except Exception:                                   # noqa: BLE001
+        pass
+    # 处理以思考标记开头的段落：按空行切段，超阈值折叠
+    paras = out.split("\n\n")
+    new_paras = []
     for p in paras:
-        ps = p.strip()
-        if not ps:
+        stripped = p.strip()
+        if not stripped:
+            new_paras.append(p)
             continue
-        if _is_suspicious_first_para(ps) and not ps.startswith(_CONCLUSION_PREFIXES):
-            body_paras.append(ps)
+        is_think = any(stripped.startswith(m) for m in _THINK_OPEN_MARKERS)
+        if is_think and len(stripped) > POSTPROCESS_THINK_FOLD_THRESHOLD:
+            new_paras.append(_THINK_FOLDED_NOTICE)
         else:
-            head_paras.append(ps)
-    head = "\n\n".join(head_paras).strip()
-    body = "\n\n".join(body_paras).strip()
-    if not body:
-        return head or text
-    folded = _fold_process(body, force=True)
-    if not head:
-        return folded
-    return head + "\n\n" + folded
+            new_paras.append(p)
+    return "\n\n".join(new_paras)
+
+
+def _cap_length(text: str, limit: int = POSTPROCESS_HARD_CAP) -> str:
+    """③ 长度上限：单轮硬上限 8000 字，超出截断并加提示。
+
+    截断点尽量落在段落边界，避免把一句话砍成半截；
+    末尾附「…（已截断，继续请说「下一轮」）」，让用户知道怎么继续。
+    """
+    if not text:
+        return text
+    try:
+        limit = int(limit)
+    except Exception:                                   # noqa: BLE001
+        limit = POSTPROCESS_HARD_CAP
+    if limit <= 0:
+        limit = POSTPROCESS_HARD_CAP
+    if len(text) <= limit:
+        return text
+    notice = _POSTPROCESS_TRUNCATE_NOTICE
+    room = max(0, limit - len(notice))
+    if room <= 0:
+        return text[:limit]
+    cut = text[:room]
+    # 尽量在段落边界截断
+    para_cut = cut.rfind("\n\n")
+    if para_cut > room // 2:
+        cut = cut[:para_cut]
+    return cut.rstrip() + notice
+
+
+def postprocess(text) -> str:
+    """回复出口后处理：结论前置 + 过程折叠 + 长度上限。
+
+    这是叠加在现有闸门之上的最后一层，不改动任何现有闸门逻辑。
+    三个动作按顺序执行：
+      ① 结论前置：首段不是结论句（不含「结论/已/完成/通过/失败」等词）时，
+         把最后一段结论提到最前；
+      ② 过程折叠：超过 4000 字的思考块折叠成「▸ 展开」；
+      ③ 长度上限：单轮硬上限 8000 字，超出截断并加「…（已截断，继续请说「下一轮」）」。
+
+    任何异常都退回原文本，绝不影响主回复。
+    """
+    try:
+        s = _as_text(text)
+        if not s or not s.strip():
+            return s
+        s = _promote_conclusion(s)
+        s = _fold_think_blocks(s)
+        s = _cap_length(s)
+        return s
+    except Exception:                                   # noqa: BLE001
+        return _as_text(text)
+# 结尾「下一步 / 验证方式」缺失时补的兜底文案
+# 明确的 yes/no 开头（结论前置的另一种合法形态）
+def _enforce_message_cap(text: str, limit: int = MAX_MESSAGE_CHARS) -> str:
+    """单条消息字符硬上限：超过 limit 就截断，并提示「已拆为多段」。
+
+    对应「回复被截断 36 次」的痛点 —— 换思路而不是继续加规则：
+    与其让平台/前端在任意位置硬截断（用户拿到半截过程、零信息），
+    不如由闸门自己主动拆轮，每段都带明确的「回复『继续』看剩余」提示。
+
+    行为：
+      · 未超限 → 原样返回；
+      · 超限 → 截到 limit 以内，末尾附 _SPLIT_NOTICE；
+      · 截断点尽量落在段落边界（\n\n），避免把一句话砍成半截；
+      · 若截断点落在 <details> 块内，整块丢弃并换成一行纯文本提示，
+        避免留下未闭合的 <details> 把后续内容吞掉。
+    """
+    if not text:
+        return text
+    try:
+        limit = int(limit)
+    except Exception:                                   # noqa: BLE001
+        limit = MAX_MESSAGE_CHARS
+    if limit <= 0:
+        limit = MAX_MESSAGE_CHARS
+    if len(text) <= limit:
+        return text
+
+    notice = _SPLIT_NOTICE
+    room = max(0, limit - len(notice))
+    if room <= 0:
+        return text[:limit]
+
+    cut = text[:room]
+    # 尽量在段落边界截断，避免半句话
+    para_cut = cut.rfind("\n\n")
+    if para_cut > room // 2:
+        cut = cut[:para_cut]
+
+    # 若截断点落在未闭合的 <details> 块内，整块丢弃并换成纯文本提示
+    if cut.count("<details") > cut.count("</details>"):
+        last_open = cut.rfind("<details")
+        if last_open > 0:
+            cut = cut[:last_open].rstrip()
+            cut = cut + "\n\n（过程过长，已省略）"
+
+    return cut.rstrip() + notice
 
 
 def enforce(text, user_input=None, suggested_action=None, actions=None, todos=None,
@@ -1155,6 +1201,9 @@ def enforce(text, user_input=None, suggested_action=None, actions=None, todos=No
                 out = head[:limit]
         # 出口硬上限：无论上游怎么组装，最终绝不超过 HARD_MAX_CHARS
         out = _enforce_hard_cap(out)
+        # 单条消息硬上限：超过 MAX_MESSAGE_CHARS 就主动拆轮，
+        # 提示「内容较长，已拆为多段」，下一轮继续输出剩余内容。
+        out = _enforce_message_cap(out)
         return out
     except Exception:                                   # noqa: BLE001
         return raw
@@ -1177,6 +1226,15 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
     conclusion = _strip_internal(_as_text(conclusion).strip())
     process = _strip_internal(_as_text(process).strip())
     artifacts = _strip_internal(_as_text(artifacts).strip())
+
+    # ★ 免确认语句识别：用户已明确授权（「权限给到最高」「想怎么搞就怎么搞」
+    #   「只要不搞坏就行」等）时，不再 ask_user，直接在结论前加一行「已授权，
+    #   直接执行」并附计划，避免用户已授权还在纠结。
+    #   对应摩擦点「过度确认」×5。
+    if is_auto_approved(user_input):
+        approve_note = auto_approve_plan(user_input, plan=process or conclusion)
+        if approve_note:
+            conclusion = approve_note + ("\n\n" + conclusion if conclusion else "")
 
     try:
         limit = int(max_chars)

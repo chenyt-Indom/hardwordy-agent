@@ -387,8 +387,15 @@ def _cycle(reason, focus_user, source):
         except Exception:                               # noqa: BLE001
             logger.debug("silent-except", exc_info=True)
 
+        # ★ 2026-11-16 用户要求：「信任模式关闭时，自动自我迭代（包括任务进行中
+        #   发现的问题和可优化的内容）也不要自动执行，全部放到待批准，并说明
+        #   原因和解决方案」。
+        #   这里原来写死 auto_execute=True —— 等于绕过了信任模式，任务一结束就
+        #   自动改代码，用户在「待批准」里根本看不到这些计划。
+        #   改成 None：由 reflect 内部按 settings.trust_mode 决定。
+        #   信任模式关 → 只生成计划 + 待批准（带原因/改法）；开 → 照旧自动执行。
         r = _si.reflect(trigger="event", use_web=use_web, focus=focus,
-                        auto_execute=True, polish=True)
+                        auto_execute=None, polish=True)
         out = r or {"ok": False}
 
         p = (r or {}).get("plan") or {}

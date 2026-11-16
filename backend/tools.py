@@ -3901,7 +3901,7 @@ def _img_ask_gate(arguments: dict, context: dict):
     设计取舍：
       · 只有**能弹框**（context["ask"] 可调用）时才问 —— 没有界面通道就放行，
         不能因为拦不到人就把功能卡死；
-      · 每轮只问一次（context["img_asked"]），问完不再纠缠；
+      · 每轮最多问一次（context["img_asked"]），问完不再纠缠；
       · 用户跳过/一条没填 → 按最合理的默认继续画，不让他白等。
     """
     if not isinstance(arguments, dict):
@@ -3932,7 +3932,7 @@ def _img_ask_gate(arguments: dict, context: dict):
                "question": "画面里还想要什么？（不填就按我的理解画）",
                "options": []})
 
-    ctx["img_asked"] = True              # 只问一次
+    ctx["img_asked"] = True              # 每轮最多问一次（图片询问专用，与 ask_user 无关）
     answers = ask({"questions": qs,
                    "hint": "🎨 画一张要几十秒，先确认这两点，画出来才不返工。"})
     if not answers:

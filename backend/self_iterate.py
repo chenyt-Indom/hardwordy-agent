@@ -827,101 +827,6 @@ def _is_probe(plan, act):
         return False
 
 
-def _verify_failure_real(fail_kind, days=7):
-    """校验 fail_kind 是否真实存在（反幽灵修复 / Phantom Guardrails）。
-
-    背景（arXiv:2611.17336v1 Phantom Guardrails）：模型会「修复」一个
-    根本不存在的失败类型 —— 幽灵修复。实测成功率只有 66%，其中相当一部分
-    是「修了一个从未发生过的 fail_kind」。
-
-    做法（2026-11-17 升级为双源校验）：
-      ① 主源：actlog（本模块自己的动作账本，list_actlog）；
-      ② 备源：actlog 模块的 task.json 事件账本（count_fail_kind_ex），
-         它按**时间窗**过滤，能识别「3 个月前出现过、近 7 天没发生」的幽灵。
-    两源任一命中即视为真实（宁可放行，也不要把真实失败误判成幽灵）。
-
-      · 计数 > 0 → 真实，放行；
-      · 计数 = 0 → 幽灵，拒绝立项，并往 actlog 记一条 phantom 事件留痕。
-
-    返回 {"ok": bool, "count": int, "reason": str, "source": str}。
-    任何异常都按「放行」处理 —— 校验坏了不能把整个迭代锁死。
-    """
-    fk = str(fail_kind or "").strip()
-    if not fk:
-        return {"ok": True, "count": 0, "source": "skip",
-                "reason": "fail_kind 为空，跳过校验"}
-    try:
-        n_days = float(days)
-    except (TypeError, ValueError):
-        n_days = 7.0
-    if n_days <= 0:
-        n_days = 7.0
-    cutoff = time.time() - n_days * 86400.0
-
-    # ---- 源 ①：本模块 actlog（动作账本）----
-    count = 0
-    try:
-        rows = list_actlog(500)
-    except Exception:                                   # noqa: BLE001
-        logger.debug("silent-except", exc_info=True)
-        rows = []
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        # 只认失败记录，且 fail_kind 要精确匹配
-        if str(r.get("result") or "") != "fail":
-            continue
-        if str(r.get("fail_kind") or "").strip() != fk:
-            continue
-        try:
-            t = time.mktime(time.strptime(str(r.get("ts") or "")[:19],
-                                          "%Y-%m-%d %H:%M:%S"))
-        except Exception:                               # noqa: BLE001
-            continue
-        if t >= cutoff:
-            count += 1
-    if count > 0:
-        return {"ok": True, "count": count, "source": "actlog",
-                "reason": "%s 近 %d 天真实失败 %d 次" % (fk, int(n_days), count)}
-
-    # ---- 源 ②：actlog 模块的 task.json 事件账本（按时间窗）----
-    # 只有「账本读得出来且确实是 0」才算幽灵；读不出来（ok=False）按放行处理。
-    try:
-        from . import actlog as _AL
-        n2, ok2 = _AL.count_fail_kind_ex(fk, days=int(n_days))
-    except Exception:                                   # noqa: BLE001
-        logger.debug("silent-except", exc_info=True)
-        n2, ok2 = 0, False
-    if n2 > 0:
-        return {"ok": True, "count": int(n2), "source": "task_events",
-                "reason": "%s 近 %d 天真实失败 %d 次（事件账本）"
-                          % (fk, int(n_days), int(n2))}
-    if not ok2:
-        # 账本读不出来 —— 不能据此判幽灵，放行
-        return {"ok": True, "count": 0, "source": "unavailable",
-                "reason": "%s 的失败账本读不出来，跳过幽灵校验" % fk}
-
-    # ---- 两源都是 0：确认幽灵，记一条 phantom 留痕 ----
-    try:
-        _actlog({"ts": _now(),
-                 "plan_id": "",
-                 "action": "phantom_guard",
-                 "title": "拒绝幽灵修复：%s" % fk[:60],
-                 "files": [],
-                 "result": "fail",
-                 "fail_kind": fk,
-                 "phantom": True,
-                 "detail": "%s 近 %d 天真实计数为 0（actlog + 事件账本双源），拒绝立项"
-                           % (fk, int(n_days)),
-                 "probe": False,
-                 "auto": False})
-    except Exception:                                   # noqa: BLE001
-        logger.debug("silent-except", exc_info=True)
-    return {"ok": False, "count": 0, "source": "phantom",
-            "reason": "%s 近 %d 天真实计数为 0（幽灵修复），拒绝立项"
-                      % (fk, int(n_days))}
-
-
 def _log_act(plan, act, ok, detail=""):
     """记录一条动作执行日志（用户可查「到底改没改」）。"""
     # ★ 2026-11-16 新增：把 fail_kind 的当前计数写进 evidence，供前端高亮。
@@ -2098,6 +2003,20 @@ def _llm_text(prompt, max_tokens=8192, temperature=0.55, want_json=False):
         from .deepseek_client import chat_stream, DeepSeekError
     except Exception as e:                              # noqa: BLE001
         return None, "导入 LLM 客户端失败：%s" % e
+    # ★★ 2026-11-17 用户要求：「自检和评估也是用当前的 LLM（例如 deepseek 那个），
+    #    但也不一定固定，跟随当前对话时用的模型」。
+    #    原来这里写死 "deepseek-flash" —— 自检、反思、体验评估、新功能构思
+    #    全都被锁在同一个模型上，用户在设置里换了模型也不生效。
+    #    现在统一问 iter_agent._pick_model()（它读配置：代码模型选择 / 有没有 Key /
+    #    本机默认模型），云端就用它，本地则走 Ollama。
+    _kind, _model = "cloud", "deepseek-flash"
+    try:
+        from . import iter_agent as _IA
+        _kind, _model, _ = _IA._pick_model()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("取当前模型失败，退回 deepseek-flash", exc_info=True)
+    if _kind == "local":
+        return _llm_text_local(prompt, max_tokens, temperature, _model)
     key = ""
     try:
         key = keyvault.get_key()
@@ -2109,7 +2028,7 @@ def _llm_text(prompt, max_tokens=8192, temperature=0.55, want_json=False):
     def _once(msgs, mt):
         buf = []
         for kind, txt in chat_stream(
-                msgs, "deepseek-flash", key, temperature=temperature,
+                msgs, _model or "deepseek-flash", key, temperature=temperature,
                 max_tokens=mt, thinking=False,
                 # 取 JSON 时不能把「（输出达到 max_tokens 上限被截断）」混进正文，
                 # 那行中文会插在 JSON 中间，结构直接坏掉（2026-11-16 实测）
@@ -2145,6 +2064,34 @@ def _llm_text(prompt, max_tokens=8192, temperature=0.55, want_json=False):
         return None, "DeepSeek 失败：%s" % e
     except Exception as e:                              # noqa: BLE001
         return None, "%s: %s" % (type(e).__name__, e)
+
+
+def _llm_text_local(prompt, max_tokens=8192, temperature=0.55, model=""):
+    """用**本机 Ollama** 取一次纯文本（当前对话用本地模型时，自检/反思走这条）。
+
+    为什么需要（2026-11-17 用户要求「跟随当前对话时用的模型」）：
+    原来 `_llm_text` 只走 DeepSeek，没 Key 就直接返回错误 —— 于是
+    「本机模型聊天 + 自动反思」这个组合根本跑不起来。这里补上本地分支。
+    """
+    try:
+        from . import main as _main
+    except Exception as e:                              # noqa: BLE001
+        return None, "导入本机客户端失败：%s" % e
+    try:
+        resp = _main.client.chat(
+            [{"role": "user", "content": prompt}],
+            model=model or "", stream=False,
+            params={"temperature": temperature,
+                    "max_tokens": max(1024, int(max_tokens or 4096)),
+                    "think": False})
+        data = resp.json() if hasattr(resp, "json") else resp
+    except Exception as e:                              # noqa: BLE001
+        return None, "本机模型调用失败（%s）：%s: %s" % (
+            model or "默认", type(e).__name__, e)
+    txt = str((((data or {}).get("message") or {}).get("content")) or "").strip()
+    if not txt:
+        return None, "本机模型没有输出内容（模型：%s）" % (model or "默认")
+    return _strip_llm_notice(txt), None
 
 
 def _parse_json(txt):
@@ -2527,8 +2474,14 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
   "features": [{"title":"功能名","why":"为什么值得做（必须说清）","pain":"对应哪个痛点或预判","how":"大概怎么做","effort":"S|M|L","files":["backend/xxx.py","frontend/xxx.js"],"anchor":"改哪个函数","risk":"low|mid|high","verify":"怎么验证有效","theory":"理论/论文依据，没有就留空","assert_code":"必填，见下方说明"}],
   "questions": [{"q":"想问用户的一句话","why":"为什么这个信息会改变做法","options":["选项1","选项2"]}],
   "tech_takeaways": [{"title":"技术名","source":"来源","url":"链接","takeaway":"一句话要点","applicable":"对本项目有没有用，怎么用"}],
-  "actions": [{"title":"短标题","detail":"具体改什么、为什么","risk":"low|mid|high","files":["backend/xxx.py"]}]
+  "actions": [{"title":"短标题","why":"为什么要动这个（原因 + 证据，1~2 句）","detail":"解决方案：具体改哪个文件、怎么改、改完怎么验证","risk":"low|mid|high","files":["backend/xxx.py"]}]
 }
+
+⚠️ why 和 detail 会**原样显示在【待批准】卡片里给用户看**（信任模式关闭时，用户就是
+靠这两段判断该不该批），所以：
+· why 必须写清「为什么要动」——是哪个真实问题、哪条证据触发的，不要写「为了更好」这类空话；
+· detail 必须写清「怎么改」——改哪个文件、改成什么样、改完怎么验证，要能让用户看懂并判断；
+· 两段都要具体，不许互相复述。
 
 %s""" % (_PROJECT_BRIEF,
         "\n".join(sig_lines) or "（暂无）",
@@ -2929,6 +2882,10 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
         actions.append({
             "id": "a%d" % (i + 1),
             "title": str(a.get("title"))[:120],
+            # ★ 2026-11-16 用户要求「放到待批准并说明原因以及解决方案」：
+            #   why = 为什么要动（原因），detail = 准备怎么改（解决方案）。
+            #   以前只有 detail 一段，卡片上用户看不出「为什么」，只能凭标题猜。
+            "why": str(a.get("why") or "")[:400],
             "detail": str(a.get("detail") or "")[:900],
             "risk": (a.get("risk") or "mid").lower(),
             "files": files[:_MAX_FILES_PER_ACTION],
@@ -3652,10 +3609,22 @@ def classify_fail(msg):
     #   · 冷却闸门：反复修改熔断：xxx 在最近 60 分钟内已被自动改成功 N 次…
     #   · 硬熔断：xxx 已自动改 16 次、远超阈值（阈值 3），先停手换思路
     # 只匹配前者会把后者归到 other，看着像故障。
+    # ★ 2026-11-17：新增「LLM 直接操作」模式（iter_agent）的失败文案，
+    #   否则这些失败会全落到 other（界面上看着像不明故障）。
     for k in ("反复修改熔断", "占位式修补", "无法安全实施", "涉及文件过多",
-              "未接入主链路", "先停手", "远超阈值", "改动让自检问题"):
+              "未接入主链路", "先停手", "远超阈值", "改动让自检问题",
+              "护栏文件被修改"):
         if k in s:
             return "guard"
+    for k in ("模型没有改动任何文件", "LLM 评审拒绝"):
+        if k in s:
+            return "model"
+    for k in ("语法校验失败", "无法导入", "跑不起来"):
+        if k in s:
+            return "env"
+    for k in ("行为回归新增失败", "功能验收断言没过"):
+        if k in s:
+            return "unsolved"
     for k in ("没给出合法 JSON", "没有给出任何 patch", "模型没返回合法",
               "不是合法 JSON", "无法生成"):
         if k in s:
@@ -3670,8 +3639,291 @@ def classify_fail(msg):
     return "other"
 
 
-def _plan_patch_for_action(plan, action):
-    """让 LLM 针对这一条动作产出具体 patch（此时才读相关文件内容）。"""
+def _locate_files_for_action(plan, action):
+    """动作里没写文件、文本里也抠不出路径时，让模型自己从项目里挑。
+
+    ★ 2026-11-16 第三层根因（用户报「点了批准没反应」）：
+      featradar 生成的新功能说明全是「改会话存储结构、侧栏组件与上下文组装逻辑」
+      这种描述 —— 实测三条推荐**一个文件路径都没有**。路径抠不出来，执行就必然
+      报「没有可读的目标文件」，于是新功能一条都做不成，用户看到的只有
+      「已提交执行」和一片安静。
+      所以这里兜底问一次模型「按这个功能该动哪几个文件」。只在抠不出路径时
+      才调用，平时不花这次钱。
+
+    返回 (files, new_files, err)。只接受白名单内的真实代码文件。
+    """
+    try:
+        paths = []
+        for sub in ("backend", "frontend"):
+            base = _ROOT / sub
+            if not base.is_dir():
+                continue
+            for p in sorted(base.rglob("*")):
+                if not p.is_file() or p.suffix not in _ALLOWED_EXT:
+                    continue
+                rel = p.relative_to(_ROOT).as_posix()
+                if any(b in rel for b in _FORBIDDEN_PARTS):
+                    continue
+                if "__pycache__" in rel:
+                    continue
+                paths.append(rel)
+        if not paths:
+            return [], [], "项目里没找到可选文件"
+        listing = "\n".join(paths[:240])
+        prompt = (
+            "你是这个项目的工程师。下面有一个要做的新功能，请判断**该动哪几个文件**。\n\n"
+            "【功能】%s\n【做法】%s\n\n"
+            "【项目文件清单】\n%s\n\n"
+            "要求：\n"
+            "1. 只能从上面清单里选**已存在**的文件，最多 4 个，选最核心的；\n"
+            "2. 如果必须新建文件，放进 new_files（必须在 backend/ 或 frontend/ 下，"
+            "最多 2 个），命名要贴合项目习惯；\n"
+            "3. 不要选测试文件、临时文件、data/ 下的任何文件；\n"
+            "4. 只输出 JSON，不要解释：\n"
+            '{"files": ["backend/xxx.py"], "new_files": [], "why": "一句话"}'
+        ) % (str(action.get("title") or "")[:120],
+             str(action.get("detail") or "")[:600], listing)
+        txt, err = _llm_text(prompt, max_tokens=900, temperature=0.2,
+                             want_json=True)
+        if err or not txt:
+            return [], [], "定位文件失败：%s" % (err or "空返回")
+        data = _parse_json(txt)
+        if not isinstance(data, dict):
+            return [], [], "定位文件失败：模型没给出合法 JSON"
+
+        def _ok(rel, must_exist):
+            rel = str(rel or "").replace("\\", "/").strip().lstrip("./")
+            if not rel:
+                return False
+            if not rel.startswith(_ALLOWED_PREFIX):
+                return False
+            if not rel.endswith(_ALLOWED_EXT):
+                return False
+            if any(b in rel for b in _FORBIDDEN_PARTS):
+                return False
+            if must_exist and not (_ROOT / rel).is_file():
+                return False
+            return True
+
+        _f = [r for r in dict.fromkeys(data.get("files") or []) if _ok(r, True)]
+        _n = [r for r in dict.fromkeys(data.get("new_files") or []) if _ok(r, False)]
+        if not _f and not _n:
+            return [], [], "模型也没能定位到合适的文件"
+        logger.info("featradar 动作定位到文件：files=%s new=%s", _f[:4], _n[:2])
+        return _f[:4], _n[:2], ""
+    except Exception as e:                              # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return [], [], "%s: %s" % (type(e).__name__, e)
+
+
+_FIX_ROUNDS = 2          # 校验失败后，最多再让模型改几轮
+
+
+_REVIEW_PROMPT = """你在给一个自动迭代系统做**执行前评审**。下面这条改动已经排好队，
+马上就要动真实代码了。请判断它**该不该执行**。
+
+## 这条改动
+标题：%s
+说明：%s
+用户备注：%s
+目标文件：%s
+风险标注：%s
+
+## 只问三件事
+1. 能不能落地：目标文件是否对得上（新建文件也算对得上），需求与代码是否同一件事。
+2. 会不会搞坏：是否要改公共函数/删掉现有能力/动与需求无关的模块。
+3. 范围是否失控：是不是为了一个小需求要重写一大片。
+
+## 输出（只输出 JSON）
+{"ok": true 或 false, "reason": "一句话理由"}
+- **只有明显不该做**才给 false：目标文件根本不存在且不是新建、需求与代码完全对不上、
+  明确会删掉现有功能。
+- **拿不准就 true**。后面还有语法校验和行为回归兜底，你的职责是拦掉明显错误的，
+  不是挑剔写法或风格。
+"""
+
+
+def _llm_review_action(plan, action):
+    """执行前的 LLM 评审门禁（用户 2026-11-16：「每次迭代必须接入 LLM」）。
+
+    ⚠️ 这个函数原来是**只有调用、没有定义**（自动迭代自己加的，注释写着
+       2026-11-17），而调用点在 for 循环里无保护 —— 一旦跑到就 NameError，
+       整条迭代直接崩。这里补上实现。
+
+    ⚠️ fail-open：评审自身出错（没 key / 超时 / JSON 坏）一律**放行**。
+       评审是「多一道把关」，不能反过来变成「一坏就卡死所有自动改动」——
+       这个系统已经因为「兜底机制自己坏掉」卡过好几次。
+
+    ★ 2026-11-16 用户新要求：评审要能判断「这个改动会伤到哪些函数」。
+       做法：把 diff + 被改动文件的函数签名列表一起喂给模型，让它判断
+       「有没有误伤无关函数」。命中则拒绝，fail_kind=llm_review_reject。
+       为了不破坏原有「拿不准就放行」的语义，这里把「误伤无关函数」作为
+       **额外的拒绝理由**，而不是唯一判据 —— 模型说 ok=false 且给出
+       reason 时，reason 里带「误伤/无关函数/影响其他函数」等关键词，
+       就按 llm_review_reject 处理；否则仍按普通 reject 处理。
+    """
+    try:
+        if not load_settings().get("llm_review_before_change", True):
+            return {"ok": True, "reason": "评审已关闭"}
+        _files = [f for f in (action.get("files") or []) if isinstance(f, str)]
+        # ★ 新增：把 diff + 函数签名列表拼进 prompt，让模型判断「误伤无关函数」。
+        #   diff 用 action 里已有的 patch 字段（没有就退化为空），签名列表
+        #   用 _file_inventory 拿（它本来就会扫 backend/frontend 的函数名）。
+        _diff = ""
+        try:
+            _diff = str(action.get("diff") or action.get("patch") or "")[:4000]
+        except Exception:                           # noqa: BLE001
+            _diff = ""
+        _sigs = ""
+        try:
+            _inv = _file_inventory() or {}
+            _lines = []
+            for _f in _files[:8]:
+                _info = _inv.get(_f) or {}
+                _fns = _info.get("functions") or []
+                if _fns:
+                    _lines.append("%s: %s" % (_f, ", ".join(str(x) for x in _fns[:40])))
+            _sigs = "\n".join(_lines)[:3000]
+        except Exception:                           # noqa: BLE001
+            _sigs = ""
+        _extra = ""
+        if _diff or _sigs:
+            _extra = ("\n\n## 改动 diff（截断）\n%s\n\n## 被改动文件的函数签名\n%s\n"
+                      "\n请特别判断：这个改动**会不会误伤无关函数**（改了公共函数、\n"
+                      "删了别人在用的能力、动了与需求无关的模块）。\n"
+                      "如果会误伤，ok=false 并在 reason 里写明「误伤无关函数：…」。\n"
+                      % (_diff or "（无）", _sigs or "（无）"))
+        prompt = _REVIEW_PROMPT % (
+            action.get("title") or "",
+            (action.get("detail") or "")[:1200],
+            action.get("note") or "（无）",
+            "、".join(_files[:8]) or "（未指定）",
+            action.get("risk") or "未标注",
+        ) + _extra
+        txt, err = _llm_text(prompt, max_tokens=400, temperature=0.1,
+                             want_json=True)
+        if err:
+            return {"ok": True, "reason": "评审不可用，放行：%s" % err}
+        d = _parse_json(txt)
+        if not isinstance(d, dict) or "ok" not in d:
+            return {"ok": True, "reason": "评审输出无法解析，放行"}
+        _ok = bool(d.get("ok"))
+        _reason = str(d.get("reason") or "").strip()
+        # ★ 命中「误伤无关函数」时打上 fail_kind，方便统计和前端展示。
+        _hit = False
+        if not _ok:
+            _low = _reason.lower()
+            _hit = any(k in _reason for k in (
+                "误伤", "无关函数", "影响其他函数", "影响无关",
+                "公共函数", "删掉现有", "删了现有",
+            )) or any(k in _low for k in (
+                "unrelated", "collateral", "break other",
+            ))
+        out = {"ok": _ok, "reason": _reason}
+        if _hit:
+            out["fail_kind"] = "llm_review_reject"
+        return out
+    except Exception as e:                          # noqa: BLE001
+        logger.warning("执行前评审异常，放行", exc_info=True)
+        return {"ok": True, "reason": "评审异常，放行：%s: %s" % (type(e).__name__, e)}
+
+
+def _retry_fix(plan, a, first_fail, orig_tag, base_fails, base_ok, on_ev=None):
+    """带着**真实失败原因**让 LLM 重改，最多 _FIX_ROUNDS 轮。
+
+    为什么要有这个（用户 2026-11-16 原话：「以后每次迭代必须接入 LLM 保证
+    迭代效果以及迭代顺利」）：
+      原来语法校验/行为回归一失败就直接回滚判死，模型**根本不知道自己改坏了
+      什么**。实测「意图回放」那条动作改了 4 个文件、回归 6 条红，整条作废 ——
+      它下次还会犯同样的错。现在把失败原文喂回去，让它照着修。
+
+    返回 (ok, last_fail, patches, tag, done_rels)。ok=True 时文件已应用且通过校验。
+    """
+    def _ev2(kind, **kw):
+        if on_ev:
+            try:
+                on_ev(kind, **kw)
+            except Exception:                       # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+    fail = first_fail
+    for i in range(1, _FIX_ROUNDS + 1):
+        try:
+            set_stage("patch", "%s 第 %d 次修正：%s" % (
+                a.get("id"), i, str(fail)[:60]))
+        except Exception:                           # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+        _ev2("step", text="%s 没通过校验（%s），让模型带着失败原因重改（第 %d/%d 次）…"
+            % (a.get("id"), str(fail)[:70], i, _FIX_ROUNDS))
+        _restore(orig_tag)                          # 先退回干净状态再重来
+        patches, err = _plan_patch_for_action(plan, a, prev_fail=fail)
+        if err:
+            return False, "修正轮生成失败：%s" % err, [], "", []
+        rels = []
+        bad = ""
+        for pt in patches:
+            rel = _norm_rel(pt.get("file"))
+            if not rel:
+                bad = "目标文件不在允许范围：%s" % pt.get("file")
+                break
+            rels.append(rel)
+        if bad:
+            fail = bad
+            continue
+        rels = list(dict.fromkeys(rels))
+        tag = "%s_%s_fix%d_%s" % (plan.get("id") or "", a.get("id"), i, _pid())
+        tag2, _saved, _created = _backup_files(rels, tag)
+        done_rels, fail_msg = [], ""
+        for pt in patches:
+            rel = _norm_rel(pt.get("file"))
+            ok, m = _apply_find_replace(rel, pt.get("find") or "",
+                                        pt.get("replace") or "")
+            if not ok:
+                fail_msg = m
+                break
+            done_rels.append(rel)
+        if fail_msg:
+            _restore(tag2)
+            fail = "patch 应用失败：%s" % fail_msg
+            continue
+        vbad = ""
+        for rel in dict.fromkeys(done_rels):
+            ok, m = _verify(rel)
+            if not ok:
+                vbad = "%s 语法校验失败：%s" % (rel, m)
+                break
+        if vbad:
+            _restore(tag2)
+            fail = vbad
+            continue
+        if load_settings().get("regress_after_change", True):
+            try:
+                from . import regress as _RG
+                _rr = _RG.run_disk(scope="quick")
+                now_fails = {str(x.get("name"))
+                             for x in (_rr.get("failed_items") or [])}
+                new_fails = now_fails - base_fails
+                if new_fails and base_ok:
+                    _restore(tag2)
+                    fail = "行为回归新增失败 %d 条：%s" % (
+                        len(new_fails), "；".join(sorted(new_fails)[:3]))
+                    continue
+            except Exception as e:                  # noqa: BLE001
+                _restore(tag2)
+                fail = "行为回归跑不起来（%s: %s）" % (type(e).__name__, e)
+                continue
+        a["backup"] = tag2
+        return True, "", patches, tag2, done_rels
+    return False, fail, [], "", []
+
+
+def _plan_patch_for_action(plan, action, prev_fail=""):
+    """让 LLM 针对这一条动作产出具体 patch（此时才读相关文件内容）。
+
+    prev_fail：上一轮改完**没通过真实验证**的原因。非空表示这是修正轮 ——
+    会把失败详情原样写进 prompt（用户 2026-11-16 要求「每次迭代必须接入 LLM，
+    保证迭代效果以及迭代顺利」：改坏了要让它看见自己改坏了什么，
+    而不是直接判死回滚，让人只看到一条红色失败）。
+    """
     want = [f for f in (action.get("files") or []) if isinstance(f, str)]
     _new_from_text = []          # 动作显式写了 files 时也要有定义
     if not want:
@@ -3698,7 +3950,14 @@ def _plan_patch_for_action(plan, action):
     new_files = [f for f in want if not (_ROOT / f).is_file()] + _new_from_text
     new_files = list(dict.fromkeys(new_files))[:2]
     if not files and not new_files:
-        return None, "没有可读的目标文件（动作里没写 files，文本里也没找到已存在的路径）"
+        # ★ 2026-11-16：先别放弃 —— 让模型自己说该动哪些文件。
+        #   新功能说明里通常只有「改会话存储结构」这种话，没有路径。
+        _lf, _ln, _lerr = _locate_files_for_action(plan, action)
+        if _lf or _ln:
+            files, new_files = _lf, _ln
+        else:
+            return None, ("没有可读的目标文件（动作里没写 files，文本里也没找到"
+                          "已存在的路径；让模型自己定位也没成功：%s）" % (_lerr or "未知"))
     # 2026-11-15 修：原来单文件硬截 14000 字符。selfdev.py 有 47904 字节，
     # 模型只看到前 30%，而要改的函数在后面 → 生成不出「一字不差」的 find，
     # 实测 2 条动作因此失败（error 都是「文件内容被截断，无法生成 find」）。
@@ -3768,6 +4027,17 @@ def _plan_patch_for_action(plan, action):
         ctx.append("### 待新建文件：%s\n（这个文件还不存在。要新建它，"
                    "patch 里把 find 写成空字符串 \"\"，replace 写完整文件内容。）" % rel)
 
+    _fail_block = ""
+    if prev_fail:
+        _fail_block = (
+            "\n## ⚠️ 上一轮改动被真实验证打回（这一轮必须修正）\n"
+            "你上一次给出的改动已经应用到文件上，系统随后跑了真实验证，结果是：\n"
+            "%s\n"
+            "这说明你的改法**破坏了现有功能**。这一轮请针对性修正：\n"
+            "· 先把上面这些断言修回通过（最常见的原因是你动了不该动的公共函数）；\n"
+            "· 与需求无关的文件、函数，一律还原成原样；\n"
+            "· 同时把需求本身做出来 —— 只修不实现，等于没做。\n" % prev_fail
+        )
     prompt = """你要在这个项目里实施一个已经获得用户批准的小改动。请输出**精确的查找替换**。
 
 ## 改动需求
@@ -3777,7 +4047,7 @@ def _plan_patch_for_action(plan, action):
 
 ## 涉及文件（当前内容）
 %s
-
+%s
 ## 硬性要求
 1. 只输出 JSON，不要任何解释文字。
 2. find 必须与文件内容**一字不差**（含缩进和换行），并且在整个文件里**只出现一次**。
@@ -3787,6 +4057,11 @@ def _plan_patch_for_action(plan, action):
      **不要为了"最小化"把改动做残** —— 半截的实现比不实现更糟；
    · 但**必须保证现有功能不被破坏**：不要删掉现有能力、不要改无关代码的行为、
      不要留下未接线的死代码；
+   · ★ **别误伤无关函数**（2026-11-16 实测教训）：`backend/main.py` 有 1.5 万行、
+     `backend/tools.py` 有 7 千行，它们往往只是**顺带被列进候选**的。
+     除非需求明确要求改它们，否则**一个字都不要动**。实测有动作为了实现
+     「存套路」顺手改了 main.py 里的回复裁剪 `_clip_reply`，结果 6 条回归断言
+     全红、整条动作被回滚，白干一场；
    · 改动面越大，越要**一次改完整**（所有相关处一起给），因为任何一处失败
      都会让整条动作回滚，等于白改；
    · 拿不准要不要动某处时，宁可多给一处 patch，也别让它跑不通。
@@ -3798,7 +4073,7 @@ def _plan_patch_for_action(plan, action):
 {"patches":[{"file":"backend/xxx.py","find":"原文片段","replace":"替换后片段"}]}
 （需要补段时：{"need":"函数名或特征代码"}）
 """ % (action.get("title"), action.get("detail"),
-       action.get("note") or "（无）", "\n\n".join(ctx))
+       action.get("note") or "（无）", "\n\n".join(ctx), _fail_block)
 
     txt, err = _llm_text(prompt, max_tokens=3600, temperature=0.2)
     if err:
@@ -4217,6 +4492,42 @@ def _residual_findings(plan):
             if (f.get("verify") or {}).get("verdict") == "verified"]
 
 
+def _check_phantom(action):
+    """检查一个动作是不是「幽灵修复」：按 fail_kind 统计近 7 天真实出现次数。
+
+    返回 dict：
+      {"ok": True, "phantom": False, "evidence": {...}}  正常，可执行
+      {"ok": True, "phantom": True, "reason": "...", "fail_kind": "..."}  幽灵，拒绝
+      {"ok": True, "phantom": False}  没有 fail_kind 字段，跳过检查
+
+    为什么需要（2026-11-17 用户要求）：
+      模型有时会凭空捏一个「失败」出来，然后针对它生成修复动作 —— 实际上
+      这个失败近 7 天根本没发生过。这种修复不仅浪费执行轮次，还可能把本来
+      正常的代码改坏。所以动手前先查账本：近 7 天真实出现次数为 0 → 拒绝。
+
+    数据源：actlog.count_fail_kind_ex（按时间窗过滤，不是按条数截断）。
+    账本读不出来（ok=False）时放行 —— 账本坏了不能挡住正常改动。
+    """
+    a = action or {}
+    fk = str(a.get("fail_kind") or "").strip()
+    if not fk:
+        return {"ok": True, "phantom": False}
+    try:
+        from . import actlog as _AL
+        n, ok = _AL.count_fail_kind_ex(fk, days=7)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return {"ok": True, "phantom": False}
+    if not ok:
+        # 账本读不出来 → 放行，不判幽灵
+        return {"ok": True, "phantom": False}
+    if n <= 0:
+        return {"ok": True, "phantom": True, "fail_kind": fk,
+                "reason": "幽灵修复：fail_kind=%s 近 7 天真实出现 0 次，拒绝执行" % fk}
+    return {"ok": True, "phantom": False,
+            "evidence": {"fail_kind": fk, "count": n}}
+
+
 @_exec_guard
 def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=None):
     """执行这次反思里所有 status=approved 的动作。带备份 + 校验 + 失败回滚。
@@ -4258,6 +4569,41 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     # 动手前最后一道复核：确认这些问题现在还真的存在
     precheck, _pre_note, _base = _precheck_actions(todo)
 
+    # ★ 2026-11-17 用户要求：拒绝「幽灵修复」—— 按 fail_kind 统计近 7 天
+    #   真实出现次数，计数为 0 说明这个失败根本没发生过，属于凭空捏的，
+    #   直接拒绝执行并记录；计数 >0 则把证据写进动作，供前端证据卡展示。
+    #   账本读不出来（ok=False）时放行 —— 账本坏了不能挡住正常改动。
+    _phantom_rejected = []
+    for _a in todo:
+        try:
+            _chk = _check_phantom(_a)
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+            _chk = {"ok": True, "phantom": False}
+        if _chk.get("phantom"):
+            _a["status"] = "rejected"
+            _a["error"] = _chk.get("reason") or "幽灵修复：近 7 天无真实失败记录"
+            _a["phantom"] = True
+            _phantom_rejected.append(_a.get("id"))
+            try:
+                _ev("phantom_reject", action_id=str(_a.get("id") or ""),
+                    fail_kind=str(_chk.get("fail_kind") or ""),
+                    reason=str(_a.get("error") or "")[:400])
+            except Exception:                           # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+        elif _chk.get("evidence"):
+            _a["evidence"] = _chk["evidence"]
+    if _phantom_rejected:
+        todo = [a for a in todo if a.get("status") == "approved"]
+        try:
+            save_plans(d)
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+        if not todo:
+            return {"ok": False, "done": 0, "total": 0, "results": [],
+                    "error": "全部动作都是幽灵修复（近 7 天无真实失败记录），已拒绝执行",
+                    "phantom_rejected": _phantom_rejected}
+
     def _card(a, patches, ok, error="", rolled_back=False, files=None, backup=""):
         """把一次动作的结果整理成前端代码卡片要的数据。
 
@@ -4285,6 +4631,27 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     results = []
     cancelled = False
     skipped = 0
+    # ★ 2026-11-17 用户要求「让时间线卡片有终点」：
+    #   最终复核分支要显式写 verify_pass / verify_fail 事件，
+    #   失败时附回滚原因，前端时间线卡片才能收尾（不再永远转圈）。
+    _verify_events = []          # 收集本轮所有 verify_pass / verify_fail
+    _rollback_reasons = []       # 收集回滚原因，供 verify_fail 汇总
+
+    def _emit_verify(ok, action_id="", reason="", files=None):
+        """写一条 verify_pass / verify_fail 事件，并记进 _verify_events。"""
+        kind = "verify_pass" if ok else "verify_fail"
+        payload = {"kind": kind, "action_id": str(action_id or ""),
+                   "reason": str(reason or "")[:400],
+                   "files": list(files or [])}
+        _verify_events.append(payload)
+        if not ok and reason:
+            _rollback_reasons.append(str(reason)[:400])
+        try:
+            _ev(kind, **payload)
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+        return payload
+
     for _i, a in enumerate(todo):
         _rp = {}                     # 自修轮的结果（没走自修就是空）
         if _stop():
@@ -4299,6 +4666,30 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
             results.append({"id": a["id"], "ok": True, "skipped": True, "why": _pwhy})
             _log_act(plan, a, True, _pwhy)
             _ev("step", text="%s 跳过：%s" % (a.get("id"), _pwhy))
+            # 跳过也算「复核通过」——问题已不存在，时间线卡片可以收尾
+            _emit_verify(True, a.get("id"), "复核通过（问题已不存在）：%s" % _pwhy,
+                         a.get("files") or [])
+            continue
+        # ★ 2026-11-17 用户要求「每次迭代必须接入LLM保证迭代效果」：
+        #   在 patch 生成后、执行前加一道 LLM 评审门禁。
+        #   把 diff + 目标文件 + 用户意图喂给模型，要求返回 {ok, reason}；
+        #   ok=false 则拒绝执行并记录 fail_kind='llm_reject'。
+        #   这是把「生成即执行」改成「生成→评审→执行」。
+        # ★ 2026-11-17：直接操作模式（iter_agent）下，评审挪到「模型改完之后、
+        #   拿真实 diff 去评」（iter_agent.run_action 第⑥步）。在这里再评一次
+        #   等于凭空多一次调用，而且那时改动还没生成、看不到 diff，判断没依据。
+        _rv = ({"ok": True, "reason": "直接操作模式：评审挪到改动后"}
+               if load_settings().get("iter_agent_enabled", True)
+               else _llm_review_action(plan, a))
+        if not _rv.get("ok"):
+            _why = str(_rv.get("reason") or "LLM 评审未通过")
+            a["status"] = "failed"
+            a["error"] = "LLM 评审拒绝：%s" % _why
+            a["fail_kind"] = "llm_reject"
+            results.append({"id": a.get("id"), "ok": False,
+                            "error": a["error"], "fail_kind": "llm_reject"})
+            _log_act(plan, a, False, a["error"], fail_kind="llm_reject")
+            _ev("step", text="%s 被 LLM 评审拒绝：%s" % (a.get("id"), _why))
             continue
         # 第二道：反复修改熔断（防止「越改越乱」）
         _lk, _lwhy = _loop_guard(
@@ -4327,6 +4718,79 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
             _ev("step", text="%s 熔断：%s" % (a.get("id"), _lwhy))
             _ev("code", **_card(a, [], False, _lwhy))
             continue
+        # ★★ 2026-11-17 用户要求：「我是要迭代时由 LLM 直接上手操作，而不是辅助」。
+        #    所以这里**完全替换**原来的「模型出 find/replace 补丁 → 系统应用」：
+        #    由 iter_agent 开一个工具循环，模型自己 list/read/edit/write/
+        #    run_cmd/run_check，做到它自己认为完成；系统只在**最后**做一次
+        #    独立复核（语法 / 能导入 / 行为回归 / 功能断言 / 真实 diff 评审），
+        #    不过就整条回滚，并把过程与失败原因落盘给人看。
+        #    ⚠️ 只有用户**主动在设置里关掉** iter_agent_enabled 时，才退回旧流程 ——
+        #      不做「悄悄退回」：否则用户会以为改是模型自己动手的，其实不是。
+        _ar, _agent_off = {}, False
+        try:
+            from . import iter_agent as _IA
+            _ev("step", text="%s %s · 由 LLM 直接动手（工具循环）…"
+                % (a.get("id"), a.get("title")))
+            _ar = _IA.run_action(plan, a, ev=_ev, stop=_stop) or {}
+            _agent_off = bool(_ar.get("skipped"))
+        except Exception as _e:                     # noqa: BLE001
+            logger.warning("直接操作执行器异常", exc_info=True)
+            _ar = {"ok": False,
+                   "error": "直接操作执行器异常：%s: %s" % (type(_e).__name__, _e)}
+        if not _agent_off:
+            _ah = _ar.get("hunks") or {}
+            _apt = [{"file": _r, "find": _h.get("find") or "",
+                     "replace": _h.get("replace") or ""}
+                    for _r, _hs in _ah.items() for _h in (_hs or [])]
+            _afiles = [str(x) for x in (_ar.get("changed") or [])]
+            a["agent"] = {"model": _ar.get("model"), "steps": _ar.get("steps"),
+                          "seconds": _ar.get("seconds"),
+                          "summary": _ar.get("summary") or "",
+                          "log": _ar.get("log") or ""}
+            if _ar.get("ok"):
+                a["status"] = "done"
+                a["error"] = ""
+                a["backup"] = _ar.get("backup_tag") or ""
+                a["changelog"] = _change_summary(_apt)
+                results.append({"id": a["id"], "ok": True, "files": _afiles,
+                                "backup": a["backup"],
+                                "changelog": a["changelog"],
+                                "agent": a["agent"]})
+                _log_act(plan, a, True, "LLM 直接操作：%s" % (
+                    a["changelog"].get("summary") or "、".join(_afiles)))
+                _ev("step", text="%s 完成（%s 步 / %s 秒，改动 %s）" % (
+                    a.get("id"), int(_ar.get("steps") or 0), _ar.get("seconds"),
+                    "、".join(_afiles) or "无"))
+                _cc = _card(a, _apt, True, "", False, _afiles, a["backup"])
+                _cc["agent_steps"] = int(_ar.get("steps") or 0)
+                _cc["agent_secs"] = _ar.get("seconds")
+                _ev("code", **_cc)
+            else:
+                _aerr = str(_ar.get("error") or "LLM 直接操作没做成")
+                # 用户要求「回滚，但把它的改动和失败原因存下来给我看」——
+                # 过程记录落盘在 data/iter_agent/logs/，这里把路径带上，
+                # 卡片上就能直接看到去哪查它每一步做了什么。
+                if _ar.get("log"):
+                    _aerr = "%s｜过程记录：%s" % (_aerr, _ar.get("log"))
+                a["status"] = "failed"
+                a["error"] = _aerr
+                results.append({"id": a["id"], "ok": False, "error": _aerr,
+                                "files": _afiles, "agent": a["agent"]})
+                _log_act(plan, a, False, _aerr)
+                _ev("step", text="%s 没做成：%s" % (a.get("id"), _aerr[:160]))
+                _cf = _card(a, _apt, False, _aerr,
+                            bool(_ar.get("rolled_back")), _afiles, "")
+                _cf["agent_steps"] = int(_ar.get("steps") or 0)
+                _cf["agent_secs"] = _ar.get("seconds")
+                _ev("code", **_cf)
+            if _stop():
+                cancelled = True
+                skipped = len(todo) - _i - 1
+                _ev("step", text="收到终止请求，剩余 %d 条动作不再执行" % skipped)
+                break
+            continue
+
+        _ev("step", text="%s 直接操作模式已关闭，退回旧的补丁流程" % a.get("id"))
         tag = "%s_%s_%s" % (pid, a["id"], _pid())
         _ev("step", text="%s %s · 正在生成改动方案…" % (a.get("id"), a.get("title")))
         patches, err = _plan_patch_for_action(plan, a)
@@ -4454,13 +4918,19 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 break
         if vbad:
             _restore(tag2)
-            a["status"] = "failed"
-            a["error"] = vbad + "（已自动回滚）"
-            results.append({"id": a["id"], "ok": False, "error": a["error"]})
-            _log_act(plan, a, False, a["error"])
-            _ev("step", text="%s 语法校验没通过，已自动回滚" % a.get("id"))
-            _ev("code", **_card(a, patches, False, a["error"], True))
-            continue
+            # ★ 2026-11-16：语法不过不再直接判死 —— 先让模型带着真实报错重改。
+            _ok2, vbad, _p2, tag2, done_rels = _retry_fix(
+                plan, a, vbad, tag2, _base_fails, _base_ok, _ev)
+            if not _ok2:
+                a["status"] = "failed"
+                a["error"] = vbad + "（已自动回滚）"
+                results.append({"id": a["id"], "ok": False, "error": a["error"]})
+                _log_act(plan, a, False, a["error"])
+                _ev("step", text="%s 语法校验没通过，已自动回滚" % a.get("id"))
+                _ev("code", **_card(a, patches, False, a["error"], True))
+                continue
+            patches = _p2
+            _ev("step", text="%s 语法报错已被修正轮修好" % a.get("id"))
 
         # 行为级回归：语法通过 ≠ 逻辑没坏。
         # 静态检查只看名字/结构，off-by-one、条件写反、返回值类型错位这类逻辑 bug
@@ -4501,13 +4971,22 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                     type(_e).__name__, _e)
         if rbad:
             _restore(tag2)
-            a["status"] = "failed"
-            a["error"] = rbad + "（已自动回滚）"
-            results.append({"id": a["id"], "ok": False, "error": a["error"]})
-            _log_act(plan, a, False, a["error"])
-            _ev("step", text="%s 行为回归没通过，已自动回滚" % a.get("id"))
-            _ev("code", **_card(a, patches, False, a["error"], True))
-            continue
+            # ★ 2026-11-16 用户要求「保证迭代顺利」：回归抓到破坏后，
+            #   先让它看见「哪几条断言红了」再改一遍，而不是直接作废。
+            #   实测「意图回放」那条就是因为顺手改了 main.py 的 _clip_reply
+            #   导致 6 条断言全红 —— 模型完全不知道，重试时还得犯同样的错。
+            _ok2, rbad, _p2, tag2, done_rels = _retry_fix(
+                plan, a, rbad, tag2, _base_fails, _base_ok, _ev)
+            if not _ok2:
+                a["status"] = "failed"
+                a["error"] = rbad + "（已自动回滚）"
+                results.append({"id": a["id"], "ok": False, "error": a["error"]})
+                _log_act(plan, a, False, a["error"])
+                _ev("step", text="%s 行为回归没通过，已自动回滚" % a.get("id"))
+                _ev("code", **_card(a, patches, False, a["error"], True))
+                continue
+            patches = _p2
+            _ev("step", text="%s 回归失败已被修正轮修好" % a.get("id"))
 
         # 修复质量闸门：语法过了、回归过了，也可能是「占位式修补」
         # （把出错的调用换成 return 0 —— 告警消失但语义是猜的）。
@@ -5695,6 +6174,28 @@ def _run_audit_impl(deep=False, source="manual", create_plan=True, auto_fix=None
     return out
 
 
+def audit_deep_default(settings=None) -> bool:
+    """自检要不要请 LLM 复核 —— 与 /api/selfiter/audit 的解析保持**一致**。
+
+    ★ 2026-11-16 修不一致：调度器的定时自检原来直接传 settings.deep_audit
+      （默认 False），于是「selfaudit_use_llm 默认 True」这条配置对**定时任务
+      完全无效** —— 手动点自检走 LLM 复核、每天 05:10 那次却不走，同一个功能
+      两种行为。用户问「自检是不是 LLM 接管」时，答案会因入口不同而不同。
+      现在统一：显式配了 selfaudit_use_llm 就听它的，否则退回 deep_audit。
+    """
+    try:
+        from . import config as _cfg
+        c = _cfg.load_config() or {}
+        # 默认 True —— 必须与 /api/selfiter/audit 的 `get("selfaudit_use_llm", True)`
+        # 完全一致，否则定时和手动又是两种行为。
+        if isinstance(c, dict):
+            return bool(c.get("selfaudit_use_llm", True))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    s = settings if isinstance(settings, dict) else load_settings()
+    return bool(s.get("deep_audit"))
+
+
 def audit_overview():
     """给前端：最近几次自检的摘要 + 最近一次的 findings。"""
     d = _audit_history()
@@ -6079,7 +6580,36 @@ def delete_plan(pid):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
-def list_pending_actions(days: int = 0, limit: int = 300) -> dict:
+_TRIGGER_ZH = {
+    "event": "任务结束后自动反思",
+    "daily": "每日定时反思",
+    "experience": "体验评估发现体验变差",
+    "audit": "代码自检发现问题",
+    "audit:tool": "代码自检发现问题",
+    "manual": "你手动点的反思",
+    "manual_added": "你手动记下的待办",
+    "featradar": "推荐新功能",
+    "diagnose": "任务结果不达标诊断",
+}
+
+
+def _is_feature_action(plan, action) -> bool:
+    """这条动作是「新功能」还是「改进/修复」。
+
+    ★ 2026-11-16 用户要求：「待批准里不能有新功能的批准，两个类别得分开，
+      目前是待批准里面有新功能的批准」。
+    判据两条（任一命中即算新功能）：
+      ① 动作自带 origin=="feature" —— reflect 把 features 转成动作时打的标；
+      ② 计划来自 featradar —— 用户批准某条推荐功能时造的单动作计划。
+    分开之后：改进/修复进【待批准】，新功能进【推荐新功能】。
+    """
+    if str((action or {}).get("origin") or "") == "feature":
+        return True
+    return str((plan or {}).get("trigger") or "") == "featradar"
+
+
+def list_pending_actions(days: int = 0, limit: int = 300,
+                         kind: str = "normal") -> dict:
     """跨所有计划收集「还没被执行的」动作，按计划分组。
 
     用户 2026-11-16 要求：「前端增加一个按钮【待批准】，点击后是一张卡片，
@@ -6089,11 +6619,22 @@ def list_pending_actions(days: int = 0, limit: int = 300) -> dict:
     找不到重点。按计划分组、每组显示摘要和时间，用户能顺着「那轮它在想什么」
     去判断该不该批。
 
+    kind: "normal"（默认，改进/修复）| "feature"（新功能）—— 两类**分开**，
+      互不混入。用户明确要求待批准里不许出现新功能的批准。
     days: 只看最近 N 天（0 = 全部）。默认全部，前端可以自己切。
+
+    每条动作都带两样东西，对应「放到待批准并说明原因以及解决方案」：
+      · why    —— 为什么要动这个（原因：动作自带的 why/root_cause，退化为计划摘要）
+      · detail —— 准备怎么改（解决方案，模型给的具体做法）
     """
     try:
         d = load_plans()
         _fix_review_states(d)
+        want_feature = str(kind or "normal").lower() in ("feature", "feat", "new")
+        try:
+            trust = bool(load_settings().get("trust_mode"))
+        except Exception:                               # noqa: BLE001
+            trust = False
         cut = 0.0
         if days and int(days) > 0:
             cut = time.time() - int(days) * 86400
@@ -6106,10 +6647,15 @@ def list_pending_actions(days: int = 0, limit: int = 300) -> dict:
                 st = str(a.get("status") or a.get("state") or "pending")
                 if st not in ("pending", "need_review"):
                     continue
+                if _is_feature_action(p, a) != want_feature:
+                    continue
+                why = (str(a.get("why") or "") or str(a.get("root_cause") or "")
+                       or str(p.get("summary") or p.get("title") or ""))
                 acts.append({
                     "id": str(a.get("id") or ""),
                     "title": str(a.get("title") or "")[:120],
                     "detail": str(a.get("detail") or "")[:900],
+                    "why": why[:400],
                     "risk": str(a.get("risk") or "mid"),
                     "files": [str(f) for f in (a.get("files") or []) if f][:8],
                     "status": st,
@@ -6123,23 +6669,43 @@ def list_pending_actions(days: int = 0, limit: int = 300) -> dict:
                 ts = _parse_ts(p.get("ts"))
                 if ts and ts < cut:
                     continue
+            trig = str(p.get("trigger") or "")
+            # 为什么这条停在这里没自动执行 —— 用户要求「说明原因」。
+            if not trust:
+                hold = "信任模式关闭：只生成计划、不自动改代码，等你批准"
+            elif any(x["status"] == "need_review" for x in acts):
+                hold = "被护栏拦下（改太频繁或高风险），需要你确认"
+            else:
+                hold = "等你批准"
             total += len(acts)
             groups.append({
                 "plan_id": str(p.get("id") or ""),
                 "ts": str(p.get("ts") or ""),
-                "trigger": str(p.get("trigger") or ""),
+                "trigger": trig,
+                "trigger_zh": _TRIGGER_ZH.get(trig, trig or "自动迭代"),
+                "hold_reason": hold,
                 "summary": str(p.get("summary") or p.get("title") or "")[:300],
                 "actions": acts,
                 "n": len(acts),
                 "n_review": sum(1 for x in acts if x["status"] == "need_review"),
             })
         groups.sort(key=lambda g: g["ts"], reverse=True)
-        return {"ok": True, "groups": groups[:60], "total": total,
+        return {"ok": True, "kind": "feature" if want_feature else "normal",
+                "groups": groups[:60], "total": total,
                 "n_groups": len(groups)}
     except Exception as e:                              # noqa: BLE001
         logger.warning("list_pending_actions failed: %s: %s", type(e).__name__, e)
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
                 "groups": [], "total": 0, "n_groups": 0}
+
+
+def list_pending_features(days: int = 0, limit: int = 300) -> dict:
+    """【推荐新功能】里的「待批准的新功能」—— 与【待批准】严格分开。
+
+    用户 2026-11-16：「待批准里不能有新功能的批准，两个类别得分开」。
+    这里只收 origin=="feature" / 来自 featradar 的计划。
+    """
+    return list_pending_actions(days=days, limit=limit, kind="feature")
 
 
 def _parse_ts(s) -> float:

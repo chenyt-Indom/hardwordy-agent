@@ -108,6 +108,185 @@
     bubble.appendChild(wrap);
   }
 
+  // ============================================================
+  // 画布圈选再改（2026-11-16）
+  // ------------------------------------------------------------
+  // 用户诉求：一轮回复里往往混着「说明文字 + 图片 + PPT + 网页链接」，
+  //   想只改其中某一块，却只能整段重发 —— 模型经常把没让改的地方也动了。
+  // 做法：
+  //   · split_blocks(reply) 把一轮回复按类型拆成 block 对象
+  //     { id, type, content }，type ∈ text / image / ppt / web；
+  //   · block_context(blocks, id) 返回选中块的原文（给后端当上下文）；
+  //   · 前端在气泡上做块级圈选（点击 / 拖选高亮）与箭头连线合并两块，
+  //     选中后把 block_context 结果随消息一起发给后端。
+  // 无选中时 block_context 返回空串，调用方按旧逻辑走（降级）。
+  // ============================================================
+
+  // 从一段文本里识别「块」：图片 markdown / 网页链接 / PPT 文件引用 / 普通文字。
+  // 返回 [{type, content}]，content 是这一块的原文（不含分隔用的空行）。
+  function split_blocks(reply) {
+    const src = String(reply == null ? "" : reply);
+    if (!src.trim()) return [];
+    const blocks = [];
+    let buf = [];
+    const flushText = () => {
+      const t = buf.join("\n").replace(/^\s*\n+|\n+\s*$/g, "");
+      if (t.trim()) blocks.push({ type: "text", content: t });
+      buf = [];
+    };
+    // 逐行扫：命中「独立成块的媒体/链接」就先把累积的文字块收掉，再单独成块。
+    const lines = src.split(/\r?\n/);
+    const IMG_RE = /^\s*!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)\s*$/;
+    const PPT_RE = /^\s*(?:\[?[^\]]*\]\(([^)\s]+\.(?:pptx?|key)(?:\?[^)\s]*)?)\)|([^\s]+\.(?:pptx?|key)))\s*$/i;
+    const WEB_RE = /^\s*(?:[-*+]\s+)?(?:\[([^\]]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s]+))\s*$/;
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      let m;
+      if ((m = IMG_RE.exec(ln))) {
+        flushText();
+        blocks.push({ type: "image", content: ln.trim() });
+        continue;
+      }
+      if ((m = PPT_RE.exec(ln))) {
+        flushText();
+        blocks.push({ type: "ppt", content: ln.trim() });
+        continue;
+      }
+      if ((m = WEB_RE.exec(ln))) {
+        flushText();
+        blocks.push({ type: "web", content: ln.trim() });
+        continue;
+      }
+      buf.push(ln);
+    }
+    flushText();
+    // 补 id：b0 / b1 / b2 …（稳定、可预测，方便前端和后端对齐）
+    return blocks.map((b, i) => ({ id: "b" + i, type: b.type, content: b.content }));
+  }
+
+  // 取选中块的原文。id 可以是单个 id，也可以是 id 数组（连线合并两块时用）。
+  // 找不到 / 没选中 → 返回空串（调用方据此降级为旧行为）。
+  function block_context(blocks, id) {
+    const list = Array.isArray(blocks) ? blocks : [];
+    if (!list.length || id == null) return "";
+    const ids = Array.isArray(id) ? id : [id];
+    const picked = [];
+    ids.forEach((one) => {
+      const b = list.find((x) => x && x.id === one);
+      if (b && typeof b.content === "string" && b.content.trim()) picked.push(b);
+    });
+    if (!picked.length) return "";
+    // 单块：直接给原文；多块（合并）：按类型加个小标题，让模型知道这是几块拼起来的
+    if (picked.length === 1) return picked[0].content;
+    return picked.map((b) => "【" + b.type + "】\n" + b.content).join("\n\n");
+  }
+
+  // 把 split_blocks 的结果渲染成可圈选的块（挂在气泡里）。
+  // 返回一个句柄，供 app.js 读取当前选中 / 连线状态。
+  function mountBlocks(bubble, reply) {
+    if (!bubble) return null;
+    const blocks = split_blocks(reply);
+    if (!blocks.length) return null;
+    const wrap = document.createElement("div");
+    wrap.className = "blk-wrap";
+    wrap.setAttribute("data-blk-count", String(blocks.length));
+    wrap.innerHTML = blocks.map((b) =>
+      '<div class="blk" data-blk-id="' + esc(b.id) + '" data-blk-type="' + esc(b.type) + '">'
+      + '<span class="blk-tag">' + esc(b.type) + '</span>'
+      + '<div class="blk-body">' + esc(b.content) + '</div>'
+      + '</div>'
+    ).join("");
+    bubble.appendChild(wrap);
+
+    const state = { blocks: blocks, selected: [], links: [] };
+    const blkEls = () => Array.from(wrap.querySelectorAll(".blk"));
+    const idOf = (el) => (el ? el.getAttribute("data-blk-id") : "");
+    const elOf = (id) => wrap.querySelector('.blk[data-blk-id="' + id + '"]');
+
+    function paint() {
+      blkEls().forEach((el) => {
+        const id = idOf(el);
+        el.classList.toggle("sel", state.selected.indexOf(id) >= 0);
+        el.classList.toggle("linked", state.links.some((p) => p.indexOf(id) >= 0));
+      });
+    }
+
+    // 点击：单选 / Ctrl(⌘) 多选切换
+    wrap.addEventListener("click", (e) => {
+      const el = e.target.closest ? e.target.closest(".blk") : null;
+      if (!el) return;
+      const id = idOf(el);
+      const multi = e.ctrlKey || e.metaKey;
+      if (multi) {
+        const i = state.selected.indexOf(id);
+        if (i >= 0) state.selected.splice(i, 1); else state.selected.push(id);
+      } else {
+        state.selected = state.selected.length === 1 && state.selected[0] === id ? [] : [id];
+      }
+      paint();
+      if (window.__onBlockSelect) window.__onBlockSelect(state);
+    });
+
+    // 拖选：从一块拖到另一块 → 高亮这一段（连续区间）
+    let dragFrom = null;
+    wrap.addEventListener("mousedown", (e) => {
+      const el = e.target.closest ? e.target.closest(".blk") : null;
+      if (!el) return;
+      dragFrom = idOf(el);
+    });
+    wrap.addEventListener("mouseup", (e) => {
+      if (!dragFrom) return;
+      const el = e.target.closest ? e.target.closest(".blk") : null;
+      const to = el ? idOf(el) : "";
+      if (to && to !== dragFrom) {
+        const ids = blocks.map((b) => b.id);
+        const a = ids.indexOf(dragFrom), b = ids.indexOf(to);
+        if (a >= 0 && b >= 0) {
+          const lo = Math.min(a, b), hi = Math.max(a, b);
+          state.selected = ids.slice(lo, hi + 1);
+          paint();
+          if (window.__onBlockSelect) window.__onBlockSelect(state);
+        }
+      }
+      dragFrom = null;
+    });
+
+    // 连线：按住 Shift 点两块 → 合并成一组（links 里存 [idA, idB]）
+    let linkFrom = null;
+    wrap.addEventListener("click", (e) => {
+      if (!(e.shiftKey)) return;
+      const el = e.target.closest ? e.target.closest(".blk") : null;
+      if (!el) return;
+      const id = idOf(el);
+      if (!linkFrom) { linkFrom = id; return; }
+      if (linkFrom !== id) {
+        state.links.push([linkFrom, id]);
+        state.selected = [linkFrom, id];
+        paint();
+        if (window.__onBlockSelect) window.__onBlockSelect(state);
+      }
+      linkFrom = null;
+    });
+
+    // 对外句柄：app.js 发消息时读它拿上下文
+    const handle = {
+      blocks: blocks,
+      getSelected: () => state.selected.slice(),
+      getLinks: () => state.links.map((p) => p.slice()),
+      context: () => block_context(blocks, state.selected),
+      clear: () => { state.selected = []; state.links = []; paint(); },
+    };
+    wrap.__blkHandle = handle;
+    return handle;
+  }
+
+  // 从气泡里找块句柄（发消息时用）
+  function handleOf(bubble) {
+    if (!bubble) return null;
+    const wrap = bubble.querySelector(".blk-wrap");
+    return wrap ? (wrap.__blkHandle || null) : null;
+  }
+
   function isOpen(card) { return card.classList.contains("open"); }
 
   function toggle(card) {
@@ -244,5 +423,9 @@
     }
   });
 
-  window.__Artifacts = { begin: begin, chip: chip, flush: flush, openWithSystem: openWithSystem };
+  window.__Artifacts = {
+    begin: begin, chip: chip, flush: flush, openWithSystem: openWithSystem,
+    split_blocks: split_blocks, block_context: block_context,
+    mountBlocks: mountBlocks, handleOf: handleOf,
+  };
 })();

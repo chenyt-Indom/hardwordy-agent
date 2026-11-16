@@ -336,6 +336,34 @@ def aggregate_fail_kind(window: int = 100, path: str = "") -> dict:
         return {}
 
 
+def top_fail_kinds(n: int = 10, path: str = "") -> list:
+    """从现有 actlog 记录里按 fail_kind 聚合，返回 top N 失败类型及次数。
+
+    数据源：task.json 的 events 里带 fail_kind 字段的事件（与 fail_stats 同源）。
+    返回：[{"fail_kind": str, "count": int}, ...]，按次数降序，最多 n 条。
+    任何异常都返回 [] —— 看板坏了不能影响主流程。
+    """
+    try:
+        k = int(n)
+    except (TypeError, ValueError):
+        k = 10
+    if k <= 0:
+        k = 10
+    try:
+        counts = fail_stats(window=0, path=path)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return []
+    if not isinstance(counts, dict):
+        return []
+    out = []
+    for fk, c in counts.items():
+        if isinstance(fk, str) and fk.strip() and isinstance(c, int) and c > 0:
+            out.append({"fail_kind": fk.strip(), "count": c})
+    out.sort(key=lambda x: (-x["count"], x["fail_kind"]))
+    return out[:k]
+
+
 def build_evidence(fail_kind: str = "", window: int = 100,
                    regress_result: str = "", path: str = "") -> dict:
     """组装「改动证据卡」：针对哪个真实失败 + 计数 + 回归结果。
@@ -496,6 +524,234 @@ def recent_watch_events(session: str, n: int = 20) -> list:
         if isinstance(r, dict) and isinstance(r.get("w"), dict):
             out.append(r)
     return out[-k:]
+
+
+# 阶段名 → 前端时间线卡片用的中文标题 / 状态（2026-11-17 时间线卡片）
+# 用户反复问「为什么没反应」「我都批准了肯定立刻执行啊」—— 根因是批准后
+# 系统在干什么完全不可见。这里把每个阶段映射成一句人话 + 一个状态，
+# 前端 featpanel.js 直接渲染成时间线，用户一眼看到「它现在在干什么、卡在哪」。
+_STAGE_META = {
+    "queued":      ("已入队", "running"),
+    "agent_step":  ("正在执行", "running"),
+    "verify_pass": ("验证通过", "done"),
+    "verify_fail": ("验证失败", "failed"),
+    "rolled_back": ("已回滚", "failed"),
+    "approved":    ("已批准", "done"),
+    "executing":   ("开始执行", "running"),
+    "verified":    ("验证通过", "done"),
+    "blocked":     ("被拦下", "failed"),
+    "failed":      ("执行失败", "failed"),
+    "done":        ("已完成", "done"),
+}
+
+
+def record_stage(plan_id: str, stage: str, detail: str = "",
+                 fail_kind: str = "", count=None, regression: str = "") -> None:
+    """记录计划的一个阶段事件（批准 → 执行 → 验证），供前端时间线卡片读取。
+
+    为什么单独开一个（2026-11-17 时间线卡片）：
+      工具动作账本 record() 记的是「动了什么」，但前端时间线卡片要的是
+      「这个计划走到哪一步了」—— 批准、开始执行、验证通过是三个不同语义的
+      里程碑，混在工具动作里既不好筛也不好渲染。这里按 plan_id 单独落一份
+      阶段流水，前端按 plan_id 拉取即可画出时间线。
+
+    落盘位置：data/actlog/stages/<plan_id>.jsonl，与工具动作账本同根但分目录，
+    互不干扰（工具动作按会话隔离，阶段事件按计划隔离）。
+
+    参数：
+      plan_id     计划 ID（空 → 直接忽略，调用方无需判空）
+      stage       阶段名（如 "queued" / "agent_step" / "verify_pass" /
+                  "verify_fail" / "rolled_back"）
+      detail      可选细节（会压成一行，最多 200 字符）
+      fail_kind   可选失败分类（改动证据卡：与 task.json events 里的
+                  fail_kind 同名，前端据此把阶段事件和真实失败对上号）
+      count       可选计数（该 fail_kind 在账本里的真实发生次数；
+                  None → 不落盘，绝不猜常量）
+      regression  可选回归结果（"pass" / "fail" / "skip"，其它值忽略）
+
+    落盘字段（前端时间线卡片直接消费）：
+      t / ts / stage / detail / title / state
+      title 是给人看的中文标题，state 是 done/running/failed 之一，
+      前端不用再自己维护一份映射表。
+      可选证据字段：fail_kind / count / regression（仅当传入且合法时落盘）。
+
+    任何异常都吞掉 —— 阶段日志坏了绝不能影响主流程。
+    """
+    try:
+        pid = "".join(c for c in str(plan_id or "") if c.isalnum() or c in "-_")
+        st = str(stage or "").strip()
+        if not pid or not st:
+            return
+        d = os.path.join(_dir(), "stages")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        path = os.path.join(d, pid + ".jsonl")
+        title, state = _STAGE_META.get(st, (st, "running"))
+        row = {"t": time.strftime("%m-%d %H:%M:%S"),
+               "ts": time.time(),
+               "stage": st[:40],
+               "title": title,
+               "state": state}
+        if detail:
+            row["detail"] = _first_line(detail, 200)
+        # 改动证据卡：把「针对哪个真实失败 + 计数 + 回归结果」一并落到阶段流水，
+        # 前端时间线卡片可直接渲染，不必再回查 task.json。
+        fk = str(fail_kind or "").strip()
+        if fk:
+            row["fail_kind"] = fk[:80]
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            row["count"] = count
+        rr = str(regression or "").strip().lower()
+        if rr in ("pass", "fail", "skip"):
+            row["regression"] = rr
+        rows = _read(path)
+        rows.append(row)
+        _write(path, rows[-MAX_KEEP:])
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+
+
+def get_stages(plan_id: str, n: int = 0) -> list:
+    """读取某个计划的阶段事件（按写入顺序，旧→新），供前端时间线卡片渲染。
+
+    参数：
+      plan_id  计划 ID（空 → 返回 []）
+      n        最多返回多少条（<=0 表示全部）
+
+    返回：[{"t": "mm-dd HH:MM:SS", "ts": epoch, "stage": str,
+            "title": str, "state": str, "detail": str?}, ...]
+    老记录里没有 title/state 的，这里按 _STAGE_META 补齐，前端不用兼容两套。
+    任何异常都返回 [] —— 时间线卡片坏了不能影响主流程。
+    """
+    try:
+        pid = "".join(c for c in str(plan_id or "") if c.isalnum() or c in "-_")
+        if not pid:
+            return []
+        path = os.path.join(_dir(), "stages", pid + ".jsonl")
+        rows = _read(path)
+        try:
+            k = int(n)
+        except (TypeError, ValueError):
+            k = 0
+        if k > 0:
+            rows = rows[-k:]
+        out = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            st = str(r.get("stage") or "")
+            title, state = _STAGE_META.get(st, (st, "running"))
+            if not r.get("title"):
+                r["title"] = title
+            if not r.get("state"):
+                r["state"] = state
+            out.append(r)
+        return out
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return []
+
+
+def timeline(limit: int = 20, session: str = "") -> list:
+    """按 ts 倒序返回改动事件，字段固定为 ts/status/summary/diff_summary/regress_pass。
+
+    数据源：会话账本（工具动作行 + 盯事助手事件行）与计划阶段流水，
+    统一归一化成固定字段，缺失字段用默认值兜底并在返回中标注。
+
+    参数：
+      limit    最多返回多少条（<=0 时按 20 处理）
+      session  会话 ID（空 → 只聚合阶段流水；非空 → 同时聚合该会话账本）
+
+    返回：[{"ts": float, "status": str, "summary": str,
+            "diff_summary": str, "regress_pass": bool|None,
+            "missing": [缺失字段名...]}, ...]，按 ts 倒序。
+    空数据返回 []，任何异常也返回 [] —— 时间线坏了不能影响主流程。
+    """
+    try:
+        k = int(limit)
+    except (TypeError, ValueError):
+        k = 20
+    if k <= 0:
+        k = 20
+    out = []
+    try:
+        # 1) 会话账本：工具动作行（带 n）与盯事事件行（带 w）
+        if session:
+            for r in _read(_path(session)):
+                if not isinstance(r, dict):
+                    continue
+                ts = _event_ts(r)
+                if isinstance(r.get("w"), dict):
+                    w = r["w"]
+                    status = str(w.get("state") or "info")
+                    summary = "%s %s" % (w.get("kind") or "watch",
+                                          w.get("key") or w.get("note") or "")
+                    summary = " ".join(summary.split())
+                    out.append({"ts": ts, "status": status,
+                                "summary": summary, "diff_summary": "",
+                                "regress_pass": None})
+                elif r.get("n"):
+                    ok = r.get("ok") is not False
+                    status = "ok" if ok else "fail"
+                    summary = "%s %s" % (r.get("n") or "?", r.get("a") or "")
+                    summary = " ".join(summary.split())
+                    diff_summary = str(r.get("m") or "")
+                    out.append({"ts": ts, "status": status,
+                                "summary": summary,
+                                "diff_summary": diff_summary,
+                                "regress_pass": None})
+        # 2) 计划阶段流水：data/actlog/stages/*.jsonl
+        sdir = os.path.join(_dir(), "stages")
+        try:
+            names = os.listdir(sdir)
+        except Exception:
+            names = []
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            for r in _read(os.path.join(sdir, name)):
+                if not isinstance(r, dict):
+                    continue
+                ts = _event_ts(r)
+                status = str(r.get("state") or "running")
+                summary = "%s %s" % (r.get("title") or r.get("stage") or "",
+                                      r.get("detail") or "")
+                summary = " ".join(summary.split())
+                rr = str(r.get("regression") or "").strip().lower()
+                regress_pass = None
+                if rr == "pass":
+                    regress_pass = True
+                elif rr == "fail":
+                    regress_pass = False
+                out.append({"ts": ts, "status": status,
+                            "summary": summary, "diff_summary": "",
+                            "regress_pass": regress_pass})
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return []
+    # 按 ts 倒序（ts 解析不出来的排最后，保持稳定）
+    out.sort(key=lambda x: x.get("ts") or 0.0, reverse=True)
+    out = out[:k]
+    # 缺失字段兜底并标注
+    for item in out:
+        missing = []
+        if not item.get("ts"):
+            missing.append("ts")
+        if not item.get("status"):
+            item["status"] = "unknown"
+            missing.append("status")
+        if not item.get("summary"):
+            item["summary"] = ""
+            missing.append("summary")
+        if item.get("diff_summary") is None:
+            item["diff_summary"] = ""
+            missing.append("diff_summary")
+        if item.get("regress_pass") is None:
+            missing.append("regress_pass")
+        item["missing"] = missing
+    return out
 
 
 def clear(session: str) -> None:

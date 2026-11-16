@@ -209,7 +209,13 @@ sch = T.make_schemas(True, True, True)
 tok = M._est_tokens(json.dumps(sch, ensure_ascii=False))
 print("     工具定义：%d 个，约 %d token" % (len(sch), tok))
 check("工具定义规模被记录下来了（超过 8000 token 时值得警惕）", tok > 0)
-check("系统提示本身不超过 5000 token", M._est_tokens(sysp) < 5000,
+# ⚠️ 2026-11-17：阈值从 5000 调到 6500。
+#   原因：系统提示里承载的是**用户多次明确追加的行为规范**（地图/天气/联网查证/
+#   回复长度分档/工具选用纪律…），这些不是冗余，删掉会直接让行为退化。
+#   实测当前 5747 token，而 5000 是早期（功能少得多时）定的数字。
+#   这条断言的价值是「防止**意外**膨胀」，所以留 750 token 余量继续盯着，
+#   而不是为了过测试去砍掉真实需求。
+check("系统提示本身不超过 6500 token（防意外膨胀）", M._est_tokens(sysp) < 6500,
       M._est_tokens(sysp))
 
 shutil.rmtree(TMP, ignore_errors=True)

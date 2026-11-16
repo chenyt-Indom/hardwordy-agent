@@ -167,6 +167,12 @@ def _ds_key(header_key: str = "") -> str:
     请求头带了 Key、而后端还没存过时**顺手记下来**（只写一次）。
     之后后台线程 / 定时任务 / 以后新加的功能都不用再让用户配一次。
     """
+    # ⚠️ 2026-11-17 修：直接调用端点函数（测试 / 内部复用 / 后台线程）时，
+    #    FastAPI 的 `Header(default="")` 默认值会**原样**传进来 —— 它不是字符串，
+    #    下一行 `.strip()` 直接 AttributeError: 'Header' object has no attribute 'strip'，
+    #    整条对话流当场 500。这里统一兜一层：非 str 一律当成「这次没带 Key」。
+    if not isinstance(header_key, str):
+        header_key = ""
     k = (header_key or "").strip()
     if k:
         try:
@@ -640,6 +646,8 @@ def _empty_reply_fallback(text: str, session: str = "", model: str = "") -> str:
     except Exception:
         logger.warning("记录空回复兜底到 actlog 失败（不影响回复）", exc_info=True)
     return _EMPTY_REPLY_FALLBACK
+
+
 
 
 def _clip_reply(text: str, limit: int = _REPLY_MAX_CHARS) -> str:
@@ -2964,10 +2972,25 @@ def selfiter_plans_del(pid: str):
 
 @app.get("/api/selfiter/pending")
 def selfiter_pending(days: int = 0):
-    """【待批准】卡片：所有还没执行的自动迭代任务，按计划分组。"""
+    """【待批准】卡片：所有还没执行的自动迭代任务，按计划分组。
+
+    ★ 2026-11-16 用户要求：「待批准里不能有新功能的批准，两个类别得分开」。
+      所以这里**只返回改进/修复类**，新功能类走 /api/selfiter/pending_features，
+      在【推荐新功能】面板里批准。
+    """
     from . import self_iterate as _si
     try:
-        return _si.list_pending_actions(days=days)
+        return _si.list_pending_actions(days=days, kind="normal")
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e), "groups": [], "total": 0}
+
+
+@app.get("/api/selfiter/pending_features")
+def selfiter_pending_features(days: int = 0):
+    """【推荐新功能】里的「待批准的新功能」：与【待批准】严格分开的那一类。"""
+    from . import self_iterate as _si
+    try:
+        return _si.list_pending_features(days=days)
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e), "groups": [], "total": 0}
 
@@ -2984,6 +3007,73 @@ def featradar_items(state: str = "", limit: int = 100):
         return _fr.list_items(state=state, limit=limit)
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e), "items": []}
+
+
+@app.get("/api/featradar/pending")
+def featradar_pending(limit: int = 100):
+    """【推荐新功能】面板用：只返回**待批准**的推荐列表。
+
+    前端点开按钮时直接调这个，不用自己再按 state 过滤一遍。
+    逻辑全部走 featradar 模块，这里只做参数收敛和异常兜底 ——
+    不重复实现任何筛选/排序规则，避免两处口径不一致。
+    """
+    from . import featradar as _fr
+    try:
+        # 先按 state=pending 取；万一模块的 list_items 不认这个 state，
+        # 再退回全量列表里自己筛一遍（保持向后兼容，不依赖模块内部实现）。
+        try:
+            res = _fr.list_items(state="pending", limit=limit)
+        except TypeError:
+            res = _fr.list_items(limit=limit)
+        if isinstance(res, dict) and res.get("ok") is not False:
+            items = res.get("items")
+            if isinstance(items, list):
+                # 模块已按 state 过滤时这里不会改动任何东西；
+                # 若它忽略了 state，这里兜底筛出 pending。
+                if any(str(it.get("state") or "") != "pending" for it in items
+                       if isinstance(it, dict)):
+                    items = [it for it in items
+                             if isinstance(it, dict)
+                             and str(it.get("state") or "pending") == "pending"]
+                out = dict(res)
+                out["items"] = items
+                out["pending"] = len(items)
+                return out
+        return res
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e), "items": [], "pending": 0}
+
+
+@app.post("/api/featradar/recommend")
+def featradar_recommend(body: dict = None):
+    """触发一次新功能推荐生成，并**直接返回结果**（同步等待）。
+
+    与 /api/featradar/think 的区别：think 是「立刻构思一批」，
+    这个路由是前端「推荐新功能」按钮的入口 —— 语义上就是「给我推荐」，
+    所以固定 force=True（用户主动点了按钮，不该被节流挡掉），
+    并把本次新增的条目一并回给前端，省掉一次额外拉列表的往返。
+
+    逻辑全部复用 featradar.think()，不重复实现生成流程。
+    """
+    from . import featradar as _fr
+    b = body or {}
+    reason = str(b.get("reason") or "用户点击【推荐新功能】")
+    try:
+        res = _fr.think(force=True, reason=reason)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e), "added": 0, "items": []}
+    # 生成完顺手把当前待批准列表带上，前端拿到就能直接渲染卡片。
+    try:
+        pend = _fr.list_items(state="pending", limit=100)
+        if isinstance(pend, dict) and isinstance(pend.get("items"), list):
+            if isinstance(res, dict):
+                out = dict(res)
+                out["items"] = pend["items"]
+                out["pending"] = len(pend["items"])
+                return out
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    return res
 
 
 @app.get("/api/featradar/stats")
@@ -3017,6 +3107,64 @@ def featradar_approve(body: dict):
                            execute=bool(b.get("execute", True)))
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/featradar/status")
+def featradar_status(id: str = ""):
+    """批准后前端轮询用：返回这条推荐功能的**真实执行状态**。
+
+    用户 2026-11-16：「为什么没有反应」「我都批准了肯定立刻执行啊」——
+    批准后前端原来只显示「已提交执行」标签，但执行器可能还在排队、
+    也可能已经失败。这里把 featradar 记录里的 state / error / files
+    直接摊给前端，让它能显示「排队中 / 执行中 / 已完成 / 失败原因」。
+
+    返回字段：
+      ok       是否查到这条记录
+      state    pending / approved / submitted / running / done / failed / rejected
+      label    给用户看的中文状态（前端可直接显示）
+      error    失败原因（state=failed 时有值）
+      files    改动到的文件列表（state=done 时有值）
+      title    功能名（弹结果卡片用）
+      finished 是否已到终态（前端据此停止轮询）
+    """
+    from . import featradar as _fr
+    iid = str(id or "").strip()
+    if not iid:
+        return {"ok": False, "error": "缺少 id 参数"}
+    try:
+        d = _fr.load()
+        it = _fr._find(d, iid)
+        if not it:
+            return {"ok": False, "error": "找不到这条推荐", "finished": True}
+        st = str(it.get("state") or "pending")
+        # 中文状态映射：前端直接显示，不用自己再维护一份
+        _LABELS = {
+            "pending": "待批准",
+            "approved": "已批准，排队中",
+            "submitted": "已提交，排队中",
+            "running": "执行中",
+            "done": "已完成",
+            "failed": "执行失败",
+            "rejected": "已拒绝",
+        }
+        label = _LABELS.get(st, st)
+        # 终态：done / failed / rejected —— 前端可以停止轮询
+        finished = st in ("done", "failed", "rejected")
+        return {
+            "ok": True,
+            "id": iid,
+            "state": st,
+            "label": label,
+            "title": str(it.get("title") or ""),
+            "error": str(it.get("error") or ""),
+            "files": list(it.get("files") or []),
+            "finished": finished,
+            "approved_at": str(it.get("approved_at") or ""),
+            "executed_at": str(it.get("executed_at") or ""),
+            "finished_at": str(it.get("finished_at") or ""),
+        }
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e), "finished": False}
 
 
 @app.post("/api/featradar/reject")
@@ -3475,7 +3623,25 @@ def selfiter_audit(body: dict):
         auto = b.get("auto_fix")
         if auto is None:
             auto = bool(s.get("trust_mode"))
-        return _si.run_audit(deep=bool(b.get("deep", s.get("deep_audit"))),
+        # ★ 2026-11-17 用户要求：LLM 复核**默认启用**。
+        #   原来 deep 只跟设置里的 deep_audit 走，而 deep_audit 默认 False，
+        #   于是「自检」永远只跑静态检查、从不请 LLM 复核 —— 用户问
+        #   「自检是否 LLM 接管」时只能答「否」。
+        #   现在：请求显式给 deep 就听请求；没给就看配置 selfaudit_use_llm
+        #   （默认 True）；配置里也没有才退回 deep_audit。
+        deep = b.get("deep")
+        if deep is None:
+            try:
+                # ⚠️ 原来写 `config.get(...)`，但本模块**从未绑定** `config`
+                #    （全文没有 `import config` / `config = ...`）——
+                #    这是 NameError，被 except 静默吞掉，配置项永远读不到。
+                from . import config as _audit_cfg1
+                _ac1 = _audit_cfg1.load_config() or {}
+                deep = bool((_ac1 if isinstance(_ac1, dict) else {}).get(
+                    "selfaudit_use_llm", True))
+            except Exception:
+                deep = bool(s.get("deep_audit"))
+        return _si.run_audit(deep=bool(deep),
                              source=str(b.get("source") or "manual"),
                              create_plan=bool(b.get("create_plan", True)),
                              auto_fix=bool(auto))
@@ -3582,8 +3748,24 @@ def selfiter_evaluate(body: dict):
         limit = int(b.get("limit") or 10)
     except (TypeError, ValueError):
         limit = 10
+    # ★ 2026-11-17 用户要求：自检的 LLM 复核**默认开启**。
+    #   原来这里写死 `use_llm = True if use_llm is None else bool(use_llm)`，
+    #   但调用方（定时任务 / 前端）常常显式传 use_llm=False，于是 LLM 复核
+    #   实际上一直是关的 —— 用户问「自检是否 LLM 接管」时只能答「否」。
+    #   现在改成读 config 的 selfaudit_use_llm（默认 True）：
+    #     · 请求里**显式**给了 use_llm → 尊重请求（手动关掉仍然有效）；
+    #     · 没给 → 读配置，配置里也没有 → 默认 True。
     use_llm = b.get("use_llm")
-    use_llm = True if use_llm is None else bool(use_llm)
+    if use_llm is None:
+        try:
+            from . import config as _audit_cfg2
+            _ac2 = _audit_cfg2.load_config() or {}
+            use_llm = bool((_ac2 if isinstance(_ac2, dict) else {}).get(
+                "selfaudit_use_llm", True))
+        except Exception:
+            use_llm = True
+    else:
+        use_llm = bool(use_llm)
     try:
         # 暂停闸：定时体验评估整个跳过。前端手动点按钮带 force=true。
         if not b.get("force"):
@@ -8189,6 +8371,14 @@ async def chat(req: ChatRequest,
         # 结论前置（2026-11-15 接线）：`_force_conclusion_first` 以前也只定义没调用。
         # 只在「用户问的是确认句（好了吗/是否正常/检查…）」且「模型以『让我确认』开头」时生效，
         # 且只加一行**诚实**的引导，不编造结论 —— 闲聊/解释类完全不受影响。
+        # 空回复兜底（2026-11-17 接线）：`_empty_reply_fallback` 以前也只定义没调用。
+        # 模型偶尔只回「…」「。」或纯空白 —— 用户看到的就是「发出去没反应」。
+        # 必须放在所有后处理**最前面**：空的先补成可执行占位回复，
+        # 后面的结论前置 / 过程折叠 / 长度裁剪才有内容可处理。
+        _filled = _empty_reply_fallback(final_text, session=session, model=model)
+        if _filled != final_text:
+            logger.warning("[empty-reply] 模型返回空回复，已替换为占位回复")
+            final_text = _filled
         # ⚠️ 必须在 _clip_reply 之前做：否则刚加到首行的引导会被长度裁剪切掉。
         _pre = _force_conclusion_first(final_text, last_user)
         if _pre != final_text:
@@ -8209,6 +8399,26 @@ async def chat(req: ChatRequest,
 
     # 用 _track_chat 包一层：登记"有聊天在跑"，后台记忆提炼会主动让路（见 _chat_busy）
     return StreamingResponse(_track_chat(gen()), media_type="application/x-ndjson")
+
+
+@app.post("/api/canvas/artifacts")
+def canvas_artifacts(body: dict = None):
+    """把一段回复拆成「画布卡片」数组（2026-11-17 接线）。
+
+    `_build_artifacts` 以前**只定义、没有任何调用方**（前端 renderCanvas 一直没建），
+    属于「写了没接线」。这里给它一个真实入口：前端拿卡片数组自己排版，
+    也可以当调试接口用 —— 至少它是活的、能被验证的，不再是被静态自检判死的空壳。
+    """
+    b = body if isinstance(body, dict) else {}
+    text = str(b.get("text") or "")
+    events = b.get("tool_events") or b.get("events") or []
+    if not isinstance(events, list):
+        events = []
+    try:
+        return {"ok": True, "artifacts": _build_artifacts(text, events)}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return {"ok": False, "artifacts": [], "error": "拆分失败"}
 
 
 # ================== DeepSeek 纯对话（流式）==================
@@ -10991,6 +11201,11 @@ _WEB_FACT_NOUNS = (
     "条例", "规范", "协议", "合同", "条款", "临床", "药物", "疾病",
     "症状", "成分", "配料", "工艺", "材料", "术语", "算法", "架构",
     "深度学习", "机器学习", "人工智能", "神经网络", "大模型",
+    # ⚠️ 2026-11-17 补：硬科学 / 前沿科技**主题词**。这类题材的事实与最新进展
+    #    很容易编错（「量子纠缠的科普文章」原来一个名词都不命中 → 判成不用搜）。
+    #    只加**具体学科/技术名词**，不加「科普 / 原理 / 概念」这类通用词 ——
+    #    那些已在 2026-09-28 被刻意移除（会让「摄影入门指南」也去搜，只搜不写）。
+    "量子", "相对论", "引力波", "核聚变", "半导体", "光刻", "基因", "疫苗", "碳中和",
     # —— 机构 / 人物 / 地方 / 事件 ——
     "机构", "单位", "大学", "学院", "医院", "博物馆", "景区", "景点",
     "人物", "生平", "事件", "赛事", "比赛", "球队",
