@@ -3763,7 +3763,7 @@ def _plan_patch_for_action(plan, action):
 ## 改动需求
 标题：%s
 说明：%s
-用户备注：%s
+用户备注（★ 与上面的说明冲突时，**一律以这条备注为准** —— 这是用户在你动手前临时改的要求）：%s
 
 ## 涉及文件（当前内容）
 %s
@@ -6067,6 +6067,77 @@ def delete_plan(pid):
         return {"ok": True, "id": pid, "left": len(d["items"])}
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def list_pending_actions(days: int = 0, limit: int = 300) -> dict:
+    """跨所有计划收集「还没被执行的」动作，按计划分组。
+
+    用户 2026-11-16 要求：「前端增加一个按钮【待批准】，点击后是一张卡片，
+    里面是所有待审核的自迭代任务，然后可以在里面输入备注框微改任务」。
+
+    为什么不做成「一个动作一个按钮」：动作有 200 多条，平铺出来用户根本
+    找不到重点。按计划分组、每组显示摘要和时间，用户能顺着「那轮它在想什么」
+    去判断该不该批。
+
+    days: 只看最近 N 天（0 = 全部）。默认全部，前端可以自己切。
+    """
+    try:
+        d = load_plans()
+        _fix_review_states(d)
+        cut = 0.0
+        if days and int(days) > 0:
+            cut = time.time() - int(days) * 86400
+        groups, total = [], 0
+        for p in (d.get("items") or []):
+            if not isinstance(p, dict):
+                continue
+            acts = []
+            for a in (p.get("actions") or []):
+                st = str(a.get("status") or a.get("state") or "pending")
+                if st not in ("pending", "need_review"):
+                    continue
+                acts.append({
+                    "id": str(a.get("id") or ""),
+                    "title": str(a.get("title") or "")[:120],
+                    "detail": str(a.get("detail") or "")[:900],
+                    "risk": str(a.get("risk") or "mid"),
+                    "files": [str(f) for f in (a.get("files") or []) if f][:8],
+                    "status": st,
+                    "note": str(a.get("note") or "")[:800],
+                    "error": str(a.get("error") or "")[:300],
+                    "origin": str(a.get("origin") or ""),
+                })
+            if not acts:
+                continue
+            if cut:
+                ts = _parse_ts(p.get("ts"))
+                if ts and ts < cut:
+                    continue
+            total += len(acts)
+            groups.append({
+                "plan_id": str(p.get("id") or ""),
+                "ts": str(p.get("ts") or ""),
+                "trigger": str(p.get("trigger") or ""),
+                "summary": str(p.get("summary") or p.get("title") or "")[:300],
+                "actions": acts,
+                "n": len(acts),
+                "n_review": sum(1 for x in acts if x["status"] == "need_review"),
+            })
+        groups.sort(key=lambda g: g["ts"], reverse=True)
+        return {"ok": True, "groups": groups[:60], "total": total,
+                "n_groups": len(groups)}
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("list_pending_actions failed: %s: %s", type(e).__name__, e)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                "groups": [], "total": 0, "n_groups": 0}
+
+
+def _parse_ts(s) -> float:
+    """把 '2026-11-16 12:20:00' 解析成时间戳；解析不了返回 0。"""
+    try:
+        return time.mktime(time.strptime(str(s or "")[:19], "%Y-%m-%d %H:%M:%S"))
+    except Exception:                                   # noqa: BLE001
+        return 0.0
 
 
 def create_plan(summary, actions=None, trigger="manual_added"):

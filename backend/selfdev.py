@@ -788,6 +788,54 @@ def insert_after(rel: str, anchor: str, text: str, note: str = "") -> dict:
     return write(rel, "\n".join(new_lines) + "\n", note or ("insert_after: " + a[:40]))
 
 
+def list_pending() -> list:
+    """读取待审核动作存储，返回给前端展示的待审核列表。
+
+    沿用现有 selfdev 的 pending 结构（data/selfdev_pending.json 里的 actions 列表），
+    每条动作转成 {id, title, risk, files, diff_summary, note}：
+      · diff_summary 截断到 500 字（避免前端一次渲染几十 KB 的 diff）；
+      · note 从 a.get('note','') 读取（approve 时写入的备注）。
+
+    任何异常都返回空列表 —— 待审核列表读不出来不该把整个面板带崩。
+    """
+    out = []
+    try:
+        p = _pending_path()
+        if not os.path.isfile(p):
+            return out
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        acts = data.get("actions") if isinstance(data, dict) else None
+        if not isinstance(acts, list):
+            return out
+        for a in acts:
+            if not isinstance(a, dict):
+                continue
+            diff = str(a.get("diff") or a.get("diff_summary") or "")
+            if len(diff) > 500:
+                diff = diff[:500] + "…"
+            files = a.get("files")
+            if not isinstance(files, list):
+                files = [a.get("rel")] if a.get("rel") else []
+            out.append({
+                "id": str(a.get("id") or ""),
+                "title": str(a.get("title") or a.get("description") or ""),
+                "risk": str(a.get("risk") or ""),
+                "files": [str(x) for x in files if x],
+                "diff_summary": diff,
+                "note": str(a.get("note", "") or ""),
+            })
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return []
+    return out
+
+
+def _pending_path() -> str:
+    """待审核动作存储路径：data/selfdev_pending.json。"""
+    return config.data("data", "selfdev_pending.json")
+
+
 def _recent_file_changes(rel: str, hours: float = 24.0) -> int:
     """统计该文件近 hours 小时内被改动的次数（读 selfdev journal）。
 

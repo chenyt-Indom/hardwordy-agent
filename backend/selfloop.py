@@ -416,6 +416,18 @@ def _cycle(reason, focus_user, source):
                "error": "%s: %s" % (type(e).__name__, e)}
     finally:
         _BUSY[0] = False
+        # ★ 2026-11-16 用户要求：「在每次任务中都要时刻思考」新功能。
+        #   放在 finally 里 —— 哪怕这轮反思失败/超时，新功能的构思照样跑。
+        #   真实成本由 featradar 自己控：距上次 20 分钟内不重复想、待批准堆到
+        #   12 条就先停，所以不会每轮都烧一次调用。
+        try:
+            from . import featradar as _fr
+            fr = _fr.think(reason=reason)
+            if fr.get("added"):
+                res["feat_added"] = int(fr.get("added") or 0)
+                res["feat_titles"] = [x.get("title") for x in (fr.get("items") or [])]
+        except Exception:                               # noqa: BLE001
+            logger.debug("featradar tick failed", exc_info=True)
         try:
             d = cfg()
             if res.get("executed"):

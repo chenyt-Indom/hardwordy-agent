@@ -2962,6 +2962,94 @@ def selfiter_plans_del(pid: str):
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfiter/pending")
+def selfiter_pending(days: int = 0):
+    """【待批准】卡片：所有还没执行的自动迭代任务，按计划分组。"""
+    from . import self_iterate as _si
+    try:
+        return _si.list_pending_actions(days=days)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e), "groups": [], "total": 0}
+
+
+# ---------------------------------------------------------------- 推荐新功能
+# 用户 2026-11-16：「在最前端的设置按钮旁边增加一个新按钮就是【推荐新功能】…
+# 模型需要先想用户可能需要什么新功能…有计划时就在按钮中提示有推荐新功能，
+# 点击之后可以查看详情并选择是否批准，也可以备注微调。」
+
+@app.get("/api/featradar/items")
+def featradar_items(state: str = "", limit: int = 100):
+    from . import featradar as _fr
+    try:
+        return _fr.list_items(state=state, limit=limit)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e), "items": []}
+
+
+@app.get("/api/featradar/stats")
+def featradar_stats():
+    """给顶栏按钮画红点用：有几条待批准。"""
+    from . import featradar as _fr
+    try:
+        return _fr.stats()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e), "pending": 0}
+
+
+@app.post("/api/featradar/think")
+def featradar_think(body: dict = None):
+    """立刻构思一批新功能（手动点按钮）。约 30~60 秒。"""
+    from . import featradar as _fr
+    b = body or {}
+    try:
+        return _fr.think(force=True, reason=str(b.get("reason") or ""))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e), "added": 0}
+
+
+@app.post("/api/featradar/approve")
+def featradar_approve(body: dict):
+    """批准一条推荐功能：立刻造计划并提交执行器真去改代码。"""
+    from . import featradar as _fr
+    b = body or {}
+    try:
+        return _fr.approve(str(b.get("id") or ""), note=str(b.get("note") or ""),
+                           execute=bool(b.get("execute", True)))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/featradar/reject")
+def featradar_reject(body: dict):
+    from . import featradar as _fr
+    b = body or {}
+    try:
+        return _fr.reject(str(b.get("id") or ""), note=str(b.get("note") or ""))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.patch("/api/featradar/{iid}")
+def featradar_edit(iid: str, body: dict):
+    """只改备注 / 名字，不动状态（卡片里随手改两笔）。"""
+    from . import featradar as _fr
+    b = body or {}
+    try:
+        return _fr.update_note(iid, note=b.get("note", ""),
+                               title=str(b.get("title") or ""))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.delete("/api/featradar/{iid}")
+def featradar_del(iid: str):
+    from . import featradar as _fr
+    try:
+        return _fr.delete(iid)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/api/selfiter/reflect")
 def selfiter_reflect(body: dict):
     """跑一次反思：联网抓技术动态 + 调 LLM 出方案。约 20~40 秒。"""
@@ -8550,9 +8638,68 @@ def selfdev_diff(batch: str = "", rel: str = ""):
 # 只能在前端弹提示，等用户按下「立即重启」才真正重启；不按就继续跑旧代码。
 @app.get("/api/selfdev/pending")
 def selfdev_pending():
-    """前端轮询：有没有改完还没生效的新版本。"""
+    """前端轮询：有没有改完还没生效的新版本。
+
+    同时返回待审核动作列表（items），供「待审核」面板展示：
+    每条含 {id, title, risk, files, diff_summary, note}，diff_summary 已截断到 500 字。
+    """
     from . import pending as _pend
-    return {"ok": True, **_pend.status()}
+    try:
+        items = selfdev.list_pending()
+    except Exception:
+        logger.warning("读取待审核动作列表失败（返回空列表）", exc_info=True)
+        items = []
+    return {"ok": True, "items": items, **_pend.status()}
+
+
+@app.post("/api/selfdev/approve")
+def selfdev_approve(body: dict = None):
+    """审核通过一条待审核动作：校验 note 长度后写入 a['note']。
+
+    body: {"id": "动作 id", "note": "审核备注"}
+      · note 长度 > 800 → 400，附错误信息（不写盘）；
+      · 通过 → 写入 a['note']，返回 200。
+    """
+    b = body or {}
+    aid = str(b.get("id") or "").strip()
+    note = str(b.get("note") or "")
+    if not aid:
+        raise HTTPException(status_code=400, detail="缺少 id")
+    if len(note) > 800:
+        raise HTTPException(
+            status_code=400,
+            detail="note 超长：%d 字，上限 800 字" % len(note))
+    try:
+        p = selfdev._pending_path()
+        data = {}
+        if os.path.isfile(p):
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+        acts = data.get("actions") if isinstance(data, dict) else None
+        if not isinstance(acts, list):
+            raise HTTPException(status_code=404, detail="没有待审核动作")
+        hit = None
+        for a in acts:
+            if isinstance(a, dict) and str(a.get("id") or "") == aid:
+                hit = a
+                break
+        if hit is None:
+            raise HTTPException(status_code=404, detail="找不到 id=%s 的动作" % aid)
+        hit["note"] = note
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, p)
+        try:
+            selfdev.journal("approve", str(hit.get("rel") or ""), id=aid,
+                            note_len=len(note))
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        return {"ok": True, "id": aid, "note": note}
+    except HTTPException:
+        raise
+    except Exception as e:                              # noqa: BLE001
+        raise HTTPException(status_code=500, detail="写入失败：%s" % e)
 
 
 @app.post("/api/selfdev/apply_restart")
