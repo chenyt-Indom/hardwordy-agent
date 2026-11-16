@@ -287,6 +287,334 @@
     return wrap ? (wrap.__blkHandle || null) : null;
   }
 
+  // ============================================================
+  // 画布对话：回复变成可拖拽 / 可圈选的卡片（2026-11-16）
+  // ------------------------------------------------------------
+  // 痛点（用户实测计数）：
+  //   · 「回复被截断」39 次 —— 长回复是一整条文字流，重点要滚半天找；
+  //   · 「同一需求被重复发送」51 次 —— 只想改其中一块，却只能整段重新描述。
+  // 做法：
+  //   · renderCanvas(blocks) 按 block.type 分派：
+  //       text  → renderTextBlock   （正文照旧走 markdown，长文可展开/收起，绝不截断）
+  //       image → renderImageBlock  （缩略图 + 文件名 + 下载 / 直接打开）
+  //       file  → renderFileBlock   （PPT / 文档 / 网页摘要都落在这一类）
+  //     每个子函数返回一个带 data-block-id 的 .canvas-card 节点，
+  //     由 renderCanvas 组装进 .canvas-grid（auto-fill 网格，窄屏自动一列）。
+  //   · app.js 渲染助手正文前先 tryRenderCanvas(message)：成功就挂画布；
+  //     失败 / 没块 → 返回 false，继续走原来的文字流渲染（宁可丑，不能丢内容）。
+  //   · 圈选交互：点某张卡片 → 输入框预填「就这块：<blockId> 再改改」，
+  //     省掉「把需求重新描述一遍」这一步。
+  //   · 卡片可拖拽：拖到另一张卡上就换位置（只改 DOM 顺序，不动正文内容）。
+  // 首版只做 text / image / file 三类；web 归到 file 块，未知类型按 text 兜底。
+  // ============================================================
+  const CANVAS_TAGS = { text: "文字", image: "图片", file: "文件", web: "网页" };
+
+  // 归一化：后端给的 block 可能只有 {id,type,content}，缺 type/id 也要能画
+  function normBlock(b, i) {
+    const src = (b && typeof b === "object") ? b : { type: "text", content: String(b == null ? "" : b) };
+    const t0 = String(src.type || "text").toLowerCase();
+    let t = t0;
+    if (["image", "img", "picture", "photo", "png", "jpg", "jpeg", "gif", "webp", "svg"].indexOf(t0) >= 0) t = "image";
+    else if (["file", "ppt", "pptx", "key", "doc", "docx", "pdf", "xlsx", "xls", "csv", "zip",
+              "md", "txt", "log", "py", "js", "json"].indexOf(t0) >= 0) t = "file";
+    else if (["web", "link", "url", "site", "page"].indexOf(t0) >= 0) t = "web";
+    else if (t0 !== "text") t = "text";
+    return {
+      id: String(src.id || ("b" + i)),
+      type: t,
+      raw_type: t0,
+      content: String(src.content == null ? (src.text == null ? "" : src.text) : src.content),
+      url: String(src.url || src.src || src.href || ""),
+      name: String(src.name || src.title || ""),
+    };
+  }
+
+  // 绝对地址 / 站内 api / 生成文库相对路径 → 可直接用的 src
+  function srcOf(url, rel) {
+    const u = String(url || "").trim();
+    if (!u) return rel ? "/api/doclib/download?rel=" + encodeURIComponent(rel) : "";
+    if (/^(https?:|data:|blob:)/i.test(u)) return u;
+    if (u.charAt(0) === "/") return u;
+    return "/api/doclib/download?rel=" + encodeURIComponent(u.replace(/^\.\//, ""));
+  }
+
+  // 从块内容里抠出「文件 / 图片 / 网页」需要的东西（名字、地址、后缀、图标）
+  function fileInfoOf(b) {
+    const raw = String(b.content || "").trim();
+    let name = String(b.name || "").trim();
+    let url = String(b.url || "").trim();
+    const md = /^!?\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/.exec(raw);
+    if (md) {
+      if (!name) name = md[1];
+      if (!url) url = md[2];
+    }
+    if (!url) {
+      const bare = /(https?:\/\/[^\s)）】]+|\/api\/[^\s)）】]+)/.exec(raw);
+      if (bare) url = bare[1];
+    }
+    if (!name) {
+      const nm = /([^\s/\\]+\.(?:pptx?|key|docx?|pdf|xlsx?|csv|zip|md|txt|log|png|jpe?g|gif|webp|svg|py|js|json))$/i.exec(raw);
+      if (nm) name = nm[1];
+      else if (url) name = String(url).split("/").pop() || url;
+    }
+    if (!url && name && (/[\\/]/.test(name) || /\.[a-z0-9]{1,5}$/i.test(name))) {
+      url = "/api/doclib/download?rel=" + encodeURIComponent(name.replace(/^\.?\//, ""));
+    }
+    const disp = name || "未命名";
+    const ext = extOf(disp);
+    const k = KINDS[ext] || ["📎", ext ? ext.toUpperCase() : "文件"];
+    return { name: disp, url: url, rel: relOf(url), ext: ext, ico: k[0], kindName: k[1] };
+  }
+
+  // 卡片外壳：带 data-block-id / draggable，类型标签贴在右上角
+  function canvasCard(b) {
+    const node = document.createElement("div");
+    node.className = "canvas-card canvas-card-" + b.type;
+    node.setAttribute("data-block-id", b.id);
+    node.setAttribute("data-block-type", b.type);
+    node.setAttribute("draggable", "true");
+    node.title = "点这块：输入框会预填「就这块：" + b.id + " 再改改」；也可以拖到别的位置";
+    const tag = document.createElement("span");
+    tag.className = "canvas-tag";
+    tag.textContent = CANVAS_TAGS[b.type] || b.type;
+    node.appendChild(tag);
+    return node;
+  }
+
+  // 卡片里的小按钮 / 小链接（点它别触发整块的「圈选」）
+  function canvasBtn(text, attrs, onClick) {
+    const el = document.createElement(onClick ? "button" : "a");
+    el.className = "canvas-btn";
+    if (onClick) el.type = "button";
+    Object.keys(attrs || {}).forEach((k) => { el.setAttribute(k, attrs[k]); });
+    el.textContent = text;
+    if (onClick) el.addEventListener("click", (e) => { e.stopPropagation(); onClick(e); });
+    return el;
+  }
+
+  // ---------- 文字块 ----------
+  function renderTextBlock(b) {
+    const node = canvasCard(b);
+    const src = String(b.content || "");
+    const body = document.createElement("div");
+    body.className = "canvas-text";
+    body.innerHTML = window.__mdToHtml
+      ? window.__mdToHtml(src)
+      : esc(src).replace(/\r?\n/g, "<br>");
+    node.appendChild(body);
+    // 长文默认折叠（是「收起」，不是「截断」：点一下就看全，一个字都不丢）
+    if (src.length > 900) {
+      body.classList.add("cut");
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "canvas-btn canvas-more";
+      more.textContent = "展开全文 ▾";
+      more.addEventListener("click", (e) => {
+        e.stopPropagation();                      // 别让「展开」被当成「圈选这块」
+        const cut = body.classList.toggle("cut");
+        more.textContent = cut ? "展开全文 ▾" : "收起 ▴";
+      });
+      node.appendChild(more);
+    }
+    return node;
+  }
+
+  // ---------- 图片块 ----------
+  function renderImageBlock(b) {
+    const node = canvasCard(b);
+    const info = fileInfoOf(b);
+    const fig = document.createElement("figure");
+    fig.className = "canvas-fig";
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.alt = info.name || "图片";
+    img.src = srcOf(info.url, info.rel || info.name);
+    img.onerror = () => {
+      const note = document.createElement("div");
+      note.className = "canvas-note";
+      note.textContent = "这张图没加载出来（可能还没生成好或已被删除）：" + (info.name || "");
+      if (img.parentNode) img.parentNode.replaceChild(note, img);
+    };
+    fig.appendChild(img);
+    if (info.name) {
+      const cap = document.createElement("figcaption");
+      cap.className = "canvas-cap";
+      cap.textContent = info.name;
+      fig.appendChild(cap);
+    }
+    node.appendChild(fig);
+    const acts = document.createElement("div");
+    acts.className = "canvas-acts";
+    const view = window.__mobileViewUrl ? window.__mobileViewUrl(info.url || "") : srcOf(info.url, info.rel);
+    if (info.url) acts.appendChild(canvasBtn("⬇ 下载", { href: view }, null));
+    // 「直接打开」复用产物卡片已有的 document 级事件委托（见文件末尾）
+    if (info.rel) acts.appendChild(canvasBtn("🗂 直接打开", { "data-art-openfile": info.rel }, null));
+    if (acts.childNodes.length) node.appendChild(acts);
+    return node;
+  }
+
+  // ---------- 文件块（PPT / 文档 / 网页摘要都走这里） ----------
+  function renderFileBlock(b) {
+    const node = canvasCard(b);
+    const info = fileInfoOf(b);
+    const isWeb = b.type === "web";
+    const head = document.createElement("div");
+    head.className = "canvas-file";
+    const ico = document.createElement("span");
+    ico.className = "canvas-ico";
+    ico.textContent = isWeb ? "🌐" : info.ico;
+    const main = document.createElement("span");
+    main.className = "canvas-file-main";
+    const nm = document.createElement("span");
+    nm.className = "canvas-name";
+    nm.textContent = info.name || (isWeb ? "网页链接" : "文件");
+    const sub = document.createElement("span");
+    sub.className = "canvas-sub";
+    sub.textContent = isWeb ? (info.url || "网页") : info.kindName;
+    main.appendChild(nm);
+    main.appendChild(sub);
+    head.appendChild(ico);
+    head.appendChild(main);
+    node.appendChild(head);
+
+    const note = document.createElement("div");
+    note.className = "canvas-note";
+    const desc = String(b.content || "").replace(/\s+/g, " ").trim();
+    note.textContent = isWeb
+      ? (desc || info.url || "（这一块是个网页链接）")
+      : (info.rel ? "生成文库：" + info.rel : (desc || "（这一块是个文件）"));
+    node.appendChild(note);
+
+    const acts = document.createElement("div");
+    acts.className = "canvas-acts";
+    if (isWeb) {
+      if (info.url) {
+        acts.appendChild(canvasBtn("🔗 打开网页", { href: info.url, target: "_blank", rel: "noopener" }, null));
+      }
+    } else {
+      if (info.url) {
+        const view = window.__mobileViewUrl ? window.__mobileViewUrl(info.url) : srcOf(info.url, info.rel);
+        acts.appendChild(canvasBtn("⬇ 下载", { href: view }, null));
+      }
+      if (info.rel) acts.appendChild(canvasBtn("🗂 直接打开", { "data-art-openfile": info.rel }, null));
+      if (info.rel && typeof window.__openInLibrary === "function") {
+        acts.appendChild(canvasBtn("📂 在文件库中定位", {}, () => window.__openInLibrary(info.rel)));
+      }
+    }
+    if (acts.childNodes.length) node.appendChild(acts);
+    return node;
+  }
+
+  // 圈选再改：点卡片 → 输入框预填「就这块：<blockId> 再改改」
+  function prefillRevise(blockId) {
+    const id = String(blockId || "").trim();
+    if (!id) return false;
+    const inp = document.querySelector("#input")
+      || document.querySelector(".composer textarea")
+      || document.querySelector("textarea");
+    if (!inp) return false;
+    const text = "就这块：" + id + " 再改改";
+    try {
+      inp.value = text;
+      inp.focus();
+      if (typeof inp.setSelectionRange === "function") inp.setSelectionRange(text.length, text.length);
+      // 触发一次 input，让 app.js 的 autoGrow 把输入框高度调回来
+      inp.dispatchEvent(new Event("input", { bubbles: true }));
+    } catch (e) { return false; }
+    return true;
+  }
+
+  // 挂交互：圈选（click）+ 拖拽换位（dragstart / dragover / drop）
+  function wireCanvas(grid, list) {
+    let dragId = "";
+    let moved = false;
+
+    grid.addEventListener("click", (e) => {
+      if (moved) { moved = false; return; }        // 刚拖过，不算「点选」
+      const node = e.target.closest ? e.target.closest(".canvas-card") : null;
+      if (!node || !grid.contains(node)) return;
+      const id = node.getAttribute("data-block-id") || "";
+      Array.prototype.forEach.call(grid.querySelectorAll(".canvas-card"), (n) => {
+        if (n !== node) n.classList.remove("sel");
+      });
+      node.classList.add("sel");
+      const ok = prefillRevise(id);
+      if (window.__onBlockSelect) {
+        try { window.__onBlockSelect({ blocks: list, selected: [id] }); }
+        catch (err) { /* 外部回调出错不影响画布 */ }
+      }
+      if (!ok) toast("点到了「" + id + "」，但没找到输入框", "warn");
+    });
+
+    grid.addEventListener("dragstart", (e) => {
+      const node = e.target.closest ? e.target.closest(".canvas-card") : null;
+      if (!node) return;
+      dragId = node.getAttribute("data-block-id") || "";
+      node.classList.add("dragging");
+      try {
+        e.dataTransfer.setData("text/plain", dragId);
+        e.dataTransfer.effectAllowed = "move";
+      } catch (err) { /* 老浏览器没有 dataTransfer：拖拽降级，点选仍然可用 */ }
+    });
+    grid.addEventListener("dragover", (e) => {
+      if (!dragId) return;
+      const over = e.target.closest ? e.target.closest(".canvas-card") : null;
+      if (!over || over.getAttribute("data-block-id") === dragId) return;
+      e.preventDefault();                          // 必须 preventDefault，否则不会触发 drop
+      try { e.dataTransfer.dropEffect = "move"; } catch (err) { /* 忽略 */ }
+    });
+    grid.addEventListener("drop", (e) => {
+      if (!dragId) return;
+      const over = e.target.closest ? e.target.closest(".canvas-card") : null;
+      if (!over) return;
+      e.preventDefault();
+      const from = grid.querySelector('.canvas-card[data-block-id="' + dragId + '"]');
+      if (from && from !== over) {
+        // 落在卡片右半边就插到它后面、左半边插到前面 —— 拖一下就到想去的位置
+        const r = over.getBoundingClientRect();
+        const after = (e.clientX - r.left) > r.width / 2;
+        grid.insertBefore(from, after ? over.nextSibling : over);
+        moved = true;
+      }
+      dragId = "";
+    });
+    grid.addEventListener("dragend", () => {
+      Array.prototype.forEach.call(grid.querySelectorAll(".canvas-card.dragging"), (n) => {
+        n.classList.remove("dragging");
+      });
+      dragId = "";
+      setTimeout(() => { moved = false; }, 0);
+    });
+  }
+
+  // 主入口：blocks = [{id, type, content}]（后端 artifacts / split_blocks 的输出）
+  // 返回组装好的 .canvas-grid 节点；没有可画的块就返回 null（调用方回退文字流）
+  function renderCanvas(blocks) {
+    const list = (Array.isArray(blocks) ? blocks : [])
+      .map(normBlock)
+      .filter((b) => String(b.content || "").trim() || b.url);
+    if (!list.length) return null;
+    const grid = document.createElement("div");
+    grid.className = "canvas-grid";
+    grid.setAttribute("data-block-count", String(list.length));
+    list.forEach((b) => {
+      let node = null;
+      try {
+        if (b.type === "image") node = renderImageBlock(b);
+        else if (b.type === "file" || b.type === "web") node = renderFileBlock(b);
+        else node = renderTextBlock(b);
+      } catch (e) {
+        // 单块画失败 → 按文字块兜底，绝不把这块内容吞掉
+        try { console.warn("[canvas] 块渲染失败，按文字兜底：", b && b.id, e); } catch (e2) { /* 忽略 */ }
+        node = renderTextBlock(Object.assign({}, b, { type: "text" }));
+      }
+      if (node) grid.appendChild(node);
+    });
+    if (!grid.childNodes.length) return null;
+    wireCanvas(grid, list);
+    return grid;
+  }
+
   function isOpen(card) { return card.classList.contains("open"); }
 
   function toggle(card) {
@@ -427,5 +755,9 @@
     begin: begin, chip: chip, flush: flush, openWithSystem: openWithSystem,
     split_blocks: split_blocks, block_context: block_context,
     mountBlocks: mountBlocks, handleOf: handleOf,
+    // 画布卡片（2026-11-16）：回复按块渲染成可拖拽 / 可圈选的卡片
+    renderCanvas: renderCanvas, renderTextBlock: renderTextBlock,
+    renderImageBlock: renderImageBlock, renderFileBlock: renderFileBlock,
+    prefillRevise: prefillRevise,
   };
 })();

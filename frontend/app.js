@@ -1958,6 +1958,50 @@
     } catch (e) { /* 忽略 */ }
   }
 
+  // ---------- 画布卡片（2026-11-16）----------
+  // 对应两个摩擦点：「回复被截断」39 次 +「同一需求被重复发送」51 次。
+  // 做法：一轮回复先拆成块（文字 / 图片 / 文件），能画就画成 .canvas-card，
+  //   每块可以单独圈选「就这块再改改」；画不出来就原样走下面的文字流渲染。
+  // 开关：localStorage.canvas_reply === "0" 或地址栏 ?canvas=0 → 关掉画布。
+  function canvasModeOn() {
+    try {
+      if (/[?&]canvas=0/.test(location.search)) return false;
+      return localStorage.getItem("canvas_reply") !== "0";
+    } catch (e) { return true; }
+  }
+  window.__canvasModeOn = canvasModeOn;      // 设置面板 / 控制台可切换
+
+  // 正文 → 块列表；拆不出来（或 artifacts.js 没加载）就返回空数组
+  function canvasBlocksOf(raw) {
+    const A = window.__Artifacts;
+    if (!A || typeof A.split_blocks !== "function") return [];
+    try {
+      return A.split_blocks(stripToolLeak(String(raw == null ? "" : raw))) || [];
+    } catch (e) { return []; }
+  }
+
+  // 画布优先：message.blocks 是数组且非空 → 画成卡片挂进 bubble，返回 true；
+  // 否则（没块 / 画布没开 / 渲染抛错）返回 false，调用方继续走原有文字流。
+  function tryRenderCanvas(message, bubble) {
+    if (!bubble || !canvasModeOn()) return false;
+    const A = window.__Artifacts;
+    if (!A || typeof A.renderCanvas !== "function") return false;
+    const blocks = (message && Array.isArray(message.blocks)) ? message.blocks : [];
+    if (!blocks.length) return false;
+    try {
+      const grid = A.renderCanvas(blocks);
+      if (!grid) return false;
+      bubble.innerHTML = "";
+      bubble.appendChild(grid);
+      return true;
+    } catch (e) {
+      // 画布出任何问题都退回文字流 —— 宁可丑，不能丢内容
+      try { console.warn("[canvas] 画布渲染失败，回退文字流：", e); } catch (e2) { /* 忽略 */ }
+      return false;
+    }
+  }
+  window.__tryRenderCanvas = tryRenderCanvas;
+
   function renderFinal(bubble, text, userText, silent) {
     let raw = String(text == null ? "" : text);
     // ★ 空输出兜底：正文为空 → 换成可读的兜底文案，并记一次硬失败
@@ -1971,13 +2015,24 @@
       attachSpeak(bubble, raw);
       return;
     }
-    try {
-      if (raw.indexOf("```") >= 0) renderAnswerWithCode(bubble, raw, userText || "");
-      else renderAnswerLinks(bubble, raw);
-    } catch (e) {
-      bubble.textContent = raw;
-      attachSpeak(bubble, raw);
-      return;
+    // ★ 画布卡片：先把这一轮回复拆成块（文字 / 图片 / 文件）画成卡片 ——
+    //   长回复不再是一大坨文字，每块还能单独圈选「就这块再改改」。
+    //   带代码围栏的回复仍走专用代码渲染（卡片里读代码不方便）；
+    //   画布任何一步失败都返回 false，继续走下面的原有渲染（绝不丢内容）。
+    let canvasDrawn = false;
+    if (raw.indexOf("```") < 0) {
+      canvasDrawn = tryRenderCanvas(
+        { role: "assistant", content: raw, blocks: canvasBlocksOf(raw) }, bubble);
+    }
+    if (!canvasDrawn) {
+      try {
+        if (raw.indexOf("```") >= 0) renderAnswerWithCode(bubble, raw, userText || "");
+        else renderAnswerLinks(bubble, raw);
+      } catch (e) {
+        bubble.textContent = raw;
+        attachSpeak(bubble, raw);
+        return;
+      }
     }
     try {
       const wantTail = raw.replace(/\*\*|`|^\s*[-*]\s+/gm, "").trim().slice(-24)
