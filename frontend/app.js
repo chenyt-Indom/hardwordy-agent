@@ -14919,7 +14919,9 @@
         stat +
         '<span class="if-card-files">' + ifEsc(names.join("、") || "（无目标文件）") + "</span>" +
         (ev.agent_steps ? '<span class="if-flag">🤖 直接操作 ' + ev.agent_steps + ' 步' +
-          (ev.agent_secs ? " / " + ev.agent_secs + "s" : "") + '</span>' : "") +
+          (ev.agent_secs ? " / " + ev.agent_secs + "s" : "") +
+          (ev.agent_tries > 1 ? " · 第 " + ev.agent_tries + " 次尝试" : "") +
+          (ev.agent_repairs ? " · 就地修复 " + ev.agent_repairs + " 轮" : "") + '</span>' : "") +
         (ev.rolled_back ? '<span class="if-flag">已自动回滚</span>' : "") +
         (ev.ok ? '<span class="if-ok">✓ 完成</span>' : '<span class="if-bad">✕ 失败</span>') +
         '<span class="if-card-toggle">▸</span>' +

@@ -4764,6 +4764,8 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 _cc = _card(a, _apt, True, "", False, _afiles, a["backup"])
                 _cc["agent_steps"] = int(_ar.get("steps") or 0)
                 _cc["agent_secs"] = _ar.get("seconds")
+                _cc["agent_tries"] = int(_ar.get("attempts") or 1)
+                _cc["agent_repairs"] = int(_ar.get("repairs") or 0)
                 _ev("code", **_cc)
             else:
                 _aerr = str(_ar.get("error") or "LLM 直接操作没做成")
@@ -4782,6 +4784,8 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                             bool(_ar.get("rolled_back")), _afiles, "")
                 _cf["agent_steps"] = int(_ar.get("steps") or 0)
                 _cf["agent_secs"] = _ar.get("seconds")
+                _cf["agent_tries"] = int(_ar.get("attempts") or 1)
+                _cf["agent_repairs"] = int(_ar.get("repairs") or 0)
                 _ev("code", **_cf)
             if _stop():
                 cancelled = True

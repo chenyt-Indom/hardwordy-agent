@@ -594,6 +594,13 @@ def _t_check(ctx, args):
 
 
 def _t_finish(ctx, args):
+    # ★ 用户要求「LLM 修完/写完代码之后要反复验证，直到一切完全正常」：
+    #   模型一次 run_check 都没跑就想收工 → 先让它自己跑一遍看结果，
+    #   有问题就地修。只提醒一次，避免模型死活不肯跑时卡在这里（系统复核仍会兜底）。
+    if not ctx.last_check and not getattr(ctx, "finish_nagged", False):
+        ctx.finish_nagged = True
+        return ("还没跑过自检。请先调 run_check(kind=\"all\") 看真实结果，"
+                "有问题就地修好、再跑一次确认全过，然后才 finish。")
     ctx.finished = True
     ctx.finish_args = dict(args or {})
     return "收到完成信号。系统接下来会独立复核（语法 / 导入 / 回归 / 功能断言）。"
@@ -774,8 +781,13 @@ _TASK = """## 要做的改动
 标题：{title}
 说明：{detail}
 用户备注（★ 与上面的说明冲突时，**一律以这条备注为准**）：{note}
-动作里点名的文件：{files}
+计划里点名的文件（**仅供参考**）：{files}
 风险等级：{risk}
+
+⚠️ 上面这些**只是计划阶段的猜测，不是限制**。你是真正动手的人：
+   - 该改哪些文件、怎么改，由你读代码后自己判断；
+   - 如果计划点错了文件、或漏了必须一起改的文件（前端/路由/数据结构），
+     照你判断的改，并在 finish 的 summary 里说清为什么偏离计划。
 
 ## 项目结构（源码文件 + 行数，先看这里决定读哪个）
 {inventory}
@@ -801,6 +813,42 @@ _PREV_FAIL = """
 · 如果是「LLM 评审拒绝」→ 说明改动偏离需求或误伤了无关代码，缩小改动范围；
 · 如果是「没有改动任何文件」→ 你只说了没做，这次必须真的 write_file/edit_file。
 不要换个地方乱改，也不要放弃 —— 除非确实做不到（那就 finish 说明原因）。
+"""
+
+# ★★ 2026-11-17 用户要求（核心）：
+#   「遇到阻碍或哪里有问题时，不要直接失败回滚，LLM 需要和平时一样排除困难
+#     完成迭代」「LLM 必须发挥作用来排除错误以及迭代时遇到的困难和阻碍」
+#   所以复核没过时**不回滚**，把系统复核的真实原因 + 自己改出来的 diff 一起
+#   喂回去，让它在**同一份改动上**修好。只有修复轮用尽仍不行，才回滚。
+#
+#   与 _PREV_FAIL 的区别很关键：
+#     _PREV_FAIL —— 外层重试用，**代码已回滚**，换思路从头再来；
+#     _REPAIR    —— 内层就地修，**代码保持原样**，看着真实报错修。
+#   后者才是人排查 bug 的方式，也不会把前面几十步的工作白扔掉。
+_REPAIR = """
+## 系统复核没通过（第 {n} 轮就地修复）
+
+你刚才的改动**没有被回滚，文件现在就是改过之后的状态**。系统另外跑了一遍
+独立复核，给出的问题在这里：
+
+{why}
+
+你这一轮改动出来的 diff（供你对照，看看是哪里出的问题）：
+
+```diff
+{diff}
+```
+
+请**就地把它修好** —— 不要重头再来，也不要放弃：
+- 语法错（中文冒号/全角括号/引号不配对/缩进）→ 把那几行读出来，改到能编译；
+- backend.main 无法导入 → 说明引用了不存在的名字，先 grep 确认再改；
+- 行为回归新增失败 → 你改坏了别处的行为，找到被影响的地方，改成不影响原有行为；
+- 功能验收断言没过 → 按断言要求的行为把它补全；
+- LLM 评审拒绝 → 改动偏离需求或误伤了无关代码，缩小改动范围；
+- 「没有改动任何文件」→ 你只说了没做，这次必须真的 write_file / edit_file。
+
+修完**必须**跑 run_check(kind="all")，确认语法 / 导入 / 回归全过，再 finish。
+你还有约 {steps} 步、{minutes} 分钟可用。
 """
 
 
@@ -1053,40 +1101,60 @@ def _run_local(ctx, sys_prompt, task_prompt, steps, model, on_note=None):
 # ---------------------------------------------------------------- 独立复核
 
 def _final_verify(ctx, snap):
-    """系统自己的复核（不信模型自述）。返回 (ok, 原因, 细节)。"""
+    """系统自己的复核（不信模型自述）。返回 (ok, 原因, 细节)。
+
+    ★ 聚合式复核：一次把**所有**问题查出来一起返回，而不是遇到第一个错就停。
+      理由（2026-11-16 用户问「LLM 修完之后有没有反复验证再修复」）：
+      短路式的话，模型改了 3 个文件、其中 2 个有语法错，每轮只报第一个；
+      修好第一个 → 下一轮才发现第二个 → 再下一轮才发现导入起不来 →
+      再下一轮才发现回归挂了。修复轮预算根本不够，最后被判失败整条回滚，
+      前面几十步全白扔。聚合后一轮就能看到全部问题，一次修完。
+    """
     mod, new, gone = _changed_files(snap)
     changed = mod + new
     if not changed and not gone:
         return False, "模型没有改动任何文件（它可能只是说了说）", {}
 
     # ① 护栏文件有没有被动过（包括用 shell 绕过去改的）
+    #    硬违规：不进「修复轮」，直接回滚 —— 这种错不能靠改代码绕过去
     bad = [r for r, sha in (snap.get("guards") or {}).items()
            if _sha(_ROOT / r) != sha]
     if bad:
         return False, "护栏文件被修改（不允许）：%s" % "、".join(bad[:3]), {}
 
-    # ② 语法
+    probs = []      # 收集全部问题（不短路）
+    detail = {}
+
+    # ② 语法 —— 检查**所有**改动文件，逐个收集
     from . import self_iterate as _SI
+    syn_bad = []
     for rel in changed:
         ok, msg = _SI._verify(rel)
         if not ok:
-            return False, "%s 语法校验失败：%s" % (rel, msg), {}
+            syn_bad.append("  · %s：%s" % (rel, str(msg).strip()[:400]))
+    if syn_bad:
+        probs.append("【语法】%d 个文件编译不过：\n%s"
+                     % (len(syn_bad), "\n".join(syn_bad[:8])))
 
     # ③ 能启动（backend.main 导入）
-    code = ("import sys;sys.path.insert(0,r'%s');import backend.main;print('IMPORT_OK')"
-            % str(_ROOT))
-    try:
-        r = subprocess.run([sys.executable, "-c", code], cwd=str(_ROOT),
-                           capture_output=True, timeout=240)
-        o = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
-        if "IMPORT_OK" not in o or r.returncode != 0:
-            return False, "backend.main 无法导入（程序起不来）：\n" + o[-1200:], {}
-    except Exception as e:                                  # noqa: BLE001
-        return False, "导入检查跑不起来：%s: %s" % (type(e).__name__, e), {}
+    #    语法不过时导入必然失败，重复报同一个根因只会干扰模型判断，所以跳过
+    imp_bad = ""
+    if not syn_bad:
+        code = ("import sys;sys.path.insert(0,r'%s');import backend.main;print('IMPORT_OK')"
+                % str(_ROOT))
+        try:
+            r = subprocess.run([sys.executable, "-c", code], cwd=str(_ROOT),
+                               capture_output=True, timeout=240)
+            o = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
+            if "IMPORT_OK" not in o or r.returncode != 0:
+                imp_bad = o[-1500:]
+                probs.append("【导入】backend.main 起不来（程序会打不开）：\n" + imp_bad)
+        except Exception as e:                              # noqa: BLE001
+            imp_bad = "%s: %s" % (type(e).__name__, e)
+            probs.append("【导入】检查跑不起来：%s" % imp_bad)
 
-    # ④ 行为回归（只算「本次新增的失败」）
-    detail = {}
-    if _settings().get("regress_after_change", True):
+    # ④ 行为回归（只算「本次新增的失败」）—— 列出**全部**新增失败，不只前 4 条
+    if not syn_bad and not imp_bad and _settings().get("regress_after_change", True):
         try:
             from . import regress as _RG
             # ★ 用户要求「弄完之后验证**所有功能**是否完全正常」——
@@ -1096,13 +1164,14 @@ def _final_verify(ctx, snap):
             fails = {str(x.get("name")) for x in (rr.get("failed_items") or [])}
             new_fails = fails - (ctx.base_fails or set())
             detail["regress"] = {"passed": rr.get("passed"), "seconds": rr.get("seconds"),
-                                 "new_fails": sorted(new_fails)[:8]}
+                                 "new_fails": sorted(new_fails)}
             if new_fails and ctx.base_ok:
-                return False, "行为回归新增失败 %d 条：%s" % (
-                    len(new_fails), "；".join(sorted(new_fails)[:4])), detail
+                probs.append("【回归】新增失败 %d 条（改动前这些是过的，说明你改坏了）：\n%s"
+                             % (len(new_fails),
+                                "\n".join("  · " + x for x in sorted(new_fails)[:12])))
         except Exception as e:                              # noqa: BLE001
-            return False, "行为回归跑不起来，无法确认改动安全：%s: %s" % (
-                type(e).__name__, e), detail
+            probs.append("【回归】跑不起来，无法确认改动安全：%s: %s"
+                         % (type(e).__name__, e))
 
     # ⑤ 新功能自带验收断言
     act = ctx.action
@@ -1113,10 +1182,12 @@ def _final_verify(ctx, snap):
             vr = selfevolve.verify_one(act.get("title"), path=(act.get("assert_file") or None))
             detail["assert"] = {"ok": bool(vr.get("ok")), "why": str(vr.get("why") or "")[:300]}
             if not vr.get("ok"):
-                return False, "功能验收断言没过：%s" % str(vr.get("why") or "")[:300], detail
+                probs.append("【功能验收】断言没过：%s" % str(vr.get("why") or "")[:600])
         except Exception as e:                              # noqa: BLE001
             detail["assert"] = {"ok": False, "why": str(e)[:200]}
 
+    if probs:
+        return False, "\n\n".join(probs)[:4000], detail
     return True, "", detail
 
 
@@ -1223,74 +1294,141 @@ def _run_once(plan, action, ev=None, stop=None, prev_fail="", attempt=0):
         prev=_prev,
         steps=steps, minutes=max(1, seconds // 60))
 
-    err = ""
+    # ---------------------------------------------------------------
+    # ★★ 2026-11-17 用户要求（核心，务必看清为什么这么写）：
+    #   「如果遇到阻碍或哪里有问题时，不要直接失败回滚，LLM 需要和平时一样
+    #     排除困难完成迭代」「LLM 必须发挥作用来排除错误以及迭代时遇到的
+    #     困难和阻碍」「一般不到很严重的问题时绝对不能迭代失败」
+    #
+    #   原来的写法：模型跑完 → 复核没过 → **立刻整条回滚** → 外层从头再来。
+    #   问题：模型永远看不到自己的报错，几十步的工作全白扔，语法错这种
+    #   一分钟就能修好的事也会被判「失败」——这就是用户说的「遇到东西就失败回滚」。
+    #
+    #   现在：复核没过**不回滚**，把「系统复核的真实原因 + 自己改出来的 diff」
+    #   一起喂回去，让它在**同一份改动上**修好，修完再复核。
+    #   只有修复轮用尽仍然不行，才回滚（回滚是最后手段，不是第一反应）。
+    #
+    #   两层重试的分工（不要混淆）：
+    #     · 内层「就地修复」（这里）：代码保持原样，看着真实报错修 —— 人的排查方式；
+    #     · 外层「重试」（run_action）：整条回滚、换一个思路重来 —— 用来跳出死胡同。
+    # ---------------------------------------------------------------
     try:
-        if kind == "cloud":
-            # on_note 原来定义了却没传进来 —— 客户端吐的「输出被截断，正在续写」
-            # 这类过程提示全被丢掉，界面上看起来像卡住。现在接上。
-            _run_cloud(ctx, _SYS, task_prompt, steps, model, key,
-                       on_note=lambda s: ctx.emit(s, "step"))
-        else:
-            _run_local(ctx, _SYS, task_prompt, steps, model,
-                       on_note=lambda s: ctx.emit(s, "think"))
-    except Exception as e:                                  # noqa: BLE001
-        err = "模型调用失败：%s: %s" % (type(e).__name__, e)
-        logger.warning("iter_agent 调用失败", exc_info=True)
-
-    # 用户点了终止
-    cancelled = False
-    try:
-        cancelled = bool(stop and stop())
+        repairs = int(st.get("iter_agent_repairs", 2))
     except Exception:                                       # noqa: BLE001
-        cancelled = False
+        repairs = 2
+    repairs = max(0, min(5, repairs))
 
-    mod, new, gone = _changed_files(snap)
-    changed = mod + new
-    hunks = {}
-    for rel in changed:
-        old = ""
-        src = snap["dir"] / rel.replace("/", "__")
+    err = ""
+    ok, why, detail, diff = False, "", {}, ""
+    changed, hunks = [], {}
+    mod, new = [], []
+    cancelled = False
+    rounds = 0
+    for rnd in range(repairs + 1):
+        rounds = rnd + 1
+        if rnd:
+            # 修复轮：文件保持上一轮改过的样子（**不回滚**），把问题喂回去
+            ctx.finished = False
+            ctx.finish_args = {}
+            ctx.last_check = ""
+            # 修复轮额外给 15 步预算 —— 否则第一轮把步数用光后，连修都修不了
+            try:
+                ctx.steps = int(ctx.steps) + 15
+            except Exception:                               # noqa: BLE001
+                pass
+            ctx.emit("第 %d 轮就地修复（不回滚，让它对着真实报错改）…" % rnd, "step")
+            try:
+                prompt = _REPAIR.format(
+                    n=rnd, why=str(why or "")[:3000], diff=(diff or "")[:3000],
+                    steps=max(6, int(ctx.steps) - ctx.n_calls),
+                    minutes=max(1, int(max(0, ctx.seconds - ctx.elapsed())) // 60))
+            except Exception:                               # noqa: BLE001
+                prompt = ("系统复核没通过：%s\n请就地修好，然后跑 "
+                          "run_check(kind=\"all\") 再 finish。" % str(why)[:3000])
+        else:
+            prompt = task_prompt
+
+        err = ""
         try:
-            if src.is_file():
-                old = src.read_text(encoding="utf-8", errors="replace")
+            _left = max(6, int(ctx.steps) - ctx.n_calls)
+            if kind == "cloud":
+                # on_note 原来定义了却没传进来 —— 客户端吐的「输出被截断，正在续写」
+                # 这类过程提示全被丢掉，界面上看起来像卡住。现在接上。
+                _run_cloud(ctx, _SYS, prompt, _left, model, key,
+                           on_note=lambda s: ctx.emit(s, "step"))
+            else:
+                _run_local(ctx, _SYS, prompt, _left, model,
+                           on_note=lambda s: ctx.emit(s, "think"))
+        except Exception as e:                              # noqa: BLE001
+            err = "模型调用失败：%s: %s" % (type(e).__name__, e)
+            logger.warning("iter_agent 调用失败", exc_info=True)
+            break
+
+        # 用户点了终止
+        try:
+            cancelled = bool(stop and stop())
         except Exception:                                   # noqa: BLE001
+            cancelled = False
+
+        # 每轮都要重算：修复轮可能又改了别的文件、也可能把自己建的文件删了
+        mod, new, gone = _changed_files(snap)
+        changed = mod + new
+        hunks = {}
+        for rel in changed:
             old = ""
-        hunks[rel] = _hunks(old, _read_text(rel))
-    diff = _diff_text(snap, changed)
+            src = snap["dir"] / rel.replace("/", "__")
+            try:
+                if src.is_file():
+                    old = src.read_text(encoding="utf-8", errors="replace")
+            except Exception:                               # noqa: BLE001
+                old = ""
+            hunks[rel] = _hunks(old, _read_text(rel))
+        diff = _diff_text(snap, changed)
 
-    ok, why, detail = False, err, {}
-    if not err:
-        ok, why, detail = _final_verify(ctx, snap)
+        ok, why, detail = False, err, {}
+        if not err:
+            ok, why, detail = _final_verify(ctx, snap)
 
-    # ⑥ LLM 评审**真实 diff**。
-    #   旧流程里的评审门禁（self_iterate._llm_review_action）在「生成改动之前」
-    #   就跑，那时 action["diff"] 是空的 —— 它实际只能看标题和说明，
-    #   「会不会误伤无关函数」根本判断不了。现在模型已经改完，拿真 diff 去评才有意义。
-    #   fail-open：评审自身出错一律放行（它只是多一道把关，不能反过来卡死迭代）。
-    if ok:
-        try:
-            from . import self_iterate as _SI2
-            _a2 = dict(act)
-            _a2["diff"] = diff[:4000]
-            _a2["files"] = changed
-            _rv = _SI2._llm_review_action(plan or {}, _a2)
-            if not _rv.get("ok"):
-                ok = False
-                why = ("LLM 评审拒绝（针对真实 diff）：%s"
-                       % str(_rv.get("reason") or "")[:200])
-        except Exception:                                   # noqa: BLE001
-            logger.debug("评审失败（放行）", exc_info=True)
+        # ⑥ LLM 评审**真实 diff**。
+        #   旧流程里的评审门禁（self_iterate._llm_review_action）在「生成改动之前」
+        #   就跑，那时 action["diff"] 是空的 —— 它实际只能看标题和说明，
+        #   「会不会误伤无关函数」根本判断不了。现在模型已经改完，拿真 diff 去评才有意义。
+        #   fail-open：评审自身出错一律放行（它只是多一道把关，不能反过来卡死迭代）。
+        if ok:
+            try:
+                from . import self_iterate as _SI2
+                _a2 = dict(act)
+                _a2["diff"] = diff[:4000]
+                _a2["files"] = changed
+                _rv = _SI2._llm_review_action(plan or {}, _a2)
+                if not _rv.get("ok"):
+                    ok = False
+                    why = ("LLM 评审拒绝（针对真实 diff）：%s"
+                           % str(_rv.get("reason") or "")[:200])
+            except Exception:                               # noqa: BLE001
+                logger.debug("评审失败（放行）", exc_info=True)
+
+        if ok or cancelled:
+            break
+        # 护栏文件被改是**硬违规**，不能靠「修」绕过去 —— 直接回滚，不进修复轮
+        if "护栏文件被修改" in str(why or ""):
+            break
+        if rnd < repairs:
+            ctx.emit("复核没过（%s），进入第 %d 轮就地修复"
+                     % (str(why or "")[:80], rnd + 1), "step")
 
     # 成功时留一份 self_iterate 格式的备份（供手动回滚 / 退化回滚使用）
     _btag = _compat_backup(snap, mod, new, tag) if ok else ""
 
-    # 全部失败 → 回滚（用户要求：回滚，但把改动和原因存下来）
+    # 修复轮用尽仍不行 → 回滚（**最后手段**；用户要求回滚时把改动和原因存下来）
     rolled = []
     if not ok:
         if not why:
             why = "未通过系统复核"
         rolled = _restore(snap)
         why = why + "（已自动回滚：%s）" % ("、".join(rolled[:4]) or "无改动可回滚")
+        if rounds > 1:
+            why = why + "｜已就地修复 %d 轮仍未过" % (rounds - 1)
 
     payload = {
         "tag": tag, "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1300,6 +1438,7 @@ def _run_once(plan, action, ev=None, stop=None, prev_fail="", attempt=0):
         "changed": changed, "rolled_back": rolled, "verify": detail,
         "summary": (ctx.finish_args or {}).get("summary") or "",
         "finished": ctx.finished, "cancelled": cancelled,
+        "repairs": max(0, rounds - 1), "rounds": rounds,
         "log": ctx.log, "diff": diff,
     }
     log_path = _save_log(tag, payload)
@@ -1308,6 +1447,7 @@ def _run_once(plan, action, ev=None, stop=None, prev_fail="", attempt=0):
             "seconds": round(ctx.elapsed(), 1),
             "model": "%s:%s" % (kind, model), "backup_tag": _btag,
             "summary": payload["summary"], "rolled_back": rolled,
+            "repairs": max(0, rounds - 1),
             "cancelled": cancelled, "diff": diff}
 
 
@@ -1320,10 +1460,16 @@ def run_action(plan, action, ev=None, stop=None):
       「如果说迭代受阻 LLM 需要解决这个问题直到成功迭代且完全正常，
         一般不到万不得已不能迭代失败」
 
-    所以不再是「跑一次、失败就回滚收工」，而是：
-        跑一次 → 失败就回滚 → 把**系统复核给出的真实原因**喂回模型 → 再跑
-        → 最多重试 iter_agent_retries 次（默认 2，即最多共 3 次尝试）
-        → 用户点终止 / 总耗时超预算 → 立刻停，不硬撑。
+    所以不再是「跑一次、失败就回滚收工」，而是**两层**：
+
+      ① 内层「就地修复」（_run_once 里，iter_agent_repairs，默认 2 轮）：
+         复核没过**不回滚**，把真实报错 + 自己的 diff 喂回去，
+         让它在**同一份改动上**修好 —— 这是人排查 bug 的方式，
+         语法错这种一分钟能修的事，不会再被判成「失败」。
+      ② 外层「回滚重来」（这里，iter_agent_retries，默认 3 次，共 4 次尝试）：
+         修复轮用尽仍不行，才整条回滚、带着失败原因换一个思路重做。
+      ③ 用户点终止 / 总耗时超预算（iter_agent_total_seconds，默认 2400 秒）
+         → 立刻停，不硬撑。
 
     为什么要有上限：模型在同一处反复失败，多半是需求本身做不到（或触及
     护栏文件）。无限重试只会烧 token、把代码反复改坏。所以设上限，但把
@@ -1337,10 +1483,14 @@ def run_action(plan, action, ev=None, stop=None):
                 "error": "「LLM 直接操作」已关闭（设置里打开 iter_agent_enabled）",
                 "skipped": True}
 
+    # ★ 用户要求「一般不到很严重的问题时绝对不能迭代失败，LLM 必须主动
+    #   排除错误」。所以默认从 2 提到 3（最多共 4 次尝试）：每次失败都把
+    #   系统复核的真实原因喂回去，让它针对性重做。上限仍在，避免在
+    #   「需求本身做不到」时无限烧 token、把代码反复改坏。
     try:
-        retries = int(st.get("iter_agent_retries", 2))
+        retries = int(st.get("iter_agent_retries", 3))
     except Exception:                                       # noqa: BLE001
-        retries = 2
+        retries = 3
     retries = max(0, min(6, retries))
     try:
         total_budget = int(st.get("iter_agent_total_seconds") or 2400)

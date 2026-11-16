@@ -340,21 +340,12 @@
   //   · 接口没就绪 / 读盘失败时静默失败，角标保持隐藏 —— 不能因为一个
   //     可选接口 404 就在控制台刷红，更不能挡住页面；
   //   · 采纳 / 拒绝 / 删除之后立刻重算，用户能马上看到数字减一。
+  // 2026-11-16：原来这里单独读 /api/featradar/recommend 的 unread，
+  // 而顶栏角标走的是 refreshDots（featradar.pending + pending_features），
+  // 两套算法不同 → 侧栏和顶栏会显示两个不一样的数字。
+  // 现在统一到 refreshDots 一处取数，renderBadge 只做兼容别名。
   async function renderBadge() {
-    const el = document.getElementById("suggestBadge");
-    if (!el) return;
-    let n = 0;
-    try {
-      const r = await fetch("/api/featradar/recommend");
-      if (r.ok) {
-        const d = await r.json();
-        // 后端可能给 unread / count / pending 三种字段名，都兼容一下
-        n = Number(d.unread != null ? d.unread
-          : (d.count != null ? d.count : (d.pending || 0))) || 0;
-      }
-    } catch (e) { /* 接口未就绪：忽略，角标保持隐藏 */ }
-    el.textContent = n > 99 ? "99+" : String(n);
-    el.hidden = n <= 0;
+    return refreshDots();
   }
   window.__refreshSuggestBadge = renderBadge;
 
@@ -686,15 +677,24 @@
   }
 
   // ============================================================ 红点
+  // paintDot：把数字**真正写进**角标。
+  // 2026-11-16 用户报「明明有 9 条，顶栏还是 0」：原来只设了 hidden / title，
+  // 圆圈里的文字一直是 HTML 里写死的「0」，所以数字永远不动 ——
+  // 有数据时只是把 hidden 去掉，露出那个写死的 0。
+  function paintDot(id, n, label) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = n > 99 ? "99+" : String(n);
+    el.hidden = n <= 0;
+    el.title = n ? (n + " " + label) : "";
+  }
+
   async function refreshDots() {
     try {
       const p = await api("/api/selfiter/pending");
-      const pd = document.getElementById("pendingDot");
-      if (pd) {
-        const n = (p && p.total) || 0;
-        pd.hidden = !n;
-        pd.title = n ? n + " 条待批准" : "";
-      }
+      const n = (p && p.total) || 0;
+      paintDot("pendingDot", n, "条待批准");
+      paintDot("pendingBadge", n, "条待批准");
     } catch (e) { /* 忽略 */ }
     try {
       const f = await api("/api/featradar/stats");
@@ -705,24 +705,34 @@
         const fp = await api("/api/selfiter/pending_features");
         n += (fp && fp.total) || 0;
       } catch (e) { /* 忽略 */ }
-      const fd = document.getElementById("featDot");
-      if (fd) {
-        fd.hidden = !n;
-        fd.title = n ? n + " 条新功能等你决定" : "";
-      }
+      paintDot("featDot", n, "条新功能等你决定");
+      paintDot("suggestBadge", n, "条新功能等你决定");
     } catch (e) { /* 忽略 */ }
   }
 
   // ============================================================ 绑定
-  const pendBtn = document.getElementById("pendingBtn");
-  if (pendBtn) {
-    pendBtn.addEventListener("click", function (e) {
-      e.preventDefault();
-      ensurePanel(PEND, "📋 待批准", "所有还没执行的自动迭代任务");
-      openPanel(PEND);
-      loadPending();
-    });
+  // 2026-11-16：侧栏还有一套同名入口（btnPending / btnSuggest），原来**没有
+  // 任何点击处理** —— 点了完全没反应。现在和顶栏共用同一套打开逻辑。
+  function openPendingPanel() {
+    ensurePanel(PEND, "📋 待批准", "所有还没执行的自动迭代任务");
+    openPanel(PEND);
+    loadPending();
   }
+  function openFeatPanel() {
+    ensurePanel(FEAT, "💡 推荐新功能", "模型想出来的、能提高体验的全新功能");
+    openPanel(FEAT);
+    loadFeat();
+  }
+
+  ["pendingBtn", "btnPending"].forEach(function (id) {
+    const b = document.getElementById(id);
+    if (b) {
+      b.addEventListener("click", function (e) {
+        e.preventDefault();
+        openPendingPanel();
+      });
+    }
+  });
 
   const failkBtn = document.getElementById("failkBtn");
   if (failkBtn) {
@@ -734,15 +744,15 @@
     });
   }
 
-  const featBtn = document.getElementById("featBtn");
-  if (featBtn) {
-    featBtn.addEventListener("click", function (e) {
-      e.preventDefault();
-      ensurePanel(FEAT, "💡 推荐新功能", "模型想出来的、能提高体验的全新功能");
-      openPanel(FEAT);
-      loadFeat();
-    });
-  }
+  ["featBtn", "btnSuggest"].forEach(function (id) {
+    const b = document.getElementById(id);
+    if (b) {
+      b.addEventListener("click", function (e) {
+        e.preventDefault();
+        openFeatPanel();
+      });
+    }
+  });
 
   document.addEventListener("click", function (e) {
     const t = e.target && e.target.closest ? e.target.closest("[data-act]") : null;
