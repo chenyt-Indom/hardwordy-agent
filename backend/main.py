@@ -3477,8 +3477,10 @@ def selfloop_cfg_set(body: dict):
     b = body or {}
     try:
         kw = {}
+        # ★ 2026-11-17：补 backlog_gate（待批准积压闸门）与 boot_gap_sec，
+        #   否则只能在 data/selfloop.json 里手改，界面上调不了。
         for k in ("enabled", "daily_plans", "min_gap_sec", "task_fail_gap",
-                  "web_every", "slow_ratio"):
+                  "web_every", "slow_ratio", "backlog_gate", "boot_gap_sec"):
             if k in b:
                 kw[k] = b[k]
         return _sl.set_cfg(**kw)
@@ -9637,6 +9639,13 @@ async def chat_deepseek(req: ChatRequest,
                     actlog.record(session, name, args, ok=True, result=_r)
                     return _r
 
+                # ★ 2026-11-17：对话也记账，标签 chat。不设的话会落到「未标注」，
+                #   汇总里分不清钱是聊天烧的还是后台迭代烧的。
+                try:
+                    from . import usage_ledger as _ul
+                    _ul.set_tag("chat")
+                except Exception:                       # noqa: BLE001
+                    logger.debug("usage tag failed", exc_info=True)
                 for kind, val in deepseek_client.chat_stream_with_tools(
                         clean, model, x_deepseek_key, tool_schemas, executor,
                         temperature=min(1.3, max(0.0, temp)),

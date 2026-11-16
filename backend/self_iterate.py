@@ -187,6 +187,14 @@ def run_status():
 
 def set_stage(stage, detail=""):
     """推进当前阶段。detail 是给人看的一句话（如「已抓 30 条」「评了 6 篇」）。"""
+    # ★ 2026-11-17：顺手把阶段名记成 token 记账标签（thread_local）。
+    #   这样「钱花在反思、打磨还是抓论文」能直接看数据，而不必给十几个
+    #   调用点加参数。放在 _RUN_LOCK 之前：阶段没在跑时也该更新标签。
+    try:
+        from . import usage_ledger as _ul
+        _ul.set_tag(str(stage or ""))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("usage tag failed", exc_info=True)
     with _RUN_LOCK:
         if not _RUN.get("running"):
             return
@@ -292,6 +300,15 @@ _DEFAULT_SETTINGS = {
     # 验收断言不过时，带着失败输出重改，最多这么多轮；仍不过才回滚。
     # 设 0/1 = 只验一次不改（回到旧行为）。
     "feature_repair_rounds": 3,
+    # ---- LLM 直接操作（iter_agent）的预算与重试（2026-11-16 补登记）----
+    # ⚠️ 这几个键必须登记在这里：load_settings() 只遍历 _DEFAULT_SETTINGS 的键，
+    # 没登记的键会被**静默丢弃** —— 用户在 settings.json 里手写也永远不生效
+    # （实测：写 iter_agent_retries=5 读回来是 None）。
+    "iter_agent_enabled": True,     # 关掉 = 退回旧的补丁流程（会在界面明说）
+    "iter_agent_steps": 80,         # 单次执行最多调几次工具
+    "iter_agent_retries": 3,        # 外层「回滚重来」次数（共 retries+1 次尝试）
+    "iter_agent_repairs": 2,        # 内层「就地修复」轮数（不回滚，喂回报错再修）
+    "iter_agent_total_seconds": 2400,  # 整条动作总耗时上限（秒）
 }
 
 

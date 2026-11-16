@@ -1240,6 +1240,12 @@ def _run_once(plan, action, ev=None, stop=None, prev_fail="", attempt=0):
         return {"ok": False, "error": "「LLM 直接操作」已关闭（设置里打开 iter_agent_enabled）",
                 "skipped": True}
     steps = int(st.get("iter_agent_steps") or 80)
+    # ★ 2026-11-17：迭代是最费钱的一条路，单独打标签，记账里能一眼分开。
+    try:
+        from . import usage_ledger as _ul
+        _ul.set_tag("iter")
+    except Exception:                                       # noqa: BLE001
+        pass
     seconds = int(st.get("iter_agent_seconds") or 1200)
     kind, model, key = _pick_model()
     if kind == "cloud" and not key:

@@ -50,14 +50,46 @@ _BOOT_TS = [time.time()]
 # 默认配置。写进 selfloop.json 的顶层，用户/我都可以直接改文件调整。
 DEFAULTS = {
     "enabled": True,        # 总开关
-    "daily_plans": 50,      # 每天最多几个计划（按计划数算，打磨几轮只算 1 个）
+    # ★ 2026-11-17 用户要求「省 API 开支且质量不变」。
+    #   实测：daily_plans=50 一天产出 54 条待批准，用户一条都没批 ——
+    #   生成速度是处理速度的几十倍，多出来的 token 纯浪费。
+    #   降到 12：单条计划的质量（打磨轮数/评分门槛）完全不变，只是少想一些。
+    #   想多要就改这个数或点「立即反思」（手动永远放行）。
+    "daily_plans": 12,      # 每天最多几个计划（按计划数算，打磨几轮只算 1 个）
     "min_gap_sec": 90,      # 两次触发之间至少隔多久（秒）
     "task_fail_gap": 300,   # 任务失败触发的额外间隔（秒），防自我循环
     "web_every": 3,         # 每 N 次触发才联网抓一次技术动态（其余用已入库论文）
     "slow_ratio": 2.0,      # 耗时超过历史均值这么多倍，算「明显变长」
     "trigger_keep": 50,     # 触发原因日志保留最近多少条（前端展示最近 5 条）
     "boot_gap_sec": 180,    # 启动冷却：进程刚起来这段时间内不自动触发（手动不受限）
+    # ★ 2026-11-17：待批准积压闸门。真实数据：用户有 54 条待批准没处理，而每轮
+    #   反思还在往里加 5~10 条 —— 生成速度远超处理速度，这些 token 是纯浪费。
+    #   积压 ≥ 这个数时**自动触发**直接跳过（手动点「立即反思」永远放行）。
+    #   设 0 = 关闭闸门。
+    "backlog_gate": 30,
 }
+
+# 积压条数的缓存：每次对话结束都读一遍 plans.json 没必要（几百 KB）。
+_BACKLOG_CACHE = {"at": 0.0, "n": 0}
+_BACKLOG_TTL = 60.0
+
+
+def _backlog():
+    """待批准动作总数（改进 + 新功能）。失败按 0 处理 —— 统计坏了不能挡住反思。"""
+    now = time.time()
+    if now - float(_BACKLOG_CACHE.get("at") or 0) < _BACKLOG_TTL:
+        return int(_BACKLOG_CACHE.get("n") or 0)
+    n = 0
+    try:
+        from . import self_iterate as _si
+        n += int((_si.list_pending_actions() or {}).get("total") or 0)
+        n += int((_si.list_pending_features() or {}).get("total") or 0)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("backlog 统计失败", exc_info=True)
+        n = 0
+    _BACKLOG_CACHE["at"] = now
+    _BACKLOG_CACHE["n"] = n
+    return n
 
 # 寒暄词。命中且整句很短 → 判定闲聊，不触发思考。
 _CHIT = (
@@ -303,8 +335,26 @@ def on_task_end(info):
 def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     """三重检查都过了才真的开线程。"""
     d = cfg()
-    if _quota_left(d) <= 0:
+    # ★ 2026-11-17：原来这里不看 source —— 配额一满，用户点「立即反思」
+    #   也会被「今日计划数已满」挡掉，等于手动按钮失效。
+    #   下面 backlog_gate 那道闸门本来就写了「手动永远放行」，这里保持一致。
+    if _quota_left(d) <= 0 and source != "manual":
         return {"ok": True, "skipped": "今日计划数已满（%d）" % d.get("daily_plans")}
+    # ★ 2026-11-17 用户问「为什么这么多条待批准」：根因就是**生成远快于处理**。
+    #   一次反思产 5~10 条动作 + 2~3 个新功能，而用户一天批不了几条。
+    #   队列已经很深时继续想新的，token 是纯浪费（这些计划只会越堆越多）。
+    #   所以生成前先看队列深度，积压超阈值就跳过 —— 手动触发永远放行。
+    try:
+        gate = int(d.get("backlog_gate") or 0)
+    except Exception:                                   # noqa: BLE001
+        gate = 0
+    if gate > 0 and source != "manual":
+        backlog = _backlog()
+        if backlog >= gate:
+            return {"ok": True,
+                    "skipped": "待批准已积压 %d 条（阈值 %d）：先把已有的批掉，"
+                               "再想新的（想立刻跑请点「立即反思」）"
+                               % (backlog, gate)}
     now = time.time()
     # ★ 2026-11-16 用户报「每次启动都要自动迭代一轮，134.9 秒」：
     #   进程刚起来时，前端可能还在重推历史、队列也可能在补跑，这时候自动开跑

@@ -44,6 +44,59 @@ _CKPT_DIR = Path(__file__).resolve().parent.parent / "data" / "llm_checkpoints"
 _CKPT_KEEP = 8      # 只留最近 8 份：磁盘被无上限增长吃过一次亏（43.8GB）
 
 
+# ---------------------------------------------------------------- token 用量
+# ★ 2026-11-17 用户要求「帮我节省 API 开支」。
+#   查了一遍：全项目**一处 token 统计都没有** —— 省了多少、质量有没有变，
+#   全凭感觉。这里加一个进程内的轻量累加器：chat_stream 收到 usage 就累加，
+#   调用方用 take_usage() 取走「自上次取走以来」的增量。
+# ⚠️ 为什么不改 chat_stream 的 yield 协议：它被对话/反思/迭代/自检等十几处
+#   调用，加一个新的 kind 要逐个确认调用方能容忍未知类型 —— 风险远大于收益。
+#   累加器对现有调用方完全透明。
+_USAGE = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+_USAGE_LOCK = threading.Lock()
+
+
+def take_usage(reset=True):
+    """取走累计 token 用量（默认清零）。返回 dict，永不抛异常。"""
+    try:
+        with _USAGE_LOCK:
+            out = dict(_USAGE)
+            if reset:
+                for _k in _USAGE:
+                    _USAGE[_k] = 0
+            return out
+    except Exception:                                   # noqa: BLE001
+        return {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+
+
+def _add_usage(u, model=""):
+    """把一条 SSE 里的 usage 累加进来。字段名各家不同，做兼容。
+
+    ★ 2026-11-17：除进程内累加，还落盘记账（usage_ledger）。
+      上一版只有进程内计数器、且**没有任何地方调用 take_usage()** —— 等于
+      白算。落盘后「今天花了多少、花在反思还是打磨」才有数据可查。
+    """
+    try:
+        if not isinstance(u, dict):
+            return
+        p = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
+        c = int(u.get("completion_tokens") or u.get("output_tokens") or 0)
+        t = int(u.get("total_tokens") or (p + c))
+        with _USAGE_LOCK:
+            _USAGE["prompt"] += max(0, p)
+            _USAGE["completion"] += max(0, c)
+            _USAGE["total"] += max(0, t)
+            _USAGE["calls"] += 1
+        # 记账是旁路：任何失败都不能影响主流程
+        try:
+            from . import usage_ledger as _ul
+            _ul.record(p, c, t, model=model)
+        except Exception:                               # noqa: BLE001
+            logger.debug("usage ledger failed", exc_info=True)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("累加 token 用量失败", exc_info=True)
+
+
 def _save_checkpoint(messages, model, code, err):
     """把本轮已收到的消息 + 失败原因落盘，供下一轮读回上下文续跑。
 
@@ -368,6 +421,9 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
         "model": wire_model,
         "messages": messages,
         "stream": True,
+        # ★ 2026-11-17：不加这个，流式响应里**根本没有 usage** —— 想统计
+        #   token 也就无从统计。加了之后最后一条 chunk 会带 usage。
+        "stream_options": {"include_usage": True},
         "temperature": temperature,
         "max_tokens": max_tokens,
         # ⚠️ 2026-11 的新协议：思考是请求参数，不是模型名
@@ -444,9 +500,14 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
                 # SSE 偶发半截包，跳过而不是整轮失败
                 continue
 
+            # ★ 2026-11-17：usage 可能出现两种位置 —— ① 空 choices 的独立分片；
+            #   ② 带 finish_reason 的收尾分片。统一在**取 choices 之前**收一次，
+            #   两种情况都不漏、也不会重复记。
+            if obj.get("usage"):
+                _add_usage(obj.get("usage"), wire_model)
+
             choices = obj.get("choices") or []
             if not choices:
-                # 可能是最后一条 usage 统计，忽略
                 continue
             delta = choices[0].get("delta") or {}
 
@@ -470,6 +531,13 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
                         yield ("content", "\n\n（输出达到 max_tokens 上限被截断）")
                     else:
                         yield ("note", "输出达到 max_tokens 上限被截断")
+                # ⚠️ 2026-11-17 实测（抓原始 SSE 确认）：DeepSeek 的 usage 与
+                #   finish_reason **在同一个分片**里
+                #   （"finish_reason":"stop","usage":{"prompt_tokens":9,...}）。
+                #   所以只要在「取 choices 之前」先收 usage（本函数上方已做），
+                #   这里照常 break 就不会漏记。
+                #   ⚠️ 别改成 continue 去等「后面的 usage 分片」：那种分片本服务
+                #   并不存在，继续读反而可能在半开连接上一直等到读超时（5 分钟）。
                 break
     finally:
         try:
@@ -546,6 +614,8 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
             "model": wire_model,
             "messages": msgs,
             "stream": True,
+            # ★ 2026-11-17：迭代是 token 大户，这一路必须能统计。
+            "stream_options": {"include_usage": True},
             "temperature": temperature,
             # ★ 2026-11-08：top_p 之前**完全没传** —— 前端那条采样滑杆对云端是死的。
             #   现在显式带上；None 表示"由模型默认"，不塞空值（有的网关会报错）。
@@ -639,6 +709,12 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 except json.JSONDecodeError:
                     continue
 
+                # ★ 2026-11-17：**迭代工具循环是最费钱的一条路**。usage 可能出现在
+                #   空 choices 的独立分片，也可能在带 finish_reason 的收尾分片 ——
+                #   统一在取 choices 前收一次，两种都不漏、也不会重复记。
+                if obj.get("usage"):
+                    _add_usage(obj.get("usage"), wire_model)
+
                 choices = obj.get("choices") or []
                 if not choices:
                     continue
@@ -668,6 +744,9 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
 
                 if ch.get("finish_reason"):
                     finish = ch["finish_reason"]
+                    # ⚠️ 2026-11-17 实测：usage 与 finish_reason 同分片，已在
+                    #   「取 choices 之前」收过 → 这里 break 不会漏记。别改成
+                    #   继续读：半开连接上会一直等到读超时。
                     break
         finally:
             try:
@@ -790,6 +869,7 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
             "model": wire_model,
             "messages": msgs,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": temperature,
             **({"top_p": top_p} if top_p is not None else {}),
             "max_tokens": max(512, min(int(max_tokens or 1024), 2048)),
@@ -818,6 +898,8 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                         _o = json.loads(_pl)
                     except json.JSONDecodeError:
                         continue
+                    # ★ 2026-11-17：收尾交代也是一次真实调用，漏记会让账对不上。
+                    _add_usage(_o.get("usage"), wire_model)
                     for _ch in (_o.get("choices") or []):
                         _d = _ch.get("delta") or {}
                         if _d.get("content"):

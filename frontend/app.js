@@ -9856,6 +9856,15 @@
       writeAll([]);
       render();
     };
+    // 结果指纹：只比"哪项过没过、失败原因是什么"，**不比耗时 ms**
+    // （ms 每跑一次都不同，若把它算进去，每 60 秒的自动自检会被判成"变了"，去重永远失效）
+    function resultSig(x) {
+      return (x.items || []).map((it) =>
+        [it.key || "", it.ok ? "1" : "0", it.skip ? "1" : "0",
+         String(it.detail || "").replace(/\d+ms|\d+\.\d+s/g, "")].join("~")
+      ).join("|");
+    }
+
     window.pushSelftestCache = function (rec) {
       if (!rec) return;
       const arr = readAll();
@@ -9869,10 +9878,46 @@
         model: rec.model || "",
         items: Array.isArray(rec.items) ? rec.items : [],
       };
+      // 和最近一条结果完全一致 → 只刷新那条的时间，不新增。
+      // 自检每 60 秒自动跑一次，若不去重，50 分钟就能把 50 条名额全堆成同一份结果。
+      const top = arr[0];
+      const same = top &&
+        String(top.level) === String(item.level) &&
+        Number(top.ok) === item.ok && Number(top.total) === item.total &&
+        Number(top.skipped) === item.skipped &&
+        String(top.model || "") === String(item.model || "") &&
+        resultSig(top) === resultSig(item);
+      if (same) {
+        top.time = item.time;
+        writeAll(arr);
+        render();
+        return;
+      }
       arr.unshift(item);
       writeAll(arr);
       render();
     };
+
+    // 历史堆积清理（2026-11-16）：去重只防「新增」，改之前每 60 秒已经堆了一批
+    // 完全相同的记录。加载时做一次性压缩：相邻且结果指纹相同的只留最新一条
+    // （不跨过中间的差异记录，保留 A→B→A 这种真实变化轨迹）。
+    (function collapseOldDup() {
+      const arr = readAll();
+      if (arr.length < 2) return;
+      const out = [];
+      for (const r of arr) {
+        const prev = out[out.length - 1];
+        const same = prev &&
+          String(prev.level) === String(r.level) &&
+          Number(prev.ok) === Number(r.ok) &&
+          Number(prev.total) === Number(r.total) &&
+          Number(prev.skipped) === Number(r.skipped) &&
+          String(prev.model || "") === String(r.model || "") &&
+          resultSig(prev) === resultSig(r);
+        if (!same) out.push(r);
+      }
+      if (out.length !== arr.length) writeAll(out);
+    })();
 
     render();
   })();
