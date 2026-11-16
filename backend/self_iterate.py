@@ -3159,6 +3159,22 @@ def force_execute(pid, action_ids=None):
     p["_force"] = list(dict.fromkeys(list(p.get("_force") or []) + ids))
     save_plans(d)
     reset_loop(files)
+    # ★ 2026-11-16 收尾核对：确认 force_execute 真的把动作放行到执行器。
+    #   上一轮把熔断类 failed 迁移成 need_review 后成功率仍 55%，怀疑「前端批量
+    #   放行」只改了状态、没真正进执行器。这里加一条断言日志：放行后动作状态
+    #   必须是 approved 且 id 已进 _force，否则说明放行链路断了。
+    _forced_set = set(ids)
+    _bad = [str(a.get("id")) for a in (p.get("actions") or [])
+            if str(a.get("id")) in _forced_set
+            and a.get("status") != "approved"]
+    _force_ok = (not _bad) and all(x in (p.get("_force") or []) for x in ids)
+    logger.info("force_execute 放行核对 plan=%s forced=%d files=%d ok=%s%s",
+                pid, len(ids), len(set(files)), _force_ok,
+                (" bad=%s" % _bad) if _bad else "")
+    if not _force_ok:
+        return {"ok": False, "forced": ids,
+                "files": list(dict.fromkeys(files)), "plan": p,
+                "error": "放行后状态核对失败：%s" % (_bad or "_force 未写入")}
     return {"ok": True, "forced": ids,
             "files": list(dict.fromkeys(files)), "plan": p}
 

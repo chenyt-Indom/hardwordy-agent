@@ -504,6 +504,173 @@ def web_search(query: str, n: int = 8) -> list:
              "engine": "fallback"}]
 
 
+# ---------- 新闻类查询专用路径 ----------
+# 为什么单独做：普通 web_search 对「美伊局势」「某地冲突最新进展」这类
+# **时效性新闻查询**效果很差 —— 引擎会把百科词条、历史综述、聚合导航页
+# 排在前面，而这些页面讲的是「背景」不是「最新」。定时任务里反复换词
+# 也搜不到新东西，根因就在这里。
+#
+# 做法：
+#   1. 优先读**新闻栏目页 / RSS**（结构化、时效性强、无需 JS）；
+#   2. 百科类域名（baike/wiki）在结果里**降权到末尾** —— 它们对「最新进展」
+#      几乎零贡献，但相关度打分往往很高，不显式压下去就会霸榜；
+#   3. 新闻源全部失败时**回退到普通 web_search**，保证不会比原来更差。
+
+# 百科/词典类域名：对「最新进展」类查询是噪音，统一降权到末尾
+_ENCYCLOPEDIA_SITES = (
+    "baike.baidu.com", "baike.so.com", "baike.sogou.com",
+    "wikipedia.org", "wikiwand.com", "zhihu.com/topic",
+    "britannica.com", "baike.com",
+)
+
+
+def _is_encyclopedia(item: dict) -> bool:
+    """判断一条结果是否属于百科/词典类（新闻查询里要降权到末尾）。"""
+    url = (item.get("url") or "").lower()
+    return any(d in url for d in _ENCYCLOPEDIA_SITES)
+
+
+# 新闻 RSS / 栏目页源。
+# 取舍记录：
+# - 只用**无需 JS、无需 API Key** 的公开源，和本模块其它部分保持一致；
+# - 中新网/新华网/人民网的 RSS 栏目页结构稳定，实测可直接解析；
+# - 每个源都包在 try 里，单个源挂掉不影响其它源。
+_NEWS_RSS_SOURCES = (
+    # (名称, URL 模板, 解析器类型)
+    ("中新网-即时新闻", "https://www.chinanews.com.cn/rss/scroll-news.xml", "rss"),
+    ("新华网-时政", "http://www.xinhuanet.com/politics/news_politics.xml", "rss"),
+    ("人民网-国际", "http://www.people.com.cn/rss/world.xml", "rss"),
+    ("澎湃新闻-要闻", "https://feedx.net/rss/thepaper.xml", "rss"),
+)
+
+
+def _parse_rss(xml_text: str, source: str, n: int) -> list:
+    """解析 RSS/Atom → [{title, url, desc, engine, pub}]。"""
+    import re
+    out = []
+    # 同时兼容 <item>（RSS 2.0）和 <entry>（Atom）
+    blocks = re.findall(r"(?is)<item[^>]*>(.*?)</item>", xml_text)
+    if not blocks:
+        blocks = re.findall(r"(?is)<entry[^>]*>(.*?)</entry>", xml_text)
+    for b in blocks:
+        if len(out) >= n:
+            break
+        tm = re.search(r"(?is)<title[^>]*>(.*?)</title>", b)
+        if not tm:
+            continue
+        title = _clean(tm.group(1))
+        if len(title) < 4:
+            continue
+        # 链接：RSS 是 <link>URL</link>，Atom 是 <link href="URL"/>
+        lm = (re.search(r"(?is)<link[^>]*href=\"([^\"]+)\"", b)
+              or re.search(r"(?is)<link[^>]*>(.*?)</link>", b))
+        url = _clean(lm.group(1)) if lm else ""
+        if not url.startswith("http"):
+            continue
+        dm = (re.search(r"(?is)<description[^>]*>(.*?)</description>", b)
+              or re.search(r"(?is)<summary[^>]*>(.*?)</summary>", b)
+              or re.search(r"(?is)<content[^>]*>(.*?)</content>", b))
+        desc = _clean(dm.group(1)) if dm else ""
+        pm = (re.search(r"(?is)<pubDate[^>]*>(.*?)</pubDate>", b)
+              or re.search(r"(?is)<updated[^>]*>(.*?)</updated>", b)
+              or re.search(r"(?is)<published[^>]*>(.*?)</published>", b))
+        pub = _clean(pm.group(1)) if pm else ""
+        out.append({"title": title, "url": url, "desc": desc[:300],
+                    "engine": source, "pub": pub})
+    return out
+
+
+def _fetch_news_rss(query: str, n: int) -> list:
+    """并发抓取各新闻 RSS 源，按查询词过滤后返回。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(src):
+        name, url, kind = src
+        try:
+            xml_text = _fetch(url, timeout=10)
+            return _parse_rss(xml_text, name, n * 3)
+        except Exception:
+            return []
+
+    batches = []
+    try:
+        with ThreadPoolExecutor(max_workers=len(_NEWS_RSS_SOURCES)) as pool:
+            futs = [pool.submit(_one, s) for s in _NEWS_RSS_SOURCES]
+            for f in futs:
+                try:
+                    batches.append(f.result(timeout=15) or [])
+                except Exception:
+                    batches.append([])
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+
+    # 用查询词元过滤：RSS 是全量流，不筛的话返回的全是无关新闻
+    terms = _terms(query)
+    if not terms:
+        return [it for b in batches for it in b][:n]
+    kept = []
+    for b in batches:
+        for it in b:
+            text = ((it.get("title") or "") + " " + (it.get("desc") or "")).lower()
+            if any(g in text for g in terms):
+                kept.append(it)
+    return kept
+
+
+def search_news(query: str, n: int = 8) -> list:
+    """新闻类查询专用检索：优先 RSS/新闻栏目页，百科类降权到末尾。
+
+    与 web_search 的区别：
+      · 先读新闻 RSS（时效性强、结构化、无需 JS）；
+      · 再用普通引擎补充，但**百科/词典类结果一律排到最后**；
+      · 新闻源全空时回退到 web_search，保证不比原来更差。
+
+    返回格式与 web_search 一致：[{title, url, desc, engine}]，
+    新闻条目额外带 `pub`（发布时间，可能为空）。
+    """
+    news = []
+    try:
+        news = _fetch_news_rss(query, n)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+
+    # 普通引擎补充（新闻源可能覆盖不全，尤其是小众话题）
+    web = []
+    try:
+        web = web_search(query, n)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+
+    # 合并去重（按标题归一化）
+    import re
+    seen = set()
+    merged = []
+    for it in list(news) + list(web):
+        key = re.sub(r"\W+", "", it.get("title", ""))[:18]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(it)
+
+    if not merged:
+        return []
+
+    # 排序：新闻源优先 → 相关度 → 来源质量；百科类**强制沉底**
+    def _rank(it):
+        is_enc = _is_encyclopedia(it)
+        is_news = bool(it.get("pub")) or (it.get("engine") or "").startswith(
+            ("中新网", "新华网", "人民网", "澎湃"))
+        rel = relevance_ratio(query, it) if query else 0.0
+        return (
+            1 if is_enc else 0,          # 百科沉底（主键）
+            0 if is_news else 1,         # 新闻源优先
+            -(3.0 * rel + _quality_score(it, it.get("_engines", 1))),
+        )
+
+    merged.sort(key=_rank)
+    return merged[:n]
+
+
 # ---------- 网页正文抓取（深度阅读）----------
 # 为什么需要：搜索给回来的只是 100~200 字的摘要，篇幅有限、信息密度低，
 # 模型据此只能写出很短的回答。把前几条结果的**正文**抓下来喂给模型，

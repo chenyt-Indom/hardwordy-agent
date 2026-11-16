@@ -588,6 +588,60 @@ def _apply_reply_gate(text: str, limit: int = _REPLY_MAX_CHARS) -> str:
         return s
 
 
+# 空回复硬失败兜底（2026-11-16 用户要求）：
+# 低分轮次里模型只回一个「…」「。」或纯空白 —— 用户看到的就是「发出去没反应」。
+# 这里在最终回复返回前做一道检查：strip 后为空、或去掉标点/省略号后没有实质内容，
+# 就替换成一句可执行的占位回复，并把原始空回复写进 actlog 便于排查。
+_EMPTY_REPLY_FALLBACK = "收到，正在做 X，预计 Y 秒"
+# 只由这些字符组成的回复视为「无实质内容」（省略号、句号、逗号、空白、波浪号等）
+_EMPTY_REPLY_CHARS = set("…。．.，,、；;：:！!？?~～-—_ \t\r\n　")
+
+
+def _is_empty_reply(text: str) -> bool:
+    """回复是不是「空的 / 只有省略号句号」这类无实质内容。
+
+    判据（宁严勿松，避免误伤正常短回复）：
+      · strip 后为空 → 空；
+      · 去掉所有标点/省略号/空白后为空 → 空（覆盖「…」「。」「。。。」「...」）；
+      · 其余一律算有内容（「好」「收到」这种短回复**不能**被替换）。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return True
+    return all(ch in _EMPTY_REPLY_CHARS for ch in s)
+
+
+def _empty_reply_fallback(text: str, session: str = "", model: str = "") -> str:
+    """空回复兜底：返回可用的占位回复，并把原始空回复写进 actlog。
+
+    只在 `_is_empty_reply(text)` 为真时调用；有内容时原样返回，绝不改动。
+    """
+    if not _is_empty_reply(text):
+        return text
+    try:
+        # ⚠️ actlog 模块没有 `log` 方法（只有 `record` / `add` 之类），
+        #    原来写 `actlog.log(...)` 会抛 AttributeError，被下面的 except 吞掉 →
+        #    空回复兜底**从来没被记录过**，排查时看不到任何痕迹。
+        #    这里做兼容：优先用 `record`，没有就退回 `add`，再没有就写日志。
+        _rec = getattr(actlog, "record", None) or getattr(actlog, "add", None)
+        if callable(_rec):
+            _rec(
+                "empty_reply_fallback",
+                detail=("模型返回空回复（strip 后无实质内容），已替换为占位回复。"
+                        "原始内容=%r 长度=%d" % (str(text or ""), len(str(text or "")))),
+                session=session or "",
+                model=model or "",
+                result="fail",
+            )
+        else:
+            logger.warning(
+                "actlog 模块缺少 record/add，空回复兜底未记录：原始内容=%r 长度=%d",
+                str(text or ""), len(str(text or "")))
+    except Exception:
+        logger.warning("记录空回复兜底到 actlog 失败（不影响回复）", exc_info=True)
+    return _EMPTY_REPLY_FALLBACK
+
+
 def _clip_reply(text: str, limit: int = _REPLY_MAX_CHARS) -> str:
     """给回复加长度上限，超限时优先保留「结论+改动+验证」三段。
 

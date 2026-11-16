@@ -537,6 +537,209 @@ def _build_tail(actions=None, todos=None) -> str:
     return _TAIL_SEP + "**已改文件**：%s\n**待办**：%s" % (file_line, todo_line)
 
 
+# ── 每轮收口汇报（交付报告）──────────────────────────────────────
+# 对应摩擦点「同一需求被重复发送」：用户不用再追问「详细说明改了什么」。
+# 固定三段式：① 改了哪些文件（含行号区间）② 验证命令 ③ 备注/下一步。
+# 设计为纯函数 + 容错：任何输入异常都退回空串，绝不影响主回复。
+
+# 交付报告的分隔线（与 _TAIL_SEP 区分，避免和「已改文件/待办」混淆）
+_DELIVERY_SEP = "\n\n---\n"
+# 交付报告标题
+_DELIVERY_TITLE = "**本轮交付**"
+# 单条改动描述的最大长度（避免报告本身过长）
+_DELIVERY_ITEM_MAX = 200
+# 单条验证命令的最大长度
+_DELIVERY_CMD_MAX = 200
+
+
+def _normalize_change_item(item) -> dict:
+    """把一条改动归一化成 {file, lines, note} 结构。
+
+    支持多种输入形态（不同调用方命名不一，全兜住）：
+      · str："backend/reply_gate.py:100-120" 或 "backend/reply_gate.py"
+      · dict：{"file": ..., "lines"/"line"/"range": ..., "note"/"desc": ...}
+      · tuple/list：(file, lines) 或 (file, lines, note)
+    返回 dict；无法识别时返回 {}（由调用方跳过）。
+    """
+    if item is None:
+        return {}
+    # 字符串：尝试解析 "path:start-end" / "path:start" / "path"
+    if isinstance(item, str):
+        s = item.strip()
+        if not s:
+            return {}
+        file_part = s
+        lines_part = ""
+        # 从右往左找最后一个冒号，且冒号后是数字/区间才当行号
+        if ":" in s:
+            head, _, tail = s.rpartition(":")
+            t = tail.strip()
+            if t and (t[0].isdigit() or t[0] in "L#"):
+                file_part = head.strip()
+                lines_part = t
+        return {"file": file_part, "lines": lines_part, "note": ""}
+    # 元组/列表：(file, lines[, note])
+    if isinstance(item, (list, tuple)):
+        if not item:
+            return {}
+        file_part = _as_text(item[0]).strip()
+        lines_part = _as_text(item[1]).strip() if len(item) > 1 else ""
+        note = _as_text(item[2]).strip() if len(item) > 2 else ""
+        if not file_part:
+            return {}
+        return {"file": file_part, "lines": lines_part, "note": note}
+    # dict：多字段兜底
+    if isinstance(item, dict):
+        file_part = ""
+        for k in ("file", "path", "target", "filename"):
+            v = item.get(k)
+            if isinstance(v, str) and v.strip():
+                file_part = v.strip()
+                break
+        if not file_part:
+            return {}
+        lines_part = ""
+        for k in ("lines", "line", "range", "line_range", "span"):
+            v = item.get(k)
+            if v is None:
+                continue
+            if isinstance(v, (list, tuple)) and len(v) >= 2:
+                lines_part = "%s-%s" % (v[0], v[1])
+            else:
+                lines_part = _as_text(v).strip()
+            if lines_part:
+                break
+        note = ""
+        for k in ("note", "desc", "description", "summary", "what"):
+            v = item.get(k)
+            if isinstance(v, str) and v.strip():
+                note = v.strip()
+                break
+        return {"file": file_part, "lines": lines_part, "note": note}
+    return {}
+
+
+def _format_change_line(change: dict) -> str:
+    """把一条归一化后的改动格式化成一行：`- path:lines — note`。"""
+    if not change:
+        return ""
+    file_part = change.get("file") or ""
+    lines_part = change.get("lines") or ""
+    note = change.get("note") or ""
+    if not file_part:
+        return ""
+    head = file_part
+    if lines_part:
+        # 统一成 L 前缀，便于一眼识别是行号
+        lp = lines_part.strip()
+        if lp and not lp.startswith("L"):
+            lp = "L" + lp
+        head = "%s:%s" % (file_part, lp)
+    if note:
+        if len(note) > _DELIVERY_ITEM_MAX:
+            note = note[:_DELIVERY_ITEM_MAX].rstrip() + "…"
+        return "- %s — %s" % (head, note)
+    return "- %s" % head
+
+
+def _format_verify_line(cmd) -> str:
+    """把一条验证命令格式化成一行：`- `cmd``。"""
+    s = _as_text(cmd).strip()
+    if not s:
+        return ""
+    # 压成单行，避免多行命令破坏列表结构
+    s = " ".join(s.split())
+    if len(s) > _DELIVERY_CMD_MAX:
+        s = s[:_DELIVERY_CMD_MAX].rstrip() + "…"
+    return "- `%s`" % s
+
+
+def build_delivery_report(changes, verifies) -> str:
+    """把本轮改动的文件、行号区间、验证命令拼成固定三段式交付报告。
+
+    对应摩擦点「同一需求被重复发送」—— 用户不用再追问「详细说明改了什么」。
+    每轮收口时调用，把报告附在回复末尾即可。
+
+    参数
+    ----
+    changes : 本轮改动列表。每项支持：
+        · str："backend/reply_gate.py:100-120" / "backend/reply_gate.py"
+        · dict：{"file": ..., "lines"/"line"/"range": ..., "note": ...}
+        · tuple/list：(file, lines) 或 (file, lines, note)
+    verifies : 本轮验证命令列表（str / list / dict 均可）。
+
+    返回
+    ----
+    固定三段式文本：
+
+        ---
+        **本轮交付**
+        **改动文件**：
+        - path:Lstart-Lend — note
+        **验证命令**：
+        - `cmd`
+        **备注**：...
+
+    空输入时返回空串（调用方据此决定是否附加），绝不返回半截报告。
+    任何异常都退回空串，绝不影响主回复。
+    """
+    try:
+        # 归一化改动列表
+        change_items = []
+        if changes:
+            if isinstance(changes, (str, dict)):
+                changes = [changes]
+            if isinstance(changes, (list, tuple)):
+                for c in changes:
+                    norm = _normalize_change_item(c)
+                    if norm:
+                        change_items.append(norm)
+        # 归一化验证命令列表
+        verify_items = []
+        if verifies:
+            if isinstance(verifies, (str, dict)):
+                verifies = [verifies]
+            if isinstance(verifies, (list, tuple)):
+                for v in verifies:
+                    if isinstance(v, dict):
+                        # dict 形态：取 cmd/command/run 字段
+                        for k in ("cmd", "command", "run", "verify"):
+                            if v.get(k):
+                                verify_items.append(v.get(k))
+                                break
+                    else:
+                        verify_items.append(v)
+        # 空报告：不附加
+        if not change_items and not verify_items:
+            return ""
+
+        lines = [_DELIVERY_TITLE]
+        # 第一段：改动文件（含行号区间）
+        lines.append("**改动文件**：")
+        if change_items:
+            for c in change_items:
+                line = _format_change_line(c)
+                if line:
+                    lines.append(line)
+        else:
+            lines.append("- （本轮未改动文件）")
+        # 第二段：验证命令
+        lines.append("**验证命令**：")
+        if verify_items:
+            for v in verify_items:
+                line = _format_verify_line(v)
+                if line:
+                    lines.append(line)
+        else:
+            lines.append("- （本轮未提供验证命令）")
+        # 第三段：备注（固定提示，告诉用户如何复现/继续）
+        lines.append("**备注**：以上为本轮全部改动；如需回滚或补充验证，直接说「回滚」或「补验证」。")
+
+        return _DELIVERY_SEP + "\n".join(lines)
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
 def _build_head_summary(conclusion, actions=None, todos=None) -> str:
     """长度预判命中时，生成「结论 + 已改文件 + 待办」三行摘要。
 
@@ -588,6 +791,78 @@ def _predict_will_truncate(conclusion, process, artifacts, limit) -> bool:
     return raw_len > PREDICT_TRUNCATE_THRESHOLD or raw_len > limit
 
 
+# ── 回复形态闸门（结论前置 + 过程折叠 + 长度硬上限）────────────────
+# 对应「回复被截断 ×18」「空回复 ×4」的根治：不是把截断做得更整齐，
+# 而是强制先给结论 —— 用户第一眼永远看到「已完成/未完成 + 下一步」。
+
+# 超过这个字数，正文部分折叠进 <details>（结论段永远留在外面）
+SHAPE_FOLD_THRESHOLD = 1200
+# 结尾「下一步 / 验证方式」缺失时补的兜底文案
+_SHAPE_NEXT_STEP_FALLBACK = "下一步：按上面的结论执行；验证方式：跑一遍相关命令/用例确认结果符合预期。"
+# 结尾判定：出现这些字样视为已经交代了「下一步 / 验证方式」
+_NEXT_STEP_MARKERS = ("下一步", "验证方式", "验证：", "验证方法", "接下来",
+                      "后续步骤", "如何验证", "怎么验证")
+# 结论段判定：首段命中这些前缀视为「已经是结论」
+_SHAPE_CONCLUSION_PREFIXES = _CONCLUSION_PREFIXES + (
+    "结论", "已完成", "未完成", "已修复", "未修复", "已改", "未改",
+    "通过", "未通过", "成功", "失败", "是", "否", "对", "不对",
+    "可以", "不可以", "能", "不能", "Yes", "No", "YES", "NO", "yes", "no",
+)
+
+
+def _shape_first_para(text: str) -> str:
+    """取首段（首个空行之前）作为「结论段」候选。"""
+    s = (text or "").strip()
+    if not s:
+        return ""
+    return s.split("\n\n", 1)[0].strip()
+
+
+def _shape_is_conclusion(first_para: str) -> bool:
+    """首段是否已经是合格的「结论」：含 yes/no，或「已完成/未完成」类前缀。
+
+    比 _looks_like_conclusion 更宽松也更硬：只要首段以结论类前缀开头，
+    或首行以明确 yes/no 开头，就算合格 —— 这是「形态闸门」而不是「文风评分」。
+    """
+    s = (first_para or "").strip()
+    if not s:
+        return False
+    first_line = s.split("\n", 1)[0].strip()
+    if not first_line:
+        return False
+    if first_line.startswith(_SHAPE_CONCLUSION_PREFIXES):
+        return True
+    if _starts_with_yes_no(first_line):
+        return True
+    return False
+
+
+def _shape_has_next_step(text: str) -> bool:
+    """结尾是否已经交代了「下一步 / 验证方式」。"""
+    s = (text or "").strip()
+    if not s:
+        return False
+    # 只看最后 1/3，避免正文里出现「下一步」被误判
+    tail = s[-max(200, len(s) // 3):]
+    return any(m in tail for m in _NEXT_STEP_MARKERS)
+
+
+def _shape_fold_body(body: str) -> str:
+    """把超长正文折叠进 <details>；短正文原样返回。
+
+    与 _fold_process 的区别：这里不挑「过程口吻」，而是**按长度硬折叠** ——
+    超过 SHAPE_FOLD_THRESHOLD 的部分一律收进折叠块，保证正文永远短。
+    """
+    if not body:
+        return ""
+    n = len(body)
+    if n <= SHAPE_FOLD_THRESHOLD:
+        return body
+    preview = body[:FOLD_PREVIEW].replace("\n", " ").strip()
+    return ("<details><summary>详细过程 %d 字，点开看</summary>\n\n%s\n\n"
+            "…（其余 %d 字已折叠）\n\n</details>") % (n, preview, n - FOLD_PREVIEW)
+
+
 def enforce_shape(text, user_input=None, suggested_action=None, actions=None,
                   todos=None, max_chars=DEFAULT_MAX_CHARS) -> str:
     """回复形态闸门（形态硬约束版）：结论前置 + 过程折叠 + 长度上限 + 空回复兜底。
@@ -629,8 +904,21 @@ def enforce_shape(text, user_input=None, suggested_action=None, actions=None,
         # ② 过程折叠：把过程口吻的段落收进 <details>
         s = _fold_process_paragraphs(s)
 
+        # ②b 长度硬折叠：正文超过 SHAPE_FOLD_THRESHOLD 的部分一律折叠，
+        #     保证「结论段」永远在正文最前面、不被长过程淹没。
+        first_para = _shape_first_para(s)
+        if first_para and len(s) > SHAPE_FOLD_THRESHOLD:
+            rest = s[len(first_para):].lstrip("\n")
+            if rest:
+                folded_rest = _shape_fold_body(rest)
+                s = first_para + "\n\n" + folded_rest
+
         # 结构小结：有 patch 动作但没交代改了哪些文件 → 补「已改文件 / 待办」
         s = _structure_check(s, actions, todos)
+
+        # ③ 结尾必须有「下一步 / 验证方式」—— 没有就补一句兜底
+        if not _shape_has_next_step(s):
+            s = s.rstrip() + "\n\n" + _SHAPE_NEXT_STEP_FALLBACK
 
         # ③ 长度上限：超长截断并显式提示
         try:

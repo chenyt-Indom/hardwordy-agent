@@ -208,6 +208,13 @@ def decide() -> dict:
             # 不用自检」处理。宁可少扫一遍，也不要在无人值守时转圈。
             kind, why = "other", "没有指定要自检的重启，按你的要求不自检"
 
+        # ★ 2026-11-16 用户最终确认：「只有新版本已就绪弹窗里的蓝色立即重启才自检」。
+        #   除 force="audit" 外，所有重启类别（auto_iter / manual / shutdown_open /
+        #   quick / other / cold）都必须走 no-audit 路径。这里再兜一道底：
+        #   万一哪天有人新增了 kind 却忘了把 audit 置 False，也不会误自检。
+        if kind != "ready":
+            audit = False
+
     if audit:
         try:
             rec = [float(x) for x in (d.get("recent") or []) if isinstance(x, (int, float))]
@@ -219,7 +226,9 @@ def decide() -> dict:
     d["last_decision"] = {"ts": now, "at": time.strftime("%m-%d %H:%M:%S"),
                           "kind": kind, "audit": bool(audit), "why": why}
     _save(d)
-    logger.info("[bootgate] %s → audit=%s（%s）", kind, audit, why)
+    # 记录本次判定的类别，便于以后排查「为什么这次没自检 / 为什么自检了」。
+    # 只有 kind="ready"（新版本已就绪弹窗的立即重启）才会 audit=True。
+    logger.info("[bootgate] 判定类别=%s audit=%s（%s）", kind, audit, why)
     return {"audit": bool(audit), "why": why, "kind": kind}
 
 

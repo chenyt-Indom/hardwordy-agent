@@ -959,6 +959,57 @@ def patch(rel: str, find: str, replace: str, note: str = "",
                     days=7, evidence=_evidence[:200])
         except Exception:
             logger.debug("silent-except", exc_info=True)
+    # ★ 2026-11-17 幽灵修复闸门·真正接进 selfdev 提案入口（本次改动）：
+    #   上面那段只在 fail_kind 非空时才查账本 —— 但 selfdev 的提案入口
+    #   （self_iterate 生成 patch 前）经常**不带 fail_kind**，于是整道闸门
+    #   被静默跳过，幽灵修复照样放行。这是 02:44/03:01/03:21 三次立项都没
+    #   落地的关键一步：闸门逻辑写好了，但提案路径上根本没调用它。
+    #   现在改成：**无论 fail_kind 是否为空，都从 self_iterate._count_fail_kind
+    #   取真实失败计数**；计数为 0 则拒绝该提案并写 actlog 记录 phantom=true。
+    #   注意：fail_kind 为空时用 "(unspecified)" 占位，避免把「没写 fail_kind」
+    #   当成「无需证据」而放行 —— 那正是幽灵修复的温床。
+    _proposal_fk = _fk or "(unspecified)"
+    _proposal_count = -1
+    try:
+        from . import self_iterate as _si
+        _cnt_map = _si._count_fail_kind(_proposal_fk, days=7) or {}
+        _proposal_count = int(_cnt_map.get(_proposal_fk) or 0)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        _proposal_count = -1
+    if _proposal_count == 0:
+        # 幽灵修复：提案路径上真实计数为 0 → 拒绝，并写 actlog 记录 phantom=true。
+        _phantom_msg = (
+            "拒绝：提案 fail_kind「%s」近 7 天真实失败计数为 0，"
+            "属于幽灵修复（phantom=true）。请先确认这个失败真的出现过"
+            "（actlog / task.json 里有记录），再动手改代码。" % _proposal_fk)
+        try:
+            journal("phantom", rel, fail_kind=_proposal_fk, days=7,
+                    count=0, phantom=True, source="selfdev.patch")
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        try:
+            actlog.record_act(
+                "selfdev_phantom",
+                summary="幽灵修复被拒：fail_kind=%s 近 7 天计数 0" % _proposal_fk,
+                result="fail",
+                detail=_phantom_msg,
+                files=[rel] if rel else [],
+                phantom=True,
+                fail_kind=_proposal_fk,
+                count=0,
+            )
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        return {"ok": False, "error": _phantom_msg,
+                "reason": "phantom", "phantom": True,
+                "evidence": "针对 fail_kind: %s，近 7 天 0 次" % _proposal_fk}
+    if _proposal_count > 0 and _real <= 0:
+        # 提案路径查到了真实计数，但上面 fail_kind 分支没走（fail_kind 为空）——
+        # 把真实计数补进证据卡，让前端能看到「这次改动有 N 次真实失败依据」。
+        _real = _proposal_count
+        _evidence = "针对 fail_kind: %s，近 7 天 %d 次" % (
+            _proposal_fk, _proposal_count)
     # ★ 2026-11-17 改动证据卡：把 evidence 挂到本次 patch 的返回结果上，
     #   前端动作卡片直接渲染（fail_kind / 计数 / 回归结论）。
     #   这里先建一个 dict，后面成功/失败分支都往里塞，最后统一 merge 进返回值。

@@ -13172,8 +13172,10 @@
         '<div class="iter-stats"></div>' +
         // ★ 2026-11-15 用户要求：「反思自检评估以及抽空代码自检彻底成为这个项目的
         //   一项功能，不要放在自动化里面，而是放在迭代想法里面」。
-        //   所以这四项不再出现在定时任务列表，常驻在这里：每项一行 ——
+        //   所以这几项不再出现在定时任务列表，常驻在这里：每项一行 ——
         //   节律 / 上次运行与摘要 / 暂停重启 / 立即运行 / 历史。
+        // 2026-11-16 用户要求去掉「重启自检」，现在只剩三项：
+        //   自我反思（每天 04:30）/ 代码自检（每天 05:10）/ 体验评估（每 120 分钟）。
         '<div class="iter-maint">' +
           '<div class="iter-maint-h">' +
             '<span class="iter-maint-t">🛠 自我维护</span>' +
@@ -13384,12 +13386,76 @@
         // ★ 2026-11-16 用户要求：「如果要人工复核就在前端一个审核的按钮」。
         //   熔断拦下的动作不是失败，是「等你点头」。点这个按钮 → 放行 + 重置该文件
         //   的熔断计数 + 立刻执行。想放弃就点「✕ 不做」。
-        h += '<div class="iter-act-btns">' +
-          '<button type="button" class="btn sm iter-force">✔ 复核通过并执行</button>' +
-          '<button type="button" class="btn sm ghost iter-no">✕ 不做</button>' +
+        // ★ 2026-11-16 补充（摩擦点「只诊断不修复」）：复核前必须让用户**看得见证据**，
+        //   否则「复核通过」等于盲签。这里把动作自带的 evidence / 目标文件 / 锚点
+        //   全部摊开，并给出「点哪个按钮、改哪个文件」的定位提示。
+        // ★ 2026-11-17 复核入口独立交付：证据卡必须显示「针对哪个真实失败 +
+        //   计数 + 回归结果」，否则「复核通过」等于盲签。
+        //   数据来源：后端 self_iterate 在动作结果里附的 evidence 对象
+        //   （{fail_kind, count, regression}），由 actlog.aggregate_fail_kind
+        //   从真实事件聚合，取不到就是 null —— 前端绝不猜常量。
+        const eviObj = (a.evidence && typeof a.evidence === "object") ? a.evidence : null;
+        const eviText = (a.evidence && typeof a.evidence === "string" && String(a.evidence).trim()) || "";
+        const filesArr = Array.isArray(a.files) ? a.files.filter(Boolean) : [];
+        const anchorText = (a.anchor && String(a.anchor).trim()) || "";
+        // 证据卡主体：优先渲染结构化 evidence（fail_kind + count + regression），
+        // 其次退回纯文本 evidence，最后给「无证据」提示。
+        let eviBody = "";
+        if (eviObj && eviObj.fail_kind) {
+          const fk = String(eviObj.fail_kind);
+          const cnt = (typeof eviObj.count === "number") ? eviObj.count : null;
+          const rr = eviObj.regression ? String(eviObj.regression) : "";
+          const rrLabel = rr === "pass" ? "✅ 回归通过"
+            : rr === "fail" ? "❌ 回归失败"
+            : rr === "skip" ? "⏭ 回归跳过" : "";
+          eviBody = '<div class="iter-act-evidence-body">' +
+            '<div class="iter-act-evidence-row">' +
+              '<span class="iter-act-evidence-k">针对失败</span>' +
+              '<code class="iter-act-evidence-v">' + esc(fk) + '</code>' +
+            '</div>' +
+            (cnt !== null
+              ? '<div class="iter-act-evidence-row">' +
+                '<span class="iter-act-evidence-k">真实计数</span>' +
+                '<span class="iter-act-evidence-v">' + cnt + ' 次</span>' +
+                '</div>'
+              : '') +
+            (rrLabel
+              ? '<div class="iter-act-evidence-row">' +
+                '<span class="iter-act-evidence-k">回归结果</span>' +
+                '<span class="iter-act-evidence-v">' + esc(rrLabel) + '</span>' +
+                '</div>'
+              : '') +
+            '</div>';
+        } else if (eviText) {
+          eviBody = '<div class="iter-act-evidence-body">' + esc(eviText) + '</div>';
+        } else {
+          eviBody = '<div class="iter-act-evidence-body iter-act-evidence-empty">' +
+            '（这条动作没有附带 evidence —— 后端没查到真实失败记录，' +
+            '请结合下方文件与锚点自行判断是否放行）</div>';
+        }
+        h += '<div class="iter-act-evidence">' +
+          '<div class="iter-act-evidence-title">🔎 复核依据（点「复核通过并执行」前请先看这里）</div>' +
+          eviBody +
+          (filesArr.length
+            ? '<div class="iter-act-evidence-files">涉及文件：' +
+              filesArr.map(function (f) { return '<code class="iter-act-file">' + esc(String(f)) + '</code>'; }).join(" · ") +
+              '</div>'
+            : '') +
+          (anchorText
+            ? '<div class="iter-act-evidence-anchor">定位锚点：<code>' + esc(anchorText) + '</code></div>'
+            : '') +
+          '</div>' +
+          '<div class="iter-act-btns">' +
+          '<button type="button" class="btn sm iter-force" title="放行这条被护栏拦下的动作，并立刻执行（会重置该文件的熔断计数）">✔ 复核通过并执行</button>' +
+          '<button type="button" class="btn sm ghost iter-no" title="放弃这条动作，不做任何改动">✕ 不做</button>' +
           '</div>' +
           '<div class="iter-act-hint">这是护栏在拦（同一文件 60 分钟内被改太多次），' +
-          '不是出故障。确认没问题就放行。</div>';
+          '不是出故障。确认没问题就放行。</div>' +
+          '<div class="iter-act-locate">定位：文件 <code>' +
+          (filesArr.length ? esc(filesArr.join(" · ")) : "（未指定）") +
+          '</code>' +
+          (anchorText ? ' · 选择器/锚点 <code>' + esc(anchorText) + '</code>' : '') +
+          '</div>';
       } else if (a.status === "approved") {
         // 已批准但还没执行 —— 允许单条撤回（后端 reject 支持 approved→rejected）。
         h += '<div class="iter-act-btns">' +
@@ -13663,37 +13729,21 @@
   }
 
   // ---------------------------------------------------------- 自我维护
-  // 反思 / 自检 / 体验评估 / 抽空自检 —— 用户要求它们「彻底成为这个项目的
+  // 自我反思 / 代码自检 / 体验评估 —— 用户要求它们「彻底成为这个项目的
   // 一项功能，放在迭代想法里面」，所以常驻在这个抽屉，不占定时任务列表。
+  // 2026-11-16 用户要求去掉「重启自检」，只剩这三项。
   let maintData = [];
 
   async function loadMaint() {
-    // 同时问一次重启自检：如果这次启动被闸门跳过（冷启动 / 自动迭代重启），
-    // 把原因显示在「重启自检」那一行，否则用户只会看到「还没跑过」而不知道为啥。
-    let skipWhy = "";
-    try {
-      const b = await api("/api/bootaudit");
-      const sk = (b && b.ok && b.skip) || null;
-      if (sk && sk.why) skipWhy = String(sk.why);
-    } catch (e) { skipWhy = ""; }
+    // 2026-11-16 用户要求「把重启自检去掉，只保留每天自检」：
+    // 后端 selfmaint 里已经没有 selfidle 这一项，启动也不再自检，
+    // 所以这里不再问 /api/bootaudit 拿「本次未自检」的原因，
+    // 只拉剩下的三项（自我反思 / 代码自检 / 体验评估）。
     const r = await api("/api/selfiter/maint");
-    if (r && r.ok) { maintData = r.items || []; renderMaint(skipWhy); }
+    if (r && r.ok) { maintData = r.items || []; renderMaint(); }
   }
 
-  // 把「本次未自检」的长原因压成 6~10 字，保证说明行不超过两行
-  function shortSkip(w) {
-    const s = String(w || "");
-    if (s.indexOf("冷启动") >= 0) return "冷启动";
-    if (s.indexOf("自动迭代") >= 0) return "自动迭代后重启";
-    if (s.indexOf("熔断") >= 0 || s.indexOf("已自检") >= 0) return "反复重启，已熔断";
-    if (s.indexOf("过期") >= 0) return "按冷启动处理";
-    // 2026-11-16：抽屉「一键重启」/ 没指定自检的重启，都不自检
-    if (s.indexOf("一键重启") >= 0) return "一键重启（不自检）";
-    if (s.indexOf("没有指定") >= 0) return "这类重启不自检";
-    return s.length > 12 ? s.slice(0, 12) + "…" : s;
-  }
-
-  function renderMaint(skipWhy) {
+  function renderMaint() {
     const box = el && el.querySelector(".iter-maint-list");
     if (!box) return;
     const rows = maintData || [];
@@ -13703,11 +13753,9 @@
       const last = x.last_run
         ? String(x.last_run).slice(5) + (x.last_seconds ? " · " + x.last_seconds + "s" : "")
         : "还没跑过";
-      // 只有「重启自检」这一项会被启动闸门跳过，把原因跟在说明后面。
-      // ⚠️ 说明行有 max-height:3em + overflow:hidden（约两行），
-      //    所以这里必须用**短文案**，否则后半截会被裁掉（实测踩过）。
-      const skipTip = (x.kind === "selfidle" && skipWhy)
-        ? "　· 本次未自检：" + shortSkip(skipWhy) : "";
+      // 2026-11-16：重启自检已移除，说明行只放「上次摘要 / 这项是干什么的」，
+      // 不再拼「本次未自检：xxx」（启动根本不再自检了）。
+      // ⚠️ 说明行有 max-height:3em + overflow:hidden（约两行），别塞长文案。
       return '<div class="iter-maint-row' + (on ? "" : " off") + '" data-kind="' + esc(x.kind) + '">' +
         '<span class="iter-maint-i">' + esc(x.icon || "·") + '</span>' +
         '<span class="iter-maint-n">' + esc(x.name) + '</span>' +
@@ -13717,7 +13765,7 @@
           (on ? "运行中" : "已暂停") + '</button>' +
         '<button type="button" class="btn sm ghost m-go">立即运行</button>' +
         '<button type="button" class="btn sm ghost m-his">历史</button>' +
-        '<div class="iter-maint-p">' + esc((x.last_preview || x.desc) + skipTip) + '</div>' +
+        '<div class="iter-maint-p">' + esc(x.last_preview || x.desc) + '</div>' +
         '<div class="iter-maint-hr-list" hidden></div>' +
       '</div>';
     }).join("");

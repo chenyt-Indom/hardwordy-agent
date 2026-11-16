@@ -1401,11 +1401,16 @@ def tick_watch() -> dict:
 
 
 def register_watch(query: str, interval_minutes: int = 0, kind: str = "web",
-                   name: str = "", session: str = "") -> dict:
+                   name: str = "", session: str = "", source: str = "") -> dict:
     """登记一条「盯着 XX」的后台任务，返回 {ok, job} 或 {ok:False, error}。
 
     走的是和普通定时任务**同一份** schedules.json、同一个调度循环，
     所以「⏰ 定时」抽屉里能看到它、能暂停、能删 —— 用户不需要学第二套概念。
+
+    ★ 2026-11-16 去重：用户原话「同一需求被重复发送」—— 反复说「盯着美伊局势」
+      不该在列表里堆出十条一模一样的任务。这里按 (watch_query, watch_kind)
+      归一化后查重：已存在就**复用**那条（顺手把间隔/启用状态更新成最新要求），
+      返回里带 `reused=True`，调用方据此提示「已经在盯了」而不是「新建成功」。
     """
     q = str(query or "").strip()
     if not q:
@@ -1421,29 +1426,91 @@ def register_watch(query: str, interval_minutes: int = 0, kind: str = "web",
     if k not in ("web", "weather", "page"):
         k = "web"
 
-    job = {
-        "id": uuid.uuid4().hex[:12],
-        "name": str(name or "").strip() or ("盯着：" + q[:24]),
-        "kind": "watch",
-        "watch_query": q,
-        "watch_kind": k,
-        "prompt": "（盯事任务）定时抓取「%s」并与上次结果比对，有变化就记时间线。" % q,
-        "schedule": {"every_minutes": mins},
-        "enabled": True,
-        "session": str(session or ""),
-        "created": _now(),
-        "last_run": "",
-        "last_status": "",
-        "last_preview": "",
-        "last_hash": "",
-        "timeline": [],
-        "next_run": _next_run({"schedule": {"every_minutes": mins}}),
-    }
+    # 归一化：去空白、压空格、小写 —— 「美伊局势」「 美伊局势 」算同一条
+    def _norm(s: str) -> str:
+        return " ".join(str(s or "").split()).lower()
+
+    nq = _norm(q)
     with _LOCK:
         jobs = load_jobs()
+        for old in jobs:
+            if str(old.get("kind") or "") != "watch":
+                continue
+            if _norm(old.get("watch_query")) != nq:
+                continue
+            if str(old.get("watch_kind") or "web").lower() != k:
+                continue
+            # 命中已有任务：更新间隔与启用状态，保留历史时间线（用户要的是轨迹）
+            old["schedule"] = {"every_minutes": mins}
+            old["enabled"] = True
+            if session and not old.get("session"):
+                old["session"] = str(session)
+            old["next_run"] = _next_run({"schedule": {"every_minutes": mins}})
+            save_jobs(jobs)
+            return {"ok": True, "job": old, "reused": True}
+
+        job = {
+            "id": uuid.uuid4().hex[:12],
+            "name": str(name or "").strip() or ("盯着：" + q[:24]),
+            "kind": "watch",
+            "watch_query": q,
+            "watch_kind": k,
+            "watch_source": str(source or "").strip(),
+            "prompt": "（盯事任务）定时抓取「%s」并与上次结果比对，有变化就记时间线。" % q,
+            "schedule": {"every_minutes": mins},
+            "enabled": True,
+            "session": str(session or ""),
+            "created": _now(),
+            "last_run": "",
+            "last_status": "",
+            "last_preview": "",
+            "last_hash": "",
+            "timeline": [],
+            "next_run": _next_run({"schedule": {"every_minutes": mins}}),
+        }
         jobs.append(job)
         save_jobs(jobs)
-    return {"ok": True, "job": job}
+    return {"ok": True, "job": job, "reused": False}
+
+
+def list_watches() -> list:
+    """列出所有「盯事」任务（kind == "watch"），按创建时间倒序。
+
+    给前端侧栏时间线用：用户关掉页面再回来，能一眼看到「我在盯哪些事、
+    各自最近一次是什么状态、时间线里有哪些变化」。
+
+    返回的每一项都是**精简视图**（不把整条 timeline 全塞进去，只给最近
+    若干条），避免任务多了以后一次响应过大。
+    """
+    out = []
+    try:
+        jobs = load_jobs()
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return out
+    for j in jobs:
+        if str(j.get("kind") or "") != "watch":
+            continue
+        tl = j.get("timeline") or []
+        if not isinstance(tl, list):
+            tl = []
+        out.append({
+            "id": j.get("id") or "",
+            "name": j.get("name") or "",
+            "query": j.get("watch_query") or "",
+            "kind": j.get("watch_kind") or "web",
+            "source": j.get("watch_source") or "",
+            "enabled": bool(j.get("enabled")),
+            "period": describe(j),
+            "created": j.get("created") or "",
+            "last_run": j.get("last_run") or "",
+            "last_status": j.get("last_status") or "",
+            "next_run": j.get("next_run") or 0,
+            "timeline": tl[-20:],
+            "timeline_count": len(tl),
+        })
+    out.sort(key=lambda x: str(x.get("created") or ""), reverse=True)
+    return out
 
 
 def run_watch(job: dict) -> dict:

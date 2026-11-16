@@ -289,6 +289,99 @@ def aggregate_fail_kinds(since_hours: int = 24, path: str = "") -> dict:
     return dict(c.most_common())
 
 
+def fail_kind_summary(window_hours: float = 24, path: str = "") -> dict:
+    """按**时间窗**聚合 events 里的 fail_kind 计数，返回 {fail_kind: count}。
+
+    纯聚合、不依赖 LLM —— 前两次「改动证据卡」失败都是模型生成非法 JSON，
+    这里把「查账本」这一步做成确定性函数，调用方拿到 dict 直接用，
+    不需要再让模型去拼 JSON。
+
+    与 aggregate_fail_kinds 的区别：本函数是面向「最近 N 小时」的便捷入口，
+    参数名 window_hours 更直观；内部复用 aggregate_fail_kinds 的时间窗逻辑，
+    避免两套时间过滤代码各写一遍、日后改一处漏一处。
+
+    参数：
+      window_hours  时间窗（小时），<=0 表示不限时间（退化成全量聚合）
+      path          显式指定 task.json 路径（测试用）
+
+    返回：{fail_kind: count}，按次数降序。任何异常都返回 {} —— 聚合坏了
+          不能影响主流程（调用方据此判断「查不到」还是「真的是 0」）。
+    """
+    try:
+        return aggregate_fail_kinds(since_hours=window_hours, path=path)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return {}
+
+
+def aggregate_fail_kind(window: int = 100, path: str = "") -> dict:
+    """从真实事件聚合 {fail_kind: count}，不猜常量（改动证据卡的数据源）。
+
+    与 fail_stats() 的区别：fail_stats 是「按条数截断后聚合」，本函数是
+    「按真实事件聚合」的显式入口 —— 语义上等价于 fail_stats(window, path)，
+    但单独命名，便于 self_iterate 消费时一眼看出「这是证据卡的数据源」，
+    也便于后续在此处扩展（比如按时间窗、按会话过滤）而不动 fail_stats。
+
+    参数：
+      window  取最近多少条带 fail_kind 的事件（<=0 表示不限）
+      path    显式指定 task.json 路径（测试用）
+
+    返回：{fail_kind: count}，按次数降序。任何异常都返回 {} —— 证据卡
+          数据源坏了不能影响主流程。
+    """
+    try:
+        return fail_stats(window=window, path=path)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return {}
+
+
+def build_evidence(fail_kind: str = "", window: int = 100,
+                   regress_result: str = "", path: str = "") -> dict:
+    """组装「改动证据卡」：针对哪个真实失败 + 计数 + 回归结果。
+
+    为什么单独开一个（2026-11-17 复核入口独立交付）：
+      历史「改动证据卡」失败 2 次，都是**占位式修补** —— 给未定义的 count
+      赋一个常量（比如 count=1），前端渲染出来像是「有 1 次真实失败」，
+      实际上根本没查账本。这次改成从 actlog 真实聚合 fail_kind 计数：
+      查不到就返回 None（前端显示「无证据」），绝不猜常量。
+
+    参数：
+      fail_kind       失败分类名（空 → 直接返回 None，调用方据此跳过证据展示）
+      window          取最近多少条带 fail_kind 的事件（<=0 表示不限）
+      regress_result  回归结果（"pass" / "fail" / "skip"，空 → 不填）
+      path            显式指定 task.json 路径（测试用）
+
+    返回：
+      dict 形如 {"fail_kind": "timeout", "count": 3, "regression": "pass"}
+      或 None（fail_kind 为空 / 账本里查不到该 fail_kind / 任何异常）。
+
+    ⚠️ 关键语义：count 为 0 时**返回 None 而不是 {"count": 0}** ——
+       「查不到」和「真的是 0」在证据卡上要区分开：前者说明这条动作
+       没有真实失败支撑（可能是幽灵修复），后者说明账本坏了。
+       调用方拿到 None 就不展示证据，而不是展示一个假的 0。
+    """
+    fk = str(fail_kind or "").strip()
+    if not fk:
+        return None
+    try:
+        counts = aggregate_fail_kind(window=window, path=path)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return None
+    if not isinstance(counts, dict):
+        return None
+    n = counts.get(fk)
+    if not isinstance(n, int) or n <= 0:
+        # 账本里没有这个 fail_kind 的真实记录 → 不猜常量，返回 None
+        return None
+    ev = {"fail_kind": fk, "count": n}
+    rr = str(regress_result or "").strip().lower()
+    if rr in ("pass", "fail", "skip"):
+        ev["regression"] = rr
+    return ev
+
+
 def count_fail_kind(fail_kind: str, days: int = 7, path: str = "") -> int:
     """统计某个 fail_kind 在最近 days 天内的真实发生次数。
 
@@ -350,6 +443,59 @@ def count_fail_kind_ex(fail_kind: str, days: int = 7, path: str = "") -> tuple:
                 continue
         hit += 1
     return hit, True
+
+
+def append_watch_event(session: str, event: dict) -> None:
+    """追加一条「盯事助手」事件到会话账本（与工具动作共用同一 jsonl）。
+
+    为什么复用 actlog 的落盘：盯事助手（watch）需要「这件事我盯过、上次
+    看到什么状态」的持久证据，而 actlog 已经是按会话隔离、滚动覆盖、
+    重启后仍在的账本。单独再开一套存储只会多一份要维护的路径。
+
+    事件行约定（尽量小，避免把大对象塞进账本）：
+      {"t": "mm-dd HH:MM", "w": {…白名单字段…}}
+    白名单字段：kind / key / state / prev / note / ts / count
+    任何异常都吞掉 —— 盯事助手坏了绝不能影响对话本身。
+    """
+    try:
+        if not isinstance(event, dict) or not event:
+            return
+        ev = {}
+        for k in ("kind", "key", "state", "prev", "note", "ts", "count"):
+            if k in event and event[k] is not None:
+                v = event[k]
+                if isinstance(v, str):
+                    v = _first_line(v, 120)
+                ev[k] = v
+        if not ev:
+            return
+        row = {"t": time.strftime("%m-%d %H:%M"), "w": ev}
+        path = _path(session)
+        rows = _read(path)
+        rows.append(row)
+        _write(path, rows[-MAX_KEEP:])
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+
+
+def recent_watch_events(session: str, n: int = 20) -> list:
+    """取最近 n 条「盯事助手」事件（按写入顺序，旧→新）。
+
+    只返回带 "w" 字段的行，工具动作行（带 "n"）会被跳过 —— 两者共用
+    同一个 jsonl，但语义不同，调用方不该被工具动作污染。
+    任何异常都返回 []。
+    """
+    try:
+        k = int(n)
+    except (TypeError, ValueError):
+        k = 20
+    if k <= 0:
+        k = 20
+    out = []
+    for r in _read(_path(session)):
+        if isinstance(r, dict) and isinstance(r.get("w"), dict):
+            out.append(r)
+    return out[-k:]
 
 
 def clear(session: str) -> None:

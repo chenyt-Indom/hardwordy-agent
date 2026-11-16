@@ -69,10 +69,11 @@ _DEFS = (
      "desc": "评估最近几轮对话的完成度与效率，不好就想怎么改",
      "at_time": "", "every_minutes": 120, "gate": False,
      "legacy_name": "定时体验评估"},
-    {"kind": "selfidle", "name": "重启自检", "icon": "🌙",
-     "desc": "每次重启后扫一遍自己的代码，只查不改",
-     "at_time": "", "every_minutes": 0, "gate": False, "on_boot": True,
-     "legacy_name": "抽空代码自检"},
+    # ⚠️ 2026-11-16 用户要求：「把重启自检去掉，只保留每天自检就可以」。
+    #   原来这里有一项 selfidle「重启自检」（on_boot=True），已整体移除：
+    #   界面不再显示、调度不再排期、run_item 也不再接受这个 kind。
+    #   想手动扫一遍代码，用「代码自检」那行的「立即运行」，或抽屉底部
+    #   的「🔍 代码自检」按钮 —— 两者走的是同一段只查不改的逻辑。
 )
 
 KINDS = tuple(d["kind"] for d in _DEFS)
@@ -181,17 +182,26 @@ def _ensure(raw: dict = None) -> dict:
         if not isinstance(cur.get("runs"), list):
             cur["runs"] = []
             changed = True
-        # 2026-11-16：selfidle 从「每 20 分钟」改成「每次重启后」。
-        # 老数据里存着 every_minutes=20 和排好的 next_run，光改 _DEFS 不生效
-        # （_ensure 的规矩是「已存在的值不动」），所以这里显式纠正一次：
-        # 节律归零 → due_items / catchup 都不会再自动调度它。
-        if d.get("on_boot"):
-            if cur.get("every_minutes"):
-                cur["every_minutes"] = 0
-                changed = True
-            if cur.get("next_run"):
-                cur["next_run"] = 0
-                changed = True
+    # 2026-11-16 用户要求「把重启自检去掉，只保留每天自检」：
+    # 老数据里可能还存着 selfidle 这一项（含它的历史 runs）。
+    # 从 items 里摘出去、挪到 archived 里留着 —— 不丢历史，但界面
+    # （status 只遍历 _DEFS）和调度（due_items / catchup 同理）都不再认它。
+    if "selfidle" in items:
+        arch = raw.get("archived")
+        if not isinstance(arch, dict):
+            arch = {}
+        _cur = items.pop("selfidle")
+        _old = arch.get("selfidle") or {}
+        # ⚠️ 别用「更空」的那份覆盖历史：旧版本进程（_DEFS 里还有 selfidle）
+        #   每次保存都会把这一项**重新建成空白项**塞回 items，然后又被这里
+        #   归档 —— 直接覆盖会把原来的历史 runs 冲掉（实测踩过：16 条变 0 条）。
+        #   所以只保留 runs 更多的那一份。
+        if len((_old.get("runs") or [])) > len((_cur.get("runs") or [])):
+            arch["selfidle"] = _old
+        else:
+            arch["selfidle"] = _cur
+        raw["archived"] = arch
+        changed = True
     out = dict(raw)
     out["items"] = items
     if changed:
@@ -479,30 +489,17 @@ def _record(kind: str, ok: bool, preview: str, seconds: float,
 
 
 def record_boot(rec: dict) -> None:
-    """把「重启后自检」（bootaudit）的结果记到 selfidle 这一项上。
+    """**已废弃，保留空函数**（2026-11-16 用户要求去掉重启自检）。
 
-    为什么要有这个函数
-    ----------------
-    selfidle 原来是「每 20 分钟定时跑一遍 run_audit」。用户 2026-11-16 说
-    「太频繁了，改成每次迭代重启后再自检」。执行体换成了 bootaudit.py
-    （每次启动 6 秒后自动跑，只查不改），但**界面上的「上次运行 / 历史」
-    还是从 selfmaint 的状态里读**，所以这里做一次桥接：
-    bootaudit 跑完 → 调本函数 → selfidle 项就有记录了。
+    原来 bootaudit 每次启动跑完会调这里，把结果记到 selfidle「重启自检」
+    那一项上。现在 selfidle 已被移除、启动也不再自检，这里没有任何东西
+    可记。保留空函数是为了 `bootaudit._record` 里的调用不用改 —— 少改
+    一处就少一个崩点。
 
-    只写状态，不触发任何执行 —— 跑是调用方（bootaudit）的事。
+    ⚠️ 不要在这里再写 `_record("selfidle", ...)`：selfidle 已不在 _DEFS
+    里，`_record` 会 `st["items"]["selfidle"]` 直接 KeyError。
     """
-    try:
-        v = str(rec.get("verdict") or "")
-        # fail 才算失败；warn（只有 mid）和 pass 都记成 ok
-        ok = bool(rec.get("ok", True)) and v != "fail"
-        text = str(rec.get("text") or "")
-        if not text:
-            text = "重启自检：%s" % (rec.get("error") or v or "完成")
-        _record("selfidle", ok, text[:300], float(rec.get("seconds") or 0),
-                status_text=(v or ("ok" if ok else "error")))
-    except Exception:                                    # noqa: BLE001
-        # 记录失败绝不能反过来影响自检本身
-        logger.debug("record_boot 写入失败（不影响自检）", exc_info=True)
+    return None
 
 
 def run_item(kind: str, trigger: str = "manual", force: bool = False) -> dict:
@@ -530,35 +527,10 @@ def run_item(kind: str, trigger: str = "manual", force: bool = False) -> dict:
         except Exception:                                # noqa: BLE001
             logger.debug("silent-except", exc_info=True)
 
-    # selfidle（重启自检）的执行体在 bootaudit.py，不走 scheduler。
-    # 这样「自动（重启后）」和「手动点立即运行」走的是同一段代码，
-    # 行为完全一致：只查不改、不建计划，避免出现
-    # 「手动点一下就被改了代码」这种意料之外的事。
-    if kind == "selfidle":
-        from . import bootaudit as _ba
-        t0 = time.time()
-        try:
-            r = _ba.run(reason="手动点「立即运行」", force=True)
-        except Exception as e:                           # noqa: BLE001
-            sec = time.time() - t0
-            msg = "%s: %s" % (type(e).__name__, e)
-            _record(kind, False, msg, sec, status_text="error: %s" % e)
-            return {"ok": False, "error": msg, "kind": kind,
-                    "name": d["name"], "seconds": round(sec, 1)}
-        sec = time.time() - t0
-        if r.get("skipped"):
-            return {"ok": True, "skipped": True, "kind": kind, "name": d["name"],
-                    "reason": str(r.get("reason") or ""), "seconds": round(sec, 1)}
-        if not r.get("ok"):
-            return {"ok": False, "error": str(r.get("error") or "自检失败"),
-                    "kind": kind, "name": d["name"], "seconds": round(sec, 1)}
-        # 注意：结果已由 bootaudit.run() 内部通过 record_boot 写进本项，
-        # 这里不能再 _record 一次（会重复记两条历史）。
-        last = r.get("last") or {}
-        text = str(last.get("text") or "")
-        return {"ok": True, "kind": kind, "name": d["name"],
-                "answer": text, "seconds": round(sec, 1), "preview": text[:300]}
-
+    # 2026-11-16：原来这里有一个 `if kind == "selfidle"` 分支（重启自检，
+    # 执行体在 bootaudit.py）。用户要求去掉重启自检后 selfidle 已不在
+    # _DEFS 里，上面 `kind not in _BY_KIND` 就先返回了，这个分支永远走不到，
+    # 所以整段删掉。三项（反思 / 代码自检 / 体验评估）统一走 scheduler。
     from . import scheduler as _sch          # 延迟导入，避免循环
     job = {"id": "maint_%s" % kind, "name": "自我维护·%s" % d["name"],
            "kind": kind, "prompt": "", "session": "", "focus": "",
