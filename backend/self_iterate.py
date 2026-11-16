@@ -812,22 +812,28 @@ def _is_probe(plan, act):
 
 
 def _verify_failure_real(fail_kind, days=7):
-    """校验 fail_kind 是否真实存在（反幽灵修复）。
+    """校验 fail_kind 是否真实存在（反幽灵修复 / Phantom Guardrails）。
 
     背景（arXiv:2611.17336v1 Phantom Guardrails）：模型会「修复」一个
     根本不存在的失败类型 —— 幽灵修复。实测成功率只有 66%，其中相当一部分
     是「修了一个从未发生过的 fail_kind」。
 
-    做法：从 actlog 统计该 fail_kind 近 days 天的真实计数。
+    做法（2026-11-17 升级为双源校验）：
+      ① 主源：actlog（本模块自己的动作账本，list_actlog）；
+      ② 备源：actlog 模块的 task.json 事件账本（count_fail_kind_ex），
+         它按**时间窗**过滤，能识别「3 个月前出现过、近 7 天没发生」的幽灵。
+    两源任一命中即视为真实（宁可放行，也不要把真实失败误判成幽灵）。
+
       · 计数 > 0 → 真实，放行；
       · 计数 = 0 → 幽灵，拒绝立项，并往 actlog 记一条 phantom 事件留痕。
 
-    返回 {"ok": bool, "count": int, "reason": str}。
+    返回 {"ok": bool, "count": int, "reason": str, "source": str}。
     任何异常都按「放行」处理 —— 校验坏了不能把整个迭代锁死。
     """
     fk = str(fail_kind or "").strip()
     if not fk:
-        return {"ok": True, "count": 0, "reason": "fail_kind 为空，跳过校验"}
+        return {"ok": True, "count": 0, "source": "skip",
+                "reason": "fail_kind 为空，跳过校验"}
     try:
         n_days = float(days)
     except (TypeError, ValueError):
@@ -835,6 +841,8 @@ def _verify_failure_real(fail_kind, days=7):
     if n_days <= 0:
         n_days = 7.0
     cutoff = time.time() - n_days * 86400.0
+
+    # ---- 源 ①：本模块 actlog（动作账本）----
     count = 0
     try:
         rows = list_actlog(500)
@@ -857,9 +865,27 @@ def _verify_failure_real(fail_kind, days=7):
         if t >= cutoff:
             count += 1
     if count > 0:
-        return {"ok": True, "count": count,
+        return {"ok": True, "count": count, "source": "actlog",
                 "reason": "%s 近 %d 天真实失败 %d 次" % (fk, int(n_days), count)}
-    # 幽灵：记一条 phantom 到 actlog 留痕，方便回看「拦下了哪些幽灵修复」
+
+    # ---- 源 ②：actlog 模块的 task.json 事件账本（按时间窗）----
+    # 只有「账本读得出来且确实是 0」才算幽灵；读不出来（ok=False）按放行处理。
+    try:
+        from . import actlog as _AL
+        n2, ok2 = _AL.count_fail_kind_ex(fk, days=int(n_days))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        n2, ok2 = 0, False
+    if n2 > 0:
+        return {"ok": True, "count": int(n2), "source": "task_events",
+                "reason": "%s 近 %d 天真实失败 %d 次（事件账本）"
+                          % (fk, int(n_days), int(n2))}
+    if not ok2:
+        # 账本读不出来 —— 不能据此判幽灵，放行
+        return {"ok": True, "count": 0, "source": "unavailable",
+                "reason": "%s 的失败账本读不出来，跳过幽灵校验" % fk}
+
+    # ---- 两源都是 0：确认幽灵，记一条 phantom 留痕 ----
     try:
         _actlog({"ts": _now(),
                  "plan_id": "",
@@ -869,12 +895,13 @@ def _verify_failure_real(fail_kind, days=7):
                  "result": "fail",
                  "fail_kind": fk,
                  "phantom": True,
-                 "detail": "%s 近 %d 天真实计数为 0，拒绝立项" % (fk, int(n_days)),
+                 "detail": "%s 近 %d 天真实计数为 0（actlog + 事件账本双源），拒绝立项"
+                           % (fk, int(n_days)),
                  "probe": False,
                  "auto": False})
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
-    return {"ok": False, "count": 0,
+    return {"ok": False, "count": 0, "source": "phantom",
             "reason": "%s 近 %d 天真实计数为 0（幽灵修复），拒绝立项"
                       % (fk, int(n_days))}
 

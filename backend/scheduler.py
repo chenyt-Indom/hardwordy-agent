@@ -1217,6 +1217,129 @@ def add_watch(query: str, kind: str = "web", interval_min: int = 0,
                           name=name, session=session)
 
 
+def _run_watch(job: dict) -> dict:
+    """执行一次盯事任务：抓取 → 与上次快照做文本 diff → 超阈值就记时间线。
+
+    这是「盯事助手」的核心执行体，由 _run_once 在 kind=="watch" 时调用，
+    也可以被测试/手动触发直接调用（不依赖调度线程）。
+
+    返回 {ok, changed, added, removed, error}：
+      · ok=False 表示抓取失败（不算变化，但如实写 last_status）；
+      · changed=True 表示变化量超过阈值，已写入 timeline + actlog。
+
+    阈值语义（job["threshold"]）：
+      · 0 或缺失 → 只要有任意一行增/删就算变化；
+      · N>0      → added+removed 必须 >= N 才算变化（过滤掉广告位之类的抖动）。
+    """
+    q = str(job.get("watch_query") or job.get("query") or "").strip()
+    kind = str(job.get("watch_kind") or "web")
+    snap = _watch_snapshot(q, kind)
+    if not snap.get("ok"):
+        job["last_status"] = "抓取失败：%s" % (snap.get("error") or "未知错误")
+        job["last_run"] = _now()
+        return {"ok": False, "changed": False, "added": 0, "removed": 0,
+                "error": snap.get("error") or "抓取失败"}
+
+    text = str(snap.get("text") or "")
+    new_hash = hashlib.md5(text.encode("utf-8", "ignore")).hexdigest()
+    old_hash = str(job.get("last_hash") or "")
+    old_text = str(job.get("last_preview") or "")
+
+    # 第一次抓取：只记基线，不算「变化」（否则一建任务就报一条假的）
+    if not old_hash:
+        job["last_hash"] = new_hash
+        job["last_preview"] = text[:4000]
+        job["last_status"] = "已建立基线"
+        job["last_run"] = _now()
+        return {"ok": True, "changed": False, "added": 0, "removed": 0,
+                "error": ""}
+
+    if new_hash == old_hash:
+        job["last_status"] = "无变化"
+        job["last_run"] = _now()
+        return {"ok": True, "changed": False, "added": 0, "removed": 0,
+                "error": ""}
+
+    # 有变化：算 diff（优先用 snapdiff，没有就自己算 unified diff）
+    # ★ 2026-11-16 修 [missing-attr]：snapdiff 里没有 diff_text，原来那句
+    #   `_sd.diff_text(...)` 必然抛 AttributeError，被下面的 except 吞掉后
+    #   永远走 difflib 兜底 —— 等于 snapdiff 从没生效过。
+    #   这里改成按 snapdiff 实际提供的接口依次尝试（diff / unified_diff /
+    #   compare / text_diff），都没有就明确走 difflib 兜底。
+    added = removed = 0
+    diff_text = ""
+    try:
+        from . import snapdiff as _sd
+        _fn = None
+        for _name in ("diff", "unified_diff", "compare", "text_diff",
+                      "diff_text"):
+            _f = getattr(_sd, _name, None)
+            if callable(_f):
+                _fn = _f
+                break
+        if _fn is not None:
+            res = _fn(old_text, text) or {}
+            if isinstance(res, str):
+                diff_text = res
+            elif isinstance(res, dict):
+                diff_text = str(res.get("diff") or res.get("text") or "")
+                added = int(res.get("added") or 0)
+                removed = int(res.get("removed") or 0)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    if not diff_text:
+        try:
+            import difflib
+            diff_text = "\n".join(difflib.unified_diff(
+                old_text.splitlines(), text.splitlines(),
+                fromfile="上次", tofile="本次", lineterm="", n=3))
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+    if diff_text and not (added or removed):
+        added = len([ln for ln in diff_text.splitlines()
+                     if ln.startswith("+") and not ln.startswith("+++")])
+        removed = len([ln for ln in diff_text.splitlines()
+                       if ln.startswith("-") and not ln.startswith("---")])
+
+    try:
+        threshold = int(job.get("threshold") or 0)
+    except Exception:
+        threshold = 0
+    if threshold > 0 and (added + removed) < threshold:
+        # 变化量没到阈值：更新基线但**不记时间线**（避免广告位抖动刷屏）
+        job["last_hash"] = new_hash
+        job["last_preview"] = text[:4000]
+        job["last_status"] = "变化 %d 处（未达阈值 %d）" % (added + removed, threshold)
+        job["last_run"] = _now()
+        return {"ok": True, "changed": False, "added": added,
+                "removed": removed, "error": ""}
+
+    point = {"t": _now(),
+             "added": added,
+             "removed": removed,
+             "diff": diff_text[:4000],
+             "preview": text[:600]}
+    tl = list(job.get("timeline") or [])
+    tl.append(point)
+    job["timeline"] = tl[-WATCH_MAX_TIMELINE:]
+    job["last_hash"] = new_hash
+    job["last_preview"] = text[:4000]
+    job["last_status"] = "有变化：+%d/-%d" % (added, removed)
+    job["last_run"] = _now()
+
+    # 写 actlog：用户问「刚刚有什么变化」时模型手里得有证据
+    try:
+        from . import actlog as _al
+        _al.record(str(job.get("session") or ""), "watch_change",
+                   {"query": q}, ok=True,
+                   note="+%d/-%d 处变化" % (added, removed))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+
+    return {"ok": True, "changed": True, "added": added,
+            "removed": removed, "error": ""}
+
+
 def tick_watch() -> dict:
     """跑一轮所有到期的盯事任务：抓取 → 比对 → 有变化就记时间线 + actlog。
 

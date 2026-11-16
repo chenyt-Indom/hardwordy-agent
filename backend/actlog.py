@@ -109,13 +109,26 @@ def _first_line(text, cap: int = 80) -> str:
 
 
 def record(session: str, name: str, args=None, ok: bool = True,
-           result: str = "", note: str = "") -> None:
-    """记一次工具动作。任何异常都吞掉 —— 账本坏了绝不能影响对话本身。"""
+           result: str = "", note: str = "", evidence=None) -> None:
+    """记一次工具动作。任何异常都吞掉 —— 账本坏了绝不能影响对话本身。
+
+    evidence（2026-11-17 改动证据卡）：可选 dict，形如
+      {"fail_kind": "...", "count": N, "regression": "pass|fail|skip"}
+    会原样落到账本行里，前端动作卡片据此渲染「针对哪个真实失败 + 计数 + 回归结果」。
+    """
     try:
         row = {"t": time.strftime("%m-%d %H:%M"),
                "n": str(name or "?")[:40],
                "a": _brief(args),
                "ok": bool(ok)}
+        if isinstance(evidence, dict) and evidence:
+            # 只留白名单字段，避免把大对象塞进账本
+            ev = {}
+            for k in ("fail_kind", "count", "regression", "evidence"):
+                if k in evidence and evidence[k] is not None:
+                    ev[k] = evidence[k]
+            if ev:
+                row["ev"] = ev
         if note:
             row["m"] = _first_line(note, 90)
         elif not ok:

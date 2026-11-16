@@ -207,18 +207,42 @@ def _require_real_failure(fail_kind: str, days: int = 7) -> dict:
     if not fk:
         return {"ok": True, "reason": "", "reason_text": "", "count": 0,
                 "evidence": ""}
-    ev = _check_failure_evidence(fk, days=days)
-    if ev.get("ok"):
-        return {"ok": True, "reason": "", "reason_text": "",
-                "count": int(ev.get("count") or 0),
-                "evidence": ev.get("evidence") or ""}
-    # 幽灵修复：_check_failure_evidence 内部已写 phantom 记录，这里只做转译
-    return {"ok": False, "reason": "phantom",
-            "reason_text": ev.get("reason") or
-            ("拒绝：fail_kind「%s」近 %d 天真实发生 0 次，属于幽灵修复。"
-             % (fk, int(days))),
-            "count": int(ev.get("count") or 0),
-            "evidence": ev.get("evidence") or ""}
+    # ★ 2026-11-17 幽灵修复闸门（用户要求「改动前必须从 actlog 取真实 fail_kind 计数」）：
+    #   这里**直接**从 actlog 聚合真实计数，不再经过 _check_failure_evidence 的
+    #   「账本不可读就放行」分支 —— 入口硬前置必须拿到真实数字：
+    #     · 账本可读且计数 > 0 → 放行，evidence 带上真实次数；
+    #     · 账本可读且计数 == 0 → 拒绝（phantom），并写一条 phantom 记录；
+    #     · 账本读不出来 → 保守放行（不能因为账本坏了挡住正常改动），
+    #       但 evidence 里明确标注「账本不可读，未拦截」，让前端卡片能看出来。
+    #   上次「改动证据卡」失败是因为给未定义的 count 赋常量；这次改为从 actlog
+    #   真实聚合，且计数为 0 直接拒绝，不再占位。
+    try:
+        n, readable = actlog.count_fail_kind_ex(fk, days=days)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        n, readable = 0, False
+    n = int(n or 0)
+    evidence = "针对 fail_kind: %s，近 %d 天 %d 次" % (fk, int(days), n)
+    if not readable:
+        # 账本坏了不能挡住正常改动 —— 保守放行，但证据里说明查不到
+        return {"ok": True, "reason": "", "reason_text": "", "count": 0,
+                "evidence": evidence + "（账本不可读，未拦截）"}
+    if n <= 0:
+        # 幽灵修复：计数为 0 直接拒绝，并写 phantom 记录（act=phantom）
+        reason_text = ("拒绝：fail_kind「%s」近 %d 天真实发生 0 次，属于幽灵修复。\n"
+                       "请先确认这个失败真的出现过（actlog / task.json 里有记录），"
+                       "再动手改代码。" % (fk, int(days)))
+        try:
+            journal("phantom", "", fail_kind=fk, days=int(days), count=0)
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        return {"ok": False, "reason": "phantom",
+                "reason_text": reason_text,
+                "count": 0,
+                "evidence": evidence}
+    return {"ok": True, "reason": "", "reason_text": "",
+            "count": n,
+            "evidence": evidence}
 
 
 def locked() -> bool:
@@ -935,8 +959,14 @@ def patch(rel: str, find: str, replace: str, note: str = "",
                     days=7, evidence=_evidence[:200])
         except Exception:
             logger.debug("silent-except", exc_info=True)
+    # ★ 2026-11-17 改动证据卡：把 evidence 挂到本次 patch 的返回结果上，
+    #   前端动作卡片直接渲染（fail_kind / 计数 / 回归结论）。
+    #   这里先建一个 dict，后面成功/失败分支都往里塞，最后统一 merge 进返回值。
+    _card = {"fail_kind": _fk, "count": int(_real) if _real > 0 else 0,
+             "evidence": _evidence}
     got = read(rel)
     if not got.get("ok"):
+        got["evidence"] = _card
         return got
     # 🧊 同文件改动冷却（2026-11-11 用户要求，2026-11-17 强化）：
     #   24h 内同文件改动 ≥ FILE_CHANGE_LIMIT_24H 次时，patch **必须**附带
