@@ -58,9 +58,154 @@ DELAY_SEC = 6.0
 # 保留多少条历史
 _HIST_MAX = 20
 
+# 自检结果缓存：同版本 + 24h 内命中则跳过重算
+_CACHE_MAX = 50
+_CACHE_TTL_SEC = 24 * 3600.0
+
 
 def _path() -> str:
     return config.data("data", "boot_audit.json")
+
+
+def _cache_path() -> str:
+    """自检结果缓存文件路径（与主结果文件分开，避免互相污染）。"""
+    return config.data("data", "boot_audit_cache.json")
+
+
+def _cache_blank() -> dict:
+    return {"records": []}
+
+
+def _cache_load_raw() -> dict:
+    try:
+        p = _cache_path()
+        if not os.path.isfile(p):
+            return _cache_blank()
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if not isinstance(d, dict):
+            return _cache_blank()
+        if not isinstance(d.get("records"), list):
+            d["records"] = []
+        return d
+    except Exception:                                    # noqa: BLE001
+        logger.debug("bootaudit 缓存读取失败，按空处理", exc_info=True)
+        return _cache_blank()
+
+
+def _cache_save_raw(d: dict) -> None:
+    try:
+        p = _cache_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, p)
+    except Exception:                                    # noqa: BLE001
+        logger.warning("bootaudit 缓存写盘失败（不影响使用）", exc_info=True)
+
+
+def _code_version() -> str:
+    """当前代码版本指纹：用 backend 目录下 py 文件的 mtime+size 拼一个短哈希。
+
+    目的：同版本 + 24h 内命中缓存就跳过重算。用 mtime+size 而不是内容哈希，
+    是因为扫 99 个 py 算 sha 本身就要几百毫秒，得不偿失；mtime+size 足够
+    区分「代码有没有被改过」。
+    """
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+        items = []
+        for name in sorted(os.listdir(base)):
+            if not name.endswith(".py"):
+                continue
+            fp = os.path.join(base, name)
+            try:
+                st = os.stat(fp)
+            except Exception:                            # noqa: BLE001
+                continue
+            items.append("%s:%d:%d" % (name, int(st.st_mtime), int(st.st_size)))
+        raw = "|".join(items)
+        import hashlib
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    except Exception:                                    # noqa: BLE001
+        logger.debug("计算代码版本失败，返回空版本", exc_info=True)
+        return ""
+
+
+def load_cache() -> list:
+    """读取全部缓存记录（按时间升序）。"""
+    try:
+        recs = list(_cache_load_raw().get("records") or [])
+    except Exception:                                    # noqa: BLE001
+        return []
+    return recs
+
+
+def append_cache(record: dict) -> dict:
+    """追加一条缓存记录，自动补 id / ts / version，并裁剪到 _CACHE_MAX。"""
+    if not isinstance(record, dict):
+        return {}
+    rec = dict(record)
+    rec.setdefault("ts_unix", time.time())
+    rec.setdefault("ts", _now())
+    rec.setdefault("version", _code_version())
+    if not rec.get("id"):
+        rec["id"] = "%d-%s" % (int(rec["ts_unix"] * 1000),
+                                str(rec.get("version") or "")[:8])
+    with _LOCK:
+        d = _cache_load_raw()
+        recs = list(d.get("records") or [])
+        recs.append(rec)
+        d["records"] = recs[-_CACHE_MAX:]
+        _cache_save_raw(d)
+    return rec
+
+
+def delete_cache(cid: str) -> bool:
+    """按 id 删除一条缓存记录，返回是否删掉了。"""
+    cid = str(cid or "")
+    if not cid:
+        return False
+    with _LOCK:
+        d = _cache_load_raw()
+        recs = list(d.get("records") or [])
+        kept = [r for r in recs if str(r.get("id")) != cid]
+        if len(kept) == len(recs):
+            return False
+        d["records"] = kept
+        _cache_save_raw(d)
+    return True
+
+
+def clear_cache() -> int:
+    """清空全部缓存，返回清掉的条数。"""
+    with _LOCK:
+        d = _cache_load_raw()
+        n = len(d.get("records") or [])
+        d["records"] = []
+        _cache_save_raw(d)
+    return n
+
+
+def _cache_hit(version: str) -> dict:
+    """同版本 + 24h 内命中则返回那条记录，否则返回空 dict。"""
+    if not version:
+        return {}
+    now = time.time()
+    try:
+        recs = load_cache()
+    except Exception:                                    # noqa: BLE001
+        return {}
+    for rec in reversed(recs):
+        try:
+            if str(rec.get("version") or "") != version:
+                continue
+            if now - float(rec.get("ts_unix") or 0) > _CACHE_TTL_SEC:
+                continue
+            return rec
+        except Exception:                                # noqa: BLE001
+            continue
+    return {}
 
 
 def _now() -> str:
@@ -275,12 +420,26 @@ def status() -> dict:
         skip = dict(_load().get("skip") or {})
     except Exception:                                     # noqa: BLE001
         skip = {}
+    # 缓存统计：条数 + 最近一条缓存时间，给前端展示「缓存命中情况」。
+    try:
+        cache_recs = load_cache()
+    except Exception:                                     # noqa: BLE001
+        cache_recs = []
+    cache_count = len(cache_recs)
+    last_cache_at = ""
+    if cache_recs:
+        try:
+            last_cache_at = str(cache_recs[-1].get("ts") or "")
+        except Exception:                                 # noqa: BLE001
+            last_cache_at = ""
     # 2026-11-16：重启自检已整体关闭，把这件事作为**恒定字段**告诉调用方，
     # 不再靠「有没有 skip 记录」间接推断（skip 可能被别的路径覆盖）。
     disabled_why = "重启自检已关闭，只保留每天 05:10 的代码自检"
     return {"ok": True, "last": l, "history": history(10), "skip": skip,
             "start_disabled": True, "start_disabled_why": disabled_why,
             "debounce_sec": DEBOUNCE_SEC, "delay_sec": DELAY_SEC,
+            "cache_count": cache_count,
+            "last_cache_at": last_cache_at,
             # text 是「当前状态」不是「上次结果」：拿上一次的自检结论冒充现在
             # 会让人以为「刚跑过一次」—— 上次结果在 last 里，别混用。
             "text": disabled_why,
@@ -338,6 +497,28 @@ def start_delayed(delay: float = None) -> dict:
     _ONCE["started"] = True
 
     why = "重启自检已关闭，只保留每天 05:10 的代码自检"
+
+    # ---- 先读缓存：同版本 + 24h 内命中则跳过重算，并记一条 skip。
+    #      注意：这里只读缓存、不写 last/runs，避免让界面误以为「刚跑过」。
+    try:
+        ver = _code_version()
+        hit = _cache_hit(ver)
+    except Exception:                                    # noqa: BLE001
+        ver, hit = "", {}
+    if hit:
+        try:
+            _record_skip({"audit": False, "kind": "cache_hit",
+                          "why": "同版本 24h 内已有自检结果，跳过重算",
+                          "cache_id": hit.get("id"),
+                          "cache_ts": hit.get("ts"),
+                          "version": ver})
+        except Exception:                                # noqa: BLE001
+            logger.debug("记录缓存命中失败（不影响启动）", exc_info=True)
+        logger.info("[bootaudit] 命中缓存，跳过重算：%s", hit.get("id"))
+        return {"ok": True, "skipped": True, "kind": "cache_hit",
+                "why": "同版本 24h 内已有自检结果，跳过重算",
+                "cache": hit, "version": ver}
+
     # 写一条 skip（不写 last/runs）：`/api/bootaudit` 才能如实回答
     # 「为什么这次启动没自检」，而不是让调用方以为「还没跑过」。
     try:

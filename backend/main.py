@@ -2476,6 +2476,164 @@ def api_selftest(run: int = 0, model: str = ""):
     return {"ok": True, **r}
 
 
+# ---------- 自检缓存：增删改查 ----------
+# 用户 2026-11-16 要求：自检结果要能像普通数据一样被查看 / 重跑 / 删除 / 清空。
+# 为什么单独开一组接口而不是复用 /api/selftest：
+#   · /api/selftest 是「读一次当前状态」，语义是**无副作用**的；
+#   · 这组接口是「管理缓存条目」，要能列出所有模型的历史结果、手动追加一条、
+#     删掉某条、整体清空 —— 混在一起会让 /api/selftest 的语义变脏。
+# 缓存本体由 backend/selftest.py 维护（按模型分开存），这里只做薄封装。
+
+
+def _selftest_cache_list() -> list:
+    """把 selftest 模块里的缓存整理成「一条一条」的列表。
+
+    selftest 内部按模型 key 分开存（`{"": {...}, "qwen2.5:7b": {...}}`），
+    这里统一摊平成列表，每条带上 `id`（就是模型 key，空串用 `__default__` 表示），
+    方便前端直接渲染、也方便 DELETE 按 id 定位。
+
+    兼容两种可能的内部结构（模块实现可能演进）：
+      · `selftest.list_cache()` 直接返回列表 → 原样用；
+      · 只有 `selftest.get(model)` → 逐个模型取。
+    任何异常都返回空列表，绝不让管理接口把主流程带崩。
+    """
+    try:
+        fn = getattr(selftest, "list_cache", None)
+        if callable(fn):
+            raw = fn()
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, dict):
+                out = []
+                for k, v in raw.items():
+                    item = dict(v) if isinstance(v, dict) else {"value": v}
+                    item.setdefault("id", k or "__default__")
+                    item.setdefault("model", k or "")
+                    out.append(item)
+                return out
+    except Exception:
+        logger.warning("读取自检缓存列表失败", exc_info=True)
+    # 退化路径：只知道当前进程里有哪些模型 key
+    out = []
+    try:
+        keys = getattr(selftest, "_CACHE", None)
+        if isinstance(keys, dict):
+            for k in list(keys.keys()):
+                r = selftest.get(k)
+                if isinstance(r, dict) and r:
+                    item = dict(r)
+                    item.setdefault("id", k or "__default__")
+                    item.setdefault("model", k or "")
+                    out.append(item)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    return out
+
+
+@app.get("/api/selftest/cache")
+def api_selftest_cache_list():
+    """列出所有已缓存的自检结果（按模型分开）。
+
+    返回 `{"ok": True, "items": [...], "total": N}`。
+    每条至少含：`id`（删除时用）、`model`、`ok`/`total`、`ts`（跑的时间）。
+    """
+    items = _selftest_cache_list()
+    return {"ok": True, "items": items, "total": len(items)}
+
+
+@app.post("/api/selftest/cache/run")
+def api_selftest_cache_run(body: dict = None):
+    """手动重跑一次自检，并把结果**追加**进缓存。
+
+    body: `{"model": "qwen2.5:7b"}`（可省略，省略则用默认模型）。
+
+    和 `GET /api/selftest?run=1` 的区别：那个是「跑完直接返回、顺手覆盖缓存」，
+    这个是「跑完把这次结果作为一条新记录追加」，便于对比多次结果。
+    """
+    body = body or {}
+    mdl = str(body.get("model") or "").strip()
+    try:
+        r = selftest.run_all(mdl)
+    except Exception as exc:                   # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="自检执行失败：%s: %s" % (type(exc).__name__, exc))
+    # 尽量让模块把这次结果也记进缓存（不同实现方法名可能不同，逐个尝试）
+    for name in ("append_cache", "remember", "save", "put"):
+        fn = getattr(selftest, name, None)
+        if callable(fn):
+            try:
+                fn(mdl, r)
+                break
+            except Exception:
+                logger.debug("selftest.%s 调用失败", name, exc_info=True)
+    item = dict(r) if isinstance(r, dict) else {"value": r}
+    item.setdefault("id", mdl or "__default__")
+    item.setdefault("model", mdl)
+    item.setdefault("ts", time.strftime("%Y-%m-%d %H:%M:%S"))
+    return {"ok": True, "item": item, **r}
+
+
+@app.delete("/api/selftest/cache/{item_id}")
+def api_selftest_cache_delete(item_id: str):
+    """删掉某一条缓存。`item_id` 就是列表里的 `id`（模型 key，默认模型是 `__default__`）。
+
+    找不到就返回 404 —— 静默成功会让用户以为删错了地方。
+    """
+    key = "" if item_id == "__default__" else item_id
+    removed = False
+    for name in ("drop", "delete", "remove", "forget"):
+        fn = getattr(selftest, name, None)
+        if callable(fn):
+            try:
+                fn(key)
+                removed = True
+                break
+            except Exception:
+                logger.debug("selftest.%s 调用失败", name, exc_info=True)
+    if not removed:
+        # 退化：直接操作模块里的缓存字典（如果存在）
+        cache = getattr(selftest, "_CACHE", None)
+        if isinstance(cache, dict) and key in cache:
+            try:
+                cache.pop(key, None)
+                removed = True
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+    if not removed:
+        raise HTTPException(status_code=404, detail="没有这条自检缓存：%s" % item_id)
+    return {"ok": True, "deleted": item_id}
+
+
+@app.delete("/api/selftest/cache")
+def api_selftest_cache_clear():
+    """清空全部自检缓存。
+
+    清空后下一次 `GET /api/selftest` 会自动重跑一次（模块里 `total` 为 0 时的既有行为），
+    所以不会出现「清空后界面一片空白」。
+    """
+    cleared = False
+    for name in ("clear", "clear_cache", "reset"):
+        fn = getattr(selftest, name, None)
+        if callable(fn):
+            try:
+                fn()
+                cleared = True
+                break
+            except Exception:
+                logger.debug("selftest.%s 调用失败", name, exc_info=True)
+    if not cleared:
+        cache = getattr(selftest, "_CACHE", None)
+        if isinstance(cache, dict):
+            try:
+                cache.clear()
+                cleared = True
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+    if not cleared:
+        raise HTTPException(status_code=500, detail="自检模块不支持清空缓存")
+    return {"ok": True, "cleared": True}
+
+
 # ---------- 重启后自检（每次重启自动跑一遍自己的代码）----------
 @app.get("/api/bootaudit")
 def api_bootaudit():
@@ -2759,6 +2917,47 @@ def selfiter_plan(id: str = ""):
     from . import self_iterate as _si
     try:
         return _si.get_plan(id)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------- 计划缓存 CRUD（用户 2026-11-16）
+# 「能不能弄成缓存且可增删改查的形式？」—— 查已有单条接口，这里补齐列表/新增/改/删。
+@app.get("/api/selfiter/plans")
+def selfiter_plans(limit: int = 60, q: str = ""):
+    from . import self_iterate as _si
+    try:
+        return _si.list_plans(limit=limit, q=q)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/plans")
+def selfiter_plans_add(body: dict):
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        return _si.create_plan(summary=b.get("summary"),
+                               actions=b.get("actions") or [],
+                               trigger=b.get("trigger") or "manual_added")
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.patch("/api/selfiter/plans/{pid}")
+def selfiter_plans_edit(pid: str, body: dict):
+    from . import self_iterate as _si
+    try:
+        return _si.update_plan(pid, body or {})
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.delete("/api/selfiter/plans/{pid}")
+def selfiter_plans_del(pid: str):
+    from . import self_iterate as _si
+    try:
+        return _si.delete_plan(pid)
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
 
@@ -8558,6 +8757,26 @@ def pref_chat_model_set(body: dict):
     return scheduler.set_chat_model(str((body or {}).get("model") or ""))
 
 
+# ---------------- 今日预告（记忆预告片） ----------------
+@app.get("/api/preview/today")
+def preview_today():
+    """今日预告：记忆未完成项 + 今日定时任务 + 天气 + 最近搜索 → 30 秒文案。
+
+    2026-11-16 用户需求：新建 preview.py 记忆预告片模块，前端「今日预告」卡片
+    首次打开自动展开、可关闭并 localStorage 记日期。
+
+    ⚠️ 这个接口**必须秒回**（前端一打开界面就调），所以内部不调大模型，
+    全部是本地读文件 + 规则拼装；任何一路数据源挂了都只是少一段，不报错。
+    """
+    try:
+        from . import preview as _preview
+        return _preview.today()
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("今日预告生成失败", exc_info=True)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                "date": time.strftime("%Y-%m-%d"), "text": "", "data": {}}
+
+
 # ---------------- 定时 / 长期自动化任务 ----------------
 @app.get("/api/schedule")
 def schedule_list():
@@ -9934,23 +10153,20 @@ def _warmup_on_start():
 
     threading.Thread(target=_selftest_boot, daemon=True).start()
 
-    # ★ 重启后自动自检（2026-11-16）
-    #   用户要求：「这个自检给他弄成每次自迭代重启之后自动检验」。
-    #   和上面的 _selftest_boot 不是一回事，两者互补：
-    #     · _selftest_boot（selftest.run_all）查**服务健康**：模型/端口/ffmpeg；
-    #     · 这里（bootaudit）查**代码本身**：语法、调用不存在的函数、
-    #       前端调了删掉的路由、同名函数重复定义 —— 也就是「自我迭代刚改完
-    #       代码，有没有把里面弄断」。
-    #   只查不改（auto_fix=False）、不建计划、后台线程 + 延迟 6 秒，
-    #   跑挂了也不影响服务启动。详见 backend/bootaudit.py 开头的三条铁律。
+    # ★ 重启后自检：**已关闭**（2026-11-16 用户要求「把重启自检去掉，只保留每天自检」）。
+    #   这里不再调用 bootaudit.start_delayed() —— 它本身已恒跳过，但启动流程里
+    #   再留一处调用点，会让后来的人以为「重启自检还能被打开」。
+    #   真正的代码自检只剩一项：selfmaint 里每天 05:10 的「代码自检」
+    #   （走 scheduler 的 _run_selfaudit），与启动无关。
+    #   想手动扫一遍代码：迭代想法 → 自我维护 → 「代码自检」那行的「立即运行」。
+    #   保留一条 skip 记录（写进 boot_audit.json 的 skip 字段，不写 last/runs），
+    #   这样 /api/bootaudit 能如实回答「为什么这次启动没自检」。
     try:
-        _ba = bootaudit.start_delayed()
-        if _ba.get("skipped"):
-            logger.info("本次不自检：%s", _ba.get("why"))
-        elif _ba.get("ok"):
-            logger.info("已安排重启后自检（延迟 %s 秒）", _ba.get("delay"))
-    except Exception as e:                               # noqa: BLE001
-        logger.warning("重启后自检没安排上（不影响使用）：%s", e)
+        bootaudit._record_skip({"audit": False, "kind": "disabled",
+                                "why": "重启自检已关闭，只保留每天 05:10 的代码自检"})
+    except Exception:                                    # noqa: BLE001
+        logger.debug("记录「重启自检已关闭」失败（不影响启动）", exc_info=True)
+    logger.info("[bootaudit] 本次不自检：重启自检已关闭，只保留每天 05:10 的代码自检")
 
     # ★ 定时任务调度线程（2026-11-08）：每 20 秒看一次有没有到期的任务
     try:

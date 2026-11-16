@@ -41,6 +41,11 @@ _LOCK = threading.RLock()
 _BUSY = [False]          # 当前是否有一轮思考在跑
 _LAST_AT = [0.0]         # 上次真正开跑的时间戳
 _WEB_TICK = [0]          # 触发计数，用来决定这次要不要联网抓技术动态
+# ★ 2026-11-16 用户报「每次启动都要自动迭代一轮，134 秒」：进程启动时刻。
+#   重启后节流虽然从 last_at 恢复了，但只要距上次超过 90 秒，前端一重推历史
+#   就会立刻开跑。所以再给一道「启动冷却」——刚启动的头几分钟只接受用户
+#   主动点击（manual），自动触发一律让路。
+_BOOT_TS = [time.time()]
 
 # 默认配置。写进 selfloop.json 的顶层，用户/我都可以直接改文件调整。
 DEFAULTS = {
@@ -51,6 +56,7 @@ DEFAULTS = {
     "web_every": 3,         # 每 N 次触发才联网抓一次技术动态（其余用已入库论文）
     "slow_ratio": 2.0,      # 耗时超过历史均值这么多倍，算「明显变长」
     "trigger_keep": 50,     # 触发原因日志保留最近多少条（前端展示最近 5 条）
+    "boot_gap_sec": 180,    # 启动冷却：进程刚起来这段时间内不自动触发（手动不受限）
 }
 
 # 寒暄词。命中且整句很短 → 判定闲聊，不触发思考。
@@ -300,6 +306,19 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     if _quota_left(d) <= 0:
         return {"ok": True, "skipped": "今日计划数已满（%d）" % d.get("daily_plans")}
     now = time.time()
+    # ★ 2026-11-16 用户报「每次启动都要自动迭代一轮，134.9 秒」：
+    #   进程刚起来时，前端可能还在重推历史、队列也可能在补跑，这时候自动开跑
+    #   会让用户觉得「一开机它就自己忙上了」。所以给一段冷却期，只接受手动点击。
+    if source != "manual":
+        try:
+            boot_gap = float(d.get("boot_gap_sec", 180) or 0)
+        except Exception:                               # noqa: BLE001
+            boot_gap = 180.0
+        since_boot = now - _BOOT_TS[0]
+        if boot_gap > 0 and since_boot < boot_gap:
+            return {"ok": True, "skipped": "刚启动 %.0f 秒（冷却 %d 秒内不自动思考，"
+                                           "想立刻跑请点「立即反思」）"
+                    % (since_boot, int(boot_gap))}
     # ★ 节流跨重启有效：_LAST_AT 是内存变量，重启后归零 → waited 变成天文数字
     #   → 节流形同虚设（实测 03:55:16 跑完，03:56:10 重启后又跑了一轮）。
     #   所以第一次用到时从落盘的 last_at 恢复。

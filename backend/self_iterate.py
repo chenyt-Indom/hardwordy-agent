@@ -745,18 +745,34 @@ def _merge_plans(disk, mem):
     if not isinstance(d_items, list) or not isinstance(m_items, list):
         return mem
     m_by = {p.get("id"): p for p in m_items if isinstance(p, dict)}
+    # ★ 2026-11-16 用户要「计划缓存可增删改查」：删除必须先能删掉。
+    #   原来的合并规则是「磁盘独有的保留」，所以删掉的计划会被另一个进程
+    #   （或内存里还留着旧数据的本进程）又合并回来 —— 之前清测试数据就踩过。
+    #   现在用墓碑列表记录「已删除的 id」，合并时一律跳过。
+    gone = set()
+    for src in (mem, disk):
+        if isinstance(src, dict) and isinstance(src.get("deleted"), list):
+            gone |= {str(x) for x in src["deleted"] if x}
     out = []
     for p in d_items:
         if not isinstance(p, dict):
             continue
+        pid = str(p.get("id") or "")
+        if pid in gone:
+            continue
         out.append(m_by.pop(p.get("id"), p))
-    out.extend(m_by.values())
+    for pid, p in list(m_by.items()):
+        if str(pid or "") in gone:
+            continue
+        out.append(p)
     try:
         out.sort(key=lambda x: str(x.get("id") or ""), reverse=True)
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
     merged = dict(mem)
     merged["items"] = out
+    if gone:
+        merged["deleted"] = sorted(gone)[-500:]
     return merged
 
 
@@ -908,6 +924,34 @@ def _verify_failure_real(fail_kind, days=7):
 
 def _log_act(plan, act, ok, detail=""):
     """记录一条动作执行日志（用户可查「到底改没改」）。"""
+    # ★ 2026-11-16 新增：把 fail_kind 的当前计数写进 evidence，供前端高亮。
+    #   背景：用户要求「每次自动改动时，调用 fail_kind_summary 取当前计数，
+    #   写入 evidence={fail_kind, count}。计数为 0 时标记 phantom=true，
+    #   前端可高亮」—— 这样一眼就能看出这次改动到底有没有真实失败依据，
+    #   还是「幽灵修复」（Phantom Guardrails）。
+    #   任何异常都不能影响日志写入本身，所以整段包在 try 里。
+    _fk = ""
+    _fk_count = 0
+    _phantom = False
+    try:
+        _fk = str((act or {}).get("fail_kind") or "").strip()
+        if _fk:
+            # ★ 2026-11-16 修 NameError：本文件从未定义/导入过 fail_kind_summary，
+            #   运行到这一行会直接抛 NameError（被 except 吞掉 → evidence 永远是
+            #   count=0/phantom 判不出来）。这里改为直接复用本文件已有的
+            #   `_count_fail_kind`（读 actlog.jsonl 统计真实失败次数），
+            #   语义与「取当前计数」一致，且不引入新的外部依赖。
+            _cnt = _count_fail_kind(_fk, days=7)
+            if isinstance(_cnt, dict):
+                _fk_count = int(_cnt.get("count") or 0)
+            else:
+                _fk_count = int(_cnt or 0)
+            _phantom = (_fk_count == 0)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    _evidence = {"fail_kind": _fk, "count": _fk_count}
+    if _phantom:
+        _evidence["phantom"] = True
     _actlog({"ts": _now(),
              "plan_id": (plan or {}).get("id"),
              "action": (act or {}).get("id"),
@@ -924,6 +968,10 @@ def _log_act(plan, act, ok, detail=""):
              "feature": str((act or {}).get("detail") or "")[:300],
              "changelog": (act or {}).get("changelog") or {},
              "backup": (act or {}).get("backup") or "",
+             # ★ 2026-11-16：evidence 字段 —— {fail_kind, count}，
+             #   count=0 时额外带 phantom=true，前端据此高亮「幽灵修复」。
+             "evidence": _evidence,
+             "phantom": _phantom,
              "auto": bool((act or {}).get("auto"))})
 
 
@@ -3099,6 +3147,7 @@ def approve(pid, action_ids=None, note=""):
     if not p:
         return {"ok": False, "error": "找不到这次反思"}
     hit = 0
+    approved_ids = []
     for a in p.get("actions") or []:
         if action_ids and a["id"] not in action_ids:
             continue
@@ -3111,8 +3160,27 @@ def approve(pid, action_ids=None, note=""):
                     list(p.get("_force") or []) + [str(a.get("id"))]))
             a["status"] = "approved"
             a["note"] = str(note or "")[:800]
+            approved_ids.append(str(a.get("id")))
             hit += 1
     save_plans(d)
+    # ★ 2026-11-17 用户要求「人工放行需要可追溯：谁批的、批了哪条、执行结果如何」。
+    #   在 approve 里写一条 actlog 事件 kind=review_approve，前端时间线可查。
+    #   只记摘要（计划 id / 动作 id / 备注 / 条数），不落盘动作全文。
+    #   写账本失败绝不能影响批准本身 —— 所以整段包在 try 里。
+    try:
+        _actlog({
+            "ts": _now(),
+            "kind": "review_approve",
+            "plan_id": str(pid or ""),
+            "title": str(p.get("title") or p.get("summary") or "")[:120],
+            "action_ids": approved_ids,
+            "count": hit,
+            "note": str(note or "")[:300],
+            "result": "approved" if hit else "noop",
+            "source": "manual",
+        })
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
     return {"ok": True, "approved": hit, "plan": p}
 
 
@@ -5912,3 +5980,129 @@ def get_plan(pid):
     if not p:
         return {"ok": False, "error": "找不到这次反思"}
     return {"ok": True, "plan": fill_fail_kind(p)}
+
+
+# ---------------------------------------------------------------- 计划缓存 CRUD
+# 用户 2026-11-16：「这个能不能不要每次启动都这样，能不能弄成缓存且可增删改查
+# 的形式？」—— 计划本来就是缓存（plans.json），但一直只有「读列表 + 读单条」，
+# 删不掉、改不了、也加不了。这里补齐四件套，前端才有得管。
+
+_PLAN_LIST_KEEP = ("id", "ts", "trigger", "summary", "signals_used", "tech_total")
+
+
+def list_plans(limit=60, q=""):
+    """列出计划缓存（不带 tech_raw / 动作明细这种大块，列表页用不上）。"""
+    try:
+        d = load_plans()
+        items = [p for p in d.get("items") or [] if isinstance(p, dict)]
+        kw = (q or "").strip().lower()
+        if kw:
+            def _hit(p):
+                blob = " ".join(str(p.get(k) or "") for k in
+                                ("id", "summary", "trigger", "ts")).lower()
+                for a in p.get("actions") or []:
+                    if isinstance(a, dict):
+                        blob += " " + str(a.get("title") or "").lower()
+                return kw in blob
+            items = [p for p in items if _hit(p)]
+        try:
+            limit = max(1, min(int(limit), 300))
+        except Exception:                               # noqa: BLE001
+            limit = 60
+        total = len(items)
+        out = []
+        for p in items[:limit]:
+            row = {k: p.get(k) for k in _PLAN_LIST_KEEP}
+            acts = [a for a in (p.get("actions") or []) if isinstance(a, dict)]
+            row["actions_total"] = len(acts)
+            row["actions_done"] = sum(1 for a in acts if a.get("state") == "done")
+            row["actions_need_review"] = sum(
+                1 for a in acts if a.get("state") == "need_review")
+            row["features"] = len(p.get("features") or [])
+            row["weaknesses"] = len(p.get("weaknesses") or [])
+            out.append(row)
+        return {"ok": True, "total": total, "items": out,
+                "file": str(_PLANS), "deleted": len(d.get("deleted") or [])}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def update_plan(pid, fields):
+    """改一条计划缓存的文字字段。只允许改描述类字段，不许借它改动作状态
+    （动作状态有专门的批准/执行接口，走那条才有闸门和日志）。"""
+    allow = ("summary", "trigger", "ts")
+    try:
+        d, p = _find_plan(pid)
+        if not p:
+            return {"ok": False, "error": "找不到这条计划：%s" % pid}
+        changed = []
+        for k in allow:
+            if k in (fields or {}):
+                v = str(fields.get(k) or "")[:500]
+                if p.get(k) != v:
+                    p[k] = v
+                    changed.append(k)
+        if not changed:
+            return {"ok": False, "error": "没有可改的字段（只支持 %s）" % "、".join(allow)}
+        p["edited_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_plans(d)
+        return {"ok": True, "id": pid, "changed": changed, "plan": fill_fail_kind(p)}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def delete_plan(pid):
+    """删一条计划缓存（进墓碑，不会被并发合并又捡回来）。"""
+    try:
+        d, p = _find_plan(pid)
+        if not p:
+            return {"ok": False, "error": "找不到这条计划：%s" % pid}
+        d["items"] = [x for x in d.get("items") or []
+                      if not (isinstance(x, dict) and x.get("id") == pid)]
+        gone = [str(x) for x in (d.get("deleted") or []) if x]
+        if pid not in gone:
+            gone.append(pid)
+        d["deleted"] = gone[-500:]
+        save_plans(d)
+        return {"ok": True, "id": pid, "left": len(d["items"])}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def create_plan(summary, actions=None, trigger="manual_added"):
+    """手动新增一条计划缓存。给用户「我自己想到一件事，先记下来」用。"""
+    try:
+        sm = str(summary or "").strip()
+        if not sm:
+            return {"ok": False, "error": "摘要不能为空"}
+        now = time.localtime()
+        pid = time.strftime("%Y%m%d_%H%M%S", now)
+        d = load_plans()
+        if any(isinstance(x, dict) and x.get("id") == pid for x in d["items"]):
+            pid = pid + "_" + str(int(time.time() * 1000) % 1000)
+        acts = []
+        for i, a in enumerate(actions or []):
+            if isinstance(a, str):
+                acts.append({"id": "a%d" % (i + 1), "title": a[:120],
+                             "detail": "", "state": "pending", "risk": "low"})
+            elif isinstance(a, dict):
+                b = dict(a)
+                b.setdefault("id", "a%d" % (i + 1))
+                b.setdefault("state", "pending")
+                b.setdefault("risk", "low")
+                acts.append(b)
+        plan = {
+            "id": pid,
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S", now),
+            "trigger": str(trigger or "manual_added")[:40],
+            "summary": sm[:500],
+            "weaknesses": [], "user_insights": [], "features": [],
+            "tech_takeaways": [], "tech_raw": {}, "tech_total": 0,
+            "actions": acts, "signals_used": 0,
+        }
+        d["items"].insert(0, plan)
+        d["items"].sort(key=lambda x: str(x.get("id") or ""), reverse=True)
+        save_plans(d)
+        return {"ok": True, "plan": plan}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}

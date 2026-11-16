@@ -9482,9 +9482,11 @@
   //   用 DeepSeek 就只查云端通道（本地 Ollama/本地模型那两项标 ⚪ 不计分）。
   (() => {
     const btn = document.querySelector("#btnSelftest");
+    if (!btn) return;
     const sum = document.querySelector("#stSummary");
+    if (!sum) return;
     const det = document.querySelector("#stDetail");
-    if (!btn || !sum || !det) return;
+    if (!det) return;
 
     let busy = false;
 
@@ -9515,6 +9517,20 @@
         const good = total > 0 && ok === total;
         sum.textContent = (good ? "✅" : "⚠️") + " 自检 " + ok + "/" + total +
                           " · " + modelLabel(d.model || m) + (sk ? "（⚪" + sk + " 项不参与）" : "");
+        // 写入自检缓存（2026-11-16）：每次结果都留一份，供 #selftestCacheList 回看
+        if (typeof window.pushSelftestCache === "function") {
+          try {
+            window.pushSelftestCache({
+              time: Date.now(),
+              level: good ? "ok" : (total > 0 && ok + sk === total ? "skip" : "warn"),
+              ok: ok,
+              total: total,
+              skipped: sk,
+              model: d.model || m,
+              items: d.items || [],
+            });
+          } catch (e) { /* 缓存失败不影响自检展示 */ }
+        }
         det.innerHTML = (d.items || []).map((it) =>
           "<div class=\"st-row\"><span>" + (it.skip ? "⚪" : (it.ok ? "✅" : "❌")) + "</span>" +
           "<b>" + it.label + "</b>" +
@@ -9541,6 +9557,135 @@
 
     load(false);
     setInterval(() => load(false), 60000);
+  })();
+
+  // ================== 自检缓存列表（2026-11-16）==================
+  // 每次自检结果都留一份，可回看历史、单条删除或清空。
+  // 存储：localStorage.selftest_cache（数组，最新在前，最多 50 条）。
+  // 每条：{ id, time, level, ok, total, skipped, model, items }
+  //   level = "ok"（全绿）/ "warn"（有失败）/ "skip"（全跳过）
+  // 渲染：time / level / 发现数（失败数），带删除按钮与「清空」按钮。
+  (() => {
+    const KEY = "selftest_cache";
+    const MAX = 50;
+    const listEl = document.querySelector("#selftestCacheList");
+    const clearBtn = document.querySelector("#stCacheClear");
+    if (!listEl) return;
+
+    function readAll() {
+      try {
+        const raw = localStorage.getItem(KEY);
+        const arr = raw ? JSON.parse(raw) : [];
+        return Array.isArray(arr) ? arr : [];
+      } catch (e) { return []; }
+    }
+    function writeAll(arr) {
+      try { localStorage.setItem(KEY, JSON.stringify(arr.slice(0, MAX))); }
+      catch (e) { /* 隐私模式 / 配额满：静默忽略 */ }
+    }
+    function fmtTime(ts) {
+      const d = new Date(Number(ts) || Date.now());
+      const p = (n) => String(n).padStart(2, "0");
+      return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " +
+             p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+    }
+    function levelOf(rec) {
+      if (rec.level) return rec.level;
+      const total = Number(rec.total || 0);
+      const ok = Number(rec.ok || 0);
+      const sk = Number(rec.skipped || 0);
+      if (total > 0 && ok === total) return "ok";
+      if (total > 0 && ok + sk === total) return "skip";
+      return "warn";
+    }
+    function levelBadge(lv) {
+      if (lv === "ok") return "✅ 全绿";
+      if (lv === "skip") return "⚪ 全跳过";
+      return "⚠️ 有失败";
+    }
+    function escHtml(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    function render() {
+      const arr = readAll();
+      if (!arr.length) {
+        listEl.innerHTML = '<div class="st-cache-empty">暂无自检缓存</div>';
+        if (clearBtn) clearBtn.hidden = true;
+        return;
+      }
+      if (clearBtn) clearBtn.hidden = false;
+      listEl.innerHTML = arr.map((rec) => {
+        const lv = levelOf(rec);
+        const total = Number(rec.total || 0);
+        const ok = Number(rec.ok || 0);
+        const sk = Number(rec.skipped || 0);
+        const bad = Math.max(0, total - ok - sk);
+        const found = bad > 0 ? bad : 0;
+        const foundTxt = found > 0 ? ("发现 " + found + " 项问题") : "无问题";
+        return '<div class="st-cache-item ' + lv + '" data-id="' + escHtml(rec.id) + '">' +
+          '<span class="st-cache-time">' + escHtml(fmtTime(rec.time)) + '</span>' +
+          '<span class="st-cache-lv">' + levelBadge(lv) + '</span>' +
+          '<span class="st-cache-found">' + escHtml(foundTxt) +
+            (total ? ' · ' + ok + '/' + total : '') + '</span>' +
+          '<button type="button" class="st-cache-del" data-id="' + escHtml(rec.id) + '" ' +
+            'title="删除这条缓存">✕</button>' +
+          '</div>';
+      }).join("");
+    }
+
+    // 单条删除
+    listEl.addEventListener("click", (e) => {
+      const b = e.target.closest(".st-cache-del");
+      if (!b) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const id = b.getAttribute("data-id");
+      if (id) deleteSelftestCache(id);
+    });
+
+    // 清空
+    if (clearBtn) {
+      clearBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (!readAll().length) return;
+        if (typeof confirm === "function" && !confirm("清空全部自检缓存记录？")) return;
+        clearSelftestCache();
+      });
+    }
+
+    // 对外暴露：供自检流程写入 / 删除 / 清空
+    window.loadSelftestCache = function () { render(); };
+    window.deleteSelftestCache = function (id) {
+      const arr = readAll().filter((r) => String(r.id) !== String(id));
+      writeAll(arr);
+      render();
+    };
+    window.clearSelftestCache = function () {
+      writeAll([]);
+      render();
+    };
+    window.pushSelftestCache = function (rec) {
+      if (!rec) return;
+      const arr = readAll();
+      const item = {
+        id: rec.id || (String(Date.now()) + "-" + Math.random().toString(36).slice(2, 8)),
+        time: rec.time || Date.now(),
+        level: rec.level || levelOf(rec),
+        ok: Number(rec.ok || 0),
+        total: Number(rec.total || 0),
+        skipped: Number(rec.skipped || 0),
+        model: rec.model || "",
+        items: Array.isArray(rec.items) ? rec.items : [],
+      };
+      arr.unshift(item);
+      writeAll(arr);
+      render();
+    };
+
+    render();
   })();
 
   refreshHealth();
@@ -12947,9 +13092,14 @@
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-  async function api(url, body) {
-    const opt = body === undefined ? {} :
-      { method: "POST", headers: { "Content-Type": "application/json" },
+  // ★ 2026-11-16 计划缓存要做增删改查，PATCH / DELETE 得能发出去。
+  //   原来这个函数只会 POST（第二个参数一律当 body），所以补一个 method 参数。
+  async function api(url, body, method) {
+    // 不传 body = 查询（GET）；传了 body = 提交（POST）。显式给 method 时以它为准。
+    const m = method || (body === undefined ? "GET" : "POST");
+    const noBody = (m === "GET" || m === "DELETE") || body === undefined;
+    const opt = noBody ? { method: m } :
+      { method: m, headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body) };
     try {
       const r = await fetch(url, opt);
@@ -13047,9 +13197,16 @@
   function sigKey(u, a) {
     return String(u || "").slice(0, 120) + "\u0000" + String(a || "").slice(0, 120);
   }
-  async function pushSignals() {
+  // ★ 2026-11-16 用户报「每次启动都要自动迭代一轮，134 秒」：
+  //   根因是页面一打开就把**当前可见的历史对话**当成新任务上报。指纹用渲染后的
+  //   文本算，重启后重新渲染（时间戳/换行/截断标记）会让指纹对不上 → 整段重推
+  //   → 后端当新需求 → 又跑一轮。所以页面加载后的第一次调用只「标记不发送」，
+  //   之后只有真正新产生的问答才会被上报。
+  let warmupDone = false;
+  async function pushSignals(opts) {
     if (pushing) return;
     pushing = true;
+    const markOnly = (opts && opts.markOnly) || !warmupDone;
     try {
       const arr = grabRecent();
       for (let i = 0; i < arr.length; i++) {
@@ -13057,12 +13214,23 @@
         const nxt = (arr[i + 1] && arr[i + 1].role === "bot") ? arr[i + 1].text : "";
         // 最后一条且还没有回复 → 多半还在流式输出，等下一轮再记
         if (!nxt && i >= arr.length - 1) continue;
+        // 预热阶段：只标记「已配对」的历史问答，最后一条没回复的不标记，
+        // 这样用户启动后立刻发的新需求仍然能被正常上报。
         const k = sigKey(arr[i].text, nxt);
         if (pushedKeys.has(k)) continue;
         pushedKeys.add(k);
-        await api("/api/selfiter/signal", { user: arr[i].text, assistant: nxt });
+        if (!markOnly) {
+          const rr = await api("/api/selfiter/signal",
+                               { user: arr[i].text, assistant: nxt });
+          // ★ 被节流 / 启动冷却 / 配额挡掉的不算「已推送」：把指纹撤回来，
+          //   否则这条真实需求会被永久跳过（启动后 3 分钟内的需求尤其容易撞上）。
+          if (rr && rr.skipped && String(rr.skipped).indexOf("已经思考过") < 0) {
+            pushedKeys.delete(k);
+          }
+        }
         i++;
       }
+      warmupDone = true;
       if (pushedKeys.size > 400) {
         const keep = Array.from(pushedKeys).slice(-200);
         pushedKeys.clear();
@@ -13249,6 +13417,7 @@
     loadActlog();
     loadMaint();
     loadLoop();
+    loadPlanCache();
     pushSignals();
     startPoll();
     feedProbe();
@@ -13311,6 +13480,19 @@
           (pickable ? '<input type="checkbox" class="iter-ck" title="勾选后可批量批准 / 拒绝">' : '') +
           '<span class="iter-act-t">' + esc(a.title) + '</span>' +
           '<span class="iter-risk">' + esc(RISK_LABEL[risk] || risk) + '</span>' +
+          // ★ 2026-11-16 用户要求：单条「复核通过并执行」按钮明确落地。
+          //   need_review 改造已生效（42 条已迁移），但单条放行按钮的 DOM 位置与
+          //   操作路径一直没交付 —— 用户只能靠「批准选中」批量放行，单条没法点。
+          //   这里在每行动作头右侧固定一颗「✅ 通过并执行」，只对 need_review 显示；
+          //   点击直接调 /api/selfdev/review/approve?id=xxx（后端 force_execute 放行
+          //   并重置熔断计数），成功后把本行状态就地改成「已批准·待执行」，
+          //   再触发一次抽屉刷新，让「▶ 执行已批准的」能立刻把它跑掉。
+          (a.status === 'need_review'
+            ? '<button type="button" class="btn sm iter-approve-one" ' +
+              'data-id="' + esc(a.id) + '" ' +
+              'title="人工复核通过：放行这条动作并重置该文件的熔断计数，之后可点「▶ 执行已批准的」执行">' +
+              '✅ 通过并执行</button>'
+            : '') +
           '<span class="iter-act-st">' + esc(ST_LABEL[a.status] || a.status) + '</span>' +
         '</div>' +
         '<div class="iter-act-d">' + esc(a.detail) + '</div>' +
@@ -13732,13 +13914,14 @@
   // 自我反思 / 代码自检 / 体验评估 —— 用户要求它们「彻底成为这个项目的
   // 一项功能，放在迭代想法里面」，所以常驻在这个抽屉，不占定时任务列表。
   // 2026-11-16 用户要求去掉「重启自检」，只剩这三项。
+  // 2026-11-16 二次清理：前端不再读 bootaudit.status / skipTip 等旧字段，
+  //   侧栏只显示「每日 05:10 代码自检」这一条固定说明，避免与后端实际状态不一致。
   let maintData = [];
 
   async function loadMaint() {
-    // 2026-11-16 用户要求「把重启自检去掉，只保留每天自检」：
-    // 后端 selfmaint 里已经没有 selfidle 这一项，启动也不再自检，
-    // 所以这里不再问 /api/bootaudit 拿「本次未自检」的原因，
     // 只拉剩下的三项（自我反思 / 代码自检 / 体验评估）。
+    // 不再请求 /api/bootaudit —— 启动自检已整体关闭，读它的 status 只会
+    // 拿到过期字段（skipTip 等），反而让侧栏显示不一致。
     const r = await api("/api/selfiter/maint");
     if (r && r.ok) { maintData = r.items || []; renderMaint(); }
   }
@@ -13755,7 +13938,12 @@
         : "还没跑过";
       // 2026-11-16：重启自检已移除，说明行只放「上次摘要 / 这项是干什么的」，
       // 不再拼「本次未自检：xxx」（启动根本不再自检了）。
+      // 2026-11-16 二次清理：代码自检这一项固定显示「每日 05:10 代码自检」，
+      // 不再读 bootaudit.status / skipTip 等旧字段，避免侧栏与后端状态不一致。
       // ⚠️ 说明行有 max-height:3em + overflow:hidden（约两行），别塞长文案。
+      const preview = (x.kind === "selfaudit")
+        ? "每日 05:10 代码自检"
+        : (x.last_preview || x.desc);
       return '<div class="iter-maint-row' + (on ? "" : " off") + '" data-kind="' + esc(x.kind) + '">' +
         '<span class="iter-maint-i">' + esc(x.icon || "·") + '</span>' +
         '<span class="iter-maint-n">' + esc(x.name) + '</span>' +
@@ -13765,7 +13953,7 @@
           (on ? "运行中" : "已暂停") + '</button>' +
         '<button type="button" class="btn sm ghost m-go">立即运行</button>' +
         '<button type="button" class="btn sm ghost m-his">历史</button>' +
-        '<div class="iter-maint-p">' + esc(x.last_preview || x.desc) + '</div>' +
+        '<div class="iter-maint-p">' + esc(preview) + '</div>' +
         '<div class="iter-maint-hr-list" hidden></div>' +
       '</div>';
     }).join("");
@@ -14127,7 +14315,43 @@
       return '<div class="iter-hist">' + esc(x.ts) + " · " + esc(x.summary || "") +
              " · " + (x.actions || 0) + " 条动作</div>";
     }).join("") || '<div class="iter-li">（暂无）</div>');
+    h += '<div class="iter-pc-wrap">' + planCacheHtml() + '</div>';
     body.innerHTML = h;
+  }
+
+  // ---------------------------------------------------- 计划缓存（可增删改查）
+  // 用户 2026-11-16：「这个能不能不要每次启动都这样，能不能弄成缓存且可增删
+  // 改查的形式？」—— 计划本来就是落盘的缓存，但界面只能看不能管。这里补管理。
+  let planCache = { items: [], total: 0, q: "" };
+  function planCacheHtml() {
+    const rows = (planCache.items || []).map(function (x) {
+      return '<div class="iter-pc-row" data-pid="' + esc(x.id) + '">' +
+        '<div class="iter-pc-h"><span class="iter-pc-ts">' + esc(x.ts || x.id) + '</span>' +
+        '<span class="iter-pc-n">' + (x.actions_total || 0) + ' 动作' +
+          (x.actions_need_review ? ' · <b>' + x.actions_need_review + ' 待复核</b>' : '') +
+        '</span>' +
+        '<button class="iter-pc-ed" type="button" title="改摘要">改</button>' +
+        '<button class="iter-pc-del" type="button" title="删除这条缓存">删</button></div>' +
+        '<div class="iter-pc-sm">' + esc(x.summary || "") + '</div></div>';
+    }).join("") || '<div class="iter-li">（还没有缓存的计划）</div>';
+    return '<details class="iter-fold"><summary>📚 计划缓存（' +
+      (planCache.total || 0) + ' 条）</summary>' +
+      '<div class="iter-pc-bar">' +
+        '<input class="iter-pc-q" placeholder="搜摘要 / id / 动作" value="' +
+          esc(planCache.q || "") + '">' +
+        '<button class="iter-pc-search" type="button">搜</button>' +
+        '<button class="iter-pc-add" type="button">＋ 新建</button>' +
+      '</div><div class="iter-pc-list">' + rows + '</div></details>';
+  }
+  async function loadPlanCache() {
+    try {
+      const r = await api("/api/selfiter/plans?limit=40&q=" +
+                          encodeURIComponent(planCache.q || ""));
+      if (r && r.ok) { planCache.items = r.items || []; planCache.total = r.total || 0; }
+    } catch (e) { /* 后端还没更新时忽略 */ }
+    const box = layer();
+    const wrap = box && box.querySelector(".iter-pc-wrap");
+    if (wrap) wrap.innerHTML = planCacheHtml();
   }
 
   // ---------------------------------------------------------- 动作
@@ -14722,6 +14946,50 @@
         else doReject(ids, "");
         // 批量操作后清空勾选，避免误触下一批
         togglePickAll(false);
+        return;
+      }
+      // ---- 计划缓存：搜 / 新建 / 改 / 删（用户 2026-11-16 要求可增删改查）
+      if (t.classList.contains("iter-pc-search")) {
+        const qb = layer() && layer().querySelector(".iter-pc-q");
+        planCache.q = qb ? qb.value.trim() : "";
+        loadPlanCache();
+        return;
+      }
+      if (t.classList.contains("iter-pc-add")) {
+        const sm = window.prompt("新建一条计划缓存（一句话摘要）：");
+        if (!sm || !sm.trim()) return;
+        api("/api/selfiter/plans", { summary: sm.trim() }).then(function (r) {
+          if (!r || !r.ok) { say((r && r.error) || "新建失败", "bad"); return; }
+          say("已新建：" + sm.trim(), "good");
+          loadPlanCache();
+        });
+        return;
+      }
+      const pcRow = t.closest ? t.closest(".iter-pc-row") : null;
+      if (pcRow && t.classList.contains("iter-pc-ed")) {
+        const pid = pcRow.getAttribute("data-pid") || "";
+        const cur = pcRow.querySelector(".iter-pc-sm");
+        const sm2 = window.prompt("改摘要（只改文字，不动动作）：",
+                                  cur ? cur.textContent : "");
+        if (sm2 === null || !sm2.trim()) return;
+        api("/api/selfiter/plans/" + encodeURIComponent(pid),
+            { summary: sm2.trim() }, "PATCH").then(function (r) {
+          if (!r || !r.ok) { say((r && r.error) || "改失败", "bad"); return; }
+          say("已改：" + sm2.trim(), "good");
+          loadPlanCache();
+        });
+        return;
+      }
+      if (pcRow && t.classList.contains("iter-pc-del")) {
+        const pid2 = pcRow.getAttribute("data-pid") || "";
+        if (!window.confirm("删除这条计划缓存？\n" + pid2 +
+                            "\n（连同它的动作记录，删了不可恢复）")) return;
+        api("/api/selfiter/plans/" + encodeURIComponent(pid2), {}, "DELETE")
+          .then(function (r) {
+            if (!r || !r.ok) { say((r && r.error) || "删除失败", "bad"); return; }
+            say("已删除：" + pid2, "good");
+            loadPlanCache();
+          });
         return;
       }
       if (t.classList.contains("iter-exec")) { doExecute(); return; }

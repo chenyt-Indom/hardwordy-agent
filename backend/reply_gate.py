@@ -23,6 +23,14 @@ DEFAULT_MAX_CHARS = 4000
 # HARD_MAX_CHARS 是「出口处的最后一道闸」—— 无论调用方传什么 max_chars，
 # 最终返回给用户的文本都不会超过这个长度。
 HARD_MAX_CHARS = 6000
+# 单轮硬长度上限：回复超过这个字数时，保留「结论段 + 最后一段」，
+# 中间过程折叠成「…（过程已折叠，共 N 字）」。
+# 与 HARD_MAX_CHARS 的区别：HARD_MAX_CHARS 是「截断」（会丢内容），
+# MAX_REPLY_CHARS 是「折叠」（内容仍在，只是收进一行提示），
+# 目的是避免回复被平台/前端硬截断后用户拿到半截过程、零信息。
+MAX_REPLY_CHARS = 6000
+# 折叠提示模板：中间过程被折叠时展示给用户的一行说明
+_FOLDED_PROCESS_NOTICE = "…（过程已折叠，共 %d 字）"
 # 截断提示语：告诉用户「已截断，回复『继续』看剩余」
 _TRUNCATE_NOTICE = "\n\n…（已截断，回复『继续』看剩余）"
 # 回复超过这个字数就强制「结论前置 + 过程折叠」形态（对应「回复被截断」）
@@ -475,6 +483,49 @@ def _ensure_conclusion_label(conclusion: str) -> str:
     if s.startswith(_CONCLUSION_PREFIXES):
         return s
     return "结论：" + s
+
+
+def _fold_middle_process(text: str, max_chars: int = MAX_REPLY_CHARS) -> str:
+    """单轮硬长度上限：超限时保留「结论段 + 最后一段」，中间过程折叠。
+
+    对应「回复被截断」：与其让平台在任意位置硬截断（用户拿到半截过程、
+    零信息），不如由闸门自己把中间过程折叠成一行提示 —— 结论段和最后一段
+    （通常是「下一步 / 验证方式」）永远保留，信息不丢。
+
+    行为：
+      · 未超限 → 原样返回；
+      · 超限 → 保留首段（结论段）+ 末段，中间折叠为「…（过程已折叠，共 N 字）」；
+      · 段落不足 3 段（无法折叠中间）→ 原样返回，交给 _enforce_hard_cap 兜底；
+      · 折叠后仍超限 → 交给 _enforce_hard_cap 做最后一道截断。
+    """
+    if not text:
+        return text
+    try:
+        max_chars = int(max_chars)
+    except Exception:                                   # noqa: BLE001
+        max_chars = MAX_REPLY_CHARS
+    if max_chars <= 0:
+        max_chars = MAX_REPLY_CHARS
+    if len(text) <= max_chars:
+        return text
+
+    # 按空行切段；段落不足 3 段时无法「保留首尾、折叠中间」
+    paras = text.split("\n\n")
+    if len(paras) < 3:
+        return text
+
+    head = paras[0].strip()
+    tail = paras[-1].strip()
+    middle = "\n\n".join(paras[1:-1])
+    if not middle.strip():
+        return text
+
+    folded = _FOLDED_PROCESS_NOTICE % len(middle)
+    out = head + "\n\n" + folded + "\n\n" + tail
+    # 折叠后仍超限 → 交给硬上限兜底（会附「已截断」提示）
+    if len(out) > max_chars:
+        return _enforce_hard_cap(out, max_chars)
+    return out
 
 
 def _enforce_hard_cap(text: str, hard_limit: int = HARD_MAX_CHARS) -> str:
@@ -931,6 +982,8 @@ def enforce_shape(text, user_input=None, suggested_action=None, actions=None,
             notice = "\n\n…（回复超过 %d 字，已截断；完整内容请点开过程或重试）" % limit
             room = max(0, limit - len(notice))
             s = s[:room].rstrip() + notice
+        # 单轮硬长度上限：超限时保留结论段 + 最后一段，中间过程折叠
+        s = _fold_middle_process(s, MAX_REPLY_CHARS)
         # 出口硬上限：无论上游怎么组装，最终绝不超过 HARD_MAX_CHARS
         s = _enforce_hard_cap(s)
         return s

@@ -113,14 +113,22 @@
             <span id="stSummary">🔄 自检中…</span>
           </button>
           <div id="stDetail" class="st-detail" hidden></div>
+          <!-- 自检缓存（2026-11-16）：每次自检结果都留一份，可回看历史、单条删除或清空。
+               列表由 app.js 的 loadSelftestCache() 渲染，每条显示 time / level / 发现数。 -->
+          <div class="st-cache" id="selftestCacheBox">
+            <div class="st-cache-head">
+              <span class="st-cache-title">🗂 自检缓存</span>
+              <button type="button" id="stCacheClear" class="dl-mini"
+                      title="清空全部自检缓存记录">清空</button>
+            </div>
+            <div class="st-cache-list" id="selftestCacheList"></div>
+          </div>
         </div>
         </div>
       </div>
     </div>
 
-    <!-- 会话时间轴（timeline）：右侧可折叠面板，展示本会话的自动改动记录。
-         每条一个圆点 + 一行摘要，点击展开详情；成功绿 / 回滚红。 -->
-    <section class="panel tlpanel" id="timelineBox">
+="timelineBox">
       <details class="tl-fold" id="timelineFold">
         <summary class="tl-head">🕒 会话时间轴</summary>
         <div class="tl-list" id="timelineList">本会话暂无自动改动</div>

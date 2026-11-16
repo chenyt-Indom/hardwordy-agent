@@ -5636,6 +5636,44 @@ html[data-theme="light"] select.pill-select option {
   color: var(--muted, #4a5568);
 }
 .iter-li b { color: var(--text, #2d3748); }
+/* 计划缓存（用户 2026-11-16：要缓存 + 可增删改查）。默认收起，不占版面。 */
+.iter-fold { margin: 4px 0 14px; }
+.iter-fold > summary {
+  cursor: pointer; font-size: 13px; color: var(--muted, #718096);
+  padding: 6px 0; list-style: none; user-select: none;
+}
+.iter-fold > summary::-webkit-details-marker { display: none; }
+.iter-fold > summary::before { content: "▸ "; }
+.iter-fold[open] > summary::before { content: "▾ "; }
+.iter-pc-bar { display: flex; gap: 6px; margin: 6px 0; flex-wrap: wrap; }
+.iter-pc-q {
+  flex: 1 1 140px; min-width: 0; padding: 4px 8px; font-size: 12px;
+  border: 1px solid var(--border, #dfe3e9); border-radius: 6px;
+  background: var(--bg, #fff); color: var(--text, #2d3748);
+}
+.iter-pc-search, .iter-pc-add {
+  flex: 0 0 auto; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  border: 1px solid var(--border, #dfe3e9); border-radius: 6px;
+  background: transparent; color: var(--text, #2d3748); white-space: nowrap;
+}
+.iter-pc-ed, .iter-pc-del {
+  flex: 0 0 auto; padding: 2px 8px; font-size: 11px; cursor: pointer;
+  border: 1px solid var(--border, #dfe3e9); border-radius: 6px;
+  background: transparent; color: var(--muted, #4a5568); white-space: nowrap;
+}
+.iter-pc-del { color: #c53030; border-color: #feb2b2; }
+.iter-pc-row { padding: 6px 8px; border-bottom: 1px dashed var(--border, #edf2f7); }
+.iter-pc-h {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11px; color: var(--muted, #718096);
+}
+.iter-pc-ts { flex: 0 0 auto; }
+.iter-pc-n { flex: 1 1 auto; min-width: 0; }
+.iter-pc-n b { color: #c05621; }
+.iter-pc-sm {
+  font-size: 12px; line-height: 1.5; margin-top: 3px;
+  color: var(--text, #2d3748); word-break: break-word;
+}
 /* 失败分类（2026-11-15）：护栏拦截是**正常的**，不能和真故障一个颜色，
    否则用户会以为系统坏了。蓝=护栏正常拦下；橙=模型/环境问题可重试；红=功能没做成。 */
 .iter-fail { border-left-width: 3px; }
