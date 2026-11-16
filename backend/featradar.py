@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -158,6 +159,9 @@ _PROMPT = """你在帮一个「私人 AI 助理应用」想**新功能**。这�
 4. **不要提**这些已经有的东西：记忆、知识库、联网搜索、跑代码、画图、
    剪视频、做 PPT/Word/Excel、定时任务、语音朗读、数字人视频、群聊、
    技能、自开发、迭代想法、计划缓存。也别提"优化界面""加快速度"这类。
+   5. **files 必须写这个仓库里真实存在的路径**（如 backend/self_iterate.py、
+      frontend/app.js、frontend/style.css）。执行器会按它去读文件再动手，
+      写错或瞎编文件名，这一步必然白跑。新建文件才写还不存在的路径。
 
 ════════ 输出格式（严格 JSON，不要代码围栏、不要解释）════════
 {"items": [{
@@ -165,7 +169,8 @@ _PROMPT = """你在帮一个「私人 AI 助理应用」想**新功能**。这�
   "scene": "第 1 步的场景：他现在怎么费劲（30~80 字，要具体）",
   "idea": "第 3 步：他会在界面上看到什么、点什么、得到什么（60~120 字）",
   "why": "这个功能为什么能省他的事 / 提高效率（30~80 字）",
-  "how": "大致怎么实现：用本应用已有的哪些能力拼出来，可能要改哪些文件（60~120 字）",
+  "how": "大致怎么实现：用本应用已有的哪些能力拼出来，要改哪几处（60~140 字）",
+  "files": ["backend/xxx.py", "frontend/xxx.js"],
   "value": 1-10 的整数（对他的价值）,
   "novelty": 1-10 的整数（有多新，照搬市面上的给低分）,
   "feasibility": 1-10 的整数（用现有能力做出来的把握）,
@@ -258,6 +263,11 @@ def think(force: bool = False, reason: str = "") -> dict:
                 "idea": idea[:600],
                 "why": str(it.get("why") or "")[:400],
                 "how": str(it.get("how") or "")[:600],
+                # ★ 2026-11-16 用户报「批准了没反应」时查出的根因之一：
+                #   功能计划原来没有 files，执行器只能从文本里正则抠路径，
+                #   而 how 写的是「改前端输入组件与后端会话记录模块」这种话，
+                #   抠不到任何路径 → 执行直接报「没有可读的目标文件」。
+                "files": _clean_files(it.get("files")),
                 "paper": str(it.get("paper") or "")[:200],
                 "value": _score(it.get("value")),
                 "novelty": _score(it.get("novelty")),
@@ -288,10 +298,69 @@ def _score(v) -> int:
     return max(1, min(10, n))
 
 
+def _clean_files(v) -> list:
+    """把模型给的 files 洗成干净相对路径。
+
+    2026-11-16：执行器靠这个字段去读文件内容，脏路径会让整条动作白跑，
+    所以在入库这一步就挡住：只收 backend/ frontend/ tools/ 开头的相对路径，
+    去掉反斜杠、前导 ./ 和绝对路径前缀。
+    """
+    out = []
+    for x in (v or []):
+        s = str(x or "").strip().replace("\\", "/")
+        while s.startswith("./"):
+            s = s[2:]
+        s = s.strip()
+        if not s or ".." in s:
+            continue
+        if not re.match(r"^(backend|frontend|tools|data)/[\w./\-]+\.\w+$", s):
+            continue
+        if s not in out:
+            out.append(s)
+    return out[:6]
+
+
 # ------------------------------------------------------------------ 增删改查
+
+def _verify_done(d: dict) -> bool:
+    """把「标了 done 但其实一条都没跑」的记录纠正成 failed。
+
+    ★ 2026-11-16：旧版本 approve() 提交成功就无条件写 done，卡片上显示
+      「已提交执行 / 已改完」，而执行器其实 0 秒就退出了（没有已批准的动作）。
+      用户看到的就是「批准了，什么都没发生」。这里在读列表时纠一次，
+      最多查 5 条，避免每次打开抽屉都扫一遍所有计划。
+    """
+    from . import self_iterate as _si
+    changed, n = False, 0
+    for it in (d.get("items") or []):
+        if it.get("state") != "done" or n >= 5:
+            continue
+        pid = str(it.get("plan_id") or "")
+        if not pid:
+            continue
+        n += 1
+        try:
+            _dd, plan = _si._find_plan(pid)
+        except Exception:                               # noqa: BLE001
+            continue
+        acts = (plan or {}).get("actions") or []
+        if not acts:
+            continue
+        if not any(a.get("status") == "done" and not a.get("skipped")
+                   for a in acts):
+            it["state"] = "failed"
+            it["error"] = (it.get("error")
+                           or "当时只是提交进了队列，执行器一条都没跑"
+                              "（旧版本的问题，点「重新执行」即可）")
+            changed = True
+    return changed
+
 
 def list_items(state: str = "", limit: int = 100) -> dict:
     d = load()
+    if _verify_done(d):
+        with _LOCK:
+            save(d)
     items = d.get("items") or []
     if state:
         items = [x for x in items if x.get("state") == state]
@@ -307,6 +376,126 @@ def _find(d: dict, iid: str):
     return None
 
 
+def _watch_plan(iid: str, pid: str, timeout: int = 900):
+    """盯住这次执行，把**真实结果**写回推荐记录。
+
+    ★ 2026-11-16 用户报「点了批准为什么没反应」：
+      根因之一是 approve() 提交后**无条件**标成 done + executed_at，而执行器
+      其实一条都没跑。现在提交只标 submitted，由这个线程盯到真结果再改状态，
+      所以卡片上「执行中 / 已改完 / 失败原因」都是真的。
+
+    只写三样：state（done/failed）、error（失败原因）、files（改动的文件）。
+    超时 15 分钟按失败处理，不会永远停在「执行中」。
+    """
+    from . import self_iterate as _si
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        time.sleep(3)
+        try:
+            _d, plan = _si._find_plan(pid)
+            acts = (plan or {}).get("actions") or []
+            if not acts:
+                break
+            running = [a for a in acts
+                       if a.get("status") in ("pending", "approved")]
+            if running:
+                continue                        # 还在跑，继续等
+            done = [a for a in acts if a.get("status") == "done"]
+            fails = [a for a in acts if a.get("status") == "failed"]
+            review = [a for a in acts if a.get("status") == "need_review"]
+            files = []
+            for a in done:
+                for f in (a.get("files") or []):
+                    if f and f not in files:
+                        files.append(f)
+            if done and not fails:
+                st, err = "done", ""
+            elif review and not done:
+                st = "failed"
+                err = str((review[0].get("review_why")
+                           or "被护栏拦下，等人工复核后再执行"))[:300]
+            else:
+                st = "failed"
+                err = str((fails[0].get("error") or fails[0].get("result")
+                           or "执行失败（未改到文件）"))[:300] if fails else "执行失败"
+            with _LOCK:
+                d2 = load()
+                x = _find(d2, iid)
+                if x:
+                    x.update({"state": st, "finished_at": _now(),
+                              "error": err, "files": files[:12]})
+                save(d2)
+            return
+        except Exception:                       # noqa: BLE001
+            logger.debug("featradar 盯执行结果出错（继续等）", exc_info=True)
+    with _LOCK:
+        try:
+            d2 = load()
+            x = _find(d2, iid)
+            if x and x.get("state") == "submitted":
+                x.update({"state": "failed", "finished_at": _now(),
+                          "error": "执行超时（%d 分钟没等到结果）" % (timeout // 60)})
+            save(d2)
+        except Exception:                       # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+
+
+_LOCATE_PROMPT = """你要判断「实现下面这个功能，需要改哪几个文件」。
+
+功能名：%s
+他看到的样子：%s
+大致怎么做：%s
+
+这个项目的源码文件清单（路径都是相对项目根目录的）：
+%s
+
+只输出 JSON，不要解释、不要代码围栏：
+{"files": ["backend/xxx.py", "frontend/xxx.js"]}
+
+要求：
+1. 只选**真正需要改**的文件，1~4 个，不要凑数；
+2. 路径必须从上面清单里原样抄，一个字都不能改；
+3. 宁可选少一点 —— 选错了会让执行器去改无关文件，比少选更糟。"""
+
+
+def _locate_files(it: dict) -> list:
+    """功能没写 files 时，用一次轻量调用定位要改哪几个文件。
+
+    ★ 2026-11-16 用户报「我都批准了肯定立刻执行啊」查出的第三个根因：
+      早期推荐记录没有 files 字段，而执行器必须有目标文件才能读内容，
+      没有就直接报「没有可读的目标文件（动作里没写 files）」→ 一条都改不了。
+      让用户「重新想一批」太粗暴，这里补一次定位即可。
+    """
+    try:
+        root = Path(__file__).resolve().parent.parent
+        cand = []
+        for g in ("backend/*.py", "frontend/*.js", "frontend/*.css",
+                  "frontend/*.html"):
+            for p in sorted(root.glob(g)):
+                cand.append(str(p.relative_to(root)).replace("\\", "/"))
+        if not cand:
+            return []
+        from . import self_iterate as _si
+        prompt = _LOCATE_PROMPT % (
+            str(it.get("title") or ""), str(it.get("idea") or "")[:300],
+            str(it.get("how") or "")[:300], "\n".join(cand))
+        raw, err = _si._llm_text(prompt, max_tokens=600,
+                                 temperature=0.2, want_json=True)
+        if err or not raw:
+            logger.warning("featradar 定位文件失败：%s", err)
+            return []
+        from . import jsonfix
+        j = jsonfix.parse(raw)
+        if not isinstance(j, dict):
+            return []
+        got = _clean_files(j.get("files"))
+        # 只留清单里真有的，防止模型编路径
+        return [f for f in got if f in cand][:4]
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("featradar 定位文件异常：%s: %s", type(e).__name__, e)
+        return []
+
+
 def approve(iid: str, note: str = "", execute: bool = True) -> dict:
     """批准一条推荐功能 → 变成可执行的动作，交给执行器真去改代码。
 
@@ -318,8 +507,25 @@ def approve(iid: str, note: str = "", execute: bool = True) -> dict:
         it = _find(d, iid)
         if not it:
             return {"ok": False, "error": "找不到这条推荐"}
-        if it.get("state") not in ("pending", "rejected"):
-            return {"ok": False, "error": "这条已经处理过了（%s）" % it.get("state")}
+        _st = str(it.get("state") or "")
+        # ★ 2026-11-16 用户报「我都批准了肯定立刻执行啊」的配套修复：
+        #   旧版本会把「提交进队列但一条都没跑」的记录标成 done，用户再点批准
+        #   只被告知「已经处理过了（done）」—— 这条就永久废了，只能眼睁睁看着。
+        #   所以 done 要先核实计划里真有跑成功的动作，否则允许重跑。
+        _ran_before = False
+        if _st == "done":
+            _pid0 = str(it.get("plan_id") or "")
+            if _pid0:
+                try:
+                    from . import self_iterate as _si0
+                    _d0, _p0 = _si0._find_plan(_pid0)
+                    _ran_before = any(
+                        (a.get("status") == "done" and not a.get("skipped"))
+                        for a in ((_p0 or {}).get("actions") or []))
+                except Exception:                       # noqa: BLE001
+                    _ran_before = False
+        if _st not in ("pending", "rejected", "failed", "submitted") and _ran_before:
+            return {"ok": False, "error": "这条已经处理过了（%s）" % _st}
         it["note"] = str(note or "")[:800]
         it["state"] = "approved"
         it["approved_at"] = _now()
@@ -334,18 +540,43 @@ def approve(iid: str, note: str = "", execute: bool = True) -> dict:
     try:
         from . import self_iterate as _si
         from . import iter_runner as _ir
-        detail = "%s\n\n【怎么做】%s" % (it.get("idea") or "", it.get("how") or "")
+        detail = "%s\n\n【他为什么需要】%s\n\n【怎么做】%s" % (
+            it.get("idea") or "", it.get("scene") or "", it.get("how") or "")
         if it.get("note"):
             detail += "\n\n【用户备注（与上面冲突时以这条为准）】%s" % it["note"]
+        # 没有目标文件 → 先定位一次（约 5~10 秒）。老记录都是这种，
+        # 不补的话重跑还是会报「没有可读的目标文件」。
+        _act_files = _clean_files(it.get("files"))
+        if not _act_files:
+            _act_files = _locate_files(it)
+            if _act_files:
+                with _LOCK:
+                    _d3 = load()
+                    _x3 = _find(_d3, iid)
+                    if _x3:
+                        _x3["files"] = _act_files
+                    save(_d3)
+                logger.info("featradar 定位到文件：%s", _act_files)
         plan = _si.create_plan(
             summary="新功能：%s" % it.get("title"),
             actions=[{
                 "title": it.get("title"),
-                "detail": detail[:900],
+                # 900 太短：idea+场景+how 一拼就截断，后半段的落地路径全丢了。
+                "detail": detail[:1800],
                 "risk": "mid",
-                "files": [],
-                "status": "pending",
-                "state": "pending",
+                # ★★ 2026-11-16 用户报「我都批准了肯定立刻执行啊」的第二个根因：
+                #   这里原来恒为 []，执行器只能从文本里正则抠路径，抠不到就报
+                #   「没有可读的目标文件（动作里没写 files）」，一条都改不了。
+                #   现在把模型构思时给出的真实文件路径带下去。
+                "files": _act_files,
+                # ★ 2026-11-16 修 bug（用户报「点了批准没反应」）：
+                #   这里原来写 pending，而执行器只跑 status=="approved" 的动作；
+                #   iter_runner._worker 又只在 source=="auto" 时才自动批准，
+                #   featradar 的 source 是 "featradar" → 没人批准 → 执行器
+                #   直接返回「这次反思没有已批准的动作」→ 一条都没跑。
+                #   用户在卡片上点「批准」本身就是明确授权，这里直接标 approved。
+                "status": "approved",
+                "state": "approved",
                 "note": it.get("note") or "",
                 "origin": "feature",
             }],
@@ -356,14 +587,36 @@ def approve(iid: str, note: str = "", execute: bool = True) -> dict:
             return {"ok": False, "error": "计划没建成", "item": it}
         sub = _ir.submit(pid, source="featradar",
                          title="新功能：%s" % it.get("title"))
+        _sub_ok = bool((sub or {}).get("ok"))
+        if not _sub_ok:
+            # ★ 2026-11-16 修 bug：原来不管提交成没成，都标 done + executed_at，
+            #   于是卡片显示「已提交执行」，实际队列根本没接住 —— 用户看到的就是
+            #   「点了没反应」。提交失败必须如实标失败，并留下原因。
+            _err = str((sub or {}).get("error") or "提交执行队列失败")
+            with _LOCK:
+                d2 = load()
+                x = _find(d2, iid)
+                if x:
+                    x.update({"state": "failed", "finished_at": _now(),
+                              "plan_id": pid, "error": _err[:300]})
+                save(d2)
+            return {"ok": False, "error": _err, "item": it,
+                    "plan_id": pid, "submitted": False}
+
+        # ★ 提交成功 ≠ 改成功。真结果由执行器异步产出，这里先标「执行中」，
+        #   再起一个后台线程盯到真结果回写（done / failed + 改了哪些文件）。
         with _LOCK:
             d2 = load()
             x = _find(d2, iid)
             if x:
-                x.update({"state": "done", "executed_at": _now(), "plan_id": pid})
+                x.update({"state": "submitted", "submitted_at": _now(),
+                          "plan_id": pid, "error": ""})
             save(d2)
+        threading.Thread(target=_watch_plan, args=(iid, pid), daemon=True,
+                         name="featwatch-%s" % iid).start()
         return {"ok": True, "item": it, "plan_id": pid,
-                "submitted": bool((sub or {}).get("ok"))}
+                "submitted": True, "state": "submitted",
+                "queue_state": (sub or {}).get("state") or ""}
     except Exception as e:                              # noqa: BLE001
         logger.warning("featradar 批准后提交失败：%s: %s", type(e).__name__, e)
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e), "item": it}

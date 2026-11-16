@@ -249,11 +249,16 @@
 
   function featCardHtml(it) {
     const st = it.state || "pending";
+    // 2026-11-16：原来 done 一律显示「已提交执行」，而旧版本把「提交进队列但
+    // 一条都没跑」也标成 done，用户看到的就是「已提交执行」却什么都没发生。
+    // 现在 done 只表示执行器真跑过；submitted 才是「刚交上去、还在跑」。
     const tag = st === "pending" ? '<span class="fr-tag">待你决定</span>'
-      : st === "done" ? '<span class="fr-tag fr-tag-ok">已提交执行</span>'
+      : st === "done" ? '<span class="fr-tag fr-tag-ok">✅ 已改完</span>'
+      : st === "submitted" ? '<span class="fr-tag fr-tag-run">⏳ 执行中…</span>'
+      : st === "failed" ? '<span class="fr-tag fr-tag-bad">❌ 没改成</span>'
       : st === "rejected" ? '<span class="fr-tag fr-tag-off">已拒绝</span>'
       : '<span class="fr-tag fr-tag-ok">已批准</span>';
-    const editable = (st === "pending" || st === "rejected");
+    const editable = (st === "pending" || st === "rejected" || st === "failed");
     return '<div class="fr-card fr-feat" data-fid="' + esc(it.id) + '">' +
       '<div class="fr-c-head"><b>' + esc(it.title || "（未命名）") + '</b>' + tag + '</div>' +
       '<div class="fr-scores">' +
@@ -271,9 +276,21 @@
       '<textarea class="fr-note" rows="2" placeholder="备注（可选）：想怎么改这个功能？' +
         '写在这儿，批准后会按你的话做"' + (editable ? '' : ' disabled') + '>' +
         esc(it.note || '') + '</textarea>' +
+      (st === "failed" && it.error
+        ? '<div class="fr-c-files fr-err">失败原因：' + esc(String(it.error).slice(0, 200)) + '</div>'
+        : '') +
+      (st === "done" && it.files && it.files.length
+        ? '<div class="fr-c-files">改了 ' + it.files.length + ' 个文件：' +
+          esc(it.files.join("、")) + '</div>'
+        : '') +
+      (st === "submitted"
+        ? '<div class="fr-c-files">已交给执行器，正在改代码 —— 跑完这里会自动变成结果，' +
+          '去聊天区也能看到它的每一步。</div>'
+        : '') +
       (editable
         ? '<div class="fr-c-btns">' +
-            '<button type="button" class="fr-btn fr-ok" data-act="ok">✓ 批准，去做</button>' +
+            '<button type="button" class="fr-btn fr-ok" data-act="ok">' +
+              (st === "failed" ? '🔁 重新执行' : '✓ 批准，去做') + '</button>' +
             '<button type="button" class="fr-btn fr-no" data-act="no">✕ 不要</button>' +
             '<button type="button" class="fr-btn fr-save" data-act="save">💾 只存备注</button>' +
           '</div>'
@@ -299,6 +316,8 @@
       return;
     }
     setBody(FEAT, items.map(featCardHtml).join(""));
+    // 有「执行中」的就盯到出结果，省得用户手动刷新
+    if (items.some(function (x) { return x.state === "submitted"; })) watchRun();
   }
 
   async function featThink(btn) {
@@ -324,9 +343,28 @@
     toast("已批准，正在排进执行队列…");
     const r = await api("/api/featradar/approve", { id: fid, note: note, execute: true });
     if (!r || !r.ok) { toast("批准失败：" + ((r && r.error) || "未知"), "bad"); return; }
-    toast(r.submitted ? "已提交执行，去聊天区看它改代码的进度" : "已批准（排队中）", "good");
+    toast(r.submitted ? "已交给执行器，正在改代码…" : "已批准（排队中）", "good");
     await loadFeat();
     refreshDots();
+    watchRun();
+  }
+
+  // 2026-11-16：用户点批准后最想知道「到底跑了没」。执行是异步的，
+  // 这里盯到所有 submitted 变成 done/failed 就停，最多盯 8 分钟。
+  let _watchT = null;
+  function watchRun() {
+    if (_watchT) return;
+    const t0 = Date.now();
+    _watchT = setInterval(async function () {
+      const items = (featData && featData.items) || [];
+      const running = items.filter(function (x) { return x.state === "submitted"; });
+      if (!running.length || Date.now() - t0 > 8 * 60 * 1000) {
+        clearInterval(_watchT); _watchT = null;
+        return;
+      }
+      await loadFeat();
+      refreshDots();
+    }, 5000);
   }
 
   async function featReject(fid) {

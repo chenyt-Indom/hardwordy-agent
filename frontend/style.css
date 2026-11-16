@@ -6039,3 +6039,9 @@ html[data-theme="light"] select.pill-select option {
 .fr-toast.show { opacity: 1; transform: translate(-50%, 0); }
 .fr-toast.bad { background: rgba(185, 28, 28, .95); }
 .fr-toast.good { background: rgba(4, 120, 87, .95); }
+
+/* 2026-11-16：功能卡片的状态标签补三档 —— 执行中 / 没改成 / 失败原因。
+   原来 done 一律显示「已提交执行」，一条都没跑也这么显示，用户以为在跑。 */
+.fr-tag-run { border-color: #2563eb; color: #1d4ed8; background: rgba(37, 99, 235, .09); opacity: 1; }
+.fr-tag-bad { border-color: #dc2626; color: #b91c1c; background: rgba(220, 38, 38, .08); opacity: 1; }
+.fr-c-files.fr-err { color: #b91c1c; opacity: .9; }

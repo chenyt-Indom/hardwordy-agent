@@ -3673,6 +3673,7 @@ def classify_fail(msg):
 def _plan_patch_for_action(plan, action):
     """让 LLM 针对这一条动作产出具体 patch（此时才读相关文件内容）。"""
     want = [f for f in (action.get("files") or []) if isinstance(f, str)]
+    _new_from_text = []          # 动作显式写了 files 时也要有定义
     if not want:
         # 兜底（2026-11-15）：模型产出的动作常常只在标题/说明里写路径，
         # 不填 files 字段 —— 那样执行必然报「没有可读的目标文件」，白排一次队。
@@ -3681,12 +3682,21 @@ def _plan_patch_for_action(plan, action):
         _blob = "%s %s %s" % (action.get("title") or "",
                               action.get("detail") or "",
                               action.get("note") or "")
-        _cand = re.findall(
-            r"((?:backend|frontend|data|tools)/[\w./\-]+\.(?:py|js|css|html|json|md))",
-            _blob)
-        want = [c for c in dict.fromkeys(_cand) if (_ROOT / c).is_file()][:3]
+        # ★ 2026-11-16 修 bug（用户报「点了批准没反应」，第二层根因）：
+        #   原来这里把候选路径直接过滤成「只含已存在的文件」，下面再用同一个
+        #   want 去算 new_files → **new_files 永远为空**。结果是「新建文件」类
+        #   动作必然报「没有可读的目标文件」，白排一次队。用户想让它做的新功能
+        #   大多要新建文件，所以这条一卡，等于新功能一条都做不成。
+        #   现在：已存在的进 files，不存在的进 new_files，分开算。
+        #   写入仍受 _FORBIDDEN_PARTS（data/ models/ sessions/ …）和语法校验兜底。
+        _cand = list(dict.fromkeys(re.findall(
+            r"((?:backend|frontend|tools)/[\w./\-]+\.(?:py|js|css|html|json|md))",
+            _blob)))
+        want = [c for c in _cand if (_ROOT / c).is_file()][:3]
+        _new_from_text = [c for c in _cand if not (_ROOT / c).is_file()][:2]
     files = [f for f in want if (_ROOT / f).is_file()]
-    new_files = [f for f in want if not (_ROOT / f).is_file()]
+    new_files = [f for f in want if not (_ROOT / f).is_file()] + _new_from_text
+    new_files = list(dict.fromkeys(new_files))[:2]
     if not files and not new_files:
         return None, "没有可读的目标文件（动作里没写 files，文本里也没找到已存在的路径）"
     # 2026-11-15 修：原来单文件硬截 14000 字符。selfdev.py 有 47904 字节，
