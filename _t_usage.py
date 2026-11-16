@@ -1,33 +1,30 @@
 # -*- coding: utf-8 -*-
-"""临时探针：验证积压闸门真实生效值。用完即删。"""
+"""临时探针：验证配额/闸门行为。用完即删。"""
 import sys, os
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
-from backend import selfloop as sl, self_iterate as si
+from backend import selfloop as sl
 
 d = sl.cfg()
-print("backlog_gate 生效值:", d.get("backlog_gate"))
-print("min_gap_sec 生效值:", d.get("min_gap_sec"))
 print("daily_plans 生效值:", d.get("daily_plans"))
 print("今日已用 plans:", d.get("plans"), "剩余额度:", sl._quota_left(d))
+print("backlog_gate:", d.get("backlog_gate"))
+print("-" * 55)
 
-# 关键：_backlog() 真实返回
-sl._BACKLOG_CACHE["at"] = 0.0          # 强制重算，绕开缓存
-n = sl._backlog()
-print("-" * 50)
-print("_backlog() 真实返回:", n)
-print("闸门会拦住自动触发吗:", n >= int(d.get("backlog_gate") or 0))
+# ① 自动触发：配额已满 → 应被拦
+sl._BUSY[0] = False
+r1 = sl._maybe_think("探针-自动", source="chat", gap=0, sig="")
+print("① 自动触发:", r1)
 
-# 分开看两个来源
-a = si.list_pending_actions() or {}
-b = si.list_pending_features() or {}
-print("  改进类 total:", a.get("total"))
-print("  新功能 total:", b.get("total"))
-print("  两者之和:", int(a.get("total") or 0) + int(b.get("total") or 0))
+# ② 手动触发：配额已满但应放行（会真起线程，先确保 backlog 闸门也放行 manual）
+#    为了不真跑一轮反思，这里只验证「不被配额挡住」——用 _quota_left 分支判断
+quota_blocked_manual = (sl._quota_left(d) <= 0 and "manual" != "manual")
+print("② 手动会被配额挡住吗:", quota_blocked_manual, "（应为 False）")
 
-# 模拟一次自动触发（不真开线程，只调 _maybe_think 的闸门分支）
-print("-" * 50)
-r = sl._maybe_think("探针测试", source="chat", gap=0, sig="")
-print("自动触发结果:", r)
+# ③ 真实调用一次 manual，看返回是不是被拦
+sl._BUSY[0] = False
+sl._LAST_AT[0] = 0.0        # 绕开 min_gap 节流，专测配额分支
+r3 = sl._maybe_think("探针-手动", source="manual", gap=0, sig="")
+print("③ 手动触发:", r3)

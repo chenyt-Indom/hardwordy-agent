@@ -5252,6 +5252,8 @@
     await loadSessions();
     // 记忆按对话隔离：换了对话，记忆面板也必须跟着换
     await loadMemory();
+    // 切走之后旧对话的「相似旧任务」提示条就不适用了（会指到别的任务上）
+    hideTaskReuse();
     showToast(`已切换到「${await currentTitle(sid)}」`);
   }
 
@@ -5277,6 +5279,10 @@
       await loadSessions();
       // 新对话有自己独立的记忆（从空白开始），面板要跟着切
       await loadMemory();
+      // 跨任务抄近道：新任务开张，先看看历史上有没有「最像的 2~3 次」可复用
+      // （这里先按「最近做过的」弹一条；用户一开口打字就会换成真正最像的）
+      trTouched = false;
+      refreshTaskReuse("");
       showToast("已新建对话", "ok");
     } catch (e) {
       showToast("新建失败：" + e.message, "warn");
@@ -5840,6 +5846,165 @@
     document.body.appendChild(ov);
   }
 
+  // ---------- 跨任务抄近道：相似旧任务提示条 ----------
+  // 【为什么】用户上周让 AI 做过一份带特定格式的 Word 报告，这周又要做类似的，
+  //   却得把「章节结构 / 语气 / 格式要求」重新描述一遍 —— 上次那套完全能复用，
+  //   但没人帮他自动找出来。
+  // 【怎么做】开新对话（或刚开始描述新任务）时问后端
+  //   `GET /api/task_similar`：它按历史会话切任务、向量化、算相似度，
+  //   抽出「提示词 / 产出模板 / 脚本」。这里把结果渲染成顶部提示条，
+  //   点一下就 POST /api/task_similar/reuse 把整套内容填进输入框
+  //   （用户改两行再发 → 自然进入本轮上下文，聊天主链路一个字不用动）。
+  let trBarEl = null;        // 提示条 DOM
+  let trItems = [];          // 当前展示的候选
+  let trQuery = "";          // 发起请求时的查询词（防乱序覆盖）
+  let trTimer = null;        // 输入防抖
+  let trTouched = false;     // 用户手动关掉过 → 这次对话不再烦他
+
+  function ensureTaskReuseBar() {
+    if (trBarEl && document.body.contains(trBarEl)) return trBarEl;
+    const bar = document.createElement("div");
+    bar.className = "task-reuse-bar";
+    bar.id = "taskReuseBar";
+    bar.hidden = true;
+    if (messagesEl && messagesEl.parentNode) {
+      messagesEl.parentNode.insertBefore(bar, messagesEl);
+    } else {
+      document.body.appendChild(bar);
+    }
+    trBarEl = bar;
+    return bar;
+  }
+
+  function hideTaskReuse() {
+    trItems = [];
+    if (trBarEl) { trBarEl.hidden = true; trBarEl.innerHTML = ""; }
+  }
+
+  function renderTaskReuse(data) {
+    const items = (data && data.items) || [];
+    trItems = items;
+    if (!items.length) { hideTaskReuse(); return; }
+    const bar = ensureTaskReuseBar();
+    const recent = ((data && data.mode) || "") === "recent";
+    bar.innerHTML = "";
+
+    const head = document.createElement("div");
+    head.className = "tr-head";
+    const ttl = document.createElement("span");
+    ttl.className = "tr-title";
+    ttl.textContent = recent
+      ? "🧷 最近做过的任务 —— 格式 / 结构 / 脚本可以直接沿用？"
+      : "🧷 找到 " + items.length + " 次相似的旧任务 —— 复用它的格式 / 结构 / 脚本？";
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "tr-close";
+    closeBtn.title = "先不用（这次对话不再自动弹）";
+    closeBtn.textContent = "✕";
+    closeBtn.onclick = () => { trTouched = true; hideTaskReuse(); };
+    head.appendChild(ttl);
+    head.appendChild(closeBtn);
+    bar.appendChild(head);
+
+    const list = document.createElement("div");
+    list.className = "tr-list";
+    items.forEach((it) => {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "tr-card";
+      card.title = "点一下：把它的提示词 / 产出模板 / 脚本载入输入框";
+      const tags = [];
+      if (it.has_template) tags.push("结构");
+      if (it.scripts) tags.push(it.scripts + " 段脚本");
+      const name = document.createElement("span");
+      name.className = "tr-name";
+      name.textContent = it.title || "未命名任务";
+      const when = document.createElement("span");
+      when.className = "tr-time";
+      when.textContent = String(it.when || "").slice(5, 16);
+      const prom = document.createElement("span");
+      prom.className = "tr-prom";
+      prom.textContent = it.prompt_preview || "";
+      card.appendChild(name);
+      card.appendChild(when);
+      card.appendChild(prom);
+      if (tags.length) {
+        const tagEl = document.createElement("span");
+        tagEl.className = "tr-tags";
+        tags.forEach((x) => {
+          const i = document.createElement("i");
+          i.textContent = x;
+          tagEl.appendChild(i);
+        });
+        card.appendChild(tagEl);
+      }
+      if (it.why) {
+        const why = document.createElement("span");
+        why.className = "tr-why";
+        why.textContent = it.why;
+        card.appendChild(why);
+      }
+      card.onclick = () => useTaskReuse(it.id);
+      list.appendChild(card);
+    });
+    bar.appendChild(list);
+    bar.hidden = false;
+  }
+
+  async function refreshTaskReuse(q, opts = {}) {
+    if (trTouched && !opts.force) return;
+    // 已经聊起来的任务不需要抄近道（只在「这段对话还没有内容」时推）
+    if (!opts.force && history.length > 1) return;
+    const query = String(q || "").trim();
+    trQuery = query;
+    try {
+      const d = await api("/api/task_similar?q=" + encodeURIComponent(query) +
+        "&session_id=" + encodeURIComponent(sessionId || "") + "&k=3");
+      if (trQuery !== query) return;          // 用户又改了输入 → 等下一次结果
+      if (!d || d.ok === false) { if (query) hideTaskReuse(); return; }
+      renderTaskReuse(d);
+    } catch (e) { /* 提示条失败不能影响聊天本身 */ }
+  }
+
+  async function useTaskReuse(id) {
+    if (!id) return;
+    try {
+      const d = await api("/api/task_similar/reuse", {
+        method: "POST",
+        body: JSON.stringify({ id: id, session_id: sessionId || "" }),
+      });
+      if (!d || d.ok === false) {
+        showToast("载入失败：" + ((d && d.error) || "未知原因"), "warn");
+        return;
+      }
+      const typed = (inputEl.value || "").trim();
+      const inject = String(d.inject || "").replace(/\s+$/, "");
+      inputEl.value = typed ? (inject + "\n" + typed + "\n") : (inject + "\n");
+      autoGrow();
+      try { inputEl.focus(); } catch (e) { /* 忽略 */ }
+      hideTaskReuse();
+      trTouched = true;
+      showToast("已载入「" + (d.title || "旧任务") + "」的提示词 / 模板 / 脚本，改完直接发送", "ok");
+    } catch (e) {
+      showToast("载入失败：" + (e && e.message ? e.message : e), "warn");
+    }
+  }
+
+  // 他开始描述新任务（这段对话还什么都没聊）时，跟着输入实时换候选 ——
+  // 「最像」必须基于他真正要做的这件事，而不是上一件事。
+  if (inputEl) {
+    inputEl.addEventListener("input", () => {
+      if (history.length > 1) return;
+      clearTimeout(trTimer);
+      trTimer = setTimeout(() => {
+        const t = (inputEl.value || "").trim();
+        if (t.length < 4) return;
+        trTouched = false;
+        refreshTaskReuse(t);
+      }, 700);
+    });
+  }
+
   async function send() {
     setFreeView(false);        // 自己发消息 → 恢复跟随，别停在半路
     const text = inputEl.value.trim();
@@ -5893,6 +6058,8 @@
     }
     images = []; videoB64 = null; docs = []; renderAttachments();
     inputEl.value = ""; autoGrow();
+    // 任务已经开始做了，「抄近道」提示条就该收起来（它只在动手之前有用）
+    hideTaskReuse();
     await doSend(promptText, media.length ? media : null, docPayload);
     scheduleMemoryRefresh();   // 记忆提炼是后端异步防抖的，延迟补刷面板
   }

@@ -47,7 +47,7 @@ from . import (config, ollama_client, deepseek_client, cloud_image, image_models
                t2i, tools, sessions, image_library, doclib, docx_write, tts,
                workspace, actlog, chatimg, hive, hive_client, hive_p2p,
                hive_mesh, hive_relay_link, avatar2, deploy_keys, reply_gate,
-               bootaudit)
+               bootaudit, task_similarity)
 
 app = FastAPI(title="hardwordy", version="1.0.0")
 
@@ -12063,6 +12063,38 @@ def session_delete(sid: str):
     sessions.delete(sid)
     memory.delete_short(sid)
     return {"ok": True}
+
+
+# ---------- 跨任务抄近道（相似旧任务提示条）----------
+# 用户上周让 AI 做过一份带特定格式的 Word 报告，这周又要做类似的，
+# 却得重新描述一遍章节结构 / 语气 / 格式要求 —— 这套其实上次就能复用。
+# 这里按「新任务的描述」在历史会话里找最像的 2~3 次，把提示词、
+# 产出模板（章节骨架）、用到的脚本一起抽出来给他点一下就能载入。
+@app.get("/api/task_similar")
+def api_task_similar(q: str = "", session_id: str = "", k: int = 3, recent: int = 1):
+    """找相似旧任务。q 为空时返回「最近做过的」几个（前端文案会相应改变）。"""
+    try:
+        out = task_similarity.find_similar(q, k=k, exclude_sid=session_id,
+                                           allow_recent=bool(recent))
+        out["ok"] = True
+        return out
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("[task_similar] 检索失败：%s: %s", type(e).__name__, e)
+        return {"ok": False, "mode": "none", "items": [],
+                "error": "%s: %s" % (type(e).__name__, e)}
+
+
+@app.post("/api/task_similar/reuse")
+def api_task_similar_reuse(body: dict | None = None):
+    """点「复用它的格式/结构/脚本？」——返回要注入当前任务的完整文本。"""
+    b = body or {}
+    try:
+        out = task_similarity.reuse_payload(str(b.get("id") or ""),
+                                           str(b.get("session_id") or ""))
+        return out
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("[task_similar] 复用失败：%s: %s", type(e).__name__, e)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
 # ---------- 图片库（搜到的图 / 生成的图统一留存）----------
