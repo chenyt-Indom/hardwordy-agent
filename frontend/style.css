@@ -540,109 +540,6 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   font-size: 13px; line-height: 1.6;
 }
 
-/* ============================================================
-   画布对话：回复变成可拖拽 / 可圈选的卡片（2026-11-16）
-   ------------------------------------------------------------
-   一轮回复被拆成若干 .canvas-card，排进 .canvas-grid：
-     · auto-fill 网格（每列最小 280px，窄屏自动变一列）
-     · 点卡片 = 输入框预填「就这块：<blockId> 再改改」
-     · 拖卡片 = 换位置（cursor: grab / grabbing）
-   颜色全走变量，浅色模式自动跟随。
-   ============================================================ */
-.canvas-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
-  margin-top: 8px;
-  /* 气泡是 white-space:pre-wrap，不关掉的话源码换行会变成真空行 */
-  white-space: normal;
-}
-.canvas-card {
-  position: relative;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  overflow: hidden;
-  background: var(--panel);
-  cursor: grab;
-  white-space: normal;
-  transition: border-color .16s ease, box-shadow .16s ease, transform .12s ease;
-}
-.canvas-card:hover {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  box-shadow: 0 4px 14px rgba(0, 0, 0, .12);
-}
-.canvas-card:active { cursor: grabbing; }
-.canvas-card.dragging { opacity: .5; transform: scale(.99); }
-.canvas-card.sel {
-  border-color: var(--kb-accent);
-  box-shadow: 0 0 0 1px var(--kb-accent) inset;
-}
-.canvas-tag {
-  position: absolute; top: 8px; right: 8px;
-  font-size: 10px; line-height: 1;
-  padding: 2px 6px; border-radius: 999px;
-  background: var(--chip-bg); color: var(--muted);
-  border: 1px solid var(--chip-border);
-  pointer-events: none; user-select: none;
-}
-.canvas-card.sel .canvas-tag { background: var(--kb-accent); color: #fff; border-color: var(--kb-accent); }
-
-/* 文字块：照旧走 markdown（.bubble .md-* 那套），长文默认「收起」不是「截断」 */
-.canvas-text {
-  padding: 12px 14px 10px;
-  font-size: 13px; line-height: 1.7;
-  word-break: break-word; overflow-wrap: anywhere;
-}
-.canvas-text.cut {
-  max-height: 300px;
-  overflow: hidden;
-  -webkit-mask-image: linear-gradient(180deg, #000 76%, transparent);
-  mask-image: linear-gradient(180deg, #000 76%, transparent);
-}
-.canvas-more { align-self: flex-start; margin: 0 14px 10px; }
-
-/* 图片块：缩略图 + 文件名 */
-.canvas-fig { margin: 0; }
-.canvas-fig img {
-  display: block; width: 100%; max-height: 320px; object-fit: contain;
-  background: var(--panel2);
-}
-.canvas-cap {
-  padding: 6px 12px 0;
-  font-size: 11.5px; color: var(--muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-
-/* 文件块（PPT / 文档 / 网页摘要） */
-.canvas-file { display: flex; align-items: flex-start; gap: 8px; padding: 12px 14px 6px; }
-.canvas-ico { flex: 0 0 auto; font-size: 20px; line-height: 1.2; }
-.canvas-file-main { display: flex; flex-direction: column; min-width: 0; }
-.canvas-name {
-  font-size: 13px; font-weight: 600;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.canvas-sub {
-  font-size: 11.5px; color: var(--muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.canvas-note {
-  padding: 0 14px 8px;
-  font-size: 12px; color: var(--muted); line-height: 1.6;
-  word-break: break-word; overflow-wrap: anywhere;
-}
-.canvas-acts { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 14px 12px; margin-top: auto; }
-.canvas-btn {
-  display: inline-block; padding: 4px 11px;
-  border: 1px solid var(--border); border-radius: 8px;
-  background: transparent; color: var(--text); font: inherit;
-  font-size: 12px; line-height: 1.6; text-decoration: none; cursor: pointer;
-  transition: background-color .15s, border-color .15s, color .15s;
-}
-.canvas-btn:hover { border-color: var(--accent); color: var(--accent); }
-
 .chat-header {
   display: flex; align-items: center; gap: 12px; padding: 14px 20px;
   border-bottom: 1px solid var(--border); background: var(--panel);
@@ -3205,9 +3102,6 @@ html[data-theme="light"] body {
   .code-body { font-size: 12px; }
   .code-head { padding: 6px 8px; }
   .code-btns .btn { font-size: 11px; padding: 3px 7px; }
-  /* 画布卡片：窄屏一列（280px 的两列在手机上会挤成一坨） */
-  .canvas-grid { grid-template-columns: 1fr; gap: 10px; }
-  .canvas-text { font-size: 13.5px; }
 
   /* --- 输入区：贴底、按钮不换行 --- */
   /* 卡片化后左右有外留白，窄屏要收紧，不然输入框被挤窄 */
