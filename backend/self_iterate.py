@@ -4555,65 +4555,6 @@ def _check_phantom(action):
             "evidence": {"fail_kind": fk, "count": n}}
 
 
-def _rescue_mod():
-    """按路径加载根目录的 rescue.py（只依赖标准库，不 import backend，避免循环导入）。
-
-    冻结（PyInstaller）后 backend 在 _internal 里，而 rescue.py 在 exe 同级 ——
-    所以冻结时必须用 exe 所在目录，否则会报「找不到 rescue.py」。
-    """
-    import importlib.util as _ilu
-    if getattr(sys, "frozen", False):
-        _root = os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    _p = os.path.join(_root, "rescue.py")
-    if not os.path.isfile(_p):
-        raise RuntimeError("项目根目录找不到 rescue.py")
-    _spec = _ilu.spec_from_file_location("_rescue_iter_standalone", _p)
-    _m = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_m)
-    return _m
-
-
-def _iter_snapshot(plan, pid, ev=None):
-    """★ 2026-11-17 用户要求：**每批迭代动手前**自动建一个全栈版本（it_ 前缀）。
-
-    为什么要它：单文件备份（data/self_iterate/backups）只能还原被改的那几个文件，
-    一旦迭代把多个文件改乱、或改坏了没人备份的配置/前端，就回不到改动前。
-    这里在动手前打一个全栈快照，回滚一次整体还原。
-
-    同一批只建一个：plan 里记 _iter_snap，文件还在就直接复用 ——
-    重试同一批不该重复占 4.8MB。
-    """
-    try:
-        r = _rescue_mod()
-    except Exception as exc:                            # noqa: BLE001
-        logger.warning("迭代前快照不可用：%s", exc)
-        return ""
-    prev = str(plan.get("_iter_snap") or "")
-    if prev:
-        _dir = str(getattr(r, "SNAP_DIR", "") or "")
-        if _dir and os.path.isfile(os.path.join(_dir, prev)):
-            return prev
-    try:
-        res = r.create_snapshot("迭代前_%s" % str(pid)[:8], prefix="it")
-    except Exception as exc:                            # noqa: BLE001
-        logger.warning("迭代前快照失败：%s", exc)
-        return ""
-    if isinstance(res, dict) and res.get("ok"):
-        name = str(res.get("name") or "")
-        if name:
-            plan["_iter_snap"] = name
-            if ev:
-                try:
-                    ev("iter_snapshot", name=name, count=res.get("count", 0))
-                except Exception:                       # noqa: BLE001
-                    logger.debug("silent-except", exc_info=True)
-            return name
-    logger.warning("迭代前快照未成功：%s", res)
-    return ""
-
-
 @_exec_guard
 def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=None):
     """执行这次反思里所有 status=approved 的动作。带备份 + 校验 + 失败回滚。
@@ -4689,19 +4630,6 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
             return {"ok": False, "done": 0, "total": 0, "results": [],
                     "error": "全部动作都是幽灵修复（近 7 天无真实失败记录），已拒绝执行",
                     "phantom_rejected": _phantom_rejected}
-
-    # ★ 2026-11-17 用户要求：动手前先自动打一个全栈版本，改坏了能整体滚回来。
-    #   放在这里（幽灵检查之后、真正 patch 之前）：被拒的动作不该占快照。
-    _iter_snap_name = _iter_snapshot(plan, pid, _ev)
-    if _iter_snap_name:
-        try:
-            save_plans(d)
-        except Exception:                               # noqa: BLE001
-            logger.debug("silent-except", exc_info=True)
-        try:
-            _ev("snapshot", name=_iter_snap_name)
-        except Exception:                               # noqa: BLE001
-            logger.debug("silent-except", exc_info=True)
 
     def _card(a, patches, ok, error="", rolled_back=False, files=None, backup=""):
         """把一次动作的结果整理成前端代码卡片要的数据。

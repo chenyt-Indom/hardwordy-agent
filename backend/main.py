@@ -12832,18 +12832,9 @@ def version_undo_info():
 # 这里把根目录的 rescue.py 接出来 —— 它只依赖标准库、故意不 import backend，
 # 所以主程序坏掉时它自己还能跑；这一层只是给它套个 HTTP 外壳。
 def _rescue_mod():
-    """按路径加载根目录的 rescue.py（不依赖 sys.path，避免和包名冲突）。
-
-    ⚠️ 2026-11-17（打包 11.17a 时实测踩到）：PyInstaller 冻结后 backend 在
-    `_internal` 里，`__file__` 的上级是 `_internal` —— 而 rescue.py 放在
-    **exe 同级**，照旧算法会报「项目根目录找不到 rescue.py」。
-    所以冻结时必须用 exe 所在目录。
-    """
+    """按路径加载根目录的 rescue.py（不依赖 sys.path，避免和包名冲突）。"""
     import importlib.util as _ilu
-    if getattr(sys, "frozen", False):
-        _root = os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _p = os.path.join(_root, "rescue.py")
     if not os.path.isfile(_p):
         raise RuntimeError("项目根目录找不到 rescue.py")

@@ -9100,26 +9100,18 @@
         const mb = (n) => ((n || 0) / 1048576).toFixed(1) + " MB";
         // 手动快照必须全部露出（是用户亲手存的，被截掉就等于没有）；其余按时间取前 6 个
         const manSet = new Set(items.filter((s) => s.man).map((s) => s.name));
-        // 迭代前自动版本可能有 30 个，全列出来会把启动快照挤掉 —— 只露最近 5 个
-        const itSet = new Set(items.filter((s) => s.iter).slice(0, 5).map((s) => s.name));
-        const restSet = new Set(items.filter((s) => !s.man && !s.iter).slice(0, 6).map((s) => s.name));
-        const show = items.filter((s) => manSet.has(s.name) || itSet.has(s.name) || restSet.has(s.name));
+        const restSet = new Set(items.filter((s) => !s.man).slice(0, 6).map((s) => s.name));
+        const show = items.filter((s) => manSet.has(s.name) || restSet.has(s.name));
         rbox.innerHTML = [
           '<div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">全栈快照（源码 + data 状态；程序崩了也能用，点「回滚」整批还原）</div>',
           '<div style="max-height:260px;overflow:auto">',
           show.length ? show.map((s) => {
-            // bad_ 快照是「回滚前自动备份」，内容是当时正在跑的代码，不是坏代码；
-            // 标成灰色「回滚前备份」，避免被误读成代码坏了。它的 tag 也是「回滚前状态」，不再重复显示。
-            const st = s.bad ? '<span style="color:#9a9aa2">回滚前备份</span>'
-              : ((s.iter ? '<span style="color:#a78bfa" title="自我迭代动手前自动建的全栈版本">⚡迭代前</span> · ' : '')
-                + (s.healthy ? '<span style="color:#7bd88f">健康</span>' : '<span style="color:#9a9aa2">未知</span>'));
-            const nm = s.bad ? ''
-              : ((s.man ? '<span style="color:#7fb8f0">📌 ' : '') + (s.tag || s.name) + (s.man ? '</span>' : ''));
+            const st = s.bad ? '<span style="color:#e0a0a0">坏状态</span>'
+              : (s.healthy ? '<span style="color:#7bd88f">健康</span>' : '<span style="color:#9a9aa2">未知</span>');
             return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #262a32;font-size:12px">'
               + '<span style="flex:1;min-width:0;word-break:break-all">' + s.mtime_str + ' · '
-              + nm + (nm ? ' · ' : '') + st + ' · ' + mb(s.size)
-              + (s.app_exe ? ' · <span style="color:#c9a86a" title="这份快照含应用 exe（后端编译在里面），回滚时会连 exe 一起换回">含 exe</span>' : '')
-              + '</span>'
+              + (s.man ? '<span style="color:#7fb8f0">📌 ' : '') + (s.tag || s.name)
+              + (s.man ? '</span>' : '') + ' · ' + st + ' · ' + mb(s.size) + '</span>'
               + '<button data-rsnap="' + s.name + '" style="flex:0 0 auto;padding:4px 10px;border-radius:6px;border:1px solid #4a3a3a;background:transparent;color:#e0a0a0;cursor:pointer;font-size:12px">回滚</button>'
               + '</div>';
           }).join("")
@@ -9140,21 +9132,8 @@
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body || {}) })).json();
           if (r && r.ok) {
-            // exe 被占用（应用正在运行）时不能自动重启：_swap_exe.bat 要等应用退出
-            // 之后才换 exe，这时候重启只会把时机搅乱。提示用户关掉应用即可。
-            const _ex = r.exe || null;
-            if (_ex && _ex.reason === "pending") {
-              say("✅ " + (r.msg || "完成"), "#7bd88f");
-              if (btn) { btn.disabled = false; btn.textContent = "回滚"; }
-              return;
-            }
-            if (r.partial) {
-              say("⚠️ " + (r.msg || "部分完成"), "#e0a06a");
-              if (window.__restartAppNow) { setTimeout(() => window.__restartAppNow(), 600); return; }
-            } else {
-              say("✅ " + (r.msg || "完成") + "，正在自动重启…", "#7bd88f");
-              if (window.__restartAppNow) { setTimeout(() => window.__restartAppNow(), 600); return; }
-            }
+            say("✅ " + (r.msg || "完成") + "，正在自动重启…", "#7bd88f");
+            if (window.__restartAppNow) { setTimeout(() => window.__restartAppNow(), 600); return; }
           } else {
             say("❌ " + ((r && r.error) || "失败"), "#e06c6c");
           }
