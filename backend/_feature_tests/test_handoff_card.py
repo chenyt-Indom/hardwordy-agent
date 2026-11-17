@@ -1044,6 +1044,39 @@ def main():
     check("行内全角围栏错位后仍幂等",
           handoff.sanitize(_so, 40, multiline=True) == _so, repr(_so))
 
+    # ---- 字面 \n 只在多行上下文还原；单行（note/rel/标题）必须原样保留 ----
+    # 实测真实卡片第 3 条改动：「字面 \n 不还原」被渲染成「字面 不还原」，字丢了。
+    _note = "字面 \\n 不还原）"
+    _no = handoff._inline(_note, 120)
+    check("单行 note 保留字面 \\n", "\\n" in _no, repr(_no))
+    check("单行 note 不被撕成两行", "\n" not in _no, repr(_no))
+    check("多行上下文仍还原字面 \\n",
+          handoff.sanitize("日志：24\\n\\n正文", 500, multiline=True) == "日志：24\n\n正文", "")
+
+    # ---- 自迭代快照的 _pending_ 暂存文件不是真实代码改动，不能进清单 ----
+    _pb = len(handoff._read().get("changes") or [])
+    handoff.record_change("backend/_feature_tests/_pending_测试.py", "自迭代快照", 33, 0)
+    _pa = len(handoff._read().get("changes") or [])
+    check("record_change 跳过 _pending_ 快照", _pb == _pa, "%d -> %d" % (_pb, _pa))
+    _pd = {"ts": time.time(), "restarted_at": "2026-11-18 05:00:00",
+           "reason": "t", "live_at": "2026-11-18 05:00:00", "dialog": [],
+           "changes": [{"rel": "a.py", "note": "n", "added": 1, "removed": 0,
+                        "time": "2026-11-18 05:00:01"},
+                       {"rel": "backend/_feature_tests/_pending_x.py", "note": "快照",
+                        "added": 9, "removed": 0, "time": "2026-11-18 05:00:02"}]}
+    _pl = handoff.LAST
+    try:
+        with open(_pl, "w", encoding="utf-8") as _f:
+            json.dump(_pd, _f, ensure_ascii=False)
+        _pc = handoff.render(session="x")
+        check("render 过滤旧数据里的 _pending_ 条目",
+              "_pending_x.py" not in _pc and "a.py" in _pc, repr(_pc[-80:]))
+    finally:
+        try:
+            os.remove(_pl)
+        except Exception:
+            pass
+
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:

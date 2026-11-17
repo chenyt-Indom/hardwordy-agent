@@ -713,7 +713,10 @@ def sanitize(s, cap: int = None, multiline: bool = True,
     # 字面 `\n` 的还原必须**在配平之后**：配平前围栏还没确定、行内 ``` 也没
     # 降级，判不出哪里是代码。实测放前面会把 `入: '｀｀｀a\n｀｀｀** x'` 这种
     # 字符串字面内容里的 \n 也改掉。
-    _nl = _unescape_newline(body)
+    # 单行上下文（改动清单的 rel/note、标题）里**不能还原**：note 本来就是一行，
+    # 把字面 `\n` 换成真换行后会被压平成空格 —— 原文「字面 \n 不还原」渲染成
+    # 「字面 不还原」，字就丢了。实测真实卡片第 3 条改动就是这样少了一个 \n。
+    _nl = _unescape_newline(body) if multiline else body
     if _nl != body:
         # 还原换行会把标记**送到行首**：实测 `` `code`\n\n~~~ `` 里的 `~~~`
         # 原本不在行首（前面是字面 \n\n），还原后跑到行首却没被降级 ——
@@ -972,6 +975,10 @@ def record_change(rel: str, note: str = "", added: int = 0, removed: int = 0,
                   act: str = "write") -> None:
     rel = _safe_rel(rel, 120)
     if not rel:
+        return
+    # 自迭代快照的暂存文件（_pending_xxx.py）不是真实代码改动，记进来会白占
+    # 清单名额 —— 实测真实卡片把它当成了第 3 个「改过的文件」。
+    if os.path.basename(rel).startswith("_pending_"):
         return
     d = _read()
     ch = d.get("changes")
@@ -1287,7 +1294,10 @@ def render(session: str = "") -> str:
     if not _ts_ok(d.get("ts")):
         return ""                          # 太久以前的重启，别再占上下文
 
-    changes = [c for c in (d.get("changes") or []) if isinstance(c, dict)]
+    # 旧数据里可能已经存进了 _pending_ 快照文件，渲染时也过滤一遍。
+    changes = [c for c in (d.get("changes") or [])
+               if isinstance(c, dict)
+               and not os.path.basename(str(c.get("rel") or "")).startswith("_pending_")]
     dialog = [m for m in (d.get("dialog") or []) if isinstance(m, dict)]
     if not changes and not dialog:
         return ""
