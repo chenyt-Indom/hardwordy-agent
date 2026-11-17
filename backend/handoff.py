@@ -24,8 +24,10 @@
 
 存储：data/handoff/last.json（超过 KEEP_DAYS 天不再注入，文件留着不删）
 """
+import functools
 import json
 import os
+import threading
 import time
 
 from . import config
@@ -46,6 +48,25 @@ LIVE_DEBOUNCE = 3    # 同一会话两次实时落盘至少隔几秒（避免每
 
 # 上一次实时落盘的时间戳（进程内，用来节流）
 _LAST_TOUCH = {"session": "", "ts": 0.0}
+
+# ★ 2026-11-18 修（数据丢失）：record_change / touch / snapshot 三个入口都是
+#   「_read() → 改 d → _write(d)」这个非原子序列。_write 本身是原子替换，但
+#   **整个序列不是**：两个线程同时读到旧内容，各自改一处，后写的那个会把先写的
+#   整段覆盖掉。
+#   实测：record_change 与 touch 并发 20 次 → **20 次全丢**（改动记录或 dialog 丢一个）。
+#   真实场景：我正在改代码（record_change），恰好一轮对话结束触发 touch（或反过来）。
+#   修法：一把可重入锁包住整个序列（RLock 是因为 snapshot 内部会调 _dialog_digest，
+#   将来若有嵌套调用也不会自锁）。
+_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    """把「读-改-写」整段串行化，避免并发写 last.json 互相覆盖。"""
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        with _LOCK:
+            return fn(*a, **kw)
+    return wrapper
 
 
 # =====================================================================
@@ -411,6 +432,7 @@ def _write(d: dict) -> None:
 # =====================================================================
 #  1) 记录一次改动（自开发工具写盘成功后调用）
 # =====================================================================
+@_locked
 def record_change(rel: str, note: str = "", added: int = 0, removed: int = 0,
                   act: str = "write") -> None:
     # 2026-11-18：存盘时就把反引号配平，别把「落单的 `」这种脏数据写进 JSON
@@ -498,6 +520,7 @@ def _dialog_digest(session: str) -> list:
     return out[-(MAX_DIALOG * 2):]
 
 
+@_locked
 def touch(session: str = "", reason: str = "") -> None:
     """**每一轮对话结束后**调用：把最近几轮原话实时写进交接卡。
 
@@ -536,6 +559,7 @@ def touch(session: str = "", reason: str = "") -> None:
 # =====================================================================
 #  3) 重启前快照
 # =====================================================================
+@_locked
 def snapshot(session: str = "", reason: str = "", kind: str = "") -> dict:
     """重启前调用：把「改动清单 + 最近几轮对话」落盘。
 

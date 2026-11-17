@@ -440,6 +440,34 @@ def main():
     check("配平后仍稳定（** 成对）", len(handoff._bold_pos(_om)) % 2 == 0, repr(_om))
     check("配平后仍稳定（围栏成对）", _om.count("```") % 2 == 0, repr(_om))
 
+    # ---- 45. 并发写 last.json 不能互相覆盖 ----
+    # record_change / touch / snapshot 都是「_read → 改 → _write」非原子序列，
+    # 两个线程同时跑会互相覆盖。实测修前：record_change 与 touch 并发 **20/20 必丢**。
+    import threading
+    _old_last = handoff.LAST
+    _tmpd = tempfile.mkdtemp(prefix="handoff_conc_")
+    handoff.LAST = os.path.join(_tmpd, "last.json")
+    try:
+        handoff._write({"changes": [], "dialog": []})
+        _ths = [threading.Thread(target=handoff.record_change,
+                                 args=("c%02d.py" % i,), kwargs={"added": 1})
+                for i in range(20)]
+        for _t in _ths:
+            _t.start()
+        for _t in _ths:
+            _t.join()
+        _d = handoff._read()
+        _rels = [c.get("rel") for c in (_d.get("changes") or [])]
+        check("并发 20 条改动全部写入（不互相覆盖）", len(_rels) == 20, "实得 %d 条" % len(_rels))
+        check("并发写入顺序不乱", _rels == sorted(_rels), str(_rels[:5]))
+    finally:
+        handoff.LAST = _old_last
+        try:
+            import shutil as _sh
+            _sh.rmtree(_tmpd, ignore_errors=True)
+        except Exception:
+            pass
+
     print("\n结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:
         print("失败项：" + "、".join(FAILS))
