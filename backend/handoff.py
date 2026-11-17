@@ -539,6 +539,40 @@ def _smart_slice(ln: str, cap: int) -> str:
     return head + "…" + tail
 
 
+def _cut_table_row(ln: str, cap: int):
+    """表格行超长时**按单元格**截，保住列数。
+
+    实测：`| 1 | 很长的描述… | 证据… |` 被前缀硬切后成了 `| 1 | 很长的描述…`
+    —— 只剩 2 个单元格、末尾没有 `|`，而表头是 3 列，markdown 渲染时这一行
+    缺列错位，整张表看起来是坏的。
+
+    返回 None 表示「这个预算放不下所有列」——这一行整行丢弃，
+    比输出一个列数不对的行要好。
+    """
+    s = ln.strip()
+    if not (s.startswith("|") and s.endswith("|")):
+        # 不是完整表格行（原文自带的碎片，如 `| 前 20…`）：只能前缀截，保住内容
+        return _dot(ln[:cap - 1]) if cap > 1 else None
+    if cap <= 3:
+        return None
+    indent = ln[:len(ln) - len(ln.lstrip())]
+    cells = s.split("|")[1:-1]
+    n = len(cells)
+    if n <= 0:
+        return _dot(ln[:cap - 1])
+    # "| " + " | ".join(parts) + " |" 的固定开销 = 3n + 1
+    overhead = 3 * n + 1
+    per = (cap - overhead) // n
+    if per < 2:
+        return None
+    parts = []
+    for c in cells:
+        c = c.strip()
+        parts.append(c if len(c) <= per else _dot(c[:per - 1]))
+    out = indent + "| " + " | ".join(parts) + " |"
+    return out if len(out) <= cap else None
+
+
 def _cut(body: str, budget: int, per_line_cap: int = 0):
     """按**行**截断到 budget 字内，尽量不切断行（列表/表格/围栏才不会被撕开）。
 
@@ -565,7 +599,12 @@ def _cut(body: str, budget: int, per_line_cap: int = 0):
             s = ln.strip()
             # 表格行 / 围栏行 / 缩进列表：只截前缀。截尾会把表格最后一列、
             # 列表层级截掉，比丢掉后半句更糟。
-            if s.startswith("|") or s.startswith("```") or s.startswith("~~~"):
+            if s.startswith("|"):
+                row = _cut_table_row(ln, per_line_cap)
+                if row is not None:
+                    fixed.append(row)
+                continue
+            if s.startswith("```") or s.startswith("~~~"):
                 fixed.append(_dot(ln[:per_line_cap - 1]))
                 continue
             # 普通长段落：**头尾都留**。实测 12 条回复的前 200 字全是
@@ -582,10 +621,18 @@ def _cut(body: str, budget: int, per_line_cap: int = 0):
             continue
         room = budget - total - (1 if out else 0)
         if room > 1:
-            seg = ln[:room]
-            if len(ln) > room:
-                seg = _dot(ln[:room - 1])
-            out.append(seg)
+            if ln.strip().startswith("|"):
+                row = _cut_table_row(ln, room)
+                # 只收「列数完整」的行：以 | 开头结尾且至少 2 列。
+                # 否则会输出 `|…` 这种只有一根竖线的残行，比不输出更糟。
+                if row and row.strip().startswith("|") and row.strip().endswith("|") \
+                        and row.count("|") >= 3:
+                    out.append(row)
+            else:
+                seg = ln[:room]
+                if len(ln) > room:
+                    seg = _dot(ln[:room - 1])
+                out.append(seg)
         break
     return "\n".join(out).rstrip(), True
 
@@ -628,7 +675,20 @@ def sanitize(s, cap: int = None, multiline: bool = True,
     body = _balance(body, grow=grow, drop_lone=drop_lone or cut)
 
     if cut and ellipsis:
-        body = _dot(body)
+        # 先剥掉末尾的「纯省略号残行」：drop_lone 删掉 `**…` 里的 ** 之后
+        # 只剩一个 `…`，它会挡住下面「最后一行是不是表格行」的判断，
+        # 结果把表格行的收尾 `|` 顶成 `|…`（列结构又坏了）。
+        _t = body.rstrip()
+        while "\n" in _t and not _t.rsplit("\n", 1)[-1].strip().strip("…．."):
+            _t = _t.rsplit("\n", 1)[0].rstrip()
+        if _t:
+            body = _t
+        # 最后一行若是**完整的表格行**（以 | 收尾），末尾不能再加「…」——
+        # 否则变成 `|…`，收尾的竖线没了，渲染时这一行缺列；而且 _cut_table_row
+        # 已经在超长单元格里补过「…」了，这里再加是重复。
+        _last = body.rsplit("\n", 1)[-1].strip()
+        if not (_last.startswith("|") and _last.endswith("|")):
+            body = _dot(body)
 
     # 兜底：等长替换理论上不会变长，但 grow 补围栏 + 省略号可能顶出去 1~2 字
     if cap and len(body) > cap:

@@ -941,6 +941,79 @@ def main():
     check("真实卡片：段落粗体成对", _para_bad == 0, "bad=%d" % _para_bad)
     check("真实卡片：无纯空格行", not [l for l in _rl if l and not l.strip()], "")
 
+    # 56.4 表格行截断必须保住列数 --------------------------------------
+    # 实测：`| 1 | 很长的描述… | 证据… |` 被前缀硬切后成了 `| 1 | 很长的描述…`
+    # —— 只剩 2 个单元格、末尾没有 `|`，而表头 3 列，渲染时缺列错位。
+    _t = ("| # | 问题 | 证据 |\n|---|---|---|\n| 1 | " + "很长的描述" * 20
+          + " | " + "证据内容" * 20 + " |")
+    for _cap in (30, 60, 120, 200):
+        _o = handoff._clip(_t, _cap)
+        _rows = [l for l in _o.split("\n") if l.strip().startswith("|")]
+        _bad = [r for r in _rows
+                if not r.strip().endswith("|") or r.count("|") < 3]
+        check("表格行 cap=%d 保住列数" % _cap, _rows and not _bad,
+              "rows=%d bad=%s" % (len(_rows), _bad[:1]))
+
+    # 末尾不能补出 `|…`（收尾竖线被省略号顶掉）
+    _o = handoff._clip(_t, 120)
+    check("表格行末尾不出现 |…", "|…" not in _o, repr(_o[-30:]))
+
+    # 真实卡片里不能再有列数残缺的表格行
+    _tb = [l for l in _rl if l.strip().startswith("|")]
+    _tbad = [l for l in _tb
+             if not l.rstrip().endswith("|") or l.count("|") < 3]
+    check("真实卡片：表格行列数完整", not _tbad,
+          "%d 行 / 残 %d" % (len(_tb), len(_tbad)))
+
+    # 表格行截断也要幂等（否则每次注入都会再变一次）
+    _once = handoff._clip(_t, 120)
+    _twice = handoff.sanitize(_once, cap=120, ellipsis=True)
+    check("表格行截断幂等", _once == _twice, "")
+
+    # 56.5 末尾「纯省略号残行」不能顶掉表格的收尾 | --------------------
+    # 实测：`| 1 | 2 |` 后面跟一行 `**…`，drop_lone 删掉 ** 后剩一个 `…`，
+    # 它挡住了「最后一行是表格行」的判断，补省略号时把表格行顶成 `|…`。
+    _b = "| a | b |\n|---|---|\n| 1 | 2 |\n**…"
+    _o = handoff.sanitize(_b, cap=60, per_line_cap=40)
+    check("纯省略号残行不顶掉表格 |", "|…" not in _o, repr(_o))
+    _rows = [l for l in _o.split("\n") if l.strip().startswith("|")]
+    check("纯省略号残行后表格仍完整",
+          _rows and all(r.strip().endswith("|") for r in _rows),
+          str(_rows[-1:]))
+
+    # 56.6 表格块内列数必须一致（否则渲染时整块错位） ------------------
+    def _tbl_blocks(_text):
+        _out, _cur = [], []
+        for _l in _text.split("\n") + [""]:
+            _s = _l.strip()
+            if _s.startswith("|"):
+                _cur.append(_s)
+            else:
+                if _cur:
+                    _out.append(_cur)
+                _cur = []
+        return _out
+
+    def _tbl_cols(_blk):
+        return [x.count("|") - (1 if x.endswith("|") else 0) for x in _blk]
+
+    _cases = [
+        "| h0 | h1 | h2 |\n|---|---|---|\n| 1 | " + "很长" * 30 + " | x |",
+        "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |",
+    ]
+    for _i, _src in enumerate(_cases):
+        _o = handoff.sanitize(_src, cap=100, per_line_cap=50)
+        _blks = _tbl_blocks(_o)
+        _bad = [b for b in _blks if len(set(_tbl_cols(b))) != 1]
+        check("表格块列数一致 case%d" % _i, not _bad,
+              str([_tbl_cols(b) for b in _blks]))
+
+    # 真实卡片里所有表格块列数一致
+    _card_blocks = _tbl_blocks(_real)
+    _card_bad = [b for b in _card_blocks if len(set(_tbl_cols(b))) != 1]
+    check("真实卡片：表格块列数一致", not _card_bad,
+          str([_tbl_cols(b) for b in _card_blocks]))
+
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:
