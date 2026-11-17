@@ -1014,6 +1014,36 @@ def main():
     check("真实卡片：表格块列数一致", not _card_bad,
           str([_tbl_cols(b) for b in _card_blocks]))
 
+    # ---- 字面 \n（反斜杠+n）的还原：只动正文 ----
+    _nl_cases = [
+        ("正文还原成真换行", "日志：24\\n\\n正文", "日志：24\n\n正文"),
+        ("围栏内不动", "```py\na\\nprint(a)\n```", None),
+        ("行内代码不动", 'x `"a\\nb"` y', None),
+        ("代码示例行不动", "入: '｀｀｀a\\n｀｀｀'", None),
+    ]
+    for _name, _src, _want in _nl_cases:
+        _o = handoff.sanitize(_src, 500, multiline=True)
+        check("字面\\n：" + _name, _o == (_want if _want is not None else _src),
+              repr(_o))
+
+    # 还原换行会把标记送到行首 —— 必须当次就降级，否则第二次才降（非幂等）
+    _s = "`code`\\n\\n~~~\\n\\n🙂"
+    _o = handoff.sanitize(_s, 60, multiline=True)
+    check("还原换行后行首 ~~~ 已降级", "～～～" in _o and "~~~" not in _o, repr(_o))
+    check("还原换行后幂等", handoff.sanitize(_o, 60, multiline=True) == _o, "")
+
+    check("真实卡片：不留字面 \\n", "\\n" not in _real, str(_real.count("\\n")))
+
+    # 行内出现的全角围栏（`｀｀｀`）**不能切换围栏状态** —— 它被整行跳过、不切换；
+    # 若让行首的 `｀｀｀` 切换，状态就不一致，末尾正文被误判成围栏内容，
+    # 字面 \n 不还原（实测模糊测试 seed=1 第 4670 组）。
+    _st = '\\n\\n~~~\n\n\\`~~~```py\nx=1\n```\n\n`code`\\n\\n'
+    _so = handoff.sanitize(_st, 40, multiline=True)
+    check("行内全角围栏不切换状态（末尾正文仍还原）",
+          "`code`" in _so and "\\n" not in _so.rsplit("`code`", 1)[-1], repr(_so))
+    check("行内全角围栏错位后仍幂等",
+          handoff.sanitize(_so, 40, multiline=True) == _so, repr(_so))
+
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:

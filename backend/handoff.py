@@ -185,6 +185,43 @@ def _unescape_md(text: str) -> str:
     return _MD_ESC_RE.sub(lambda m: _MD_ESC[m.group(1)], text)
 
 
+_LITERAL_NL_RE = re.compile(r"\\r\\n|\\n")
+
+
+def _unescape_newline(text: str) -> str:
+    """把**正文里**的字面 `\\n`（反斜杠 + n 两个字符）还原成真换行。
+
+    为什么：模型输出偶尔把换行写成字面 `\\n`。实测真实会话 msg[17]：
+        日志：24\\n\\n这张卡是…应用自己生成的「自我迭代交接卡」
+    卡片上就挤成一行，读者看到的是 `\\n\\n` 四个字符，读不通。
+
+    只动**正文**：围栏内、行内代码内的 `\\n` 是正当内容（讨论正则 / JSON /
+    转义序列时到处是），一个字都不能改。实测 msg[3] 在围栏里、
+    msg[5] 在行内代码里，都必须原样保留。
+    """
+    if "\\n" not in text:
+        return text
+    out, in_fence = [], False
+    for ln in text.split("\n"):
+        st = ln.lstrip()
+        if st.startswith("```"):               # 只有**真围栏**才切换状态
+            in_fence = not in_fence
+            out.append(ln)
+            continue
+        # 围栏内是代码；含全角围栏（已降级）的行是代码示例 —— 两种都不动。
+        # 注意：全角围栏**不切换 in_fence**。原来让它切换，于是行内出现的
+        # `｀｀｀`（被跳过、不切换）和行首出现的 `｀｀｀`（切换）状态不一致，
+        # 末尾正文被误判成围栏内容、字面 \n 不还原（实测 seed=1 第 4670 组）。
+        if in_fence or "```" in ln or "｀｀｀" in ln or "～～～" in ln:
+            out.append(ln)
+            continue
+        segs = ln.split("`")                   # 行内代码之间才是正文
+        for j in range(0, len(segs), 2):
+            segs[j] = _LITERAL_NL_RE.sub("\n", segs[j])
+        out.append("`".join(segs))
+    return "\n".join(out)
+
+
 def _normalize(text: str, multiline: bool) -> str:
     """规范化空白。multiline=True 保留换行与行首缩进；否则压成一行。"""
     text = _unescape_md(text)
@@ -673,6 +710,16 @@ def sanitize(s, cap: int = None, multiline: bool = True,
     spare = (1 if (cut and ellipsis) else 0)
     grow = multiline and ((not cap) or (len(body) + 4 + spare <= cap))
     body = _balance(body, grow=grow, drop_lone=drop_lone or cut)
+    # 字面 `\n` 的还原必须**在配平之后**：配平前围栏还没确定、行内 ``` 也没
+    # 降级，判不出哪里是代码。实测放前面会把 `入: '｀｀｀a\n｀｀｀** x'` 这种
+    # 字符串字面内容里的 \n 也改掉。
+    _nl = _unescape_newline(body)
+    if _nl != body:
+        # 还原换行会把标记**送到行首**：实测 `` `code`\n\n~~~ `` 里的 `~~~`
+        # 原本不在行首（前面是字面 \n\n），还原后跑到行首却没被降级 ——
+        # 第二次进来才降级，于是非幂等（模糊测试 391/20000 全是这一类）。
+        # 只降级不补围栏，所以 grow=False。
+        body = _balance(_nl, grow=False, drop_lone=drop_lone or cut)
 
     if cut and ellipsis:
         # 先剥掉末尾的「纯省略号残行」：drop_lone 删掉 `**…` 里的 ** 之后
