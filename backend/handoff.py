@@ -323,6 +323,10 @@ def _balance_once(s: str, grow: bool = True, drop_lone: bool = False) -> str:
     #    否则下面 count("```") 会把「正文里提到 ``` 」当成未闭合围栏，
     #    grow=True 时补一个闭合 —— 反而凭空造出一个真围栏。
     s = _demote_inline_fences(s)
+    # 0.5) 围栏行本身的 `**` 也不算正文粗体（见 _demote_fence_line_bold）。
+    #      必须在下面 split("```") **之前**做：拆完之后围栏行的剩余内容会
+    #      落进「围栏外」那一块，和围栏外真正落单的 `**` 凑成一对。
+    s = _demote_fence_line_bold(s)
     # 1) 代码围栏
     if s.count("```") % 2 == 1:
         if grow:
@@ -506,6 +510,25 @@ def _balance_fence(s: str, drop_lone: bool = False) -> str:
     return sanitize(s, None, multiline=True, drop_lone=drop_lone)
 
 
+def _demote_fence_line_bold(s: str) -> str:
+    """把**围栏行**（``` 开头那行）里的 `**` 换成全角（等长替换）。
+
+    markdown 在围栏行只认 info string，那里的 `**` 不会渲染成粗体。
+    不剔掉的话，`split("```")` 会把它归进「围栏外」的块，和围栏外真正
+    落单的 `**` 凑成一对 —— 那个落单的就永远配不平。
+    实测：`'```a\\n```** x\\n正文**'` → 正文那个 `**` 一直留成半角，
+    输出后它把后面整段变粗体。
+    等长替换，所以调用方拿到的是等长字符串，下标不会错位。
+    """
+    if "**" not in s:
+        return s
+    ls = s.split("\n")
+    for i, ln in enumerate(ls):
+        if ln.lstrip().startswith("```") and "**" in ln:
+            ls[i] = ln.replace("**", _FW_BOLD)
+    return "\n".join(ls)
+
+
 def _bold_pos(s: str) -> list:
     """返回**正文里**（行内代码 / 围栏之外）所有 `**` 的起始下标。
 
@@ -516,6 +539,7 @@ def _bold_pos(s: str) -> list:
     if not t:
         return []
     t = _demote_inline_fences(t)
+    t = _demote_fence_line_bold(t)
     if t.count("```") % 2 == 1:
         i = t.rfind("```")
         t = t[:i] + _FW_FENCE + t[i + 3:]
@@ -612,14 +636,31 @@ def _read() -> dict:
             logger.warning("交接卡 last.json 无法解析，已隔离为 %s", os.path.basename(bad))
         except Exception:
             logger.debug("silent-except", exc_info=True)
-        try:
-            with open(LAST + ".bak", "r", encoding="utf-8") as f:
-                d = json.load(f)
-            if isinstance(d, dict):
+        bak = LAST + ".bak"
+        if os.path.exists(bak):
+            try:
+                with open(bak, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                if not isinstance(d, dict):
+                    raise ValueError("last.json.bak 顶层不是 dict")
                 logger.warning("交接卡已从 last.json.bak 恢复")
+                # 2026-11-18 修（数据丢失级，上一版只修了一半）：原来这里
+                # 只把 d 返回给调用方，**没写回磁盘**。而 LAST 已被上面改名
+                # 隔离、此刻并不存在 —— 于是下一次 _read 走 FileNotFoundError
+                # 直接 return {}，恢复等于白做，接着 record_change 就拿空字典
+                # 覆盖。实测：24 条对话 / 30 条改动在第 2 次读取后全部消失。
+                _write(d)
                 return d
-        except Exception:
-            logger.debug("silent-except", exc_info=True)
+            except Exception:
+                # .bak 自己也坏了：隔离它，否则每次损坏都拿同一份坏备份去试，
+                # 永远恢复不出来，还会把 corrupt 文件堆在原地。
+                try:
+                    bad2 = bak + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S")
+                    os.replace(bak, bad2)
+                    logger.warning("交接卡 last.json.bak 也无法解析，已隔离为 %s",
+                                   os.path.basename(bad2))
+                except Exception:
+                    logger.debug("silent-except", exc_info=True)
         return {}
 
 

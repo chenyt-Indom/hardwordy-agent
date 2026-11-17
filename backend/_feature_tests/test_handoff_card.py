@@ -488,6 +488,41 @@ def main():
         _corrupt = [n for n in os.listdir(_tmpd2) if ".corrupt-" in n]
         check("坏文件被隔离保留（可人工抢救）", len(_corrupt) == 1, str(_corrupt))
 
+        # ---- 从 .bak 恢复后必须**写回磁盘**，否则第 2 次读就读不到（数据丢失级）----
+        # 上一版只修了「第一次读能从 .bak 恢复」，没测第二次：LAST 已被改名隔离、
+        # 此刻并不存在 → 下次 _read 走 FileNotFoundError → return {} → 全丢。
+        # 修前实测：24 条对话 / 30 条改动，第 2 次读取后全部消失。
+        def _wipe(dirpath):
+            for _n in os.listdir(dirpath):
+                try:
+                    os.remove(os.path.join(dirpath, _n))
+                except Exception:
+                    pass
+
+        _wipe(_tmpd2)
+        handoff._write(_full)
+        with open(handoff.LAST, "w", encoding="utf-8") as _f:
+            _f.write("{坏")
+        handoff._read()                       # 只读一次（模拟 render 被调用）
+        check("从 .bak 恢复后 last.json 被重建", os.path.exists(handoff.LAST),
+              str(sorted(os.listdir(_tmpd2))))
+        _second = handoff._read()             # 关键：第 2 次读
+        check("恢复后第 2 次读仍有对话历史", len(_second.get("dialog") or []) == 24,
+              "实得 %d 条" % len(_second.get("dialog") or []))
+        check("恢复后第 2 次读仍有改动历史", len(_second.get("changes") or []) >= 30,
+              "实得 %d 条" % len(_second.get("changes") or []))
+
+        # ---- .bak 自己也坏时，必须隔离它（否则每次损坏都拿同一份坏备份去试）----
+        _wipe(_tmpd2)
+        handoff._write(_full)
+        for _f2 in ("last.json", "last.json.bak"):
+            with open(os.path.join(_tmpd2, _f2), "w", encoding="utf-8") as _f:
+                _f.write("{都坏")
+        handoff._read()
+        _bad_bak = [n for n in os.listdir(_tmpd2) if n.startswith("last.json.bak.corrupt-")]
+        check("坏 .bak 被隔离（不反复使用坏备份）", len(_bad_bak) == 1,
+              str(sorted(os.listdir(_tmpd2))))
+
         # 没有 .bak 时也不能抛异常，且坏文件同样要留住
         for _n in os.listdir(_tmpd2):
             try:
@@ -567,6 +602,22 @@ def main():
 
     # 50.1 粗体**不能跨代码围栏**配对（围栏会打断 markdown 解析）
     _x = "_[**\n```\\**```(🙂- |**#_"
+    # ---- 围栏行本身的 `**` 不算正文粗体（否则围栏外落单的永远配不平）----
+    # 修前实测：'```a\n```** x\n正文**' → 正文那个 `**` 一直是半角，
+    # 输出后它把后面整段变粗体。根因：split("```") 把围栏行的剩余内容
+    # （`** x`）归进了「围栏外」的块，和正文那个 `**` 凑成一对。
+    for _src, _why in [
+        ("```a\n```** x\n正文**", "围栏行带 ** + 围栏外落单 **"),
+        ("```a\n```b\n🙂**", "普通围栏 + 围栏外落单 **"),
+        ("```py\ncode\n```\n**粗体**", "正常粗体不能被误伤"),
+    ]:
+        _o = handoff.sanitize(_src, None)
+        _bp = handoff._bold_pos(_o)
+        if _why == "正常粗体不能被误伤":
+            check("围栏行剔除 **：" + _why, "**粗体**" in _o, repr(_o))
+        else:
+            check("围栏行剔除 **：" + _why, len(_bp) % 2 == 0, repr(_o) + " pos=%r" % _bp)
+
     check("粗体不跨围栏配对", _audit(handoff.sanitize(_x, None)) is None,
           repr(handoff.sanitize(_x, None)))
 
