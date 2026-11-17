@@ -287,6 +287,379 @@
     return wrap ? (wrap.__blkHandle || null) : null;
   }
 
+  // ============================================================
+  // 画布卡片化回复（2026-11-19）
+  // ------------------------------------------------------------
+  // 摩擦点：「同一需求被重复发送」—— 用户反复描述，本质是上一轮结果混在
+  //   文字流里不好指认，只能整段重述。
+  // 做法：
+  //   · split_blocks(reply) 的拆块口径不动，这里只负责**画**：
+  //     renderCanvasCard(block) 画一张卡片（文字/图片/表格/文件/网页各自成块），
+  //     renderCanvas(blocks) 把它们挂到 .canvas 容器里，卡片可拖；
+  //   · 拖动位置按 canvas key 存 localStorage —— 刷新页面后位置还在；
+  //   · 点一下卡片 = 选中，回调 onPick({cardId,type,content,…}) 由 app.js
+  //     唤起底部「就这块改」输入框（再点一次已选中的卡片 = 取消选中）。
+  // 纯文字回复不会被拆成卡片（拆不拆由 app.js 的 canvasCardsOf 决定）。
+  // ============================================================
+  const CARD_KIND = {
+    text: "📝 文字", image: "🖼 图片", ppt: "📊 PPT", file: "📎 文件",
+    table: "📈 表格", web: "🌐 网页",
+  };
+  const POS_KEY = "canvas_pos::";
+
+  // markdown 图片语法 / 裸路径 → 真正能显示的地址（站内文件走后端下载口）
+  function canvasImgSrc(raw) {
+    const m = /!\[[^\]]*\]\(\s*([^)\s]+)/.exec(String(raw == null ? "" : raw));
+    const src = m ? m[1] : String(raw == null ? "" : raw).trim();
+    if (!src) return "";
+    if (/^(https?:|data:|blob:|\/)/i.test(src)) return src;
+    if (/^(data|image_library|models)[\\/]/i.test(src)) {
+      return "/api/doclib/download?rel=" + encodeURIComponent(src);
+    }
+    return src;
+  }
+
+  // 稳定的画布 key：同一轮回复（内容一样）刷新后拿到同一个 key，位置才能恢复；
+  // 内容变了就是新画布，不会把旧位置错套到别的卡片上。
+  function canvasKeyFor(blocks) {
+    const src = (Array.isArray(blocks) ? blocks : [])
+      .map((b) => String((b && b.type) || "") + ":" + String((b && b.content) || "")).join("\u0001");
+    let h = 5381;
+    for (let i = 0; i < src.length; i++) h = ((h << 5) + h + src.charCodeAt(i)) | 0;
+    return "cv" + (h >>> 0).toString(36) + "_" + src.length;
+  }
+
+  function loadCanvasPos(key) {
+    try {
+      const raw = localStorage.getItem(POS_KEY + key);
+      const obj = raw ? JSON.parse(raw) : null;
+      return (obj && typeof obj === "object") ? obj : {};
+    } catch (e) { return {}; }
+  }
+  function saveCanvasPos(key, id, pos) {
+    if (!key || !id || !pos) return;
+    try {
+      const all = loadCanvasPos(key);
+      all[id] = { left: Math.round(pos.left || 0), top: Math.round(pos.top || 0) };
+      localStorage.setItem(POS_KEY + key, JSON.stringify(all));
+    } catch (e) { /* 存不下（隐私模式 / 配额满）就当没拖过，不影响使用 */ }
+  }
+  function resetCanvasPos(key) {
+    try { localStorage.removeItem(POS_KEY + key); } catch (e) { /* 忽略 */ }
+  }
+
+  // 一张卡片。block = { id, type, content }
+  // opts = { index, onPick(pick|null), onMove(id, {left, top}) }
+  function renderCanvasCard(block, opts) {
+    opts = opts || {};
+    const b = block || {};
+    const id = String(b.id || b.cardId || ("c" + (opts.index || 0)));
+    const type = String(b.type || "text");
+    const content = String(b.content == null ? "" : b.content);
+
+    const el = document.createElement("div");
+    el.className = "canvas-card canvas-card-" + type;
+    el.setAttribute("data-card-id", id);
+    el.setAttribute("data-card-type", type);
+    el.__card = { cardId: id, type: type, content: content };
+
+    // ---- 标题条 = 拖动把手（也是点选的落点）----
+    const hd = document.createElement("div");
+    hd.className = "canvas-card-hd";
+    const kind = document.createElement("span");
+    kind.className = "canvas-card-kind";
+    kind.textContent = CARD_KIND[type] || "📝 内容";
+    const idEl = document.createElement("span");
+    idEl.className = "canvas-card-id";
+    idEl.textContent = id;
+    hd.appendChild(kind);
+    hd.appendChild(idEl);
+    el.appendChild(hd);
+
+    // ---- 正文 ----
+    const bd = document.createElement("div");
+    bd.className = "canvas-card-bd";
+    if (type === "image") {
+      const fig = document.createElement("div");
+      fig.className = "canvas-card-fig";
+      const src = canvasImgSrc(content);
+      if (src) {
+        const img = document.createElement("img");
+        img.src = src;
+        img.alt = "卡片图片";
+        fig.appendChild(img);
+      } else {
+        fig.textContent = content;
+      }
+      bd.appendChild(fig);
+    } else if (type === "web") {
+      const a = document.createElement("a");
+      a.className = "canvas-card-web";
+      const mm = /\]\(\s*([^)\s]+)/.exec(content);
+      const url = mm ? mm[1] : (/(https?:\/\/\S+)/.exec(content) || [])[1];
+      a.textContent = content.replace(/^\s*[-*+]\s+/, "");
+      if (url) { a.href = url; a.target = "_blank"; a.rel = "noreferrer"; }
+      bd.appendChild(a);
+    } else if (type === "file" || type === "ppt") {
+      const row = document.createElement("div");
+      row.className = "canvas-card-file";
+      const mm = /\(\s*([^)\s]+)[^)]*\)/.exec(content);
+      const path = mm ? mm[1] : content.trim();
+      const name = path.split(/[\\/]/).pop() || path;
+      const ico = document.createElement("span");
+      ico.className = "canvas-card-file-ico";
+      ico.textContent = "📎";
+      const nm = document.createElement("span");
+      nm.className = "canvas-card-file-name";
+      nm.title = path;
+      nm.textContent = name;
+      row.appendChild(ico);
+      row.appendChild(nm);
+      if (/^(data|image_library|models)[\\/]/.test(path)) {
+        const dl = document.createElement("a");
+        dl.className = "canvas-card-file-dl";
+        dl.href = "/api/doclib/download?rel=" + encodeURIComponent(path);
+        dl.textContent = "下载";
+        dl.addEventListener("click", (e) => e.stopPropagation());
+        row.appendChild(dl);
+      }
+      bd.appendChild(row);
+    } else {
+      // 文字 / 表格：原样呈现（表格保留等宽对齐），太长先折叠
+      const pre = document.createElement("div");
+      pre.className = "canvas-card-text" + (content.length > 420 ? " cut" : "")
+        + (type === "table" ? " mono" : "");
+      pre.textContent = content;
+      bd.appendChild(pre);
+      if (content.length > 420) {
+        const more = document.createElement("button");
+        more.type = "button";
+        more.className = "canvas-card-more";
+        more.textContent = "展开全文 ▾";
+        more.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const cut = pre.classList.toggle("cut");
+          more.textContent = cut ? "展开全文 ▾" : "收起 ▴";
+          if (typeof el.__frame === "function") el.__frame();
+        });
+        bd.appendChild(more);
+      }
+    }
+    el.appendChild(bd);
+
+    // ---- 拖动（只在标题条上，不跟正文的点击选中打架）----
+    let drag = null;
+    let moved = false;
+    hd.addEventListener("pointerdown", (e) => {
+      if (e.button != null && e.button !== 0) return;
+      drag = { sx: e.clientX, sy: e.clientY, left: el.offsetLeft || 0, top: el.offsetTop || 0 };
+      moved = false;
+      el.classList.add("dragging");
+      try { hd.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器不支持就算了 */ }
+      e.preventDefault();
+    });
+    hd.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.sx;
+      const dy = e.clientY - drag.sy;
+      if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+      el.style.left = Math.max(0, drag.left + dx) + "px";
+      el.style.top = Math.max(0, drag.top + dy) + "px";
+      el.__placed = true;
+      if (typeof el.__frame === "function") el.__frame();
+    });
+    const endDrag = () => {
+      if (!drag) return;
+      drag = null;
+      el.classList.remove("dragging");
+      if (moved) {
+        el.__placed = true;
+        if (typeof opts.onMove === "function") {
+          try { opts.onMove(id, { left: el.offsetLeft || 0, top: el.offsetTop || 0 }); } catch (e) {}
+        }
+      }
+      if (typeof el.__frame === "function") el.__frame();
+    };
+    hd.addEventListener("pointerup", endDrag);
+    hd.addEventListener("pointercancel", endDrag);
+
+    // ---- 点选（刚拖完的那一下不算点选）----
+    el.addEventListener("click", (e) => {
+      if (moved) { moved = false; return; }
+      // 卡片里的链接 / 展开按钮自己处理，别把点击吞成选中
+      if (e.target && e.target.closest && e.target.closest("a,button.canvas-card-more")) return;
+      const on = !el.classList.contains("sel");
+      el.classList.toggle("sel", on);
+      if (typeof opts.onPick === "function") {
+        try {
+          if (on) {
+            opts.onPick({
+              cardId: id, type: type, content: content, how: "点选",
+              rect: { x: 0, y: 0, w: el.offsetWidth || 0, h: el.offsetHeight || 0 },
+            });
+          } else {
+            opts.onPick(null);
+          }
+        } catch (e2) { /* 回调炸了不能影响选中态本身 */ }
+      }
+    });
+
+    return el;
+  }
+
+  // 把若干卡片挂成一块画布。blocks = [{id,type,content}]
+  // opts = { key, onPick(pick|null), onMove(id, pos) }
+  // 返回画布 DOM（.canvas）；没有卡片时返回 null（调用方按旧逻辑走）。
+  function renderCanvas(blocks, opts) {
+    opts = opts || {};
+    const list = (Array.isArray(blocks) ? blocks : []).filter(
+      (b) => b && String(b.content == null ? "" : b.content).trim());
+    if (!list.length) return null;
+
+    const key = String(opts.key || canvasKeyFor(list));
+    const wrap = document.createElement("section");
+    wrap.className = "canvas";
+    wrap.setAttribute("data-canvas-key", key);
+
+    const hd = document.createElement("div");
+    hd.className = "canvas-hd";
+    const hint = document.createElement("span");
+    hint.className = "canvas-hint";
+    hint.textContent = "🖼 画布 · 拖标题条挪位置；点一下卡片就出现「就这块改」";
+    hd.appendChild(hint);
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "canvas-reset";
+    reset.textContent = "复位";
+    reset.title = "把卡片摆回自动排版的位置";
+    reset.addEventListener("click", (e) => {
+      e.stopPropagation();
+      resetCanvasPos(key);
+      layout(true);
+      hint.textContent = "🖼 画布 · 已复位（拖标题条挪位置，点卡片就出现「就这块改」）";
+    });
+    hd.appendChild(reset);
+    wrap.appendChild(hd);
+
+    const grid = document.createElement("div");
+    grid.className = "canvas-grid";
+    wrap.appendChild(grid);
+
+    const els = [];
+    const saved = loadCanvasPos(key);
+    let selected = "";
+
+    // 容器高度跟着卡片走（卡片绝对定位，撑不开父元素）
+    function frame() {
+      let bottom = 0;
+      els.forEach((el) => { bottom = Math.max(bottom, (el.offsetTop || 0) + (el.offsetHeight || 0)); });
+      if (!bottom) bottom = els.length * 130;
+      grid.style.height = (bottom + 10) + "px";
+    }
+
+    // 自动排版：桌面上两列交错，手机上单列；已手动拖过的卡片不动
+    function layout(force) {
+      const narrow = typeof window !== "undefined" && window.innerWidth && window.innerWidth <= 768;
+      const cols = (els.length > 1 && !narrow) ? 2 : 1;
+      const tops = [];
+      for (let i = 0; i < cols; i++) tops.push(4);
+      let anyPlaced = false;
+      els.forEach((el, i) => {
+        if (!force && el.__placed) { anyPlaced = true; return; }
+        const col = i % cols;
+        el.style.left = cols === 1 ? "0%" : (col === 0 ? "0%" : "51%");
+        el.style.top = tops[col] + "px";
+        el.__placed = false;
+        tops[col] += (el.offsetHeight || 120) + 10;
+      });
+      frame();
+      return anyPlaced;
+    }
+
+    list.forEach((b, i) => {
+      const el = renderCanvasCard(b, {
+        index: i,
+        onMove: (id, pos) => {
+          saveCanvasPos(key, id, pos);          // 刷新页面后位置还在
+          if (typeof opts.onMove === "function") {
+            try { opts.onMove(id, pos); } catch (e) {}
+          }
+        },
+        onPick: (pick) => {
+          // 单选：一块被选中时，其它卡片自动取消选中
+          els.forEach((one) => { if (!pick || one !== el) one.classList.remove("sel"); });
+          if (pick) {
+            hint.textContent = "🎯 已选中 " + pick.cardId + "（" + (CARD_KIND[pick.type] || pick.type)
+              + "）—— 底部输入「就这块改」";
+          } else {
+            hint.textContent = "🖼 画布 · 拖标题条挪位置；点一下卡片就出现「就这块改」";
+          }
+          if (pick) selected = pick.cardId; else selected = "";
+          if (typeof opts.onPick === "function") {
+            try { opts.onPick(pick); } catch (e) {}
+          }
+        },
+      });
+      if (!el) return;
+      el.__frame = frame;
+      grid.appendChild(el);
+      els.push(el);
+      const p = saved[el.__card.cardId];
+      if (p) {
+        // 窄屏会把旧的横向位置顶出画布，这里夹一下再贴回去
+        const maxLeft = Math.max(0, (grid.clientWidth || wrap.clientWidth || 600) - 120);
+        el.style.left = Math.min(Math.max(0, p.left || 0), maxLeft) + "px";
+        el.style.top = Math.max(0, p.top || 0) + "px";
+        el.__placed = true;
+      }
+    });
+    // 贴回保存位置后再夹一次：首帧容器可能还没有真实宽度，等布局出来再夹，
+    // 免得窄屏上刷新后卡片横着飘到画布外面去。
+    function clampPlaced() {
+      const maxLeft = Math.max(0, (grid.clientWidth || 0) - 100);
+      els.forEach((el) => {
+        if (!el.__placed) return;
+        const left = parseFloat(el.style.left) || 0;
+        if (left > maxLeft) el.style.left = maxLeft + "px";
+      });
+      frame();
+    }
+    layout(false);
+    if (typeof requestAnimationFrame === "function") {
+      // 字体 / 图片加载完高度会变，等一帧再排一次（手动拖过的卡片不动，尊重用户手摆的位置）
+      requestAnimationFrame(() => { layout(false); clampPlaced(); });
+    }
+
+    const handle = {
+      key: key,
+      cards: list,
+      cardEls: els,
+      selectedId: () => selected,
+      positions: () => loadCanvasPos(key),
+      getCard: (id) => {
+        const el = els.filter((x) => x.__card && x.__card.cardId === id)[0];
+        return el ? el.__card : null;
+      },
+      reset: () => { resetCanvasPos(key); layout(true); },
+    };
+    wrap.__canvasHandle = handle;
+    return wrap;
+  }
+
+  // 把「就是这块」说成一句人和模型都读得懂的话（拼进下一条用户消息）
+  function canvasPickContext(pick) {
+    if (!pick || !pick.cardId) return "";
+    const tail = String(pick.content == null ? "" : pick.content)
+      .replace(/\s+/g, " ").trim().slice(0, 300);
+    const r = pick.rect || {};
+    return "〔画布卡片〕就这块改：cardId=" + pick.cardId
+      + "（" + (pick.type || "text") + "）"
+      + (pick.how ? "（" + pick.how + "）" : "")
+      + (r.w || r.h ? " 选区 " + Math.round(r.w || 0) + "×" + Math.round(r.h || 0) : "")
+      + (tail ? "；这块的原文：" + tail : "");
+  }
+
+
   function isOpen(card) { return card.classList.contains("open"); }
 
   function toggle(card) {
@@ -427,5 +800,12 @@
     begin: begin, chip: chip, flush: flush, openWithSystem: openWithSystem,
     split_blocks: split_blocks, block_context: block_context,
     mountBlocks: mountBlocks, handleOf: handleOf,
+    // 画布卡片化回复：一块一块画，可拖、可点选「就这块改」
+    CARD_KIND: CARD_KIND,
+    canvasImgSrc: canvasImgSrc,
+    canvasKeyFor: canvasKeyFor,
+    canvasPickContext: canvasPickContext,
+    loadCanvasPos: loadCanvasPos, saveCanvasPos: saveCanvasPos, resetCanvasPos: resetCanvasPos,
+    renderCanvasCard: renderCanvasCard, renderCanvas: renderCanvas,
   };
 })();

@@ -540,6 +540,311 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   font-size: 13px; line-height: 1.6;
 }
 
+/* ============================================================
+   画布即对话（2026-11-17，livecard.renderCanvas 渲染）
+   ------------------------------------------------------------
+   一轮多模态回复（文字 + 图片/文件/表格/网页）额外挂一块画布：
+     · .lc-canvas      相对定位的容器，高度由脚本算；
+     · .lc-card        绝对定位的卡片，标题条拖动，正文里拖出选区；
+     · .lc-sel-rect    圈选出来的矩形（卡片自己的坐标系里画）。
+   颜色全走变量，浅色模式自动跟随；不改动 .blk* 那套（两处互不影响）。
+   ============================================================ */
+.lc-canvas {
+  position: relative;
+  width: 100%;
+  margin-top: 10px;
+  padding: 6px 0 0;
+  border-top: 1px dashed var(--border);
+  min-height: 60px;
+}
+.lc-canvas-hd {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 4px; font-size: 11px; color: var(--muted);
+  user-select: none;
+}
+.lc-canvas-hint { line-height: 1.5; }
+.lc-card {
+  position: absolute;
+  box-sizing: border-box;
+  width: 48%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel2);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .06);
+  overflow: hidden;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.lc-canvas.single .lc-card { width: 100%; }
+.lc-card:hover { border-color: var(--accent); }
+.lc-card.sel {
+  border-color: var(--kb-accent);
+  box-shadow: 0 0 0 1px var(--kb-accent) inset, 0 2px 8px rgba(0, 0, 0, .12);
+}
+.lc-card.dragging { box-shadow: 0 6px 18px rgba(0, 0, 0, .22); z-index: 5; }
+.lc-card-hd {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px;
+  font-size: 11px; color: var(--muted);
+  background: var(--chip-bg);
+  border-bottom: 1px solid var(--chip-border);
+  cursor: grab;               /* 标题条 = 拖动把手 */
+  user-select: none;
+  touch-action: none;         /* 手机上拖动别被滚动抢走 */
+}
+.lc-card.dragging .lc-card-hd { cursor: grabbing; }
+.lc-card-kind { flex: none; }
+.lc-card-id {
+  margin-left: auto;
+  font-family: ui-monospace, Consolas, monospace;
+  opacity: .8;
+}
+.lc-card-bd {
+  position: relative;
+  padding: 8px;
+  font-size: 13px; line-height: 1.6;
+  cursor: crosshair;          /* 正文里按住拖 = 圈选 */
+  user-select: none;
+  max-height: 220px;
+  overflow: auto;
+}
+.lc-text { white-space: pre-wrap; word-break: break-word; }
+.lc-text.cut {
+  max-height: 96px;
+  overflow: hidden;
+  mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+}
+.lc-more {
+  margin-top: 4px; padding: 2px 6px;
+  font-size: 11px; color: var(--muted);
+  background: transparent; border: 1px solid var(--chip-border);
+  border-radius: 999px; cursor: pointer;
+}
+.lc-more:hover { background: var(--hover-bg); }
+.lc-fig img {
+  display: block; max-width: 100%; max-height: 200px;
+  border-radius: 6px; object-fit: contain;
+  -webkit-user-drag: none; user-drag: none;
+}
+.lc-web { color: var(--accent); word-break: break-all; }
+.lc-file { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.lc-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lc-file-dl { flex: none; font-size: 12px; color: var(--accent); }
+.lc-sel-rect {
+  position: absolute;
+  pointer-events: none;
+  border: 1px dashed var(--kb-accent);
+  background: var(--kb-accent-soft);
+  border-radius: 3px;
+  z-index: 3;
+}
+.lc-pick-note {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--accent);
+}
+@media (max-width: 768px) {
+  /* 手机屏窄：卡片铺满一行（左右位置由脚本按单列排，拖动仍然生效） */
+  .lc-card { width: 100%; }
+}
+
+/* ============================================================
+   画布卡片化回复（2026-11-19，artifacts.renderCanvasCard 渲染）
+   ------------------------------------------------------------
+   一条多模态回复拆成几块，各自成一张 .canvas-card 挂在 .canvas 里：
+     · .canvas-grid   相对定位的底板，高度由脚本算；
+     · .canvas-card   绝对定位的卡片，标题条拖动，点一下选中；
+     · .canvas-edit-bar 底部「就这块改」输入框（选中卡片才出现）。
+   样式规范（照 unslop 那套「别塑料感」的规矩来）：
+     · 只用现有 CSS 变量取色，不新增渐变 / 高饱和 / 花哨阴影；
+     · 间距 4 的倍数、圆角沿用 --radius-md，卡片厚度只靠 1px 边框区分；
+     · 层次用「边框 + 底色」表达，不用投影堆叠（拖动时才临时抬一层）。
+   ============================================================ */
+.canvas {
+  position: relative;
+  width: 100%;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.canvas-hd {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 6px;
+  font-size: 11px; line-height: 1.5; color: var(--muted);
+  user-select: none;
+}
+.canvas-hint { flex: 1; min-width: 0; }
+.canvas-reset {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 11px; line-height: 1.6;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--chip-border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.canvas-reset:hover { background: var(--hover-bg); color: var(--text); }
+
+.canvas-grid {
+  position: relative;
+  width: 100%;
+  min-height: 60px;
+}
+
+.canvas-card {
+  position: absolute;
+  top: 0; left: 0;
+  box-sizing: border-box;
+  width: 48%;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.canvas-card:hover { border-color: var(--accent); }
+.canvas-card.sel {
+  border-color: var(--kb-accent);
+  box-shadow: 0 0 0 1px var(--kb-accent) inset;
+}
+.canvas-card.dragging {
+  /* 拖动时临时抬一层，松手就落回去 —— 不做常驻阴影 */
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .18);
+  z-index: 5;
+}
+
+.canvas-card-hd {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px;
+  font-size: 11px; line-height: 1.5;
+  color: var(--muted);
+  background: var(--chip-bg);
+  border-bottom: 1px solid var(--chip-border);
+  cursor: grab;                 /* 标题条 = 拖动把手 */
+  user-select: none;
+  touch-action: none;           /* 手机上拖动别被页面滚动抢走 */
+}
+.canvas-card.dragging .canvas-card-hd { cursor: grabbing; }
+.canvas-card-kind { flex: none; }
+.canvas-card.sel .canvas-card-kind { color: var(--kb-accent); }
+.canvas-card-id {
+  margin-left: auto;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  color: var(--muted);
+  opacity: .85;
+}
+
+.canvas-card-bd {
+  padding: 8px 10px;
+  font-size: 13px; line-height: 1.65;
+  color: var(--text);
+  max-height: 240px;
+  overflow: auto;
+  cursor: pointer;              /* 点一下 = 选中这块 */
+}
+.canvas-card-text { white-space: pre-wrap; word-break: break-word; }
+.canvas-card-text.mono {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+}
+.canvas-card-text.cut {
+  max-height: 100px;
+  overflow: hidden;
+  mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+}
+.canvas-card-more {
+  margin-top: 4px; padding: 2px 8px;
+  font-size: 11px; line-height: 1.6;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--chip-border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.canvas-card-more:hover { background: var(--hover-bg); color: var(--text); }
+.canvas-card-fig img {
+  display: block;
+  max-width: 100%; max-height: 200px;
+  border-radius: 6px;
+  object-fit: contain;
+  -webkit-user-drag: none;
+}
+.canvas-card-web { color: var(--accent); word-break: break-all; }
+.canvas-card-file { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.canvas-card-file-name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.canvas-card-file-dl { flex: none; font-size: 12px; color: var(--accent); }
+
+/* 底部「就这块改」输入框：只在选中卡片时出现 */
+.canvas-edit-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex; align-items: center; gap: 8px;
+  width: min(680px, calc(100vw - 24px));
+  box-sizing: border-box;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
+}
+.canvas-edit-bar[hidden] { display: none; }
+.canvas-edit-id {
+  flex: none;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: var(--kb-accent);
+  padding: 2px 6px;
+  border: 1px solid var(--chip-border);
+  border-radius: 999px;
+  background: var(--chip-bg);
+}
+.canvas-edit-input {
+  flex: 1; min-width: 0;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+}
+.canvas-edit-input:focus { border-color: var(--kb-accent); }
+.canvas-edit-send {
+  flex: none;
+  padding: 7px 14px;
+  font-size: 13px;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.canvas-edit-close {
+  flex: none;
+  padding: 6px 9px;
+  font-size: 12px; line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--chip-border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.canvas-edit-close:hover { background: var(--hover-bg); color: var(--text); }
+
+@media (max-width: 768px) {
+  /* 手机屏窄：卡片铺满一行（左右位置由脚本按单列排，拖动仍生效） */
+  .canvas-card { width: 100%; }
+  .canvas-edit-bar { bottom: 8px; }
+}
+
 .chat-header {
   display: flex; align-items: center; gap: 12px; padding: 14px 20px;
   border-bottom: 1px solid var(--border); background: var(--panel);

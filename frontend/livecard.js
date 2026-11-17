@@ -1029,6 +1029,311 @@ window.LiveCard = (function () {
     return el;
   }
 
+  // ------------------------------------------------------- 7. 画布即对话
+  //
+  // 为什么要有它（用户 2026-11-17，摩擦点「同一需求被重复发送 20 次」）：
+  //   回复是一整块文字流，用户想改「这张图的右下角 / 这个表格的第二行」，
+  //   只能重新打一大段字去描述位置 —— 所以同一件事被反复发。
+  // 做法：
+  //   · 把一轮回复拆成若干卡片，**绝对定位**摆在一块画布上（.lc-canvas）；
+  //   · 每张卡片的标题条是拖动把手（pointerdown / pointermove / pointerup），
+  //     卡片正文里按住拖 = 圈选一块矩形（mousedown / mousemove / mouseup）；
+  //   · 圈完（或单击=选整块）回调 { cardId, rect:{x,y,w,h} }，
+  //     app.js 把它拼进下一条用户消息 —— 圈哪问哪，少打一半字。
+  // 约定：这里只造 DOM，不持有全局状态、不碰业务。选中结果交给 opts.onPick。
+
+  const CANVAS_KIND = {
+    text: "📝 文字",
+    table: "📊 表格",
+    image: "🖼 图片",
+    file: "📎 文件",
+    ppt: "📊 PPT",
+    web: "🌐 网页",
+    map: "🗺 地图",
+  };
+
+  // markdown 图片语法 → 真正能显示的地址。
+  // 站内文件（data/library/x.png、image_library/…）走后端下载口，否则会 404。
+  function canvasImgSrc(raw) {
+    const m = /!\[[^\]]*\]\(\s*([^)\s]+)/.exec(String(raw == null ? "" : raw));
+    const src = m ? m[1] : String(raw == null ? "" : raw).trim();
+    if (!src) return "";
+    if (/^(https?:|data:|blob:|\/)/i.test(src)) return src;
+    if (/^(data|image_library|models)[\\/]/i.test(src)) {
+      return "/api/doclib/download?rel=" + encodeURIComponent(src);
+    }
+    return src;
+  }
+
+  // 把选中结果说成一句人能读懂、模型也能读懂的话（拼进下一条用户消息）
+  function canvasContext(pick) {
+    if (!pick || !pick.cardId) return "";
+    const r = pick.rect || { x: 0, y: 0, w: 0, h: 0 };
+    const tail = String(pick.content == null ? "" : pick.content)
+      .replace(/\s+/g, " ").trim().slice(0, 300);
+    return "〔画布圈选〕卡片 cardId=" + pick.cardId
+      + "（" + (pick.type || "text") + "）"
+      + " 选区 x=" + Math.round(Number(r.x) || 0)
+      + ",y=" + Math.round(Number(r.y) || 0)
+      + ",w=" + Math.round(Number(r.w) || 0)
+      + ",h=" + Math.round(Number(r.h) || 0)
+      + (pick.how ? "（" + pick.how + "）" : "")
+      + (tail ? "；这块的原文：" + tail : "");
+  }
+
+  // cards: [{ id, type, content }]
+  // opts:  { onPick(pick, canvasEl) }
+  // 返回：画布 DOM（.lc-canvas）；没有卡片时返回 null（调用方按旧逻辑走）
+  function renderCanvas(cards, opts) {
+    opts = opts || {};
+    const list = (Array.isArray(cards) ? cards : []).filter(function (c) {
+      return c && String(c.content == null ? "" : c.content).trim();
+    });
+    if (!list.length) return null;
+
+    const grid = document.createElement("div");
+    grid.className = "lc-canvas" + (list.length === 1 ? " single" : "");
+
+    const hd = document.createElement("div");
+    hd.className = "lc-canvas-hd";
+    const hint = document.createElement("span");
+    hint.className = "lc-canvas-hint";
+    hint.textContent = "🖼 画布视图 · 拖标题条移动卡片，在卡片里按住拖一个方框就能圈选追问";
+    hd.appendChild(hint);
+    grid.appendChild(hd);
+
+    const els = [];
+
+    function frame() {
+      // 容器高度跟着卡片走（卡片是绝对定位，不撑不开父元素）
+      let bottom = 0;
+      els.forEach(function (el) {
+        bottom = Math.max(bottom, el.offsetTop + el.offsetHeight);
+      });
+      if (!bottom) bottom = 8 + els.length * 120;      // 还没有布局信息（首帧）时的估计
+      grid.style.height = (bottom + 8) + "px";
+    }
+
+    function pickCard(el, rect, how) {
+      const info = el.__card || {};
+      const pick = {
+        cardId: info.cardId || "",
+        type: info.type || "text",
+        content: info.content || "",
+        how: how || "区域",
+        rect: rect,
+      };
+      grid.__canvasPick = pick;
+      els.forEach(function (one) { one.classList.toggle("sel", one === el); });
+      hint.textContent = "🎯 已圈选 " + pick.cardId + "（" + pick.how + " · "
+        + Math.round(rect.w) + "×" + Math.round(rect.h)
+        + "）—— 直接说要怎么改，发送时会带上这块";
+      if (typeof opts.onPick === "function") {
+        try { opts.onPick(pick, grid); } catch (e) { /* 回调炸了不能影响圈选本身 */ }
+      }
+      return pick;
+    }
+
+    list.forEach(function (card, i) {
+      const cardId = String(card.id || card.cardId || ("c" + i));
+      const type = String(card.type || "text");
+      const content = String(card.content == null ? "" : card.content);
+
+      const el = document.createElement("div");
+      el.className = "lc-card lc-" + type;
+      el.setAttribute("data-card-id", cardId);
+      el.setAttribute("data-card-type", type);
+      el.__card = { cardId: cardId, type: type, content: content };
+
+      // ---- 标题条 = 拖动把手 ----
+      const bar = document.createElement("div");
+      bar.className = "lc-card-hd";
+      bar.innerHTML = '<span class="lc-card-kind">' + esc(CANVAS_KIND[type] || "📝 内容")
+        + "</span>" + '<span class="lc-card-id">' + esc(cardId) + "</span>";
+      el.appendChild(bar);
+
+      // ---- 正文 ----
+      const body = document.createElement("div");
+      body.className = "lc-card-bd";
+      if (type === "image") {
+        const src = canvasImgSrc(content);
+        const fig = document.createElement("div");
+        fig.className = "lc-fig";
+        if (src) {
+          const img = document.createElement("img");
+          img.src = src;
+          img.alt = "画布图片";
+          fig.appendChild(img);
+        } else {
+          fig.textContent = content;
+        }
+        body.appendChild(fig);
+      } else if (type === "web") {
+        const a = document.createElement("a");
+        const mm = /\]\(\s*([^)\s]+)/.exec(content);
+        const url = mm ? mm[1] : (/(https?:\/\/\S+)/.exec(content) || [])[1];
+        a.className = "lc-web";
+        a.textContent = content.replace(/^\s*[-*+]\s+/, "");
+        if (url) { a.href = url; a.target = "_blank"; a.rel = "noreferrer"; }
+        body.appendChild(a);
+      } else if (type === "file" || type === "ppt") {
+        const row = document.createElement("div");
+        row.className = "lc-file";
+        const mm = /\(\s*([^)\s]+)[^)]*\)/.exec(content);
+        const path = mm ? mm[1] : content.trim();
+        const name = path.split(/[\\/]/).pop() || path;
+        row.innerHTML = '<span class="lc-file-ico">📎</span>'
+          + '<span class="lc-file-name" title="' + escAttr(path) + '">' + esc(name) + "</span>";
+        if (/^(data|image_library|models)[\\/]/.test(path)) {
+          const dl = document.createElement("a");
+          dl.className = "lc-file-dl";
+          dl.href = "/api/doclib/download?rel=" + encodeURIComponent(path);
+          dl.textContent = "下载";
+          row.appendChild(dl);
+        }
+        body.appendChild(row);
+      } else {
+        const txt = document.createElement("div");
+        txt.className = "lc-text" + (content.length > 420 ? " cut" : "");
+        txt.textContent = content;
+        body.appendChild(txt);
+        if (content.length > 420) {
+          const more = document.createElement("button");
+          more.type = "button";
+          more.className = "lc-more";
+          more.textContent = "展开全文 ▾";
+          more.onclick = function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const on = txt.classList.toggle("cut");
+            more.textContent = on ? "展开全文 ▾" : "收起 ▴";
+          };
+          body.appendChild(more);
+        }
+      }
+      el.appendChild(body);
+
+      // ---- 选区框（画在卡片自己的坐标系里）----
+      const rectEl = document.createElement("div");
+      rectEl.className = "lc-sel-rect";
+      rectEl.hidden = true;
+      el.appendChild(rectEl);
+
+      // ---- 拖拽（标题条上 pointer 事件，不跟正文圈选打架）----
+      let drag = null;
+      let moved = false;
+      bar.addEventListener("pointerdown", function (e) {
+        if (e.button != null && e.button !== 0) return;
+        drag = { sx: e.clientX, sy: e.clientY, left: el.offsetLeft || 0, top: el.offsetTop || 0 };
+        el.classList.add("dragging");
+        moved = true;
+        try { bar.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器不支持就算了 */ }
+        e.preventDefault();
+      });
+      bar.addEventListener("pointermove", function (e) {
+        if (!drag) return;
+        const dx = e.clientX - drag.sx;
+        const dy = e.clientY - drag.sy;
+        el.style.left = Math.max(0, drag.left + dx) + "px";
+        el.style.top = Math.max(0, drag.top + dy) + "px";
+        frame();
+      });
+      const endDrag = function () {
+        if (!drag) return;
+        drag = null;
+        el.classList.remove("dragging");
+        frame();
+      };
+      bar.addEventListener("pointerup", endDrag);
+      bar.addEventListener("pointercancel", endDrag);
+
+      // ---- 圈选（正文里 mousedown / mousemove / mouseup）----
+      let sel = null;
+      const paintRect = function (x, y, w, h) {
+        rectEl.hidden = false;
+        rectEl.style.left = x + "px";
+        rectEl.style.top = y + "px";
+        rectEl.style.width = w + "px";
+        rectEl.style.height = h + "px";
+      };
+      body.addEventListener("mousedown", function (e) {
+        if (e.button != null && e.button !== 0) return;
+        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0 };
+        sel = { x: e.clientX - r.left, y: e.clientY - r.top };
+        paintRect(sel.x, sel.y, 0, 0);
+        e.preventDefault();
+      });
+      body.addEventListener("mousemove", function (e) {
+        if (!sel) return;
+        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0 };
+        const x = e.clientX - r.left;
+        const y = e.clientY - r.top;
+        paintRect(Math.min(sel.x, x), Math.min(sel.y, y), Math.abs(x - sel.x), Math.abs(y - sel.y));
+      });
+      body.addEventListener("mouseup", function (e) {
+        if (!sel) return;
+        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+        const x = e.clientX - r.left;
+        const y = e.clientY - r.top;
+        const d = sel;
+        sel = null;
+        let rect = {
+          x: Math.min(d.x, x), y: Math.min(d.y, y),
+          w: Math.abs(x - d.x), h: Math.abs(y - d.y),
+        };
+        // 几乎没拖动 = 用户只是点了一下 → 当「选整块」
+        const whole = rect.w < 6 || rect.h < 6;
+        if (whole) {
+          rect = { x: 0, y: 0, w: r.width || 0, h: r.height || 0 };
+        }
+        rect = {
+          x: Math.round(rect.x), y: Math.round(rect.y),
+          w: Math.round(rect.w), h: Math.round(rect.h),
+        };
+        paintRect(rect.x, rect.y, rect.w, rect.h);
+        pickCard(el, rect, whole ? "整块" : "区域");
+      });
+
+      grid.appendChild(el);
+      els.push(el);
+    });
+
+    // 首帧排版：两列交错排（宽度由 CSS 决定），每列按前面卡片高度往下接
+    const layout = function () {
+      // 手机上只排一列（宽度由 CSS 的媒体查询放到 100%），桌面上两列交错
+      const narrow = typeof window !== "undefined" && window.innerWidth && window.innerWidth <= 768;
+      const cols = (list.length > 1 && !narrow) ? 2 : 1;
+      const tops = [];
+      for (let i = 0; i < cols; i++) tops.push(8);
+      els.forEach(function (el, i) {
+        const col = i % cols;
+        el.style.left = cols === 1 ? "0px" : (col === 0 ? "0%" : "51%");
+        el.style.top = tops[col] + "px";
+        tops[col] += (el.offsetHeight || 120) + 10;
+      });
+      frame();
+    };
+    layout();
+    if (typeof requestAnimationFrame === "function") {
+      // 字体/图片加载完高度会变，等一帧再排一次（拖过的卡片不动，尊重用户手摆的位置）
+      requestAnimationFrame(function () {
+        const touched = els.some(function (el) { return el.style.left.indexOf("%") < 0; });
+        if (!touched) layout();
+        else frame();
+      });
+    }
+
+    return grid;
+  }
+
+  // 挂到容器上（渲染入口只有这一个，app.js 不用知道内部结构）
+  function mountCanvas(el, cards, opts) {
+    if (!el) return null;
+    const grid = renderCanvas(cards, opts);
+    if (grid) el.appendChild(grid);
+    return grid;
+  }
+
   return {
     esc: esc,
     escAttr: escAttr,
@@ -1048,5 +1353,11 @@ window.LiveCard = (function () {
     billHeadline: billHeadline,
     renderBillCard: renderBillCard,
     mountBillCard: mountBillCard,
+    // 画布即对话（卡片可拖拽 / 可圈选追问）
+    CANVAS_KIND: CANVAS_KIND,
+    canvasImgSrc: canvasImgSrc,
+    canvasContext: canvasContext,
+    renderCanvas: renderCanvas,
+    mountCanvas: mountCanvas,
   };
 })();

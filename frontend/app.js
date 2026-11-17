@@ -1089,6 +1089,200 @@
     if (window.__Artifacts) window.__Artifacts.flush(bubble);
   }
 
+  // ============================================================
+  // 画布即对话：回复变成可圈选追问的卡片画布（2026-11-17）
+  // ------------------------------------------------------------
+  // 摩擦点：同一需求被重复发送 —— 用户重复描述，往往是因为指不到具体位置。
+  // 做法：
+  //   · 一轮回复里同时有「文字 + 图片 / 文件 / 表格 / 网页」时，除了原正文，
+  //     再挂一块画布（livecard.renderCanvas）：卡片可拖，可在卡片上圈一块；
+  //   · 圈完把 {cardId, rect} 记在 canvasPick 里，下一条用户消息由 send()
+  //     拼进上下文（livecard.canvasContext）—— 圈哪问哪，少打一半字。
+  // 没有多模态内容的纯文字回复**完全不走这里**，观感与原来一样。
+  // ============================================================
+  let canvasPick = null;            // 当前圈选：{ cardId, type, content, rect, how }
+  window.__takeCanvasPick = function () {
+    const p = canvasPick;
+    canvasPick = null;
+    return p;
+  };
+  window.__clearCanvasPick = function () { canvasPick = null; };
+
+  const CV_IMG_RE = /^\s*!\[[^\]]*\]\(\s*([^)\s]+)/;
+  // 整行**只**是一个文件路径才算文件卡（"运行 python main.py 就行"这种句子不算），
+  // 但允许中文前缀，因为模型常写「下载：data/xx.pptx」。
+  const CV_FILE_LINE = new RegExp(
+    "^(?:[^\\s]{0,10}[：:]\\s*)?(?:\\[[^\\]]*\\]\\(\\s*)?(?:[^\\s\\\\/]+[\\\\/])*[^\\s\\\\/]+\\."
+    + "(?:pptx?|docx?|xlsx?|pdf|csv|zip|rar|md|txt|py|json|js)\\s*\\)?$", "i");
+
+  // 一行是不是 markdown 表格的分隔行（|---|:--:|）
+  function isTableLine(line) {
+    return /^\s*\|?[\s:-]*\|[\s:|-]*$/.test(String(line || "")) && String(line || "").indexOf("|") >= 0
+      && String(line || "").indexOf("-") >= 0;
+  }
+
+  // 把一轮回复拆成画布卡片。优先用 artifacts.js 的 split_blocks（口径与块圈选一致），
+  // 它还没加载时用这里的极简拆法（脚本顺序里 artifacts.js 在 app.js 之后）。
+  function canvasCardsOf(raw) {
+    const text = String(raw == null ? "" : raw);
+    if (!text.trim()) return [];
+    let blocks = null;
+    try {
+      if (window.__Artifacts && typeof window.__Artifacts.split_blocks === "function") {
+        blocks = window.__Artifacts.split_blocks(text);
+      }
+    } catch (e) { blocks = null; }
+    if (!blocks || !blocks.length) {
+      blocks = [];
+      let buf = [];
+      const flushText = () => {
+        const t = buf.join("\n").replace(/^\s*\n+|\n+\s*$/g, "");
+        if (t.trim()) blocks.push({ type: "text", content: t });
+        buf = [];
+      };
+      String(text).split(/\r?\n/).forEach((ln) => {
+        if (CV_IMG_RE.test(ln)) { flushText(); blocks.push({ type: "image", content: ln.trim() }); }
+        else if (CV_FILE_LINE.test(ln.trim())) {
+          flushText(); blocks.push({ type: "file", content: ln.trim() });
+        } else buf.push(ln);
+      });
+      flushText();
+    }
+    // 统一成 {id, type, content}；文字块里是 markdown 表格的话单独标成 table
+    const cards = blocks.map((b, i) => {
+      let type = String((b && b.type) || "text");
+      if (type === "ppt") type = "file";
+      const content = String((b && b.content) || "");
+      if (type === "text") {
+        const lines = content.split(/\r?\n/);
+        const hit = lines.some((ln, k) => ln.indexOf("|") >= 0 && isTableLine(lines[k + 1] || ""));
+        if (hit) type = "table";
+      }
+      return { id: "cv" + i, type: type, content: content };
+    }).filter((c) => c.content.trim());
+    // 只有「多模态」才画画布：至少两张卡，且至少一张不是纯文字
+    if (cards.length < 2) return [];
+    const hasMedia = cards.some((c) => c.type !== "text" && c.type !== "table");
+    return hasMedia ? cards : [];
+  }
+
+  // 把画布挂到气泡末尾（正文照旧，画布是额外的一层可圈选视图）
+  function mountCanvasFor(bubble, raw) {
+    if (!bubble) return null;
+    const cards = canvasCardsOf(raw);
+    if (!cards.length) return null;
+    const note = document.createElement("div");
+    note.className = "lc-pick-note";
+    note.hidden = true;
+    // 点卡片 → 记下选中块 + 唤起底部「就这块改」输入框。
+    // 再点一次同一张卡（pick 为 null）= 取消选中，输入框跟着收起。
+    const onPick = (pick) => {
+      if (!pick) {
+        canvasPick = null;
+        note.hidden = true;
+        hideCanvasEditBar();
+        return;
+      }
+      canvasPick = pick;                // send() 会取走并拼进下一条消息
+      const r = pick.rect || {};
+      note.hidden = false;
+      note.textContent = "🎯 已选中卡片 " + pick.cardId + "（" + (pick.how || "点选")
+        + (r.w || r.h ? " " + Math.round(r.w || 0) + "×" + Math.round(r.h || 0) : "")
+        + "）—— 在底部输入「就这块改」，发送时会自动带上这块。";
+      showCanvasEditBar(pick);
+    };
+
+    // 首选 artifacts.js 的卡片画布（renderCanvasCard / renderCanvas）：
+    // 一张卡片一个可见物件，可拖、可点选。
+    let grid = null;
+    const A = window.__Artifacts;
+    if (A && typeof A.renderCanvas === "function") {
+      try {
+        grid = A.renderCanvas(cards, {
+          key: typeof A.canvasKeyFor === "function" ? A.canvasKeyFor(cards) : "",
+          onPick: onPick,
+        });
+      } catch (e) { grid = null; }        // 画布出错就降级到老实现，正文不受影响
+    }
+    // 降级：artifacts.js 还没加载 / 渲染失败时，用 livecard 那套画布
+    if (!grid && window.LiveCard && typeof window.LiveCard.renderCanvas === "function") {
+      try { grid = window.LiveCard.renderCanvas(cards, { onPick: onPick }); } catch (e) { grid = null; }
+    }
+    if (!grid) return null;
+    bubble.appendChild(grid);
+    bubble.appendChild(note);
+    return grid;
+  }
+
+  // ---------- 底部「就这块改」输入框（2026-11-19）----------
+  // 点画布上的卡片 → 底部滑出一条输入框，带着这张卡的 id。
+  // 说一句「标题再短点」直接发出去，send() 会把这块的原文一起拼进消息，
+  // 用户不用再把「我说的是哪一块」重述一遍。
+  // 箭头连线合并多块留到下一轮，这里只做单卡点选。
+  let canvasEditBar = null;
+  function hideCanvasEditBar() {
+    if (!canvasEditBar) return;
+    canvasEditBar.hidden = true;
+    canvasEditBar.__pick = null;
+  }
+  function showCanvasEditBar(pick) {
+    if (!pick || !pick.cardId) { hideCanvasEditBar(); return null; }
+    if (!canvasEditBar) {
+      const bar = document.createElement("div");
+      bar.className = "canvas-edit-bar";
+      bar.hidden = true;
+      const tag = document.createElement("span");
+      tag.className = "canvas-edit-id";
+      const inp = document.createElement("input");
+      inp.type = "text";
+      inp.className = "canvas-edit-input";
+      inp.placeholder = "就这块改：说一句怎么改，直接发出去";
+      const ok = document.createElement("button");
+      ok.type = "button";
+      ok.className = "canvas-edit-send";
+      ok.textContent = "发送";
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "canvas-edit-close";
+      close.title = "收起";
+      close.textContent = "✕";
+      bar.appendChild(tag);
+      bar.appendChild(inp);
+      bar.appendChild(ok);
+      bar.appendChild(close);
+      document.body.appendChild(bar);
+      canvasEditBar = bar;
+
+      const submit = () => {
+        const txt = String(inp.value || "").trim();
+        if (!txt) { try { inp.focus(); } catch (e) {} return; }
+        const cur = canvasEditBar.__pick;
+        if (cur) canvasPick = cur;       // send() 里 __takeCanvasPick 会取走
+        hideCanvasEditBar();
+        try {
+          inputEl.value = txt;
+          if (typeof autoGrow === "function") autoGrow();
+          send();
+        } catch (e) { showToast("没能发出去：" + (e && e.message ? e.message : e), "warn"); }
+      };
+      ok.onclick = submit;
+      inp.onkeydown = (e) => {
+        if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); submit(); }
+        if (e.key === "Escape") { e.preventDefault(); hideCanvasEditBar(); }
+      };
+      close.onclick = hideCanvasEditBar;
+    }
+    canvasEditBar.__pick = pick;
+    canvasEditBar.setAttribute("data-card-id", pick.cardId);
+    const tag = canvasEditBar.querySelector(".canvas-edit-id");
+    if (tag) tag.textContent = "🎯 " + pick.cardId;
+    const inp = canvasEditBar.querySelector(".canvas-edit-input");
+    if (inp) inp.value = "";
+    canvasEditBar.hidden = false;
+    try { if (inp && inp.focus) inp.focus(); } catch (e) { /* 忽略 */ }
+    return canvasEditBar;
+  }
+
   // 跳到「生成文库」并把这个文件选中、闪一下（列表长的时候也能一眼找到）
   async function openInLibrary(rel) {
     const panel = document.getElementById("doclibPanel");
@@ -1989,6 +2183,9 @@
         bubble.style.whiteSpace = "pre-wrap";
       }
     } catch (e) { /* 忽略 */ }
+    // 画布即对话：多模态结果（文字 + 图片/文件/表格/网页）再挂一层可圈选卡片画布。
+    // 纯文字回复不会进这里（canvasCardsOf 返回空），观感与原来完全一致。
+    try { mountCanvasFor(bubble, raw); } catch (e) { /* 画布失败不影响正文 */ }
   }
 
   // ---------- 朗读（TTS）----------
@@ -6087,7 +6284,32 @@
     // ★ 2026-11-12：用户主动发消息 → 自动退出自由查看。
     //   否则开着「自由查看」时发出去的消息会被留在屏幕外，用户以为没发出去。
     setFreeView(false);
-    const promptText = text || (videoB64 ? "分析这段视频的内容" : "请详细描述这张图片的内容");
+    const basePrompt = text || (videoB64 ? "分析这段视频的内容" : "请详细描述这张图片的内容");
+    // ★ 画布圈选（2026-11-17）：上一轮回复里圈了一块 → 把 {cardId, rect} 拼进这条消息，
+    //   用户不用再打字描述「就是这块」。没圈选时 promptText 与原来一字不差。
+    let promptText = basePrompt;
+    try {
+      const pick = window.__takeCanvasPick ? window.__takeCanvasPick() : null;
+      // 卡片画布（artifacts.js）与老画布（livecard.js）共用同一个 pick 结构，
+      // 谁的描述函数在就用谁的；两个都不在就当没选中，行为与以前一致。
+      let ctx = "";
+      if (pick) {
+        const A = window.__Artifacts;
+        if (A && typeof A.canvasPickContext === "function") {
+          ctx = A.canvasPickContext(pick);
+        } else if (window.LiveCard && typeof window.LiveCard.canvasContext === "function") {
+          ctx = window.LiveCard.canvasContext(pick);
+        }
+      }
+      if (ctx) {
+        promptText = basePrompt + "\n\n" + ctx;
+        // 选中提示 / 「就这块改」输入框用过就收起（卡片本身留着，用户还能再选一次）
+        try {
+          Array.prototype.forEach.call(document.querySelectorAll(".lc-pick-note"), (n) => { n.hidden = true; });
+        } catch (e1) { /* 忽略 */ }
+        try { hideCanvasEditBar(); } catch (e2) { /* 忽略 */ }
+      }
+    } catch (e) { /* 拼不上就按普通消息发，绝不能因此发不出去 */ }
     addMsg("user", promptText);
     if (videoB64) {
       const el = document.createElement("div"); el.className = "msg user";
