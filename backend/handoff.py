@@ -187,6 +187,19 @@ def _unescape_md(text: str) -> str:
 
 _LITERAL_NL_RE = re.compile(r"\\r\\n|\\n")
 
+# `\n` 被引号包住时是在**引用这个符号本身**，不是换行意图。实测真实会话：
+#     原文在解释「字面 \n」本身      ← 还原成真换行会把「字面」和「」拆成两行
+_QUOTE_OPEN = "「『（(【["
+_QUOTE_CLOSE = "」』）)】]\"'"
+
+
+def _nl_repl(m):
+    """字面 `\\n` → 真换行；但被引号包住时不还原（那是在说这个符号）。"""
+    s, a, b = m.string, m.start(), m.end()
+    if (a > 0 and s[a - 1] in _QUOTE_OPEN) or (b < len(s) and s[b] in _QUOTE_CLOSE):
+        return m.group(0)
+    return "\n"
+
 
 def _unescape_newline(text: str) -> str:
     """把**正文里**的字面 `\\n`（反斜杠 + n 两个字符）还原成真换行。
@@ -217,7 +230,7 @@ def _unescape_newline(text: str) -> str:
             continue
         segs = ln.split("`")                   # 行内代码之间才是正文
         for j in range(0, len(segs), 2):
-            segs[j] = _LITERAL_NL_RE.sub("\n", segs[j])
+            segs[j] = _LITERAL_NL_RE.sub(_nl_repl, segs[j])
         out.append("`".join(segs))
     return "\n".join(out)
 

@@ -1053,6 +1053,16 @@ def main():
     check("多行上下文仍还原字面 \\n",
           handoff.sanitize("日志：24\\n\\n正文", 500, multiline=True) == "日志：24\n\n正文", "")
 
+    # ---- 引号包住的字面 \n 是在引用符号本身，不能还原（否则「字面 \n」被拆成两行）----
+    _q = "原文在解释「字面 \\n」本身，显示 `\\n` 才是对的"
+    _qo = handoff.sanitize(_q, 500, multiline=True)
+    check("引号内的字面 \\n 不还原", "\\n」" in _qo and "\n」" not in _qo, repr(_qo))
+    check("引号内的字面 \\n 处理后仍幂等",
+          handoff.sanitize(_qo, 500, multiline=True) == _qo, repr(_qo))
+    check("引号后紧跟的换行仍还原",
+          handoff.sanitize("他说「好」\\n我们走吧", 500, multiline=True)
+          == "他说「好」\n我们走吧", "")
+
     # ---- 自迭代快照的 _pending_ 暂存文件不是真实代码改动，不能进清单 ----
     _pb = len(handoff._read().get("changes") or [])
     handoff.record_change("backend/_feature_tests/_pending_测试.py", "自迭代快照", 33, 0)
