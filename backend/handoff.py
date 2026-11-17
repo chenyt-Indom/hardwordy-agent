@@ -391,8 +391,15 @@ def _balance(s: str, grow: bool = True, drop_lone: bool = False) -> str:
     return s
 
 
-def _cut(body: str, budget: int):
+def _cut(body: str, budget: int, per_line_cap: int = 0):
     """按**行**截断到 budget 字内，尽量不切断行（列表/表格/围栏才不会被撕开）。
+
+    per_line_cap：单行最多能占多少字（0 = 不限制）。
+    **为什么需要它**：实测一条回复的第一段就有 2293 字，而 budget 只有 1200，
+    于是第一行把预算全吃掉、后面 45 行（标题、表格、结论）**全部丢弃** ——
+    24 条对话合计只保留 38.7%，8 条只剩 25~31%，其中两条 40 多行只剩 1 行。
+    交接卡本来就是要交代"刚才聊了什么"，结果只剩开头一句客套话。
+    给单行设上限后，同样 1200 字能看到 3~5 行结构，信息量完全不同。
 
     返回 (text, cut)。
     """
@@ -400,8 +407,12 @@ def _cut(body: str, budget: int):
         return "", True
     if len(body) <= budget:
         return body, False
+    lines = body.split("\n")
+    if per_line_cap and per_line_cap > 1:
+        lines = [(ln[:per_line_cap - 1] + "…") if len(ln) > per_line_cap else ln
+                 for ln in lines]
     out, total = [], 0
-    for ln in body.split("\n"):
+    for ln in lines:
         add = len(ln) + (1 if out else 0)
         if total + add <= budget:
             out.append(ln)
@@ -415,7 +426,8 @@ def _cut(body: str, budget: int):
 
 
 def sanitize(s, cap: int = None, multiline: bool = True,
-             ellipsis: bool = True, drop_lone: bool = False) -> str:
+             ellipsis: bool = True, drop_lone: bool = False,
+             per_line_cap: int = 0) -> str:
     """**唯一**的 markdown 安全入口：规范化 → 截断 → 配平 → 补省略号 → 兜底。
 
     参数
@@ -439,7 +451,7 @@ def sanitize(s, cap: int = None, multiline: bool = True,
         # 于是长度正好等于 cap 的文本第二次进来时会被多切一刀、再加个「…」——
         # 幂等性实测 17/3000 组不稳定就是这个原因。
         reserve = 1 if (ellipsis and cap > 1) else 0
-        body, _ = _cut(body, cap - reserve)
+        body, _ = _cut(body, cap - reserve, per_line_cap=per_line_cap)
         cut = True
 
     # 补闭合围栏会变长，只有「多行 且 长度富余」时才敢用。
@@ -473,9 +485,11 @@ def sanitize(s, cap: int = None, multiline: bool = True,
 
 
 # ---- 兼容旧调用点的薄包装（全部指向 sanitize，不再有第二份实现）----
-def _clip(s, cap: int = 200, ellipsis: bool = True) -> str:
+def _clip(s, cap: int = 200, ellipsis: bool = True,
+          per_line_cap: int = 0) -> str:
     """多行文本注入用（保留换行、缩进、段落空行）。"""
-    return sanitize(s, cap, multiline=True, ellipsis=ellipsis)
+    return sanitize(s, cap, multiline=True, ellipsis=ellipsis,
+                    per_line_cap=per_line_cap)
 
 
 def _inline(s, cap: int = 160) -> str:
@@ -714,7 +728,9 @@ def _dialog_digest(session: str) -> list:
             continue
         role = str(m.get("role") or "")
         # 这里**不补省略号**（否则注入时再截一次会出现「……」）
-        text = _clip(m.get("content"), 1200, ellipsis=False)
+        # per_line_cap：一条回复的第一段常有 2000+ 字，不限的话它把 1200 字
+        # 预算全吃掉，后面 40 多行（标题/表格/结论）全丢 —— 实测只保留 38.7%。
+        text = _clip(m.get("content"), 1200, ellipsis=False, per_line_cap=400)
         if role not in ("user", "assistant") or not text:
             continue
         # 同角色 + 内容高度重复 → 只留一条（长的），避免同一件事报两遍
@@ -939,7 +955,9 @@ def render(session: str = "") -> str:
             who = "用户" if m.get("role") == "user" else "你"
             cap = LAST_CAP if i >= n - 2 else TEXT_CAP
             raw = str(m.get("text") or "")
-            body = _fold(_clip(raw, cap), raw)
+            # per_line_cap：不设的话第一条长段落就能占满 200 字预算，
+            # 卡片里每条回复只剩开头一句，结论/验证结果全看不到。
+            body = _fold(_clip(raw, cap, per_line_cap=max(60, cap // 2)), raw)
             # 进卡片前把围栏全降级：这一行前面要加「用户：/ 你：」前缀，
             # 第一行的 ``` 就不在行首了，可续行缩进后仍在行首 —— 配对被打断，
             # 整卡围栏变奇数、后面全被吞。实测 body 单独 2 个围栏、进卡变 1 个。

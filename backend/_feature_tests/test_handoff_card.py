@@ -681,10 +681,31 @@ def main():
     _f = [l for l in _c.split("\n") if l.lstrip().startswith(("```", "~~~"))]
     check("卡片里带代码块不产生未闭合围栏", len(_f) % 2 == 0, repr(_f))
 
-    # 56. _tail 拼在「· 那个会话最后停在这里：」后面，同样不能补围栏
+    # 56. _tail 拼在「那个会话最后停在这里：」后面，同样不能补围栏
     _o = handoff._tail("前文\n```\n代码块")
     _f = [l for l in _o.split("\n") if l.lstrip().startswith("```")]
     check("_tail 不补出闭合围栏", not _f, repr(_o))
+
+    # 57. 单行吃掉全部预算 → 后面几十行全丢（内容丢失级）
+    #     实测：一条回复第一段 2293 字，cap=1200 时第一行就吃满，
+    #     46 行只剩 1 行；24 条对话合计只保留 38.7%。
+    _long = "甲" * 2000 + "\n" + "\n".join("第%d行结论：通过" % i for i in range(1, 40))
+    _no = handoff._clip(_long, 1200, per_line_cap=0)
+    _yes = handoff._clip(_long, 1200, per_line_cap=400)
+    check("不给单行上限时只剩第一行（旧行为）", _no.count("\n") == 0, "行数=%d" % (_no.count("\n") + 1))
+    check("给单行上限后能保留多行结构", _yes.count("\n") >= 5, "行数=%d" % (_yes.count("\n") + 1))
+    check("单行上限后仍能看到后面的结论", "结论" in _yes, repr(_yes[-80:]))
+    check("单行上限后不超 cap", len(_yes) <= 1200, "len=%d" % len(_yes))
+    check("单行上限不破坏幂等",
+          _yes == handoff._clip(_yes, 1200, per_line_cap=400), "不稳定")
+    check("单行上限超长的行带省略号", "…" in _yes, repr(_yes[:60]))
+
+    # 58. digest 与 render 都要真的传了这个参数（否则改了等于没改）
+    import inspect
+    _src = inspect.getsource(handoff._dialog_digest)
+    check("_dialog_digest 传了 per_line_cap", "per_line_cap" in _src, _src[:60])
+    _src2 = inspect.getsource(handoff.render)
+    check("render 传了 per_line_cap", "per_line_cap" in _src2, "")
 
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
