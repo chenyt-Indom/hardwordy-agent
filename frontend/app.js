@@ -9098,18 +9098,25 @@
         if (!rbox) return;
         const items = (d && d.items) || [];
         const mb = (n) => ((n || 0) / 1048576).toFixed(1) + " MB";
+        // 手动快照必须全部露出（是用户亲手存的，被截掉就等于没有）；其余按时间取前 6 个
+        const manSet = new Set(items.filter((s) => s.man).map((s) => s.name));
+        const restSet = new Set(items.filter((s) => !s.man).slice(0, 6).map((s) => s.name));
+        const show = items.filter((s) => manSet.has(s.name) || restSet.has(s.name));
         rbox.innerHTML = [
           '<div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">全栈快照（源码 + data 状态；程序崩了也能用，点「回滚」整批还原）</div>',
-          items.length ? items.slice(0, 6).map((s) => {
+          '<div style="max-height:260px;overflow:auto">',
+          show.length ? show.map((s) => {
             const st = s.bad ? '<span style="color:#e0a0a0">坏状态</span>'
               : (s.healthy ? '<span style="color:#7bd88f">健康</span>' : '<span style="color:#9a9aa2">未知</span>');
             return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #262a32;font-size:12px">'
               + '<span style="flex:1;min-width:0;word-break:break-all">' + s.mtime_str + ' · '
-              + (s.tag || s.name) + ' · ' + st + ' · ' + mb(s.size) + '</span>'
+              + (s.man ? '<span style="color:#7fb8f0">📌 ' : '') + (s.tag || s.name)
+              + (s.man ? '</span>' : '') + ' · ' + st + ' · ' + mb(s.size) + '</span>'
               + '<button data-rsnap="' + s.name + '" style="flex:0 0 auto;padding:4px 10px;border-radius:6px;border:1px solid #4a3a3a;background:transparent;color:#e0a0a0;cursor:pointer;font-size:12px">回滚</button>'
               + '</div>';
           }).join("")
             : '<div style="font-size:12px;color:#6f7787;padding:4px 0">还没有快照（点下面「立即快照」建一个）</div>',
+          '</div>',
           '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">',
           '  <button id="sdRSnap" style="padding:5px 12px;border-radius:7px;border:1px solid #2f3a4a;background:transparent;color:#5aa9ff;cursor:pointer;font-size:12px">＋ 立即快照</button>',
           '  <button id="sdRAuto" style="padding:5px 12px;border-radius:7px;border:1px solid #4a3a3a;background:transparent;color:#e0a0a0;cursor:pointer;font-size:12px">⟲ 自动回滚到最近健康版</button>',
@@ -9150,11 +9157,13 @@
         }
         const rs = ev.target.closest("#sdRSnap");
         if (rs) {
+          const tag = prompt("给这个快照起个名字（以后好认）：\n\n例如「改回滚前」「登录修好了」\n留空就用默认名", "改代码前");
+          if (tag === null) return;   // 点了「取消」，什么都不做
           rs.disabled = true; rs.textContent = "快照中…";
           try {
             const r = await (await fetch("/api/rescue/snapshot", {
               method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ message: "前端手动快照" }) })).json();
+              body: JSON.stringify({ message: (tag || "").trim() || "手动快照" }) })).json();
             if (r && r.ok) {
               say("✅ " + (r.msg || "快照完成"), "#7bd88f");
               try { rlist = await (await fetch("/api/rescue/snapshots", { cache: "no-store" })).json(); } catch (e) {}
