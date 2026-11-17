@@ -869,6 +869,78 @@ def main():
     check("合并后标出「共 N 次」", "共 6 次" in _line, _line[:80])
     check("合并后累加增删行数", "+6 -0 行" in _line or "+6" in _line, _line[:80])
 
+    # 55. markdown 转义 `\`` 必须换算成等长全角
+    #     实测（用户贴的卡第 116 行）：表格里写了 `…角度：**\`last.jso…`，
+    #     有效反引号 5 个（奇数，真正落单），但 str.count("`") 数出 8 个（偶数）
+    #     → 配平放过 → 后面整段被当成行内代码，整卡 12 条清单全被吞。
+    _bs = chr(92)
+    _esc_ln = ("| 1 | **存储层就做了头尾拼接，碎片固化进 `last.json`** | 存进去的是 "
+               "`…角度：**" + _bs + "`last.jso…109/109 通过。…` |")
+    _o = handoff.sanitize(_esc_ln, 500, multiline=True, drop_lone=True)
+    check("markdown 转义 \\` 后反引号成对", _o.count("`") % 2 == 0,
+          "count=%d" % _o.count("`"))
+    check("卡片里不留 \\` 转义", _bs + "`" not in _o, repr(_o[:80]))
+
+    # 55.2 正文 ** 的配对不能被行内代码里的 ** 干扰
+    _bold_plain = 0
+    for _a, _b in handoff._plain_spans(_o):
+        _bold_plain += _o[_a:_b].count("**")
+    check("行内代码里的 ** 不参与正文配对", _bold_plain % 2 == 0, "n=%d" % _bold_plain)
+
+    # 55.3 整卡：真实碎片数据渲染后不留转义、反引号成对
+    _frag = {"ts": __import__("time").time(), "restarted_at": "2026-11-18 03:11:37",
+             "dialog": [{"role": "user", "text": "再查"},
+                        {"role": "assistant", "text": _esc_ln}],
+             "dialog_session": "s1", "live_at": "x", "changes": []}
+    _orig_read55 = handoff._read
+    try:
+        handoff._read = lambda _d=_frag: _d
+        _card55 = handoff.render("s1")
+    finally:
+        handoff._read = _orig_read55
+    _bad55 = [l for l in _card55.split("\n")
+              if not l.strip().startswith("```") and l.count("`") % 2]
+    check("整卡（含 \\` 碎片）反引号成对", not _bad55, repr(_bad55[:2]))
+    check("整卡（含 \\` 碎片）不留转义", _bs + "`" not in _card55, repr(_card55[:60]))
+
+    # 56. 粗体按**段落**配平（CommonMark 里空行打断段落，强调不能跨段落）
+    #     实测（模糊测试 7/30000）：'**~~~\n\n`|　**\*' 整块数出 2 个（偶数→放过），
+    #     但两段各落单一个，渲染后各留半截标记。
+    _o = handoff.sanitize("**甲\n\n乙**", 200)
+    _n = [sum(p[a:b].count("**") for a, b in handoff._plain_spans(p))
+          for p in _o.split("\n\n") if p.strip()]
+    check("跨空行的两个 ** 各自配平", all(x % 2 == 0 for x in _n), str(_n) + " " + repr(_o))
+
+    # 56.2 同段落内的跨行粗体（`**a\nb**`）是合法的，不能被打扰
+    _o = handoff.sanitize("**甲\n乙**", 200)
+    check("同段落跨行粗体保持原样", _o.count("**") == 2 and "＊＊" not in _o, repr(_o))
+
+    # 56.3 真实卡片：全部不变量（围栏/反引号/段落粗体/纯空格）
+    _real = handoff.render()
+    _rl = _real.split("\n")
+    _fence_ok = len([l for l in _rl if l.strip().startswith("```")]) % 2 == 0
+    _bt_ok = not [l for l in _rl
+                  if not l.strip().startswith("```") and l.count("`") % 2]
+    _para_bad = 0
+    _p, _inb = [], False
+    for _l in _rl + [""]:
+        if _l.strip().startswith("```"):
+            _inb = not _inb
+            continue
+        if _inb:
+            continue
+        if _l.strip():
+            _p.append(_l)
+        elif _p:
+            _t = "\n".join(_p)
+            if sum(_t[a:b].count("**") for a, b in handoff._plain_spans(_t)) % 2:
+                _para_bad += 1
+            _p = []
+    check("真实卡片：围栏成对", _fence_ok, "")
+    check("真实卡片：行内反引号成对", _bt_ok, "")
+    check("真实卡片：段落粗体成对", _para_bad == 0, "bad=%d" % _para_bad)
+    check("真实卡片：无纯空格行", not [l for l in _rl if l and not l.strip()], "")
+
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:

@@ -164,8 +164,30 @@ _FW_FENCE = "｀｀｀"       # 代码围栏
 _FW_BOLD = "＊＊"         # 粗体
 
 
+_MD_ESC = {"`": "｀", "*": "＊", "_": "＿", "[": "［", "]": "］",
+           "#": "＃", "|": "｜", "~": "～", "<": "＜", ">": "＞"}
+_MD_ESC_RE = re.compile(r"\\([`*_\[\]#|~<>])")
+
+
+def _unescape_md(text: str) -> str:
+    """把 markdown 转义（`\\``、`\\*`）换成**等长全角**。
+
+    为什么必须做：转义符本身不参与 markdown 解析，但 `str.count("`")`
+    会把 `\\`` 里的反引号也数进去，于是**奇偶判错、配平失效**。
+    实测（用户贴的那张卡第 116 行）：
+        原文 `…角度：**\\`last.jso…`
+        有效反引号 5 个（奇数，真正落单），但 count 出来 8 个（偶数）
+        → 配平放过 → 后面整段被当成行内代码。
+    换成等长全角后：内容一个字不丢（｀ 就是反引号的样子），计数正确。
+    """
+    if "\\" not in text:
+        return text
+    return _MD_ESC_RE.sub(lambda m: _MD_ESC[m.group(1)], text)
+
+
 def _normalize(text: str, multiline: bool) -> str:
     """规范化空白。multiline=True 保留换行与行首缩进；否则压成一行。"""
+    text = _unescape_md(text)
     if not multiline:
         return " ".join(text.split())
     lines = []
@@ -226,20 +248,30 @@ def _balance_bold_block(block: str, drop_lone: bool = False) -> str:
     """
     if "**" not in block:
         return block
-    marks = []
-    for a, b in _plain_spans(block):        # block 内没有围栏，只按 ` 切
-        k = a
-        while True:
-            p = block.find("**", k, b)
-            if p < 0:
-                break
-            marks.append(p)
-            k = p + 2
-    if len(marks) % 2 == 1:
-        p = marks[-1]
-        block = block[:p] + (block[p + 2:] if drop_lone
-                             else _FW_BOLD + block[p + 2:])
-    return block
+    # 按**段落**分段配平：CommonMark 里空行会打断段落，强调（`**`）不能跨段落
+    # 配对。原来按整块数 marks，`**a\n\nb**` 数出 2 个（偶数）就放过，
+    # 实际两段各落单一个，渲染时各留半截标记。
+    # 实测（2026-11-18 模糊测试）：'**~~~\n\n`|　**\*' 整块 2 个（偶数→放过），
+    # 但两段各 1 个。7/30000 组失败全部是这一种。
+    # 同段落内的跨行粗体（`**a\nb**`）不受影响（没有空行 → 不分段）。
+    paras = block.split("\n\n")
+    for i, para in enumerate(paras):
+        if "**" not in para:
+            continue
+        marks = []
+        for a, b in _plain_spans(para):     # para 内没有围栏，只按 ` 切
+            k = a
+            while True:
+                p = para.find("**", k, b)
+                if p < 0:
+                    break
+                marks.append(p)
+                k = p + 2
+        if len(marks) % 2 == 1:
+            p = marks[-1]
+            paras[i] = para[:p] + (para[p + 2:] if drop_lone
+                                   else _FW_BOLD + para[p + 2:])
+    return "\n\n".join(paras)
 
 
 def _demote_inline_fences(s: str) -> str:
