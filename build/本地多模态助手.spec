@@ -338,3 +338,20 @@ coll = COLLECT(
     upx_exclude=[],
     name="本地多模态助手",
 )
+
+# ---------------------------------------------------------------------------
+# ⚠️ 2026-11-17（11.17b）：rescue.py 必须落在 **exe 同级**，不能进 _internal。
+#   后端 backend/main.py 的 _rescue_mod() 是拿 sys.executable 的目录去找它的；
+#   放进 _internal 会让打包版「崩溃救急」整个不可用（实测报「找不到 rescue.py」）。
+#   而 PyInstaller 6 的 datas 目标目录一律落到 _internal，所以只能打包后复制。
+try:
+    import shutil as _sh
+    _out = os.path.join(root, "dist", "本地多模态助手")
+    _src = os.path.join(root, "rescue.py")
+    if os.path.isdir(_out) and os.path.isfile(_src):
+        _sh.copy2(_src, os.path.join(_out, "rescue.py"))
+        print("[spec] rescue.py 已复制到 exe 同级：%s" % _out)
+    else:
+        print("[spec] 跳过 rescue.py 复制（dist 目录或源文件不存在）")
+except Exception as _e:
+    print("[spec] rescue.py 复制失败：%s" % _e)
