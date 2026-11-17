@@ -11453,6 +11453,33 @@ def _process_rss() -> int:
     return 0
 
 
+@app.get("/api/usage/summary")
+@app.get("/usage/summary")
+def usage_summary(days: int = 7):
+    """账单速览卡的数据源：一句话结论 + 折叠明细（**纯本地聚合，不调模型**）。
+
+    为什么单开一个接口、不让模型转述账本
+    ----------------------------------
+    用户 2026-11-17 连问两轮「现在比以前能大概省下多少？」「查看账单」，
+    两次收到的都是排查过程和被 max_tokens 截断的思考链。数字一直躺在
+    data/llm_usage 里，只是没人把它摆出来。这个接口只做聚合，毫秒级返回，
+    前端直接画卡 —— 模型不参与，回答就不可能被截断，也不可能答非所问。
+
+    口径（含按价格加权的 weighted_cost）见 ``usage_ledger.summarize``。
+    记账是旁路，读账也必须旁路：任何异常都降级成一张「0 调用」的空卡，
+    绝不能让「看账单」这一个动作把服务搞挂。
+    """
+    from . import usage_ledger
+    try:
+        return usage_ledger.summarize(int(days or 7))
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("usage summary failed: %s", e)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                "days": 0, "total_calls": 0, "total_tokens": 0,
+                "by_tag": {}, "by_hour": {}, "delta_vs_prev": 0.0,
+                "weighted_cost": 0.0, "headline": "账单读取失败"}
+
+
 @app.post("/api/memory/release")
 def memory_release(body: dict):
     """一键释放占用。**默认只清缓存，绝不动长期记忆。**

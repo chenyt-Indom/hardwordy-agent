@@ -6005,11 +6005,67 @@
     });
   }
 
+  // ---------- 账单速览卡 ----------
+  // 用户 2026-11-17 连问两轮「能省多少」「查看账单」，我给的却是排查过程和
+  // 被截断的思考链（低分轮次记的就是「答非所问」）。数字在后端账本里，
+  // 这类短问句**不该花一次模型调用去转述** —— 直接出卡，结论置顶。
+  function isBillAsk(t) {
+    let s = String(t || "").trim();
+    if (!s || s.length > 24) return false;        // 长问句多半是在问方案，别抢
+    s = s.replace(/[?？。！!，,、~\s]+$/g, "");     // 去掉句尾语气/标点
+    if (/^\/?(账单|bill|usage)$/i.test(s)) return true;
+    // 只认「看账」这一类**整句**，别把「帮我做个账单系统」也抢走
+    if (/^(查看|看看|看一下|打开|显示|查一下)?(我的)?(账单|用量|token用量)(看看|呢|吧)?$/i.test(s)) {
+      return true;
+    }
+    return /能省多少|省了多少|花了多少|用了多少\s*(token|令牌)|token\s*用量|用量统计/.test(s);
+  }
+
+  async function showBillCard(days) {
+    let data = null, err = "";
+    // 先占位：账本再快也有一帧网络延迟，用户点了要有反应
+    const el = document.createElement("div");
+    el.className = "msg bot";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.innerHTML = '<div class="bill-card"><div class="bill-head">'
+      + "<b>正在汇总账本…</b></div></div>";
+    el.appendChild(bubble);
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    try {
+      data = await api("/api/usage/summary?days=" + (Number(days) || 7));
+    } catch (e) {
+      err = (e && e.message) || String(e);
+    }
+    if (!data || data.ok === false) {
+      bubble.innerHTML = '<div class="bill-card"><div class="bill-head"><b>账单读取失败：'
+        + esc(err || (data && data.error) || "后端没有返回数据") + "</b></div></div>";
+      return null;
+    }
+    if (window.LiveCard && typeof window.LiveCard.mountBillCard === "function") {
+      window.LiveCard.mountBillCard(bubble, data);
+    } else {
+      bubble.textContent = window.LiveCard
+        ? window.LiveCard.billHeadline(data)
+        : ("今日 " + data.total_calls + " 次调用 / " + data.total_tokens + " token");
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return data;
+  }
+
   async function send() {
     setFreeView(false);        // 自己发消息 → 恢复跟随，别停在半路
     const text = inputEl.value.trim();
     const imgB64 = images.map((s) => s.split(",")[1]);
     if (!text && imgB64.length === 0 && !videoB64) return;
+    // 「查看账单 / 能省多少」：本地直出速览卡，不进模型（纯展示，不动 streaming 状态）
+    if (text && isBillAsk(text) && !imgB64.length && !videoB64) {
+      addMsg("user", text);
+      inputEl.value = ""; autoGrow();
+      await showBillCard(7);
+      return;
+    }
     if (streaming) {
       // 2026-11-10：桌面端"发不出去"最常见的原因是 streaming 卡在 true（上一轮异常没复位），
       //   老代码直接 return，用户点什么都没反应。这里先判断是否真的还在跑：

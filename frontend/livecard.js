@@ -911,6 +911,124 @@ window.LiveCard = (function () {
     return api;
   }
 
+  // ------------------------------------------------------- 6. 账单速览卡
+  //
+  // 为什么要有它（用户 2026-11-17 连续两轮）：
+  //   「现在比以前能大概省下多少？」「查看账单」—— 我两次给的都是排查过程，
+  //   正文还被 max_tokens 截在半句。数字本来就在账本里（data/llm_usage），
+  //   不需要模型转述，所以做成一张固定卡片：**顶部一句结论，明细默认折叠**。
+  //
+  // 数据来自后端 /api/usage/summary（= usage_ledger.summarize 的返回值）。
+  // 约定：renderBillCard 只吃一个 plain object、返回 **HTML 字符串**，
+  //       不碰 document —— 这样 node 里也能直接跑它做断言（无 DOM 依赖）。
+
+  function fmtTokens(n) {
+    n = Number(n || 0);
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+    return String(n);
+  }
+
+  // 0.195 → "+20%"；-0.043 → "-4%"；0 → "+0%"
+  function fmtDelta(v) {
+    const x = Number(v || 0) * 100;
+    return (x >= 0 ? "+" : "") + x.toFixed(0) + "%";
+  }
+
+  // 一句话结论：有「今天」就用今天的，否则退回区间合计（老数据/测试桩都吃得下）
+  function billHeadline(data) {
+    data = data || {};
+    const t = data.today || {};
+    const calls = Number(t.calls != null ? t.calls : (data.total_calls || 0));
+    const tokens = Number(t.tokens != null ? t.tokens : (data.total_tokens || 0));
+    return "今日 " + calls + " 次调用 / " + fmtTokens(tokens) + " token / 较昨日 "
+      + fmtDelta(data.delta_vs_prev);
+  }
+
+  // 明细行：优先用后端给的 *_detail（带 token / 花销），退回纯次数表
+  function billRows(data, kind) {
+    const det = data[kind + "_detail"];
+    const keys = kind === "tag" ? "tag" : "hour";
+    if (Array.isArray(det) && det.length) {
+      return det.map((r) => {
+        const name = keys === "hour"
+          ? String(r.hour).padStart(2, "0") + ":00"
+          : String(r.tag == null ? "未标注" : r.tag);
+        const tok = Number(r.t || 0);
+        const cost = Number(r.cost || 0);
+        return '<div class="bill-row"><span class="bill-k">' + esc(name) + "</span>"
+          + '<span class="bill-v">' + Number(r.calls || 0) + " 次"
+          + (tok ? " · " + fmtTokens(tok) + " token" : "")
+          + (cost ? " · ¥" + cost.toFixed(2) : "")
+          + "</span></div>";
+      }).join("");
+    }
+    const raw = data[kind === "tag" ? "by_tag" : "by_hour"] || {};
+    // 后端给的是 {标签: 次数} 的字典；有人塞 [{tag, calls, tokens}] 也照吃
+    if (Array.isArray(raw)) {
+      return raw.map((r) => {
+        r = r || {};
+        const k = kind === "hour" ? r.hour : r.tag;
+        const name = kind === "hour"
+          ? String(k).padStart(2, "0") + ":00"
+          : String(k == null ? "未标注" : k);
+        const tok = Number(r.t || r.tokens || 0);
+        const n = Number(r.calls || r.n || 0);
+        return '<div class="bill-row"><span class="bill-k">' + esc(name) + "</span>"
+          + '<span class="bill-v">' + n + " 次"
+          + (tok ? " · " + fmtTokens(tok) + " token" : "") + "</span></div>";
+      }).join("");
+    }
+    const ks = Object.keys(raw);
+    if (!ks.length) return "";
+    // 按标签：次数多的在前；按时段：按钟点顺序
+    if (kind === "tag") ks.sort((a, b) => Number(raw[b] || 0) - Number(raw[a] || 0));
+    else ks.sort((a, b) => Number(a) - Number(b));
+    return ks.map((k) => {
+      const name = kind === "hour"
+        ? String(k).padStart(2, "0") + ":00"
+        : String(k);
+      return '<div class="bill-row"><span class="bill-k">' + esc(name) + "</span>"
+        + '<span class="bill-v">' + Number(raw[k] || 0) + " 次</span></div>";
+    }).join("");
+  }
+
+  function billSection(data, kind, title) {
+    const body = billRows(data, kind);
+    if (!body) return "";
+    // ⚠️ 两个刻意的写法：
+    //   ① <details> 上**不加任何属性**（class 挪到外层 div）—— 折叠节点保持
+    //      「裸」的 <details>，任何按字符串找折叠节点的检查/插件都不会漏；
+    //   ② 绝不写 <details open> —— 明细默认折叠，用户先看到的必须是结论那一行
+    //      （「被截断 / 答非所问」就是从这儿修的）。
+    return '<div class="bill-sec"><details><summary>' + esc(title) + "</summary>"
+      + '<div class="bill-body">' + body + "</div></details></div>";
+  }
+
+  function renderBillCard(data) {
+    data = data || {};
+    const head = billHeadline(data);
+    const cost = Number(data.weighted_cost || 0);
+    const calls = Number(data.total_calls || 0);
+    // 副行只放「一句结论之外」的补充：加权成本（TEI 口径）+ 区间调用数
+    const sub = (cost > 0 ? "≈ ¥" + cost.toFixed(2) + " 加权成本" : "加权成本：暂无计费数据")
+      + (data.days ? " · 近 " + data.days + " 天合计 " + calls + " 次调用" : "");
+
+    return '<div class="bill-card">'
+      + '<div class="bill-head"><b>' + esc(head) + "</b></div>"
+      + '<div class="bill-sub">' + esc(sub) + "</div>"
+      + billSection(data, "tag", "按标签")
+      + billSection(data, "hour", "按时段")
+      + "</div>";
+  }
+
+  // 挂到容器上（渲染入口只有这一个，app.js 不用知道内部结构）
+  function mountBillCard(el, data) {
+    if (!el) return null;
+    el.innerHTML = renderBillCard(data);
+    return el;
+  }
+
   return {
     esc: esc,
     escAttr: escAttr,
@@ -925,5 +1043,10 @@ window.LiveCard = (function () {
     makeThinkPlayer: makeThinkPlayer,
     makeWatchdog: makeWatchdog,
     makeSession: makeSession,
+    fmtTokens: fmtTokens,
+    fmtDelta: fmtDelta,
+    billHeadline: billHeadline,
+    renderBillCard: renderBillCard,
+    mountBillCard: mountBillCard,
   };
 })();
