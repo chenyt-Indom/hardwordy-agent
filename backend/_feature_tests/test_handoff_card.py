@@ -1,0 +1,426 @@
+# -*- coding: utf-8 -*-
+"""交接卡（backend/handoff.py）的**内容级**回归测试。
+
+为什么要有这个文件（2026-11-18）
+--------------------------------
+`self_audit` 只做静态检查：语法错误、跨模块调用不存在的函数、前端调
+不存在的路由、裸 except、同名函数重复定义 —— 全是「代码能不能跑」。
+而交接卡出过的问题是**输出质量**：
+  · 截断不加省略号，读者以为那就是全文；
+  · 截断断在反引号中间，未闭合的 ` 把后文 markdown 全吞掉；
+  · 换行被压成空格，「结论：通过」+「通过 14 / 失败 0」粘成「通过 通过」；
+  · 中断后重试的重复消息原样列两遍；
+  · 轮数按 len//2 算，与实际用户消息数不符。
+这些代码全都能正常跑、语法全对，静态检查原理上发现不了，只能对**输出**
+做断言。所以单独留一份跑得快的内容测试。
+
+用法：python backend/_feature_tests/test_handoff_card.py
+"""
+import json
+import os
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+
+from backend import handoff  # noqa: E402
+from backend import sessions as real_ss  # noqa: E402
+
+FAILS = []
+
+# Windows 控制台默认 GBK，打不出「…」这类字符会直接抛 UnicodeEncodeError
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
+CHECKS = [0]
+
+
+def check(name, ok, extra=""):
+    CHECKS[0] += 1
+    print(("  OK   " if ok else "  FAIL ") + name + (("  " + str(extra)) if extra else ""))
+    if not ok:
+        FAILS.append(name)
+
+
+LONG = ("结论：通过\n通过 14 / 失败 0\n\n问题值得认真解决：\n"
+        "- `rescue.py` 是 92,009 B\n- `backend/main.py` 正常\n" + "填充内容" * 120)
+
+
+def render_with(dialog, session="t", **extra):
+    handoff.DIR = tempfile.mkdtemp(prefix="hoftest_")
+    handoff.LAST = os.path.join(handoff.DIR, "last.json")
+    # render() 读的是 "text"（真实链路由 _dialog_digest 产出这个字段），
+    # 测试里为了直观用 "content" 写，这里归一一下
+    dialog = [{"role": m.get("role"), "text": m.get("text", m.get("content", ""))}
+              for m in dialog]
+    d = {"dialog": dialog, "changes": extra.get("changes") or [],
+         "ts": time.time(), "restarted_at": "2026-11-18 00:14:17",
+         "dialog_session": session, "reason": "测试"}
+    d.update({k: v for k, v in extra.items() if k != "changes"})
+    with open(handoff.LAST, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False)
+    return handoff.render(session)
+
+
+def main():
+    # ---- 1. 换行必须保留（不能被压平导致两行粘成一个词）----
+    txt = render_with([{"role": "user", "content": "问"},
+                       {"role": "assistant", "content": LONG}])
+    check("换行保留，不粘成「通过 通过」",
+          "结论：通过\n" in txt and "通过 通过" not in txt)
+
+    # ---- 2. 超长截断必须有省略号 ----
+    check("超长内容截断带「…」", "…" in txt)
+
+    # ---- 3. 每条对话条目里反引号必须成对（否则吞掉后文）----
+    seg = [l for l in txt.splitlines()
+           if l.strip().startswith(("你：", "用户："))]
+    check("条目内反引号全部成对", all(l.count("`") % 2 == 0 for l in seg), len(seg))
+
+    # ---- 4. 多行内容要缩进对齐，别顶到行首 ----
+    check("多行内容缩进对齐", "  - `rescue.py`" in txt)
+
+    # ---- 5. 中断重试的重复消息要合并 ----
+    fake = [{"role": "user", "content": "问"},
+            {"role": "assistant", "content": LONG},
+            {"role": "assistant", "content": LONG},
+            {"role": "user", "content": "再问"}]
+    real_ss.get_messages = lambda s: fake
+    dlg = handoff._dialog_digest("t")
+    check("重复条目被合并（4→3）", len(dlg) == 3, [m["role"] for m in dlg])
+
+    # ---- 6. 轮数按真实用户消息数标注 ----
+    txt2 = render_with(dlg)
+    users = sum(1 for m in dlg if m["role"] == "user")
+    check("轮数标注 == 用户消息数", ("最近 %d 轮" % users) in txt2,
+          "期望 %d" % users)
+
+    # ---- 7. 没有内容时返回空串（不注入噪音）----
+    handoff.DIR = tempfile.mkdtemp(prefix="hoftest_")
+    handoff.LAST = os.path.join(handoff.DIR, "last.json")
+    check("无内容返回空串", handoff.render("t") == "")
+
+    # ---- 8. 超过 KEEP_DAYS 不再注入 ----
+    with open(handoff.LAST, "w", encoding="utf-8") as f:
+        json.dump({"dialog": [{"role": "user", "text": "旧"}], "changes": [],
+                   "ts": time.time() - (handoff.KEEP_DAYS + 1) * 86400},
+                  f, ensure_ascii=False)
+    check("超过 %d 天不再注入" % handoff.KEEP_DAYS, handoff.render("t") == "")
+
+    # ---- 9. 改动清单渲染不受影响 ----
+    txt3 = render_with([{"role": "user", "content": "问"}],
+                       changes=[{"rel": "rescue.py", "note": "修 x",
+                                 "added": 10, "removed": 2, "time": "2026-11-18 00:08:11"}])
+    check("改动清单正常渲染",
+          "- `rescue.py`（+10 -2 行）：修 x" in txt3, txt3[-160:])
+
+    # ---- 9b. 改动清单必须按重启时间分组（实测真实卡片把 02:36~02:41 的改动
+    #          标成了「那次重启前」，读卡的人会以为这些都发生在重启前）----
+    txt3b = render_with([{"role": "user", "content": "问"}],
+                        changes=[{"rel": "a.py", "note": "重启前改的", "added": 1,
+                                  "removed": 0, "time": "2026-11-18 00:10:00"},
+                                 {"rel": "b.py", "note": "重启后改的", "added": 2,
+                                  "removed": 0, "time": "2026-11-18 00:20:00"}])
+    _pre = txt3b.split("重启之后又改过的文件")[0]
+    check("重启后的改动不混进「重启前」组",
+          "a.py" in _pre and "b.py" not in _pre, txt3b[-280:])
+    check("重启后的改动单独成组",
+          "· 重启之后又改过的文件（最近 1 个）" in txt3b, txt3b[-200:])
+
+    # ---- 9c. 没有重启记录时，标题不能谎称「那次重启前」----
+    txt3c = render_with([{"role": "user", "content": "问"}], restarted_at="",
+                        changes=[{"rel": "c.py", "note": "x", "added": 1,
+                                  "removed": 0, "time": "2026-11-18 00:10:00"}])
+    check("无重启记录时标题为「最近改过的文件」",
+          "· 最近改过的文件（最近 1 个）" in txt3c and "那次重启前" not in txt3c,
+          txt3c[-200:])
+
+    # ---- 9d. 重启后改动很多时，「重启前」那组不能被整个挤掉 ----
+    # （2026-11-18 上一版拆分引入的回归：先取最近 12 条再分组，重启后改了 12 条
+    #   以上，重启前那组就消失了，交接卡最该交代的信息反而没了）
+    _many_chg = ([{"rel": "old%d.py" % i, "note": "重启前", "added": 1, "removed": 0,
+                   "time": "2026-11-18 00:%02d:00" % i} for i in range(5)] +
+                 [{"rel": "new%d.py" % i, "note": "重启后", "added": 1, "removed": 0,
+                   "time": "2026-11-18 00:%02d:00" % (20 + i)} for i in range(12)])
+    txt3d = render_with([{"role": "user", "content": "问"}], changes=_many_chg)
+    _sec = txt3d.split("重启之后又改过的文件")[0]
+    check("重启前那组没被挤掉", "那次重启前改过的文件" in txt3d, txt3d[-260:])
+    check("重启前保留 4 个", _sec.count("old") == 4, str(_sec.count("old")))
+    check("两组加起来不超 SHOW_CHANGES",
+          (txt3d.count("- `") ) <= handoff.SHOW_CHANGES, str(txt3d.count("- `")))
+
+    # ---- 10. 缩进必须保留（嵌套列表被压平就丢了层级）----
+    txt4 = render_with([{"role": "user", "content": "问"},
+                        {"role": "assistant", "content": "- 一层\n  - 二层\n    - 三层"}])
+    check("嵌套缩进保留", "  - 二层" in txt4 and "    - 三层" in txt4, repr(txt4[-90:]))
+
+    # ---- 11. 段落之间的空行要保留（否则 markdown 里粘成一段）----
+    txt5 = render_with([{"role": "user", "content": "问"},
+                        {"role": "assistant", "content": "第一段\n\n第二段"}])
+    check("段落空行保留", "\n\n" in txt5)
+
+    # ---- 12. 截断代码块必须补闭合围栏，且不能留下非法的双反引号 ----
+    fence_src = "说明：\n```python\nprint(1)\nprint(2)\nprint(3)\n```\n结束"
+    for cap in (20, 30, 40):
+        one = handoff._clip(fence_src, cap)
+        check("cap=%d 代码块围栏闭合" % cap,
+              one.count("```") % 2 == 0 and "``" not in one.replace("```", ""),
+              repr(one))
+
+    # ---- 13. cap 极小也不能超出上限 ----
+    bad_cap = [(c, handoff._clip("abcdefghij" * 20, c)) for c in (1, 2, 3, 5)]
+    check("cap 极小不超限", all(len(o) <= c for c, o in bad_cap),
+          [(c, len(o)) for c, o in bad_cap])
+
+    # ---- 14. 连发两次「继续」是两轮，不能被合并掉 ----
+    check("短消息重复不合并（轮数不丢）",
+          handoff._similar("继续", "继续") is False
+          and handoff._similar("好", "好") is False)
+    txt6 = render_with([{"role": "user", "content": "继续"},
+                        {"role": "user", "content": "继续"}])
+    check("两次「继续」算 2 轮", "最近 2 轮" in txt6, txt6[:120])
+
+    # ---- 15. 中断重试：一条是另一条的开头 → 必须合并 ----
+    a1 = "结论：通过\n\n通过 14 / 失败 0\n\n- 项1\n  - 子项"
+    check("前缀关系的重试消息被合并", handoff._similar(a1, a1 + "（重试版）") is True)
+    check("短消息仅开头像不算重复",
+          handoff._similar("好的，我来看看这个文件", "好的，我来看看那个目录") is False)
+
+    # ---- 16. 超长代码块要折叠，且折叠提示不能落在围栏里面 ----
+    txt7 = render_with([{"role": "user", "content": "看"},
+                        {"role": "assistant", "content": "```python\n" + "x = 1\n" * 200 + "```"}])
+    check("长代码块被折叠", "已折叠" in txt7)
+    check("折叠后围栏成对", txt7.count("```") % 2 == 0, txt7.count("```"))
+    _i = txt7.find("已折叠")
+    check("折叠提示在围栏外", _i > 0 and txt7[:_i].count("```") % 2 == 0)
+
+    # ---- 17. 渲染结果里不能有「只有空格」的行（markdown 里是硬换行）----
+    check("无纯空格行",
+          not any(l and not l.strip() for l in txt7.split("\n")))
+
+    # ---- 18. 不截断时也必须配平（短消息里落单的 ` 会吞掉后面整张卡）----
+    for _src in ("```python\ncode here", "code here\n```", "用 `rescue.py 处理"):
+        _one = handoff._clip(_src, 500)
+        check("不截断也配平围栏 %r" % _src[:14],
+              _one.count("```") % 2 == 0
+              and _one.replace("```", "").count("`") % 2 == 0, repr(_one))
+        _card = render_with([{"role": "user", "content": "q"},
+                             {"role": "assistant", "content": _src}])
+        check("渲染后整卡围栏成对 %r" % _src[:14],
+              _card.count("```") % 2 == 0, _card.count("```"))
+
+    # ---- 19. 各种 cap 下都不超限且围栏成对 ----
+    _bad = []
+    for _cap in (1, 2, 3, 5, 10, 20, 30, 40, 60, 200):
+        for _src in ("```python\nprint(1)\nprint(2)\n```", "用 `x 处理一下", "abcdefghij" * 50):
+            _o = handoff._clip(_src, _cap)
+            if len(_o) > _cap or _o.count("```") % 2:
+                _bad.append((_cap, len(_o), _o.count("```")))
+    check("各种 cap 不超限且围栏成对", not _bad, _bad[:5])
+
+    # ---- 20. 改动清单的 note 含落单反引号 → 不能吞掉后面的清单和提示 ----
+    # 真实事故：note「实测短消息里落单的 ` 会吞掉整张卡」让那一行反引号变 3 个，
+    # 卡片里剩下的清单行 + ⚠️ 提示全被当成行内代码。
+    _c = [{"rel": "backend/x.py", "note": "落单的 ` 会吞卡",
+           "added": 1, "removed": 0, "time": "2026-11-18 02:37"},
+          {"rel": "backend/y.py", "note": "第二条", "added": 1, "removed": 0,
+           "time": "2026-11-18 02:38"}]
+    _card = render_with([{"role": "user", "content": "q"}], changes=_c)
+    check("清单 note 落单反引号被配平",
+          not [l for l in _card.split("\n") if l.count("`") % 2 == 1],
+          [l for l in _card.split("\n") if l.count("`") % 2 == 1][:2])
+    check("清单后续条目没被吞", "`backend/y.py`" in _card)
+
+    # ---- 21. 清单 note / rel 超长要带省略号（原来硬截断，读的人以为全文）----
+    _long_note = handoff._fmt_change({"rel": "a.py", "note": "啊" * 300,
+                                      "added": 0, "removed": 0, "time": ""})
+    check("清单 note 超长带省略号", "…" in _long_note and len(_long_note) < 220,
+          len(_long_note))
+    _long_rel = handoff._fmt_change({"rel": "d/" * 100 + "x.py", "note": "n",
+                                     "added": 0, "removed": 0, "time": ""})
+    check("清单 rel 超长带省略号且配平",
+          "…" in _long_rel and _long_rel.count("`") % 2 == 0, len(_long_rel))
+
+    # ---- 22. 原因行含落单反引号也不能吞卡 ----
+    _card = render_with([{"role": "user", "content": "q"}],
+                        reason="用户点了重启 ` 然后关窗")
+    check("原因行落单反引号被配平",
+          not [l for l in _card.split("\n") if l.count("`") % 2 == 1])
+
+    # ---- 23. _tail 必须保留换行（原来压成一行，列表/分段全丢）----
+    _t = handoff._tail("第一行\n第二行")
+    check("_tail 保留换行", "\n" in _t and "第一行" in _t and "第二行" in _t, repr(_t))
+    _t2 = handoff._tail("x" * 400 + "\n第二行\n第三行", 240)
+    check("_tail 截尾不切断半行",
+          "\n" in _t2 and "…" in _t2 and not _t2.lstrip().startswith("xxx"),
+          repr(_t2[:40]))
+
+    # ---- 24. 折叠提示里的「原文共 N 行」必须是真实行数 ----
+    # 原来用的是 _clip 之后的行数：原文 60 行、clip 到 200 字后剩 30 行 → 谎报 30
+    _many = "\n".join("第%d行内容" % i for i in range(60))
+    _card = render_with([{"role": "user", "content": "q"},
+                         {"role": "assistant", "content": _many}], )
+    _m = [l for l in _card.split("\n") if "原文共" in l]
+    check("折叠提示行数用原文行数", bool(_m) and "共 60 行" in _m[0], _m[:1])
+
+    # ---- 25. 配平删掉落单反引号后不能留下两个空格 ----
+    _n = handoff._fmt_change({"rel": "a.py", "note": "落单的 ` 会吞卡",
+                              "added": 0, "removed": 0, "time": ""})
+    check("配平后不留双空格", "  " not in _n.split("：", 1)[-1].split("　")[0], repr(_n))
+
+    # ================= 2026-11-18 模糊测试（随机内容 × 多种 cap）挖出来的 =============
+    # ---- 26. 配平不能吃掉刚补上的闭合围栏（最小复现：输入 ``` → 输出 "```\n`"）----
+    _b = handoff._balance_fence("```")
+    check("配平不吃掉闭合围栏", _b.count("```") % 2 == 0, repr(_b))
+    _b2 = handoff._balance_fence("```\n用 `x")
+    check("围栏+落单行内反引号同时存在也成对",
+          _b2.count("```") % 2 == 0 and
+          all(p.count("`") % 2 == 0 for p in _b2.split("```")[::2]), repr(_b2))
+
+    # ---- 27. cap 极小时的兜底截断不能切出半截围栏 ----
+    for cap in (1, 2, 3, 5, 7, 9):
+        for src in ("```", "```\ncode", "````", "a\n```\nb"):
+            o = handoff._clip(src, cap)
+            check("cap=%d 截断后围栏成对（%r）" % (cap, src[:6]),
+                  len(o) <= cap and o.count("```") % 2 == 0, repr(o))
+
+    # ---- 28. 不能输出一行纯空格 ----
+    for src in (" `", "`` ", "``` `"):
+        o = handoff._clip(src, 5)
+        check("无纯空格行（%r）" % src, not any(l and not l.strip()
+                                                for l in o.split("\n")), repr(o))
+
+    # ---- 29. 单行场景（原因/rel/note）里不能出现换行围栏 ----
+    _i = handoff._inline("```python\ncode\n```\n落单 `", 120)
+    check("_inline 不产生换行", "\n" not in _i, repr(_i))
+    check("_inline 围栏成对", _i.count("```") % 2 == 0, repr(_i))
+    _i2 = handoff._inline("a ``` b ``` c ```", 120)      # 3 个围栏（奇数）
+    check("_inline 修掉奇数围栏", _i2.count("```") % 2 == 0, repr(_i2))
+
+    # ---- 30. 改动清单：rel 自己带反引号时，外层包裹不能破 ----
+    _r = handoff._fmt_change({"rel": "````", "note": "x", "added": 1,
+                              "removed": 0, "time": ""})
+    check("清单 rel 不带反引号", _r.count("`") % 2 == 0, repr(_r))
+
+    # ---- 31. 整卡随机模糊（200 组）：围栏/行内反引号/纯空格行/轮数 ----
+    import random as _random
+    _alpha = ["`", "``", "```", "```python\n", "a", "中", "\n", "\n\n", " ", "\t",
+              "…", "**", "|", "- ", "#", "\\", "\r\n", "~~~", "🤖"]
+    _random.seed(20261118)
+    _bad = []
+    for _ in range(200):
+        _dlg = [{"role": _random.choice(["user", "assistant"]),
+                 "text": "".join(_random.choice(_alpha)
+                                 for _ in range(_random.randint(0, 25)))}
+                for _ in range(_random.randint(0, 6))]
+        _chg = [{"rel": "".join(_random.choice(_alpha)
+                                for _ in range(_random.randint(0, 8))),
+                 "note": "".join(_random.choice(_alpha)
+                                 for _ in range(_random.randint(0, 25))),
+                 "added": 1, "removed": 0, "time": "2026-11-18 00:10:00"}
+                for _ in range(_random.randint(0, 10))]
+        _c = render_with(_dlg, changes=_chg,
+                         reason="".join(_random.choice(_alpha)
+                                        for _ in range(15)))
+        _ps = _c.split("```")
+        if _c.count("```") % 2 == 1:
+            _bad.append(("围栏奇数", _c[:120]))
+        elif any(_ps[i].count("`") % 2 == 1 for i in range(0, len(_ps), 2)):
+            _bad.append(("围栏外反引号奇数", _c[:120]))
+        elif any(l and not l.strip() for l in _c.split("\n")):
+            _bad.append(("纯空格行", _c[:120]))
+        _u = sum(1 for m in _dlg if m["role"] == "user")
+        if _u and ("最近 %d 轮" % _u) not in _c:
+            _bad.append(("轮数不符", _c[:120]))
+    check("整卡随机模糊 200 组无不变量违例", not _bad, str(_bad[:2]))
+
+    # ---- 32. 落盘数据本身要干净：rel/note 不能带换行，反引号必须成对 ----
+    handoff.DIR = tempfile.mkdtemp(prefix="hoftest_rec_")
+    handoff.LAST = os.path.join(handoff.DIR, "last.json")
+    handoff.record_change("a.py", note="落单 ` 会吞卡", added=3, removed=1)
+    handoff.record_change("````", note="```python\nx", added=1, removed=0)
+    handoff.record_change("a.py", note="第二次改", added=2, removed=0)
+    _rec = json.load(open(handoff.LAST, encoding="utf-8"))["changes"]
+    check("落盘 rel/note 无换行", all("\n" not in c["rel"] and "\n" not in c["note"]
+                                    for c in _rec), str(_rec)[:160])
+    check("落盘 note 反引号成对", all(c["note"].count("`") % 2 == 0 for c in _rec),
+          str(_rec)[:160])
+    check("同一文件被合并", len(_rec) == 1 and _rec[0]["added"] == 5, str(_rec)[:160])
+
+    # ---- 33. 保存 reason 时超长要留省略号（原来 _clean 硬截断，落盘后看不出被截过）----
+    handoff.touch("s", "x" * 200)
+    _r = json.load(open(handoff.LAST, encoding="utf-8"))["reason"]
+    check("落盘 reason 超长带省略号", "…" in _r and len(_r) <= 120, repr(_r[:40]))
+
+    # ===== 2026-11-18 用户贴的真实卡片 + 复现挖出来的（配平/截断） =====
+    # ---- 34. 配平不能靠「删内容」：note 里的 ``` 必须还看得见 ----
+    _n = handoff._inline("实测 reason 里 3 个 ``` 会漏", 200)
+    check("_inline 配平不丢内容", ("｀｀｀" in _n) or ("```" in _n), repr(_n))
+    check("_inline 配平不留双空格", "  " not in _n, repr(_n))
+    _n2 = handoff._inline("落单 ` 反引号", 200)
+    check("_inline 落单反引号保留可辨识标记", ("｀" in _n2) or ("`" in _n2), repr(_n2))
+
+    # ---- 35. ** 必须在配平反引号之前处理（删 ** 会让两段反引号连成奇数围栏）----
+    for _src in ("``**`````python", "**``````**", "``**`**``"):
+        _o = handoff._balance_fence(_src)
+        check("先处理 ** 再配平围栏（%r）" % _src[:10],
+              _o.count("```") % 2 == 0 and
+              all(p.count("`") % 2 == 0 for p in _o.split("```")[::2]), repr(_o))
+
+    # ---- 36. _finalize 末尾的兜底截断不能破坏刚配好的围栏 ----
+    for _src, _cap in (('|```\r\n\n``**`````python\n', 200),
+                       ('`````**``\\a\\中\n\n', 200),
+                       ('```\n' + 'x' * 50, 12)):
+        _o = handoff._clip(_src, _cap)
+        check("_finalize 硬切后仍配平（cap=%d）" % _cap,
+              len(_o) <= _cap and _o.count("```") % 2 == 0, repr(_o))
+
+    # ---- 37. 截断不能只留结尾的 **（整串 ** 为偶数时也会发生）----
+    _src = "开头很长" * 30 + "**唯一确凿的新 bug 就是「重启前」这个标题在说谎**。现在修它。"
+    _t = handoff._tail(_src, 60)
+    check("_tail 截断后 ** 成对", _t.count("**") % 2 == 0, repr(_t))
+    _c = handoff._clip(_src, 60)
+    check("_clip 截断后 ** 成对", _c.count("**") % 2 == 0, repr(_c))
+
+    # ---- 38. rel 是文件路径：全角 ｀ 也必须剔除（否则 "｀｀｀｀" 会被当成文件名）----
+    handoff.DIR = tempfile.mkdtemp(prefix="hoftest_rel_")
+    handoff.LAST = os.path.join(handoff.DIR, "last.json")
+    handoff.record_change("a.py", note="x", added=1, removed=0)
+    handoff.record_change("````", note="x", added=1, removed=0)
+    _rel = json.load(open(handoff.LAST, encoding="utf-8"))["changes"]
+    check("rel 里的反引号（含全角）一律剔除",
+          len(_rel) == 1 and all("`" not in c["rel"] and "｀" not in c["rel"]
+                                 for c in _rel), str(_rel)[:120])
+
+    # ---- 39. 清单整行拼好后 ** 还要成对（rel 里带 *** 时整行会变奇数）----
+    for _rel in ("``#*****\n…\n***``````***", "\\#** - ***````***", "a.py"):
+        _l = handoff._fmt_change({"rel": _rel, "note": "**重点** 说明", "added": 1,
+                                  "removed": 0, "time": "2026-11-18 00:10:00"})
+        _p = _l.split("```")
+        check("清单整行 ** 成对（rel=%r）" % _rel[:8],
+              _l.count("**") % 2 == 0, repr(_l))
+        check("清单整行反引号成对（rel=%r）" % _rel[:8],
+              _l.count("```") % 2 == 0 and
+              all(x.count("`") % 2 == 0 for x in _p[::2]), repr(_l))
+
+    # ---- 40. 落单反引号有**多处**时要一次修完（原来写死循环 4 次，修不完）----
+    _multi = "```````python\n```python\n- \n- ##````\n```\\\n````\n```python\n…```````python"
+    _o = handoff._inline(_multi, 400)
+    check("多处落单反引号全部修完",
+          _o.count("```") % 2 == 0 and
+          all(x.count("`") % 2 == 0 for x in _o.split("```")[::2]), repr(_o))
+
+    print("\n结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
+    if FAILS:
+        print("失败项：" + "、".join(FAILS))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
