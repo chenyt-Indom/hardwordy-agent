@@ -53,8 +53,9 @@ LOG_PATH = os.path.join(DATA, "rescue.log")
 
 PORT = 8000
 VERIFY_PORT = 8011          # 验证用的临时端口，避开主程序的 8000
-KEEP_SNAPS = 8              # 保留最近几个快照
+KEEP_SNAPS = 8              # 保留最近几个自动快照
 KEEP_BAD = 2                # 「回滚前坏状态」额外保留几个
+KEEP_MAN = 5                # 手动快照（man_）单独计数，不被自动快照挤掉
 
 # ---------------------------------------------------------------- 快照范围
 # 源码目录：整个收（体积小），但排掉缓存与产物
@@ -409,8 +410,20 @@ def create_snapshot(tag="", healthy=None, prefix="snap"):
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     safe_tag = re.sub(r"[^\w\-\u4e00-\u9fff]+", "_", tag or "")[:28].strip("_")
-    name = "%s_%s%s.zip" % (prefix, ts, ("_" + safe_tag) if safe_tag else "")
+    suffix = ("_" + safe_tag) if safe_tag else ""
+    name = "%s_%s%s.zip" % (prefix, ts, suffix)
     path = os.path.join(SNAP_DIR, name)
+    # 同一秒内可能连建两个快照（实测：回滚完立刻再回滚）——同名会互相覆盖，
+    # 把「回滚前状态」这份退路吃掉，导致想回到回滚前却回不去。冲突就补毫秒+序号。
+    if os.path.exists(path):
+        ms = "%03d" % int((time.time() * 1000) % 1000)
+        name = "%s_%s_%s%s.zip" % (prefix, ts, ms, suffix)
+        path = os.path.join(SNAP_DIR, name)
+        _n = 2
+        while os.path.exists(path):
+            name = "%s_%s_%s_%d%s.zip" % (prefix, ts, ms, _n, suffix)
+            path = os.path.join(SNAP_DIR, name)
+            _n += 1
 
     manifest = {
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -474,17 +487,23 @@ def list_snapshots():
             "count": man.get("count", 0),
             "git_head": man.get("git_head", ""),
             "bad": n.startswith("bad_"),
+            "man": n.startswith("man_"),
         })
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return out
 
 
 def prune_snapshots():
-    """保留最近 KEEP_SNAPS 个正常快照 + KEEP_BAD 个坏状态快照。"""
+    """三类分开计数：自动 KEEP_SNAPS 个 / 坏状态 KEEP_BAD 个 / 手动 KEEP_MAN 个。
+
+    为什么手动要单独算：自动快照每次启动都会建一个，如果混在一个池子里，
+    一天重启 9 次就把你亲手存的「改代码前」基线挤掉了 —— 那正是最需要留的那个。
+    """
     snaps = list_snapshots()
-    normal = [s for s in snaps if not s["bad"]]
+    man = [s for s in snaps if s.get("man")]
     bad = [s for s in snaps if s["bad"]]
-    for group, keep in ((normal, KEEP_SNAPS), (bad, KEEP_BAD)):
+    normal = [s for s in snaps if not s["bad"] and not s.get("man")]
+    for group, keep in ((normal, KEEP_SNAPS), (bad, KEEP_BAD), (man, KEEP_MAN)):
         for s in group[keep:]:
             try:
                 os.remove(s["path"])
@@ -767,7 +786,8 @@ def main(argv=None):
     if args.clean_snapshots:
         did = True
         prune_snapshots()
-        _say("已按保留策略清理（保留 %d 个正常 + %d 个坏状态）" % (KEEP_SNAPS, KEEP_BAD))
+        _say("已按保留策略清理（保留 %d 个自动 + %d 个坏状态 + %d 个手动）"
+             % (KEEP_SNAPS, KEEP_BAD, KEEP_MAN))
         return 0
 
     if not did:

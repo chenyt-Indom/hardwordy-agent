@@ -12862,7 +12862,8 @@ def rescue_snapshots():
 def rescue_snapshot(req: VersionSnapReq):
     """立刻打一个全栈快照。"""
     try:
-        r = _rescue_mod().create_snapshot(req.message or "前端手动快照")
+        # prefix="man"：手动快照单独计数（KEEP_MAN），不会因为自动快照多了被挤掉
+        r = _rescue_mod().create_snapshot(req.message or "手动快照", prefix="man")
         if isinstance(r, dict) and r.get("ok"):
             r["msg"] = "快照完成：%s（%d 个文件，%.1f MB）" % (
                 r.get("name", ""), r.get("count", 0), (r.get("bytes_zip") or 0) / 1048576.0)
