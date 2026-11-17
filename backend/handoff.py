@@ -107,7 +107,49 @@ def _clean(s, cap: int = 200) -> str:
     return " ".join(str(s or "").split())[:cap]
 
 
-def _balance_fence(s: str) -> str:
+def _mask_code(s: str) -> str:
+        """把 ``` 围栏与 ` 行内代码换成等长空格（只用于统计正文里的 markdown 标记）。
+
+        2026-11-18 加（用户贴的真实卡片抓到）：原来一律用 `s.count("**") % 2`
+        判奇偶，把**行内代码里**的 `**` 也算进去了。实测一条消息里有 3 处
+        `` `**` `` 加若干正常粗体，总数变奇数，于是把最后一对**正常粗体**的闭合
+        `**` 换成了全角 ＊＊ —— 输出「现在**必须重启＊＊——」，粗体被拆开、
+        还凭空多出两个全角星号。行内代码里的 `**` 是**内容**，不该参与配平。
+        """
+        if not s:
+            return ""
+        out = list(s)
+        off = 0
+        for idx, part in enumerate(s.split("```")):
+            if idx % 2 == 1:                       # 围栏内部：整段遮掉
+                for k in range(off, min(off + len(part), len(out))):
+                    out[k] = " "
+            else:                                  # 围栏外：再按 ` 分出代码段
+                o = off
+                for j, seg in enumerate(part.split("`")):
+                    if j % 2 == 1:                 # 行内代码：遮掉
+                        for k in range(o, min(o + len(seg), len(out))):
+                            out[k] = " "
+                    o += len(seg) + 1
+            off += len(part) + 3
+        return "".join(out)
+
+
+def _bold_pos(s: str) -> list:
+        """返回**正文里**（行内代码/围栏之外）所有 `**` 的起始下标。"""
+        m = _mask_code(s)
+        pos = []
+        k = 0
+        while True:
+            p = m.find("**", k)
+            if p < 0:
+                break
+            pos.append(p)
+            k = p + 2
+        return pos
+
+
+def _balance_fence(s: str, drop_lone: bool = False) -> str:
     """把未闭合的 ``` 围栏、` 行内代码补平。
 
     2026-11-18 修：原来只在「截断时」才配平，于是**短消息**（不截断）里
@@ -116,33 +158,39 @@ def _balance_fence(s: str) -> str:
     """
     if not s:
         return s
-    # 2026-11-18 修（本轮整卡模糊测试抓到）：** 必须在配平反引号**之前**处理。
-    # 实测 "``**`````python" 去掉中间的 ** 后两段反引号连成 7 个，
-    # 围栏奇偶从 2（偶）变成 3（奇）—— 先配平再删 ** 等于白配，输出仍是奇数围栏。
-    if s.count("**") % 2 == 1:
-        k = s.rfind("**")
-        if k >= 0:
-            # 2026-11-18 修（用户贴的真实卡片抓到）：原来是删掉这个 **，
-            # 实测 note「再配一次 **（rel 里的星号…）」被输出成「再配一次 （」——
-            # 两个星号整个消失，读者看不懂。配平不能靠删内容，换全角 ＊＊
-            # （视觉等价、不构成 markdown 粗体、原文不丢）。
-            s = s[:k] + "＊＊" + s[k + 2:]
-    if s.count("```") % 2 == 1:            # 代码围栏没关 → 补一个
-        s += "\n```"
-    # 2026-11-18 修（模糊测试 3000 组随机内容 × 6 种 cap 抓到）：
-    # 原来是 `s.replace("```", "").count("`") % 2 == 1 → 用 rfind 去掉最后一个 `。
-    # 但如果这行末尾正好是**刚补上的闭合围栏**，rfind 找到的是围栏里的那个反引号，
-    # 一删就把 ``` 变成 ``，整张卡后面照样被吞。最小复现：输入「```」→ 输出
-    # "```\n`"。现在只在**围栏之外**的文本里处理落单的行内反引号。
-    parts = s.split("```")
-    for i in range(0, len(parts), 2):       # 偶数下标＝围栏之外的文本
-        if parts[i].count("`") % 2 == 1:
-            j = parts[i].rfind("`")
-            if j >= 0:
-                # 2026-11-18 修：原来是删掉这个 `，实测「落单 ` 反引号」→「落单  反引号」
-                # （内容少一个字符 + 多出双空格）。换全角，内容不丢也不产生双空格。
-                parts[i] = parts[i][:j] + "｀" + parts[i][j + 1:]
-    out = "```".join(parts)
+    # 2026-11-18 修（模糊测试抓到 29/10000 组）：** 的奇偶会在「配平反引号」**之后**
+    # 变化 —— 落单的 ` 换成全角 ｀ 后，原本被行内代码遮住的 ** 就露出来了，奇偶
+    # 又变奇，于是要到下一轮（_finalize）才被改成 ＊＊，输出「a＊＊b*」。
+    # 所以这里改成**反复处理到稳定**：每轮「处理落单 ** → 补围栏 → 配平行内反引号」。
+    for _pass in range(5):
+        _before = s
+        # 1) 正文里落单的 **（_bold_pos 会跳过 `…` 与 ``` 围栏）
+        _bp = _bold_pos(s)
+        if len(_bp) % 2 == 1:
+            k = _bp[-1]
+            if drop_lone:
+                # 截断正好切在**粗体中间**时，这个 ** 是「开标记」，配对的闭合已被
+                # 切掉、后面只剩半个词。换成 ＊＊ 会输出「2 个是真实 bug：＊＊代…」
+                # 这种像错字的东西；它只是语法标记，直接去掉（不涉及内容）。
+                s = s[:k] + s[k + 2:]
+            else:
+                # 换全角 ＊＊：视觉等价、不构成 markdown 粗体、原文不丢（不删内容）
+                s = s[:k] + "＊＊" + s[k + 2:]
+        # 2) 代码围栏没关 → 补一个
+        if s.count("```") % 2 == 1:
+            s += "\n```"
+        # 3) 围栏**之外**的落单行内反引号换全角 ｀
+        #    （不能删：实测「落单 ` 反引号」→「落单  反引号」，少一个字符还多出双空格）
+        parts = s.split("```")
+        for i in range(0, len(parts), 2):   # 偶数下标＝围栏之外的文本
+            if parts[i].count("`") % 2 == 1:
+                j = parts[i].rfind("`")
+                if j >= 0:
+                    parts[i] = parts[i][:j] + "｀" + parts[i][j + 1:]
+        s = "```".join(parts)
+        if s == _before:                    # 稳定了就停
+            break
+    out = s
     # 去掉落单 ` 之后那行可能只剩空格（实测输入「 `」→ 输出一行只有一个空格），
     # markdown 里一行纯空格虽然无害，但会让「无纯空格行」这条断言不成立，也不干净。
     return "\n".join(("" if not l.strip() else l.rstrip()) for l in out.split("\n"))
@@ -162,13 +210,13 @@ def _inline(s, cap: int = 160) -> str:
         t = t[:max(0, cap - 1)].rstrip() + "…"
     # 2026-11-18 加：截断可能把开头的 ** 切掉只剩结尾的 **，后面整段变粗体。
     # 和 _balance_fence 一样，必须在配平反引号之前处理（删 ** 会合并反引号段）。
-    if t.count("**") % 2 == 1:
-        k = t.rfind("**")
-        if k >= 0:
-            # 2026-11-18 修（真实卡片抓到）：原来是删掉 **，note 里那个
-            # 「再配一次 **（…）」被输出成「再配一次 （」，内容凭空少两个字符。
-            # 换全角 ＊＊：视觉等价、不是 markdown 标记、原文不丢。
-            t = (t[:k] + "＊＊" + t[k + 2:]).strip()
+    # 2026-11-18 修（真实卡片抓到）：同 _balance_fence —— 只统计正文里的 **，
+    # 否则 note 里 `` `**` `` 这类行内代码会让正常粗体被拆成 ＊＊。
+    _bp = _bold_pos(t)
+    if len(_bp) % 2 == 1:
+        k = _bp[-1]
+        # 换全角 ＊＊：视觉等价、不是 markdown 标记、原文不丢（不删内容）
+        t = (t[:k] + "＊＊" + t[k + 2:]).strip()
     # 单行里既要围栏成对、围栏外的行内反引号也要成对。
     # 2026-11-18 修：原来只判 `t.count("`") % 2`，实测 reason 里出现 3 个 ```
     # （9 个反引号，奇数）时删掉一个 → 剩 8 个，但围栏还是 3 个，整卡照样奇数。
@@ -216,7 +264,7 @@ def _finalize(s: str, cap: int) -> str:
         if len(s) <= cap:
             break
         s = s[:cap]
-        s = _balance_fence(s)
+        s = _balance_fence(s, drop_lone=True)
     if len(s) > cap:
         s = s[:cap]
     if s.count("```") % 2 == 1 or any(
@@ -225,11 +273,12 @@ def _finalize(s: str, cap: int) -> str:
     # 2026-11-18 加（2000 组整卡模糊抓到 572 组）：上面的兜底截断只看了反引号，
     # 没管 ** —— 切在 ** 中间会输出单个 *，切掉配对的那个也会剩一个孤立的 **，
     # 那一行之后整段变粗体。这里统一再配一次。
-    if s.count("**") % 2 == 1:
-        k = s.rfind("**")
-        if k >= 0:
-            # 同上：不删内容，换全角 ＊＊
-            s = s[:k] + "＊＊" + s[k + 2:]
+    _bp = _bold_pos(s)
+    if len(_bp) % 2 == 1:
+        # 这里已经是「被截断过」的文本：落单的 ** 是切在粗体中间留下的语法标记，
+        # 后面没有正文，直接去掉（换成 ＊＊ 会输出「：＊＊代…」这种像错字的东西）。
+        k = _bp[-1]
+        s = s[:k] + s[k + 2:]
     if s.endswith("*") and not s.endswith("**"):
         s = s.rstrip("*")                  # 被切成一半的 *
     return s if s.strip() else ""
@@ -310,7 +359,9 @@ def _clip(s, cap: int = 200, ellipsis: bool = True) -> str:
     # 本来 ** 是配对的，被补成「**我先核对基线，再写一批**新用例**…」——
     # 粗体从第 0 字开始，把正确的格式改坏了。补在开头只会让更多文字变粗体，
     # 方向就是错的。落单的 ** 交给 _balance_fence 换全角 ＊＊ 收尾即可。
-    body = _balance_fence(body)
+    # 这里是**真的被切过**的地方：落单的 ** 是切在粗体中间留下的开标记，
+    # 后面只剩半个词，换成 ＊＊ 会输出「：＊＊代…」这种像错字的东西，直接去掉。
+    body = _balance_fence(body, drop_lone=True)
     return _finalize(body + ("…" if ellipsis else ""), cap)
 
 
@@ -566,11 +617,11 @@ def _fmt_change(it: dict) -> str:
     # 2026-11-18 加（2400 组模糊抓到 32 组）：rel/note 各自配平了，但**拼成一行后**
     # 还会互相干扰 —— 实测 rel 里带 "***"（路径里不该有，但旧数据可能有）时，
     # 整行 ** 变成 5 个（奇数），这一行之后的内容全被当成粗体。整行再配一次。
-    if line.count("**") % 2 == 1:
-        k = line.rfind("**")
-        if k >= 0:
-            # 同上：整行配平也不许删内容，换全角 ＊＊
-            line = line[:k] + "＊＊" + line[k + 2:]
+    _bp = _bold_pos(line)
+    if len(_bp) % 2 == 1:
+        # 同上：只算正文里的 **（note 里的 `` `**` `` 不算）；不删内容，换全角 ＊＊
+        k = _bp[-1]
+        line = line[:k] + "＊＊" + line[k + 2:]
     return line
 
 
@@ -603,7 +654,11 @@ def _tail(text: str, cap: int = TAIL_CAP) -> str:
         # 实测输出「…这个标题在说谎**。现在修它。」→ 后面整段被当成粗体。
         # 只按「整串 ** 奇偶」判断抓不到这种（那段里共有 4 个 **，是偶数），
         # 必须看**被丢掉的前缀**里有没有落单的 **，有就补一个开头 ** 回来。
-        if dropped.count("**") % 2 == 1:
+        # 2026-11-18 修（真实卡片抓到）：原来是 dropped.count("**") % 2 —— 又把
+        # 行内代码里的 `**` 数进去了，于是**误判**成「开头有个落单粗体」，补了
+        # 一个 "…**"，补完反而变奇数，最后被换成全角 ＊＊（输出「生成的＊＊。」）。
+        # 只统计正文里的 **（_bold_pos 会跳过 `…` 与 ``` 围栏）。
+        if len(_bold_pos(dropped)) % 2 == 1:
             t = "…**" + t[1:]
     t = _balance_fence(t)
     if "\n" in t:                        # 续行缩进，避免破坏「· 那个会话…」这一行的结构

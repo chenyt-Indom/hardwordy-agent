@@ -415,6 +415,31 @@ def main():
           _o.count("```") % 2 == 0 and
           all(x.count("`") % 2 == 0 for x in _o.split("```")[::2]), repr(_o))
 
+    # ---- 41. 行内代码里的 `**` 不该把**正常粗体**拆成 ＊＊（用户贴的真实卡片抓到）----
+    _s = ('根因：**4 处"`**`"和"`**`"**，统一改成**全角 `＊＊`**。现在**必须重启**——否则')
+    _o = handoff._clip(_s, 2000)
+    check("行内代码里的 ** 不拆正常粗体（_clip）", "重启＊＊" not in _o, repr(_o[-24:]))
+    _o2 = handoff._inline('测试：固化「整行 `**` 配平」，注意**这个**要保留', 400)
+    check("行内代码里的 ** 不拆正常粗体（_inline）", "这个＊＊" not in _o2, repr(_o2))
+    _t = "前面很多字" * 20 + "正文 `**` 行内 后面**真粗体**。收尾"
+    check("_tail 不因行内 ** 误补开头 **", "…**正文" not in handoff._tail(_t, 40),
+          repr(handoff._tail(_t, 40)))
+
+    # ---- 42. 截断正好切在粗体中间：去掉语法标记，不留 ＊＊ 当错字 ----
+    _cut = "确认 **4 个真实缺陷**，其中 2 个是真实 bug：**代码块补上的闭合围栏被长度兜底又截掉了**，后面还有很多字"
+    _oc = handoff._clip(_cut, 60)
+    check("截断切在粗体中间不留 ＊＊", "＊＊" not in _oc, repr(_oc[-20:]))
+
+    # ---- 43. 短消息里落单的 ** 仍要保留（不能为了配平删内容）----
+    check("短消息落单 ** 仍保留", "＊＊" in handoff._clip("note 里有落单 ** 结尾", 200),
+          repr(handoff._clip("note 里有落单 ** 结尾", 200)))
+
+    # ---- 44. 反引号配平会改变 ** 奇偶 → 必须反复处理到稳定 ----
+    _mix = "`**```双反引号``   缩进`**`a**b**c"
+    _om = handoff._clip(_mix, 80)
+    check("配平后仍稳定（** 成对）", len(handoff._bold_pos(_om)) % 2 == 0, repr(_om))
+    check("配平后仍稳定（围栏成对）", _om.count("```") % 2 == 0, repr(_om))
+
     print("\n结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:
         print("失败项：" + "、".join(FAILS))
