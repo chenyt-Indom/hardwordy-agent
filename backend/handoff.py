@@ -242,6 +242,61 @@ def _balance_bold_block(block: str, drop_lone: bool = False) -> str:
     return block
 
 
+def _demote_inline_fences(s: str) -> str:
+    """把**不在行首**的 ``` 换成全角（等长替换）。
+
+    markdown 只把**行首**（允许前导空格）的 ``` 当围栏，行内的 ``` 只是
+    普通字符。但下游判围栏全用 count("```") / split("```") / rfind("```")，
+    分不出两者 —— 于是「正文里提到 ``` 」会被当成**未闭合围栏**，
+    grow=True 时补一个闭合，**凭空造出一个真围栏**。
+
+    实测（2026-11-18 交接卡）：助手原文里有 `_balance` 仍会补 `"\\n```"`
+    这么一句，_tail 从末尾截出来后判出 1 个围栏 → 补 "\\n```" →
+    整卡围栏行变成 1（奇数），后面的改动清单全被吞进代码块。
+
+    换成全角后：视觉一致、长度不变、不再是标记，下游的 count/split
+    也就只对应真围栏了。
+    """
+    if "```" not in s and "~~~" not in s:
+        return s
+    out = []
+    for ln in s.split("\n"):
+        st = ln.lstrip()
+        if st.startswith("```"):
+            # 行首那 3 个是围栏，保留；但**这一行后面**再出现的 ``` 仍然不是
+            # 围栏（围栏行的信息串里不会再起一个围栏），必须一并降级 ——
+            # 否则 count("```") 会把它们算进去，奇偶判断跟着错。
+            # 实测：'```约```python' 这种行 count=2（偶数→不补），
+            # 可它其实是一个未闭合围栏，整卡围栏就变成奇数。
+            i = ln.find("```")
+            out.append(ln[:i + 3] + ln[i + 3:].replace("```", _FW_FENCE))
+        elif st.startswith("~~~"):
+            # markdown 里 ~~~ 与 ``` 等价，但本模块只配平 ```。
+            # 未闭合的 ~~~ 同样会把后面整张卡吞进代码块，所以这里一律
+            # 等长降级成全角（不丢内容、不变长、绝不再构成标记）。
+            out.append(ln.replace("~~~", "～～～"))
+        else:
+            out.append(ln.replace("```", _FW_FENCE))
+    return "\n".join(out)
+
+
+def _demote_all_fences(s: str) -> str:
+    """把**所有**围栏标记换成全角（等长）。
+
+    用在「已经确定围栏语义不成立」的地方 —— 交接卡里每条正文前面都有
+    「用户：/ 你：」前缀：第一行的 ``` 根本不在行首，可**续行缩进两格后
+    的 ``` 仍然在行首**，配对就被打断，整卡围栏变成奇数，后面的改动清单
+    全被吞进代码块。
+
+    实测：body='```python\\ncode\\n```' 单独看围栏 2（偶数，配平过的），
+    拼进卡片变成 1（奇数）。所以进卡片之前必须全降级。
+    """
+    t = str(s or "").replace("```", _FW_FENCE).replace("~~~", "～～～")
+    # 4 个反引号 ` ```` ` 降级后只剩 1 个半角 → 行内反引号变奇数，这里再配一次
+    # （grow=False：绝不再补围栏，本函数的前提就是"围栏语义不成立"）
+    return _balance(t, grow=False, drop_lone=True)
+
+
 def _balance_once(s: str, grow: bool = True, drop_lone: bool = False) -> str:
     """配平**一轮**（由 _balance 循环调用到稳定）。
 
@@ -264,6 +319,10 @@ def _balance_once(s: str, grow: bool = True, drop_lone: bool = False) -> str:
     """
     if not s:
         return ""
+    # 0) 行内的 ``` 不是围栏（markdown 只认行首），先降级成全角。
+    #    否则下面 count("```") 会把「正文里提到 ``` 」当成未闭合围栏，
+    #    grow=True 时补一个闭合 —— 反而凭空造出一个真围栏。
+    s = _demote_inline_fences(s)
     # 1) 代码围栏
     if s.count("```") % 2 == 1:
         if grow:
@@ -274,10 +333,16 @@ def _balance_once(s: str, grow: bool = True, drop_lone: bool = False) -> str:
     # 2) 围栏**之外**的落单行内反引号（逐段配平，等长替换）
     parts = s.split("```")
     for i in range(0, len(parts), 2):
-        if parts[i].count("`") % 2 == 1:
-            j = parts[i].rfind("`")
-            if j >= 0:
-                parts[i] = parts[i][:j] + _FW_TICK + parts[i][j + 1:]
+        # **逐行**配平：行内代码不能跨行，所以「上一行 1 个、下一行 1 个」
+        # 并不是一对，两行各留一个未闭合的 `。按整块判奇偶（原来）会算成
+        # 偶数放过，于是那两行各自把后半句变成等宽。
+        _ls = parts[i].split("\n")
+        for _k, _ln in enumerate(_ls):
+            if _ln.count("`") % 2 == 1:
+                _j = _ln.rfind("`")
+                if _j >= 0:
+                    _ls[_k] = _ln[:_j] + _FW_TICK + _ln[_j + 1:]
+        parts[i] = "\n".join(_ls)
     s = "```".join(parts)
     # 3) 正文里连续 ≥3 个星号 → 等长全角
     #    `***` / `****` 在 markdown 里是粗斜体/分隔线，落单时会把后面整段变粗体，
@@ -436,6 +501,7 @@ def _bold_pos(s: str) -> list:
     t = str(s or "")
     if not t:
         return []
+    t = _demote_inline_fences(t)
     if t.count("```") % 2 == 1:
         i = t.rfind("```")
         t = t[:i] + _FW_FENCE + t[i + 3:]
@@ -476,7 +542,9 @@ def _tail(text: str, cap: int = TAIL_CAP) -> str:
         t = "…" + t
     # 从末尾截会把开头的 `**` 切掉、只剩结尾那个闭合标记 → 后面整段变粗体。
     # 那是纯语法标记，直接去掉（drop_lone）。
-    t = _balance(t, grow=True, drop_lone=True)
+    # 这里**不能** grow：_tail 的结果要拼在「· 那个会话最后停在这里：」后面，
+    # 第一行有前缀、续行缩进两格 —— 补出来的闭合围栏会单独成行、配对不成立。
+    t = _balance(t, grow=False, drop_lone=True)
     if "\n" in t:
         t = "\n".join(("  " + ln) if ln else "" for ln in t.split("\n"))
     return t
@@ -788,7 +856,7 @@ def _fold(body: str, orig_text: str, limit: int = 24) -> str:
     lines = body.split("\n")
     if len(lines) <= limit:
         return body
-    head = "\n".join(lines[:limit])
+    head = _demote_inline_fences("\n".join(lines[:limit]))
     orig = len(str(orig_text or "").split("\n"))
     note = "…（原文共 %d 行，已折叠显示前 %d 行）" % (max(orig, len(lines)), limit)
     # 折叠点可能正落在 ``` 代码块里 → 先补闭合围栏，提示放到围栏**外面**
@@ -872,6 +940,10 @@ def render(session: str = "") -> str:
             cap = LAST_CAP if i >= n - 2 else TEXT_CAP
             raw = str(m.get("text") or "")
             body = _fold(_clip(raw, cap), raw)
+            # 进卡片前把围栏全降级：这一行前面要加「用户：/ 你：」前缀，
+            # 第一行的 ``` 就不在行首了，可续行缩进后仍在行首 —— 配对被打断，
+            # 整卡围栏变奇数、后面全被吞。实测 body 单独 2 个围栏、进卡变 1 个。
+            body = _demote_all_fences(body)
             if "\n" in body:
                 # 续行缩进对齐；空行留空，别写成 "  "（markdown 里两个空格＝硬换行）
                 body = "\n".join(("  " + ln) if ln else "" for ln in body.split("\n"))
@@ -881,7 +953,8 @@ def render(session: str = "") -> str:
     # 只有「另一个会话」时才补一句结尾，帮模型接上别人那条线。
     last = _last_assistant(dialog)
     if last and not same:
-        lines.append("· 那个会话最后停在这里：%s" % _tail(last))
+        lines.append("· 那个会话最后停在这里：%s"
+                     % _demote_all_fences(_tail(last)))
 
     if changes:
         pre, post = _split_changes(changes, restarted)

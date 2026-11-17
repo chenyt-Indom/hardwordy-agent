@@ -631,6 +631,61 @@ def main():
         handoff._read = _orig_read
     check("整卡随机 200 组无不变量违例", not _card_bad, str(_card_bad[:3]))
 
+    # 51. 行内的 ``` 不是围栏（markdown 只认行首）
+    #     实测 2026-11-18 的交接卡：助手原文里有 `仍会补 "\n```"` 这么一句，
+    #     _tail 截出来后 count 判出 1 个围栏 → 补一个闭合 → 整卡围栏变奇数，
+    #     后面 12 条改动清单全被吞进代码块。
+    _x = '他补了 `"\\n```"` 这一段'
+    _o = handoff.sanitize(_x, 200)
+    _f = [l for l in _o.split("\n") if l.lstrip().startswith("```")]
+    check("行内 ``` 不凭空补出围栏", not _f, repr(_o))
+
+    # 52. ~~~ 在 markdown 里与 ``` 等价，未闭合一样吞掉整张卡
+    _o = handoff.sanitize("前文\n~~~\n代码", 200)
+    _f = [l for l in _o.split("\n") if l.lstrip().startswith(("```", "~~~"))]
+    check("未闭合 ~~~ 被降级（不吞卡）", not _f, repr(_o))
+
+    # 53. _tail 从末尾截，截出来含行内 ``` 时不能补围栏
+    _o = handoff._tail("很长" * 200 + ' 仍会补 "\\n```" 这句')
+    _f = [l for l in _o.split("\n") if l.lstrip().startswith("```")]
+    check("_tail 不因行内 ``` 补围栏", not _f, repr(_o[-40:]))
+
+    # 54. 整卡：内容含行内 ``` 与 ~~~ 时，围栏仍必须成对
+    _d = {"ts": __import__("time").time(), "restarted_at": "2026-11-18 03:11:37",
+          "dialog": [{"role": "user", "text": "他说 ``` 和 ~~~ 都会吞"},
+                     {"role": "assistant", "text": "补 \"\\n```\" 之后\n~~~\n结束"}],
+          "dialog_session": "s2", "live_at": "x", "changes": []}
+    _orig_read = handoff._read
+    try:
+        handoff._read = lambda _d=_d: _d
+        _c = handoff.render("s2")
+    finally:
+        handoff._read = _orig_read
+    _f = [l for l in _c.split("\n") if l.lstrip().startswith(("```", "~~~"))]
+    check("整卡含行内 ``` / ~~~ 时围栏成对", len(_f) % 2 == 0, repr(_f))
+
+    # 55. 卡片里带**代码块**的对话 —— 正文第一行要加「用户：/ 你：」前缀，
+    #     那行的 ``` 就不在行首了，可续行缩进两格后仍在行首 → 配对被打断。
+    #     实测：body='```python\ncode\n```' 单独看围栏 2（偶），进卡变 1（奇），
+    #     后面 12 条改动清单全被吞进代码块。所以进卡前必须把围栏全降级。
+    _d = {"ts": __import__("time").time(), "restarted_at": "2026-11-18 04:04:16",
+          "dialog": [{"role": "user", "text": "看这段"},
+                     {"role": "assistant", "text": "```python\nprint(1)\n```\n完了"}],
+          "dialog_session": "s3", "live_at": "x", "changes": []}
+    _orig_read = handoff._read
+    try:
+        handoff._read = lambda _d=_d: _d
+        _c = handoff.render("s3")
+    finally:
+        handoff._read = _orig_read
+    _f = [l for l in _c.split("\n") if l.lstrip().startswith(("```", "~~~"))]
+    check("卡片里带代码块不产生未闭合围栏", len(_f) % 2 == 0, repr(_f))
+
+    # 56. _tail 拼在「· 那个会话最后停在这里：」后面，同样不能补围栏
+    _o = handoff._tail("前文\n```\n代码块")
+    _f = [l for l in _o.split("\n") if l.lstrip().startswith("```")]
+    check("_tail 不补出闭合围栏", not _f, repr(_o))
+
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:
