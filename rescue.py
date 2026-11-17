@@ -1473,6 +1473,16 @@ def _rollback_impl(snap_path=None, clean=True, deep=False, force=False, allow_ma
     path = _resolve_snap(snap_path)
     if not path:
         if snap_path:
+            # ⚠️ 2026-11-18 实测：两个快照共享前缀时，_resolve_snap 返回 None（拒绝猜，正确），
+            # 但下面那句「可能已被清理策略删除」是**误导**——快照明明还在列表里，用户会以为
+            # 快照丢了、甚至去重建一份。所以先区分「歧义」和「真找不到」。
+            _hits = [s["name"] for s in list_snapshots()
+                     if s["name"].startswith(snap_path) and s["name"] != snap_path]
+            if len(_hits) > 1:
+                return {"ok": False, "error": "快照名「%s」有歧义：同时匹配到 %d 份"
+                                             "（%s）。请给出更完整的名字，或在界面上点具体那一行"
+                                             "（本次未改动任何文件）。"
+                                             % (snap_path, len(_hits), "、".join(_hits[:3]))}
             # 用户明确点了某个版本却解析不到（被清理策略删了 / 名字传错）——
             # 绝不能静默换成别的版本，否则提示「回滚成功」而实际回滚的是另一份。
             return {"ok": False, "error": "找不到快照「%s」：可能已被清理策略删除。"
