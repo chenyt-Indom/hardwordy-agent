@@ -395,6 +395,82 @@ def _balance(s: str, grow: bool = True, drop_lone: bool = False) -> str:
     return s
 
 
+# 头尾截断的切点字符：句末 > 句中 > 空格（英文词边界）
+_SENT_END = "。！？；!?;\n"
+_SENT_MID = "，、：,:"
+_WORD_END = " \t"
+
+
+def _dot(s: str) -> str:
+    """给 s 补省略号；已经以「…」结尾就不再叠一个（否则出现「……」。"""
+    s = s.rstrip()
+    while s.endswith("…"):
+        s = s[:-1].rstrip()
+    return s + "…"
+
+
+def _smart_slice(ln: str, cap: int) -> str:
+    """把一行截成「头…尾」，切点回退到句子 / 单词边界。
+
+    **为什么需要它**：早先是按字符位置硬切，于是
+    `晚于 handoff.py 的 03:05:45` 被切成 `晚于 h` + `andoff.py 的 03:05:45`，
+    `（.bak 恢复失败会不会崩）` 被切成 `（｀.` + `崩”` —— 两截拼起来读不通。
+    这里让每个片段都以完整句子 / 单词收尾。
+    """
+    if cap <= 0 or len(ln) <= cap:
+        return ln
+    if cap <= 4:
+        return ln[:cap]
+    body_cap = cap - 1                      # 留给 …
+    head_n = max(1, int(body_cap * 0.6))
+    tail_n = max(1, body_cap - head_n)
+
+    def _left(s, pos, floor, chars):
+        """pos 往左退到「chars 里的字符」之后；退不到就返回 pos。"""
+        if pos > 0 and s[pos - 1] in chars:
+            return pos
+        i = pos
+        while i > floor:
+            if s[i - 1] in chars:
+                return i
+            i -= 1
+        return pos
+
+    def _right(s, pos, ceil, chars):
+        """pos 往右进到「chars 里的字符」之后；进不到就返回 pos。"""
+        if pos > 0 and s[pos - 1] in chars:
+            return pos
+        i = pos
+        while i < ceil:
+            if s[i - 1] in chars:
+                return i
+            i += 1
+        return pos
+
+    p, q = head_n, len(ln) - tail_n
+    for chars in (_SENT_END, _SENT_MID, _WORD_END):
+        got = _left(ln, p, max(1, int(body_cap * 0.35)), chars)
+        if got != p:
+            p = got
+            break
+    for chars in (_SENT_END, _SENT_MID, _WORD_END):
+        got = _right(ln, q, len(ln) - max(1, int(body_cap * 0.25)), chars)
+        if got != q:
+            q = got
+            break
+    if q <= p or p + (len(ln) - q) + 1 > cap:   # 相接 / 超长 → 老实硬切
+        p, q = head_n, len(ln) - tail_n
+    if q <= p:
+        return ln[:body_cap].rstrip("…").rstrip() + "…"
+    head = ln[:p].rstrip()
+    tail = ln[q:].lstrip()
+    while head.endswith("…"):          # 原文自带省略号 → 不再叠一个
+        head = head[:-1].rstrip()
+    while tail.startswith("…"):
+        tail = tail[1:].lstrip()
+    return head + "…" + tail
+
+
 def _cut(body: str, budget: int, per_line_cap: int = 0):
     """按**行**截断到 budget 字内，尽量不切断行（列表/表格/围栏才不会被撕开）。
 
@@ -422,14 +498,12 @@ def _cut(body: str, budget: int, per_line_cap: int = 0):
             # 表格行 / 围栏行 / 缩进列表：只截前缀。截尾会把表格最后一列、
             # 列表层级截掉，比丢掉后半句更糟。
             if s.startswith("|") or s.startswith("```") or s.startswith("~~~"):
-                fixed.append(ln[:per_line_cap - 1] + "…")
+                fixed.append(_dot(ln[:per_line_cap - 1]))
                 continue
             # 普通长段落：**头尾都留**。实测 12 条回复的前 200 字全是
             # 「我先核对…」这种开场白，真正的结论（查出了什么、改了什么）
             # 都在尾部 —— 只留前缀等于把有效信息全丢了。
-            head_n = max(1, int((per_line_cap - 1) * 0.6))
-            tail_n = max(1, (per_line_cap - 1) - head_n)
-            fixed.append(ln[:head_n] + "…" + ln[-tail_n:])
+            fixed.append(_smart_slice(ln, per_line_cap))
         lines = fixed
     out, total = [], 0
     for ln in lines:
@@ -439,8 +513,11 @@ def _cut(body: str, budget: int, per_line_cap: int = 0):
             total += add
             continue
         room = budget - total - (1 if out else 0)
-        if room > 0:
-            out.append(ln[:room])
+        if room > 1:
+            seg = ln[:room]
+            if len(ln) > room:
+                seg = _dot(ln[:room - 1])
+            out.append(seg)
         break
     return "\n".join(out).rstrip(), True
 
@@ -483,7 +560,7 @@ def sanitize(s, cap: int = None, multiline: bool = True,
     body = _balance(body, grow=grow, drop_lone=drop_lone or cut)
 
     if cut and ellipsis:
-        body = body.rstrip() + "…"
+        body = _dot(body)
 
     # 兜底：等长替换理论上不会变长，但 grow 补围栏 + 省略号可能顶出去 1~2 字
     if cap and len(body) > cap:
@@ -593,7 +670,7 @@ def _tail(text: str, cap: int = TAIL_CAP) -> str:
         nl = t.find("\n")
         if 0 <= nl < len(t) - 1:            # 别从半行开始
             t = t[nl + 1:]
-        t = "…" + t
+        t = "…" + t.lstrip("\n")
     # 从末尾截会把开头的 `**` 切掉、只剩结尾那个闭合标记 → 后面整段变粗体。
     # 那是纯语法标记，直接去掉（drop_lone）。
     # 这里**不能** grow：_tail 的结果要拼在「· 那个会话最后停在这里：」后面，
