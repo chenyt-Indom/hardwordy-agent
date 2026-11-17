@@ -397,7 +397,10 @@ def _balance(s: str, grow: bool = True, drop_lone: bool = False) -> str:
 
 # 头尾截断的切点字符：句末 > 句中 > 空格（英文词边界）
 _SENT_END = "。！？；!?;\n"
-_SENT_MID = "，、：,:"
+# ★ 只留**全角**标点。原来还含半角 `,` `:`，于是时间 `03:05:45` 里的冒号
+#   被当成句子边界，尾段从 `05:45，因此…` 开始（半截时间，读不通）。
+#   半角标点在中英混排/代码里到处是，不能当句子边界用。
+_SENT_MID = "，、："
 _WORD_END = " \t"
 
 
@@ -447,19 +450,52 @@ def _smart_slice(ln: str, cap: int) -> str:
             i += 1
         return pos
 
-    p, q = head_n, len(ln) - tail_n
+    p = head_n
     for chars in (_SENT_END, _SENT_MID, _WORD_END):
         got = _left(ln, p, max(1, int(body_cap * 0.35)), chars)
         if got != p:
             p = got
             break
-    for chars in (_SENT_END, _SENT_MID, _WORD_END):
-        got = _right(ln, q, len(ln) - max(1, int(body_cap * 0.25)), chars)
+
+    # ★ 尾段必须从**完整句子**开始。原来 _right 只允许往右挪 body_cap*0.25，
+    #   挪不到就退回硬切 —— 实测 `backend/_feature_tests/test_handoff_card.py`
+    #   被切成 `s/test_handoff_card.py`（从路径中间开始），
+    #   `（.bak 恢复失败会不会崩）` 被切成 `（｀.` + `崩”`。
+    #   现在：允许牺牲最多一半尾段长度去对齐，只认句子符（含换行）；
+    #   仍然对不齐 → **放弃尾段**，预算全给头段（宁可只有开头，也不给半截）。
+    q = len(ln) - tail_n
+    q2 = None
+    for chars in (_SENT_END, "\n"):
+        got = _right(ln, q, min(len(ln), q + tail_n), chars)
         if got != q:
-            q = got
+            q2 = got
             break
-    if q <= p or p + (len(ln) - q) + 1 > cap:   # 相接 / 超长 → 老实硬切
-        p, q = head_n, len(ln) - tail_n
+    if q2 is None:
+        got = _right(ln, q, min(len(ln), q + tail_n), _SENT_MID)
+        if got != q:
+            q2 = got
+    if q2 is None or q2 <= p or q2 >= len(ln) - 2:
+        # 尾部没有干净的起点 → 只留头段（按句子对齐到 cap）
+        got = _left(ln, body_cap, max(1, int(body_cap * 0.5)), _SENT_END)
+        if got == body_cap:
+            got = _left(ln, body_cap, max(1, int(body_cap * 0.5)), _SENT_MID)
+        head = ln[:got] if got != body_cap else ln[:body_cap]
+        while head.endswith("…"):
+            head = head[:-1].rstrip()
+        return head.rstrip() + "…"
+    q = q2
+    if p + (len(ln) - q) + 1 > cap:
+        # 对齐后超长 → **缩短头段**去容纳干净的尾段。
+        # 原来这里退回 `p, q = head_n, len(ln)-tail_n`（双硬切），
+        # 于是刚对齐好的尾段又被切回半句（实测 `…05:45，因此`）。
+        room = cap - 1 - (len(ln) - q)
+        if room >= 8:
+            got = _left(ln, room, max(1, room // 2), _SENT_END)
+            if got == room:
+                got = _left(ln, room, max(1, room // 2), _SENT_MID)
+            p = got if got != room else room
+        else:
+            p, q = head_n, len(ln) - tail_n
     if q <= p:
         return ln[:body_cap].rstrip("…").rstrip() + "…"
     head = ln[:p].rstrip()
@@ -862,9 +898,16 @@ def _dialog_digest(session: str) -> list:
             continue
         role = str(m.get("role") or "")
         # 这里**不补省略号**（否则注入时再截一次会出现「……」）
-        # per_line_cap：一条回复的第一段常有 2000+ 字，不限的话它把 1200 字
-        # 预算全吃掉，后面 40 多行（标题/表格/结论）全丢 —— 实测只保留 38.7%。
-        text = _clip(m.get("content"), 1200, ellipsis=False, per_line_cap=400)
+        # ★ 2026-11-18 修（碎片固化）：原来存 1200 字 + per_line_cap=400，
+        #   于是这里就做了「头 60% + … + 尾 40%」的拼接，把长回复从中间
+        #   挖掉一块。实测存进 last.json 的是
+        #     `…角度：**`last.jso…109/109 通过。…`
+        #     `…（`奇偶随之……`、｀磁盘异…测试。15,000 组…`
+        #   这种碎片**一旦落盘就固化**，render 层再怎么按句子边界切也救不回来
+        #   （它看到的就是一截断掉的 `last.jso`）。
+        #   改为存**完整原文**（8000 只是兜底，实测最长 4292），把「怎么截」
+        #   全部交给 render —— 只有那一层知道卡片只有 200 字预算、头尾各留多少。
+        text = _clip(m.get("content"), 8000, ellipsis=False, per_line_cap=0)
         if role not in ("user", "assistant") or not text:
             continue
         # 同角色 + 内容高度重复 → 只留一条（长的），避免同一件事报两遍
@@ -968,6 +1011,12 @@ def _fmt_change(it: dict) -> str:
     line = "- `%s`" % rel
     if added or removed:
         line += "（+%d -%d 行）" % (added, removed)
+    try:
+        n = int(it.get("n") or 1)
+    except Exception:
+        n = 1
+    if n > 1:
+        line += "（共 %d 次）" % n
     if note:
         line += "：%s" % note
     # 只留「月-日 时:分」。原来直接 t[5:16] 硬切，实测 time 是 "11-18 05:00"
@@ -1034,8 +1083,40 @@ def _ts_ok(ts) -> bool:
     return (now - ts) <= KEEP_DAYS * 86400
 
 
+def _merge_by_rel(items: list) -> list:
+    """同一文件在窗口里出现多次 → 合并成一条。
+
+    **为什么不能只在 record_change 里合并相邻的**：实际改代码是
+    「改 handoff.py → 补测试 → 改 handoff.py → 补测试」交替进行的，
+    `ch[-1]` 永远不是同文件，那条相邻合并**从来没生效过**。
+    实测 last.json 30 条改动 = handoff.py 15 条 + test_handoff_card.py 15 条，
+    卡片上同一个测试文件出现 6 次，标题还写「最近 12 个」——
+    读起来像 12 个不同文件，实际只有 2 个。
+    """
+    seen, order = {}, []
+    for c in items:
+        rel = str(c.get("rel") or "")
+        it = seen.get(rel)
+        if it is None:
+            it = dict(c)
+            it["n"] = 1
+            seen[rel] = it
+            order.append(it)
+            continue
+        try:
+            it["added"] = int(it.get("added") or 0) + int(c.get("added") or 0)
+            it["removed"] = int(it.get("removed") or 0) + int(c.get("removed") or 0)
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        it["n"] = int(it.get("n") or 1) + 1
+        if c.get("note"):
+            it["note"] = c.get("note")          # 留最新的说明
+        it["time"] = c.get("time") or it.get("time")
+    return order
+
+
 def _split_changes(changes: list, restarted: str):
-    """按「重启时间」把改动分成 重启前 / 重启之后 两组。
+    """按「重启时间」把改动分成 重启前 / 重启之后 两组，组内按文件合并。
 
     原来一律写「那次重启前改过的文件」，但清单取的是「最近 SHOW_CHANGES 条」，
     里面混着重启之后才做的改动（实测真实卡片：上次重启 02:34:17，清单里却有
@@ -1051,6 +1132,9 @@ def _split_changes(changes: list, restarted: str):
             post.append(c)                 # 格式固定 "YYYY-MM-DD HH:MM:SS"，可直接比
         else:
             pre.append(c)
+    # ★ 先按文件合并，**再**切片 —— 反过来的话，4 个「重启前」位置可能被
+    #   同一个文件的 4 次改动占满，等于又退回原来的问题。
+    pre, post = _merge_by_rel(pre), _merge_by_rel(post)
     if pre and post:
         return pre[-4:], post[-(SHOW_CHANGES - min(4, len(pre))):]
     return pre[-SHOW_CHANGES:], post[-SHOW_CHANGES:]

@@ -829,6 +829,46 @@ def main():
     _b = handoff.sanitize(_a, cap=300, per_line_cap=200)
     check("头尾截断幂等", _a == _b, "%r vs %r" % (_a[-30:], _b[-30:]))
 
+    # ── 本轮 3 个修复（2026-11-18）────────────────────────────────────
+    # 1) 尾段必须从完整句子起：不能把 `03:05:45` 从冒号处切开
+    _time_ln = ("我先核对当前版本是否已生效，再运行回归测试和真实卡片渲染，"
+                "然后换新角度查找问题。109/109 通过；进程启动于 03:07:02，"
+                "晚于 handoff.py 的 03:05:45，因此现在运行的就是最新代码。")
+    _ts = handoff._smart_slice(_time_ln, 100)
+    _tail_part = _ts.split("…", 1)[-1] if "…" in _ts else _ts
+    check("尾段不从半截时间开始（03:05:45 不被切开）",
+          not _tail_part[:6].strip()[:2].isdigit() or _tail_part.startswith("因此"),
+          repr(_tail_part[:24]))
+
+    # 2) 尾段不能从路径中间开始（`backend/...` 被切成 `s/...`）
+    _path_ln = ("我先核对当前版本是否已生效，再运行回归测试。" * 3 +
+                "请运行 python backend/_feature_tests/test_handoff_card.py 查看结果。")
+    _ps = handoff._smart_slice(_path_ln, 120)
+    _pt = _ps.split("…", 1)[-1] if "…" in _ps else _ps
+    check("尾段不从路径中间开始（不出现 s/test_...）",
+          not _pt.startswith("s/") and not _pt.startswith("andoff"),
+          repr(_pt[:24]))
+
+    # 3) 存储层不能再做头尾拼接（碎片一旦落盘就固化，render 救不回来）
+    _frag_src = ("结论：通过\n通过 327 / 失败 0\n\n"
+                 + "我先核对当前版本是否已生效，并运行回归测试。" * 120)
+    _stored = handoff._clip(_frag_src, 8000, ellipsis=False, per_line_cap=0)
+    check("存储层不做头尾拼接（长回复不出现中段省略号）",
+          "…" not in _stored, repr(_stored[:60]))
+
+    # 4) 改动清单按文件合并（交替改两个文件时，相邻合并从来不生效）
+    _chs = []
+    for i in range(6):
+        _chs.append({"rel": "a.py", "note": "n%d" % i, "added": 1, "removed": 0,
+                     "time": "2026-11-18 04:0%d:00" % i})
+        _chs.append({"rel": "b.py", "note": "m%d" % i, "added": 2, "removed": 1,
+                     "time": "2026-11-18 04:1%d:00" % i})
+    _pre, _post = handoff._split_changes(_chs, "")
+    check("改动清单按文件合并（12 条 → 2 个文件）", len(_pre) == 2, "len=%d" % len(_pre))
+    _line = handoff._fmt_change(_pre[0])
+    check("合并后标出「共 N 次」", "共 6 次" in _line, _line[:80])
+    check("合并后累加增删行数", "+6 -0 行" in _line or "+6" in _line, _line[:80])
+
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:
