@@ -286,7 +286,7 @@ budget = ctx_limit - reserve_out - overhead - search_reserve - 512
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  前端（原生 HTML / CSS / JS，1.8 万行）                        │
+│  前端（原生 HTML / CSS / JS，2.7 万行）                        │
 │  流式渲染 · 工具卡片 · 地图 · 文件树 · 数字人面板 · 群聊         │
 └────────────────────────┬─────────────────────────────────────┘
                          │ SSE / NDJSON 流
@@ -751,7 +751,7 @@ python test_loop.py
 │   ├── web_tools.py         联网搜索
 │   ├── cutout.py            抠图；composite.py = 图片合成
 │   └── workspace.py         沙箱化工作区
-├── frontend/                原生 HTML / CSS / JS（1.8 万行，无构建步骤）
+├── frontend/                原生 HTML / CSS / JS（2.7 万行，无构建步骤）
 ├── build/                   PyInstaller 打包配置（扫目录全量收录模块）
 ├── deploy/                  中继服务器部署脚本 + 部署手册
 ├── docs/                    截图、示例产物、使用手册、源码导读
