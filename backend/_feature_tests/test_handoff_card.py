@@ -803,6 +803,32 @@ def main():
     _bad_t = [t for t in ("2026-11-18", "", "垃圾") if "[" in _times[t]]
     check("时间格式：解析不出就不显示时间", not _bad_t, str(_bad_t))
 
+    # ── 超长单行的头尾截断（否则每条回复只剩开场白、结论全丢）──────────
+    _opener = "我先核对当前版本是否已生效，并运行回归测试。" * 30   # 前半：客套话
+    _concl = "结论：修好了 3 个 bug，回归 152 项全过。"               # 后半：真正的结论
+    _long = _opener + _concl
+    _o = handoff.sanitize(_long, cap=300, per_line_cap=200)
+    check("超长行头尾都保留：尾部结论可见", "结论：修好了" in _o, _o[-40:])
+    check("超长行头尾都保留：开头也在", _o.startswith("我先核对"), _o[:20])
+    check("超长行截断后有省略号", "…" in _o, _o[:20])
+
+    _tbl = "| 项目 | 结果 | " + "x" * 200
+    _t = handoff.sanitize(_tbl, cap=300, per_line_cap=80)
+    check("表格行只截前缀（不破坏列结构）", _t.lstrip().startswith("| 项目 | 结果 |"),
+          _t[:30])
+
+    _fence = "```python " + "y" * 200
+    _f = handoff.sanitize(_fence, cap=300, per_line_cap=80)
+    check("围栏行只截前缀", _f.lstrip().startswith("｀｀｀") or _f.lstrip().startswith("```"),
+          _f[:20])
+
+    _over = [len(x) for x in handoff.sanitize("长" * 999, cap=500, per_line_cap=200).split("\n")]
+    check("头尾截断不超上限", max(_over) <= 500, str(max(_over)))
+
+    _a = handoff.sanitize(_long, cap=300, per_line_cap=200)
+    _b = handoff.sanitize(_a, cap=300, per_line_cap=200)
+    check("头尾截断幂等", _a == _b, "%r vs %r" % (_a[-30:], _b[-30:]))
+
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:

@@ -413,8 +413,24 @@ def _cut(body: str, budget: int, per_line_cap: int = 0):
         return body, False
     lines = body.split("\n")
     if per_line_cap and per_line_cap > 1:
-        lines = [(ln[:per_line_cap - 1] + "…") if len(ln) > per_line_cap else ln
-                 for ln in lines]
+        fixed = []
+        for ln in lines:
+            if len(ln) <= per_line_cap:
+                fixed.append(ln)
+                continue
+            s = ln.strip()
+            # 表格行 / 围栏行 / 缩进列表：只截前缀。截尾会把表格最后一列、
+            # 列表层级截掉，比丢掉后半句更糟。
+            if s.startswith("|") or s.startswith("```") or s.startswith("~~~"):
+                fixed.append(ln[:per_line_cap - 1] + "…")
+                continue
+            # 普通长段落：**头尾都留**。实测 12 条回复的前 200 字全是
+            # 「我先核对…」这种开场白，真正的结论（查出了什么、改了什么）
+            # 都在尾部 —— 只留前缀等于把有效信息全丢了。
+            head_n = max(1, int((per_line_cap - 1) * 0.6))
+            tail_n = max(1, (per_line_cap - 1) - head_n)
+            fixed.append(ln[:head_n] + "…" + ln[-tail_n:])
+        lines = fixed
     out, total = [], 0
     for ln in lines:
         add = len(ln) + (1 if out else 0)
