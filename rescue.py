@@ -394,7 +394,7 @@ def _state_write(d):
         _log("状态写入失败：%s" % sys.exc_info()[1])
 
 
-def create_snapshot(tag="", healthy=None, prefix="snap"):
+def create_snapshot(tag="", healthy=None, prefix="snap", keep_path=""):
     """建一个快照。healthy=None 时现场探测一次健康接口。
 
     为什么记 healthy：自动回滚**只**往「建的时候是好的」那些快照回滚。
@@ -450,7 +450,7 @@ def create_snapshot(tag="", healthy=None, prefix="snap"):
         _log("建快照 %s：%d 个文件，原始 %.1f MB → 压缩 %.1f MB，healthy=%s"
              % (name, len(files), total / 1048576.0,
                 manifest["bytes_zip"] / 1048576.0, healthy))
-        prune_snapshots()
+        prune_snapshots(keep_path=keep_path)
         return {"ok": True, "path": path, "name": name, **{k: manifest[k] for k in
                 ("count", "bytes_raw", "bytes_zip", "healthy", "created", "git_head")}}
     except Exception as exc:
@@ -493,18 +493,28 @@ def list_snapshots():
     return out
 
 
-def prune_snapshots():
+def prune_snapshots(keep_path=""):
     """三类分开计数：自动 KEEP_SNAPS 个 / 坏状态 KEEP_BAD 个 / 手动 KEEP_MAN 个。
 
     为什么手动要单独算：自动快照每次启动都会建一个，如果混在一个池子里，
     一天重启 9 次就把你亲手存的「改代码前」基线挤掉了 —— 那正是最需要留的那个。
+
+    keep_path：本次必须保住的那份快照。回滚时用它 —— 实测回滚到最旧的 bad_ 时，
+    新建的「回滚前状态」会触发清理把目标自己删掉，解压直接 FileNotFoundError。
     """
     snaps = list_snapshots()
     man = [s for s in snaps if s.get("man")]
     bad = [s for s in snaps if s["bad"]]
     normal = [s for s in snaps if not s["bad"] and not s.get("man")]
+    keep_abs = os.path.abspath(keep_path) if keep_path else ""
     for group, keep in ((normal, KEEP_SNAPS), (bad, KEEP_BAD), (man, KEEP_MAN)):
-        for s in group[keep:]:
+        if keep_abs:
+            pinned = [s for s in group if os.path.abspath(s["path"]) == keep_abs]
+            rest = [s for s in group if os.path.abspath(s["path"]) != keep_abs]
+            drop = rest[max(0, keep - len(pinned)):]
+        else:
+            drop = group[keep:]
+        for s in drop:
             try:
                 os.remove(s["path"])
                 _log("清理旧快照：%s" % s["name"])
@@ -540,6 +550,11 @@ def rollback(snap_path=None, clean=True, deep=False, force=False):
 
     path = _resolve_snap(snap_path)
     if not path:
+        if snap_path:
+            # 用户明确点了某个版本却解析不到（被清理策略删了 / 名字传错）——
+            # 绝不能静默换成别的版本，否则提示「回滚成功」而实际回滚的是另一份。
+            return {"ok": False, "error": "找不到快照「%s」：可能已被清理策略删除。"
+                                         "请刷新列表后重试（本次未改动任何文件）。" % snap_path}
         snaps = [s for s in list_snapshots() if s["healthy"] and not s["bad"]]
         if not snaps:
             return {"ok": False, "error": "没有任何可用快照。请先跑一次 --snapshot。"}
@@ -558,7 +573,7 @@ def rollback(snap_path=None, clean=True, deep=False, force=False):
     snap_files = set(n for n in names if n != "_manifest.json")
 
     # 1) 回滚前的坏状态留档
-    bad = create_snapshot(tag="回滚前状态", healthy=False, prefix="bad")
+    bad = create_snapshot(tag="回滚前状态", healthy=False, prefix="bad", keep_path=path)
     bad_path = bad.get("path") if bad.get("ok") else ""
 
     # 2) 解压覆盖

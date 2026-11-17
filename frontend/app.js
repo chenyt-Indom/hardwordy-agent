@@ -9106,12 +9106,15 @@
           '<div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">全栈快照（源码 + data 状态；程序崩了也能用，点「回滚」整批还原）</div>',
           '<div style="max-height:260px;overflow:auto">',
           show.length ? show.map((s) => {
-            const st = s.bad ? '<span style="color:#e0a0a0">坏状态</span>'
+            // bad_ 快照是「回滚前自动备份」，内容是当时正在跑的代码，不是坏代码；
+            // 标成灰色「回滚前备份」，避免被误读成代码坏了。它的 tag 也是「回滚前状态」，不再重复显示。
+            const st = s.bad ? '<span style="color:#9a9aa2">回滚前备份</span>'
               : (s.healthy ? '<span style="color:#7bd88f">健康</span>' : '<span style="color:#9a9aa2">未知</span>');
+            const nm = s.bad ? ''
+              : ((s.man ? '<span style="color:#7fb8f0">📌 ' : '') + (s.tag || s.name) + (s.man ? '</span>' : ''));
             return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #262a32;font-size:12px">'
               + '<span style="flex:1;min-width:0;word-break:break-all">' + s.mtime_str + ' · '
-              + (s.man ? '<span style="color:#7fb8f0">📌 ' : '') + (s.tag || s.name)
-              + (s.man ? '</span>' : '') + ' · ' + st + ' · ' + mb(s.size) + '</span>'
+              + nm + (nm ? ' · ' : '') + st + ' · ' + mb(s.size) + '</span>'
               + '<button data-rsnap="' + s.name + '" style="flex:0 0 auto;padding:4px 10px;border-radius:6px;border:1px solid #4a3a3a;background:transparent;color:#e0a0a0;cursor:pointer;font-size:12px">回滚</button>'
               + '</div>';
           }).join("")
