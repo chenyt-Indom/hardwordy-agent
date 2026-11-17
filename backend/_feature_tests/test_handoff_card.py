@@ -546,6 +546,91 @@ def main():
         except Exception:
             pass
 
+    # ---- 50. 重写 markdown 安全层后新增的不变量（2026-11-18）----
+    # 这一组全部来自「重写时自己引入 / 重写后模糊测试抓到」的真缺陷，
+    # 每条都对应一个曾经真实发生过的输出错误。
+    def _audit(text):
+        """独立检查器（不复用 handoff 里的判断，避免自己验自己）：
+           围栏成对 / 围栏外的行内反引号成对 / 围栏块内的 ** 成对。"""
+        if text.count("```") % 2:
+            return "围栏奇数"
+        for _i, _p in enumerate(text.split("```")):
+            if _i % 2:
+                continue
+            if _p.count("`") % 2:
+                return "行内反引号奇数"
+            _plain = "".join(_s if _j % 2 == 0 else "\x00"
+                             for _j, _s in enumerate(_p.split("`")))
+            if _plain.count("**") % 2:
+                return "粗体奇数"
+        return None
+
+    # 50.1 粗体**不能跨代码围栏**配对（围栏会打断 markdown 解析）
+    _x = "_[**\n```\\**```(🙂- |**#_"
+    check("粗体不跨围栏配对", _audit(handoff.sanitize(_x, None)) is None,
+          repr(handoff.sanitize(_x, None)))
+
+    # 50.2 连写 ≥3 个星号降级成全角（`***` 落单会让后面整段变粗斜体）
+    _x = "a***b"
+    _o = handoff.sanitize(_x, None)
+    check("连写 3 个星号降级", "***" not in _o and "＊＊＊" in _o, repr(_o))
+
+    # 50.3 幂等：同一段文本处理两次，结果必须一样
+    _idem_bad = []
+    for _x in ("```", "````", "**", "***", "a\n\n```b", "`a` **b** ```c",
+               "…＊＊ *\n\n*", "[#*\u3000*", "(* \u3000*"):
+        for _cap in (None, 5, 9, 60):
+            for _ml in (True, False):
+                _a = handoff.sanitize(_x, _cap, multiline=_ml)
+                if handoff.sanitize(_a, _cap, multiline=_ml) != _a:
+                    _idem_bad.append((_x, _cap, _ml))
+    check("sanitize 幂等（处理两次结果相同）", not _idem_bad, str(_idem_bad[:3]))
+
+    # 50.4 单行上下文**不能补换行围栏**（补出来会把一行撕成两行）
+    _o = handoff._inline("```python 代码", 200)
+    check("单行上下文不补换行围栏", "\n" not in _o, repr(_o))
+
+    # 50.5 长度正好等于 cap 时不该再截（否则第二次进来会多切一刀）
+    _s = "x" * 60
+    check("等长 cap 不重截", handoff.sanitize(_s, 60) == _s,
+          repr(handoff.sanitize(_s, 60)[-10:]))
+
+    # 50.6 配平之后长度不变（等长替换的前提，超长会顶破 cap）
+    _ov = []
+    for _x in ("```", "````", "**", "***", "`a`b", "a```b```c"):
+        if len(handoff.sanitize(_x, None)) > len(_x) + 4:   # 只允许补一个 "\n```"
+            _ov.append(_x)
+    check("配平不无端加长", not _ov, str(_ov))
+
+    # 50.7 drop_lone 删掉 ** 之后不能连出新的未闭合围栏
+    _x = "``**``xx"
+    _o = handoff.sanitize(_x, 8)
+    check("删 ** 后不留新围栏", _audit(_o) is None, repr(_o))
+
+    # 50.8 整卡：随机内容下围栏/粗体/行内反引号全部成对
+    import random as _rnd
+    _rnd.seed(2026)
+    _tok = ["`", "``", "```", "````", "**", "***", "****", "中文", "\n", "\n\n", " ",
+            "　", "｀", "＊＊", "```python\n", "\n```", "|", "- ", "#", "…", "*", "\\"]
+    _orig_read = handoff._read
+    _card_bad = []
+    try:
+        for _ in range(200):
+            _dlg = [{"role": _rnd.choice(["user", "assistant"]),
+                     "text": "".join(_rnd.choice(_tok) for _ in range(_rnd.randint(1, 15)))}
+                    for _ in range(_rnd.randint(1, 10))]
+            _d = {"ts": __import__("time").time(),
+                  "restarted_at": "2026-11-18 03:11:37",
+                  "dialog": _dlg, "dialog_session": "s1", "live_at": "x",
+                  "changes": [{"rel": "a.py", "note": "".join(
+                      _rnd.choice(_tok) for _ in range(5))}]}
+            handoff._read = lambda _d=_d: _d
+            if _audit(handoff.render("s1")):
+                _card_bad.append(_audit(handoff.render("s1")))
+    finally:
+        handoff._read = _orig_read
+    check("整卡随机 200 组无不变量违例", not _card_bad, str(_card_bad[:3]))
+
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:

@@ -23,11 +23,30 @@
    工具定义全部作废，首字会慢十几秒 —— 见 main.py 里 _attach_live_ctx 的说明）。
 
 存储：data/handoff/last.json（超过 KEEP_DAYS 天不再注入，文件留着不删）
+
+markdown 安全层（2026-11-18 重写）
+---------------------------------
+交接卡是**拼给人看的 markdown**：任何一条用户/助手原话里出现落单的
+反引号、未闭合的代码围栏、半个 `**`，都会把后面整张卡吞掉或变粗体。
+2026-11-18 之前这里有 8 个函数各自做配平（_balance_fence / _inline /
+_finalize / _clip / _tail / _fmt_change / _mask_code / _bold_pos），
+互相调用、互相修正，结果是**修一处坏一处**：文件从 366 行涨到 846 行，
+每轮修 3~5 个又引入 1~3 个。
+
+现在收敛成**一个** `sanitize(text, cap, multiline, ellipsis)`：
+
+    规范化空白 → 按预算截断 → 配平 → 补省略号 → 兜底
+
+配平的三个步骤**全部是等长替换**（把落单的 ASCII 标记换成等长全角字符），
+所以「配平之后长度不变」—— 这从结构上消灭了原来的死循环：
+截断破坏配平 → 再配平 → 又超长 → 再截断 → 又破坏。
+只有「没截断且空间足够」时才补一个闭合围栏（那时变长是安全的）。
 """
 import functools
 import json
 import math
 import os
+import re
 import shutil
 import threading
 import time
@@ -55,8 +74,7 @@ _LAST_TOUCH = {"session": "", "ts": 0.0}
 #   「_read() → 改 d → _write(d)」这个非原子序列。_write 本身是原子替换，但
 #   **整个序列不是**：两个线程同时读到旧内容，各自改一处，后写的那个会把先写的
 #   整段覆盖掉。
-#   实测：record_change 与 touch 并发 20 次 → **20 次全丢**（改动记录或 dialog 丢一个）。
-#   真实场景：我正在改代码（record_change），恰好一轮对话结束触发 touch（或反过来）。
+#   实测：record_change 与 touch 并发 20 次 → **20 次全丢**。
 #   修法：一把可重入锁包住整个序列（RLock 是因为 snapshot 内部会调 _dialog_digest，
 #   将来若有嵌套调用也不会自锁）。
 _LOCK = threading.RLock()
@@ -127,200 +145,29 @@ def _now_str() -> str:
 
 
 def _clean(s, cap: int = 200) -> str:
+    """只用于**会话 id** 这类不需要保留格式的短串（压成一行、硬截断）。"""
     return " ".join(str(s or "").split())[:cap]
 
 
-def _mask_code(s: str) -> str:
-        """把 ``` 围栏与 ` 行内代码换成等长空格（只用于统计正文里的 markdown 标记）。
-
-        2026-11-18 加（用户贴的真实卡片抓到）：原来一律用 `s.count("**") % 2`
-        判奇偶，把**行内代码里**的 `**` 也算进去了。实测一条消息里有 3 处
-        `` `**` `` 加若干正常粗体，总数变奇数，于是把最后一对**正常粗体**的闭合
-        `**` 换成了全角 ＊＊ —— 输出「现在**必须重启＊＊——」，粗体被拆开、
-        还凭空多出两个全角星号。行内代码里的 `**` 是**内容**，不该参与配平。
-        """
-        if not s:
-            return ""
-        out = list(s)
-        off = 0
-        for idx, part in enumerate(s.split("```")):
-            if idx % 2 == 1:                       # 围栏内部：整段遮掉
-                for k in range(off, min(off + len(part), len(out))):
-                    out[k] = " "
-            else:                                  # 围栏外：再按 ` 分出代码段
-                o = off
-                for j, seg in enumerate(part.split("`")):
-                    if j % 2 == 1:                 # 行内代码：遮掉
-                        for k in range(o, min(o + len(seg), len(out))):
-                            out[k] = " "
-                    o += len(seg) + 1
-            off += len(part) + 3
-        return "".join(out)
+# =====================================================================
+#  markdown 安全层 —— 唯一入口 sanitize()
+# =====================================================================
+# 落单的 ASCII 标记一律换成**等长全角**字符：
+#   `  → ｀     ``` → ｀｀｀     ** → ＊＊
+# 为什么是"换"而不是"删"：2026-11-18 实测过，删掉会让内容凭空消失
+# （「落单的 ` 会吞掉整张卡」→「落单的  会吞掉整张卡」；
+#   note 里的 `**` 被删 → 「再配一次 （rel 里的星号…）」）。
+# 为什么是"等长"：配平不改变长度，就不会再触发截断，也不会让上一轮算好的
+# 下标失效 —— 这是把「配平/截断互相破坏」这个死循环从结构上掐掉的关键。
+_FW_TICK = "｀"          # 行内代码
+_FW_FENCE = "｀｀｀"       # 代码围栏
+_FW_BOLD = "＊＊"         # 粗体
 
 
-def _bold_pos(s: str) -> list:
-        """返回**正文里**（行内代码/围栏之外）所有 `**` 的起始下标。"""
-        m = _mask_code(s)
-        pos = []
-        k = 0
-        while True:
-            p = m.find("**", k)
-            if p < 0:
-                break
-            pos.append(p)
-            k = p + 2
-        return pos
-
-
-def _balance_fence(s: str, drop_lone: bool = False) -> str:
-    """把未闭合的 ``` 围栏、` 行内代码补平。
-
-    2026-11-18 修：原来只在「截断时」才配平，于是**短消息**（不截断）里
-    一个落单的 ` 就原样注入 —— 实测「用 `rescue.py 处理」输出后整张卡后面
-    的 markdown 全被当成行内代码吞掉。配平必须对所有输出生效。
-    """
-    if not s:
-        return s
-    # 2026-11-18 修（模糊测试抓到 29/10000 组）：** 的奇偶会在「配平反引号」**之后**
-    # 变化 —— 落单的 ` 换成全角 ｀ 后，原本被行内代码遮住的 ** 就露出来了，奇偶
-    # 又变奇，于是要到下一轮（_finalize）才被改成 ＊＊，输出「a＊＊b*」。
-    # 所以这里改成**反复处理到稳定**：每轮「处理落单 ** → 补围栏 → 配平行内反引号」。
-    for _pass in range(5):
-        _before = s
-        # 1) 正文里落单的 **（_bold_pos 会跳过 `…` 与 ``` 围栏）
-        _bp = _bold_pos(s)
-        if len(_bp) % 2 == 1:
-            k = _bp[-1]
-            if drop_lone:
-                # 截断正好切在**粗体中间**时，这个 ** 是「开标记」，配对的闭合已被
-                # 切掉、后面只剩半个词。换成 ＊＊ 会输出「2 个是真实 bug：＊＊代…」
-                # 这种像错字的东西；它只是语法标记，直接去掉（不涉及内容）。
-                s = s[:k] + s[k + 2:]
-            else:
-                # 换全角 ＊＊：视觉等价、不构成 markdown 粗体、原文不丢（不删内容）
-                s = s[:k] + "＊＊" + s[k + 2:]
-        # 2) 代码围栏没关 → 补一个
-        if s.count("```") % 2 == 1:
-            s += "\n```"
-        # 3) 围栏**之外**的落单行内反引号换全角 ｀
-        #    （不能删：实测「落单 ` 反引号」→「落单  反引号」，少一个字符还多出双空格）
-        parts = s.split("```")
-        for i in range(0, len(parts), 2):   # 偶数下标＝围栏之外的文本
-            if parts[i].count("`") % 2 == 1:
-                j = parts[i].rfind("`")
-                if j >= 0:
-                    parts[i] = parts[i][:j] + "｀" + parts[i][j + 1:]
-        s = "```".join(parts)
-        if s == _before:                    # 稳定了就停
-            break
-    out = s
-    # 去掉落单 ` 之后那行可能只剩空格（实测输入「 `」→ 输出一行只有一个空格），
-    # markdown 里一行纯空格虽然无害，但会让「无纯空格行」这条断言不成立，也不干净。
-    return "\n".join(("" if not l.strip() else l.rstrip()) for l in out.split("\n"))
-
-
-def _inline(s, cap: int = 160) -> str:
-    """单行上下文（原因、改动清单的 rel/note）专用的截断。
-
-    2026-11-18 加（整卡模糊测试 400 组发现）：这几处原来复用 `_clip`，而
-    `_clip` 遇到未闭合围栏会补一个 "\\n```" —— 在单行里补出来就变成
-    「这一行 3 个反引号 + 下一行孤零零一个 ```」，markdown 被撕开，整卡
-    围栏数还变成奇数，后面照样被吞。单行里没法承载围栏，所以这里**去掉**
-    多余的反引号，而不是补一个闭合的。
-    """
-    t = " ".join(str(s or "").split())          # 压成一行（这几处本来就不需要换行）
-    if cap and len(t) > cap:
-        t = t[:max(0, cap - 1)].rstrip() + "…"
-    # 2026-11-18 修（模糊测试 3105/40000 组抓到）：** 的奇偶取决于「哪些 ** 在行内
-    # 代码里」，而配平反引号**会改变行内代码的边界** —— 配平后原先被 `…` 遮住的 **
-    # 露出来就变奇，只判一次必然漏（实测输出 `…-**` 落单，后面整卡变粗体）。
-    # 改成和 _balance_fence 一样：每轮「处理落单 ** → 配平围栏 → 配平行内反引号」，
-    # 跑到不再变化为止。每步都只把 ASCII 标记换成全角（不删内容），必定收敛。
-    for _ in range(len(t) + 6):
-        _before = t
-        # 1) 正文里落单的 **（_bold_pos 跳过 `…` 与 ``` 围栏）→ 换全角 ＊＊
-        _bp = _bold_pos(t)
-        if len(_bp) % 2 == 1:
-            k = _bp[-1]
-            t = (t[:k] + "＊＊" + t[k + 2:]).strip()
-        # 2) 围栏奇数 → 最后一个换全角 ｀｀｀（不删内容，读者仍知道是三个反引号）
-        if t.count("```") % 2 == 1:
-            i = t.rfind("```")
-            if i < 0:
-                break
-            t = (t[:i] + "｀｀｀" + t[i + 3:]).strip()
-        # 3) 围栏之外落单的行内反引号 → 全角 ｀（同样不删内容）
-        parts = t.split("```")
-        for k2 in range(0, len(parts), 2):
-            if parts[k2].count("`") % 2 == 1:
-                j = parts[k2].rfind("`")
-                if j >= 0:
-                    parts[k2] = parts[k2][:j] + "｀" + parts[k2][j + 1:]
-        t = "```".join(parts)
-        if t == _before:                        # 稳定了就停
-            break
-    return t.strip()
-
-
-def _finalize(s: str, cap: int) -> str:
-    """收尾：配平反引号 + 保证不超 cap（截断时不能再把围栏切坏）。
-
-    2026-11-18 加：模糊测试（3000 组随机内容 × 6 种 cap）发现两处兜底截断
-    会把刚补上的闭合围栏切掉。cap 小到放不下「``` + 闭合```」时，干脆把
-    反引号全去掉 —— 宁可少几个符号，也不能输出半截围栏让整张卡被吞。
-    """
-    s = _balance_fence(s)
-    if not cap or len(s) <= cap:
-        return s
-    # 2026-11-18 修（整卡模糊测试复现）：原来是「配平 → 最后再 s[:cap] 硬切一刀」，
-    # 那一刀正好把刚补上的闭合 ``` 切掉，且切完**不再配平** —— 实测
-    # _clip('|```\r\n\n``**`````python\n', 200) → '|```\n\n```````python'（围栏 3 个，奇数），
-    # 后面整张卡又被吞。现在改成「切一刀→重新配平」循环，实在放不下才去掉反引号。
-    for _ in range(3):
-        if len(s) <= cap:
-            break
-        s = s[:cap]
-        s = _balance_fence(s, drop_lone=True)
-    if len(s) > cap:
-        s = s[:cap]
-    if s.count("```") % 2 == 1 or any(
-            p.count("`") % 2 == 1 for p in s.split("```")[::2]):
-        s = s.replace("`", "")[:cap]       # 最后兜底：宁可没反引号，也不留半截围栏
-    # 2026-11-18 加（2000 组整卡模糊抓到 572 组）：上面的兜底截断只看了反引号，
-    # 没管 ** —— 切在 ** 中间会输出单个 *，切掉配对的那个也会剩一个孤立的 **，
-    # 那一行之后整段变粗体。这里统一再配一次。
-    _bp = _bold_pos(s)
-    if len(_bp) % 2 == 1:
-        # 这里已经是「被截断过」的文本：落单的 ** 是切在粗体中间留下的语法标记，
-        # 后面没有正文，直接去掉（换成 ＊＊ 会输出「：＊＊代…」这种像错字的东西）。
-        k = _bp[-1]
-        s = s[:k] + s[k + 2:]
-    if s.endswith("*") and not s.endswith("**"):
-        s = s.rstrip("*")                  # 被切成一半的 *
-    return s if s.strip() else ""
-
-
-def _clip(s, cap: int = 200, ellipsis: bool = True) -> str:
-    """注入交接卡时用的截断（与 `_clean` 不同：它**保留换行**）。
-
-    为什么单独写一个（2026-11-18）：
-      1) `_clean` 把换行压成空格 —— 一条含列表/分段的回复被压平后，
-         上一行结尾和下一行开头会粘成一个词。实测：「结论：通过」+ 换行 +
-         「通过 14 / 失败 0」被压成「结论：通过 通过 14 / 失败 0」，
-         读起来像我自己重复了一遍。
-      2) 直接 `[:cap]` 截断**不留任何标记** —— 读的人（模型）会以为那就是全文；
-         而且常常断在反引号中间，留下未闭合的 ` 把后文 markdown 全吞掉。
-         实测真实交接卡里 24 条有 13 条是硬截断，其中多条反引号数为奇数。
-    所以这里：按行压缩 → 超长补「…」→ 反引号配平。
-    """
-    text = str(s or "")
-    if not text:
-        return ""
-
-    # 逐行规范化：压掉行内多余空白，但**保留行首缩进**和**段落之间的空行**。
-    # 2026-11-18 修：原来用 " ".join(ln.split()) 会把缩进一起吃掉，
-    # 嵌套列表变成平级（实测「- 第一层 /   - 第二层」输出后两层缩进全没了）；
-    # 又把所有空行删掉，导致两段之间没有空行、markdown 里粘成一段。
+def _normalize(text: str, multiline: bool) -> str:
+    """规范化空白。multiline=True 保留换行与行首缩进；否则压成一行。"""
+    if not multiline:
+        return " ".join(text.split())
     lines = []
     for ln in text.splitlines():
         if not ln.strip():
@@ -331,54 +178,308 @@ def _clip(s, cap: int = 200, ellipsis: bool = True) -> str:
         lines.append(indent + " ".join(ln.split()))
     while lines and lines[-1] == "":
         lines.pop()
-    if not lines:
-        return ""
-    if not cap:
-        return _balance_fence("\n".join(lines))
+    return "\n".join(lines)
 
-    # 按**行**累积，尽量不在行中间切断（markdown 的列表/表格/围栏才不会被撕开）
-    reserve = 1 if ellipsis else 0
-    budget = max(1, cap - reserve)
-    out, total, cut = [], 0, False
-    for ln in lines:
+
+def _plain_spans(s: str) -> list:
+    """返回**正文**区间 [(start, end)]：既不在围栏里，也不在行内代码里。
+
+    要求 s 的围栏已经配平（否则末尾那段其实还在围栏内）。
+    """
+    spans = []
+    pos = 0
+    for idx, part in enumerate(s.split("```")):
+        if idx % 2 == 0:                       # 围栏之外
+            o = pos
+            for j, seg in enumerate(part.split("`")):
+                if j % 2 == 0 and seg:         # 行内代码之外
+                    spans.append((o, o + len(seg)))
+                o += len(seg) + 1
+        pos += len(part) + 3
+    return spans
+
+
+def _degrade_stars(s: str) -> str:
+    """把**正文里**连续 ≥3 个星号换成等长全角。
+
+    `***` / `****` 是 markdown 的粗斜体 / 分隔线，落单时会把后面整段变粗体。
+    而单个 `*` 不能像 `**` 那样按奇偶配平 —— 它还是列表符号（`* item`）和
+    乘号（`2*3`），乱配会把正常内容改坏。所以只处理"连写 3 个以上"这种
+    确定是标记的形态，换成全角，长度不变。
+    """
+    if "*" not in s:
+        return s
+    out, last = [], 0
+    for a, b in _plain_spans(s):
+        out.append(s[last:a])
+        out.append(re.sub(r"\*{3,}", lambda m: "＊" * len(m.group()), s[a:b]))
+        last = b
+    out.append(s[last:])
+    return "".join(out)
+
+
+def _balance_bold_block(block: str, drop_lone: bool = False) -> str:
+    """在**一个围栏块内**把落单的 `**` 配平（行内代码里的不算）。
+
+    单独拿出来是因为：粗体配对必须以围栏为界 —— 围栏前一个 `**` 和围栏后
+    一个 `**` 并不构成一对（markdown 在围栏处就打断解析了）。
+    """
+    if "**" not in block:
+        return block
+    marks = []
+    for a, b in _plain_spans(block):        # block 内没有围栏，只按 ` 切
+        k = a
+        while True:
+            p = block.find("**", k, b)
+            if p < 0:
+                break
+            marks.append(p)
+            k = p + 2
+    if len(marks) % 2 == 1:
+        p = marks[-1]
+        block = block[:p] + (block[p + 2:] if drop_lone
+                             else _FW_BOLD + block[p + 2:])
+    return block
+
+
+def _balance_once(s: str, grow: bool = True, drop_lone: bool = False) -> str:
+    """配平**一轮**（由 _balance 循环调用到稳定）。
+
+    为什么需要循环：drop_lone 会**删掉**一个 `**`，这一删可能让两侧的反引号
+    连起来、变成一个未闭合的围栏（实测 `'``**``xx'` → `'````xx'`，4 个反引号
+    又构成一个 ```）。单次处理时"围栏配平"那一步早就过去了，于是漏网。
+    每轮要么只做等长替换、要么只删 2 个字符，所以一定收敛。
+
+    grow=True  ：围栏没闭合就**补一个闭合**（更保真，但会变长，只在没截断
+                 且长度富余时用）。
+    grow=False ：一律**等长替换**（截断后必须用这个，否则补完又超长）。
+    drop_lone  ：粗体落单时**直接去掉**那个标记，而不是换成 ＊＊。
+                 只在"这段文字确实被截断过"时用 —— 那是切在粗体中间留下的
+                 开标记，后面只剩半个词，换成 ＊＊ 会输出「：＊＊代…」这种
+                 像错字的东西。
+
+    三步的顺序**必须是**：围栏 → 行内反引号 → 粗体。
+    因为配平行内反引号会改变「哪些 `**` 在代码里」，粗体判定必须在它之后；
+    而三步都只在"配平之后"读文本，所以**一次扫描就够，不需要循环**。
+    """
+    if not s:
+        return ""
+    # 1) 代码围栏
+    if s.count("```") % 2 == 1:
+        if grow:
+            s = s.rstrip() + "\n```"          # 补的是**半角**，才是真正的闭合围栏
+        else:
+            i = s.rfind("```")
+            s = s[:i] + _FW_FENCE + s[i + 3:]
+    # 2) 围栏**之外**的落单行内反引号（逐段配平，等长替换）
+    parts = s.split("```")
+    for i in range(0, len(parts), 2):
+        if parts[i].count("`") % 2 == 1:
+            j = parts[i].rfind("`")
+            if j >= 0:
+                parts[i] = parts[i][:j] + _FW_TICK + parts[i][j + 1:]
+    s = "```".join(parts)
+    # 3) 正文里连续 ≥3 个星号 → 等长全角
+    #    `***` / `****` 在 markdown 里是粗斜体/分隔线，落单时会把后面整段变粗体，
+    #    而 `*` 又**不能**像 `**` 那样按奇偶配平 —— 它还是列表符号（`* item`）
+    #    和乘号（`2*3`），乱配会把正常内容改坏。所以只处理"连写 3 个以上"这一种
+    #    确定是标记的形态：换成全角，长度不变，`**` 粗体完全不受影响。
+    #    实测：20000 组随机输入里 264 组「粗体奇数」全部含 `***` 及以上。
+    s = _degrade_stars(s)
+    # 4) 正文里的落单粗体 —— **按围栏分块**配对
+    #    markdown 的粗体不能跨代码围栏（围栏会打断解析），所以「围栏前一个 **、
+    #    围栏后一个 **」不是一对，必须各块单独配平。
+    #    实测：`_[**\n```\\**```(🙂- |**#_` 全局数得 2 个（偶数）所以不处理，
+    #    但每块各 1 个，输出后围栏前后两段都变粗体。
+    parts = s.split("```")
+    for i in range(0, len(parts), 2):
+        parts[i] = _balance_bold_block(parts[i], drop_lone)
+    s = "```".join(parts)
+    # 5) 落单标记换走之后，那行可能只剩空格（markdown 里无害，但不干净）
+    if "\n" in s:
+        s = "\n".join(("" if not ln.strip() else ln.rstrip()) for ln in s.split("\n"))
+    # 6) 结尾被切成一半的 *（`**` 只切到一个）
+    #    必须放在**最后**并先去掉尾部空行：原来它在第 5 步之前，遇到
+    #    「…＊＊ *\n\n」这种末尾是换行的，endswith("*") 判不到，那个 `*`
+    #    就留在正文里；下一轮处理时末尾没换行了又能删掉 → 不幂等
+    #    （实测 24000 组里漏了 1 组）。
+    while True:
+        s = s.rstrip("\n")
+        if s.endswith("*") and not s.endswith("**"):
+            s = s[:-1]                      # 删完可能又露出一个（`…*\n\n*`），继续
+            continue
+        break
+    return s
+
+
+def _balance(s: str, grow: bool = True, drop_lone: bool = False) -> str:
+    """配平到**稳定**：反复跑 _balance_once，直到结果不再变化。
+
+    实测需要多轮的情形：drop_lone 删掉一个 `**` 之后，两侧反引号连成新的
+    未闭合围栏；那一轮里"围栏配平"已经走过，必须再来一轮。
+    """
+    for _ in range(8):
+        before = s
+        s = _balance_once(s, grow, drop_lone)
+        if s == before:
+            break
+    return s
+
+
+def _cut(body: str, budget: int):
+    """按**行**截断到 budget 字内，尽量不切断行（列表/表格/围栏才不会被撕开）。
+
+    返回 (text, cut)。
+    """
+    if budget <= 0:
+        return "", True
+    if len(body) <= budget:
+        return body, False
+    out, total = [], 0
+    for ln in body.split("\n"):
         add = len(ln) + (1 if out else 0)
         if total + add <= budget:
             out.append(ln)
             total += add
             continue
-        cut = True
         room = budget - total - (1 if out else 0)
         if room > 0:
-            seg = ln[:room]
-            if seg.count("`") % 2 == 1:        # 行内代码：去掉未闭合的那个
-                i = seg.rfind("`")
-                if i >= 0:
-                    seg = seg[:i] + seg[i + 1:]
-            if seg.strip():
-                out.append(seg)
+            out.append(ln[:room])
         break
+    return "\n".join(out).rstrip(), True
 
-    body = "\n".join(out).rstrip("\n").rstrip()
-    if not cut:
-        # 2026-11-18 修：原来是「配平后直接 body[:cap]」——cap 小时会把刚补上的
-        # 闭合围栏切掉。模糊测试最小复现：cap=5、输入「```」→ 输出 "```\n`"，
-        # 围栏又变成 1 个，后面整张卡照样被吞。统一交给 _finalize 收尾。
-        return _finalize(body, cap)
-    # 截断了：先按「要补围栏就预留围栏长度」算出能留多少，再配平，
-    # 否则刚补上的 ``` 会被下面的兜底截掉（实测 count=1，围栏又断了）
-    need = body.count("```") % 2 == 1
-    keep = cap - reserve - (len("\n```") if need else 0)
-    if cap and len(body) > keep:
-        body = body[:max(0, keep)].rstrip("\n").rstrip()
-    # 2026-11-18 修（真实卡片抓到）：原来这里会「在被丢掉的部分含奇数个 ** 时，
-    # 给 body 开头补一个 **」。实测 dialog[15]「我先核对基线，再写一批**新用例**…」
-    # 本来 ** 是配对的，被补成「**我先核对基线，再写一批**新用例**…」——
-    # 粗体从第 0 字开始，把正确的格式改坏了。补在开头只会让更多文字变粗体，
-    # 方向就是错的。落单的 ** 交给 _balance_fence 换全角 ＊＊ 收尾即可。
-    # 这里是**真的被切过**的地方：落单的 ** 是切在粗体中间留下的开标记，
-    # 后面只剩半个词，换成 ＊＊ 会输出「：＊＊代…」这种像错字的东西，直接去掉。
-    body = _balance_fence(body, drop_lone=True)
-    return _finalize(body + ("…" if ellipsis else ""), cap)
+
+def sanitize(s, cap: int = None, multiline: bool = True,
+             ellipsis: bool = True, drop_lone: bool = False) -> str:
+    """**唯一**的 markdown 安全入口：规范化 → 截断 → 配平 → 补省略号 → 兜底。
+
+    参数
+    ----
+    cap       : 字数上限（None = 不限制）
+    multiline : True 保留换行与缩进（对话正文）；False 压成一行（原因、路径、说明）
+    ellipsis  : 截断时是否补「…」。False 用在"后面还会再截一次"的地方
+                （_dialog_digest），否则注入时会出现「……」两个省略号。
+    drop_lone : 粗体落单时直接去掉标记（见 _balance）
+    """
+    text = str(s or "")
+    if not text.strip():
+        return ""
+    body = _normalize(text, multiline).strip("\n")
+    if not body:
+        return ""
+
+    cut = False
+    if cap and len(body) > cap:
+        # 只有**真的超了**才截。原来无条件走 _cut(cap - 预留省略号)，
+        # 于是长度正好等于 cap 的文本第二次进来时会被多切一刀、再加个「…」——
+        # 幂等性实测 17/3000 组不稳定就是这个原因。
+        reserve = 1 if (ellipsis and cap > 1) else 0
+        body, _ = _cut(body, cap - reserve)
+        cut = True
+
+    # 补闭合围栏会变长，只有「多行 且 长度富余」时才敢用。
+    # 单行上下文（原因、rel、note）**永远不补** —— 补出来的 "\n```" 会把一行
+    # 撕成两行，整卡围栏数还变成奇数；那里只能等长替换成全角。
+    # 实测：这正是 _inline 当初单独存在的原因，重写时收进这里，由参数决定。
+    spare = (1 if (cut and ellipsis) else 0)
+    grow = multiline and ((not cap) or (len(body) + 4 + spare <= cap))
+    body = _balance(body, grow=grow, drop_lone=drop_lone or cut)
+
+    if cut and ellipsis:
+        body = body.rstrip() + "…"
+
+    # 兜底：等长替换理论上不会变长，但 grow 补围栏 + 省略号可能顶出去 1~2 字
+    if cap and len(body) > cap:
+        body = body[:cap]
+        body = _balance(body, grow=False, drop_lone=True)
+        if len(body) > cap:
+            body = body[:cap]
+    # 最后再规范化一次，让输出回到**规范形式**，这样「同一段文本处理两次」
+    # 结果一定相同（幂等）。实测要在这里兜的有两种：
+    #   · drop_lone 删掉一个 ** 之后留下两个连续空格；
+    #   · 补围栏/截断之后出现连续空行。
+    # 两种都会在第二次进来时被 _normalize 合并，于是 a != b。
+    body = _normalize(body, multiline).strip("\n")
+    # 规范化的副作用：压掉尾部空白后会**露出新的孤立 `*`**（`(* 　*` 删掉最后一个
+    # 之后，`(*` 里的那个就跑到末尾了）。_balance 里那一步在它之前，所以这里再走一遍。
+    while body.endswith("*") and not body.endswith("**"):
+        body = body[:-1].rstrip()
+    return body
+
+
+# ---- 兼容旧调用点的薄包装（全部指向 sanitize，不再有第二份实现）----
+def _clip(s, cap: int = 200, ellipsis: bool = True) -> str:
+    """多行文本注入用（保留换行、缩进、段落空行）。"""
+    return sanitize(s, cap, multiline=True, ellipsis=ellipsis)
+
+
+def _inline(s, cap: int = 160) -> str:
+    """单行上下文（原因、改动清单的 rel/note）用：压成一行 + 配平。
+
+    单行里没法承载代码围栏，所以这里的"落单围栏"也换成全角（等长替换），
+    而不是补一个 "\n```" 把这一行撕成两行。
+    """
+    return sanitize(s, cap, multiline=False)
+
+
+def _balance_fence(s: str, drop_lone: bool = False) -> str:
+    """配平一段可能含未闭合围栏/反引号/粗体的文本（不截断）。"""
+    return sanitize(s, None, multiline=True, drop_lone=drop_lone)
+
+
+def _bold_pos(s: str) -> list:
+    """返回**正文里**（行内代码 / 围栏之外）所有 `**` 的起始下标。
+
+    先做等长配平再统计：这样"哪些 `**` 在代码里"才是确定的，
+    不会因为行内代码没配平而把代码里的 `**` 当成正文粗体。
+    """
+    t = str(s or "")
+    if not t:
+        return []
+    if t.count("```") % 2 == 1:
+        i = t.rfind("```")
+        t = t[:i] + _FW_FENCE + t[i + 3:]
+    parts = t.split("```")
+    for i in range(0, len(parts), 2):
+        if parts[i].count("`") % 2 == 1:
+            j = parts[i].rfind("`")
+            if j >= 0:
+                parts[i] = parts[i][:j] + _FW_TICK + parts[i][j + 1:]
+    t = "```".join(parts)
+    t = _degrade_stars(t)
+    pos = []
+    for a, b in _plain_spans(t):
+        k = a
+        while True:
+            p = t.find("**", k, b)
+            if p < 0:
+                break
+            pos.append(p)
+            k = p + 2
+    return pos
+
+
+def _tail(text: str, cap: int = TAIL_CAP) -> str:
+    """取一段文字的最后 cap 字（跨会话时补「上次停在这里」用）。
+
+    与 sanitize 的区别：它从**末尾**截（要的是"停在哪"），并且续行缩进
+    两格，好嵌在「· 那个会话最后停在这里：」这一行下面。
+    """
+    t = str(text or "").strip()
+    if not t:
+        return ""
+    if len(t) > cap:
+        t = t[-cap:]
+        nl = t.find("\n")
+        if 0 <= nl < len(t) - 1:            # 别从半行开始
+            t = t[nl + 1:]
+        t = "…" + t
+    # 从末尾截会把开头的 `**` 切掉、只剩结尾那个闭合标记 → 后面整段变粗体。
+    # 那是纯语法标记，直接去掉（drop_lone）。
+    t = _balance(t, grow=True, drop_lone=True)
+    if "\n" in t:
+        t = "\n".join(("  " + ln) if ln else "" for ln in t.split("\n"))
+    return t
 
 
 def _similar(a: str, b: str) -> bool:
@@ -390,13 +491,11 @@ def _similar(a: str, b: str) -> bool:
     if a == b:
         # 短消息重复往往是「用户催了两次 / 确认了两次」，是真实轮次，
         # 合并会让轮数少算（实测连发两次「继续」被并成一条 → 2 轮显示成 1 轮）。
-        # 但 12 字以上完全相同，基本只可能是「中断后重试」，应该合并
-        # （实测 36 字的重试消息被 40 的阈值漏掉，同一件事报了两遍）。
+        # 但 12 字以上完全相同，基本只可能是「中断后重试」，应该合并。
         return len(a) >= 12
     if not a or not b:
         return False
     # 一条正好是另一条的开头 → 中断后重试/续写，几乎肯定同一件事。
-    # （实测：重试那条只在末尾多一句「（重试版）」，30 字，原来被 n<40 漏掉）
     short, lng = (a, b) if len(a) <= len(b) else (b, a)
     if len(short) >= 12 and lng.startswith(short):
         return True
@@ -423,8 +522,7 @@ def _read() -> dict:
     except Exception:
         # 2026-11-18 修（数据丢失级）：原来这里直接 return {}，而调用方都是
         # 「读 → 改 → 写」—— 文件一旦损坏（手工编辑出错、断电写一半、磁盘异常），
-        # 下一次 record_change/touch 就会拿空字典写回，把整份历史（对话+改动）
-        # 无声覆盖掉。实测：24 条对话 + 30 条改动 → 记录一条改动后全没。
+        # 下一次 record_change/touch 就会拿空字典写回，把整份历史无声覆盖掉。
         # 现在：先把坏文件改名隔离（留着人工抢救），再尝试上一次的 .bak。
         try:
             bad = LAST + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S")
@@ -450,35 +548,38 @@ def _write(d: dict) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2)
         os.replace(tmp, LAST)          # 原子替换，避免写一半断电把交接卡写坏
-        # 2026-11-18：写成功后把这份内容同步留一份 .bak。
-        # 放在**写成功之后**而不是之前：这样首次写入也有备份（实测原来「先备份再写」
-        # 的写法，第一次写时 LAST 还不存在，压根没有 .bak —— 此时文件损坏仍然
-        # 24 条对话全丢）。.bak 永远等于最后一次成功写入的状态。
+        # 写成功后同步留一份 .bak：放在**写成功之后**，这样首次写入也有备份
+        # （实测原来「先备份再写」的写法，第一次写时 LAST 还不存在，压根没有 .bak）。
+        # .bak 永远等于最后一次成功写入的状态。
         try:
             shutil.copyfile(LAST, LAST + ".bak")
         except Exception:
             logger.debug("silent-except", exc_info=True)
     except Exception:
-        # 写失败不能影响正常对话/改代码，但至少要在日志里留痕（原来是 debug，
-        # 磁盘满/只读时完全看不到，用户只会觉得「交接卡怎么不更新了」）
+        # 写失败不能影响正常对话/改代码，但要在日志里留痕（磁盘满/只读时
+        # 用 debug 级别会完全看不到，用户只会觉得「交接卡怎么不更新了」）
         logger.warning("交接卡写入失败", exc_info=True)
 
 
 # =====================================================================
 #  1) 记录一次改动（自开发工具写盘成功后调用）
 # =====================================================================
+_PATH_JUNK = re.compile(r"[`｀*＊]")
+
+
+def _safe_rel(rel, cap: int = 120) -> str:
+    """rel 是**文件路径**：反引号/星号本来就非法，而且外层还要用 ` 包一层。
+
+    这里全部剔除（含全角），避免 rel 的标记和 note 的 **粗体** 混在一起
+    （实测 note="**重点** 说明" 因为整行配平把闭合 ** 删成了 "**重点 说明"）。
+    """
+    return _PATH_JUNK.sub("", _inline(rel, cap)).strip()
+
+
 @_locked
 def record_change(rel: str, note: str = "", added: int = 0, removed: int = 0,
                   act: str = "write") -> None:
-    # 2026-11-18：存盘时就把反引号配平，别把「落单的 `」这种脏数据写进 JSON
-    # （渲染端 _fmt_change 还有一道兜底，因为旧数据里已经存进去了）
-    # 2026-11-18 修：原来用 _balance_fence(_clean(rel)) —— 单行 rel 里遇到未闭合围栏
-    # 会补一个 "\n```"，于是存进 JSON 的 rel 带换行（渲染端虽然能兜住，但脏数据不该
-    # 落盘，而且「同一文件合并」是按 rel 字符串比较的，带换行就合并不上）。
-    # 2026-11-18 修：_inline 现在把落单反引号换成全角 ｀（为了不丢 note 内容），
-    # 但 rel 是**文件路径**，反引号本来就非法、必须剔除。只 replace("`") 的话
-    # 全角 ｀ 会被留下 —— 实测 rel="````" 变成 "｀｀｀｀" 当成文件名存进了 JSON。
-    rel = _inline(rel, 120).replace("`", "").replace("｀", "").replace("*", "").strip()
+    rel = _safe_rel(rel, 120)
     if not rel:
         return
     d = _read()
@@ -493,7 +594,7 @@ def record_change(rel: str, note: str = "", added: int = 0, removed: int = 0,
         added = removed = 0
 
     # 同一个文件连续改了好几次 → 合并成一条（否则清单里全是同一个文件名）
-    if ch and ch[-1].get("rel") == rel:
+    if ch and isinstance(ch[-1], dict) and ch[-1].get("rel") == rel:
         it = ch[-1]
         try:
             it["added"] = int(it.get("added") or 0) + added
@@ -541,8 +642,10 @@ def _dialog_digest(session: str) -> list:
     out = []
     # 多取一些：下面要去重，去掉重复后还要凑够 MAX_DIALOG*2 条
     for m in msgs[-(MAX_DIALOG * 4):]:
+        if not isinstance(m, dict):
+            continue
         role = str(m.get("role") or "")
-        # 这里**不补省略号**（否则注入时再截一次会出现「……」，见 render）
+        # 这里**不补省略号**（否则注入时再截一次会出现「……」）
         text = _clip(m.get("content"), 1200, ellipsis=False)
         if role not in ("user", "assistant") or not text:
             continue
@@ -581,8 +684,6 @@ def touch(session: str = "", reason: str = "") -> None:
         d["updated"] = now
         d["live_at"] = _now_str()
         if reason:
-            # 2026-11-18 修：原来是 _clean(reason, 120) —— 硬截断不留标记，落盘后
-            # 渲染端已经看不出「这里被截过」，读卡的人以为那就是完整原因。
             d["reason"] = _inline(reason, 120)
         _write(d)
         _LAST_TOUCH["session"] = session
@@ -607,7 +708,6 @@ def snapshot(session: str = "", reason: str = "", kind: str = "") -> dict:
         · user_restart    —— 用户手动点「立即重启」（**自检**）
         · cold_start      —— 冷启动 / 关闭后重新打开（**不自检**）
       判据优先看调用方显式传入的 `kind`，其次按 reason 文本猜。
-      这样即使调用方只传了中文 reason，也能被正确归类。
     """
     try:
         d = _read()
@@ -615,9 +715,7 @@ def snapshot(session: str = "", reason: str = "", kind: str = "") -> dict:
             d["session"] = _clean(session, 64)
             d["dialog_session"] = _clean(session, 64)
         if reason:
-            # 2026-11-18 修：同 touch()，_clean 是硬截断、不留标记，统一改用 _inline
             d["reason"] = _inline(reason, 120)
-        # ★ 结构化原因：bootaudit 靠它决定跑不跑自检（见 bootaudit.should_run）
         d["reason_kind"] = _classify_reason(reason, kind)
         d["ts"] = time.time()
         d["restarted_at"] = _now_str()
@@ -634,25 +732,16 @@ def snapshot(session: str = "", reason: str = "", kind: str = "") -> dict:
 #  4) 每轮注入
 # =====================================================================
 def _fmt_change(it: dict) -> str:
-    # 2026-11-18 修：改动清单的 note/rel 原来直接拼进 markdown，**完全没配平**。
-    # 实测真实卡片第 38 行「实测短消息里落单的 ` 会吞掉整张卡」——note 里这个
-    # 落单的 ` 让整行反引号变成 3 个（奇数），后面剩余清单和 ⚠️ 提示全被当成
-    # 行内代码吞掉。同时超长 note 是硬截断、不留标记（实测 323 字，无「…」）。
-    # 2026-11-18 修：改用 _inline。原来 _clip 会补 "\n```"，而 rel/note 是单行上下文，
-    # 补出来的闭合围栏跑到下一行，把清单条目撕成两行、整卡围栏数还变成奇数。
-    # rel 外层已经用 ` 包了一层，所以它自己不能再带反引号（模糊测试里出现过
-    # rel="````" → 输出 "- ````（+1 -0 行）" 这种）。
-    # 2026-11-18 修：_inline 现在把落单反引号换成全角 ｀，所以这里必须连全角一起剔，
-    # 否则旧数据里 rel 带反引号时（如 "```python\n"）整行反引号还是奇数。
-    # 2026-11-18 加：路径里本来就不该有 *（Windows 非法字符）。剔掉它，
-    # 免得 rel 的星号和 note 的 **粗体** 混在一起、整行配平时把 note 的闭合 ** 删掉
-    # （实测 note="**重点** 说明" 被输出成 "**重点 说明"，粗体标记丢了）。
-    rel = (_inline(it.get("rel"), 120)
-           .replace("`", "").replace("｀", "")
-           .replace("*", "").replace("＊", "").strip())
+    """一条改动 → 一行 markdown。
+
+    三个字段各自 sanitize 之后拼起来就是干净的：
+      · rel 外层由这里加 ` ` 包住，且 rel 自己已剔掉所有反引号/星号；
+      · note 里的 ` 和 ** 已配平成偶数；
+    所以**不需要**再对整行做一次兜底配平（旧实现有那一步，反而会误伤
+    note 里正常的 **粗体**）。
+    """
+    rel = _safe_rel(it.get("rel"), 120)
     note = _inline(it.get("note"), 160)
-    while "  " in note:                    # 删掉落单 ` 后会留两个空格（实测「落单的  会吞掉」）
-        note = note.replace("  ", " ")
     try:
         added = int(it.get("added") or 0)
         removed = int(it.get("removed") or 0)
@@ -666,14 +755,6 @@ def _fmt_change(it: dict) -> str:
     t = str(it.get("time") or "")
     if t:
         line += "　[%s]" % t[5:16]      # 只留「月-日 时:分」
-    # 2026-11-18 加（2400 组模糊抓到 32 组）：rel/note 各自配平了，但**拼成一行后**
-    # 还会互相干扰 —— 实测 rel 里带 "***"（路径里不该有，但旧数据可能有）时，
-    # 整行 ** 变成 5 个（奇数），这一行之后的内容全被当成粗体。整行再配一次。
-    _bp = _bold_pos(line)
-    if len(_bp) % 2 == 1:
-        # 同上：只算正文里的 **（note 里的 `` `**` `` 不算）；不删内容，换全角 ＊＊
-        k = _bp[-1]
-        line = line[:k] + "＊＊" + line[k + 2:]
     return line
 
 
@@ -684,38 +765,74 @@ def _last_assistant(dialog: list) -> str:
     return ""
 
 
-def _tail(text: str, cap: int = TAIL_CAP) -> str:
-    """取一段文字的最后 cap 字（跨会话时补「上次停在这里」用）。
+def _dedup(dialog: list) -> list:
+    """同角色 + 内容高度重复 → 只留一条（长的）。
 
-    2026-11-18 修：原来用 " ".join(split()) 把换行**全压成空格**，
-    列表/分段/代码块的结构全丢（和 `_clean` 那个 bug 同类，但这处漏了）。
-    现在保留换行、按行对齐缩进、并配平反引号。
+    落盘时已经去过一次，但**旧数据**是旧代码写的、可能还留着「中断 + 重试」
+    的两条重复，注入前再兜一次。
     """
-    t = str(text or "")
-    if not t.strip():
-        return ""
-    if len(t) > cap:
-        dropped = t[:-cap]
-        t = t[-cap:]
-        nl = t.find("\n")
-        if 0 <= nl < len(t) - 1:        # 别从半行开始
-            dropped += t[:nl + 1]
-            t = t[nl + 1:]
-        t = "…" + t
-        # 2026-11-18 修（真实卡片抓到）：截断把开头的 ** 切掉、只剩结尾的 **，
-        # 实测输出「…这个标题在说谎**。现在修它。」→ 后面整段被当成粗体。
-        # 只按「整串 ** 奇偶」判断抓不到这种（那段里共有 4 个 **，是偶数），
-        # 必须看**被丢掉的前缀**里有没有落单的 **，有就补一个开头 ** 回来。
-        # 2026-11-18 修（真实卡片抓到）：原来是 dropped.count("**") % 2 —— 又把
-        # 行内代码里的 `**` 数进去了，于是**误判**成「开头有个落单粗体」，补了
-        # 一个 "…**"，补完反而变奇数，最后被换成全角 ＊＊（输出「生成的＊＊。」）。
-        # 只统计正文里的 **（_bold_pos 会跳过 `…` 与 ``` 围栏）。
-        if len(_bold_pos(dropped)) % 2 == 1:
-            t = "…**" + t[1:]
-    t = _balance_fence(t)
-    if "\n" in t:                        # 续行缩进，避免破坏「· 那个会话…」这一行的结构
-        t = "\n".join(("  " + ln) if ln else "" for ln in t.split("\n"))
-    return t
+    out = []
+    for m in dialog:
+        t = str(m.get("text") or "")
+        if (out and out[-1].get("role") == m.get("role")
+                and _similar(str(out[-1].get("text") or ""), t)):
+            if len(t) > len(str(out[-1].get("text") or "")):
+                out[-1] = m
+            continue
+        out.append(m)
+    return out
+
+
+def _fold(body: str, orig_text: str, limit: int = 24) -> str:
+    """长代码块/长列表折叠：只显示前 limit 行，并说明原文一共多少行。"""
+    lines = body.split("\n")
+    if len(lines) <= limit:
+        return body
+    head = "\n".join(lines[:limit])
+    orig = len(str(orig_text or "").split("\n"))
+    note = "…（原文共 %d 行，已折叠显示前 %d 行）" % (max(orig, len(lines)), limit)
+    # 折叠点可能正落在 ``` 代码块里 → 先补闭合围栏，提示放到围栏**外面**
+    if head.count("```") % 2 == 1:
+        head += "\n```"
+    return head + "\n" + note
+
+
+def _ts_ok(ts) -> bool:
+    """这张卡还该不该注入（时间戳必须可信）。"""
+    try:
+        ts = float(ts)
+    except Exception:
+        return False
+    now = time.time()
+    # 原来只判 `not ts` 和「太久以前」。实测 ts=NaN / Infinity / 10**20 时，
+    # `now - ts > KEEP_DAYS*86400` 全部为 False（NaN 比较恒 False，inf 相减得
+    # -inf），于是**永远不过期**，白占上下文。这里要求：有限数、为正、
+    # 且不超过当前时间 1 天（时钟被改到未来同样会永不过期）。
+    if not math.isfinite(ts) or ts <= 0 or ts > now + 86400:
+        return False
+    return (now - ts) <= KEEP_DAYS * 86400
+
+
+def _split_changes(changes: list, restarted: str):
+    """按「重启时间」把改动分成 重启前 / 重启之后 两组。
+
+    原来一律写「那次重启前改过的文件」，但清单取的是「最近 SHOW_CHANGES 条」，
+    里面混着重启之后才做的改动（实测真实卡片：上次重启 02:34:17，清单里却有
+    02:36/02:37/02:41 共 6 条）。读卡的人会以为这些都已经生效过。
+
+    另外：两组都有时**固定给「重启前」留 4 个位置** —— 否则重启后又改了 12 条
+    以上时，「重启前」那组被整个挤掉，交接卡最该交代的信息反而没了。
+    """
+    pre, post = [], []
+    for c in changes:
+        t = str(c.get("time") or "")
+        if restarted and t and t > restarted:
+            post.append(c)                 # 格式固定 "YYYY-MM-DD HH:MM:SS"，可直接比
+        else:
+            pre.append(c)
+    if pre and post:
+        return pre[-4:], post[-(SHOW_CHANGES - min(4, len(pre))):]
+    return pre[-SHOW_CHANGES:], post[-SHOW_CHANGES:]
 
 
 def render(session: str = "") -> str:
@@ -723,18 +840,7 @@ def render(session: str = "") -> str:
     d = _read()
     if not d:
         return ""
-    try:
-        ts = float(d.get("ts") or 0)
-    except Exception:
-        ts = 0
-    now = time.time()
-    # 2026-11-18 修：原来只判 `not ts` 和「太久以前」。实测 ts=NaN / Infinity /
-    # 10**20 时，`now - ts > KEEP_DAYS*86400` 全部为 False（NaN 比较恒 False，
-    # inf 相减得 -inf），于是**永远不过期**，这张卡会无限期注入、白占上下文。
-    # 现在要求：必须是有限数、为正、且不能超过当前时间 1 天（时钟被改到未来同样
-    # 会导致永不过期）。
-    if (not math.isfinite(ts) or ts <= 0 or ts > now + 86400
-            or (now - ts) > KEEP_DAYS * 86400):
+    if not _ts_ok(d.get("ts")):
         return ""                          # 太久以前的重启，别再占上下文
 
     changes = [c for c in (d.get("changes") or []) if isinstance(c, dict)]
@@ -749,54 +855,25 @@ def render(session: str = "") -> str:
         lines = ["【自我迭代交接卡 · 上次对话 %s（没有重启记录，可能是异常退出）】"
                  % (d.get("live_at") or "时间未知")]
     if d.get("reason"):
-        # 2026-11-18 修：原来是 str(...)[:120] —— 硬截断不留标记，且 reason 里
-        # 若有落单的 ` 会把这行之后的 markdown 全吞掉。统一走 _clip（配平+省略号）
         lines.append("原因：%s" % _inline(d.get("reason"), 120))
 
     # 这段前文是不是**当前这段对话**自己的 —— 是的话，它就是"刚才"，权重更高
     same = bool(session) and str(d.get("dialog_session") or "") == str(session)
     if dialog:
-        # 落盘时已经去过重，但**旧数据**是旧代码写的、可能还留着「中断 + 重试」
-        # 的两条重复（实测那份真实卡里第 13/14 条都是 assistant、内容重复）。
-        # 这里再兜一次，保证注入出去的东西干净。
-        _dd = []
-        for _m in dialog:
-            _t = str(_m.get("text") or "")
-            if (_dd and _dd[-1].get("role") == _m.get("role")
-                    and _similar(str(_dd[-1].get("text") or ""), _t)):
-                if len(_t) > len(str(_dd[-1].get("text") or "")):
-                    _dd[-1] = _m
-                continue
-            _dd.append(_m)
-        dialog = _dd
+        dialog = _dedup(dialog)
         # 轮数按**真实用户消息条数**算。以前用 len(dialog)//2，一旦有条目
         # 被去重或多出一条 assistant，就会显示成 12 轮而实际只有 11 轮。
-        _rounds = sum(1 for m in dialog if m.get("role") == "user") or 1
+        rounds = sum(1 for m in dialog if m.get("role") == "user") or 1
         lines.append("· %s（最近 %d 轮）："
-                     % ("本会话刚才在聊" if same else "另一个会话当时在聊",
-                        _rounds))
+                     % ("本会话刚才在聊" if same else "另一个会话当时在聊", rounds))
         n = len(dialog)
         for i, m in enumerate(dialog):
             who = "用户" if m.get("role") == "user" else "你"
             cap = LAST_CAP if i >= n - 2 else TEXT_CAP
-            # 保留换行（别把分段/列表压成一长串），多行时缩进对齐
-            body = _clip(m.get("text"), cap)
-            _bl = body.split("\n")
-            if len(_bl) > 24:                  # 长代码块/长列表：折叠，别把上下文占满
-                _head = "\n".join(_bl[:24])
-                # 2026-11-18 修：「原文共 N 行」原来用的是 _clip **之后**的行数，
-                # 实测原文 60 行、clip 到 200 字后剩 30 行 → 提示谎报「共 30 行」。
-                # 这里取原文行数（两者取大，保证不小于实际显示的行数）。
-                _orig = len(str(m.get("text") or "").split("\n"))
-                _note = "…（原文共 %d 行，已折叠显示前 24 行）" % max(_orig, len(_bl))
-                # 折叠点可能正落在 ``` 代码块里 → 先补闭合围栏，提示放到围栏**外面**
-                # （否则那句提示会被当成代码内容显示，实测就是这个样子）
-                if _head.count("```") % 2 == 1:
-                    body = _head + "\n```\n" + _note
-                else:
-                    body = _head + "\n" + _note
+            raw = str(m.get("text") or "")
+            body = _fold(_clip(raw, cap), raw)
             if "\n" in body:
-                # 续行缩进对齐；空行留空，别写成 "  "（markdown 里是两个空格＝硬换行）
+                # 续行缩进对齐；空行留空，别写成 "  "（markdown 里两个空格＝硬换行）
                 body = "\n".join(("  " + ln) if ln else "" for ln in body.split("\n"))
             lines.append("  %s：%s" % (who, body))
 
@@ -807,37 +884,15 @@ def render(session: str = "") -> str:
         lines.append("· 那个会话最后停在这里：%s" % _tail(last))
 
     if changes:
-        # 2026-11-18 修：原来一律写「那次重启前改过的文件」，但清单取的是「最近
-        # SHOW_CHANGES 条」，里面**混着重启之后才做的改动**（实测真实卡片：上次重启
-        # 02:34:17，清单里却有 02:36/02:37/02:41 共 6 条）。读卡的人会以为这些
-        # 都发生在重启前、已经生效过，判断依据就错了。现在按 restarted_at 分成两组。
-        _rt = str(d.get("restarted_at") or "")
-        _pre_all, _post_all = [], []
-        for _c in changes:
-            _t = str(_c.get("time") or "")
-            if _rt and _t and _t > _rt:
-                _post_all.append(_c)       # 时间格式固定 "YYYY-MM-DD HH:MM:SS"，可直接比
-            else:
-                _pre_all.append(_c)
-        # 2026-11-18 修（上一版拆分时我自己引入的回归）：原来是先取「最近
-        # SHOW_CHANGES 条」再分组 —— 重启后又改了 12 条以上时，「重启前」那组
-        # 被整个挤掉，标题只剩「重启之后又改过的」，交接卡最该交代的「重启前动过
-        # 什么」反而没了（实测真实卡片就变成这样）。现在两组都有时，固定给
-        # 「重启前」留 4 个位置，剩下的给「重启后」。
-        if _pre_all and _post_all:
-            _pre = _pre_all[-4:]
-            _post = _post_all[-(SHOW_CHANGES - len(_pre)):]
-        else:
-            _pre = _pre_all[-SHOW_CHANGES:]
-            _post = _post_all[-SHOW_CHANGES:]
-        if _pre:
-            _h = ("· 那次重启前改过的文件（最近 %d 个）：" % len(_pre)) if _rt \
-                else ("· 最近改过的文件（最近 %d 个）：" % len(_pre))
-            lines.append(_h)
-            lines.extend(_fmt_change(c) for c in _pre)
-        if _post:
-            lines.append("· 重启之后又改过的文件（最近 %d 个）：" % len(_post))
-            lines.extend(_fmt_change(c) for c in _post)
+        pre, post = _split_changes(changes, restarted)
+        if pre:
+            head = ("· 那次重启前改过的文件（最近 %d 个）：" % len(pre)) if restarted \
+                else ("· 最近改过的文件（最近 %d 个）：" % len(pre))
+            lines.append(head)
+            lines.extend(_fmt_change(c) for c in pre)
+        if post:
+            lines.append("· 重启之后又改过的文件（最近 %d 个）：" % len(post))
+            lines.extend(_fmt_change(c) for c in post)
 
     lines.append(
         "⚠️ 这张卡是**上一次会话的背景**，用来接上前文（用户可能正在接着问刚才的事）；"
