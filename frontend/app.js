@@ -9069,6 +9069,7 @@
         '    <span id="sdVerTxt" style="flex:1;min-width:0;font-size:12px;color:#cfd6e2;line-height:1.6">当前版本：读取中…</span>',
         '    <button id="sdUndo" type="button" style="display:none;flex:0 0 auto;padding:6px 10px;border-radius:7px;border:1px solid #4a5a3a;background:transparent;color:#9fd88f;cursor:pointer;font-size:12px;white-space:nowrap">↩ 撤销上次回撤</button>',
         '  </div>',
+        '  <div id="sdRescue"></div>',
         '  <div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">版本历史（git 快照，脚本直改也记；点「回滚」整批还原）</div>',
         '  <div id="sdHist"></div>',
         '  <div id="sdMsg" style="font-size:12.5px;min-height:18px;color:#f0b34a;margin-top:8px"></div>',
@@ -9088,6 +9089,82 @@
       const verTxt = mask.querySelector("#sdVerTxt");
       const undoBtn = mask.querySelector("#sdUndo");
       const say = (t, c) => { msg.style.color = c || "#f0b34a"; msg.textContent = t; };
+
+      // ---- 全栈快照（崩溃救急）：在前端就能回滚，不用去桌面双击脚本 ----
+      const rbox = mask.querySelector("#sdRescue");
+      let rlist = { ok: false, items: [] };
+      try { rlist = await (await fetch("/api/rescue/snapshots", { cache: "no-store" })).json(); } catch (e) { /* ignore */ }
+      const rpaint = (d) => {
+        if (!rbox) return;
+        const items = (d && d.items) || [];
+        const mb = (n) => ((n || 0) / 1048576).toFixed(1) + " MB";
+        rbox.innerHTML = [
+          '<div style="font-size:12.5px;color:#9a9aa2;margin:16px 0 6px">全栈快照（源码 + data 状态；程序崩了也能用，点「回滚」整批还原）</div>',
+          items.length ? items.slice(0, 6).map((s) => {
+            const st = s.bad ? '<span style="color:#e0a0a0">坏状态</span>'
+              : (s.healthy ? '<span style="color:#7bd88f">健康</span>' : '<span style="color:#9a9aa2">未知</span>');
+            return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #262a32;font-size:12px">'
+              + '<span style="flex:1;min-width:0;word-break:break-all">' + s.mtime_str + ' · '
+              + (s.tag || s.name) + ' · ' + st + ' · ' + mb(s.size) + '</span>'
+              + '<button data-rsnap="' + s.name + '" style="flex:0 0 auto;padding:4px 10px;border-radius:6px;border:1px solid #4a3a3a;background:transparent;color:#e0a0a0;cursor:pointer;font-size:12px">回滚</button>'
+              + '</div>';
+          }).join("")
+            : '<div style="font-size:12px;color:#6f7787;padding:4px 0">还没有快照（点下面「立即快照」建一个）</div>',
+          '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">',
+          '  <button id="sdRSnap" style="padding:5px 12px;border-radius:7px;border:1px solid #2f3a4a;background:transparent;color:#5aa9ff;cursor:pointer;font-size:12px">＋ 立即快照</button>',
+          '  <button id="sdRAuto" style="padding:5px 12px;border-radius:7px;border:1px solid #4a3a3a;background:transparent;color:#e0a0a0;cursor:pointer;font-size:12px">⟲ 自动回滚到最近健康版</button>',
+          '</div>',
+        ].join("");
+      };
+      rpaint(rlist);
+
+      const rdo = async (btn, body, url, label) => {
+        if (btn) { btn.disabled = true; btn.textContent = label; }
+        try {
+          const r = await (await fetch(url, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body || {}) })).json();
+          if (r && r.ok) {
+            say("✅ " + (r.msg || "完成") + "，正在自动重启…", "#7bd88f");
+            if (window.__restartAppNow) { setTimeout(() => window.__restartAppNow(), 600); return; }
+          } else {
+            say("❌ " + ((r && r.error) || "失败"), "#e06c6c");
+          }
+        } catch (e) { say("❌ " + e.message, "#e06c6c"); }
+        if (btn) { btn.disabled = false; btn.textContent = "回滚"; }
+      };
+
+      if (rbox) rbox.addEventListener("click", async (ev) => {
+        const rb = ev.target.closest("button[data-rsnap]");
+        if (rb) {
+          const n = rb.dataset.rsnap;
+          if (!confirm("回滚到快照 " + n + " 吗？\n\n· 回滚前会先把当前状态存一份（可再退回）\n· 源码和 data 状态会一起还原\n· 点「确定」后立刻回滚 → 自动重启（会短暂断开）")) return;
+          await rdo(rb, { snap: n }, "/api/rescue/rollback", "回滚中…");
+          return;
+        }
+        const ra = ev.target.closest("#sdRAuto");
+        if (ra) {
+          if (!confirm("自动回滚到最近一个「健康」快照吗？\n\n会逐个往前试，直到代码能正常启动。\n点「确定」后立刻回滚 → 自动重启。")) return;
+          await rdo(ra, { snap: "" }, "/api/rescue/rollback", "回滚中…");
+          return;
+        }
+        const rs = ev.target.closest("#sdRSnap");
+        if (rs) {
+          rs.disabled = true; rs.textContent = "快照中…";
+          try {
+            const r = await (await fetch("/api/rescue/snapshot", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message: "前端手动快照" }) })).json();
+            if (r && r.ok) {
+              say("✅ " + (r.msg || "快照完成"), "#7bd88f");
+              try { rlist = await (await fetch("/api/rescue/snapshots", { cache: "no-store" })).json(); } catch (e) {}
+              rpaint(rlist);
+            } else say("❌ " + ((r && r.error) || "快照失败"), "#e06c6c");
+          } catch (e) { say("❌ " + e.message, "#e06c6c"); }
+          const b2 = rbox.querySelector("#sdRSnap");
+          if (b2) { b2.disabled = false; b2.textContent = "＋ 立即快照"; }
+        }
+      });
 
       const applyState = () => {
         stateEl.textContent = on ? "已开启" : "已关闭";

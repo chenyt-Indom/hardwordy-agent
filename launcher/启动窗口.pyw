@@ -371,6 +371,31 @@ def port_in_use() -> bool:
 BACKEND_LOG = os.path.join(tempfile.gettempdir(), "mm_backend.log")
 
 
+def _rescue(*args, timeout: int = 300) -> int:
+    """调用 rescue.py（崩溃救急）。返回退出码；找不到脚本或调用失败返回 -1。
+
+    ★ 2026-11-17：用户要求「程序全面崩溃时也能完成全栈回滚」。
+      rescue.py **不 import backend**，所以后端代码坏掉时它照样能跑。
+      找不到脚本就返回 -1，调用方当作「没有救急能力」继续原流程（便携包布局
+      里可能没有这个脚本，不能因此挡住启动）。
+    """
+    script = os.path.join(_SRC_DIR, "rescue.py")
+    if not os.path.isfile(script):
+        return -1
+    try:
+        p = subprocess.run(
+            [sys.executable, script] + list(args),
+            cwd=_SRC_DIR, timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+        )
+        return p.returncode
+    except Exception as exc:                    # noqa: BLE001
+        _log("救急脚本调用失败：%s" % exc)
+        return -1
+
+
 def start_service() -> subprocess.Popen:
     """后台拉起服务，CREATE_NO_WINDOW 确保不弹黑框控制台。
 
@@ -592,19 +617,60 @@ def main() -> None:
             )
             return
     else:
+        # ★ 2026-11-17：启动前预检 —— 专防「改完代码重启就起不来」。
+        #   这是最高频的崩溃场景：双击后闪退、界面打不开，连回滚按钮都点不到。
+        rc = _rescue("--precheck", timeout=180)
+        if rc == 1:
+            _log("启动前预检失败，尝试自动回滚")
+            rc2 = _rescue("--auto", "--reason", "启动器启动前预检失败")
+            if rc2 != 0:
+                alert(
+                    "代码预检没通过（多半是刚改完代码），自动回滚也没成功。\n\n"
+                    "请双击项目根目录的「回滚救急.bat」手动回滚到更早的版本。\n"
+                    f"救急日志：{os.path.join(_SRC_DIR, 'data', 'rescue.log')}"
+                )
+                return
+            _log("自动回滚成功，继续启动")
+
         proc = start_service()
         if not wait_ready(proc):
-            alert(
-                "服务启动失败或超时。\n\n"
-                f"后端日志（排查先看它）：\n{BACKEND_LOG}\n\n"
-                "请检查：\n"
-                "1) Ollama 是否已启动（模型 qwen3-vl:8b 是否就绪）\n"
-                f"2) 端口 {PORT} 是否被占用\n"
-                "3) 程序文件是否完整"
-            )
+            # 先尝试自动救急一次，救不回来再把失败框摆给用户
             if proc.poll() is None:
                 proc.terminate()
-            return
+            _log("服务启动失败，尝试自动回滚")
+            rc3 = _rescue("--auto", "--reason", "启动后健康检查失败")
+            if rc3 == 0:
+                _log("自动回滚成功，重启服务")
+                proc = start_service()
+                if wait_ready(proc):
+                    pass                      # 救回来了，继续往下开窗口
+                else:
+                    if proc.poll() is None:
+                        proc.terminate()
+                    alert(
+                        "自动回滚后服务仍然起不来。\n\n"
+                        "请双击项目根目录的「回滚救急.bat」选更早的版本。\n"
+                        f"后端日志：{BACKEND_LOG}\n"
+                        f"救急日志：{os.path.join(_SRC_DIR, 'data', 'rescue.log')}"
+                    )
+                    return
+            else:
+                alert(
+                    "服务启动失败或超时，自动回滚也没成功。\n\n"
+                    f"后端日志（排查先看它）：\n{BACKEND_LOG}\n\n"
+                    "请检查：\n"
+                    "1) Ollama 是否已启动（模型 qwen3-vl:8b 是否就绪）\n"
+                    f"2) 端口 {PORT} 是否被占用\n"
+                    "3) 程序文件是否完整\n\n"
+                    "或双击项目根目录的「回滚救急.bat」回滚到更早的版本。"
+                )
+                return
+
+    # ★ 2026-11-17：把这次成功启动记成「可回滚版本」。
+    #   没有这一步，「回滚到上个版本」可能滚到几天前，把中间改动全丢掉。
+    #   只在本次真的拉起过服务时建（复用已有服务的重复双击不建）。
+    if proc is not None:
+        _rescue("--snapshot", "--tag", "启动成功", timeout=180)
 
     try:
         import webview

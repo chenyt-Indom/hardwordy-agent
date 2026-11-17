@@ -12827,6 +12827,80 @@ def version_undo_info():
     return _ver.get_undo()
 
 
+# ---------------------------------------------------------------- 全栈快照（崩溃救急）
+# 用户要求（2026-11-17）：回滚要能**在前端**完成，不用去桌面双击脚本。
+# 这里把根目录的 rescue.py 接出来 —— 它只依赖标准库、故意不 import backend，
+# 所以主程序坏掉时它自己还能跑；这一层只是给它套个 HTTP 外壳。
+def _rescue_mod():
+    """按路径加载根目录的 rescue.py（不依赖 sys.path，避免和包名冲突）。"""
+    import importlib.util as _ilu
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _p = os.path.join(_root, "rescue.py")
+    if not os.path.isfile(_p):
+        raise RuntimeError("项目根目录找不到 rescue.py")
+    _spec = _ilu.spec_from_file_location("_rescue_standalone", _p)
+    _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m)          # rescue.py 有 __main__ guard，import 无副作用
+    return _m
+
+
+class RescueRollbackReq(BaseModel):
+    snap: str = ""
+
+
+@app.get("/api/rescue/snapshots")
+def rescue_snapshots():
+    """全栈快照列表（源码 + data 状态文件），新的在前。"""
+    try:
+        return {"ok": True, "items": _rescue_mod().list_snapshots()}
+    except Exception as exc:
+        logger.warning("读全栈快照失败", exc_info=True)
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc), "items": []}
+
+
+@app.post("/api/rescue/snapshot")
+def rescue_snapshot(req: VersionSnapReq):
+    """立刻打一个全栈快照。"""
+    try:
+        r = _rescue_mod().create_snapshot(req.message or "前端手动快照")
+        if isinstance(r, dict) and r.get("ok"):
+            r["msg"] = "快照完成：%s（%d 个文件，%.1f MB）" % (
+                r.get("name", ""), r.get("count", 0), (r.get("bytes_zip") or 0) / 1048576.0)
+        return r
+    except Exception as exc:
+        logger.warning("创建全栈快照失败", exc_info=True)
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+
+
+@app.post("/api/rescue/rollback")
+def rescue_rollback(req: RescueRollbackReq):
+    """前端一键回滚：snap 空 = 自动挑最近一个「健康」快照。
+
+    force=True 是必须的 —— 能从界面点这个按钮，说明主程序正跑着，
+    而 rescue.py 默认会拒绝在健康状态下回滚（防误操作）。
+    """
+    try:
+        _r = _rescue_mod()
+        if req.snap:
+            # 名字解析不到时必须报错：rescue.rollback 对 None 会静默退回「最近健康快照」，
+            # 那等于用户点 A 版本却滚到了 B 版本（快照可能已被清理策略删掉）。
+            if not _r._resolve_snap(req.snap):
+                return {"ok": False, "error": "找不到快照「%s」（可能已被清理），请刷新列表重试" % req.snap}
+            r = _r.rollback(req.snap, clean=True, deep=False, force=True)
+        else:
+            r = _r.auto_rollback(deep=False, reason="前端一键回滚")
+        if isinstance(r, dict) and r.get("ok"):
+            try:
+                from . import pending as _pend
+                _pend.mark("", "回滚到全栈快照 %s" % (req.snap or "自动选择"))
+            except Exception:
+                logger.warning("回滚后标记待生效失败", exc_info=True)
+        return r
+    except Exception as exc:
+        logger.warning("全栈回滚失败", exc_info=True)
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+
+
 @app.post("/api/version/undo")
 def version_undo():
     """撤销上一次回滚：回到回滚前的那一刻（本身也会再存一个还原点）。"""
