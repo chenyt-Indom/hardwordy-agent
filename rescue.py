@@ -540,6 +540,11 @@ def _prepare_dst(dst):
 MAX_ENTRY_MB = 96          # 单个文件上限
 MAX_TOTAL_MB = 512         # 单次回滚解压总量上限
 
+# ⚠️ 2026-11-18 实测：回滚到 21:57 的老快照时，rescue.py 被一起换回 31,936 B 的旧版，
+#   救急引擎当场降级（Zip Slip 防护、sha256 校验、并发锁、exe 回滚全没了）。
+#   引擎是「救火工具」本身，不能由它自己回滚自己 —— 回滚时永远跳过这个文件。
+_ENGINE_NAME = os.path.basename(os.path.abspath(__file__)) or "rescue.py"
+
 
 def _entry_too_big(zf, name, total):
     """检查 zip 条目大小。返回 (超限说明 or "", 该条目字节数)。"""
@@ -1568,11 +1573,20 @@ def _rollback_impl(snap_path=None, clean=True, deep=False, force=False, allow_ma
 
     # 2) 解压覆盖
     restored, failed, tampered = 0, [], []
+    skipped_engine = []
     _total = 0
     try:
         with zipfile.ZipFile(path) as z:
             for n in snap_files:
                 if n.endswith("/"):      # 目录条目，不是文件
+                    continue
+                # ⚠️ 2026-11-18 实测（用户真机回滚到 21:57 的老快照时暴露）：
+                #   回滚会把 rescue.py 自己也换回旧版 —— 救急引擎当场降级：
+                #   Zip Slip 防护、sha256 校验、并发锁、只读/硬链接处理、exe 回滚
+                #   全部消失，而且旧版还会把 _feature_tests 收进快照。
+                #   引擎不能由它自己回滚自己，永远保留磁盘上正在运行的这一版。
+                if n.replace("\\", "/").lstrip("./") == _ENGINE_NAME:
+                    skipped_engine.append(n)
                     continue
                 try:
                     dst = _dst_path(n)
@@ -1648,6 +1662,8 @@ def _rollback_impl(snap_path=None, clean=True, deep=False, force=False, allow_ma
                         _expected[_n] = _z.getinfo(_n).file_size
         except Exception:
             _expected = {}
+    # 引擎文件是有意不写的（保护救急引擎不被降级），不能拿它做残缺判定
+    _expected.pop(_ENGINE_NAME, None)
 
     # 4a) 两种形态都做一次「恢复出来的文件大小对不对」的核对
     _size_bad = []
@@ -1674,6 +1690,8 @@ def _rollback_impl(snap_path=None, clean=True, deep=False, force=False, allow_ma
     if isinstance(_hman, dict) and _hman:
         for _rel, _hexp in _hman.items():
             if not isinstance(_hexp, str) or len(_hexp) != 64:
+                continue
+            if _rel == _ENGINE_NAME:      # 引擎有意不写，不参与内容核对
                 continue
             try:
                 _ap = _dst_path(_rel)
@@ -1720,9 +1738,14 @@ def _rollback_impl(snap_path=None, clean=True, deep=False, force=False, allow_ma
         "failed": failed[:20],
         "hash_mismatch": _hash_bad[:20],
         "bad_snapshot": bad_path,
+        "skipped_engine": skipped_engine[:5],
         "verify": "import",
         "detail": msg_i,
     }
+    if skipped_engine:
+        # 别让用户以为「引擎没回滚」是失败：这是有意的保护
+        result["detail"] = (str(result.get("detail") or "") +
+                            "；已保留当前 rescue.py 未覆盖（避免救急引擎被旧版替换）").lstrip("；")
     if ok_i and deep:
         ok_d, msg_d = verify_deep()
         result["deep_ok"] = bool(ok_d)
