@@ -26,7 +26,9 @@
 """
 import functools
 import json
+import math
 import os
+import shutil
 import threading
 import time
 
@@ -413,8 +415,31 @@ def _read() -> dict:
     try:
         with open(LAST, "r", encoding="utf-8") as f:
             d = json.load(f)
-        return d if isinstance(d, dict) else {}
+        if isinstance(d, dict):
+            return d
+        raise ValueError("last.json 顶层不是 dict")
+    except FileNotFoundError:
+        return {}
     except Exception:
+        # 2026-11-18 修（数据丢失级）：原来这里直接 return {}，而调用方都是
+        # 「读 → 改 → 写」—— 文件一旦损坏（手工编辑出错、断电写一半、磁盘异常），
+        # 下一次 record_change/touch 就会拿空字典写回，把整份历史（对话+改动）
+        # 无声覆盖掉。实测：24 条对话 + 30 条改动 → 记录一条改动后全没。
+        # 现在：先把坏文件改名隔离（留着人工抢救），再尝试上一次的 .bak。
+        try:
+            bad = LAST + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S")
+            os.replace(LAST, bad)
+            logger.warning("交接卡 last.json 无法解析，已隔离为 %s", os.path.basename(bad))
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        try:
+            with open(LAST + ".bak", "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                logger.warning("交接卡已从 last.json.bak 恢复")
+                return d
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
         return {}
 
 
@@ -425,8 +450,18 @@ def _write(d: dict) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2)
         os.replace(tmp, LAST)          # 原子替换，避免写一半断电把交接卡写坏
+        # 2026-11-18：写成功后把这份内容同步留一份 .bak。
+        # 放在**写成功之后**而不是之前：这样首次写入也有备份（实测原来「先备份再写」
+        # 的写法，第一次写时 LAST 还不存在，压根没有 .bak —— 此时文件损坏仍然
+        # 24 条对话全丢）。.bak 永远等于最后一次成功写入的状态。
+        try:
+            shutil.copyfile(LAST, LAST + ".bak")
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
     except Exception:
-        logger.debug("silent-except", exc_info=True)                           # 交接卡写失败**不能影响**正常对话/改代码
+        # 写失败不能影响正常对话/改代码，但至少要在日志里留痕（原来是 debug，
+        # 磁盘满/只读时完全看不到，用户只会觉得「交接卡怎么不更新了」）
+        logger.warning("交接卡写入失败", exc_info=True)
 
 
 # =====================================================================
@@ -692,7 +727,14 @@ def render(session: str = "") -> str:
         ts = float(d.get("ts") or 0)
     except Exception:
         ts = 0
-    if not ts or (time.time() - ts) > KEEP_DAYS * 86400:
+    now = time.time()
+    # 2026-11-18 修：原来只判 `not ts` 和「太久以前」。实测 ts=NaN / Infinity /
+    # 10**20 时，`now - ts > KEEP_DAYS*86400` 全部为 False（NaN 比较恒 False，
+    # inf 相减得 -inf），于是**永远不过期**，这张卡会无限期注入、白占上下文。
+    # 现在要求：必须是有限数、为正、且不能超过当前时间 1 天（时钟被改到未来同样
+    # 会导致永不过期）。
+    if (not math.isfinite(ts) or ts <= 0 or ts > now + 86400
+            or (now - ts) > KEEP_DAYS * 86400):
         return ""                          # 太久以前的重启，别再占上下文
 
     changes = [c for c in (d.get("changes") or []) if isinstance(c, dict)]

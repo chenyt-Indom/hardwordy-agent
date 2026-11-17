@@ -468,7 +468,86 @@ def main():
         except Exception:
             pass
 
-    print("\n结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
+    # ---- 46. last.json 损坏时，绝不能拿空字典覆盖整份历史（数据丢失级）----
+    # 修前实测：24 条对话 + 30 条改动 → 文件损坏 → 记录一条改动 → 全没。
+    _old_last2 = handoff.LAST
+    _tmpd2 = tempfile.mkdtemp(prefix="handoff_corrupt_")
+    handoff.LAST = os.path.join(_tmpd2, "last.json")
+    try:
+        _full = {"session": "s1", "dialog": [{"role": "user", "text": "x%d" % i} for i in range(24)],
+                 "changes": [{"rel": "f%d.py" % i, "note": "n"} for i in range(30)]}
+        handoff._write(_full)                     # 正常写一次 → 生成 .bak
+        with open(handoff.LAST, "w", encoding="utf-8") as _f:
+            _f.write('{"session": "s1", "dialog": [{"role": "us')   # 截断损坏
+        handoff.record_change("new.py", "改一处")
+        _d2 = handoff._read()
+        check("损坏后对话历史未被覆盖（有 .bak）", len(_d2.get("dialog") or []) == 24,
+              "实得 %d 条" % len(_d2.get("dialog") or []))
+        check("损坏后改动历史未被覆盖（有 .bak）", len(_d2.get("changes") or []) >= 30,
+              "实得 %d 条" % len(_d2.get("changes") or []))
+        _corrupt = [n for n in os.listdir(_tmpd2) if ".corrupt-" in n]
+        check("坏文件被隔离保留（可人工抢救）", len(_corrupt) == 1, str(_corrupt))
+
+        # 没有 .bak 时也不能抛异常，且坏文件同样要留住
+        for _n in os.listdir(_tmpd2):
+            try:
+                os.remove(os.path.join(_tmpd2, _n))
+            except Exception:
+                pass
+        with open(handoff.LAST, "w", encoding="utf-8") as _f:
+            _f.write("{坏掉了")
+        _ok = True
+        try:
+            handoff.record_change("b.py", "x")
+        except Exception:
+            _ok = False
+        check("损坏且无 .bak 时不抛异常", _ok and len(handoff._read().get("changes") or []) >= 1,
+              str(len(handoff._read().get("changes") or [])))
+    finally:
+        handoff.LAST = _old_last2
+        try:
+            import shutil as _sh2
+            _sh2.rmtree(_tmpd2, ignore_errors=True)
+        except Exception:
+            pass
+
+    # ---- 50. render 过期判断：NaN / Infinity / 未来时间都不能永久注入 ----
+    # 修前实测：ts=NaN、Infinity、10**20 时 `now - ts > KEEP_DAYS*86400` 恒为 False，
+    # 卡片**永不过期**，无限期占上下文。
+    _old_last3 = handoff.LAST
+    _tmpd3 = tempfile.mkdtemp(prefix="handoff_ts_")
+    handoff.LAST = os.path.join(_tmpd3, "last.json")
+    try:
+        def _render_ts(_v):
+            _d = {"session": "s1", "restarted_at": "2026-11-18 03:08:47",
+                  "dialog": [{"role": "user", "text": "你好"}],
+                  "changes": [{"rel": "a.py", "note": "n"}]}
+            if _v is not None:
+                _d["ts"] = _v
+            with open(handoff.LAST, "w", encoding="utf-8") as _f:
+                json.dump(_d, _f, ensure_ascii=False)
+            return handoff.render("s1")
+
+        _bad = []
+        for _n, _v in (("NaN", float("nan")), ("Infinity", float("inf")),
+                       ("-Infinity", float("-inf")), ("10**20", 10 ** 20),
+                       ("未来 10 天", __import__("time").time() + 10 * 86400)):
+            if _render_ts(_v):
+                _bad.append(_n)
+        check("异常 ts 不会永久注入（NaN/inf/未来）", not _bad, "漏了：" + str(_bad))
+        check("正常 ts 仍能注入", bool(_render_ts(__import__("time").time())), "")
+        check("超过 KEEP_DAYS 不注入",
+              not _render_ts(__import__("time").time() - (handoff.KEEP_DAYS + 1) * 86400), "")
+    finally:
+        handoff.LAST = _old_last3
+        try:
+            import shutil as _sh3
+            _sh3.rmtree(_tmpd3, ignore_errors=True)
+        except Exception:
+            pass
+
+    print("")
+    print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:
         print("失败项：" + "、".join(FAILS))
         return 1
