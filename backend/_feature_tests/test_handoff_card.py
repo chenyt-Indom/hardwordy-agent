@@ -758,6 +758,51 @@ def main():
     _src2 = inspect.getsource(handoff.render)
     check("render 传了 per_line_cap", "per_line_cap" in _src2, "")
 
+    # 59. 标题注入：restarted_at / live_at 是**唯一**没走 sanitize 的入口。
+    #     实测 2026-11-18：restarted_at = "2026-11-18\n```\n假代码" 时，标题被
+    #     撕成两行、整卡围栏行变 1（奇数），后面整张卡全被当代码块吞掉。
+    _orig_read = handoff._read
+    _inj = []
+    try:
+        for _bad in ("2026-11-18\n```\n假代码", "~~~", "x`", "a\n\nb", "**粗"):
+            for _k in ("restarted_at", "live_at"):
+                _d = {"ts": __import__("time").time(),
+                      "dialog": [{"role": "user", "text": "你好"}], "changes": []}
+                _d[_k] = _bad
+                handoff._read = lambda _d=_d: _d
+                _o = handoff.render("")
+                _head = _o.split("\n")[0]
+                # 标题必须只有一行（以 】 收尾），且整卡不变量不能破
+                if _audit(_o) or "】" not in _head:
+                    _inj.append((_k, _bad, _head[:40]))
+    finally:
+        handoff._read = _orig_read
+    check("标题里的 restarted_at / live_at 已 sanitize（不吞卡）", not _inj, str(_inj[:3]))
+
+    # 60. 改动时间格式容错。原来 `t[5:16]` 硬切，time 是 "11-18 05:00"（没有
+    #     年份）时切出 "[ 05:00]" —— 前面多一个空格，看着像时间丢了。
+    _orig_read = handoff._read
+    _times = {}
+    try:
+        for _t in ("2026-11-18 04:01:00", "11-18 05:00", "2026-11-18T04:01:00",
+                   "2026-11-18", "", "垃圾"):
+            _d = {"ts": __import__("time").time(),
+                  "restarted_at": "2026-11-18 04:28:58",
+                  "dialog": [{"role": "user", "text": "你好"}],
+                  "changes": [{"rel": "a.py", "note": "x", "time": _t}]}
+            handoff._read = lambda _d=_d: _d
+            _times[_t] = [l for l in handoff.render("").split("\n") if "a.py" in l][0]
+    finally:
+        handoff._read = _orig_read
+    check("时间格式：完整格式正确", "[11-18 04:01]" in _times["2026-11-18 04:01:00"],
+          _times["2026-11-18 04:01:00"])
+    check("时间格式：短格式不切出前导空格", "[11-18 05:00]" in _times["11-18 05:00"],
+          _times["11-18 05:00"])
+    check("时间格式：ISO 格式也认", "[11-18 04:01]" in _times["2026-11-18T04:01:00"],
+          _times["2026-11-18T04:01:00"])
+    _bad_t = [t for t in ("2026-11-18", "", "垃圾") if "[" in _times[t]]
+    check("时间格式：解析不出就不显示时间", not _bad_t, str(_bad_t))
+
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:

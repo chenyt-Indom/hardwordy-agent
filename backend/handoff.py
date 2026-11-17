@@ -877,9 +877,12 @@ def _fmt_change(it: dict) -> str:
         line += "（+%d -%d 行）" % (added, removed)
     if note:
         line += "：%s" % note
-    t = str(it.get("time") or "")
-    if t:
-        line += "　[%s]" % t[5:16]      # 只留「月-日 时:分」
+    # 只留「月-日 时:分」。原来直接 t[5:16] 硬切，实测 time 是 "11-18 05:00"
+    # （没有年份）时会切出 "[ 05:00]" —— 前面多一个空格，看着像时间丢了。
+    # 改成按正则取，取不到就不显示时间（比显示一个错时间好）。
+    m = re.search(r"(\d{1,2}-\d{1,2})[T\s]+(\d{1,2}:\d{2})", str(it.get("time") or ""))
+    if m:
+        line += "　[%s %s]" % (m.group(1), m.group(2))
     return line
 
 
@@ -974,11 +977,15 @@ def render(session: str = "") -> str:
         return ""
 
     restarted = str(d.get("restarted_at") or "")
+    # ★ 2026-11-18 修（注入）：这是**唯一**没走 sanitize 的入口。原来直接
+    #   "%s" % restarted 拼进标题，实测 restarted_at 里带一个换行 + ``` 时，
+    #   标题被撕成两行、整卡围栏行变 1（奇数），**后面整张卡全被当代码块吞掉**。
+    #   live_at 同理。标题是单行上下文，用 _inline。
     if restarted:
-        lines = ["【自我迭代交接卡 · 上次重启 %s】" % restarted]
+        lines = ["【自我迭代交接卡 · 上次重启 %s】" % _inline(restarted, 40)]
     else:
         lines = ["【自我迭代交接卡 · 上次对话 %s（没有重启记录，可能是异常退出）】"
-                 % (d.get("live_at") or "时间未知")]
+                 % _inline(d.get("live_at") or "时间未知", 40)]
     if d.get("reason"):
         lines.append("原因：%s" % _inline(d.get("reason"), 120))
 
