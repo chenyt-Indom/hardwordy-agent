@@ -1166,6 +1166,10 @@
     return hasMedia ? cards : [];
   }
 
+  // 当前可见的那块画布（最近一次挂载的）。底部「就这块改」输入框要就地重画时用它：
+  // { cards, remount(nextCards) } —— 语音画布快路，解析在 backend/canvas.py
+  let canvasCtx = null;
+
   // 把画布挂到气泡末尾（正文照旧，画布是额外的一层可圈选视图）
   function mountCanvasFor(bubble, raw) {
     if (!bubble) return null;
@@ -1211,6 +1215,27 @@
     if (!grid) return null;
     bubble.appendChild(grid);
     bubble.appendChild(note);
+
+    // 记下这块画布：底部输入框说一句「改红色 / 删掉这张 / 合并前两张」时，
+    // 拿后端返回的新卡片数组就地重画，不用再等一整轮对话。
+    const remount = (nextCards) => {
+      const A2 = window.__Artifacts;
+      let g2 = null;
+      try {
+        if (A2 && typeof A2.renderCanvas === "function") {
+          g2 = A2.renderCanvas(nextCards, {
+            key: typeof A2.canvasKeyFor === "function" ? A2.canvasKeyFor(nextCards) : "",
+            onPick: onPick,
+          });
+        }
+      } catch (e) { g2 = null; }
+      if (!g2) return false;                       // 重画失败就交回调用方走对话，不硬改
+      if (grid && grid.parentNode) grid.parentNode.replaceChild(g2, grid);
+      grid = g2;
+      canvasCtx.cards = nextCards;
+      return true;
+    };
+    canvasCtx = { cards: cards, remount: remount };
     return grid;
   }
 
@@ -1253,10 +1278,36 @@
       document.body.appendChild(bar);
       canvasEditBar = bar;
 
-      const submit = () => {
+      const submit = async () => {
         const txt = String(inp.value || "").trim();
         if (!txt) { try { inp.focus(); } catch (e) {} return; }
         const cur = canvasEditBar.__pick;
+        // 快路（语音画布）：改色 / 删除 / 合并这类「指着卡片说」的话，当场落到卡片上。
+        // 后端 action 为空 = 认不出是画布指令（比如「标题再短点」），照旧走对话链路。
+        if (cur && cur.cardId && canvasCtx && canvasCtx.cards && canvasCtx.cards.length) {
+          let hit = null;
+          try {
+            const r = await fetch("/api/canvas/command", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text: txt, cards: canvasCtx.cards, selected: cur.cardId }),
+            });
+            hit = await r.json();
+          } catch (e) { hit = null; }
+          if (hit && hit.ok && Array.isArray(hit.cards) && hit.cards.length) {
+            if (canvasCtx.remount(hit.cards)) {
+              hideCanvasEditBar();
+              showToast(hit.note || "已改好", "ok");
+              return;
+            }
+          }
+          // 是画布指令、但指不到卡 / 没说颜色 → 原样提示，别把话再丢给模型白跑一轮
+          if (hit && hit.ok === false && hit.action && hit.error) {
+            showToast(hit.error, "warn");
+            try { inp.focus(); } catch (e) {}
+            return;
+          }
+        }
         if (cur) canvasPick = cur;       // send() 里 __takeCanvasPick 会取走
         hideCanvasEditBar();
         try {
