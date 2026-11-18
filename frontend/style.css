@@ -1465,7 +1465,15 @@ body.dragging .drop-overlay,
 .kb-idx b { color: var(--kb-accent); font-weight: 600; }
 
 /* 文档列表 */
-.kb-list { display: flex; flex-direction: column; gap: 5px; }
+/* 2026-11-18 用户报「侧边栏底部被裁切」：kb-list 原来沿用 .list 的
+   max-height:320px + overflow-y:auto，在本来就能整体滚动的 .sidebar 里
+   形成**嵌套滚动** —— 滚轮要先滚完内层才滚外层，而且列表底部那一项
+   永远只露半截（看着像被裁）。这里取消内层滚动，交给侧边栏统一滚。
+   ⚠️ 只改 .kb-list，不动通用 .list（记忆库等还要靠它限高）。 */
+.kb-list {
+  display: flex; flex-direction: column; gap: 5px;
+  max-height: none; overflow-y: visible; padding-bottom: 2px;
+}
 .kb-item {
   display: flex; align-items: center; gap: 7px;
   background: var(--panel2); border: 1px solid var(--border);
@@ -2641,9 +2649,11 @@ select.pill-select option {
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;      /* 2026-11-12：多了「思考框跟随」按钮，窄屏允许换行，别横向挤压 */
-  row-gap: 6px;
+  /* 2026-11-18：原来 row-gap: 6px 写在 gap: 8px 前面，被简写覆盖成 8px 没生效。
+     简写必须在前、单项在后，否则换行后上下间距还是 8px，看着挤。 */
   gap: 8px;
-  margin-top: 6px;
+  row-gap: 5px;
+  margin-top: 4px;
 }
 
 /* 这一条里的控件比顶栏略小一档，免得在输入区显得笨重 */
