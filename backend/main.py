@@ -12229,6 +12229,32 @@ def tts_audio(name: str):
                         headers={"Content-Disposition": "inline"})
 
 
+# ---------- 语音画布：指哪改哪（2026-11-20） ----------
+# 摩擦点「同一需求被重复发送」：用户反复描述同一个修改意图，因为文字流里
+# **指不到具体那块**。卡片画布（artifacts.js）已经能点选，这里补上「说一句
+# 就当场改」：语音/文字 → 卡片 id + 操作（改色 / 删除 / 合并）→ 新卡片数组。
+#
+# 为什么解析放后端（backend/canvas.py）而不是前端：
+#   · 「第 2 张」「前两张」「用『南澳岛』那张」这类指代要一套统一口径，
+#     前后端各写一份必然走偏；
+#   · 放后端才能被回归断言直接钉住（前端 JS 里的逻辑没法在 Python 回归里跑）。
+@app.post("/api/canvas/command")
+def canvas_command(body: dict):
+    """画布指令。body: {text, cards: [{id,type,content,color}], selected}
+
+    返回 {ok, action, card_ids, cards, color, note, error}：
+      · ok=False 时 error 是**人话**，前端直接提示用户（不弹异常、不改画布）；
+      · action ∈ recolor / delete / merge（第一版只有这三类）；
+      · cards 是**操作后的完整卡片数组**（前端整体重画，注意 id 保持不变，
+        这样下一句话还能继续指着同一张卡改）；
+      · selected 是画布上圈选/点选中的 card-id，指不到具体卡片时用它兜底。
+    """
+    body = body or {}
+    from . import canvas as _canvas            # 局部导入：画布是可选能力，别拖慢启动
+    return _canvas.handle(str(body.get("text") or ""), body.get("cards") or [],
+                          selected=str(body.get("selected") or ""))
+
+
 @app.get("/api/tts/styles")
 def tts_styles():
     """情感预设清单（用 rate/pitch/volume 组合近似，不是真情感合成）。"""
