@@ -61,6 +61,13 @@ LEGACY_GLOBAL_FILE = os.path.join(MEM_DIR, "global.json")          # 早期"全�
 LONG_CAP = 15000     # 长期记忆
 SHORT_CAP = 1000     # 单个对话的短期记忆
 
+# 空会话时的兜底 id：**定义在这里**，main.py 和 tools.py 都引用它。
+# 原来 main.py 里硬编码一份 `_NO_SESSION_SID`，而 tools.py 里压根没有 ——
+# 于是「前端清过缓存、session 为空」时，自动提炼能写进这个兜底 id，
+# 而 remember 工具却直接回「无法确定当前对话，记忆未写入」，
+# 两条写入路径对同一场景的处理不一致。集中一处避免漂移。
+NO_SESSION_SID = "_nosession"
+
 _STOP_WORDS = set(
     "的 了 在 是 和 与 我 你 他 她 它 我们 你们 一 个 有 也 都 要 把 让 这 那 就 吗 呢 啊 吧 很 会 可以 请 帮 下 换 或 并 及 想 要 说 请".split())
 
@@ -80,21 +87,105 @@ def _read_json(path, default):
     # 实测（2026-11-18，6 个读线程 + 4 个写线程）：写操作失败 163 次，
     # 240 条要点只落进 69 条 —— 而调用方大多把异常吞掉，用户看到的就是"这条又没记住"。
     # 读写共用 _MEM_LOCK（RLock，可重入）后彻底消除。
-    try:
-        with _MEM_LOCK:
+    # ⚠️ **读和"发现损坏后的备份"必须在同一把锁里**。
+    # 原来 `with _MEM_LOCK` 只包了 open+load，备份在锁外：
+    #   线程 A 读到坏文件 → 出 with（释放锁）→ 线程 B 写入成功（replace 落盘）
+    #   → A 才执行 `os.replace(path, bad)`，把 B **刚写好的正常文件**当成坏文件挪走
+    #   → A 返回 default，B 的写入就这么"消失"了（下一次写入再用 default 覆盖）。
+    # 现在整段都在锁内，并且备份前**再确认一次**它还是坏的。
+    with _MEM_LOCK:
+        try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-    except Exception:
-        # 文件存在、非空、却解析不了 → **先备份再返回默认值**。
-        # 否则下一次写入会拿默认值把整份记忆覆盖掉，用户的档案就彻底没了。
-        try:
-            if os.path.getsize(path) > 0:
-                bad = "%s.corrupt-%d" % (path, int(_now()))
-                os.replace(path, bad)
-                logger.warning("记忆文件解析失败，已备份到 %s", bad)
         except Exception:
-            logger.debug("silent-except", exc_info=True)
-        return default
+            # 文件存在、非空、却解析不了 → **先备份再返回默认值**。
+            # 否则下一次写入会拿默认值把整份记忆覆盖掉，用户的档案就彻底没了。
+            try:
+                if os.path.getsize(path) > 0:
+                    still_bad = True
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            json.load(f)
+                        still_bad = False      # 刚刚被修好了，别动它
+                    except Exception:
+                        still_bad = True
+                    if still_bad:
+                        # ⚠️ 先**抢救**：JSON 整体解析失败，但 `"content": "…"` 这一段
+                        # 往往还是完整的（截断/多一个字符最常见），能抠出来就别丢。
+                        salvaged = _salvage(path)
+                        bad = "%s.corrupt-%d" % (path, int(_now()))
+                        os.replace(path, bad)
+                        logger.warning("记忆文件解析失败，已备份到 %s（抢救出 %d 字）",
+                                       bad, len(str((salvaged or {}).get("content") or "")))
+                        keep = salvaged if salvaged is not None else default
+                        # ⚠️⚠️ **必须立刻把文件重建出来**。原来备份完就 return，
+                        # 文件从此不存在；而 `_read_json` 开头的
+                        # `if not os.path.exists(path): return default` 会直接给空。
+                        # 实测（2026-11-18，4 线程各写 20 条）：80 条只落进 **19 条** ——
+                        # 每个线程都读到"文件不存在"→ 拿空正文 → 各自 set_long 覆盖前一个。
+                        try:
+                            _write_json(path, keep)
+                        except Exception:
+                            logger.debug("silent-except", exc_info=True)
+                        return keep
+                    else:
+                        with open(path, "r", encoding="utf-8") as f:
+                            return json.load(f)
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+            # 连备份都没做成：也要保证文件存在，否则同样会引发上面的互相覆盖
+            try:
+                if not os.path.exists(path):
+                    _write_json(path, default)
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+            return default
+
+
+def _salvage(path: str):
+    """从一份**解析失败的**记忆 JSON 里尽量把 `content` 抠出来。
+
+    为什么值得做：记忆文件被写坏通常是"截断"或"多/少一个字符"，
+    而 `{"content": "用户姓名：…；…", "updated_at": …}` 里那段长字符串
+    绝大多数情况是完整的。整份丢掉 = 用户档案没了；
+    抠出来再备份，等于把损失降到"最后一条可能残缺"。
+
+    返回 `{"content": ..., "updated_at": ...}` 或 None（实在抠不出来）。
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            raw = f.read()
+    except Exception:
+        return None
+    m = re.search(r'"content"\s*:\s*"', raw)
+    if not m:
+        return None
+    s = raw[m.end():]
+    out, i = [], 0
+    esc = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\",
+           "/": "/", "b": "\b", "f": "\f"}
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s):
+            nxt = s[i + 1]
+            if nxt == "u" and i + 5 < len(s):
+                try:
+                    out.append(chr(int(s[i + 2:i + 6], 16)))
+                    i += 6
+                    continue
+                except Exception:
+                    logger.debug("silent-except", exc_info=True)
+            out.append(esc.get(nxt, nxt))
+            i += 2
+            continue
+        if c == '"':
+            break
+        out.append(c)
+        i += 1
+    txt = "".join(out).strip()
+    if not txt:
+        return None
+    return {"content": txt, "updated_at": _now()}
 
 
 def _write_json(path, data):
@@ -326,7 +417,14 @@ def set_short(sid: str, content: str) -> dict:
     sid = _safe_sid(sid)
     if not sid:
         return {"content": "", "updated_at": 0}
-    content = _trim(content, SHORT_CAP)
+    # ⚠️ 短期记忆也必须保护最早的几条。
+    # 淘汰方向是"丢最早的"，而最早写进去的正是**这件事本身是什么**
+    # （「正在做的项目：考勤打卡系统；目标是下周三前交付」）。
+    # 实测（2026-11-18，塞到 998 字 / 上限 1000）：项目名和目标**双双消失**，
+    # 第一条变成「过程要点23：这是一条排查记录」——
+    # 用户看到的就是"聊着聊着它忘了我到底在做什么"。
+    # 长期记忆早就加了 _TRIM_PROTECT，短期这里漏了。
+    content = _trim(content, SHORT_CAP, protect=3)
     shorts = _load_shorts()
     # 时间戳只取一次：原来落盘用 _now()、返回值又调一次 _now()，
     # 两者差几毫秒，调用方拿返回值去比对文件永远对不上。
@@ -526,7 +624,8 @@ def drop_short(sid: str, point: str, threshold: float = 0.5) -> bool:
 CTX_LONG_CAP = 6000     # 注入上下文时长期记忆的上限（字）
 
 
-def _ctx_trim_long(lng: str, cap: int = CTX_LONG_CAP) -> str:
+def _ctx_trim_long(lng: str, cap: int = CTX_LONG_CAP,
+                   query: str = "", sid: str = "") -> str:
     """长期记忆过长时，注入**头部稳定档案 + 尾部最新内容**。
 
     ⚠️ 原来是**全文注入**。长期记忆上限 15000 字，实测灌到 14975 字时
@@ -537,12 +636,73 @@ def _ctx_trim_long(lng: str, cap: int = CTX_LONG_CAP) -> str:
     """
     if len(lng) <= cap:
         return lng
-    head_n = cap // 3
-    tail_n = cap - head_n
-    logger.warning("长期记忆 %d 字，超过注入上限 %d，按头尾摘录注入", len(lng), cap)
-    return (lng[:head_n]
-            + "\n…（记忆较长，中间部分未逐条列出；用户问到具体某条时用 search_memory 查）…\n"
-            + lng[-tail_n:])
+    # ⚠️ 必须**按条目边界**切，不能直接 `lng[:n]` / `lng[-n:]`。
+    # 记忆条目是用 `；` 拼起来的，硬切会把一条要点劈成两半：
+    # 实测（2026-11-18，10698 字）头段末尾停在「第5条：这是一个用于测试截断行为的条目内容」，
+    # 尾段从「右的样子；第289条」开始 —— 模型读到的是两条**残缺事实**，
+    # 比不注入更糟（它会把半句话当真）。
+    #
+    # ⚠️⚠️ 而且**不能只做头尾摘录**。`build_context(sid, query=…)` 一直是带 query 的，
+    # 但这里从来没接过 —— 于是注入的内容**和用户当前问什么完全无关**。
+    # 实测（2026-11-18，10255 字）：超限后注入 6110 字，其中 **174 条是无关填充**，
+    # 换一个查询（「什么时候考网络工程师」vs「我的专业是什么」）注入内容**一字不差**。
+    # 这块被算进 budget_sys，等于用 6000 字挤掉聊天历史，换来一堆无关信息。
+    # 现在按「头部稳定档案 → 与当前问题相关的条目 → 最新条目」挑，省略的才真的省略。
+    items = _split_items(lng)
+    if len(items) < 2:
+        return lng[:cap]
+    picked, used = [], 0
+
+    def _take(it):
+        nonlocal used
+        if not it or it in picked:
+            return False
+        if used + len(it) + 1 > cap:
+            return False
+        picked.append(it)
+        used += len(it) + 1
+        return True
+
+    # 1) 头部稳定档案（姓名/身份/专业 —— 每轮都用得上，必须给）
+    head_budget = max(cap // 4, 200)
+    for it in items:
+        if used + len(it) + 1 > head_budget:
+            break
+        _take(it)
+
+    # 2) 与当前问题相关的条目（向量检索，只取长期记忆那几条）
+    n_rel = 0
+    if query:
+        try:
+            from . import memvec
+            for h in memvec.search(query, sid=sid, top_k=12, with_transcripts=False):
+                if h.get("level") != "长期记忆":
+                    continue
+                if _take((h.get("content") or "").strip()):
+                    n_rel += 1
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+
+    # 3) 剩余空间补**最新**条目（从尾部往前）。
+    # ⚠️ 但**不能把 cap 填满**：cap 是"上限"，不是"目标"。
+    # 实测（2026-11-18）：头部 + 相关条目只占 1600 字，尾部补足却一路填到 6090 字，
+    # 其中 4500 字是与当前问题无关的填充 —— 这块算进 budget_sys，等于用 4500 字
+    # 把聊天历史挤掉，换来一堆用不上的内容。宁可少注入，也要把 context 留给对话。
+    tail_budget = used + int(cap * 0.35)
+    for it in reversed(items):
+        if used + len(it) + 1 > tail_budget:
+            break
+        _take(it)
+
+    if len(picked) >= len(items):
+        return lng
+    # 日志要能看出「凭什么挑了这几条」
+    logger.warning("长期记忆 %d 字，超过注入上限 %d：相关条目 %d 条，"
+                   "共注入 %d/%d 条（头部档案 + 相关 + 最新补足）",
+                   len(lng), cap, n_rel, len(picked), len(items))
+    return ("；".join(picked)
+            + "\n…（记忆较长，其余 %d 条未逐条列出；用户问到具体某条时用 search_memory 查）…"
+            % max(0, len(items) - len(picked)))
 
 
 def build_context(sid: str, query: str = "") -> str:
@@ -554,7 +714,10 @@ def build_context(sid: str, query: str = "") -> str:
     parts = ["【记忆】以下是已经知道的用户信息，回答时**直接用**，不要再问一遍。"
              "有新信息用 remember 工具补充（是**追加**，不用重写旧的）："]
     if lng:
-        parts.append(f"【长期记忆 · 所有对话通用】\n{_ctx_trim_long(lng)}")
+        # query 一路传下去：超长时才能按「当前问的是什么」挑相关条目，
+        # 而不是把中间一大段无关内容也塞进上下文（见 _ctx_trim_long 的说明）。
+        parts.append(f"【长期记忆 · 所有对话通用】\n"
+                     f"{_ctx_trim_long(lng, query=query, sid=_safe_sid(sid))}")
     if sht:
         parts.append(f"【短期记忆 · 仅本次对话】\n{sht}")
     return "\n\n".join(parts)
@@ -575,6 +738,16 @@ def search_all(query: str, sid: str = "", top_k: int = 5) -> list:
     q = (query or "").strip()
     if not q:
         return []
+    # ⚠️ sid 必须**先归一化**再进检索层。索引里存的 `it["sid"]` 是 `_safe_sid`
+    # 之后的（短期记忆落盘的 key 就是 safe 过的），而调用方传进来的是**原始**
+    # session id（tools.py 直接取 context["session"]）。
+    # 一旦原始 id 含 `[A-Za-z0-9_-]` 以外的字符（空格、中文、点号…），
+    # memvec.search 里 `it["sid"] != sid` 就永远成立 → **本对话的短期记忆被全部过滤掉**。
+    # 实测（2026-11-18）：sid="2026-11-18 22:50:34"，查「线程安全的问题」，
+    # 传 safe sid 能召回（vec 0.5874），传原始 sid **完全召回不到** ——
+    # 而且因为 memvec 返回空，还会掉进 _keyword_items 兜底（门槛 0.5 更严），
+    # 结果就是"刚才说的事它想不起来了"。
+    sid = _safe_sid(sid) if sid else ""
     try:
         from . import memvec
         hits = memvec.search(q, sid=sid, top_k=top_k)

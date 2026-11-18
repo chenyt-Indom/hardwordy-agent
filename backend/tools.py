@@ -5187,6 +5187,23 @@ def _do_append_file(arguments):
 
 
 # ---------- 记忆工具 ----------
+# remember 工具的 action / scope 别名（英文 + 中文常见写法）。
+# 提示词全用中文描述，模型很容易直接把「更新 / 删除 / 长期」写进参数里。
+_ACTION_ALIAS = {
+    "add": "add", "新增": "add", "添加": "add", "记住": "add", "记": "add", "new": "add",
+    "update": "update", "更新": "update", "修改": "update", "改写": "update",
+    "改": "update", "修正": "update", "replace": "update",
+    "forget": "forget", "删除": "forget", "忘掉": "forget", "遗忘": "forget",
+    "作废": "forget", "移除": "forget", "delete": "forget", "remove": "forget",
+}
+_SCOPE_ALIAS = {
+    "long": "long", "global": "long", "长期": "long", "长期记忆": "long",
+    "全局": "long", "档案": "long", "用户档案": "long",
+    "short": "short", "短期": "short", "短期记忆": "short",
+    "当前对话": "short", "本对话": "short", "本会话": "short", "session": "short",
+}
+
+
 def _do_remember(arguments, context=None):
     """写入 / 改写 / 删除记忆。
 
@@ -5202,9 +5219,20 @@ def _do_remember(arguments, context=None):
     old 可以少写几个字（匹配是模糊的，见 memory._locate）。
     """
     content = (arguments.get("content") or arguments.get("section") or "").strip()
-    action = (arguments.get("action") or "add").strip().lower()
+    raw_action = (arguments.get("action") or "add").strip().lower()
     old = (arguments.get("old") or "").strip()
-    scope = (arguments.get("scope") or "").strip().lower()
+    raw_scope = (arguments.get("scope") or "").strip().lower()
+    # ⚠️ **模型会用中文写这两个参数**，而原来只认英文。
+    # 后果是静默降级（实测 2026-11-18，三条都复现）：
+    #   · scope="长期" → 不在 ("long","global") 里 → 当短期处理，
+    #     用户以为记进了跨对话档案，实际只在当前对话有效，换对话就没了；
+    #   · action="更新" → 不在 ("update","forget") 里 → 走新增分支，
+    #     长期记忆里出现「计划考网络工程师」和「已报名网络工程师」**两条矛盾条目**；
+    #   · action="删除" → 同样被当成新增，而且 content 为空 → 直接报「内容为空」，
+    #     旧条目永远删不掉。
+    # 这正是用户说的「记了但不更新」的一条来源。这里统一做别名归一。
+    action = _ACTION_ALIAS.get(raw_action, "add")
+    scope = _SCOPE_ALIAS.get(raw_scope, "")
     if action in ("update", "forget") and not old:
         # 没给原句就没法定位 —— 直接把新内容当新条目存，总比丢掉强
         action, old = "add", ""
@@ -5227,7 +5255,12 @@ def _do_remember(arguments, context=None):
 
     session = str(((context or {}).get("session")) or "").strip()
     if not session:
-        return "错误：无法确定当前对话，记忆未写入。"
+        # ⚠️ 不再直接拒绝。前端在「清过浏览器缓存 / 一个历史会话都没有」时
+        # 确实会传空 session（app.js: localStorage.getItem(...) || ""），
+        # 而自动提炼那条路对同一场景用的是 memory.NO_SESSION_SID 兜底 ——
+        # 两边不一致的结果是：自动提炼能写，用户说「记住这个」却报错。
+        # 统一走同一个兜底 id（这些对话共享一份短期记忆，总比全丢好）。
+        session = memory_mod.NO_SESSION_SID
     if action == "update":
         r = memory_mod.update_short(session, old, content)
         return {"replaced": "已更新本对话记忆里的那条。",

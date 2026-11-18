@@ -196,10 +196,19 @@ def probe(force: bool = False) -> dict:
     import time
     with _lock:
         now = time.time()
-        if not force and _state["ready"] and now - _state["probed"] < 60:
-            return dict(_state)
-        if not force and not _state["ready"] and now - _state["probed"] < 60:
-            return dict(_state)
+        # ⚠️ **已就绪时不要频繁重探**。原来 ready 状态也是 60 秒过期一次，
+        # 而 ONNX 分支的重探会走 `_onnx_load()` —— 那是**重新加载整个模型**
+        # （Tokenizer.from_file + InferenceSession）。实测（2026-11-18，bge-small-zh）：
+        #   首次探测 0.41s，60 秒后自动重探 0.42s、再探 0.30s / 0.27s
+        #   —— 每次都和首次一样慢，说明模型被反复重载（95MB，换成 bge-base 是 400MB）。
+        # 后果：每 60 秒的**第一次**记忆检索/写入都要多等 0.3~2 秒，且内存反复分配。
+        # 现在：就绪后 30 分钟才重探一次（模型不会自己消失）；
+        # 不可用时仍保持 60 秒 —— 那个场景是"用户刚装好模型，希望尽快用上"。
+        # 需要立刻重探（换了模型）走 `probe(force=True)`，界面的「重建索引」就是。
+        if not force:
+            ttl = 1800 if _state["ready"] else 60
+            if now - _state["probed"] < ttl:
+                return dict(_state)
 
         _state.update({"backend": "", "model": "", "dim": 0,
                        "ready": False, "error": "", "probed": now})
@@ -221,7 +230,12 @@ def probe(force: bool = False) -> dict:
                     _LOG.info("向量后端：Ollama / %s（%d 维）", model, dim)
                     return dict(_state)
                 else:
-                    loaded = _onnx_load(cand)
+                    # 同一个模型已经加载过就直接复用 —— 重探只是确认"还能用"，
+                    # 没必要把 95~400MB 的模型重新读一遍（见上面 probe 里的实测）。
+                    if _onnx.get("name") == cand and _onnx.get("sess") is not None:
+                        loaded = (_onnx.get("tok"), _onnx.get("sess"), _onnx.get("names"))
+                    else:
+                        loaded = _onnx_load(cand)
                     if not loaded:
                         continue
                     v = _onnx_embed(["探测"], loaded)

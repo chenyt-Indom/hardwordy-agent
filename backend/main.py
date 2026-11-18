@@ -313,7 +313,7 @@ def _now_str() -> str:
 
 
 # 会话 id 为空时的记忆兜底（详见 _memory_sid）
-_NO_SESSION_SID = "_nosession"
+_NO_SESSION_SID = memory.NO_SESSION_SID
 
 
 def _memory_sid(session: str) -> str:
@@ -2339,13 +2339,36 @@ def _long_for_prompt(cur: str, budget: int = 6000) -> str:
     cur = (cur or "").strip()
     if len(cur) <= budget:
         return cur
+    # ⚠️ 和 memory._ctx_trim_long 一样：**必须按条目边界**切。
+    # 记忆条目用 `；` 拼接，`cur[:n]` / `cur[-n:]` 会把一条要点劈成两半，
+    # 模型看到「第5条：这是一个用于测试截断行为的条目内容」这种半句，
+    # 会把它当成一条完整事实去比对，去重和改写都会跟着错。
     head_n = budget // 3
     tail_n = budget - head_n
-    return (cur[:head_n]
-            + "\n…（中间省略了若干条已存在的记忆，仅因篇幅未列出 —— "
+    items = [p for p in (cur.split("；") if "；" in cur else cur.splitlines()) if p.strip()]
+    if len(items) < 2:
+        return cur[:budget]
+    head, used = [], 0
+    for it in items:
+        if used + len(it) + 1 > head_n:
+            break
+        head.append(it)
+        used += len(it) + 1
+    tail, used = [], 0
+    for it in reversed(items):
+        if used + len(it) + 1 > tail_n:
+            break
+        tail.append(it)
+        used += len(it) + 1
+    tail.reverse()
+    if len(head) + len(tail) >= len(items):
+        return cur
+    return ("；".join(head)
+            + "\n…（中间省略了 %d 条已存在的记忆，仅因篇幅未列出 —— "
               "这些**仍然是已知信息**，不要凭猜测重复记录；"
               "要改某条时请只针对上面明确列出的条目）…\n"
-            + cur[-tail_n:])
+              % max(0, len(items) - len(head) - len(tail))
+            + "；".join(tail))
 
 
 def _auto_extract_memory(session: str, turns: list, model: str, cfg: dict,
@@ -2379,8 +2402,11 @@ def _auto_extract_memory(session: str, turns: list, model: str, cfg: dict,
         return "empty"
     known_long = memory.get_long().strip() or "（暂无）"
     known_short = memory.get_short(_memory_sid(session)).strip() or "（暂无）"
+    # ⚠️ `known_short[-800:]` 同样是硬切：短期记忆上限 1000 字，
+    # 这样会砍掉**最早写的那 200 字**（往往是项目名/目标这类定调内容），
+    # 而且切点落在一条要点的中间。和 `_long_for_prompt` 用同一套头尾整条摘录。
     prompt = _EXTRACT_PROMPT.format(long=_long_for_prompt(known_long),
-                                    short=known_short[-800:],
+                                    short=_long_for_prompt(known_short, 800),
                                     convo=convo)
     text = _llm_extract(prompt, model, cfg, abort=abort)
     if not text:
@@ -2396,7 +2422,12 @@ def _auto_extract_memory(session: str, turns: list, model: str, cfg: dict,
     # 但窗口是最近 8 条消息（约 4 轮），信息密集时给出 6~8 条很常见，
     # 于是每次多半只落进前半部分，用户就觉得"我明明说了，它没记住"。
     # 放宽到 8：留一个上限是为了防模型灌一堆噪声，但别卡在"刚好够一半"的位置。
-    n = _apply_extract(text, session, limit=8)
+    # ⚠️ 上限从 8 再放宽到 20。`_apply_extract` 里是 `if kept >= limit: break`，
+    # 超出的行**直接丢弃**，而缓冲区这时已经清空 —— 等于永久丢数据。
+    # 实测（2026-11-18）：模型给 12 条、limit=8，后 4 条（要点内容08~11）全没了。
+    # 提示词要求"最多 6 条"，但模型偶尔会给十几条（把背景也列出来）。
+    # 20 只是防灌爆的兜底，正常不会碰到。
+    n = _apply_extract(text, session, limit=20)
     if n > 0:
         return "written"
     # ⚠️ 模型这次一条都没落地（回了「无」，或整段都是被过滤掉的审查结论）。
@@ -11773,9 +11804,13 @@ def memory_release(body: dict):
     # ---- 1) 归档 transcript（沉淀之后才删）----
     if scope in ("auto", "caches"):
         if _os.path.isdir(memory.TRANSCRIPT_DIR):
-            n_del = 0
+            n_del, n_keep = 0, 0
             for fn in _os.listdir(memory.TRANSCRIPT_DIR):
                 if not fn.endswith(".jsonl"):
+                    continue
+                # ⚠️ 本次**没来得及沉淀**的归档一律保留 —— 删了就是永久丢内容。
+                if fn[:-6] in _sweep_skipped:
+                    n_keep += 1
                     continue
                 p = _os.path.join(memory.TRANSCRIPT_DIR, fn)
                 freed += _tsize(p)
@@ -11786,6 +11821,8 @@ def memory_release(body: dict):
                     logger.debug("silent-except", exc_info=True)
             if n_del:
                 detail.append(f"清理归档记录 {n_del} 个（已先沉淀要点）")
+            if n_keep:
+                detail.append(f"保留 {n_keep} 个归档（本次没来得及沉淀，下次释放再处理）")
 
     # ---- 2) 僵尸会话（很久没聊且几乎没内容）----
     if scope in ("auto", "caches"):
@@ -11813,15 +11850,21 @@ def memory_release(body: dict):
     # ---- 5) 短期记忆：可选释放（它是"缓存"性质的，长期记忆仍然保留）----
     short_freed = 0
     if scope == "short":
-        # 释放前先把归档沉淀一轮，否则短期记忆一清、对话里的结论就真没了
+        # ⚠️⚠️ **顺序必须是「先清空、再沉淀」，不能反过来。**
+        # 原来是先 `_sweep_all()` 再 `memory.release("short")`：
+        # 而 `_sweep_one` → `_apply_extract` 里「短期|…」的要点是写进
+        # **各会话的短期记忆**的 —— 紧接着 `release("short")` 把它全清掉，
+        # 等于**刚沉淀的内容当场被删**，只有「长期|」的能活下来。
+        # 用户点「释放短期记忆」的本意是"清掉旧结论、留下重要的"，
+        # 结果重要的也被清，跟界面文案「会先把要点提炼进记忆」直接矛盾。
+        r = memory.release("short")
+        short_freed = int(r.get("freed_chars") or 0)
         if do_sweep:
             try:
                 swept_total += _sweep_all(
                     known_sids={s.get("id") for s in sm.list_sessions()})
             except Exception:
                 logger.debug("silent-except", exc_info=True)
-        r = memory.release("short")
-        short_freed = int(r.get("freed_chars") or 0)
         detail.append(f"已释放全部短期记忆（{short_freed} 字）")
         detail.append("长期记忆（身份/偏好/约定）已保留")
 
@@ -11837,6 +11880,9 @@ def memory_release(body: dict):
 #  —— "释放不会丢重要信息"的关键保障
 # =====================================================================
 _SWEEP_MAX_SESSIONS = 8      # 单次释放最多沉淀几个对话，避免等太久
+# 本次**没来得及沉淀**的归档 sid。memory_release 删归档时必须跳过它们，
+# 否则"超过 8 个归档"时后面的会被没沉淀就删掉（见 _sweep_all 的说明）。
+_sweep_skipped = set()
 _SWEEP_MIN_MSGS = 4          # 少于这么多条的归档不值得单独跑一次模型
 
 
@@ -11848,14 +11894,27 @@ def _sweep_one(session: str, cfg: dict = None, model: str = None) -> int:
     """
     if not session:
         return 0
-    msgs = memory.read_transcript(session, limit=120)
+    # ⚠️⚠️ 这里是"**归档马上要被删掉**之前的最后一次机会"，覆盖范围必须够。
+    # 原来是 `read_transcript(limit=120)` 之后再 `msgs[-60:]` —— 两道削减叠加：
+    # 实测（2026-11-18，造 300 条归档）：
+    #   · read_transcript(limit=120) 只读到**最后 120 条**（最早的 180 条根本没读）；
+    #   · 再取 `[-60:]`，等于只提炼**最后 60 条**；
+    #   · 合计 **240/300 条（80%）在"释放"时被永久丢弃** ——
+    #     而界面上的文案写的是"会先把归档里还没记下的要点提炼进记忆"。
+    # 现在：读够 600 条，**全程均匀采样**到 100 条（早期内容也一定被覆盖），
+    # 每条压到 130 字以控制 prompt 长度。只做一次模型调用（不翻倍耗时）。
+    msgs = memory.read_transcript(session, limit=600)
     if len(msgs) < _SWEEP_MIN_MSGS:
         return 0
     cfg = cfg or config.load_config()
     model = model or cfg.get("default_model")
+    picked = msgs
+    if len(msgs) > 100:
+        step = len(msgs) / 100.0
+        picked = [msgs[min(len(msgs) - 1, int(i * step))] for i in range(100)]
     convo = "\n".join(
-        f"{'用户' if m['role'] == 'user' else '助手'}：{str(m['content'])[:220]}"
-        for m in msgs[-60:])
+        f"{'用户' if m['role'] == 'user' else '助手'}：{str(m['content'])[:130]}"
+        for m in picked)
     prompt = (
         "下面是一段历史对话。请提取其中值得记住的内容，"
         "**这段对话记录马上就要被删除**，只保留你提取的要点。\n"
@@ -11870,14 +11929,23 @@ def _sweep_one(session: str, cfg: dict = None, model: str = None) -> int:
         "  宁可这条长一点也不能丢（丢了这条记录就废了）\n"
         "· 最多 6 条；确实没有值得留存的内容就只输出：无\n"
         "· 下面【已知信息】里已经有的，不要再重复提取\n\n"
-        "【已知信息】\n长期记忆：" + (memory.get_long().strip()[-2500:] or "（暂无）")
-        + "\n短期记忆：" + (memory.get_short(session).strip()[-800:] or "（暂无）")
+        # ⚠️ 这里原来是 `get_long()[-2500:]` / `get_short()[-800:]`，
+        # 和 `_long_for_prompt` 修之前**是同一个毛病**（上一轮只改了自动提炼那条路，漏了这条）：
+        #   · 长期记忆上限 15000 字，只给最后 2500 → **83% 看不见**，
+        #     最早的姓名/身份/专业全在看不见的那部分里，
+        #     而提示词又要求"已知信息里有的不要重复提取" —— 它看不到就只能重记一遍；
+        #   · 硬切还会把一条要点劈成两半。
+        # 这条路径是用户点「释放」时跑的，也就是**归档马上要被删**的那一刻，
+        # 记漏了就是永久丢失，所以必须和自动提炼用同一套摘录。
+        "【已知信息】\n长期记忆：" + (_long_for_prompt(memory.get_long().strip()) or "（暂无）")
+        + "\n短期记忆：" + (_long_for_prompt(memory.get_short(session).strip(), 800) or "（暂无）")
         + "\n\n【对话】\n" + convo
     )
     # 输出预算不足会让提炼静默失败（见 _EXTRACT_TOKENS），
     # 所以这里统一走 _llm_extract（它会自动在截断时加预算重试）。
     text = _llm_extract(prompt, model, cfg)
-    return _apply_extract(text, session, limit=6)
+    # 同理：这里是**归档马上要被删**的最后一刻，多给的行不能丢
+    return _apply_extract(text, session, limit=20)
 
 
 def _sweep_all(known_sids=None) -> int:
@@ -11887,15 +11955,24 @@ def _sweep_all(known_sids=None) -> int:
     提取出来也无处安放（那部分属于用户主动删除，本就该消失）。
     """
     import glob as _glob
+    global _sweep_skipped
     total, done = 0, 0
+    all_sids, done_sids = set(), set()
     try:
         cfg = config.load_config()
     except Exception:
         return 0
     for path in _glob.glob(os.path.join(memory.TRANSCRIPT_DIR, "*.jsonl")):
-        if done >= _SWEEP_MAX_SESSIONS:
-            break
         sid = os.path.basename(path)[:-6]
+        all_sids.add(sid)
+        if done >= _SWEEP_MAX_SESSIONS:
+            # ⚠️ 原来这里是 `break`：直接结束循环，后面的文件连统计都没做。
+            # 而调用方（memory_release）随后会把 **TRANSCRIPT_DIR 里所有 .jsonl 全删**，
+            # 于是"超过 8 个归档"时，第 9 个之后的归档**没沉淀就被删掉**，
+            # 界面上却写着"会先把要点提炼进记忆"。
+            # 现在改成 continue（继续统计 all_sids），并把没处理的记进 _sweep_skipped，
+            # 让删除那一步跳过它们（下次释放还有机会）。
+            continue
         if known_sids is not None and sid not in known_sids:
             continue          # 对话已删，没必要再沉淀
         try:
@@ -11904,6 +11981,15 @@ def _sweep_all(known_sids=None) -> int:
             got = 0
         total += got
         done += 1
+        done_sids.add(sid)
+    # 有对话、但这次没来得及沉淀的 → 删归档时必须跳过
+    _sweep_skipped = {s for s in all_sids
+                      if s not in done_sids
+                      and (known_sids is None or s in known_sids)}
+    if _sweep_skipped:
+        logging.getLogger("uvicorn.error").warning(
+            "本次只沉淀了 %d 个归档，%d 个来不及处理（这些归档会保留，不删）",
+            done, len(_sweep_skipped))
     return total
 
 

@@ -138,12 +138,26 @@ def _collect_items():
         shorts = memory._load_shorts()
     except Exception:
         shorts = {}
+    long_n = len(items)
     for sid, obj in (shorts or {}).items():
         body = str((obj or {}).get("content") or "")
         for t in memory._split_items(body):
             _push(items, "短期记忆", sid, sid, t)
     if len(items) > MAX_ITEMS:
-        items = items[-MAX_ITEMS:]     # 超限时保留靠后的（新条目更重要）
+        # ⚠️ **长期记忆一条都不能丢**。原来是 `items[-MAX_ITEMS:]`（保留尾部），
+        # 而长期记忆恰好排在最前面 —— 条目一超限，整块长期档案被裁掉，
+        # 只剩短期记忆，检索就再也找不到姓名/身份/专业。
+        # 实测（2026-11-18，5 个会话各 1000 条短期）：收集到 4000 条，
+        # **全部是短期**，「用户姓名：陈宇桐」消失，第一条变成「短期条目1-0」。
+        # 正确做法：长期全保，只裁短期（保留靠后的，新会话更重要）。
+        if long_n >= MAX_ITEMS:
+            # 极端情况：长期自己就超了。保尾部（最新写的），但要记日志
+            items = items[len(items) - MAX_ITEMS:]
+            logger.warning("长期记忆条目数 %d 已超索引上限 %d，仅索引最近的部分",
+                           long_n, MAX_ITEMS)
+        else:
+            keep_short = MAX_ITEMS - long_n
+            items = items[:long_n] + items[len(items) - keep_short:]
     return items
 
 
@@ -198,10 +212,20 @@ def _load_disk():
 def _save_disk(sig, items, mat):
     try:
         os.makedirs(memory.MEM_DIR, exist_ok=True)
-        if mat is None or not items:
+        # ⚠️ `mat is None` **不等于**数据没了 —— 它多半只是"这一轮向量化失败"
+        # （模型还没加载完、显存不够、onnx 报错…）。
+        # 原来这时会 `os.remove(VEC_FILE/META_FILE)`，把磁盘上**一份完好的索引**删掉：
+        # 实测（2026-11-18）调一次 `_save_disk(sig, items, None)`，638KB 的 _vec.npy 直接消失。
+        # 后果是下次模型恢复后要**全量重算**（109 条几秒，条目多时更久），
+        # 而且如果失败反复发生，索引永远建不起来。
+        # 正确做法：只有"真的没有条目了"才删；向量暂时不可用就**保留旧索引不动**。
+        if not items:
             for p in (VEC_FILE, META_FILE):
                 if os.path.isfile(p):
                     os.remove(p)
+            return
+        if mat is None:
+            _LOG.warning("本轮向量不可用，保留磁盘上的旧索引（不覆盖、不删除）")
             return
         tmp = VEC_FILE + ".tmp.npy"
         np.save(tmp, mat)
@@ -421,6 +445,14 @@ def _search_transcripts(query: str, top_k: int = TRANS_TOP) -> list:
             # 门槛收紧：实测原来「语义 0.34 + 字面 0.80」也能过，
             # 结果查「挑餐厅」把一段系统提示词捞了出来。转录必须语义也像。
             if not (vec >= 0.45 or (vec >= 0.38 and cov >= 0.85)):
+                continue
+        else:
+            # ⚠️ **向量不可用时的兜底**（模型没装 / onnx 加载失败 / 显存不够）。
+            # 原来这里 `vec` 恒为 0.0，于是上面那条判定永远不成立 → 转录部分**一条都返回不了**，
+            # 而模块开头的设计写着"检索功能不能因为没模型整个挂掉"。
+            # 退化为**高阈值字面匹配**（cov >= 0.85，宁缺毋滥）：
+            # 至少"用户原话里提到过的关键词"还能搜到，而不是整块功能消失。
+            if cov < 0.85:
                 continue
         score = (W_VEC * vec + W_COV * rank_cov) if vecs is not None else rank_cov
         body = it["text"]
