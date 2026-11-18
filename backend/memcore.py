@@ -17,14 +17,12 @@ memory.py 原来没有"条目表示"这层抽象，每条规则各自解析一�
 
 设计
 ----
-Fact 把一条记忆拆成 6 个字段：
+Fact 把一条记忆拆成 4 个字段：
 
     raw      原始文本（原样保留）
     body     归一化：去首尾空白与句末标点
-    subject  冒号前的短标签（"专业：人工智能" → "专业"），没有就是 ""
     core     核心字面：剔掉否定词与尾部语气词，假否定词换成占位符
     neg      否定标记的**个数**（假否定词不计）
-    num      结尾编号（"条目12" → "12"），没有就是 ""
 
 relation(a, b) 只返回 5 种结果：
 
@@ -101,9 +99,6 @@ _SUPPLEMENT_PREFIX = "，,、：:（(【[「『 \t　-—"
 # 和「不喜欢跑步」的「用户喜欢跑步」对不上，正反说法就识别不出来了（对比测试实测）。
 _DEGREE_WORDS = ("非常", "特别", "十分", "极其", "格外", "相当", "有点", "稍微", "比较")
 
-_SUBJECT_RE = re.compile(r"^([^：:\s]{1,8})[：:]\s*(.+)$")
-_NUM_RE = re.compile(r"(?:第)?([0-9]+)\s*(?:条|个|项|章|节|号|款|步|轮|批)?$")
-
 _BODY_STRIP = "。.；;，,、！!？?　 -•*"
 
 
@@ -113,27 +108,26 @@ _BODY_STRIP = "。.；;，,、！!？?　 -•*"
 class Fact:
     """一条记忆的解析结果。构造请用 `parse()`，它带缓存。"""
 
-    __slots__ = ("raw", "body", "core", "neg", "subject", "num")
+    __slots__ = ("raw", "body", "core", "neg")
 
-    def __init__(self, raw, body, core, neg, subject, num):
+    def __init__(self, raw, body, core, neg):
         self.raw = raw
         self.body = body
         self.core = core
         self.neg = neg
-        self.subject = subject
-        self.num = num
 
     def __repr__(self):
-        return ("Fact(body=%r, core=%r, neg=%d, subject=%r, num=%r)"
-                % (self.body, self.core, self.neg, self.subject, self.num))
+        return "Fact(body=%r, core=%r, neg=%d)" % (self.body, self.core, self.neg)
 
     def __eq__(self, other):
+        # 注意：num/subject 曾参与比较，但 num 是 body 的纯函数（body 相同则 num 必相同），
+        # subject 同理 —— 去掉它们不改变任何可达的比较结果。
         return isinstance(other, Fact) and (
             self.body == other.body and self.core == other.core
-            and self.neg == other.neg and self.num == other.num)
+            and self.neg == other.neg)
 
     def __hash__(self):
-        return hash((self.body, self.core, self.neg, self.num))
+        return hash((self.body, self.core, self.neg))
 
 
 def _has_neg_mark(s):
@@ -195,18 +189,8 @@ def parse(text):
     raw = raw.strip()
     body = raw.strip(_BODY_STRIP)
     if not body:
-        return Fact(raw, "", "", 0, "", "")
-    subject = ""
-    m = _SUBJECT_RE.match(body)
-    if m:
-        subject = m.group(1).strip()
-    core = _core(body)
-    neg = _neg_count(body)
-    num = ""
-    m2 = _NUM_RE.search(body)
-    if m2:
-        num = m2.group(1)
-    return Fact(raw, body, core, neg, subject, num)
+        return Fact(raw, "", "", 0)
+    return Fact(raw, body, _core(body), _neg_count(body))
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +317,7 @@ def overlap(a, b):
     return max(ratio, cov)
 
 
-def locate(items, hint, threshold=0.5):
+def locate(items, hint):
     """在 items 里找与 hint 最像的那条，返回 (下标, 相似度)。
 
     短定位词保护：`overlap` 里"被包含"直接给 1.0，于是删「用户」会把
