@@ -325,8 +325,13 @@ def model_dir() -> str:
 
 def install_hint() -> str:
     """给用户看的安装提示。"""
+    # ⚠️ 这里原来推荐的是 `ollama pull nomic-embed-text`，和本文件 BACKENDS 处的
+    # 实测注释**直接矛盾**：nomic 对中文几乎没有区分度（查「入团需要什么条件」时，
+    # 无关的「今天天气晴朗」0.708 反而高于真正相关的「入团申请人需要年满十四周岁」0.664），
+    # 给中文库用它召回率不升反降。按旧提示装完的用户等于白装，还更差。
     return ("向量检索需要一个 embedding 模型（二选一）：\n"
-            "· 推荐：命令行执行 `ollama pull nomic-embed-text`（274MB，中英通用）\n"
-            "· 或把 bge-small-zh-v1.5 的 model.onnx + tokenizer.json "
-            "放进 %s/bge-small-zh-v1.5/\n"
+            "· 推荐（中文专用）：把 bge-small-zh-v1.5 的 model.onnx + tokenizer.json "
+            "放进 %s/bge-small-zh-v1.5/（95MB，最快）\n"
+            "· 或用 Ollama：`ollama pull bge-m3`（1.2GB，中文效果最好）\n"
+            "⚠️ 不要用 nomic-embed-text —— 它对中文几乎没区分度，排序等于随机。\n"
             "没装也能用，会自动退化为关键词检索（召回率低一些）。" % _MODEL_DIR)

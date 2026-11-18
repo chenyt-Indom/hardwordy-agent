@@ -903,9 +903,13 @@ def _keyword_items(query: str, sid: str = "", top_k: int = 5) -> list:
     q = set(_tokenize(query or ""))
     if not q:
         return []
+    # 空 sid 等价于 NO_SESSION_SID（与 remember 的写入兜底、memvec.search 的过滤口径一致）。
+    # 原来这里 `if sid else ""` —— 空 sid 时短期记忆**完全不参与**兜底检索，
+    # 而向量层不可用时这是唯一的检索路径，等于"刚记下就问它、它说没找到"。
+    mine = sid or NO_SESSION_SID
     out = []
     for label, body, s in (("长期记忆", get_long(), ""),
-                           ("短期记忆", get_short(sid) if sid else "", sid)):
+                           ("短期记忆", get_short(mine), mine)):
         for e in _split_items(body or ""):
             e = _norm_point(e)
             if len(e) < 2:

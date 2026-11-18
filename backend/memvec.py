@@ -74,7 +74,10 @@ _lock = threading.RLock()
 # 现在 touch 只碰这把叶子锁，永远不再请求别的锁，环就断了。
 _touch_lock = threading.Lock()
 _idx = {"sig": "", "dsig": "", "items": [], "mat": None}
-_trans = {"sig": "", "items": []}
+_trans = {"sig": "", "items": [], "files": {}, "ver": 0}
+# 解析逻辑变了就把它 +1，否则按 (mtime, size) 命中的**旧解析结果**会一直沿用
+# （改完 `_strip_injected` 后，缓存里那 429 条带交接卡的条目不会自己消失）。
+_TRANS_VER = 2
 _dirty = True
 _syncing = False
 
@@ -318,6 +321,30 @@ def touch():
 # =====================================================================
 #  历史会话：预筛 + 向量重排（不进大索引）
 # =====================================================================
+# ⚠️ **应用自己注入到用户消息里的内容，不是用户说的话**。
+# 每轮重启后，系统会往用户消息末尾追加「自我迭代交接卡」和「工具动作账本」，
+# 它们以 role="user" 落盘，于是被当成用户原话进了转录检索。
+# 实测（2026-11-18）：转录候选 2500 条里 **429 条（17%）** 含交接卡，
+# 查「上次重启」返回的第一条就是交接卡本身，而不是真正的对话内容。
+# 这些段总是追加在用户原话**之后**，所以从标记处截到末尾即可。
+_INJECTED_MARKS = (
+    "【自我迭代交接卡",
+    "【本对话真实执行过的工具动作",
+    "【最近",          # 【最近 N 轮速览】同样是系统注入的
+)
+
+
+def _strip_injected(c: str) -> str:
+    """去掉系统注入的段落，只留用户/助手真正说的话。"""
+    s = c or ""
+    cut = len(s)
+    for m in _INJECTED_MARKS:
+        i = s.find(m)
+        if 0 <= i < cut:
+            cut = i
+    return s[:cut].strip()
+
+
 def _parse_trans_file(path: str, fn: str) -> list:
     """把一个 .jsonl 切成「一段对话」的条目列表。"""
     out = []
@@ -351,6 +378,10 @@ def _parse_trans_file(path: str, fn: str) -> list:
                 if role not in ("user", "assistant"):
                     continue
                 c = str(o.get("content") or "").strip()
+                if not c:
+                    continue
+                # 剥掉应用自己注入的交接卡/账本/速览（详见 _strip_injected 处的实测）
+                c = _strip_injected(c)
                 if not c:
                     continue
                 buf.append(("用户" if role == "user" else "助手", c[:400]))
@@ -387,6 +418,8 @@ def _trans_items():
     files.sort(reverse=True)          # 新的优先
 
     with _lock:
+        if _trans.get("ver") != _TRANS_VER:
+            _trans.update({"ver": _TRANS_VER, "files": {}, "items": []})
         cache = dict(_trans.get("files") or {})
 
     new_cache, out = {}, []
@@ -472,7 +505,11 @@ def _search_transcripts(query: str, top_k: int = TRANS_TOP) -> list:
 def _label(it, sid):
     lv = it["level"]
     if lv == "短期记忆":
-        return "本对话短期" if (sid and it["sid"] == sid) else "其他对话短期"
+        # 与 search() 的过滤口径保持一致：空 sid 等价 NO_SESSION_SID。
+        # 原来空 sid 时本对话的条目会被标成「其他对话短期」（实测踩过），
+        # 模型看到这个标签会当成"别人的事"，从而不用它回答。
+        mine = sid or memory.NO_SESSION_SID
+        return "本对话短期" if it["sid"] == mine else "其他对话短期"
     return lv
 
 
@@ -516,8 +553,17 @@ def search(query: str, sid: str = "", top_k: int = 5,
         # 原来 sid 只用来打标签（_label），别的对话的短期记忆照样参与排序，
         # 实测查「今天天气怎么样」时前 4 条全是别的对话里的元评论，
         # 把真正的偏好条目挤出了 top_k。
-        if sid and it["level"] == "短期记忆" and it["sid"] != sid:
-            continue
+        # ⚠️ **sid 为空时不能"不过滤"**。原来条件是 `if sid and ...`，
+        # 于是 sid="" 时这条过滤整个失效 → **所有对话的短期记忆全部进候选**。
+        # 实测（2026-11-18）：A、B 两个对话各有一条「考勤打卡系统…」，
+        # 空 sid 检索把两条 + _nosession 那条一起返回了（3 条全中），
+        # 而 tools._do_remember 在空 session 时用的是 NO_SESSION_SID 兜底 ——
+        # 也就是说"记进去的那份"和"检索时看的那份"根本不是一个口径。
+        # 现在统一：空 sid 等价于 NO_SESSION_SID（与写入侧兜底一致）。
+        if it["level"] == "短期记忆":
+            mine = sid or memory.NO_SESSION_SID
+            if it["sid"] != mine:
+                continue
         # ⚠️ 按层级过滤（`_ctx_trim_long` 只想要长期记忆）。
         # 原来那边是"取 top_k=12 再自己筛 level==长期记忆" —— 而本对话的短期条目
         # 同样占名额，相关条目一多，12 个名额可能被短期记忆全占掉，
