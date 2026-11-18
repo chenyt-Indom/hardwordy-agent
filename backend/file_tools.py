@@ -21,6 +21,7 @@ TEXT_EXTS = {
 }
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 MAX_READ = 200_000  # 单文件最多读取字符，防止超大文件卡死
+MAX_IMAGE_BYTES = 80 * 1024 * 1024  # 图片上限 80MB：再大也会被压到 1024px，读进内存只会吃爆
 
 
 def read_text(path: str, max_chars: int = MAX_READ):
@@ -37,7 +38,14 @@ def read_text(path: str, max_chars: int = MAX_READ):
 
 def read_image_b64(path: str, max_side: int = 1024):
     """读取图片并压缩为 base64，供 Qwen-VL 理解。"""
-    raw = open(path, "rb").read()
+    # ⚠️ 原来这里有一句 raw = open(path, "rb").read()，读完从未被使用：
+    # 等于为每张图多占一份完整文件大小的内存，大图直接吃爆。已删。
+    try:
+        _size = os.path.getsize(path)
+    except OSError:
+        _size = 0
+    if _size > MAX_IMAGE_BYTES:
+        raise ValueError("图片过大（%.0f MB），上限 %d MB" % (_size / 1048576, MAX_IMAGE_BYTES // 1048576))
     img = __import__("PIL.Image", fromlist=["Image"]).open(os.fsdecode(path))
     img = img.convert("RGB")
     if max(img.size) > max_side:
@@ -243,32 +251,62 @@ def resolve_path(path: str, roots=None, max_depth: int = SEARCH_MAX_DEPTH,
             "decisive": decisive, "candidates": uniq, "timed_out": timed_out}
 
 
+def _walk_candidates(target: str, max_files: int, deadline: float) -> list:
+    """在目录里收集候选文本文件。
+
+    ⚠️ 2026-11-19 实测：原来是「对 31 个扩展名各做一次 glob 全递归」，
+    项目根（26 万文件）实测 7.29s/扩展名、外推 **224 秒**，接口直接卡死。
+    改成一次 os.walk，并复用本文件已有的 SKIP_DIRS / 深度 / 超时常量。
+    """
+    import time as _t
+    out = []
+    base_depth = target.rstrip("\\/").count(os.sep)
+    for root, dirs, files in os.walk(target):
+        # 剪枝：与 resolve_path 同一套跳过规则
+        dirs[:] = [d for d in dirs
+                   if d not in SKIP_DIRS and not d.startswith(SKIP_PREFIXES)]
+        if root.rstrip("\\/").count(os.sep) - base_depth >= SEARCH_MAX_DEPTH:
+            dirs[:] = []
+        for fn in files:
+            if os.path.splitext(fn)[1].lower() in TEXT_EXTS:
+                out.append(os.path.join(root, fn))
+                if len(out) >= max_files:
+                    return out
+        if _t.time() > deadline:
+            break
+    return out
+
+
 def read_by_keywords(paths_or_dirs: list[str], keywords: str, max_files: int = 50) -> str:
     """在指定路径集里按关键词检索文件内容，返回匹配摘要。"""
-    import glob
+    import time as _t
+    kws = [k.strip().lower() for k in str(keywords or "").split() if k.strip()]
+    if not kws:
+        return ""
     results = []
+    deadline = _t.time() + SEARCH_MAX_SECONDS
     for target in paths_or_dirs:
+        if _t.time() > deadline:
+            break
         # 空路径必须跳过：os.path.abspath("") 会解析成**当前工作目录**，
         # 于是「没传路径」变成「递归扫描整个项目目录」（实测接口卡死数分钟）。
         if not target or not str(target).strip():
             continue
         target = os.path.abspath(str(target).strip())
         if os.path.isdir(target):
-            candidates = []
-            for ext in TEXT_EXTS:
-                candidates += glob.glob(os.path.join(target, "**", "*" + ext), recursive=True)
-            candidates = candidates[:max_files]
+            candidates = _walk_candidates(target, max_files, deadline)
         elif os.path.isfile(target):
             candidates = [target]
         else:
             continue
-        kws = [k.strip().lower() for k in str(keywords or "").split() if k.strip()]
         for c in candidates[:max_files]:
+            if _t.time() > deadline:
+                break
             text = read_text(c)
             if not text:
                 continue
             low = text.lower()
-            if kws and any(k in low for k in kws):
+            if any(k in low for k in kws):
                 # 截取命中上下文
                 first = min((low.find(k) for k in kws if k in low), default=0)
                 seg = text[max(0, first - 100): first + 200]
