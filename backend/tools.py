@@ -2917,7 +2917,7 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
     if name == "self_evaluate":
         return _do_self_evaluate(arguments)
     if name == "search_memory":
-        return _do_search_memory(arguments)
+        return _do_search_memory(arguments, context)
     if name == "search_knowledge":
         return _do_search_knowledge(arguments)
     if name == "hive_files":
@@ -7852,9 +7852,14 @@ def _do_search_knowledge(arguments):
     return "\n".join(lines)
 
 
-def _do_search_memory(arguments):
+def _do_search_memory(arguments, context=None):
     query = arguments.get("query") or ""
-    hits = memory_mod.search_all(query, top_k=5)
+    # ⚠️ 必须带上当前会话 id。短期记忆是**按对话隔离**的，
+    # 不传 sid 时别的对话的短期记忆也会进候选、抢走 top_k 名额 ——
+    # 实测查「今天天气怎么样」返回的前 4 条全是别的对话里的元评论，
+    # 而真正该命中的偏好条目被挤出了结果。
+    sid = str(((context or {}).get("session")) or "").strip()
+    hits = memory_mod.search_all(query, sid=sid, top_k=5)
     if not hits:
         return "没有找到相关记忆信息。"
     lines = ["检索到的历史记忆："]

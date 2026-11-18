@@ -53,6 +53,9 @@ META_FILE = os.path.join(memory.MEM_DIR, "_vec_meta.json")
 #   0.50 → top3 11/12（开始漏），误召 1/6
 MIN_VEC = 0.46
 MIN_COV = 0.50
+# 「（推断）」条目的排序降权。实测长期记忆里 18/69（26%）是推断条目，
+# 它们写得像总结、向量分偏高，常把事实条目（"专业：人工智能技术应用"）挤出 top_k。
+INFER_PENALTY = 0.82
 W_VEC, W_COV = 0.75, 0.25        # 只用于排序，不参与拦截
 
 MAX_ITEMS = 4000                 # 记忆条目上限
@@ -445,12 +448,23 @@ def search(query: str, sid: str = "", top_k: int = 5,
     qc, qt = _q_sets(q)
     out = []
     for i, it in enumerate(items):
+        # 短期记忆**按对话隔离**：给了 sid 就只留本对话的。
+        # 原来 sid 只用来打标签（_label），别的对话的短期记忆照样参与排序，
+        # 实测查「今天天气怎么样」时前 4 条全是别的对话里的元评论，
+        # 把真正的偏好条目挤出了 top_k。
+        if sid and it["level"] == "短期记忆" and it["sid"] != sid:
+            continue
         c, b = _cov_pair(qc, qt, *(_text_sets(it["text"])))
         cov = max(c, b)                       # 门槛：任一说得通就收
         vec = float(vec_scores[i]) if vec_scores else 0.0
         if vec >= min_vec or cov >= min_cov:
             rank_cov = 0.6 * c + 0.4 * b      # 排序：2-gram 更能分近义词边界
             score = (W_VEC * vec + W_COV * rank_cov) if vec_scores else rank_cov
+            # 事实优先于推断：长期记忆里 26% 是「（推断）」条目，它们措辞更"总结感"，
+            # 向量分天然偏高，经常把真档案（如"专业：人工智能技术应用"）挤下去。
+            # 只降排序分，不影响门槛判定 —— 推断条目该召回还是召回，只是排在事实后面。
+            if it["text"].startswith(("（推断）", "(推断)")):
+                score *= INFER_PENALTY
             out.append({
                 "level": _label(it, sid),
                 "section": it["section"],

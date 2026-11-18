@@ -2035,6 +2035,16 @@ _VERB_FORGET = ("删除", "作废", "取消", "遗忘", "移除", "无效")
 _KIND_LONG = ("长期", "长期记忆", "全局", "全局记忆", "档案", "用户档案")
 _KIND_SHORT = ("短期", "短期记忆", "当前对话", "本对话", "本会话", "本次")
 
+# 提炼模型有时不按 `长期|要点` 的格式输出，而是把自己的判断过程写出来
+# （实测踩到：「经过严格审查，此轮对话**不产生任何可录入的长期记忆更新」）。
+# 这类句子没有类别前缀，会落到 _apply_extract 的 else 分支被当成新信息
+# **存进短期记忆** —— 于是记忆库里混进一堆"关于记忆的评论"，
+# 检索时还会抢走 top_k 名额（实测查「今天天气」前 4 条全是这种）。
+_EXTRACT_NOISE = (
+    "不产生任何", "此轮对话", "本轮对话", "纯属", "无需记录",
+    "任务委托", "一次性具体提问", "本条不", "不符合「", "严格审查",
+)
+
 
 def _clean_extract_line(raw: str) -> str:
     line = raw.strip().lstrip("-*• ").strip("`").strip()
@@ -2098,6 +2108,8 @@ def _apply_extract(text: str, session: str, limit: int = 4) -> int:
             continue
         if line.startswith("无") and len(line) <= 8:
             continue
+        if any(m in line for m in _EXTRACT_NOISE):
+            continue
         parts = _split_extract_line(line)
         verb = parts[0].strip().strip("【】[]（）() ")
         # ⚠️ 值里**不要**剥掉圆括号 —— 「（推断）用户…」这种标记是内容的一部分，
@@ -2115,6 +2127,12 @@ def _apply_extract(text: str, session: str, limit: int = 4) -> int:
             elif any(v in verb for v in _VERB_REVISE) and len(rest) >= 2:
                 if _revise_point(rest[0], " ".join(rest[1:]), kind, session):
                     kept += 1
+            elif not rest and any(v in verb for v in _VERB_REVISE + _VERB_FORGET):
+                # 写了「更新/删除」但没给分隔符和旧要点（模型把整句话连成一串）。
+                # 这时 verb 会把整行都吃掉，落到下面的 else 分支被当成**新事实**存进去，
+                # 长期记忆里就出现了「更新 (推断)…」这种带动词前缀的脏条目（实测踩到）。
+                # 没有旧要点就无法定位要改哪条，跳过比存脏数据好。
+                continue
             else:
                 val = (" ".join(rest) if rest else verb).strip().strip("，。；;、 ")
                 if len(val) < 3:
