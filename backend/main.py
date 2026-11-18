@@ -1639,7 +1639,7 @@ _MEM_SEQ_KEY = "_n"            # 缓冲区消息副本上的自增序号（仅�
 
 
 def _merge_turns(old: list, new: list, st: dict) -> list:
-    """把新来的消息并进提炼缓冲区：**按序号去重、大上限、绝不按 8 条截断**。
+    """把新来的消息并进提炼缓冲区：**按内容去重、大上限、绝不按 8 条截断**。
 
     ⚠️ 原来这里是 `(旧 + 新)[-_MEM_WINDOW_TURNS:]`（8 条）。两个后果都实测到了：
 
@@ -1657,7 +1657,19 @@ def _merge_turns(old: list, new: list, st: dict) -> list:
     for m in list(old or []):
         if not isinstance(m, dict):
             continue
-        key = (m.get("role"), str(m.get("content") or ""), m.get(_MEM_SEQ_KEY))
+        # ⚠️⚠️ 去重键**不能带序号**。原来 key 是 `(role, content, _n)`，而新来的消息
+        # 每次都被分配一个**新的序号**，于是同一条消息第二次进入窗口时 key 必然不同
+        # → 去重**完全失效**。
+        # 实测（2026-11-18）：4 条消息、模拟"每轮结束传一次窗口"调 4 次，
+        # 缓冲区变成 **14 条，全是重复**（期望仍是 4 条）。
+        # 真实场景里每轮都会调 `_schedule_memory_extract(session, full[-8:], …)`，
+        # 相邻两轮的窗口**天然重叠**，所以这不是边角情况而是每轮都在发生：
+        #   · 缓冲区迅速撞到 _MEM_BUF_MAX(40)，**最早那批还没提炼的内容被挤掉**；
+        #   · 提炼 prompt 里同一句话出现好几次，85~250 秒的模型调用白烧，
+        #     还容易让模型把同一件事提炼成多条同义要点。
+        # 序号只用于"这次消费到哪"的定位（见 _run_memory_extract 的 cut），
+        # 不参与去重。
+        key = (m.get("role"), str(m.get("content") or ""))
         if key in seen:
             continue
         seen.add(key)
@@ -1665,14 +1677,13 @@ def _merge_turns(old: list, new: list, st: dict) -> list:
     for m in list(new or []):
         if not isinstance(m, dict):
             continue
-        seq += 1
-        item = {"role": m.get("role"), "content": m.get("content"),
-                _MEM_SEQ_KEY: seq}
-        key = (item["role"], str(item["content"] or ""), seq)
+        key = (m.get("role"), str(m.get("content") or ""))
         if key in seen:
-            continue
+            continue          # 已经缓冲过：不重复加入，也不浪费一个序号
         seen.add(key)
-        out.append(item)
+        seq += 1
+        out.append({"role": m.get("role"), "content": m.get("content"),
+                    _MEM_SEQ_KEY: seq})
     st["seq"] = seq
     if len(out) > _MEM_BUF_MAX:
         dropped = len(out) - _MEM_BUF_MAX
@@ -2249,6 +2260,12 @@ def _revise_point(old: str, new: str, kind: str, session: str) -> bool:
     new = (new or "").strip()
     if not new:
         return False
+    # ⚠️ 新增路径（_apply_extract 的 else 分支）有 `_clip_point(val, 200)`，
+    # 更新路径**原来没有** —— 实测（2026-11-18）`更新|旧|` 后面跟 800 字，
+    # 800 字原样写进长期记忆。而长期记忆上限 15000 字、超了从最早开始淘汰，
+    # 一条超长更新就能把姓名/专业这类早期档案挤掉（正是用户抱怨的"名字怎么没了"）。
+    # 这里补上同一套裁剪，两条路径口径一致。
+    new = _clip_point(new, 200)
     if kind in _KIND_LONG:
         return memory.update_long(old, new) != "skipped"
     if kind in _KIND_SHORT:
@@ -2278,6 +2295,27 @@ def _clip_point(text: str, cap: int = 200) -> str:
         if i >= cap * 0.6:          # 太靠前就别切了，不然只剩半句话
             return cut[:i + 1]
     return cut
+
+
+def _clip_ends(text: str, cap: int) -> str:
+    """超长时**保留头尾**、中间省略。
+
+    ⚠️ 为什么不能用 `text[:cap]`：这段文本是**喂给提炼模型的对话内容**，
+    而用户的关键信息（结论、金额、时间点、"顺便说一下…"）经常出现在
+    **最后一句**——从头部硬切正好把它切掉，而这条路径（`_sweep_one`）
+    跑在"归档马上就要被删"的时刻，切掉就是**永久丢失**。
+
+    实测（2026-11-18）：`_sweep_one` 每条压到 130 字、`_auto_extract_memory`
+    每条 300 字，都是纯头部截断。
+    """
+    text = (text or "").strip()
+    if len(text) <= cap:
+        return text
+    head = int(cap * 0.6)
+    tail = cap - head - 1
+    if tail <= 0:
+        return text[:cap]
+    return text[:head] + "…" + text[-tail:]
 
 
 def _apply_extract(text: str, session: str, limit: int = 4) -> int:
@@ -2426,7 +2464,7 @@ def _auto_extract_memory(session: str, turns: list, model: str, cfg: dict,
         return "empty"
     convo = "\n".join(
         "%s：%s" % ("用户" if m.get("role") == "user" else "助手",
-                    str(m.get("content") or "")[:300])
+                    _clip_ends(str(m.get("content") or ""), 300))
         for m in turns if (m.get("content") or "").strip())
     if not convo:
         return "empty"
@@ -11803,6 +11841,11 @@ def memory_release(body: dict):
             return {"ok": False, "reason": "未指定 session_id"}
         # 删历史前也先沉淀一遍，否则这段对话里没被记下的要点就没了
         swept = 0
+        arch_n = 0
+        try:
+            arch_n = len(memory.read_transcript(sid, limit=10))
+        except Exception:
+            arch_n = 0
         if do_sweep:
             try:
                 swept = _sweep_one(sid)
@@ -11814,7 +11857,28 @@ def memory_release(body: dict):
         msg = f"已清空该对话的 {_fmt_bytes(before)} 历史"
         if swept:
             msg += f"（先沉淀了 {swept} 条要点进记忆，不会丢）"
-        return {"ok": True, "freed_bytes": max(0, before - after),
+
+        # ⚠️⚠️ 归档底稿也要删 —— 只清 sessions 里的历史等于"释放了一半"。
+        # 实测（2026-11-18）：点「释放此对话历史」后历史条数归 0、界面提示
+        # 释放了 1321 字节，但 `data/transcript/<sid>.jsonl` **1487 字节原封不动**，
+        # `read_transcript` 照样读出全部 16 条（含 8 条带密码的原话），
+        # 而 search_transcripts 是直接扫目录的 —— 用户以为清掉了，其实一个字没少。
+        #
+        # 删除条件（**宁可留着，也不能丢数据**）：
+        #   · 本次真的提炼出了要点（swept > 0）→ 已沉淀，可以删；
+        #   · 归档本来就太少、不值得提炼（arch_n < _SWEEP_MIN_MSGS）→ 没有可丢的内容，可以删；
+        #   · 其余情况（提炼失败 / 没有新内容）→ 保留，下次释放再处理。
+        freed_arch = 0
+        if do_sweep and (swept > 0 or arch_n < _SWEEP_MIN_MSGS):
+            freed_arch = _tsize(memory._transcript_path(sid))
+            try:
+                memory.purge_transcript(sid)
+                if freed_arch:
+                    msg += f"，并清掉归档底稿 {_fmt_bytes(freed_arch)}"
+            except Exception:
+                logger.warning("释放时删除归档失败（历史已清空）：%s", sid, exc_info=True)
+                freed_arch = 0
+        return {"ok": True, "freed_bytes": max(0, before - after) + freed_arch,
                 "swept": swept, "detail": [msg], "memory_intact": True}
 
     # ---- 0) 沉淀：把归档里还没进记忆的重要内容提炼出来 ----
@@ -11933,17 +11997,20 @@ def _sweep_one(session: str, cfg: dict = None, model: str = None) -> int:
     #     而界面上的文案写的是"会先把归档里还没记下的要点提炼进记忆"。
     # 现在：读够 600 条，**全程均匀采样**到 100 条（早期内容也一定被覆盖），
     # 每条压到 130 字以控制 prompt 长度。只做一次模型调用（不翻倍耗时）。
-    msgs = memory.read_transcript(session, limit=600)
+    # ⚠️⚠️ 必须 `sample=True`：`limit` 是**采样上限**，不是"取最后 N 条"。
+    # 上一轮虽然改成了"读 600 + 均匀采样 100"，但 600 这个上限本身仍会截掉更长的对话 ——
+    # 实测（2026-11-18）造 1000 条归档，读到的是**第 200 轮之后**的 600 条，
+    # 最早 400 条（含「我叫陈宇桐」）既没读进内存、也就永远进不了记忆，
+    # 而这条路径跑在**归档马上要被删**的时刻，漏掉就是永久丢失。
+    # 现在一步到位：均匀采样 100 条覆盖**整段**归档（第 0 条和最后一条都在）。
+    msgs = memory.read_transcript(session, limit=100, sample=True)
     if len(msgs) < _SWEEP_MIN_MSGS:
         return 0
     cfg = cfg or config.load_config()
     model = model or cfg.get("default_model")
     picked = msgs
-    if len(msgs) > 100:
-        step = len(msgs) / 100.0
-        picked = [msgs[min(len(msgs) - 1, int(i * step))] for i in range(100)]
     convo = "\n".join(
-        f"{'用户' if m['role'] == 'user' else '助手'}：{str(m['content'])[:130]}"
+        f"{'用户' if m['role'] == 'user' else '助手'}：{_clip_ends(str(m['content']), 130)}"
         for m in picked)
     prompt = (
         "下面是一段历史对话。请提取其中值得记住的内容，"
@@ -11983,11 +12050,30 @@ def _sweep_all(known_sids=None) -> int:
 
     只处理"对话还在"的归档 —— 对话已删的归档没有记忆可挂，
     提取出来也无处安放（那部分属于用户主动删除，本就该消失）。
+
+    ⚠️⚠️ 口径必须统一：归档文件名（stem）≠ 原始 session id。
+    id 里只要有中文/空格/点号，文件名就是 `_____120999b6` 这种，
+    直接拿它去 `in known_sids` 永远不成立。实测（2026-11-18）后果：
+      · 该对话被误判成"已删除"→ 跳过沉淀，一条要点都没记；
+      · 又进不了 _sweep_skipped 保留名单 → 随后被 memory_release 删掉；
+      · **归档内容永久丢失**（实测 `中文对话` 的归档正是这个下场）。
+    所以：比对一律用 stem，而**沉淀时传回原始 sid** ——
+    `_sweep_one` 内部要读写该对话的短期记忆（键由 _safe_sid 生成），
+    传 stem 会在长 id 场景写到错的键上，用户界面看不到。
     """
     import glob as _glob
     global _sweep_skipped
     total, done = 0, 0
     all_sids, done_sids = set(), set()
+    # stem -> 原始 sid，供沉淀时还原
+    stem2raw = {}
+    known_stems = None
+    if known_sids is not None:
+        known_stems = set()
+        for s in known_sids:
+            st = memory.transcript_stem(s)
+            known_stems.add(st)
+            stem2raw[st] = s
     try:
         cfg = config.load_config()
     except Exception:
@@ -12003,10 +12089,12 @@ def _sweep_all(known_sids=None) -> int:
             # 现在改成 continue（继续统计 all_sids），并把没处理的记进 _sweep_skipped，
             # 让删除那一步跳过它们（下次释放还有机会）。
             continue
-        if known_sids is not None and sid not in known_sids:
+        if known_stems is not None and sid not in known_stems:
             continue          # 对话已删，没必要再沉淀
         try:
-            got = _sweep_one(sid, cfg)
+            # ⚠️ 传**原始 sid**（不是文件名 stem）：_sweep_one 内部要
+            # get_short / set_short 这个对话的记忆，键由 _safe_sid 生成。
+            got = _sweep_one(stem2raw.get(sid, sid), cfg)
         except Exception:
             got = 0
         total += got
@@ -12015,7 +12103,7 @@ def _sweep_all(known_sids=None) -> int:
     # 有对话、但这次没来得及沉淀的 → 删归档时必须跳过
     _sweep_skipped = {s for s in all_sids
                       if s not in done_sids
-                      and (known_sids is None or s in known_sids)}
+                      and (known_stems is None or s in known_stems)}
     if _sweep_skipped:
         logging.getLogger("uvicorn.error").warning(
             "本次只沉淀了 %d 个归档，%d 个来不及处理（这些归档会保留，不删）",

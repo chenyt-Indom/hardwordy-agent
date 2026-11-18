@@ -1034,6 +1034,28 @@ def _rename(path: str) -> None:
 # =====================================================================
 #  历史会话归档（transcript）
 # =====================================================================
+def transcript_stem(session_id: str) -> str:
+    """归档文件名（不含 .jsonl）。
+
+    ⚠️⚠️ **必须和 _transcript_path 用同一套规则**，不能各写一份。
+    原来 _sweep_all 拿「文件名」去和「原始 session id」比对，
+    而文件名在 id 含中文/空格/点号时是 `_____120999b6` 这种形式 ——
+    两者永远不相等。实测（2026-11-18）后果是**数据丢失**：
+      · 该对话的归档被当成"对话已删"直接跳过，一条要点都没沉淀；
+      · 又因为 sid 不在 known_sids 里，进不了 _sweep_skipped 保留名单；
+      · 于是 memory_release 照删不误 → **归档内容永久消失**。
+    现在统一从这里取，比对和删除都用同一个值。
+    """
+    raw = session_id or "session"
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", raw)
+    if safe != raw or len(raw) > 40:
+        h = hashlib.md5(raw.encode("utf-8", "ignore")).hexdigest()[:8]
+        safe = (safe[:31] + "_" + h)[:40]
+    else:
+        safe = safe[:40]
+    return safe
+
+
 def _transcript_path(session_id: str):
     """归档文件路径。
 
@@ -1044,14 +1066,7 @@ def _transcript_path(session_id: str):
     同样只在"确实改动过原文"时补哈希，纯安全字符的 id 文件名保持不变。
     """
     os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
-    raw = session_id or "session"
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", raw)
-    if safe != raw or len(raw) > 40:
-        h = hashlib.md5(raw.encode("utf-8", "ignore")).hexdigest()[:8]
-        safe = (safe[:31] + "_" + h)[:40]
-    else:
-        safe = safe[:40]
-    return os.path.join(TRANSCRIPT_DIR, f"{safe}.jsonl")
+    return os.path.join(TRANSCRIPT_DIR, f"{transcript_stem(session_id)}.jsonl")
 
 
 # 单条归档消息的上限。超过就**保留头尾**，而不是只留前面 2000 字。
@@ -1097,7 +1112,16 @@ def save_transcript(session_id: str, messages: list):
     _index_touch()      # 历史会话也是记忆的一部分，新内容要能被检索到
 
 
-def read_transcript(session_id: str, limit: int = 200) -> list:
+def read_transcript(session_id: str, limit: int = 200, sample: bool = False) -> list:
+    """读归档消息。
+
+    ⚠️⚠️ `sample=False`（默认）时是「取最后 limit 条」—— 这对"看看最近聊了什么"
+    是对的，但对**归档马上要被删、最后一次提炼**是致命的：
+    实测（2026-11-18）造 1000 条归档，`limit=600` 只返回**最后 600 条**
+    （从第 200 轮开始），最早 400 条里的「我叫陈宇桐」**完全读不到**，
+    也就永远不会被提炼，归档一删就没了。
+    `sample=True` 改成**全程均匀采样**：无论归档多长，早期内容一定被覆盖到。
+    """
     path = _transcript_path(session_id)
     if not os.path.exists(path):
         return []
@@ -1113,6 +1137,12 @@ def read_transcript(session_id: str, limit: int = 200) -> list:
                     out.append({"role": o["role"], "content": o["content"]})
     except Exception:
         return []
+    if limit <= 0 or len(out) <= limit:
+        return out
+    if sample:
+        # 均匀采样：第 0 条和最后一条都一定被选中，中间按等距取
+        step = len(out) / float(limit)
+        return [out[min(len(out) - 1, int(i * step))] for i in range(limit)]
     return out[-limit:]
 
 
