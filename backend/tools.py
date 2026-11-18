@@ -5129,7 +5129,10 @@ def _do_search_files(arguments):
     # 最后还返回「未找到」（明明有）。改为复用 file_tools.find_hits：
     # 一次 os.walk + 剪枝 + 时间预算，和 read_by_keywords 共用同一份实现。
     try:
-        found = file_tools.find_hits([path], keyword, max_files=200)
+        # ⚠️ 2026-11-19：原来这里传 max_files=200，但那个参数是**扫描文件数上限**
+        # 而不是返回条数（返回条数由下面的 hits[:30] 控制）。传 200 会让大目录
+        # 只扫前 200 个文件就漏搜。改用默认值（全扫，SEARCH_MAX_SECONDS 兜底）。
+        found = file_tools.find_hits([path], keyword)
     except Exception as e:
         return f"错误：扫描目录失败：{e}"
     hits = []
