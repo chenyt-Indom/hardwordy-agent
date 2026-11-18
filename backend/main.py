@@ -1715,6 +1715,9 @@ def _run_memory_extract(session: str, model: str, cfg: dict) -> None:
         turns = list(st.get("turns") or [])
         # ⚠️ **先别清空 turns**：万一这次被用户打断（或失败），
         # 这批对话还得留着下次再来一遍，否则这几轮的内容就永远记不上了。
+        # 记下这次**真正要提炼**的条数：结束时只移除这一段，
+        # 提炼期间新并进来的轮次必须留着（否则它们一次都没提炼就消失）。
+        n_consumed = len(turns)
         st["first_ts"] = time.time()
         st["running"] = True
         _mem_pending[session] = st
@@ -1734,6 +1737,7 @@ def _run_memory_extract(session: str, model: str, cfg: dict) -> None:
     finally:
         with _busy_lock:
             _extracting = False
+        more = False
         with _mem_lock:
             st = _mem_pending.get(session) or {}
             st["running"] = False
@@ -1741,8 +1745,23 @@ def _run_memory_extract(session: str, model: str, cfg: dict) -> None:
             # 「模型说这轮没什么可记的」（empty）也算处理完了 ——
             # 原来它返回 False，缓冲区永不清空，同一批 turns 每轮都重新提炼一遍。
             if status != "failed":
-                st["turns"] = []
+                # ⚠️ 只移除**这次真正提炼过**的那几条（前 n_consumed 条）。
+                # 原来是无条件 `st["turns"] = []`，于是提炼期间新并进来的轮次
+                # 一次都没被提炼就静默消失了。
+                # 实测（2026-11-18）：第一轮在提炼时第二轮进来，跑完缓冲区清空，
+                # 第二轮内容**从未被提炼过**，用户说的那句等于没说过。
+                rest = list(st.get("turns") or [])[n_consumed:]
+                st["turns"] = rest
+                more = bool(rest)
             _mem_pending[session] = st
+        if more:
+            # 提炼期间又有新内容 → 立刻再排一次。
+            # 必须在锁**外**调用：_mem_lock 是普通 Lock，重入会死锁。
+            try:
+                _schedule_memory_extract(session, [], model, cfg)
+            except Exception:
+                logging.getLogger("uvicorn.error").warning(
+                    "记忆提炼补排失败（session=%s）", session, exc_info=True)
 
 
 # 抽取调用的输出预算。
@@ -2055,6 +2074,16 @@ _EXTRACT_NOISE = (
 )
 
 
+# 模型「这轮没什么可记的」时回的**占位词**。
+# ⚠️ 只认这些**完整**写法，绝不能按「以无开头」判断 ——
+# 原来写成 `line.startswith("无") and len(line) <= 8`，实测把
+# 「无固定作息」「无糖咖啡」这类**正常事实**也当占位词丢掉了。
+_EMPTY_MARKS = {
+    "无", "暂无", "没有", "无内容", "无新增", "无要点", "无记忆",
+    "无可用信息", "无值得记录", "无信息", "无需记录",
+}
+
+
 # 「1. 」「2、」「3）」这种列表序号
 _SEQ_PREFIX = re.compile(r"^\s*\d{1,2}\s*[.、)．）]\s*")
 
@@ -2152,7 +2181,7 @@ def _apply_extract(text: str, session: str, limit: int = 4) -> int:
         line = _clean_extract_line(raw)
         if not line or line.startswith("#"):
             continue
-        if line.startswith("无") and len(line) <= 8:
+        if line.strip().strip("。.！!（）()【】[] \t") in _EMPTY_MARKS:
             continue
         if any(m in line for m in _EXTRACT_NOISE):
             continue

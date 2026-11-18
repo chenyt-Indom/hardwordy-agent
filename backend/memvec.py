@@ -67,6 +67,12 @@ TRANS_CANDIDATES = 8             # 预筛出来送去向量重排的候选数（
 TRANS_TOP = 2                    # 转录最多挤进结果几条
 
 _lock = threading.RLock()
+# ⚠️ **必须和 _lock 分开的一把锁**，而且只能在它里面做「读/写一个布尔值」。
+# 原因（2026-11-18 实测踩到死锁）：memory 的写函数在持有 _MEM_LOCK 时调 touch()，
+# 若 touch() 去抢 _lock，而后台 sync() 正持着 _lock 调 memory.get_long()（要 _MEM_LOCK），
+# 两条线程就互相等成环 —— 整个应用直接卡死（测试跑满 600 秒被强杀）。
+# 现在 touch 只碰这把叶子锁，永远不再请求别的锁，环就断了。
+_touch_lock = threading.Lock()
 _idx = {"sig": "", "dsig": "", "items": [], "mat": None}
 _trans = {"sig": "", "items": []}
 _dirty = True
@@ -145,7 +151,12 @@ def _data_sig():
     parts = []
     for p in (memory.LONG_FILE, memory.SHORT_FILE):
         try:
-            parts.append("%d:%d" % (os.path.getsize(p), int(os.path.getmtime(p))))
+            st = os.stat(p)
+            # ⚠️ 必须用**纳秒** mtime。原来取整到秒，实测同一秒内把
+            # 「用户姓名：陈宇桐」改成「用户姓名：张小明」（字节数相同），
+            # 数据签名一模一样 → sync() 判定"没变化" → 索引里永远留着旧名字，
+            # 检索也永远返回旧的。纳秒级现实中撞不上。
+            parts.append("%d:%d" % (st.st_size, st.st_mtime_ns))
         except Exception:
             parts.append("0")
     d = memory.TRANSCRIPT_DIR
@@ -158,7 +169,7 @@ def _data_sig():
                 st = os.stat(os.path.join(d, fn))
                 n += 1
                 sz += st.st_size
-                mt = max(mt, int(st.st_mtime))
+                mt = max(mt, st.st_mtime_ns)
         except Exception:
             logger.debug("silent-except", exc_info=True)
     parts.append("t:%d:%d:%d" % (n, sz, mt))
@@ -213,7 +224,9 @@ def sync(force: bool = False):
     with _lock:
         dsig = _data_sig()
         sig = embed.signature()
-        if (not force and _idx["mat"] is not None
+        # `_dirty` 也必须参与判断：记忆刚被写过就一定要重算条目，
+        # 不能只靠文件签名（签名可能因为"同秒同字节"看不出变化）。
+        if (not force and not _dirty and _idx["mat"] is not None
                 and _idx["sig"] == sig and _idx.get("dsig") == dsig):
             return _idx
 
@@ -255,22 +268,26 @@ def _bg_sync():
     except Exception as e:
         _LOG.warning("记忆索引后台同步失败：%s", e)
     finally:
-        with _lock:
+        with _touch_lock:
             _syncing = False
 
 
 def touch():
-    """记忆被写入后调用：标记脏 + 后台增量同步（不阻塞调用方）。"""
+    """记忆被写入后调用：标记脏 + 后台增量同步（不阻塞调用方）。
+
+    ⚠️ 只碰 `_touch_lock`（叶子锁），**绝不**在这里请求 `_lock` 或 memory 的锁，
+    否则会和后台 sync() 形成锁序环（详见 `_touch_lock` 处的说明）。
+    """
     global _dirty, _syncing
     _dirty = True
-    with _lock:
+    with _touch_lock:
         if _syncing:
             return
         _syncing = True
     try:
         threading.Thread(target=_bg_sync, daemon=True).start()
     except Exception:
-        with _lock:
+        with _touch_lock:
             _syncing = False
 
 
@@ -340,7 +357,7 @@ def _trans_items():
         p = os.path.join(d, fn)
         try:
             st = os.stat(p)
-            files.append((st.st_mtime, fn, p, st.st_size))
+            files.append((st.st_mtime_ns, fn, p, st.st_size))
         except Exception:
             logger.debug("silent-except", exc_info=True)
     files.sort(reverse=True)          # 新的优先

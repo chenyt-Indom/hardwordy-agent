@@ -75,10 +75,25 @@ def _now():
 def _read_json(path, default):
     if not os.path.exists(path):
         return default
+    # ⚠️ **读也要拿锁**。Windows 上 os.replace 不能替换一个正被读打开的文件，
+    # 并发时会直接抛 PermissionError(WinError 5)。
+    # 实测（2026-11-18，6 个读线程 + 4 个写线程）：写操作失败 163 次，
+    # 240 条要点只落进 69 条 —— 而调用方大多把异常吞掉，用户看到的就是"这条又没记住"。
+    # 读写共用 _MEM_LOCK（RLock，可重入）后彻底消除。
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with _MEM_LOCK:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
     except Exception:
+        # 文件存在、非空、却解析不了 → **先备份再返回默认值**。
+        # 否则下一次写入会拿默认值把整份记忆覆盖掉，用户的档案就彻底没了。
+        try:
+            if os.path.getsize(path) > 0:
+                bad = "%s.corrupt-%d" % (path, int(_now()))
+                os.replace(path, bad)
+                logger.warning("记忆文件解析失败，已备份到 %s", bad)
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
         return default
 
 
@@ -376,6 +391,12 @@ def _locate(body: str, hint: str):
     ⚠️ 定位词太短时**只认完全相同的那一条**。`_overlap` 里"被包含"直接给 1.0，
     于是删「用户」会把「用户姓名：陈宇桐」整条删掉（实测），改「喜欢」也可能
     改到毫不相干的一条上。宁可改不到，也不能改错。
+
+    但一刀切到"长度<4 全部拒绝"又太狠（实测）：`old="考四级"` 定位不到
+    「打算考四级」、`old="陈宇桐"` 定位不到「用户姓名：陈宇桐」，
+    于是 forget 永远删不掉、update 只能退化成**追加** ——
+    记忆里就出现「打算考四级」和「四级不考了」并存，正是"记了却不更新"的来源。
+    折中：**3 个字**的定位词，若只出现在**唯一一条**里，就认它。
     """
     items = _split_items(body)
     hint_n = _norm_point(hint)
@@ -385,6 +406,10 @@ def _locate(body: str, hint: str):
         if sc > best_s:
             best_i, best_s = i, sc
     if best_i >= 0 and len(hint_n) < 4 and _norm_point(items[best_i]) != hint_n:
+        if len(hint_n) >= 3:
+            hits = [i for i, e in enumerate(items) if hint_n in _norm_point(e)]
+            if len(hits) == 1:
+                return hits[0], items, 1.0
         return -1, items, 0.0
     return best_i, items, best_s
 
