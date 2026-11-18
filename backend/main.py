@@ -6,7 +6,7 @@
     py -3 run.py
 """
 from fastapi import (FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect,
-                     Response, File, Header)
+                     Response, File, Header, Body)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import (StreamingResponse, FileResponse, PlainTextResponse,
@@ -3179,6 +3179,28 @@ def selfiter_actlog(limit: int = 40):
     try:
         rows = _si.list_actlog(limit=limit)
         return {"ok": True, "count": len(rows), "items": rows}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/actlog")
+def api_actlog_append(payload: dict = Body(...)):
+    """前端追加一条 actlog（例如「模型返回空正文」这类硬失败）。
+
+    2026-11-19 实测：前端 logEmptyAnswer() 一直在 POST /api/actlog，
+    但后端从来没有这个路由 —— 每次 404 静默失败，所以「空输出」这个
+    硬失败从来没进过执行日志，用户在「最近自动执行」里也看不到。
+    这里补上；写入和 list_actlog 读的是同一个 actlog.jsonl，口径一致。
+    """
+    from . import self_iterate as _si
+    try:
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "payload 必须是对象"}
+        entry = dict(payload)
+        entry.setdefault("ts", time.strftime("%Y-%m-%d %H:%M:%S"))
+        entry["source"] = entry.get("source") or "frontend"
+        _si._actlog(entry)
+        return {"ok": True}
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
 
