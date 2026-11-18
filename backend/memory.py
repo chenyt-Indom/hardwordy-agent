@@ -139,8 +139,29 @@ def _read_json(path, default):
                         # ⚠️ 先**抢救**：JSON 整体解析失败，但 `"content": "…"` 这一段
                         # 往往还是完整的（截断/多一个字符最常见），能抠出来就别丢。
                         salvaged = _salvage(path)
-                        bad = "%s.corrupt-%d" % (path, int(_now()))
+                        # ⚠️ 备份名只到「秒」时，同一秒内两次损坏会互相覆盖，
+                        # 而这是**唯一的抢救痕迹**。改成毫秒 + 冲突递增。
+                        stamp = int(_now() * 1000)
+                        bad = "%s.corrupt-%d" % (path, stamp)
+                        n = 0
+                        while os.path.exists(bad):
+                            n += 1
+                            bad = "%s.corrupt-%d-%d" % (path, stamp, n)
                         os.replace(path, bad)
+                        # ⚠️ 损坏备份必须**定期回收**：它的名字是
+                        # `long_term.json.corrupt-…`，不匹配 `_snapshot_long` 的
+                        # `long_term-` 前缀，所以原来**一份都不会被清理**，
+                        # 反复损坏会无限堆积。只留最近 5 份。
+                        try:
+                            cdir = os.path.dirname(path)
+                            stem = os.path.basename(path) + ".corrupt-"
+                            cs = [os.path.join(cdir, x) for x in os.listdir(cdir)
+                                  if x.startswith(stem)]
+                            cs.sort(key=lambda q: (os.path.getmtime(q), q))
+                            for q in cs[:-5]:
+                                os.remove(q)
+                        except Exception:
+                            logger.debug("silent-except", exc_info=True)
                         logger.warning("记忆文件解析失败，已备份到 %s（抢救出 %d 字）",
                                        bad, len(str((salvaged or {}).get("content") or "")))
                         keep = salvaged if salvaged is not None else default
@@ -397,9 +418,16 @@ def _snapshot_long(old: str) -> str:
         json.dump({"content": old, "updated_at": _now()}, f, ensure_ascii=False)
     logger.warning("长期记忆将被大幅缩减，已自动备份到 %s（原 %d 字）", p, len(old))
     try:
-        olds = sorted(x for x in os.listdir(d) if x.startswith("long_term-"))
-        for x in olds[:-20]:
-            os.remove(os.path.join(d, x))
+        # ⚠️ 必须按 **mtime** 排，不能按文件名。
+        # 文件名里的 -1/-2… 递增后缀是**字典序**排在 "-10" 之后的，
+        # `sorted()` 会把它当"较旧"排到前面删掉，反而留下最旧的那份。
+        # 实测（2026-11-19 02:15，25 次内容各异的骤减）：
+        # 保留的是批次 0~20，**最新的 21~24 全被删** ——
+        # 用户想回滚"刚才那次"时，发现最新几份根本没留下。
+        olds = [os.path.join(d, x) for x in os.listdir(d) if x.startswith("long_term-")]
+        olds.sort(key=lambda q: (os.path.getmtime(q), os.path.basename(q)))
+        for q in olds[:-20]:
+            os.remove(q)
     except Exception:
         logger.debug("silent-except", exc_info=True)
     return p
