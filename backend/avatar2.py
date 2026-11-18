@@ -474,7 +474,7 @@ def concat_videos(names, out_name: str = "") -> dict:
         r = subprocess.run([exe, "-y", "-loglevel", "error", "-f", "concat",
                             "-safe", "0", "-i", lst, "-c", "copy",
                             "-movflags", "+faststart", out],
-                           capture_output=True)
+                           capture_output=True, timeout=300)
         ok = r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 1000
         if not ok:
             # 兜底：参数不一致时重编码
@@ -483,11 +483,17 @@ def concat_videos(names, out_name: str = "") -> dict:
                                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                                  "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
                                  "-movflags", "+faststart", out],
-                                capture_output=True)
+                                capture_output=True, timeout=900)
             if r2.returncode != 0 or not os.path.isfile(out) or os.path.getsize(out) < 1000:
                 return {"ok": False,
                         "error": "拼接失败：%s" % ((r2.stderr or r.stderr or b"")[:300]
                                                   .decode("utf-8", "ignore"))}
+    except subprocess.TimeoutExpired as te:
+        # ffmpeg 卡住不能把整个 HTTP 请求拖死：超时就明确报错
+        # （/api/avatar2/concat 端点本身没有 try，不在这里兜就会变成 500）
+        return {"ok": False,
+                "error": "ffmpeg 拼接超时（%d 秒）：分段视频可能损坏，或编码参数不一致"
+                         % int(getattr(te, "timeout", 0) or 0)}
     finally:
         try:
             os.remove(lst)
@@ -506,7 +512,7 @@ def _probe_duration(path: str) -> float:
     try:
         import re as _re
         exe = ffmpeg()
-        r = subprocess.run([exe, "-i", path], capture_output=True)
+        r = subprocess.run([exe, "-i", path], capture_output=True, timeout=30)
         s = (r.stderr or b"").decode("utf-8", "ignore")
         m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", s)
         if not m:
