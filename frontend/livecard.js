@@ -717,6 +717,25 @@ window.LiveCard = (function () {
     // 思考正文：**增量追加**（O(1)）；和已有内容对不上才整块重设。
     // 原来每帧 `textContent = 全文 + "▌"`，思考到 5000 字时每秒重排 3 万字。
     // 光标做成独立 span，追加时插到它前面 —— 空卡片仍能靠 :empty 规则隐藏。
+    // ★ 2026-11-19 用户要求「跟随思考」：开启时每帧把思考正文滚到最底部。
+    //   用户手动上滚（滚轮 / 触摸 / 拖滚动条）后 1.2 秒内不抢滚动位置 ——
+    //   否则想往上翻一眼历史，每帧都被拽回底部，根本没法看。
+    //   开关由 app.js 写进 window.__thinkScrollFollow；单聊和群聊共用这一份绘制。
+    let _userScrollAt = 0;
+    const markUserScroll = () => { _userScrollAt = Date.now(); };
+    ["wheel", "touchmove", "pointerdown"].forEach((ev) => {
+      try { think.body.addEventListener(ev, markUserScroll, { passive: true }); }
+      catch (e) { /* 老浏览器不支持 passive 选项 */ }
+    });
+    const followThinkScroll = () => {
+      const body = think.body;
+      if (!body.classList.contains("open")) return;             // 折叠着看不见，不用滚
+      if (!window.__thinkScrollFollow) return;                  // 用户关掉了开关
+      if (Date.now() - _userScrollAt < 1200) return;            // 用户正在手动翻，别抢
+      if (body.scrollHeight <= body.clientHeight + 1) return;   // 内容没超出一屏
+      body.scrollTop = body.scrollHeight;
+    };
+
     const paintThink = (text, withCursor) => {
       const body = think.body;
       if (!body.classList.contains("open")) return;
@@ -742,6 +761,7 @@ window.LiveCard = (function () {
         if (text) cur.insertAdjacentText("beforebegin", text);
       }
       painted = text;
+      followThinkScroll();      // 跟随思考：滚到最新一句（开关关闭时内部直接返回）
     };
 
     const player = makeThinkPlayer({

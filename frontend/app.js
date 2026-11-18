@@ -499,6 +499,7 @@
     }
     placeThinkDock(w);
     ensureThinkHome(w, sendThinkHome);
+    ensureThinkScrollBtn(w);
   }
   // ★ 2026-11-12 用户三次反馈「点了跟随，过一会儿又自己回原位」：
   //   根因是**好几处**都会调 undockOne（正文开始输出、思考结束、新一轮开始…），
@@ -541,6 +542,62 @@
       w._homeBtn = b;
     }
     b._onHome = onHome;
+    if (b.parentNode !== w) w.appendChild(b);
+    return b;
+  }
+  // ---------- 思考卡片「跟随思考」开关（2026-11-19 用户要求）----------
+  // 用户原话：「在【归位】按钮的正下方增加一个【跟随思考】的按钮，当模型不断流式输出
+  //   思考过程时能够自动下滑显示最新输出的思考内容，可以自由选择开与关」。
+  // 分工：真正的滚动动作在 livecard.js 的 paintThink() 里（单聊/群聊共用那一份绘制），
+  //   这里只管开关状态 + 按钮外观，通过 window.__thinkScrollFollow 传过去 ——
+  //   不这么做的话单聊和群聊要各写一套滚动逻辑，迟早只修好一边。
+  let thinkScrollFollow = localStorage.getItem("think_scroll_follow") !== "0";   // 默认开
+  window.__thinkScrollFollow = thinkScrollFollow;
+
+  function syncThinkScrollBtn(w) {
+    const b = w && w._scrollBtn;
+    if (!b) return;
+    b.classList.toggle("is-on", thinkScrollFollow);
+    b.setAttribute("aria-pressed", thinkScrollFollow ? "true" : "false");
+    b.title = thinkScrollFollow
+      ? "跟随思考：开 —— 思考正文会自动滚到最新一句。点一下关闭"
+      : "跟随思考：关 —— 思考正文停在你当前位置不自动下滑。点一下开启";
+  }
+  function setThinkScrollFollow(v, silent) {
+    thinkScrollFollow = !!v;
+    window.__thinkScrollFollow = thinkScrollFollow;
+    try { localStorage.setItem("think_scroll_follow", thinkScrollFollow ? "1" : "0"); } catch (e) { /* 隐私模式 */ }
+    _thinkBoxes.forEach(syncThinkScrollBtn);
+    // 打开的瞬间就把现有卡片滚到最新位置，不然要等下一帧才有反应，像"没生效"
+    if (thinkScrollFollow) {
+      _thinkBoxes.forEach((w) => {
+        const body = w && w.querySelector && w.querySelector(".think-body");
+        if (body && body.classList.contains("open")) body.scrollTop = body.scrollHeight;
+      });
+    }
+    if (!silent && typeof showToast === "function") {
+      showToast(thinkScrollFollow
+        ? "跟随思考已开启：思考正文会自动滚到最新一句"
+        : "跟随思考已关闭：思考正文不再自动下滑", "");
+    }
+  }
+  function ensureThinkScrollBtn(w) {
+    if (!w) return null;
+    let b = w._scrollBtn;
+    if (!b) {
+      b = document.createElement("button");
+      b.type = "button";
+      b.className = "think-follow";
+      b.textContent = "跟随思考";
+      b.setAttribute("aria-label", "跟随思考（思考内容自动滚到最新）");
+      b.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setThinkScrollFollow(!thinkScrollFollow);
+      });
+      w._scrollBtn = b;
+    }
+    syncThinkScrollBtn(w);
     if (b.parentNode !== w) w.appendChild(b);
     return b;
   }
