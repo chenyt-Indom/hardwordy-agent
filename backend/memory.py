@@ -1116,6 +1116,32 @@ def read_transcript(session_id: str, limit: int = 200) -> list:
     return out[-limit:]
 
 
+def purge_transcript(session_id: str) -> bool:
+    """删除某个对话的归档底稿（用户删掉对话时必须调）。
+
+    ⚠️⚠️ 为什么非有不可：删对话时 `sessions.delete` 删了历史、`delete_short`
+    删了短期记忆，但归档 `.jsonl` **一直留在磁盘上**。而 `search_transcripts`
+    是直接扫目录的 —— 于是"用户以为已经删掉"的对话仍能被历史会话检索召回。
+    实测（2026-11-18）：删掉含「身份证号 440101199001011234」的对话后，
+    查「身份证」照样把那两句原话返回回来；归档文件也一直占着磁盘
+    （`data/transcript/` 里已经攒了 235 个文件）。
+    删对话 = 用户要它消失，底稿不删就不算删干净。
+    """
+    path = _transcript_path(session_id)
+    ok = False
+    with _MEM_LOCK:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                ok = True
+        except Exception:
+            # 删不掉不影响对话本身已经删掉这件事，只记日志
+            logger.warning("删除归档失败（不影响其它功能）：%s", path, exc_info=True)
+    if ok:
+        _index_touch()      # 归档也是检索源，删了要通知索引重建
+    return ok
+
+
 def transcript_stats() -> dict:
     files, size = 0, 0
     if os.path.isdir(TRANSCRIPT_DIR):

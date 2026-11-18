@@ -12434,6 +12434,14 @@ def session_delete(sid: str):
     # 记忆按对话隔离，对话没了它的记忆也没必要留着（否则会攒一堆孤儿记忆）
     sessions.delete(sid)
     memory.delete_short(sid)
+    # ⚠️ 归档底稿也要删。原来只删了历史 + 短期记忆，`.jsonl` 一直留在磁盘上，
+    # 而 search_transcripts 是直接扫目录的 —— 实测（2026-11-18）删掉含
+    # 「身份证号 440101199001011234」的对话后，查「身份证」仍能召回那两句原话。
+    # 用户点了删除就得真没了，不能只删一半。
+    try:
+        memory.purge_transcript(sid)
+    except Exception:
+        logger.warning("删除归档底稿失败：%s", sid, exc_info=True)
     return {"ok": True}
 
 
