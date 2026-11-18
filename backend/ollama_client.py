@@ -69,6 +69,15 @@ class OllamaClient:
         cfg = config.load_config()
         default = str(cfg.get("default_model") or "")
         code_model = str(cfg.get("code_model") or "").strip()
+        choice = str(cfg.get("code_model_choice") or "auto").strip()
+
+        # 云端 Key：deepseek 系列走 API，有 Key 就算就绪（不占本地磁盘）
+        has_key = False
+        try:
+            from . import keyvault
+            has_key = bool(keyvault.status().get("has_key"))
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
 
         models: list = []
         if online:
@@ -78,21 +87,47 @@ class OllamaClient:
                 models = []
         by_name = {str(m.get("name") or ""): m for m in models}
 
+        def _is_cloud(name: str) -> bool:
+            # 与前端 / deepseek_client 的口径一致：deepseek 开头 = 云端通道
+            return str(name or "").strip().lower().startswith("deepseek")
+
         def _ready(name: str) -> bool:
+            if not name:
+                return False
+            if _is_cloud(name):
+                # 云端模型永远不会出现在 /api/tags 里，按 Key 判定
+                return has_key
             # 允许"只写了仓库名没写 tag"的情况（Ollama 会补 :latest）
-            return bool(name) and (name in by_name or (name + ":latest") in by_name)
+            return name in by_name or (name + ":latest") in by_name
+
+        def _info(name: str):
+            return self._brief(by_name.get(name) or by_name.get(name + ":latest"))
+
+        # 代码模型"实际生效的是谁"：choice 优先（前端选的那一项），否则回落到 code_model。
+        # 与 tools.code_model_pick 同口径 —— health 不该报一个实际没在用的模型。
+        code_eff, code_cloud = code_model, _is_cloud(code_model)
+        if choice.startswith("local:"):
+            code_eff, code_cloud = choice.split(":", 1)[1], False
+        elif choice.startswith("deepseek"):
+            code_eff = choice if has_key else ""
+            code_cloud = bool(has_key)
+        elif has_key:
+            # auto：有 Key 走 code_model_ds
+            code_eff = str(cfg.get("code_model_ds") or "deepseek-flash")
+            code_cloud = True
 
         return {
             "online": online,
             "model_ready": _ready(default),
             "model": default,
+            # 通道：local / cloud —— 前端据此决定提示语（云端不会说"请下载"）
+            "model_channel": "cloud" if _is_cloud(default) else "local",
             # 界面把这两段直接显示出来（模型名 · 参数量 · 量化 · 体积）
-            "model_info": self._brief(by_name.get(default) or by_name.get(default + ":latest")),
-            "code_model": code_model,
-            "code_model_ready": _ready(code_model) if code_model else False,
-            "code_model_info": (self._brief(by_name.get(code_model)
-                                            or by_name.get(code_model + ":latest"))
-                                if code_model else None),
+            "model_info": _info(default),
+            "code_model": code_eff,
+            "code_model_ready": _ready(code_eff),
+            "code_model_channel": "cloud" if code_cloud else "local",
+            "code_model_info": None if code_cloud else _info(code_eff),
             # 本机装了哪些（界面的"还没下载 xxx"提示要用）
             "installed": sorted(by_name.keys()),
         }

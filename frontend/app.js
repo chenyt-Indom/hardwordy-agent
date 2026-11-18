@@ -2726,7 +2726,12 @@
       const ready = wantModel ? (d.online && has(wantModel)) : !!d.model_ready;
       const shown = wantModel || d.model || "默认模型";
 
-      if (d.online) {
+      if (d.model_channel === "cloud" && !wantModel) {
+        // 默认模型被配成云端（走 API）：本地 Ollama 查不到它是正常的，别说"请下载"
+        dot.className = "dot" + (d.model_ready ? " on" : " off");
+        t.textContent = d.model_ready ? "默认模型走云端" : "云端 Key 未配置";
+        det.textContent = d.model_ready ? shown + " · 不占本地显存" : "点右上角 🔑 填入 API Key";
+      } else if (d.online) {
         dot.className = "dot" + (ready ? " on" : " off");
         t.textContent = ready ? "模型就绪（离线）" : "Ollama 在线，模型未下载";
         det.textContent = ready ? shown + " · 智能体已就绪" : "缺少 " + shown + "，请下载";
@@ -2746,11 +2751,23 @@
         } else {
           const main = fmtModel(d.model_info);
           if (main) bits.push("对话 " + main);
-          else if (d.model) bits.push("对话 " + d.model + (online ? "（未下载）" : ""));
+          else if (d.model) {
+            // 云端模型本来就不在本地清单里，不能说"未下载"
+            const cloudMain = d.model_channel === "cloud";
+            bits.push("对话 " + d.model
+                      + (cloudMain ? (d.model_ready ? "（云端）" : "（云端·缺 Key）")
+                                   : (online ? "（未下载）" : "")));
+          }
         }
         if (d.code_model) {
-          if (d.code_model_ready) bits.push("代码 " + fmtModel(d.code_model_info));
-          else bits.push("代码 " + d.code_model + (online ? "（未下载，暂用默认模型）" : ""));
+          // 云端代码模型没有本地体积信息，fmtModel 会返回空串 —— 回落到模型名
+          const codeCloud = d.code_model_channel === "cloud";
+          if (d.code_model_ready) {
+            bits.push("代码 " + (fmtModel(d.code_model_info) || d.code_model)
+                      + (codeCloud ? "（云端）" : ""));
+          } else {
+            bits.push("代码 " + d.code_model + (online ? "（未下载，暂用默认模型）" : ""));
+          }
         }
         mi.textContent = bits.join(" · ");
         mi.title = bits.join("\n");
