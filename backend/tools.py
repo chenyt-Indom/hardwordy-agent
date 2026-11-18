@@ -6477,11 +6477,20 @@ def _do_map_plan(arguments=None, ui_events=None, context=None) -> str:
         for _k in ("from", "to"):
             if route.get(_k):
                 _qs.append(str(route.get(_k)))
+        # ① 先纯本地（零延迟）：_CITIES 表 + 「X市」写法 + 「广州天河城」前缀拆分
         for _q in _qs:
-            _c = _mt.city_of(_q) or _mt._split_city(_q)[0]
+            _c = _mt.city_of(_q, allow_net=False) or _mt._split_city(_q)[0]
             if _c:
                 city = _c
                 break
+        # ② 本地全认不出时再联网兜底（县级市、自治州首府这类表外城市）。
+        #    只在前面失败后才走，避免每次规划都多几次地理编码调用。
+        if not city and net:
+            for _q in _qs:
+                _c = _mt.city_of(_q, allow_net=True)
+                if _c:
+                    city = _c
+                    break
     markers, lines = [], []
 
     # 最多标 5 个点：十几个点挤在一张图上用户根本看不清（实测反馈）
@@ -6703,7 +6712,11 @@ def _do_nearby_places(arguments=None, ui_events=None, context=None) -> str:
     # ★ 2026-11-18：区分「整座城市里有什么」和「某个地点周围有什么」。
     #   实测用户问「广州有什么商场」时，按半径 1.5km 的周边搜索只会在市政府
     #   旁边打转（返回 Amall商场、广德商场这些 140 米的小店），天河城永远进不来。
-    _pcity = _mt.city_of(place)                  # place 本身就是城市名 → 城市级
+    net = _mt.online()
+    # ⚠️ allow_net 必须传（2026-11-18）：城市表只覆盖地级市，县级市/自治州首府
+    #    （敦煌、香格里拉…）要靠高德地理编码的「省+市」结构动态判定。
+    #    不传的话这类城市会被当成普通地点 → 退化成 1.5km 周边搜索。
+    _pcity = _mt.city_of(place, allow_net=net)   # place 本身就是城市名 → 城市级
     city = str(a.get("city") or a.get("城市") or "").strip() or _pcity
     city_level = bool(_pcity)
     try:
@@ -6719,7 +6732,6 @@ def _do_nearby_places(arguments=None, ui_events=None, context=None) -> str:
         limit = 8
     limit = max(1, min(20, limit))
 
-    net = _mt.online()
     # ⚠️ 干活之前先问一次高德 key（没配、联网、且本进程还没问过时）。
     #    必须放在这里：key 一旦填上，下面这次查询就直接走高德了。
     _key_note = _ask_amap_key_once(context, net)

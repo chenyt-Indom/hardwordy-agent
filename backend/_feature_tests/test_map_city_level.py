@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
 from backend import map_tools as mt          # noqa: E402
+from backend import tools as T              # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -150,6 +151,53 @@ else:
        str([x.get("city") for x in r[:3]]))
     ck("白云机场没被相关性校验误杀",
        bool(mt.search_place("广州白云机场", allow_net=True)))
+
+# ================================================================
+# 6. 表外城市（2026-11-18 第二轮）
+#    用户原话：「我问广州有什么景点，结果一堆不准确的内容」。
+#    查出来城市表只硬编码了 81 个 —— 承德、保定、临沂、漳州全不在里面，
+#    city_of() 返回空 → 退化成「以 geocode 结果为中心的 1.5 公里周边」。
+#    实测 place="承德" 被定位成「承德站」，只返回火车站附近 4 个景点。
+# ================================================================
+print("[6] 表外城市 / 城市名校验")
+# ① 城市表补全后，纯本地（不联网）就得认出来
+for _c in ("承德", "保定", "临沂", "漳州", "襄阳", "张家界"):
+    ck("city_of 本地认得出 %s" % _c, mt.city_of(_c, allow_net=False) == _c)
+ck("city_of：承德市 → 承德（去掉「市」）", mt.city_of("承德市", allow_net=False) == "承德")
+ck("city_of：广州市天河区 → 广州", mt.city_of("广州市天河区", allow_net=False) == "广州")
+ck("city_of：上海市浦东新区 → 上海", mt.city_of("上海市浦东新区", allow_net=False) == "上海")
+# ② 地点名绝不能当城市（判错了就会把「天河城附近餐厅」变成「天河城全城餐厅」）
+for _q in ("天河城", "汕头大学", "广州塔", "正佳广场", "承德避暑山庄", "北京朝阳"):
+    ck("city_of 不把地点名当城市：%s" % _q, mt.city_of(_q, allow_net=False) == "")
+ck("_city_from_admin_name：河北省承德市 → 承德",
+   mt._city_from_admin_name("河北省承德市") == "承德")
+ck("_city_from_admin_name：甘肃省酒泉市敦煌市 → 敦煌（县级市取最后一个）",
+   mt._city_from_admin_name("甘肃省酒泉市敦煌市") == "敦煌")
+ck("_city_from_admin_name：带县的地点名不算城市",
+   mt._city_from_admin_name("江西省南昌市进贤县天河城") == "")
+
+if not (net and has_key):
+    print("  skip  没网或没配高德 key（下面几项要联网）")
+else:
+    # ③ 县级市 / 自治州首府：靠 geocode 的「省+市」结构动态判定
+    ck("city_of 联网认出县级市：敦煌", mt.city_of("敦煌", allow_net=True) == "敦煌")
+    ck("city_of 联网认出州府：香格里拉", mt.city_of("香格里拉", allow_net=True) == "香格里拉")
+    # ④ 城市名打错时，高德不返回空而是退回默认城市（实测 → 北京故宫）
+    ck("城市名不存在时不返回外地结果",
+       not mt._nearby_amap_text("不存在市xyz", "景点", 8, 31.23, 121.47))
+    ck("城市名打错时不返回外地结果",
+       not mt._nearby_amap_text("广洲", "景点", 8, 31.23, 121.47))
+    # ⑤ 端到端：表外城市走**全城**检索，不是 1.5km 周边
+    _out = T._do_nearby_places({"place": "承德", "category": "景点"})
+    ck("承德走全城检索（不是火车站周边）", "全城搜索" in _out.split("\n")[0],
+       _out.split("\n")[0][:60])
+    _names = [ln.split("**")[1] for ln in _out.split("\n") if ln.startswith("· **")]
+    ck("承德返回的景点 ≥6 条", len(_names) >= 6, str(len(_names)))
+    # ⑥ 回归：城市问法走全城、地点问法走周边，不能互相串
+    ck("广州仍走全城检索", "全城搜索" in T._do_nearby_places(
+        {"place": "广州", "category": "景点"}).split("\n")[0])
+    ck("天河城附近仍是周边检索", "周边搜索" in T._do_nearby_places(
+        {"place": "天河城", "category": "餐厅"}).split("\n")[0])
 
 print("\n%d 项，失败 %d" % (len(PASS) + len(FAIL), len(FAIL)))
 sys.exit(1 if FAIL else 0)
