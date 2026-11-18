@@ -1087,6 +1087,43 @@ def main():
         except Exception:
             pass
 
+    # ---- 间隔重复：同一段 assistant 回复被记两遍，中间隔着别的消息也不能漏 ----
+    # 实测真实数据 dialog[10] == dialog[13]（同一段 2187 字回复），中间隔着一条
+    # 被中断的 152 字回复，原来只跟 out[-1] 比 → 两条都留在卡上，白占 200 字预算。
+    _lt = "这是一段足够长的助手回复内容，用来验证间隔重复。" * 10
+    _dp = [{"role": "assistant", "text": _lt},
+           {"role": "user", "text": "验证一下是否完全正常"},
+           {"role": "assistant", "text": "中间这条不同"},
+           {"role": "assistant", "text": _lt}]
+    _do = handoff._dedup([dict(x) for x in _dp])
+    check("间隔重复的 assistant 被合并", len(_do) == 3, len(_do))
+    check("间隔重复后长文只出现一次",
+          sum(1 for x in _do if x["text"] == _lt) == 1, "")
+    check("间隔重复去重幂等",
+          len(handoff._dedup([dict(x) for x in _do])) == 3, "")
+
+    # 反过来：user 的真实重复（连问两次「好了吗」）绝不能被合并
+    _up = [{"role": "user", "text": "好了吗"},
+           {"role": "assistant", "text": "第一条回复内容"},
+           {"role": "user", "text": "好了吗"},
+           {"role": "assistant", "text": "第二条回复内容"}]
+    check("user 的短重复保留（4 条不变）",
+          len(handoff._dedup([dict(x) for x in _up])) == 4, "")
+    _up2 = [{"role": "user", "text": "验证一下是否完全正常"},
+            {"role": "assistant", "text": "甲"},
+            {"role": "user", "text": "验证一下是否完全正常"},
+            {"role": "assistant", "text": "乙"}]
+    check("user 的 10 字重复保留（4 条不变）",
+          len(handoff._dedup([dict(x) for x in _up2])) == 4, "")
+
+    # 真实 last.json：去重后 user 条数必须一条不少（那是真实轮次）
+    _rd = handoff._read().get("dialog") or []
+    if _rd:
+        _rb = sum(1 for m in _rd if m.get("role") == "user")
+        _ra = sum(1 for m in handoff._dedup([dict(m) for m in _rd])
+                  if m.get("role") == "user")
+        check("真实数据去重不动 user 条数", _rb == _ra, "%d -> %d" % (_rb, _ra))
+
     print("")
     print("结果：%d 项，失败 %d" % (CHECKS[0], len(FAILS)))
     if FAILS:
