@@ -1721,10 +1721,10 @@ def _run_memory_extract(session: str, model: str, cfg: dict) -> None:
     with _busy_lock:
         _extracting = True
         _extract_abort = False        # 新的提炼开始，重新接受打断信号
-    ok = False
+    status = "failed"
     try:
-        ok = bool(_auto_extract_memory(session, turns, model, cfg,
-                                       abort=lambda: _extract_abort))
+        status = _auto_extract_memory(session, turns, model, cfg,
+                                      abort=lambda: _extract_abort)
     except Exception:
         # ⚠️ 这里**不能**静默 pass。
         # 自动记忆整个链路跑在后台线程里，出错了界面上完全看不出来 ——
@@ -1737,8 +1737,11 @@ def _run_memory_extract(session: str, model: str, cfg: dict) -> None:
         with _mem_lock:
             st = _mem_pending.get(session) or {}
             st["running"] = False
-            if ok:
-                st["turns"] = []      # 成功了才清；被打断/失败留着下次重试
+            # 只有**真的失败**（模型没吐字 / 被打断）才留着下次重试。
+            # 「模型说这轮没什么可记的」（empty）也算处理完了 ——
+            # 原来它返回 False，缓冲区永不清空，同一批 turns 每轮都重新提炼一遍。
+            if status != "failed":
+                st["turns"] = []
             _mem_pending[session] = st
 
 
@@ -1971,6 +1974,12 @@ _EXTRACT_PROMPT = """你是"长期记忆整理员"。阅读下面的对话，挑
 【记成长期还是短期】问自己一句话：换个话题还成立吗？
 · 成立 → 长期（跨所有对话通用）
 · 只在当前这件事里成立 → 短期（只服务这个对话）
+⚠️ **短期记忆不是可有可无的**，别一律写成 `长期|`。这两类必须写成 `短期|`：
+  · 当前这个任务/项目的**背景与约定**：`短期|这次做的是考勤签到软件，要求桌面程序+SQLite`
+  · 这一轮**定下来的做法或结论**：`短期|报表按部门分组，迟到标黄、缺卡标红`
+  · **排查到一半的进度**：`短期|已经定位到卡片颜色字段没被渲染，还没修`
+  判断口诀：**「过几天换个话题，这条还用得上吗？」** 用不上 → 短期。
+  写长期会让无关对话也被这些临时上下文干扰；写短期才刚好服务当前这件事。
 
 【输出格式】每行一条，**只写有变化的内容**：
 · 新信息 → `长期|具体事实` 或 `短期|具体事实`
@@ -2046,10 +2055,17 @@ _EXTRACT_NOISE = (
 )
 
 
+# 「1. 」「2、」「3）」这种列表序号
+_SEQ_PREFIX = re.compile(r"^\s*\d{1,2}\s*[.、)．）]\s*")
+
+
 def _clean_extract_line(raw: str) -> str:
     line = raw.strip().lstrip("-*• ").strip("`").strip()
-    while line[:1].isdigit():
-        line = line[1:].lstrip("、.)． ").strip()
+    # ⚠️ 只剥**序号**，不能见数字就剥。原来是逐字符 `while line[:1].isdigit()`，
+    # 实测「2026年3月开始备考网络工程师」被削成「年3月开始备考网络工程师」、
+    # 「3月要去实习」变成「月要去实习」——
+    # 年份和月份恰恰是记忆里最不能丢的数据（提示词自己也写着"数字一个都不能丢"）。
+    line = _SEQ_PREFIX.sub("", line, count=1)
     if line.startswith("【") and "】" in line:
         inner = line.split("】", 1)
         if inner[1].strip():
@@ -2057,11 +2073,41 @@ def _clean_extract_line(raw: str) -> str:
     return line
 
 
+# 冒号只有在**前面是已知标签**时才算分隔符。
+# 否则「专业：人工智能技术应用」会被切成 ["专业", "人工智能技术应用"]：
+# 前缀「专业」被当成动词丢掉，只剩一个没有主语的「人工智能技术应用」，
+# 而且因为 verb 不在类别名单里，这条会被默认丢进短期记忆（实测）。
+_LABELS = set(_VERB_REVISE) | set(_VERB_FORGET) | set(_KIND_LONG) | set(_KIND_SHORT)
+
+# 动词后面紧跟这些才算「指令」而不是普通事实
+_VERB_DELIM = re.compile(r"[\s:：,，、|｜(（\[【]")
+
+
+def _starts_with_verb(text: str) -> bool:
+    """整行以「更新/删除/取消…」开头、且动词后紧跟分隔符 —— 才当指令。
+
+    只判断"包含"会误伤正常事实：「取消了健身房会员卡」里也有"取消"，
+    原来会被当成删除指令直接丢掉（实测）。所以要求动词后面必须是空格/冒号/括号。
+    """
+    t = (text or "").strip()
+    for v in _VERB_REVISE + _VERB_FORGET:
+        if t.startswith(v) and len(t) > len(v) and _VERB_DELIM.match(t[len(v)]):
+            return True
+    return False
+
+
 def _split_extract_line(line: str) -> list:
-    # 竖线优先（标准格式），其次容忍「长期：xxx」这种中文冒号写法
-    for sep in ("|", "｜", "：", ":"):
+    # 竖线优先（标准格式）
+    for sep in ("|", "｜"):
         if sep in line:
             return [p.strip() for p in line.split(sep)]
+    # 其次容忍「长期：xxx」这种中文冒号写法 —— 但只在前面确实是标签时才切
+    for sep in ("：", ":"):
+        if sep in line:
+            head = line.split(sep, 1)[0].strip().strip("【】[]（）() ")
+            if head in _LABELS:
+                a, b = line.split(sep, 1)
+                return [a.strip(), b.strip()]
     return [line]
 
 
@@ -2111,6 +2157,10 @@ def _apply_extract(text: str, session: str, limit: int = 4) -> int:
         if any(m in line for m in _EXTRACT_NOISE):
             continue
         parts = _split_extract_line(line)
+        # 有没有真的切出分隔符 —— 决定这一行是「指令」还是「一句普通事实」。
+        # 原来不区分，只要文本里**包含**"取消/更新"就按指令处理，于是
+        # 「取消了健身房会员卡」这种正常事实被当成删除指令直接丢掉（实测）。
+        has_sep = len(parts) > 1
         verb = parts[0].strip().strip("【】[]（）() ")
         # ⚠️ 值里**不要**剥掉圆括号 —— 「（推断）用户…」这种标记是内容的一部分，
         # 剥了用户就看不出这条是推出来的（踩过：存进去变成「推断）用户…」）
@@ -2121,13 +2171,13 @@ def _apply_extract(text: str, session: str, limit: int = 4) -> int:
         if verb in _KIND_LONG or verb in _KIND_SHORT:
             verb, kind = "", verb       # "长期|要点"：第一段写的其实是类别
         try:
-            if any(v in verb for v in _VERB_FORGET) and rest:
+            if has_sep and any(verb.startswith(v) for v in _VERB_FORGET) and rest:
                 if _forget_point(rest[0], kind, session):
                     kept += 1
-            elif any(v in verb for v in _VERB_REVISE) and len(rest) >= 2:
+            elif has_sep and any(verb.startswith(v) for v in _VERB_REVISE) and len(rest) >= 2:
                 if _revise_point(rest[0], " ".join(rest[1:]), kind, session):
                     kept += 1
-            elif not rest and any(v in verb for v in _VERB_REVISE + _VERB_FORGET):
+            elif not has_sep and _starts_with_verb(verb):
                 # 写了「更新/删除」但没给分隔符和旧要点（模型把整句话连成一串）。
                 # 这时 verb 会把整行都吃掉，落到下面的 else 分支被当成**新事实**存进去，
                 # 长期记忆里就出现了「更新 (推断)…」这种带动词前缀的脏条目（实测踩到）。
@@ -2149,10 +2199,14 @@ def _apply_extract(text: str, session: str, limit: int = 4) -> int:
 
 
 def _auto_extract_memory(session: str, turns: list, model: str, cfg: dict,
-                         abort=None) -> bool:
+                         abort=None) -> str:
     """把**最近几轮**对话里的要点提炼进记忆（后台线程，不阻塞回复）。
 
-    返回是否**真的写进了记忆**（调用方据此决定要不要清空待处理队列）。
+    返回三态（调用方据此决定要不要清空待处理队列）：
+      "written" —— 真的写进记忆了
+      "empty"   —— 跑完了，但这轮没有可记的内容（模型回「无」/ 全是被过滤的噪声）
+      "failed"  —— 没拿到任何输出（思考吃光额度，或被用户打断）
+    只有 "failed" 才该保留缓冲区重试；"empty" 保留会变成**每轮重复提炼同一批**。
 
     长期记忆是"久远对话可被清理"的前提 —— 要点沉淀下来后，
     老的聊天记录才可以安全裁剪或清除。**所以释放归档前必须先跑一遍这个沉淀**，
@@ -2166,13 +2220,13 @@ def _auto_extract_memory(session: str, turns: list, model: str, cfg: dict,
     长期记忆里堆出一串"同义句"（实测见过同一个人被记了三遍），白白吃掉 15000 字上限。
     """
     if not turns:
-        return False
+        return "empty"
     convo = "\n".join(
         "%s：%s" % ("用户" if m.get("role") == "user" else "助手",
                     str(m.get("content") or "")[:300])
         for m in turns if (m.get("content") or "").strip())
     if not convo:
-        return False
+        return "empty"
     known_long = memory.get_long().strip() or "（暂无）"
     known_short = memory.get_short(session).strip() or "（暂无）"
     prompt = _EXTRACT_PROMPT.format(long=known_long[-2500:], short=known_short[-800:],
@@ -2184,14 +2238,20 @@ def _auto_extract_memory(session: str, turns: list, model: str, cfg: dict,
         if not (abort and abort()):
             logging.getLogger("uvicorn.error").warning(
                 "记忆提炼返回空（session=%s, model=%s）", session, model)
-        return False
+        return "failed"
     # ⚠️ 这里的上限原来写 4 —— 而 `_apply_extract` 里是 `if kept >= limit: break`：
     # 模型一次给出 6~8 条时，**超出的部分被静默丢掉**（不报错、界面上也看不出来）。
     # 实测：一段 6 条的对话，模型能正确给出「事迹」「称呼约定」「技术结论」共 3 条；
     # 但窗口是最近 8 条消息（约 4 轮），信息密集时给出 6~8 条很常见，
     # 于是每次多半只落进前半部分，用户就觉得"我明明说了，它没记住"。
     # 放宽到 8：留一个上限是为了防模型灌一堆噪声，但别卡在"刚好够一半"的位置。
-    return _apply_extract(text, session, limit=8) > 0
+    n = _apply_extract(text, session, limit=8)
+    if n > 0:
+        return "written"
+    # ⚠️ 模型这次一条都没落地（回了「无」，或整段都是被过滤掉的审查结论）。
+    # 这必须算"处理完了"，**不能**算失败 —— 否则 _run_memory_extract 不清缓冲区，
+    # 同一批 turns 会被每一轮反复提炼（单次 85~250 秒的模型时间），永远没有进展。
+    return "empty"
 
 
 

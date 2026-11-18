@@ -19,11 +19,29 @@ import os
 import re
 import json
 import time
+import functools
+import threading
 import logging
 from . import config
 logger = logging.getLogger(__name__)
 
 _LOG = logging.getLogger("uvicorn.error")
+
+# ⚠️ 记忆是**读-改-写**：get_long → 拼一条 → set_long。
+# 没有锁时两个线程同时做，后写的会把先写的整段覆盖掉。
+# 实测（2026-11-18）：4 个线程各写 15 条长期记忆，最终只剩 20 条（丢了 40 条）；
+# 短期记忆更狠，4 个会话同时写，30 次试验**全部**出现会话丢失。
+# 真实场景里「后台自动提炼」和「remember 工具」本来就可能同时写，所以必须串行化。
+_MEM_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    """把一次读-改-写整体锁住（RLock，内部嵌套调用安全）。"""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _MEM_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
 
 DATA_DIR = config.data("data")
 MEM_DIR = os.path.join(DATA_DIR, "memory")
@@ -66,10 +84,21 @@ def _read_json(path, default):
 
 def _write_json(path, data):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)          # 原子替换，避免写一半断电把记忆写坏
+    # ⚠️ tmp 名字里必须带线程号。原来固定用 `path + ".tmp"`，两个线程同时写
+    # 会抢同一个临时文件，os.replace 直接抛 PermissionError（实测 WinError 32/5）——
+    # 而调用方（提炼线程 / remember 工具）大多把异常吞掉，用户看到的就是"这条没记住"。
+    tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+    with _MEM_LOCK:
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)      # 原子替换，避免写一半断电把记忆写坏
+        except Exception:
+            try:
+                os.remove(tmp)
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+            raise
     # 记忆一改，向量索引就得跟着更新（后台增量同步，不阻塞调用方）。
     # 挂在 _write_json 这一处收口，长期/短期/清空/释放全都覆盖到，
     # 不用在每个写函数里各加一行 —— 少一处遗漏的机会。
@@ -111,13 +140,20 @@ def _split_items(text: str) -> list:
 
 
 def _trim(text: str, cap: int) -> str:
-    """超上限时从**最早**的条目开始丢（新的更重要）。"""
+    """超上限时从**最早**的条目开始丢（新的更重要）。
+
+    ⚠️ 单条就超长时**不能**一路 pop 到底：那样会返回空串，而 set_short
+    看到空串会把整个会话的记忆删掉（`shorts.pop(sid)`）。实测一个 1500 字的
+    单条要点进来，该对话的短期记忆直接消失。超长就截断保留。
+    """
     text = (text or "").strip()
     if len(text) <= cap:
         return text
     items = _split_items(text)
     while items and len("；".join(items)) > cap:
         items.pop(0)
+    if not items:
+        return text[:cap]
     return "；".join(items)
 
 
@@ -150,6 +186,7 @@ def get_long_doc() -> dict:
             "updated_at": float(d.get("updated_at") or 0)}
 
 
+@_locked
 def set_long(content: str) -> dict:
     content = _trim(content, LONG_CAP)
     doc = {"content": content, "updated_at": _now()}
@@ -157,6 +194,7 @@ def set_long(content: str) -> dict:
     return doc
 
 
+@_locked
 def merge_long(point: str) -> bool:
     """把一条要点并入长期记忆（追加 + 去重），返回是否真的写入了。"""
     point = _norm_point(point)
@@ -165,24 +203,64 @@ def merge_long(point: str) -> bool:
     cur = get_long()
     if _already(cur, point):
         return False
+    sup = _supersede(cur, point)
+    if sup is not None:
+        set_long(sup)
+        return True
     new = (cur.rstrip("；;。 \n") + "；" + point) if cur.strip() else point
     set_long(new)
     return True
 
 
+def _neg_key(s: str) -> bool:
+    """这条要点是不是否定性表述（只用来判断"两条说的是不是同一件事"）。
+
+    「未来」「非常」里的"未/非"不是否定，先剔掉 —— 否则「未来打算考研」
+    会被当成否定句，和「计划考研」判成两件事，白白记两条。
+    """
+    t = (s or "").replace("未来", "").replace("非常", "")
+    return any(w in t for w in ("不", "没", "无", "未", "别"))
+
+
 def _already(body: str, point: str) -> bool:
-    """判断要点是否已在文段里（完全重复 / 被现有条目涵盖 / 涵盖现有条目）。"""
+    """判断要点是否已在文段里（完全重复 / 被现有条目涵盖）。
+
+    ⚠️ 必须**先比否定状态**再比字面包含。原来只做子串判断，实测：
+    已有「用户不喜欢咖啡」，新要点「喜欢咖啡」会被判成"已经在里面了"，
+    于是一条**纠正**被静默丢弃 —— 用户改了口径，记忆却永远停在旧说法上。
+    """
     if not body:
         return False
-    if point in body:
-        return True
+    pn = _neg_key(point)
     for e in _split_items(body):
         e = _norm_point(e)
         if not e:
             continue
-        if point == e or point in e:
+        if point == e:
             return True
+        if _neg_key(e) != pn:
+            continue              # 一个肯定一个否定，不是同一条
+        if point in e:
+            return True           # 新要点被旧条目涵盖，确实已经有了
     return False
+
+
+def _supersede(body: str, point: str):
+    """新要点**完整包含**某条旧要点且更长 → 返回替换后的正文；否则 None。
+
+    修的是"加信息反而丢信息"：原来「计划考网络工程师」遇到
+    「计划考网络工程师，报名费800元」会被 _already 判成重复、整条丢掉，
+    费用就永远记不上。这种情况应该**原地替换**成信息更全的那条。
+    """
+    items = _split_items(body)
+    for i, e in enumerate(items):
+        en = _norm_point(e)
+        if not en or en == point:
+            continue
+        if en in point and len(point) > len(en) and _neg_key(en) == _neg_key(point):
+            items[i] = point
+            return "；".join(items)
+    return None
 
 
 # =====================================================================
@@ -206,20 +284,25 @@ def get_short(sid: str) -> str:
     return get_short_doc(sid)["content"]
 
 
+@_locked
 def set_short(sid: str, content: str) -> dict:
     sid = _safe_sid(sid)
     if not sid:
         return {"content": "", "updated_at": 0}
     content = _trim(content, SHORT_CAP)
     shorts = _load_shorts()
+    # 时间戳只取一次：原来落盘用 _now()、返回值又调一次 _now()，
+    # 两者差几毫秒，调用方拿返回值去比对文件永远对不上。
+    ts = _now()
     if content:
-        shorts[sid] = {"content": content, "updated_at": _now()}
+        shorts[sid] = {"content": content, "updated_at": ts}
     else:
         shorts.pop(sid, None)       # 清空就不占地方
     _write_json(SHORT_FILE, shorts)
-    return {"content": content, "updated_at": _now()}
+    return {"content": content, "updated_at": ts if content else 0}
 
 
+@_locked
 def merge_short(sid: str, point: str) -> bool:
     point = _norm_point(point)
     if not point or not _safe_sid(sid):
@@ -227,11 +310,16 @@ def merge_short(sid: str, point: str) -> bool:
     cur = get_short(sid)
     if _already(cur, point):
         return False
+    sup = _supersede(cur, point)
+    if sup is not None:
+        set_short(sid, sup)
+        return True
     new = (cur.rstrip("；;。 \n") + "；" + point) if cur.strip() else point
     set_short(sid, new)
     return True
 
 
+@_locked
 def delete_short(sid: str) -> bool:
     """对话被删除时调用，免得攒一堆孤儿短期记忆。"""
     sid = _safe_sid(sid)
@@ -283,19 +371,28 @@ def _overlap(a: str, b: str) -> float:
 
 
 def _locate(body: str, hint: str):
-    """在记忆正文里找与 hint 最像的那一条，返回 (下标, 条目列表, 相似度)。"""
+    """在记忆正文里找与 hint 最像的那一条，返回 (下标, 条目列表, 相似度)。
+
+    ⚠️ 定位词太短时**只认完全相同的那一条**。`_overlap` 里"被包含"直接给 1.0，
+    于是删「用户」会把「用户姓名：陈宇桐」整条删掉（实测），改「喜欢」也可能
+    改到毫不相干的一条上。宁可改不到，也不能改错。
+    """
     items = _split_items(body)
+    hint_n = _norm_point(hint)
     best_i, best_s = -1, 0.0
     for i, e in enumerate(items):
         sc = _overlap(e, hint)
         if sc > best_s:
             best_i, best_s = i, sc
+    if best_i >= 0 and len(hint_n) < 4 and _norm_point(items[best_i]) != hint_n:
+        return -1, items, 0.0
     return best_i, items, best_s
 
 
 MATCH_THRESHOLD = 0.5           # 低于它就认为"不是同一条"，宁可不改也不乱改
 
 
+@_locked
 def update_long(old_hint: str, new_point: str, threshold: float = MATCH_THRESHOLD,
                 append_missing: bool = True) -> str:
     """把长期记忆里的某一条**改成新内容**。
@@ -322,6 +419,7 @@ def update_long(old_hint: str, new_point: str, threshold: float = MATCH_THRESHOL
     return "replaced"
 
 
+@_locked
 def update_short(sid: str, old_hint: str, new_point: str,
                  threshold: float = MATCH_THRESHOLD,
                  append_missing: bool = True) -> str:
@@ -345,6 +443,7 @@ def update_short(sid: str, old_hint: str, new_point: str,
     return "replaced"
 
 
+@_locked
 def drop_long(point: str, threshold: float = 0.5) -> bool:
     """删掉长期记忆里最像 point 的那一条（用户明确说"不做了/弄错了"时用）。"""
     cur = get_long()
@@ -358,6 +457,7 @@ def drop_long(point: str, threshold: float = 0.5) -> bool:
     return True
 
 
+@_locked
 def drop_short(sid: str, point: str, threshold: float = 0.5) -> bool:
     sid = _safe_sid(sid)
     if not sid:
@@ -455,6 +555,7 @@ def usage() -> dict:
     }
 
 
+@_locked
 def release(scope: str = "short", session_id: str = "") -> dict:
     """释放记忆占用。
 
