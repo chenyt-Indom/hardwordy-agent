@@ -511,7 +511,18 @@ def idle_gate(settings=None):
 
 
 def _pid():
-    return time.strftime("%Y%m%d_%H%M%S")
+    """计划 / 备份的唯一 id。
+
+    ⚠️ 2026-11-19：原来只到秒（`%Y%m%d_%H%M%S`），**同一秒内建两个计划会拿到同一个 id**：
+      · `_merge_plans` 按 id 合并 → 后一个把前一个覆盖掉（实测建 2 个，落盘只剩 1 个）；
+      · 备份目录名也用 _pid → 两次备份撞同一个目录，`mkdir(exist_ok=True)` 不报错，
+        第二次把第一次的备份覆盖掉 —— 回滚回到的是「第二次改动前」而不是
+        「第一次改动前」（实测 a.py 回滚成 A=2，本该是 A=1）。
+    现在补毫秒 + 3 字节随机；前缀仍是时间，`str(pid)[:8]` 和按 id 排序都不受影响。
+    """
+    return "%s_%03d%s" % (time.strftime("%Y%m%d_%H%M%S"),
+                          int(time.time() * 1000) % 1000,
+                          os.urandom(3).hex())
 
 
 # ------------------------------------------------- 检查点落盘复用
@@ -3366,14 +3377,21 @@ def _read_text(rel):
 def _backup_files(files, tag):
     """备份要改的文件。
 
-    返回 (tag, saved, created)：
+    返回 (tag, saved, created, failed)：
       saved   = 已存在、已备份的文件
       created = 原本不存在（属于新建）的文件 —— 回滚时要把它们删掉
+      failed  = **备份失败**的文件 —— 调用方必须拒绝修改它们
+
+    ⚠️ 2026-11-19：原来备份失败只写一条 debug 日志就继续，而 `_restore` 只按
+    manifest 里的 `files`(saved) 恢复 —— 于是「备份失败的文件被改了、回滚却恢复不了」。
+    实测：让 b.py 的 copy2 抛 PermissionError，改完 b.py 变成 99，
+    `_restore` 之后 a.py 正确回到 1、**b.py 仍是 99**（永久停在改坏的版本）。
+    现在把失败清单交出去，由调用方在动手前拦下。
     """
     _ensure()
     dst = _BACKUPS / tag
     dst.mkdir(parents=True, exist_ok=True)
-    saved, created = [], []
+    saved, created, failed = [], [], []
     for rel in files:
         src = _ROOT / rel
         if not src.is_file():
@@ -3384,10 +3402,12 @@ def _backup_files(files, tag):
             shutil.copy2(src, out)
             saved.append(rel)
         except Exception:                               # noqa: BLE001
-            logger.debug("silent-except", exc_info=True)
+            logger.warning("备份失败，调用方应拒绝修改：%s", rel, exc_info=True)
+            failed.append(rel)
     _write_json(dst / "_manifest.json",
-                {"files": saved, "created": created, "ts": _now(), "tag": tag})
-    return tag, saved, created
+                {"files": saved, "created": created, "failed": failed,
+                 "ts": _now(), "tag": tag})
+    return tag, saved, created, failed
 
 
 def _outline_block(body, limit=800, max_chars=11000):
@@ -3524,6 +3544,11 @@ def _verify(rel):
             return True, ""
         except FileNotFoundError:
             return True, ""                             # 没装 node 就跳过
+        except subprocess.TimeoutExpired:
+            # ⚠️ 2026-11-19：原来所有异常都 return True —— 包括 40 秒超时，
+            #   等于「语法根本没验成」也放行。js 语法错回归测试抓不到，
+            #   写进前端就是白屏。超时宁可判失败让它重改一轮。
+            return False, "node --check 超过 40 秒没返回，语法未校验"
         except Exception:                               # noqa: BLE001
             return True, ""
     return True, ""
@@ -3566,6 +3591,28 @@ def _looks_mojibake(s):
     return odd >= 3 and han <= odd // 2
 
 
+def _atomic_write_text(path, text):
+    """原子写文本：先写同目录 .mmtmp，再 os.replace 覆盖。
+
+    ⚠️ 2026-11-19：`_apply_find_replace` 原来是 `open(path, "w")` 直写 ——
+    这是**改自己源码**的路径，写到一半崩掉/断电会留下**半截 .py**，
+    而语法校验是在写完之后才跑的，进程崩了就没人回滚，应用直接起不来。
+    同文件里的 `_write_json` 早就用了 tmp + replace，这里补齐。
+    """
+    tmp = str(path) + ".mmtmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+        raise
+
+
 def _apply_find_replace(rel, find, replace):
     """精确替换（必须恰好命中 1 处），与 selfdev_patch 同一套语义。
 
@@ -3579,8 +3626,7 @@ def _apply_find_replace(rel, find, replace):
     if not find and not path.is_file():
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(replace or "")
+            _atomic_write_text(path, replace or "")
             return True, ""
         except Exception as e:                          # noqa: BLE001
             return False, "新建文件失败：%s" % e
@@ -3596,8 +3642,7 @@ def _apply_find_replace(rel, find, replace):
         return False, "find 命中 %d 处，不唯一" % n
     new = txt.replace(find, replace, 1)
     try:
-        with open(_ROOT / rel, "w", encoding="utf-8") as f:
-            f.write(new)
+        _atomic_write_text(_ROOT / rel, new)
         return True, ""
     except Exception as e:                              # noqa: BLE001
         return False, "写入失败：%s" % e
@@ -3898,7 +3943,10 @@ def _retry_fix(plan, a, first_fail, orig_tag, base_fails, base_ok, on_ev=None):
             continue
         rels = list(dict.fromkeys(rels))
         tag = "%s_%s_fix%d_%s" % (plan.get("id") or "", a.get("id"), i, _pid())
-        tag2, _saved, _created = _backup_files(rels, tag)
+        tag2, _saved, _created, _bfail = _backup_files(rels, tag)
+        if _bfail:
+            fail = "备份失败，已拒绝改动：%s" % "、".join(_bfail)
+            continue
         done_rels, fail_msg = [], ""
         for pt in patches:
             rel = _norm_rel(pt.get("file"))
@@ -4266,8 +4314,11 @@ def _repair_feature(plan, action, rels, why, rounds=3, ev=None):
         # 本轮备份（把 patch 里新出现的文件也算进来）
         allf = list(dict.fromkeys(
             uniq + [str(p.get("file")) for p in pts if p.get("file")]))
-        tag_r, _sv, _cr = _backup_files(
+        tag_r, _sv, _cr, _bfail = _backup_files(
             allf, "repair_%s_%d" % (action.get("id") or "x", i + 1))
+        if _bfail:
+            hist.append("备份失败，已拒绝改动：%s" % "、".join(_bfail))
+            continue
         bad = ""
         for pt in pts:
             rel = _norm_rel(pt.get("file"))
@@ -4989,8 +5040,19 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
         _ev("step", text="%s 备份并应用改动（%s）…" % (
             a.get("id"), "、".join(dict.fromkeys(rels))))
         # 备份（created 里是本次要新建的文件，回滚时会被删除）
-        tag2, saved, created = _backup_files(list(dict.fromkeys(rels)), tag)
+        tag2, saved, created, _bfail = _backup_files(list(dict.fromkeys(rels)), tag)
         a["backup"] = tag2
+        if _bfail:
+            # 备份失败的文件改了就回不来（_restore 只按 saved 恢复）→ 宁可不改
+            _err = ("备份失败，已拒绝改动（这些文件改了回不来）：%s"
+                    % "、".join(_bfail))
+            a["status"] = "failed"
+            a["error"] = _err
+            results.append({"id": a["id"], "ok": False, "error": _err})
+            _log_act(plan, a, False, _err)
+            _ev("step", text="%s 备份失败，已拒绝改动" % a.get("id"))
+            _ev("code", **_card(a, patches, False, _err, False))
+            continue
 
         # 应用
         done_rels, fail_msg = [], ""

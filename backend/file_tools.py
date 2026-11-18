@@ -277,13 +277,21 @@ def _walk_candidates(target: str, max_files: int, deadline: float) -> list:
     return out
 
 
-def read_by_keywords(paths_or_dirs: list[str], keywords: str, max_files: int = 50) -> str:
-    """在指定路径集里按关键词检索文件内容，返回匹配摘要。"""
+def find_hits(paths_or_dirs: list[str], keywords: str, max_files: int = 50) -> list:
+    """按关键词检索，返回**结构化**命中列表。
+
+    每项：{"path": 路径, "text": 全文, "idx": 首个命中位置, "kws": 命中的词}
+
+    ⚠️ 2026-11-19：`tools._do_search_files` 原来自己另写了一套
+    「31 个扩展名各 glob 一次 + 全部扫完才截断」—— 和本文件修之前是**同一个 bug**
+    （项目根 26 万文件实测 221.97 秒，且扫完还因为截断在前 200 个而返回"未找到"）。
+    现在两边共用这一份实现，以后只有一处需要维护。
+    """
     import time as _t
     kws = [k.strip().lower() for k in str(keywords or "").split() if k.strip()]
     if not kws:
-        return ""
-    results = []
+        return []
+    out = []
     deadline = _t.time() + SEARCH_MAX_SECONDS
     for target in paths_or_dirs:
         if _t.time() > deadline:
@@ -307,8 +315,17 @@ def read_by_keywords(paths_or_dirs: list[str], keywords: str, max_files: int = 5
                 continue
             low = text.lower()
             if any(k in low for k in kws):
-                # 截取命中上下文
                 first = min((low.find(k) for k in kws if k in low), default=0)
-                seg = text[max(0, first - 100): first + 200]
-                results.append(f"--- {c} ---\n{seg}")
+                out.append({"path": c, "text": text, "idx": first,
+                            "kws": [k for k in kws if k in low]})
+    return out
+
+
+def read_by_keywords(paths_or_dirs: list[str], keywords: str, max_files: int = 50) -> str:
+    """在指定路径集里按关键词检索文件内容，返回匹配摘要。"""
+    results = []
+    for h in find_hits(paths_or_dirs, keywords, max_files):
+        # 截取命中上下文
+        seg = h["text"][max(0, h["idx"] - 100): h["idx"] + 200]
+        results.append(f"--- {h['path']} ---\n{seg}")
     return "\n\n".join(results[:30])

@@ -4276,7 +4276,13 @@ def _do_edit_image(arguments, ui_events, context):
     if source:
         if not os.path.isfile(source):
             return f"错误：source 不是有效图片路径：{source}"
+        # ⚠️ 2026-11-19：原来直接 f.read() 无上限 —— 用户给一张 300MB 的 TIFF，
+        # 读进内存再 base64 会膨胀到 400MB，进程直接被打爆。与 file_tools 统一 80MB。
         try:
+            _sz = os.path.getsize(source)
+            if _sz > file_tools.MAX_IMAGE_BYTES:
+                return (f"错误：底图太大（{_sz/1024/1024:.1f}MB，上限 "
+                        f"{file_tools.MAX_IMAGE_BYTES//1024//1024}MB）。请先压缩或换一张。")
             with open(source, "rb") as f:
                 img_b64 = _b64.b64encode(f.read()).decode("ascii")
         except Exception as e:                       # noqa: BLE001
@@ -5116,29 +5122,20 @@ def _do_search_files(arguments):
     keyword = (arguments.get("keyword") or "").strip()
     if not path or not keyword:
         return "错误：需要同时提供 path 与 keyword。"
-    if os.path.isfile(path):
-        paths = [path]
-    elif os.path.isdir(path):
-        paths = []
-        try:
-            for ext in file_tools.TEXT_EXTS:
-                paths += glob.glob(os.path.join(path, "**", "*" + ext), recursive=True)
-        except Exception as e:
-            return f"错误：扫描目录失败：{e}"
-        paths = paths[:200]
-    else:
+    if not (os.path.isfile(path) or os.path.isdir(path)):
         return f"错误：路径不存在：{path}"
+    # ⚠️ 2026-11-19：原来是「对 31 个扩展名各做一次 glob 全递归，扫完再 paths[:200]」——
+    # 项目根 26 万文件实测 **221.97 秒**，而且因为截断落在前 200 个里，
+    # 最后还返回「未找到」（明明有）。改为复用 file_tools.find_hits：
+    # 一次 os.walk + 剪枝 + 时间预算，和 read_by_keywords 共用同一份实现。
+    try:
+        found = file_tools.find_hits([path], keyword, max_files=200)
+    except Exception as e:
+        return f"错误：扫描目录失败：{e}"
     hits = []
-    kws = [k.lower() for k in keyword.split()]
-    for p in paths[:200]:
-        text = file_tools.read_text(p)
-        if not text:
-            continue
-        low = text.lower()
-        if kws and any(k in low for k in kws):
-            idx = min((low.find(k) for k in kws if k in low), default=0)
-            seg = text[max(0, idx - 80): idx + 220].replace("\n", " ")
-            hits.append(f"--- {p} ---\n…{seg}…")
+    for h in found:
+        seg = h["text"][max(0, h["idx"] - 80): h["idx"] + 220].replace("\n", " ")
+        hits.append(f"--- {h['path']} ---\n…{seg}…")
     if not hits:
         return f"在 {path} 下未找到包含“{keyword}”的文件。"
     return "找到的匹配内容（最多返回30条）：\n\n" + "\n\n".join(hits[:30])
