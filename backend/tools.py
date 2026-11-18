@@ -566,10 +566,8 @@ _WS_WRITE_SCHEMA = {
         "name": "workspace_write",
         "description": ("【开发工作区】把内容写进工作区文件（存在则覆盖，旧版自动进回收站）。"
                         "**要给整份文件内容**，不要只给片段。写完用户会在「开发台」里看到。"
-                        "⚠️ **只用来写「非代码」内容（README、配置、数据、txt/md/json），"
-                        "或者你自己动手改一两行**；"
-                        "**要写/改一个代码文件（.py/.js/.ts/.html/.java…）请改用 write_code** ——"
-                        "由本机专用代码模型来写，代码质量和长度都更有保障。"),
+                        "代码文件（.py/.js/.ts/.html/.java…）也用它，给整份内容；"
+                        "写完**一定要用 workspace_run 真跑一遍**，不要凭空猜运行结果。"),
         "parameters": {"type": "object",
                        "properties": {
                            "rel": {"type": "string", "description": "工作区内的相对路径"},
@@ -578,6 +576,11 @@ _WS_WRITE_SCHEMA = {
     },
 }
 
+
+# write_code 是否启用。False = 不暴露给模型，且 dispatch 里也拒绝执行
+# （12GB 显存装不下两个模型，每调一次要重载大脑，实测一个任务绕了 10 分钟）。
+# 想启用：把这里改成 True，并把 make_schemas 里那行 schemas.append(_WS_CODE_SCHEMA) 加回来。
+_WRITE_CODE_ENABLED = False
 
 _WS_CODE_SCHEMA = {
     "type": "function",
@@ -2820,6 +2823,12 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
         return _do_workspace_run(arguments, ui_events)
     # 「写代码」单独交给专用代码模型（见 _do_write_code 的说明：那是实测出来的分工）
     if name == "write_code":
+        # ⚠️ 该工具默认**不暴露**（见 make_schemas 里的注释），但 dispatch 这条分支一直在。
+        # 模型只要从历史对话/别处猜到这个名字就会调进来，真的去加载第二个模型（实测 10 分钟）。
+        # 这里加一道闸，未启用时直接劝回，省得白等。
+        if not _WRITE_CODE_ENABLED:
+            return ("write_code 当前未启用（它会额外加载一个模型，太慢）。"
+                    "请改用 workspace_write 写整份代码，再用 workspace_run 跑一遍验证。")
         return _do_write_code(arguments, ui_events, context)
     # ---- 下面这组是"完全自动开发项目"必需的：建项目 / 建目录 / 删 / 移动 / 切项目 ----
     # 这些能力 workspace 模块**早就有了**（create_project / mkdir / remove / rename），
