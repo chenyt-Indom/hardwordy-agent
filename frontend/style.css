@@ -90,11 +90,12 @@ html[data-theme="light"] {
           **不靠压暗底色**，而是靠 ① 文字压到近黑 ② 描边明显加重 来拉对比。
      明度阶梯：页面/侧栏 #f1f1ef → 主内容区 #ffffff → 次级面板 #f6f6f4，
      三档差距小、不抢眼；所有边框统一到 #c8c8c2（白底上看得见但不脏）。 */
-  --bg: #f1f1ef;            /* 页面/侧栏底：中性浅灰，退到背景里去 */
+  --bg: #ebebe6;            /* 页面/侧栏底：2026-11-18 再压一档，与白面板拉开层次（1.20:1） */
   --panel: #ffffff;         /* 主内容区：白（白色为主） */
-  --panel2: #f6f6f4;        /* 气泡/次级面板：极浅灰，与白区分开 */
+  --panel2: #f3f3ef;        /* 气泡/次级面板：与白面板拉开可见分界（原 #f6f6f4 只有 1.08，糊成一片） */
   --field-bg: #fdfdfc;      /* 输入框：极浅暖白，不再是刺眼纯白 */
-  --border: #bcbcb6;        /* 描边：再深一档，卡片/分隔线一眼看得清 */
+  --border: #b8b8b0;        /* 描边：白底上 2.0:1（原 1.68 偏淡，线条看不出） */
+  --line-soft: rgba(0, 0, 0, .10); /* 弱分隔线：深色下是「白 8%」，浅色下必须反过来 —— 原来漏了这行，白底上完全看不见 */
   --text: #14161a;          /* 正文：近黑，对比度 ~16:1 */
   --muted: #43474f;         /* 次要文字：深灰，小字也不发虚 */
   --accent: #1d5fd0;
@@ -104,17 +105,17 @@ html[data-theme="light"] {
   --kb-accent: #0f8a84;
   --kb-accent-soft: rgba(15, 138, 132, .1);
 
-  --btn-bg: #f0f0ed;
-  --btn-bg-hover: #e2e2de;
+  --btn-bg: #f0f0eb;
+  --btn-bg-hover: #e3e3dd;
   --accent-hover: #1750b6;
-  --hover-bg: #f1f1ee;
-  --think-bg: #f5f5f2;
+  --hover-bg: #e8e8e2;
+  --think-bg: #f1f1ec;
   --chip-bg: #f0f0ed;
   --chip-border: #c8c8c2;
   --gen-label-bg: #f0f0ed;
   --meta-fg: #565a63;
   --overlay: rgba(18, 20, 24, .5);
-  --shadow: rgba(24, 27, 33, .14);
+  --shadow: rgba(24, 27, 33, .20);
   --lb-cap: #f7f7f5;
   --tag-pin-bg: #1f8f5f;
   --tag-pin-fg: #fff;
@@ -124,8 +125,8 @@ html[data-theme="light"] {
   --warn: #9a610f;
   --warn-border: #dfb877;
   --warn-bg: rgba(223, 184, 119, .16);
-  --scrollbar: #c2c2bc;
-  --scrollbar-hover: #a6a6a0;
+  --scrollbar: #b4b4ac;
+  --scrollbar-hover: #94948c;
 }
 
 /* 主题切换的过渡：只给底色/文字色，避免整页元素一起动导致卡顿 */
@@ -3624,7 +3625,7 @@ html[data-theme="light"] {
   --text: #14161a;
   --muted: #4a4e57;
   --meta-fg: #4f535c;
-  --border: #c8c8c2;
+  --border: #b8b8b0;
 }
 
 /* ---- 2. 对话正文：14 → 15px，行距/字重一起提一点 ---- */
@@ -3652,7 +3653,7 @@ html[data-theme="light"] {
 }
 html[data-theme="light"] {
   --bot-bubble: #e4eefc;
-  --bot-bubble-border: #c2d7f4;
+  --bot-bubble-border: #b0cbec;
   --bot-bubble-fg: #10192b;
   --bot-bubble-link: #1a4fd0;
   --bot-bubble-chip: #d2e2f9;
@@ -3743,6 +3744,27 @@ html[data-theme="light"] .st-detail { border-top-color: #d4d4ce; }
 html[data-theme="light"] .st-row b { color: #14161a; }
 html[data-theme="light"] .st-det { color: #4a4e57; }
 html[data-theme="light"] .st-hint { color: #92400e; }
+
+/* ---- 4. 卡片层次（2026-11-18 用户反馈「浅色对比度不如深色、显得难看」）----
+   根因：浅色下 .sidebar 是 transparent，卡片用 --panel2 直接压在 --bg 上，
+   两者对比只有 1.08（深色同项是 1.22）→ 卡片边界糊掉，整页看起来"发平"。
+   做法：侧栏里的卡片改**白底**（vs --bg = 1.20），描边 #b8b8b0（白底上 2.0:1），
+        再补一层柔和投影。只动颜色，不动宽高 / flex / position。 */
+html[data-theme="light"] .sidebar .panel,
+html[data-theme="light"] .sidebar .status-card {
+  background: var(--panel);
+  border: 1px solid #adada5;
+  box-shadow: 0 1px 2px rgba(24, 27, 33, .07), 0 8px 20px rgba(24, 27, 33, .11);
+}
+/* 顶栏快捷按钮（待批准 / 推荐 / 画布）：白底 + 描边，在浅灰侧栏上立起来 */
+html[data-theme="light"] .tq-btn {
+  background: var(--panel);
+  border-color: var(--border);
+}
+html[data-theme="light"] .tq-btn:hover {
+  background: var(--hover-bg);
+  border-color: #9a9a92;
+}
 
 /* ---- 3. 顶栏开关/下拉：原来写死深藏青底，浅色下是一块块黑疙瘩 ---- */
 html[data-theme="light"] .pill.on,
