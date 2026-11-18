@@ -1064,8 +1064,18 @@ def _dialog_digest(session: str) -> list:
         return []
     out = []
     # 多取一些：下面要去重，去掉重复后还要凑够 MAX_DIALOG*2 条
-    seen_exact = set()          # 全局：完全相同的 assistant 只留第一条
-    for m in msgs[-(MAX_DIALOG * 4):]:
+    window = msgs[-(MAX_DIALOG * 4):]
+    # ★ 2026-11-18 修（去重留哪条）：原来留「第一条」，实测最坏情况下重复正好
+    #   发生在最后一轮（[u, a, u, a] 且两个 a 完全相同），删掉后面那条之后
+    #   卡尾就断在用户消息上 —— 卡片最该显示的「刚才说了什么」反而没了。
+    #   改为留**最后一条**（离当前最近的那次），卡尾始终落在 assistant 上。
+    last_pos = {}
+    for _i, _m in enumerate(window):
+        if isinstance(_m, dict) and str(_m.get("role") or "") == "assistant":
+            _t = _clip(_m.get("content"), 8000, ellipsis=False, per_line_cap=0)
+            if _t and len(_t) >= 12:
+                last_pos[_t] = _i
+    for _i, m in enumerate(window):
         if not isinstance(m, dict):
             continue
         role = str(m.get("role") or "")
@@ -1089,9 +1099,8 @@ def _dialog_digest(session: str) -> list:
         #   user 的重复（连问两次「好了吗」）是**真实轮次**，这里只对 assistant
         #   动手，且要求完全相同、长度 ≥12，短状态句照旧保留。
         if role == "assistant" and len(text) >= 12:
-            if text in seen_exact:
+            if last_pos.get(text, _i) != _i:      # 不是最后一次出现 → 让给后面那条
                 continue
-            seen_exact.add(text)
         # 同角色 + 内容高度重复 → 只留一条（长的），避免同一件事报两遍
         if out and out[-1]["role"] == role and _similar(out[-1]["text"], text):
             if len(text) > len(out[-1]["text"]):
@@ -1224,15 +1233,20 @@ def _dedup(dialog: list) -> list:
     的两条重复，注入前再兜一次。
     """
     out = []
-    seen_exact = set()          # 全局：完全相同的 assistant 只留第一条
-    for m in dialog:
+    # 同 _dialog_digest：留**最后一条**，否则重复落在最后一轮时卡尾断在用户消息上
+    last_pos = {}
+    for _i, _m in enumerate(dialog):
+        if _m.get("role") == "assistant":
+            _t = str(_m.get("text") or "")
+            if len(_t) >= 12:
+                last_pos[_t] = _i
+    for _i, m in enumerate(dialog):
         t = str(m.get("text") or "")
         # ★ 2026-11-18 修（间隔重复）：同 _dialog_digest，救 last.json 里
         #   已经存下来的间隔重复（真实数据 dialog[10] == dialog[13]）。
         if m.get("role") == "assistant" and len(t) >= 12:
-            if t in seen_exact:
+            if last_pos.get(t, _i) != _i:         # 不是最后一次出现 → 让给后面那条
                 continue
-            seen_exact.add(t)
         if (out and out[-1].get("role") == m.get("role")
                 and _similar(str(out[-1].get("text") or ""), t)):
             if len(t) > len(str(out[-1].get("text") or "")):

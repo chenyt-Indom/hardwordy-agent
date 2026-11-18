@@ -1102,6 +1102,21 @@ def main():
     check("间隔重复去重幂等",
           len(handoff._dedup([dict(x) for x in _do])) == 3, "")
 
+    # ★ 2026-11-18 修（去重留哪条）：原来留第一条，重复落在最后一轮时卡尾
+    #   会断在用户消息上（那条 assistant 被删了）。必须留**最后一条**。
+    check("重复留最后一条（不是第一条）",
+          [x["text"] for x in _do][-1] == _lt, "")
+    _tail = [{"role": "user", "text": "验证一下"},
+             {"role": "assistant", "text": _lt},
+             {"role": "user", "text": "验证一下是否完全正常"},
+             {"role": "assistant", "text": _lt}]
+    _to = handoff._dedup([dict(x) for x in _tail])
+    check("重复在最后一轮时卡尾仍是 assistant",
+          bool(_to) and _to[-1]["role"] == "assistant",
+          _to[-1]["role"] if _to else "-")
+    check("重复在最后一轮时内容只出现一次",
+          sum(1 for x in _to if x["text"] == _lt) == 1, "")
+
     # 反过来：user 的真实重复（连问两次「好了吗」）绝不能被合并
     _up = [{"role": "user", "text": "好了吗"},
            {"role": "assistant", "text": "第一条回复内容"},
