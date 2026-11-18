@@ -1775,6 +1775,88 @@ def _mem_path(gid: str) -> str:
     return os.path.join(_gdir(gid), "memory.md")
 
 
+def _max_seq(gid: str) -> int:
+    """本地已收到的最大 seq —— 用来判断群记忆有没有过期。
+
+    ⚠️ 这里**不能**沿用 max_ts 比文件 mtime：消息 ts 来自发送方时钟，
+    memory.md 的 mtime 是本机时钟。群聊是 P2P 跨机器的，两台机器差几秒
+    很正常；重建之后对方发来的消息 ts 就可能小于文件 mtime，于是
+    `stale` 永远为 False —— 群记忆冻结在第一次生成的那一刻，成了死记忆。
+    实测把 mtime 往后调 300 秒，新消息就再也进不了记忆。
+    改用 seq（单调递增、与本机时钟无关）就稳了。
+    """
+    path = _msg_path(gid)
+    if not os.path.exists(path):
+        return 0
+    mx = 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    s = int(json.loads(line).get("seq") or 0)
+                    if s > mx:
+                        mx = s
+                except Exception:
+                    continue
+    except Exception:
+        return mx
+    return mx
+
+
+_MEM_META_TAG = "<!-- mem-meta"
+
+
+def _mem_meta(text: str) -> Dict[str, int]:
+    """从群记忆里读出 `<!-- mem-meta seq=N msgs=M -->`。
+
+    旧文件没有这行 → 返回 0，调用方会当成"过期"重建一次，无副作用。
+    """
+    out: Dict[str, int] = {"seq": 0, "msgs": 0}
+    i = (text or "").find(_MEM_META_TAG)
+    if i < 0:
+        return out
+    j = (text or "").find("-->", i)
+    if j < 0:
+        return out
+    body = text[i + len(_MEM_META_TAG):j]
+    for part in body.split():
+        if "=" not in part:
+            continue
+        k, _, v = part.partition("=")
+        try:
+            out[k.strip()] = int(v)
+        except Exception:
+            continue
+    return out
+
+
+def _clip_mem(text: str, max_chars: int) -> str:
+    """超长时**保留头尾**，不要只砍尾巴。
+
+    ⚠️ 原来一律 `text[:max_chars]`，而群记忆的「四、最近进展」排在最末尾，
+    截断后永远进不了提示词 —— 模型看得到"这个群在做什么"，却看不到
+    "群里刚刚在说什么"。实测注入 2510 字时，「最近进展」只剩标题和第一条，
+    最后一条消息完全不在里面。
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    keep_head = int(max_chars * 0.55)
+    keep_tail = max(0, max_chars - keep_head - 24)
+    head = text[:keep_head]
+    tail = text[-keep_tail:] if keep_tail else ""
+    # 尽量在换行处断开，别把一句话劈成两半
+    nl = head.rfind("\n")
+    if nl > keep_head * 0.7:
+        head = head[:nl]
+    nl = tail.find("\n")
+    if 0 <= nl < keep_tail * 0.3:
+        tail = tail[nl + 1:]
+    return head.rstrip() + "\n…（群记忆中间部分已省略）\n" + tail.lstrip("\n")
+
+
 def _short(s: str, n: int = 90) -> str:
     s = " ".join((s or "").split())
     return s if len(s) <= n else s[:n] + "…"
@@ -1846,12 +1928,19 @@ def rebuild_memory(gid: str, limit: int = 600) -> Dict[str, Any]:
         if tail:
             head += ["", "## 四、最近进展（最后 12 条）"] + ["- " + t for t in tail[-12:]]
 
+        seq_now = max([int(m.get("seq") or 0) for m in msgs] or [0])
         text = "\n".join(head).strip() + "\n"
-        # 兜底：太长就砍（记忆是给提示词用的，不是存档）
-        if len(text) > 6000:
-            text = text[:6000] + "\n…（已截断）\n"
-        with open(_mem_path(gid), "w", encoding="utf-8") as f:
+        # 记下"这份记忆依据到第几条"，下次用 seq 比大小判断是否过期
+        text += "\n%s seq=%d msgs=%d -->\n" % (_MEM_META_TAG, seq_now, len(msgs))
+        # 兜底：太长就砍（记忆是给提示词用的，不是存档）—— 保留头尾，
+        # 否则「四、最近进展」永远是被砍掉的那一段。
+        text = _clip_mem(text, 6000)
+        # 原子写：原来直接 open(w)，进程中断会留下半截文件，
+        # 而 read_memory 会把半截内容当记忆注入提示词。
+        _tmp = _mem_path(gid) + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as f:
             f.write(text)
+        os.replace(_tmp, _mem_path(gid))
         return {"ok": True, "gid": gid, "chars": len(text), "msgs": len(msgs),
                 "updated_at": time.time(), "path": _mem_path(gid)}
 
@@ -1859,19 +1948,27 @@ def rebuild_memory(gid: str, limit: int = 600) -> Dict[str, Any]:
 def read_memory(gid: str) -> Dict[str, Any]:
     """读群记忆（没有就现建一份）。"""
     p = _mem_path(gid)
-    if not os.path.exists(p):
+    # 读也拿锁：rebuild_memory 是"写临时文件 + replace"，但读到一半再被
+    # 另一次重建替换时，仍可能拿到旧/新混杂的内容。RLock 可重入，
+    # rebuild_memory 内部再拿一次不会死锁。
+    with _LOCK:
+        if not os.path.exists(p):
+            try:
+                return rebuild_memory(gid)
+            except Exception:
+                return {"ok": False, "gid": gid, "chars": 0, "msgs": 0,
+                        "seq": 0, "updated_at": 0, "content": ""}
         try:
-            return rebuild_memory(gid)
+            with open(p, "r", encoding="utf-8") as f:
+                content = f.read()
+            mt = os.path.getmtime(p)
         except Exception:
-            return {"ok": False, "gid": gid, "chars": 0, "msgs": 0,
-                    "updated_at": 0, "content": ""}
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            content = f.read()
-    except Exception:
-        content = ""
-    return {"ok": True, "gid": gid, "chars": len(content), "msgs": 0,
-            "updated_at": os.path.getmtime(p), "content": content}
+            content = ""
+            mt = 0
+    meta = _mem_meta(content)
+    # msgs 原来恒为 0（前端「依据 N 条消息」永远是 0），现在从记忆里读回来
+    return {"ok": True, "gid": gid, "chars": len(content), "msgs": meta["msgs"],
+            "seq": meta["seq"], "updated_at": mt, "content": content}
 
 
 def memory_context(gid: str, max_chars: int = 2500) -> str:
@@ -1885,7 +1982,10 @@ def memory_context(gid: str, max_chars: int = 2500) -> str:
     stale = not os.path.exists(p)
     if not stale:
         try:
-            stale = max_ts(gid) > os.path.getmtime(p)
+            # ⚠️ 用 seq 比较，不要用 max_ts(gid) > getmtime(p)：
+            #    消息 ts 来自发送方时钟、mtime 是本机时钟，跨机器不可比。
+            #    实测把 mtime 往后调 300 秒，之后的新消息就再也进不了记忆。
+            stale = _max_seq(gid) > int(read_memory(gid).get("seq") or 0)
         except Exception:
             stale = False
     if stale:
@@ -1897,9 +1997,13 @@ def memory_context(gid: str, max_chars: int = 2500) -> str:
     c = (d.get("content") or "").strip()
     if not c:
         return ""
-    if len(c) > max_chars:
-        c = c[:max_chars] + "\n…（群记忆已截断）"
-    return c
+    # 元信息是给程序看的，别喂给模型
+    i = c.find(_MEM_META_TAG)
+    if i >= 0:
+        j = c.find("-->", i)
+        if j >= 0:
+            c = (c[:i] + c[j + 3:]).strip()
+    return _clip_mem(c, max_chars)
 
 
 # ---------------------------------------------------------------- 删除群
