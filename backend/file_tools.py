@@ -248,7 +248,11 @@ def read_by_keywords(paths_or_dirs: list[str], keywords: str, max_files: int = 5
     import glob
     results = []
     for target in paths_or_dirs:
-        target = os.path.abspath(target)
+        # 空路径必须跳过：os.path.abspath("") 会解析成**当前工作目录**，
+        # 于是「没传路径」变成「递归扫描整个项目目录」（实测接口卡死数分钟）。
+        if not target or not str(target).strip():
+            continue
+        target = os.path.abspath(str(target).strip())
         if os.path.isdir(target):
             candidates = []
             for ext in TEXT_EXTS:
@@ -258,7 +262,7 @@ def read_by_keywords(paths_or_dirs: list[str], keywords: str, max_files: int = 5
             candidates = [target]
         else:
             continue
-        kws = [k.strip().lower() for k in keywords.split() if k.strip()]
+        kws = [k.strip().lower() for k in str(keywords or "").split() if k.strip()]
         for c in candidates[:max_files]:
             text = read_text(c)
             if not text:
