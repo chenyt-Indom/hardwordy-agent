@@ -5781,13 +5781,21 @@
   // 切对话时只有"短期记忆"跟着变；长期记忆是同一份，永远不变。
   // 长期记忆读取失败了几次（用于"自动重试 + 显示原因"）
   let _memLoadFails = 0;
+  // 请求序号：防「先发的慢请求后回来」把新内容覆盖成旧的。
+  // 场景：保存后连调 loadMemory() + scheduleMemoryRefresh 的定时器也调，
+  // 两次并发时先发的若更慢，旧快照会盖掉刚保存的内容（用户看到"保存了但没变"）。
+  let _memReqSeq = 0;
 
   async function loadMemory() {
     const lng = $("#memLongText"), sht = $("#memShortText");
     if (!lng || !sht) return;
+    const _myReq = ++_memReqSeq;
     try {
       const d = await api("/api/memory?session_id=" + encodeURIComponent(sessionId || ""));
-      if ((d.session_id || "") !== (sessionId || "")) return;   // 用户已切走，别覆盖
+      if (_myReq !== _memReqSeq) return;   // 已有更新的请求发出，丢弃这次的旧响应
+      // 后端会 strip(session_id)，这里两边都 trim 再比，否则带空格时会永远不相等
+      // → 面板一直空白（且不报错，看起来像"记忆是空的"）。
+      if ((d.session_id || "").trim() !== (sessionId || "").trim()) return;   // 用户已切走，别覆盖
       lng.value = d.long || "";
       sht.value = d.short || "";
       _memLoadFails = 0;
@@ -5808,6 +5816,10 @@
       _memLoadFails += 1;
       const lm = $("#memLongMeta");
       if (lm) lm.textContent = `⚠️ 记忆读取失败（第 ${_memLoadFails} 次）：${e.message || e}`;
+      // 短期记忆那块原来不更新：读取失败时它还停在旧文案（或"这个对话还没有短期记忆"），
+      // 用户看到"长期报错、短期空着"，会误判成"这个对话的记忆被清掉了"。
+      const sm2 = $("#memShortMeta");
+      if (sm2) sm2.textContent = "⚠️ 读取失败，不代表没有记忆";
       if (_memLoadFails <= 4) setTimeout(loadMemory, 1500 * _memLoadFails);
     }
   }
