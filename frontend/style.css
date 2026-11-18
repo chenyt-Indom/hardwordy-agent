@@ -1161,8 +1161,10 @@ body.dragging .drop-overlay,
 }
 .toast {
   padding: 10px 18px; border-radius: 10px; font-size: 13px;
-  background: #232a38; color: var(--text);
-  border: 1px solid var(--border);
+  /* 底色固定深色（两种主题下都清楚），所以文字也必须固定浅色 ——
+     用 var(--text) 时亮色主题下会变成近黑字压在深底上，直接看不见。 */
+  background: #232a38; color: #f3f5f9;
+  border: 1px solid rgba(255, 255, 255, .16);
   box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
   animation: toastIn .18s ease-out;
 }
@@ -1779,6 +1781,14 @@ body.dragging .drop-overlay,
   font-size: 12.5px; outline: none;
 }
 .ask-free:focus { border-color: var(--accent); }
+/* 2026-11-18：`.ask-free` / `#dlText` 原来写死深底 #0f1218 + color: var(--text)，
+   亮色主题下 --text 是近黑 → 黑字压黑底，一个字都看不见（实测对比度 1.04）。
+   这里只给亮色补输入框底色，暗色一个像素不动。 */
+html[data-theme="light"] .ask-free,
+html[data-theme="light"] #dlText {
+  background: var(--field-bg);
+  color: var(--text);
+}
 
 /* ---------- 生成文库面板 ---------- */
 .dl-list { display: flex; flex-direction: column; gap: 4px; }

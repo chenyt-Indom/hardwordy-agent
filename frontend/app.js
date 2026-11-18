@@ -588,8 +588,8 @@
       b = document.createElement("button");
       b.type = "button";
       b.className = "think-follow";
-      b.textContent = "跟随思考";
-      b.setAttribute("aria-label", "跟随思考（思考内容自动滚到最新）");
+      b.textContent = "跟随";
+      b.setAttribute("aria-label", "跟随（思考内容自动滚到最新）");
       b.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
