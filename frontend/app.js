@@ -15264,6 +15264,12 @@
     }
   })();
 
+  // 设置抽屉是 div（不是 <details>）：关着时 #loopStatusCard 的 offsetParent 为 null，
+  // 定时器会自己停表；而 bindLoopStatus 只在页面加载时跑一次，再打开不会重跑 ——
+  // 所以由抽屉的 open() 主动通知启动 / 停止（见 index.html ⑥ 抽屉开关）。
+  window.__loopStatusStart = startLoopStatusTimer;
+  window.__loopStatusStop = stopLoopStatusTimer;
+
   function loopChips() {
     const L = loopStats;
     if (!L || !L.ok) return "";

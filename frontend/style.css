@@ -6906,3 +6906,30 @@ html[data-theme="light"] .composer {
 .bill-row { display: flex; justify-content: space-between; gap: 10px; }
 .bill-k { color: var(--muted, #8a93a6); }
 .bill-v { color: var(--text, #e6e9ef); font-variant-numeric: tabular-nums; }
+
+/* ===== 自循环状态卡（设置抽屉顶部）=====
+   app.js renderLoopStatus() 与后端 /api/selfloop/status 早已写好，只缺样式。 */
+.loop-st-card { border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel2); padding: 9px 11px; font-size: 12px; }
+.loop-st-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.loop-st-title { font-weight: 600; color: var(--text); }
+.loop-st-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+.loop-st-dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.loop-st-state { color: var(--muted); }
+.loop-st-busy { color: var(--accent); font-size: 11px; animation: loop-st-pulse 1.4s ease-in-out infinite; }
+@keyframes loop-st-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .45 } }
+.loop-st-refresh { margin-left: auto; border: 1px solid var(--border); background: var(--btn-bg);
+  color: var(--muted); border-radius: 6px; padding: 1px 7px; font-size: 12px;
+  cursor: pointer; line-height: 1.5; }
+.loop-st-refresh:hover { background: var(--btn-bg-hover); color: var(--text); }
+.loop-st-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+.loop-st-cell { display: flex; flex-direction: column; gap: 1px; min-width: 0;
+  padding: 5px 6px; border-radius: 7px; background: rgba(255, 255, 255, .03); }
+.loop-st-cell b { font-size: 13px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loop-st-cell i { font-style: normal; font-size: 10px; color: var(--muted); }
+.loop-st-err { margin-top: 7px; color: var(--danger); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loop-st-hint { color: var(--muted); }
+.loop-st-hint.bad { color: var(--danger); }
+@media (max-width: 420px) { .loop-st-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
