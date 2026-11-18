@@ -397,6 +397,60 @@ def _builtin_exact(query: str):
     return None
 
 
+def _norm_city(s: str) -> str:
+    """城市名归一：去掉「省 / 市 / 自治区 / 特别行政区」后缀和空白。"""
+    s = str(s or "").strip()
+    for suf in ("特别行政区", "自治区", "省", "市"):
+        if s.endswith(suf) and len(s) > len(suf):
+            return s[: -len(suf)]
+    return s
+
+
+def _city_ok(item: dict, city: str) -> bool:
+    """这条结果是否真的落在 city 里。
+
+    ⚠️ 这一步不能省（2026-11-18 实测）：高德 place/text 在**目标城市查不到时
+    不返回空，而是退化成全国搜索** —— place_text("正佳广场", city="上海")
+    返回 20 条广州的。不校验的话，用户问上海会拿到广州的结果，
+    模型还会照着念，说得像真的一样。
+    """
+    c0 = _norm_city(city)
+    if not c0:
+        return True
+    for k in ("city", "province", "district", "addr"):
+        v = item.get(k)
+        if isinstance(v, str) and v and c0 in _norm_city(v):
+            return True
+    return False
+
+
+def _name_relevant(q: str, item: dict) -> bool:
+    """兜底（地址解析）出来的结果，名字得跟查询词沾边。
+
+    ⚠️ 2026-11-18 实测：geocode("正佳广场") 会把「正佳」当村镇名，返回
+    "广东省江门市新会区正佳"、"江西省吉安市青原区正佳"。查询词不像地址
+    （没有 路/街/号/市/区/县/镇/村）时，要求结果里含得住整个查询词，
+    否则宁可返回空、让上层如实说"没查到"，也不能给个外地的同名村。
+    """
+    q = str(q or "").strip()
+    if not q or re.search(r"[路街巷号市区县镇村]", q):
+        return True
+    # ⚠️ 只比 name，**不比 addr**：addr 里必然含城市名（"上海市…"），
+    #    查询词里的城市部分就白送了覆盖率 —— 实测「上海正佳广场」对
+    #    「正大广场」能算到 5/6=0.83 蒙混过关。
+    blob = str(item.get("name") or "")
+    if not blob:
+        return False
+    if q in blob:
+        return True
+    # 用**字符覆盖率**而不是连续子串：别名写法差很多（「白云机场」→「白云国际机场」、
+    # 「中大」→「中山大学」），但字都在。实测阈值 0.8 能分开两类：
+    #   白云机场 → 白云国际机场 4/4=1.0 留 ✅ ／ 正佳广场 → 江门新会区正佳 3/4=0.75 丢 ✅
+    qs = set(q)
+    hit = sum(1 for ch in qs if ch in blob)
+    return (hit / max(1, len(qs))) >= 0.8
+
+
 def search_place(query: str, limit: int = 5, allow_net=None, city: str = "") -> list:
     """按名字找地点，返回 [{name, lat, lon, addr, kind}]。
 
@@ -423,14 +477,19 @@ def search_place(query: str, limit: int = 5, allow_net=None, city: str = "") -> 
     #     ⚠️ 顺序反了会出大错（实测）：查「天河城」时 /geocode 把它当地址，
     #     命中"江西省南昌市进贤县天河城"—— 那边真有个叫天河城的村子。
     #     凡是想找"某个地方"而不是"某个门牌号"，都该先走 /place/text。
+    amap_done = False
     if net:
         try:
             from . import amap
             if amap.has_key():
+                amap_done = True
                 hits = []
                 c0 = str(city or "").strip()
                 if c0:
-                    kw = q            # 调用方已经说了城市，整个查询词就是关键词
+                    # 调用方说了城市，但查询词里往往**还带着城市名**（"上海正佳广场"）。
+                    # 整串丢给高德会被模糊匹配成别的地方 —— 实测返回"正大广场"。
+                    # 能拆就拆掉前缀；拆不出（"广州塔"→"塔"太短）就整串用。
+                    kw = _split_city(q)[1] or q
                 else:
                     c0, kw = _split_city(q)   # 从"广州市天河城"里抠出 广州 + 天河城
                 if not c0 and kw:
@@ -448,8 +507,19 @@ def search_place(query: str, limit: int = 5, allow_net=None, city: str = "") -> 
                     r = amap.place_text(kw, city=c0)
                     hits = [dict(x, kind=x.get("kind") or "poi")
                             for x in (r.get("items") or [])]
+                    if c0:
+                        # 高德在目标城市查不到会退化成全国搜索，这里必须自己拦
+                        hits = [h for h in hits if _city_ok(h, c0)]
+                    # 高德对长串查询会**模糊匹配**：实测 place_text("不存在的假地方xyz")
+                    # 返回北京 4 家「不存驿站」（只认了前两个字）。名字不沾边的丢掉。
+                    hits = [h for h in hits if _name_relevant(kw, h)]
                 if not hits:
-                    hits = amap.geocode(q)        # 兜底：当地址解析
+                    # 兜底：当地址解析（把城市传下去，否则会解析到别的城市）
+                    hits = amap.geocode(q, city=c0)
+                    if c0:
+                        hits = [h for h in hits if _city_ok(h, c0)]
+                    if hits and not re.search(r"[路街巷号市区县镇村]", q):
+                        hits = [h for h in hits if _name_relevant(q, h)]
                     # ⚠️ 这一步是"按地址解析"，对**地点名**很不可靠：实测查「天河城」
                     #    会命中"江西省南昌市进贤县天河城"（那边真有个同名村子）。
                     #    所以查询词不像地址（没有"路/街/号/市/区/县/镇/村"）时打个标记，
@@ -460,10 +530,15 @@ def search_place(query: str, limit: int = 5, allow_net=None, city: str = "") -> 
                 if hits:
                     return hits[:limit]
         except Exception:
+            amap_done = False
             logger.debug("silent-except", exc_info=True)
 
-    # ③ 联网查 ⚠️ 不要带 &lang=zh —— 带了中文查询会全部返回空
-    if net:
+    # ③ 联网查 Photon
+    #    ⚠️ 只在高德**用不了**时才走（没配 key / 调用异常）。Photon 对中国地名
+    #    是纯模糊匹配，实测：「不存在的假地方xyz」返回北京的"不存驿站"、
+    #    「上海正佳广场」返回"上海电影广场"——这种噪声比"查不到"更糟。
+    #    ⚠️ 不要带 &lang=zh —— 带了中文查询会全部返回空
+    if net and not amap_done:
         url = "%s?q=%s&limit=%d" % (PHOTON, urllib.parse.quote(q), limit)
         try:
             d = _get_json(url)

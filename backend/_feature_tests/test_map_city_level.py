@@ -114,5 +114,42 @@ else:
     ck("地址类查询仍能解析",
        bool(g4) and "天河路" in str(g4.get("name") or ""), str((g4 or {}).get("name")))
 
+# ---------------------------------------------------------------- 5. 城市校验 + 相关性
+# 用户原话：「我想要计划结果一堆不准确的内容」。实测两条根因：
+#   ① 高德 place/text 在**目标城市查不到时不返回空，而是退化成全国搜索**
+#      —— place_text("正佳广场", city="上海") 返回 20 条广州的。
+#   ② 高德对长串查询会**模糊匹配** —— place_text("不存在的假地方xyz") 返回
+#      北京 4 家「不存驿站」（只认了前两个字）。
+# 另外 Photon 兜底对中国地名是纯模糊匹配（「上海正佳广场」→「上海电影广场」），
+# 高德可用时不再走它。
+print("[5] 城市校验 + 相关性（不给错的地方）")
+ck("_city_ok：广州的结果不属于上海",
+   not mt._city_ok({"city": "广州市", "district": "广东省广州市天河区"}, "上海"))
+ck("_city_ok：广州的结果属于广州",
+   mt._city_ok({"city": "广州市", "district": "广东省广州市天河区"}, "广州"))
+ck("_city_ok：给了空城市就都算通过", mt._city_ok({"city": "广州市"}, ""))
+ck("_name_relevant：假地名 vs 不存驿站 判不相关",
+   not mt._name_relevant("不存在的假地方xyz", {"name": "不存驿站", "addr": "北京市朝阳区"}))
+ck("_name_relevant：正佳广场 vs 正大广场 判不相关",
+   not mt._name_relevant("正佳广场", {"name": "正大广场", "addr": "上海市浦东新区"}))
+ck("_name_relevant：白云机场 vs 白云国际机场 判相关（别名不能误杀）",
+   mt._name_relevant("白云机场", {"name": "广州白云国际机场", "addr": ""}))
+ck("_name_relevant：含「路/号」的地址类查询不校验",
+   mt._name_relevant("天河路208号", {"name": "随便什么", "addr": ""}))
+
+if not (net and has_key):
+    print("  skip  没网或没配高德 key（下面几项要联网）")
+else:
+    ck("假地名返回空（不给「不存驿站」）", not mt.search_place("不存在的假地方xyz", allow_net=True))
+    ck("城市不匹配返回空（正佳广场不在上海）",
+       not mt.search_place("正佳广场", allow_net=True, city="上海"))
+    ck("城市不匹配返回空（上海正佳广场整串）",
+       not mt.search_place("上海正佳广场", allow_net=True))
+    r = mt.search_place("天河城", allow_net=True, city="天津") or []
+    ck("说了天津就给天津的", bool(r) and all("天津" in str(x.get("city") or "") for x in r),
+       str([x.get("city") for x in r[:3]]))
+    ck("白云机场没被相关性校验误杀",
+       bool(mt.search_place("广州白云机场", allow_net=True)))
+
 print("\n%d 项，失败 %d" % (len(PASS) + len(FAIL), len(FAIL)))
 sys.exit(1 if FAIL else 0)
