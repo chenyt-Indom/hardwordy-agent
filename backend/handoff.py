@@ -974,6 +974,18 @@ def _write(d: dict) -> None:
 _PATH_JUNK = re.compile(r"[`｀*＊]")
 
 
+_SCRATCH_PREFIXES = ("_pending_", "_tmp_")
+
+
+def _is_scratch(rel) -> bool:
+    """_pending_ 是自迭代快照暂存、_tmp_ 是调试用临时脚本 —— 都不是真实代码改动。
+
+    实测 2026-11-18 的真实卡片：「最近 12 个」被 _tmp_verify_map.py 这类
+    **已经删掉**的临时脚本占满，map_tools.py / amap.py 的真实改动一条都没露出来。
+    """
+    return os.path.basename(str(rel or "")).startswith(_SCRATCH_PREFIXES)
+
+
 def _safe_rel(rel, cap: int = 120) -> str:
     """rel 是**文件路径**：反引号/星号本来就非法，而且外层还要用 ` 包一层。
 
@@ -989,9 +1001,9 @@ def record_change(rel: str, note: str = "", added: int = 0, removed: int = 0,
     rel = _safe_rel(rel, 120)
     if not rel:
         return
-    # 自迭代快照的暂存文件（_pending_xxx.py）不是真实代码改动，记进来会白占
-    # 清单名额 —— 实测真实卡片把它当成了第 3 个「改过的文件」。
-    if os.path.basename(rel).startswith("_pending_"):
+    # 暂存/临时脚本不是真实代码改动，记进来会白占清单名额 —— 实测真实卡片
+    # 先是被 _pending_ 占了名额，后来被 16 个 _tmp_ 占满整张清单。
+    if _is_scratch(rel):
         return
     d = _read()
     ch = d.get("changes")
@@ -1307,10 +1319,10 @@ def render(session: str = "") -> str:
     if not _ts_ok(d.get("ts")):
         return ""                          # 太久以前的重启，别再占上下文
 
-    # 旧数据里可能已经存进了 _pending_ 快照文件，渲染时也过滤一遍。
+    # 旧数据里已经存进了 _pending_ 快照 / _tmp_ 临时脚本，渲染时也过滤一遍
+    # —— 光靠 record_change 拦不住历史数据（实测存量 16 条 _tmp_）。
     changes = [c for c in (d.get("changes") or [])
-               if isinstance(c, dict)
-               and not os.path.basename(str(c.get("rel") or "")).startswith("_pending_")]
+               if isinstance(c, dict) and not _is_scratch(c.get("rel"))]
     dialog = [m for m in (d.get("dialog") or []) if isinstance(m, dict)]
     if not changes and not dialog:
         return ""
