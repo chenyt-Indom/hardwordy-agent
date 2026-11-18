@@ -10613,9 +10613,16 @@
         '<button class="rb-go" type="button">立即重启</button>' +
         '<button class="rb-later" type="button" title="先不重启，继续用旧版本">稍后</button>';
       // ★ 2026-11-18：原来挂在 body 上（position:fixed 悬浮），会盖住正文。
-      //   现在挂到消息区顶部，作为消息流里的 sticky 条 —— 占位不遮挡。
-      const host = document.getElementById("messages") || document.body;
-      host.prepend(banner);
+      //   后来改成 #messages 内的 sticky 条 —— 但 sticky 在滚动容器里贴顶时
+      //   仍会盖住下面滚上来的文字（用户截图复现）。
+      //   最终方案：挂到 #messages **前面**，成为 .main 的直接子元素 ——
+      //   不随消息滚动、不覆盖任何内容，靠右排列（见 style.css .restart-banner）。
+      const msgs = document.getElementById("messages");
+      if (msgs && msgs.parentNode) {
+        msgs.parentNode.insertBefore(banner, msgs);
+      } else {
+        (document.querySelector(".main") || document.body).prepend(banner);
+      }
       banner.querySelector(".rb-go").onclick = apply;
       banner.querySelector(".rb-later").onclick = later;
       return banner;

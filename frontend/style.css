@@ -3483,14 +3483,20 @@ html[data-theme="light"] body {
    改成消息流里的 sticky 条 —— 占真实位置、不覆盖任何内容；
    滚动时贴住顶部，仍随时能点到「立即重启」。 */
 .restart-banner {
-  position: sticky;
-  top: 0;
-  align-self: stretch;
+  /* 2026-11-18 用户要求「不要靠左，要靠右」：
+     原来是 align-self:stretch + width:100%，整条撑满消息区、内容从最左边开始。
+     现改为：① 挂在 #messages **外面**（.main 的直接子元素），不再随消息滚动、
+     不覆盖正文；② 收缩到内容宽度、靠右排列。 */
+  position: static;
+  align-self: flex-end;
+  flex: 0 0 auto;
+  margin: 10px 20px 0;
   z-index: 30;
   display: none;
   align-items: center;
   gap: 8px;
-  width: 100%;
+  width: fit-content;
+  max-width: calc(100% - 40px);
   box-sizing: border-box;
   padding: 8px 10px;
   border-radius: 10px;

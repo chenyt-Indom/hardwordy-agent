@@ -1149,6 +1149,25 @@ def _frontend_text():
     return "\n".join(buf)
 
 
+def _fe_calls(path, fe):
+    """前端到底有没有真的调用这个接口。
+
+    ★ 2026-11-18 自查发现原来的判据是「路径前三段出现在前端就算有调用方」：
+      `/api/canvas/command` 的键是 `/api/canvas`，于是同一模块下**再加**一个
+      `/api/canvas/other` 也会被当成「已接上」—— 检查形同虚设。
+      改成认引号里的**完整路径**（`"/api/canvas/command"`），
+      外加一种明确的拼接写法：前端引号里正好是 `"/api/canvas/"`。
+    """
+    for q in ('"', "'", "`"):
+        if q + path + q in fe:
+            return True
+    parent = path.rsplit("/", 1)[0] + "/" if "/" in path[1:] else path
+    for q in ('"', "'", "`"):
+        if q + parent + q in fe:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------- 独立复核
 
 def _final_verify(ctx, snap):
@@ -1253,8 +1272,7 @@ def _final_verify(ctx, snap):
         routes = _new_api_routes(snap, changed)
         if routes:
             fe = _frontend_text()
-            orphan = [(r, p) for r, p in routes
-                      if ("/".join(p.split("/")[:3]) not in fe)]
+            orphan = [(r, p) for r, p in routes if not _fe_calls(p, fe)]
             if orphan:
                 probs.append(
                     "【可达性】新增了 %d 个后端接口，但前端一处调用都没有"
