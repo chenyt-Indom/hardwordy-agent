@@ -991,7 +991,10 @@ def _is_scratch(rel) -> bool:
     base = os.path.basename(s)
     if base.startswith(_SCRATCH_PREFIXES):
         return True
-    if "/_feature_tests/" in s and base.endswith(".py") and not base.startswith("test_"):
+    # 前面补一个 "/"，否则相对路径写成 `_feature_tests/x.py`（不带 backend/）
+    # 时匹配不到 "/_feature_tests/" —— 实测这条漏判。
+    if "/_feature_tests/" in "/" + s.lstrip("/") and base.endswith(".py") \
+            and not base.startswith("test_"):
         return True
     return False
 

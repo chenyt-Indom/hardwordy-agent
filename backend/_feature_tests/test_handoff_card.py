@@ -1075,7 +1075,12 @@ def main():
     for _sr in ("backend/_feature_tests/_pending_a.py",
                 "backend/_feature_tests/_tmp_a.py",
                 "backend/_feature_tests/画布对话：回复变可拖拽卡片.py",
-                "backend/_feature_tests/LLM_异常断点续跑.py"):
+                "backend/_feature_tests/LLM_异常断点续跑.py",
+                # 实测漏判：相对路径不带 backend/ 前缀时匹配不到 "/_feature_tests/"
+                "_feature_tests/画布对话：回复变可拖拽卡片.py",
+                "_feature_tests/_tmp_b.py",
+                "backend\\_feature_tests\\中文名.py",
+                "backend/_feature_tests/_quarantine/x.py"):
         check("_is_scratch 拦暂存 " + _sr.split("/")[-1][:12],
               handoff._is_scratch(_sr) is True, repr(_sr))
     for _sr in ("backend/_feature_tests/test_handoff_card.py",
