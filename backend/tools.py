@@ -2182,7 +2182,17 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                 return "读取失败：%s" % r.get("error")
             return r["text"]
         if name == "selfdev_write":
-            r = _sd.write(str(a.get("rel") or ""), str(a.get("content") or ""),
+            # ★ 2026-11-18：空内容会**静默清空文件**。实测把参数名传错（content 写成
+            #   text）时，_sd.write(rel, "") 照样备份+写盘+返回 ok —— 一个 435KB 的
+            #   源码被截成 0 字节，消息还说「已写入」，毫无提示。工具层硬拦。
+            _c = a.get("content")
+            if _c is None:
+                return ("写入被拒绝：缺少 content 参数（要写的内容）。"
+                        "参数名是 content，不是 text / body；rel 是相对路径。")
+            if not str(_c).strip():
+                return ("写入被拒绝：content 是空字符串，这会把文件清空成 0 字节。"
+                        "要新建文件就先写一行占位内容；要删文件请用删除工具。")
+            r = _sd.write(str(a.get("rel") or ""), str(_c),
                           str(a.get("note") or ""))
             if not r.get("ok"):
                 return "写入被拒绝：%s" % r.get("error")
@@ -6761,10 +6771,26 @@ def _do_nearby_places(arguments=None, ui_events=None, context=None) -> str:
     if _city_level:
         head = (_amap_broken_prefix() + "全城搜索（要找：%s；城市：%s）"
                 % (r.get("category"), r.get("city") or c["name"]))
+    elif city_level:
+        # ★ 2026-11-18：用户问的是「整座城市里有什么」，但城市级检索没出结果、
+        #   降级成了周边搜索。措辞必须仍按全城说 —— 否则用户会看到
+        #   「周边搜索（中心：承德南站；半径 20000 米）」这种莫名其妙的话。
+        head = (_amap_broken_prefix() + "全城搜索（要找：%s；城市：%s）"
+                % (r.get("category"), city or c["name"]))
     else:
         head = (_amap_broken_prefix() + "周边搜索（要找：%s；中心：%s；半径 %d 米）"
                 % (r.get("category"), c["name"], rad))
     if not items:
+        if city_level:
+            # 全城查询空结果：不说「N 米内」，也不建议调 radius（对全城没意义）
+            return (head + "\n· 在「%s」全市范围内**一个都没查到**这一类。\n"
+                    "  ⚠️ 换个更常见的说法再试（比如「餐厅」→「美食」）；"
+                    "确实没有就如实说没有，**不要自己编一个补上**。" % (city or place))
+        if (r.get("source") or "") == "amap":
+            # 走高德却还在提 OSM 会误导用户以为数据很弱
+            return (head + "\n· 这一类在 %d 米内**一个都没查到**。\n"
+                    "  ⚠️ 这是高德地图的收录结果；**查不到不等于一定没有**，"
+                    "但也别自己编一个补上。可以换个说法、或把 radius 调大再试。" % rad)
         return (head + "\n· 这一类在 %d 米内**一个都没查到**。\n"
                 "  ⚠️ OpenStreetMap 是志愿者测绘，中国的小微店铺覆盖很稀疏，"
                 "「查不到」不等于「没有」。可以换个说法、或把 radius 调大再试。" % rad)
