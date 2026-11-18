@@ -90,11 +90,11 @@ html[data-theme="light"] {
           **不靠压暗底色**，而是靠 ① 文字压到近黑 ② 描边明显加重 来拉对比。
      明度阶梯：页面/侧栏 #f1f1ef → 主内容区 #ffffff → 次级面板 #f6f6f4，
      三档差距小、不抢眼；所有边框统一到 #c8c8c2（白底上看得见但不脏）。 */
-  --bg: #ebebe6;            /* 页面/侧栏底：2026-11-18 再压一档，与白面板拉开层次（1.20:1） */
+  --bg: #eae8e2;            /* 页面/侧栏底：2026-11-18 第三轮 —— 暖中性，全屏一个色温，不再出现「侧栏冷灰 vs 主区暖米黄」 */
   --panel: #ffffff;         /* 主内容区：白（白色为主） */
   --panel2: #f3f3ef;        /* 气泡/次级面板：与白面板拉开可见分界（原 #f6f6f4 只有 1.08，糊成一片） */
   --field-bg: #fdfdfc;      /* 输入框：极浅暖白，不再是刺眼纯白 */
-  --border: #b8b8b0;        /* 描边：白底上 2.0:1（原 1.68 偏淡，线条看不出） */
+  --border: #bfbeb6;        /* 描边：白底上 ~1.87:1（1.68 偏淡 → 2.0 太重像线框，取中间档） */
   --line-soft: rgba(0, 0, 0, .10); /* 弱分隔线：深色下是「白 8%」，浅色下必须反过来 —— 原来漏了这行，白底上完全看不见 */
   --text: #14161a;          /* 正文：近黑，对比度 ~16:1 */
   --muted: #43474f;         /* 次要文字：深灰，小字也不发虚 */
@@ -3270,9 +3270,12 @@ body {
   background-attachment: scroll;
 }
 html[data-theme="light"] body {
+  /* 2026-11-18 第二轮：原来 .07/.05 的暖金光晕把正文区烘成米黄，
+     而侧栏离光斑远、还是冷灰 → 一块屏幕上两种白，「怪」的主因之一。
+     减到 .035/.022：留一点暖意，但不再和侧栏分成两个色温。 */
   background-image:
-    radial-gradient(900px 620px at 10% -12%, rgba(212, 176, 90, .07), transparent 62%),
-    radial-gradient(760px 520px at 94% 4%, rgba(196, 158, 74, .05), transparent 64%);
+    radial-gradient(900px 620px at 10% -12%, rgba(212, 176, 90, .035), transparent 62%),
+    radial-gradient(760px 520px at 94% 4%, rgba(196, 158, 74, .022), transparent 64%);
 }
 
 /* 玻璃面板 → 2026-11-12 改成实色。
@@ -3752,9 +3755,12 @@ html[data-theme="light"] .st-hint { color: #92400e; }
         再补一层柔和投影。只动颜色，不动宽高 / flex / position。 */
 html[data-theme="light"] .sidebar .panel,
 html[data-theme="light"] .sidebar .status-card {
-  background: var(--panel);
-  border: 1px solid #adada5;
-  box-shadow: 0 1px 2px rgba(24, 27, 33, .07), 0 8px 20px rgba(24, 27, 33, .11);
+  /* 2026-11-18 第二轮：上一版给每条侧栏项加了 #adada5 深框 + 8px/20px 重投影，
+     十几个条目全立起来 → 像线框图/表单。现在改成「白卡 + 极淡描边 + 一点投影」：
+     层次靠**底色差**（白 vs 暖灰 1.17）表达，描边只做收边，不做主角。 */
+  background: #fffdf9;   /* 暖白，不用纯白 —— 纯白压在暖灰底上会显得"冷"、像贴上去的纸片 */
+  border: 1px solid transparent;
+  box-shadow: 0 1px 2px rgba(32, 30, 24, .05), 0 3px 10px rgba(32, 30, 24, .04);
 }
 /* 顶栏快捷按钮（待批准 / 推荐 / 画布）：白底 + 描边，在浅灰侧栏上立起来 */
 html[data-theme="light"] .tq-btn {
@@ -3799,6 +3805,45 @@ html[data-theme="light"] select.pill-select {
 html[data-theme="light"] select.pill-select option {
   background: #ffffff;
   color: #14161a;
+}
+
+/* ---- 5. 去线框化（2026-11-18 第三轮，用户第二次反馈「还是有点怪」）----
+   上一版（第 4 节）给侧栏每条都加了 #adada5 描边 + 8px/20px 重投影，
+   十几条白卡片全立起来 → 视觉评审判定为「像线框图 / 半成品」。
+   这一版反过来：**描边退到看不见，层次只用「白卡 + 极轻投影 + 底色差」**。
+   另外去掉亮色的暖金径向光晕 —— 它只盖住主区，侧栏离光斑远，
+   结果同一屏上出现两种白（冷灰 / 米黄），这是「怪」的第二个来源。 */
+html[data-theme="light"] body { background-image: none; }
+
+html[data-theme="light"] .sidebar .panel,
+html[data-theme="light"] .sidebar .status-card,
+html[data-theme="light"] .tq-btn,
+html[data-theme="light"] .mode-tab {
+  border-color: transparent;
+}
+html[data-theme="light"] .sidebar .panel,
+html[data-theme="light"] .sidebar .status-card {
+  box-shadow: 0 1px 2px rgba(32, 30, 24, .05), 0 3px 10px rgba(32, 30, 24, .04);
+}
+html[data-theme="light"] .tq-btn {
+  box-shadow: 0 1px 2px rgba(32, 30, 24, .06);
+}
+html[data-theme="light"] .tq-btn:hover {
+  background: #fffdf8;
+  border-color: transparent;
+  box-shadow: 0 1px 3px rgba(32, 30, 24, .10);
+}
+/* 单机/群聊分段：未选中用极浅底，选中用主色实底，不再靠描边区分 */
+html[data-theme="light"] .mode-tab { background: #f7f5ef; }
+html[data-theme="light"] .mode-tab.on {
+  background: var(--accent); border-color: transparent; color: #fff;
+}
+/* 顶栏与正文之间：硬描边换成一根几乎看不见的发丝线，过渡不再突兀 */
+html[data-theme="light"] .chat-header { border-bottom-color: rgba(32, 30, 24, .07); }
+/* 输入区：白卡浮在暖灰上，靠柔和投影收边，不用深框 */
+html[data-theme="light"] .composer {
+  border-color: rgba(32, 30, 24, .07);
+  box-shadow: 0 1px 2px rgba(32, 30, 24, .05), 0 6px 18px rgba(32, 30, 24, .05);
 }
 
 /* ================= 手机端二次优化（2026-11-09 用户反馈"难看"）=================
