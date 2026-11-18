@@ -974,7 +974,7 @@ def _write(d: dict) -> None:
 _PATH_JUNK = re.compile(r"[`｀*＊]")
 
 
-_SCRATCH_PREFIXES = ("_pending_", "_tmp_")
+_SCRATCH_PREFIXES = ("_pending_", "_tmp_", "_probe_", "_guard_")
 
 
 def _is_scratch(rel) -> bool:
@@ -990,6 +990,11 @@ def _is_scratch(rel) -> bool:
     s = str(rel or "").replace("\\", "/")
     base = os.path.basename(s)
     if base.startswith(_SCRATCH_PREFIXES):
+        return True
+    # 2026-11-18 修：_probe_ / _guard_ 之外还有各种单下划线变体的探针脚本（_w1.py 之类），
+    # 实测 30 条改动里 8 条是这种、占 27% 名额，指向的文件早就删了。
+    # backend 根目录下唯一的单下划线正式文件是 __init__.py（双下划线），所以用通用规则。
+    if base.endswith(".py") and base.startswith("_") and not base.startswith("__"):
         return True
     # 前面补一个 "/"，否则相对路径写成 `_feature_tests/x.py`（不带 backend/）
     # 时匹配不到 "/_feature_tests/" —— 实测这条漏判。
