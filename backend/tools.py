@@ -246,6 +246,10 @@ _MAP_PLAN_SCHEMA = {
             "⚠️ 驾车时间在配了高德 key 时**已经包含实时路况**，可以照实说「这个时间已含实时路况」；"
             "但**不要**编「XX 路段现在堵」这种具体路况描述 —— 接口不给这个。"
             "地图卡片会自己显示，你只要用一两句话把结论说清楚。"
+            "\n"
+            "⚠️ **一轮里只调用一次**：既要标地点、又要算路线时，**一次**把 places 和 route 都传进来\n"
+            "（前端会把它们合并画在同一张地图上），不要分成几次调用。\n"
+            "⚠️ **places 最多 5 个** —— 标十几个点只会让地图糊成一片，用户看不清。\n"
         ),
         "parameters": {
             "type": "object",
@@ -283,6 +287,12 @@ _NEARBY_SCHEMA = {
             "  「广州市内有什么商场」→ place:\"广州市\", category:\"购物中心\", radius:30000；"
             "「汕头有什么好吃的」→ place:\"汕头市\", category:\"餐厅\", radius:20000。\n"
             "· 参数 {\"place\": \"汕头大学\", \"category\": \"餐厅\", \"radius\": 1500}；"
+            "⚠️ **place 给城市名（「广州」）＝整座城市检索**：后端走高德全城搜索、按相关度返回\n"
+            "8 个左右的代表（天河城这种大商场会在里面），不是只给离市中心最近的几个小店。\n"
+            "给具体地点（「汕头大学」）＝周边检索，按距离返回最近的。\n"
+            "⚠️⚠️ **一次调用只查一个类别，不要为了「多找几个」反复调用本工具** —— 实测模型会\n"
+            "连着调十几次（公园一次、博物馆一次、寺庙一次…），结果是十几张地图卡片糊满屏幕。\n"
+            "用户要的是「8 个左右的代表」，一次就够；真要补，最多再补 1 次，只补真正缺的那类。\n"
             "place 也接受 \"23.35,116.68\" 这种坐标，也可以是城市名。\n"
             "· category 用中文日常说法即可：餐厅 / 咖啡馆 / 便利店 / 超市 / 购物中心 / "
             "药店 / 医院 / 银行 / 加油站 / 停车场 / 酒店 / 学校 / 公交站 / 公园 / 厕所…\n"
@@ -312,7 +322,10 @@ _NEARBY_SCHEMA = {
                 "category": {"type": "string",
                              "description": "要找什么：餐厅/便利店/药店/银行…"},
                 "radius": {"type": "integer", "description": "半径（米），默认 1500"},
-                "limit": {"type": "integer", "description": "最多返回几个，默认 20"},
+                "limit": {"type": "integer", "description": "最多返回几个，默认 8（用户要的是精选，不是一堆）"},
+                "city": {"type": "string",
+                         "description": "限定城市（如「广州」）。place 给具体地点时可选填，"
+                                        "能防止同名地点跑到外省"},
             },
             "required": ["place", "category"],
         },
@@ -6457,9 +6470,22 @@ def _do_map_plan(arguments=None, ui_events=None, context=None) -> str:
     # ⚠️ 不填的后果实测很离谱：查「天河城」会被高德按**地址**解析到
     #    "江西省南昌市进贤县天河城"，而广州的正主反而出不来。
     city = str(a.get("city") or a.get("城市") or "").strip()
+    if not city:
+        # 模型经常忘填 city → 从地名里自动认（「广州天河城」→ 广州）。
+        # 不认的话高德按地址解析，「天河城」会跑到「江西省南昌市进贤县天河城」。
+        _qs = [str(p) for p in places if str(p).strip()]
+        for _k in ("from", "to"):
+            if route.get(_k):
+                _qs.append(str(route.get(_k)))
+        for _q in _qs:
+            _c = _mt.city_of(_q) or _mt._split_city(_q)[0]
+            if _c:
+                city = _c
+                break
     markers, lines = [], []
 
-    for q in [p for p in places if str(p).strip()][:12]:
+    # 最多标 5 个点：十几个点挤在一张图上用户根本看不清（实测反馈）
+    for q in [p for p in places if str(p).strip()][:5]:
         one = _mt.geocode_one(str(q), allow_net=net, city=city)
         if not one:
             if net:
@@ -6674,14 +6700,24 @@ def _do_nearby_places(arguments=None, ui_events=None, context=None) -> str:
         return '错误：缺少 place（中心地点），比如 "汕头大学" 或 "23.35,116.68"。'
     if not category:
         return '错误：缺少 category（要找什么），比如 "餐厅" "便利店" "药店"。'
+    # ★ 2026-11-18：区分「整座城市里有什么」和「某个地点周围有什么」。
+    #   实测用户问「广州有什么商场」时，按半径 1.5km 的周边搜索只会在市政府
+    #   旁边打转（返回 Amall商场、广德商场这些 140 米的小店），天河城永远进不来。
+    _pcity = _mt.city_of(place)                  # place 本身就是城市名 → 城市级
+    city = str(a.get("city") or a.get("城市") or "").strip() or _pcity
+    city_level = bool(_pcity)
     try:
-        radius = int(a.get("radius") or a.get("半径") or 1500)
+        radius = int(a.get("radius") or a.get("半径")
+                     or (20000 if city_level else 1500))
     except (TypeError, ValueError):
-        radius = 1500
+        radius = 20000 if city_level else 1500
+    if city_level:
+        radius = max(radius, 20000)              # 城市级搜索半径没意义，给足
     try:
-        limit = int(a.get("limit") or 20)
+        limit = int(a.get("limit") or 8)         # 用户要「8 个左右」，不是 20 个
     except (TypeError, ValueError):
-        limit = 20
+        limit = 8
+    limit = max(1, min(20, limit))
 
     net = _mt.online()
     # ⚠️ 干活之前先问一次高德 key（没配、联网、且本进程还没问过时）。
@@ -6694,14 +6730,19 @@ def _do_nearby_places(arguments=None, ui_events=None, context=None) -> str:
         return "没找到中心地点「%s」—— %s" % (place, hint)
 
     r = _mt.nearby(c["lat"], c["lon"], category, radius=radius, limit=limit,
-                   allow_net=net)
+                   allow_net=net, city=city)
     if not r.get("ok"):
         return "周边查询失败：%s" % (r.get("error"))
 
     items = r.get("items") or []
     rad = r.get("radius")
-    head = (_amap_broken_prefix() + "周边搜索（要找：%s；中心：%s；半径 %d 米）"
-            % (r.get("category"), c["name"], rad))
+    _city_level = r.get("level") == "city"
+    if _city_level:
+        head = (_amap_broken_prefix() + "全城搜索（要找：%s；城市：%s）"
+                % (r.get("category"), r.get("city") or c["name"]))
+    else:
+        head = (_amap_broken_prefix() + "周边搜索（要找：%s；中心：%s；半径 %d 米）"
+                % (r.get("category"), c["name"], rad))
     if not items:
         return (head + "\n· 这一类在 %d 米内**一个都没查到**。\n"
                 "  ⚠️ OpenStreetMap 是志愿者测绘，中国的小微店铺覆盖很稀疏，"
@@ -6730,7 +6771,13 @@ def _do_nearby_places(arguments=None, ui_events=None, context=None) -> str:
         if it.get("info_note"):
             lines.append("  %s" % it["info_note"])
 
-    tail = ("\n⚠️ **有评分就照实念**：返回里带 rating 字段的是**真实评分**（来自高德地图），"
+    tail = ("\n⚠️ **这是按相关度筛出来的代表，不是全部**（全城检索按相关度排，"
+            "不是按距离）：别把「清单里没有」说成「只有这些」；"
+            "用户点名要某个地方而清单里没有时，如实说没查到，**不要自己编一个补上**。\n"
+            "⚠️ **给行程/安排时必须标出哪些是推断**：距离、用时、评分是真实数据；"
+            "「先去 A 再去 B 更顺路」「下午去更合适」这类安排是你的推断，"
+            "要写成「建议」或标〔推断〕，不能说得像查出来的事实。\n"
+            "⚠️ **有评分就照实念**：返回里带 rating 字段的是**真实评分**（来自高德地图），"
             "直接告诉用户「评分 4.7」就行，也可以用来排序推荐；"
             "带 cost 的是人均消费。\n"
             "⚠️ **没有 rating 字段时绝不许自己编评分、星级或评价** —— "
@@ -6748,7 +6795,10 @@ def _do_nearby_places(arguments=None, ui_events=None, context=None) -> str:
             # 并决定打点要不要做 WGS-84 → GCJ-02 的换算。
             "tile_source": _mt.tile_source(net),
             "center": [c["lat"], c["lon"]],
-            "zoom": 15 if rad <= 1200 else 14 if rad <= 3000 else 13 if rad <= 8000 else 12,
+            # 全城检索的点散在全城（番禺、增城也算），zoom 11 才框得下
+            "zoom": 11 if _city_level else (
+                15 if rad <= 1200 else 14 if rad <= 3000
+                else 13 if rad <= 8000 else 12),
             "markers": [{"name": c["name"], "lat": c["lat"], "lon": c["lon"],
                          "addr": "", "role": "center"}] +
                        [{"name": m["name"] or "（无名）", "lat": m["lat"], "lon": m["lon"],

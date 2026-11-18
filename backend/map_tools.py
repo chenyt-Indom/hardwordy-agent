@@ -433,6 +433,17 @@ def search_place(query: str, limit: int = 5, allow_net=None, city: str = "") -> 
                     kw = q            # 调用方已经说了城市，整个查询词就是关键词
                 else:
                     c0, kw = _split_city(q)   # 从"广州市天河城"里抠出 广州 + 天河城
+                if not c0 and kw:
+                    # 没有城市限定：/place/text 不带 city 一律 0 条，/geocode 又会
+                    # 命中"江西省南昌市进贤县天河城"这种同名村镇。改走「输入提示」
+                    # 按高德自己的全国相关度排 —— 实测「天河城」能给出广州天河区那个正主。
+                    tips = amap.input_tips(kw)
+                    hits = [dict(x, kind=x.get("kind") or "poi")
+                            for x in (tips.get("items") or [])]
+                    if hits:
+                        # 名字完全一致的提前（高德顺序本身已按相关度，只加这一层加固）
+                        hits.sort(key=lambda x: 0 if (x.get("name") or "").strip() == kw else 1)
+                        return hits[:limit]
                 if kw and (c0 or len(kw) >= 2):
                     r = amap.place_text(kw, city=c0)
                     hits = [dict(x, kind=x.get("kind") or "poi")
@@ -1073,8 +1084,116 @@ def _nearby_amap(lat, lon, cat, radius, limit):
         return None
 
 
+def city_of(place: str) -> str:
+    """「广州市」「广州」→「广州」；不是纯城市名就返回 ""。
+
+    用途：判断这次查询是「整座城市里有什么」还是「某个地点周围有什么」——
+    两者的检索方式完全不同（见 nearby 里的说明）。
+    """
+    s = str(place or "").strip()
+    if not s:
+        return ""
+    for c in _CITIES:
+        if s in (c, c + "市"):
+            return c
+    return ""
+
+
+# 这些不是「场所」，是场所的附属设施 —— 出现在清单里只会挤掉真正要找的地方。
+_POI_NOISE = ("管理办公室", "管理委员会", "客服中心", "服务中心", "售票处", "停车场",
+              "停车库", "入口", "出口", "卫生间", "公共厕所", "派出所", "居委会",
+              "物业管理", "游客中心", "门卫", "值班室")
+# 类型明显不对的（高德按关键词搜会捎带出来）
+_KIND_NOISE = ("住宅小区", "公司企业", "政府机构", "商务写字楼", "产业园区", "地名地址")
+
+
+def _clean_items(items: list, cat: str) -> list:
+    """去噪 + 去重。
+
+    ⚠️ 两个实测出来的毛病（用户原话：「同一地方重复出现、根本不是景点」）：
+      ① 高德会把同一景区的子点位全列出来 ——「人民公园-宫灯帏」「人民公园-新娘像」…
+         600 条里前 20 条全是这种，真正想看的公园反而被挤到后面。
+         → 取「-」前的父名去重，一个景区只留一条。
+      ② 关键词搜会捎带「XX停车场」「XX售票处」「XX管理办公室」和「住宅小区」。
+         → 按词表过滤。
+    """
+    out, seen, pts = [], set(), []
+    for it in items:
+        nm = str(it.get("name") or "").strip()
+        if not nm:
+            continue
+        if any(b in nm for b in _POI_NOISE):
+            continue
+        kind = str(it.get("kind") or "")
+        if kind and any(b in kind for b in _KIND_NOISE):
+            continue
+        # 「人民公园-宫灯帏」→ 父名「人民公园」；已经收过就不再收
+        base = nm.split("-")[0].strip() if "-" in nm else nm
+        key = base.lower()
+        if key in seen:
+            continue
+        dup = False
+        for (la, lo, kn) in pts:
+            if kn == key and haversine(it["lat"], it["lon"], la, lo) < 200:
+                dup = True
+                break
+        if dup:
+            continue
+        seen.add(key)
+        pts.append((it["lat"], it["lon"], key))
+        out.append(it)
+    return out
+
+
+def _nearby_amap_text(city: str, cat: str, limit: int,
+                      clat: float, clon: float):
+    """**整座城市**里找某类场所：走高德关键词搜索（按相关度），不按距离。
+
+    ⚠️ 为什么不能用周边搜索（place/around）：
+       实测「广州有什么商场」→ around 返回 82 条，但按**距离**排，
+       前 20 全是市政府旁边 140~484 米的小店（Amall商场、广德商场…），
+       **6 公里外的天河城根本进不来**（用户原话：「连最大的天河城都没有」）。
+       而 place/text 带 city 搜「购物中心」：广州塔广场 / 正佳广场 / 天河城 /
+       太古汇 / 万菱汇 全在前 10 —— 这才是用户想要的「广州有什么商场」。
+    """
+    try:
+        from . import amap
+        if not amap.has_key():
+            return None
+        r = amap.place_text(cat, city=city, offset=25)
+        if not r.get("ok") or not r.get("items"):
+            return None
+        items = []
+        for it in r["items"]:
+            row = {
+                "name": it.get("name") or "",
+                "lat": it["lat"], "lon": it["lon"],
+                "dist_m": int(haversine(clat, clon, it["lat"], it["lon"])),
+                "kind": it.get("kind") or cat,
+                "addr": it.get("addr") or "",
+                "phone": it.get("phone") or "",
+                "website": "",
+                "hours": "",
+                "info_note": "",
+            }
+            if it.get("rating"):
+                row["rating"] = str(it["rating"])
+            if it.get("cost"):
+                row["cost"] = str(it["cost"])
+            items.append(row)
+        items = _clean_items(items, cat)
+        if not items:
+            return None
+        return {"ok": True, "category": cat, "radius": 0, "center": [clat, clon],
+                "total": len(items), "items": items[:limit], "source": "amap",
+                "city": city, "level": "city",
+                "note": "数据来自高德地图（**全城**检索，按相关度排序；距离是到城市中心的直线距离）。"}
+    except Exception:
+        return None
+
+
 def nearby(lat: float, lon: float, category: str, radius: int = 1500,
-           limit: int = 20, allow_net=None) -> dict:
+           limit: int = 20, allow_net=None, city: str = "") -> dict:
     """查某个坐标周围指定类别的场所（按距离排序）。
 
     返回 {"ok","items":[{name,lat,lon,dist_m,kind,addr,phone,website,hours,
@@ -1100,6 +1219,16 @@ def nearby(lat: float, lon: float, category: str, radius: int = 1500,
     # 高德的 POI 库比 OSM 强太多：实测汕头大学 1.5km 内，
     # OSM 只录到 3 家餐厅、便利店 **0 家**；高德分别有 7 家和 11 家，
     # 而且带**真实评分**和人均消费 —— 这正是用户要的东西。
+    #
+    # ⚠️ 两条路要分开走，这是实测出来的（别再合并回去）：
+    #    · **整座城市**里有什么 → place/text（按相关度）。否则天河城这种
+    #      离市中心 6 公里的正主永远排不进「最近的 N 个」。
+    #    · **某个地点周围**有什么 → place/around（按距离），这才是「附近」。
+    city = str(city or "").strip()
+    if city and radius >= 8000:
+        _amt = _nearby_amap_text(city, cat, limit, lat, lon)
+        if _amt:
+            return _amt
     _am = _nearby_amap(lat, lon, cat, radius, limit)
     if _am:
         return _am
@@ -1147,6 +1276,7 @@ def nearby(lat: float, lon: float, category: str, radius: int = 1500,
         })
     # 只按距离排（没有评分可用，也不该拿记录完整度冒充评分去排序）
     items.sort(key=lambda x: x["dist_m"])
+    items = _clean_items(items, cat)
     res = {"ok": True, "category": cat, "radius": radius, "center": [lat, lon],
            "total": len(items), "items": items[:limit],
            "note": "数据来自 OpenStreetMap（志愿者测绘）。中国的小微店铺覆盖很稀疏，"

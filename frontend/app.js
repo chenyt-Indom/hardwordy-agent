@@ -1348,6 +1348,11 @@
       if (rt.estimated) {
         html += `<span class="map-warn">时间为估算</span>`;
       }
+      // 合并后同一张卡上还可能有周边清单，信息栏得提一句，否则用户以为只有路线
+      if (ui.nearby && (ui.nearby.items || []).length) {
+        html += `<span class="map-alt">另有 ${ui.nearby.items.length} 处` +
+          `${escapeHtml(ui.nearby.category || "地点")}</span>`;
+      }
     } else if (ui.nearby && (ui.nearby.items || []).length) {
       // 周边搜索：信息栏要说清"找的是什么、几家"，别只说"N 个地点"
       html += ` <b>${escapeHtml(ui.nearby.center_name || "")}</b> 周边 ` +
@@ -1435,6 +1440,60 @@
     // 等这一帧排完再初始化，否则容器高度还是 0，地图画不出来
     requestAnimationFrame(() => initMapCard(id, ui));
     return wrap;
+  }
+
+  // ★ 2026-11-18：一轮里模型可能连续调十几次地图工具（景点按类别各查一次），
+  //   原来是每调一次就多一张地图卡片 → 用户一次看到十几张图。
+  //   现在同一轮内的地图事件**合并进第一张**：点位、周边清单去重累加，中心和缩放重算。
+  //   新一轮（用户发消息）时 lastMap 置空，从新的一张开始。
+  let lastMap = null;
+  function mergeMapUI(a, b) {
+    const out = JSON.parse(JSON.stringify(a));
+    const mk = out.markers || (out.markers = []);
+    (b.markers || []).forEach(function (m) {
+      const dup = mk.some(function (x) {
+        return x.name === m.name ||
+          (Math.abs((x.lat || 0) - (m.lat || 0)) < 3e-4 &&
+           Math.abs((x.lon || 0) - (m.lon || 0)) < 3e-4);
+      });
+      if (!dup) mk.push(m);
+    });
+    if (b.nearby) {
+      const nb = out.nearby || (out.nearby = {
+        category: b.nearby.category, center_name: b.nearby.center_name,
+        radius: b.nearby.radius, source: b.nearby.source, items: [], total: 0,
+      });
+      const names = {};
+      (nb.items || []).forEach(function (x) { names[x.name] = 1; });
+      (b.nearby.items || []).forEach(function (x) {
+        if (!names[x.name] && (nb.items || []).length < 8) {
+          nb.items.push(x); names[x.name] = 1;
+        }
+      });
+      nb.total = (nb.items || []).length;
+    }
+    if (b.route && !out.route) out.route = b.route;
+    if (mk.length) {
+      const lats = mk.map(function (m) { return m.lat; });
+      const lons = mk.map(function (m) { return m.lon; });
+      const mn = function (v) { return Math.min.apply(null, v); };
+      const mx = function (v) { return Math.max.apply(null, v); };
+      out.center = [(mn(lats) + mx(lats)) / 2, (mn(lons) + mx(lons)) / 2];
+      const span = Math.max(mx(lats) - mn(lats), mx(lons) - mn(lons));
+      out.zoom = span < 0.02 ? 14 : span < 0.06 ? 13 : span < 0.3 ? 11
+        : span < 1.2 ? 9 : 7;
+    }
+    return out;
+  }
+  function pushMapCard(ui) {
+    if (lastMap && lastMap.wrap && lastMap.wrap.parentNode) {
+      const merged = mergeMapUI(lastMap.ui, ui);
+      lastMap.wrap.remove();
+      lastMap = { ui: merged, wrap: makeMapCard(merged) };
+      return lastMap.wrap;
+    }
+    lastMap = { ui: ui, wrap: makeMapCard(ui) };
+    return lastMap.wrap;
   }
 
   // 离线时地图上没有底图 → 给一句明白话，别让用户对着灰底猜"是不是坏了"
@@ -6253,6 +6312,7 @@
 
   async function send() {
     setFreeView(false);        // 自己发消息 → 恢复跟随，别停在半路
+    lastMap = null;            // 新一轮：地图卡片重新从一张开始（合并只在一轮内生效）
     const text = inputEl.value.trim();
     const imgB64 = images.map((s) => s.split(",")[1]);
     if (!text && imgB64.length === 0 && !videoB64) return;
@@ -7659,8 +7719,8 @@
               if (typeof loadDoclib === "function") loadDoclib(obj.ui.rel);
             }
             else if (obj.ui.type === "map") {
-              // 地图卡片：地点/路线已经算好，这里把它画出来
-              makeMapCard(obj.ui);
+              // 地图卡片：同一轮里的多次地图查询合并成一张（见 pushMapCard）
+              pushMapCard(obj.ui);
             }
             else if (obj.ui.type === "selfdev") {
               // 模型改了应用源码：给一张**可折叠**的改动卡片（默认收起，不撑页面）

@@ -423,6 +423,61 @@ def place_text(keywords: str, city: str = "", page: int = 1, offset: int = 20) -
     return {"ok": True, "items": items, "total": int(d.get("count") or len(items))}
 
 
+def _city_from_district(district: str) -> str:
+    """「广东省广州市天河区」→「广州」；「天津市和平区」→「天津」。取不到就空串。"""
+    m = re.search(r"([\u4e00-\u9fa5]{2,6}?)市", str(district or ""))
+    return m.group(1) if m else ""
+
+
+def input_tips(keywords: str, city: str = "", limit: int = 10) -> dict:
+    """**输入提示（联想）** —— 全国范围按名字相关度出结果，**不需要 city**。
+
+    ⚠️ 这个接口存在的唯一理由（实测过 4 种写法）：
+       · /place/text 不带 city 一律返回 **0 条**（city=""、city=全国、
+         citylimit=false、v5 的 region=全国，全试过，都是 0）；
+       · /geocode 是**按地址解析**的 —— 查「天河城」会命中
+         "江西省南昌市进贤县天河城"（那边真有个同名村子），广州正主出不来。
+       只有这里能不带城市、按高德自己的全国相关度把正主排上来：
+       实测「天河城」第 3 条就是 **广东省广州市天河区天河城**（113.3226, 23.1323）。
+
+    返回结构跟 place_text 一致（坐标已转 WGS-84），另带 city/district/adcode，
+    调用方可以据此告诉用户「我按广州算的」。
+    """
+    kw = str(keywords or "").strip()
+    if not kw:
+        return {"ok": False, "items": []}
+    d = _get("/assistant/inputtips", keywords=kw, city=city, datatype="all")
+    if not d:
+        return {"ok": False, "items": []}
+    items = []
+    for t in (d.get("tips") or []):
+        c = _loc(t.get("location"))
+        if not c:
+            continue              # 纯行政区/空壳条目：location 是 []，没有坐标
+        district = t.get("district")
+        if not isinstance(district, str):
+            district = ""
+        addr = t.get("address")
+        if not isinstance(addr, str):
+            addr = ""
+        tc = t.get("typecode")
+        ad = t.get("adcode")
+        iid = t.get("id")
+        items.append({
+            "name": t.get("name") or kw,
+            "lat": c[0], "lon": c[1],
+            "addr": addr,
+            "kind": "",
+            "type_full": tc if isinstance(tc, str) else "",
+            "phone": "",
+            "city": _city_from_district(district),
+            "district": district,
+            "adcode": ad if isinstance(ad, str) else "",
+            "id": iid if isinstance(iid, str) else "",
+        })
+    return {"ok": True, "items": items[:max(1, int(limit or 10))]}
+
+
 def place_around(lat: float, lon: float, keywords: str = "", radius: int = 1500,
                  offset: int = 25) -> dict:
     """**周边搜索** —— 这就是「附近有什么」。按距离排序。"""
