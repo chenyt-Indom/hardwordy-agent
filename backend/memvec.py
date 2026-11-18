@@ -478,13 +478,28 @@ def _label(it, sid):
 
 def search(query: str, sid: str = "", top_k: int = 5,
            min_vec: float = MIN_VEC, min_cov: float = MIN_COV,
-           with_transcripts: bool = True) -> list:
+           with_transcripts: bool = True, levels=None) -> list:
     """条目级检索。返回命中的**条目**（不是整块正文），无关时返回空列表。"""
     q = (query or "").strip()
     if not q:
         return []
+    # ⚠️ sid 要在这里也归一化一次。索引里存的 `it["sid"]` 是 `memory._safe_sid`
+    # 之后的（落盘的 key 就是 safe 过的），而本函数是**公开入口**，
+    # 任何调用方传原始 id（含空格/中文/点号）都会让下面的过滤条件永远成立 →
+    # 本对话的短期记忆**一条都召回不到**。
+    # 实测（2026-11-18）：sid="2026-11-18 22:50:34" 传原始值 → []；
+    # 传 safe 值 → 召回（vec 0.7056）。memory.search_all 已经归一化了，
+    # 但 `_ctx_trim_long` 等直接调本函数的地方不应该依赖调用方自觉。
+    sid = memory._safe_sid(sid) if sid else ""
     st = sync()
-    items, mat = st["items"], st["mat"]
+    # ⚠️ `items` 和 `mat` 必须**一起取**。`_idx.update()` 是逐个键替换的，
+    # 原来 `items, mat = st["items"], st["mat"]` 是两次独立读取 ——
+    # 中间若另一个线程跑完一次 sync()（条目增删/重排），就会拿到"旧条目 + 新矩阵"：
+    # 轻则 `vec_scores[i]` 越界抛异常（退化成关键词检索），
+    # 重则**分数贴到别的条目上**，返回一条内容与得分完全不匹配的记忆。
+    with _lock:
+        items = list(st["items"])
+        mat = st["mat"]
     if not items:
         return []
 
@@ -502,6 +517,12 @@ def search(query: str, sid: str = "", top_k: int = 5,
         # 实测查「今天天气怎么样」时前 4 条全是别的对话里的元评论，
         # 把真正的偏好条目挤出了 top_k。
         if sid and it["level"] == "短期记忆" and it["sid"] != sid:
+            continue
+        # ⚠️ 按层级过滤（`_ctx_trim_long` 只想要长期记忆）。
+        # 原来那边是"取 top_k=12 再自己筛 level==长期记忆" —— 而本对话的短期条目
+        # 同样占名额，相关条目一多，12 个名额可能被短期记忆全占掉，
+        # 筛完剩 0 条，等于"按当前问题挑相关档案"这一步白做。
+        if levels is not None and it["level"] not in levels:
             continue
         c, b = _cov_pair(qc, qt, *(_text_sets(it["text"])))
         cov = max(c, b)                       # 门槛：任一说得通就收

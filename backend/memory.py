@@ -365,13 +365,42 @@ def merge_long(point: str) -> bool:
     return True
 
 
+# 「含否定字、但不是否定」的常见词：地名 / 食品 / 技术词 / 固定搭配。
+# 不剔掉它们，`_neg_key` 会把「无锡」「无糖」「无线」「无人机」整句判成否定句，
+# 于是「喜欢无锡」和「不喜欢无锡」被判成**同为否定** → 纠正识别不出来，
+# 两条互相矛盾的说法并存。实测（2026-11-18）：
+#   merge「用户不喜欢无锡的湿冷天气」+「用户喜欢无锡的湿冷天气」
+#   → 正文「用户不喜欢…；用户喜欢…」两句并存，用户的纠正等于没生效。
+_NEG_FALSE = ("无锡", "无糖", "无线", "无人机", "无数", "无论", "无效", "无关", "无限",
+              "无疑", "无损", "无奈", "无所谓", "未来", "非常", "别人", "别的",
+              "区别", "类别", "级别", "性别", "告别", "识别", "别墅", "不错",
+              "不断", "不仅", "不但", "不少", "不久", "不同", "不论", "不光",
+              "没关系", "没错", "没准", "没意思")
+
+
+def _neg_strip(s: str) -> str:
+    """先剔掉「含否定字但其实不是否定」的词。"""
+    t = s or ""
+    for w in _NEG_FALSE:
+        t = t.replace(w, "")
+    return t
+
+
+def _neg_count(s: str) -> int:
+    """否定标记的**个数**（剔掉假否定词之后）。"""
+    t = _neg_strip(s)
+    return sum(t.count(w) for w in ("不", "没", "无", "未", "别"))
+
+
 def _neg_key(s: str) -> bool:
     """这条要点是不是否定性表述（只用来判断"两条说的是不是同一件事"）。
 
     「未来」「非常」里的"未/非"不是否定，先剔掉 —— 否则「未来打算考研」
     会被当成否定句，和「计划考研」判成两件事，白白记两条。
+    ⚠️ 地名/技术词里的「无」（无锡、无糖、无线、无人机…）同样不是否定，
+    见 `_NEG_FALSE` 的说明。
     """
-    t = (s or "").replace("未来", "").replace("非常", "")
+    t = _neg_strip(s)
     return any(w in t for w in ("不", "没", "无", "未", "别"))
 
 
@@ -425,7 +454,10 @@ def _bare(s: str) -> str:
     不去"了"的话两边 bare 一个是「打算考四级」、一个是「打算考四级了」，
     判不成同一件事，于是两条**并存**（用户的否定没生效）。
     """
-    t = (s or "").replace("未来", "").replace("非常", "")
+    # ⚠️ 先剔掉「含否定字但不是否定」的词（无锡/无糖/无线…），
+    # 否则「喜欢无锡」的 bare 会变成「喜欢锡」，和「不喜欢无锡」的「喜欢锡」虽然能对上，
+    # 但跟「喜欢上海」这类就全乱了；更关键的是 `_neg_count` 要按剔完的结果数。
+    t = _neg_strip(s)
     # ⚠️ 复合否定词必须**先整词删**：只删单字「没」会剩下「有每天跑步」，
     # 和「每天跑步」对不上，实测这一条纠正就漏了。
     # ⚠️ 只有「没有」需要整词删（否则剩个「有」）。
@@ -447,16 +479,23 @@ def _neg_flip(body: str, point: str):
     等于用户的纠正**从来没生效过**。
     正确做法：认出这是同一件事的反面，**原地替换**。
     """
-    pn = _neg_key(point)
     pb = _bare(point)
-    if not pb:
-        return -1
+    if not pb or len(pb) < 3:
+        return -1                      # 太短（「咖啡」）容易误配，宁可不改
+    pc = _neg_count(point)
     for i, e in enumerate(_split_items(body)):
         en = _norm_point(e)
-        if not en or _neg_key(en) == pn:
+        if not en:
             continue
-        if _bare(en) == pb:
-            return i
+        # ⚠️ 判据不能再用「`_neg_key` 不同」——
+        # 那是个布尔值，一旦句子里含有「无」的地名/技术词（无锡/无糖/无线），
+        # 正反两句都会被判成否定 → 永远认不出这是纠正。
+        # 改成：**去掉否定词之后正文相同**，且**否定标记个数不同** → 就是同一件事的正反说法。
+        if _bare(en) != pb:
+            continue
+        if _neg_count(en) == pc:
+            continue
+        return i
     return -1
 
 
@@ -773,7 +812,10 @@ def _ctx_trim_long(lng: str, cap: int = CTX_LONG_CAP,
     if query:
         try:
             from . import memvec
-            for h in memvec.search(query, sid=sid, top_k=12, with_transcripts=False):
+            # levels=("长期记忆",)：只让长期记忆参与，别让本对话的短期条目占掉名额
+            # （原来取 12 条再自己筛，短期条目一多就筛出 0 条，这一步白做）。
+            for h in memvec.search(query, sid=sid, top_k=12,
+                                   with_transcripts=False, levels=("长期记忆",)):
                 if h.get("level") != "长期记忆":
                     continue
                 if _take((h.get("content") or "").strip()):

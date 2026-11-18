@@ -2171,10 +2171,31 @@ def _clean_extract_line(raw: str) -> str:
     # 「3月要去实习」变成「月要去实习」——
     # 年份和月份恰恰是记忆里最不能丢的数据（提示词自己也写着"数字一个都不能丢"）。
     line = _SEQ_PREFIX.sub("", line, count=1)
-    if line.startswith("【") and "】" in line:
-        inner = line.split("】", 1)
-        if inner[1].strip():
-            line = inner[1].strip()
+    # ⚠️⚠️ **类别标签不能丢**。模型很爱写成「【长期】用户姓名：陈宇桐」，
+    # 而原来这里只保留 `】` 后面的正文，标签被直接扔掉 ——
+    # 于是 kind 识别不出来，走到 `_apply_extract` 末尾的「没写类别一律进短期」，
+    # **姓名/身份/专业这类跨对话信息被记成了可释放的短期记忆**，
+    # 换个对话就不认识用户了。
+    # 实测（2026-11-18，3 条【】格式的要点）：长期记忆 **0 条**、短期记忆 3 条；
+    # 同样内容改用标准竖线格式，长期 2 条、短期 1 条 —— 差别全在标签上。
+    # 现在把标签转成标准格式 `类别|正文`，让后面的解析照常走。
+    for lb, rb in (("【", "】"), ("〔", "〕"), ("（", "）"), ("(", ")")):
+        if line.startswith(lb) and rb in line:
+            head, rest = line.split(rb, 1)
+            label = head.strip("【】〔〕（）()[] \t").strip()
+            rest = rest.strip()
+            if not rest:
+                break
+            if label in _KIND_LONG or label in _KIND_SHORT:
+                return label + "|" + rest
+            # ⚠️ 「（推断）」这类圆括号标记是**内容的一部分**，不能剥。
+            # `memvec` 靠这个前缀给推断条目降权，用户也要能看出哪条是推出来的。
+            # 实测（2026-11-18）：加括号处理后「（推断）有意学数据分析」被削成
+            # 「有意学数据分析」，推断标记直接消失 —— 所以圆括号只在标签是类别时才处理。
+            if lb in ("（", "("):
+                break
+            line = rest        # 【要点】这种装饰性方括号，剥掉保留正文
+            break
     return line
 
 
@@ -2287,7 +2308,16 @@ def _apply_extract(text: str, session: str, limit: int = 4) -> int:
         # 原来不区分，只要文本里**包含**"取消/更新"就按指令处理，于是
         # 「取消了健身房会员卡」这种正常事实被当成删除指令直接丢掉（实测）。
         has_sep = len(parts) > 1
-        verb = parts[0].strip().strip("【】[]（）() ")
+        # ⚠️ 只有**标签**才剥括号，不能无条件剥。
+        # 原来这里写 `.strip("【】[]（）() ")`，于是「（推断）有意学数据分析」被削成
+        # 「推断）有意学数据分析」—— 推断标记残缺，而 `memvec` 靠
+        # `startswith(("（推断）", "(推断)"))` 给推断条目降权，匹配不上就不降权了，
+        # 推断条目重新开始挤占真档案（正是之前修过的问题又回来）。
+        # 实测（2026-11-18）：短期记忆里落成「推断）有意学数据分析，认为对求职有帮助」。
+        verb = parts[0].strip()
+        _bare_verb = verb.strip("【】[]（）() ").strip()
+        if _bare_verb in _LABELS:
+            verb = _bare_verb
         # ⚠️ 值里**不要**剥掉圆括号 —— 「（推断）用户…」这种标记是内容的一部分，
         # 剥了用户就看不出这条是推出来的（踩过：存进去变成「推断）用户…」）
         rest = [p.strip().strip("【】[]|｜ ") for p in parts[1:]]
