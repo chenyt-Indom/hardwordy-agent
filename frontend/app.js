@@ -2542,7 +2542,7 @@
         det.textContent = saved ? "不占显存 · 走云端 API" : "点右上角 🔑 填入 API Key";
         if (mi) {
           mi.textContent = "当前 " + label + (saved
-            ? "　|　工具调度：function calling（41 个工具）"
+            ? " · 工具调度：function calling（41 个工具）"
             : "（缺 Key，无法调用）");
           mi.title = mi.textContent;
         }
@@ -2588,7 +2588,7 @@
           if (d.code_model_ready) bits.push("代码 " + fmtModel(d.code_model_info));
           else bits.push("代码 " + d.code_model + (online ? "（未下载，暂用默认模型）" : ""));
         }
-        mi.textContent = bits.join("　|　");
+        mi.textContent = bits.join(" · ");
         mi.title = bits.join("\n");
       }
 
@@ -10601,6 +10601,9 @@
     let busy = false;
 
     function box() {
+      // 消息区被清空（innerHTML=""）后旧节点会脱离 DOM，必须重建，
+      // 否则 banner 变量还指着它、永远不会再显示。
+      if (banner && !banner.isConnected) banner = null;
       if (banner) return banner;
       banner = document.createElement("div");
       banner.className = "restart-banner";
@@ -10609,7 +10612,10 @@
         '<span class="rb-text">新版本已就绪</span>' +
         '<button class="rb-go" type="button">立即重启</button>' +
         '<button class="rb-later" type="button" title="先不重启，继续用旧版本">稍后</button>';
-      document.body.appendChild(banner);
+      // ★ 2026-11-18：原来挂在 body 上（position:fixed 悬浮），会盖住正文。
+      //   现在挂到消息区顶部，作为消息流里的 sticky 条 —— 占位不遮挡。
+      const host = document.getElementById("messages") || document.body;
+      host.prepend(banner);
       banner.querySelector(".rb-go").onclick = apply;
       banner.querySelector(".rb-later").onclick = later;
       return banner;

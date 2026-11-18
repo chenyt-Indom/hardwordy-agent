@@ -1098,6 +1098,57 @@ def _run_local(ctx, sys_prompt, task_prompt, steps, model, on_note=None):
             break
 
 
+# ---------------------------------------------------------------- 可达性检查
+
+_RE_ROUTE = re.compile(
+    r"""@app\.(?:get|post|put|delete|patch|websocket)\(\s*["']([^"']+)["']""")
+
+
+def _is_scratch(rel):
+    """临时脚本：文件名以单下划线开头（`__init__.py` 这类双下划线不算）。"""
+    name = str(rel).replace("\\", "/").rsplit("/", 1)[-1]
+    if name.startswith("__"):
+        return False
+    return name.startswith("_")
+
+
+def _new_api_routes(snap, changed):
+    """本轮**新增**的后端路由（对比快照里的旧内容）。返回 [(rel, path)]。"""
+    out = []
+    for rel in changed:
+        if not rel.endswith(".py"):
+            continue
+        new_txt = _read_text(rel)
+        if "no-frontend" in new_txt:      # 文件里声明了「这是外部接口，不需要前端」
+            continue
+        src = snap["dir"] / rel.replace("/", "__")
+        old_txt = ""
+        try:
+            if src.is_file():
+                old_txt = src.read_text(encoding="utf-8", errors="replace")
+        except Exception:                                    # noqa: BLE001
+            old_txt = ""
+        old_set = set(_RE_ROUTE.findall(old_txt))
+        for path in _RE_ROUTE.findall(new_txt):
+            if path not in old_set and path.startswith("/api/"):
+                out.append((rel, path))
+    return out
+
+
+def _frontend_text():
+    """把所有前端文件的正文拼起来，用于判断「新接口有没有调用方」。"""
+    buf = []
+    d = _ROOT / "frontend"
+    if d.is_dir():
+        for p in d.rglob("*"):
+            if p.suffix.lower() in (".js", ".html", ".css", ".mjs"):
+                try:
+                    buf.append(p.read_text(encoding="utf-8", errors="replace"))
+                except Exception:                            # noqa: BLE001
+                    pass
+    return "\n".join(buf)
+
+
 # ---------------------------------------------------------------- 独立复核
 
 def _final_verify(ctx, snap):
@@ -1114,6 +1165,13 @@ def _final_verify(ctx, snap):
     changed = mod + new
     if not changed and not gone:
         return False, "模型没有改动任何文件（它可能只是说了说）", {}
+
+    # ★ 2026-11-18 用户问「自迭代的检验机制是不是有问题」——
+    #   实测 f5_a1 改了 _tmp_plan.py / _tmp_probe.py / _tmp_wire.py 三个临时脚本，
+    #   语法/导入/回归当然全过，于是被判「成功」，但产品里没有任何变化。
+    if changed and all(_is_scratch(r) for r in changed):
+        return False, ("只改动了临时脚本（%s），等于没做任何真实改动"
+                       % "、".join(changed[:4])), {}
 
     # ① 护栏文件有没有被动过（包括用 shell 绕过去改的）
     #    硬违规：不进「修复轮」，直接回滚 —— 这种错不能靠改代码绕过去
@@ -1185,6 +1243,27 @@ def _final_verify(ctx, snap):
                 probs.append("【功能验收】断言没过：%s" % str(vr.get("why") or "")[:600])
         except Exception as e:                              # noqa: BLE001
             detail["assert"] = {"ok": False, "why": str(e)[:200]}
+
+    # ⑥ 新接口有没有调用方
+    #   ★ 2026-11-18 用户报「点了迭代说成功，功能却点不到」：
+    #   f6 那轮新建 backend/canvas.py + POST /api/canvas/command，前端一处调用都没有，
+    #   但语法/导入/回归全过 → 被判成功（日志里 assert=None，说明功能断言压根没跑）。
+    #   用户侧看到的就是「这个功能不存在」。所以「有没有入口」必须算验收项。
+    if not syn_bad:
+        routes = _new_api_routes(snap, changed)
+        if routes:
+            fe = _frontend_text()
+            orphan = [(r, p) for r, p in routes
+                      if ("/".join(p.split("/")[:3]) not in fe)]
+            if orphan:
+                probs.append(
+                    "【可达性】新增了 %d 个后端接口，但前端一处调用都没有"
+                    "（用户在界面上点不到，等于没做）：\n%s\n"
+                    "  要么在前端接上调用，要么在该接口所在文件里写注释 "
+                    "`no-frontend` 声明它是给外部/脚本用的。"
+                    % (len(orphan),
+                       "\n".join("  · %s → %s" % (r, p) for r, p in orphan[:6])))
+                detail["orphan_routes"] = [p for _r, p in orphan[:20]]
 
     if probs:
         return False, "\n\n".join(probs)[:4000], detail

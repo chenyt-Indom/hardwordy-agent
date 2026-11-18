@@ -3467,21 +3467,21 @@ html[data-theme="light"] body {
   .composer-tools { display: flex; gap: 8px; overflow-x: auto; }
 }
 
-/* 「新版本已就绪」提示条：右下角小卡片，position:fixed 不占布局、不撑页面 */
+/* 「新版本已就绪」提示条
+   2026-11-18 用户报「弹窗压住正文」：原来是 position:fixed; top:128px; right:18px，
+   固定悬浮在消息区正上方，截图确认它盖住了正文顶部的几行文字。
+   改成消息流里的 sticky 条 —— 占真实位置、不覆盖任何内容；
+   滚动时贴住顶部，仍随时能点到「立即重启」。 */
 .restart-banner {
-  position: fixed;
-  right: 18px;
-  /* 2026-11-13：原来是 bottom: 92px —— 那个值正好落在输入框和「发送」键上，
-     像素采样确认它与输入框纵向重叠约 25px、把发送按钮上半截盖住了。
-     底部栏现在要做成一体式，这条提示浮在上面更显突兀，
-     干脆挪到右上角（消息区上方），彻底不碰底部。 */
-  top: 128px;
-  bottom: auto;
-  z-index: 9998;
+  position: sticky;
+  top: 0;
+  align-self: stretch;
+  z-index: 30;
   display: none;
   align-items: center;
   gap: 8px;
-  max-width: min(420px, calc(100vw - 36px));
+  width: 100%;
+  box-sizing: border-box;
   padding: 8px 10px;
   border-radius: 10px;
   background: #1f2937;
@@ -3508,6 +3508,54 @@ html[data-theme="light"] body {
 .restart-banner .rb-go:disabled { opacity: .6; cursor: default; }
 .restart-banner .rb-later { background: transparent; color: #cbd5e1; border-color: #475569; }
 .restart-banner .rb-later:hover { color: #fff; border-color: #94a3b8; }
+
+/* 自检缓存列表（2026-11-18 补）
+   app.js 里用到了 st-cache-list / -item / -time / -lv / -found / -del / -empty，
+   但样式表里**一个都没有** —— 元素是裸 span，时间和结论挤在一行互相重叠。
+   侧边栏只有 260px 左右，这里用两行网格：第一行时间，第二行徽标+结论，删除按钮靠右跨两行。 */
+.st-cache-list { display: flex; flex-direction: column; gap: 4px; }
+.st-cache-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "time time del"
+    "lv found del";
+  align-items: center;
+  column-gap: 6px;
+  row-gap: 1px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, .10);
+  font-size: 11.5px;
+  line-height: 1.25;
+  min-width: 0;
+}
+.st-cache-item.ok { background: rgba(34, 197, 94, .10); }
+.st-cache-item.warn { background: rgba(239, 68, 68, .10); }
+.st-cache-time { grid-area: time; font-variant-numeric: tabular-nums; opacity: .85; }
+.st-cache-lv { grid-area: lv; white-space: nowrap; }
+.st-cache-found {
+  grid-area: found;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-cache-del {
+  grid-area: del;
+  align-self: center;
+  flex: 0 0 auto;
+  padding: 0 3px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: .55;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.st-cache-del:hover { opacity: 1; }
+.st-cache-empty { padding: 4px 2px; font-size: 12px; opacity: .7; }
 
 /* ============================================================
    可读性增强（2026-11-08）
