@@ -312,6 +312,27 @@ def _now_str() -> str:
     return f"{now.year}年{now.month}月{now.day}日（星期{wd}），{now.strftime('%H:%M:%S')}"
 
 
+# 会话 id 为空时的记忆兜底（详见 _memory_sid）
+_NO_SESSION_SID = "_nosession"
+
+
+def _memory_sid(session: str) -> str:
+    """记忆层用的会话 id —— 空会话给一个**固定兜底值**。
+
+    ⚠️ 为什么必须有：`memory.set_short("")` 会**静默返回空 dict**（不报错、不写盘），
+    于是 session 为空时，提炼出来的所有「短期|」要点**一条都落不下去**。
+    实测（2026-11-18）：`_apply_extract("短期|…", session="")` 落地 **0 条**，
+    同一行换成 "sess123" 就是 1 条。更糟的是落地 0 条 → 提炼返回 "empty"
+    → 缓冲区被当成"处理完了"清空 → 这几轮内容**永久丢失**，日志里一个字都没有。
+
+    前端在「清过浏览器缓存 / 一个历史会话都没有」时确实会传空 session
+    （app.js: `sessionId = localStorage.getItem("ai_session_id") || ""`），
+    所以这不是假想情况。兜底成固定 id：这些对话共享一份短期记忆，总比全丢好。
+    """
+    s = (session or "").strip()
+    return s or _NO_SESSION_SID
+
+
 def _memory_ctx(session: str, last_user_text: str, cfg: dict) -> str:
     """组装要注入的**记忆**内容（长期+短期 + 目标/计划的用法说明）。
 
@@ -333,7 +354,7 @@ def _memory_ctx(session: str, last_user_text: str, cfg: dict) -> str:
     if not (cfg or {}).get("memory_enabled", True):
         return ""
     try:
-        ctx = memory.build_context(session, query=last_user_text)
+        ctx = memory.build_context(_memory_sid(session), query=last_user_text)
     except Exception:
         logger.warning("读取记忆失败（本轮不注入）", exc_info=True)
         return ""
@@ -1610,7 +1631,57 @@ def _looks_memorable(text: str) -> bool:
 # 每次带上**最近几轮**对话，前几轮讲的事不会漏。
 _MEM_DEBOUNCE_SEC = 6.0        # 停手这么久才动
 _MEM_FORCE_AFTER_SEC = 45.0    # 连续聊天时，最迟这么久必须提炼一次
-_MEM_WINDOW_TURNS = 8          # 每次最多带上最近 8 条消息（约 4 轮）
+_MEM_WINDOW_TURNS = 8          # 首次送进提炼时带最近 8 条消息（约 4 轮）
+# ⚠️ 上面这个只是**第一次**取窗口的大小，**不是缓冲区的容量**。
+#    缓冲区容量见 _MEM_BUF_MAX —— 两者混用正是下面 _merge_turns 里说的事故来源。
+_MEM_BUF_MAX = 40              # 缓冲区最多积压 40 条消息（约 20 轮）
+_MEM_SEQ_KEY = "_n"            # 缓冲区消息副本上的自增序号（仅本模块内部用）
+
+
+def _merge_turns(old: list, new: list, st: dict) -> list:
+    """把新来的消息并进提炼缓冲区：**按序号去重、大上限、绝不按 8 条截断**。
+
+    ⚠️ 原来这里是 `(旧 + 新)[-_MEM_WINDOW_TURNS:]`（8 条）。两个后果都实测到了：
+
+      ① 提炼一次要 85~250 秒，用户在这期间连聊几轮，**最早的整批被挤出缓冲区**
+         （实测：8 条 + 4 条 → 只剩 8 条，"第一批第0条"消失）；
+      ② 挤出之后 `_run_memory_extract` 里的 `n_consumed = len(turns)` 就和缓冲区
+         **错位**了：`rest = st["turns"][n_consumed:]` 取到空列表，
+         于是**连新来的内容也一起被清空**（实测：3 条新内容全部丢失，日志里一个字没有）。
+
+    现在：每条打一个自增序号 `_n`，结束时按序号移除"本次真正提炼过的"，
+    与缓冲区长度无关；上限放到 40 条，真超了**打日志**而不是静默丢。
+    """
+    seq = int(st.get("seq") or 0)
+    out, seen = [], set()
+    for m in list(old or []):
+        if not isinstance(m, dict):
+            continue
+        key = (m.get("role"), str(m.get("content") or ""), m.get(_MEM_SEQ_KEY))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    for m in list(new or []):
+        if not isinstance(m, dict):
+            continue
+        seq += 1
+        item = {"role": m.get("role"), "content": m.get("content"),
+                _MEM_SEQ_KEY: seq}
+        key = (item["role"], str(item["content"] or ""), seq)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    st["seq"] = seq
+    if len(out) > _MEM_BUF_MAX:
+        dropped = len(out) - _MEM_BUF_MAX
+        logging.getLogger("uvicorn.error").warning(
+            "记忆提炼积压 %d 条，超过上限 %d，丢弃最早的 %d 条"
+            "（提炼速度跟不上聊天，这几轮可能记不上）",
+            len(out), _MEM_BUF_MAX, dropped)
+        out = out[-_MEM_BUF_MAX:]
+    return out
 
 _mem_pending: dict = {}
 _mem_lock = threading.Lock()
@@ -1679,7 +1750,8 @@ def _schedule_memory_extract(session: str, turns: list, model: str, cfg: dict,
         if old_timer:
             old_timer.cancel()
         first_ts = float(st.get("first_ts") or now)
-        buf = (list(st.get("turns") or []) + list(turns or []))[-_MEM_WINDOW_TURNS:]
+        # ⚠️ 不能再用 [-_MEM_WINDOW_TURNS:] 截断（见 _merge_turns 的说明）
+        buf = _merge_turns(st.get("turns") or [], turns or [], st)
         st["turns"] = buf
         st["first_ts"] = first_ts
         st["timer"] = None
@@ -1715,9 +1787,12 @@ def _run_memory_extract(session: str, model: str, cfg: dict) -> None:
         turns = list(st.get("turns") or [])
         # ⚠️ **先别清空 turns**：万一这次被用户打断（或失败），
         # 这批对话还得留着下次再来一遍，否则这几轮的内容就永远记不上了。
-        # 记下这次**真正要提炼**的条数：结束时只移除这一段，
-        # 提炼期间新并进来的轮次必须留着（否则它们一次都没提炼就消失）。
-        n_consumed = len(turns)
+        # 记下这次**真正要提炼到哪一条**（按序号，不按条数）：
+        # 结束时只移除到这条为止的内容，提炼期间新并进来的轮次必须留着。
+        # ⚠️ 原来用 `n_consumed = len(turns)` 当下标 —— 一旦缓冲区在此期间
+        # 被合并/截断过，下标就和实际内容**错位**，`rest` 取到空列表，
+        # 新来的内容被一起清掉（实测：3 条新内容全丢，无日志）。
+        cut = max([int(m.get(_MEM_SEQ_KEY) or 0) for m in turns] or [0])
         st["first_ts"] = time.time()
         st["running"] = True
         _mem_pending[session] = st
@@ -1745,12 +1820,13 @@ def _run_memory_extract(session: str, model: str, cfg: dict) -> None:
             # 「模型说这轮没什么可记的」（empty）也算处理完了 ——
             # 原来它返回 False，缓冲区永不清空，同一批 turns 每轮都重新提炼一遍。
             if status != "failed":
-                # ⚠️ 只移除**这次真正提炼过**的那几条（前 n_consumed 条）。
+                # ⚠️ 只移除**这次真正提炼过**的那几条（序号 <= cut）。
                 # 原来是无条件 `st["turns"] = []`，于是提炼期间新并进来的轮次
                 # 一次都没被提炼就静默消失了。
                 # 实测（2026-11-18）：第一轮在提炼时第二轮进来，跑完缓冲区清空，
                 # 第二轮内容**从未被提炼过**，用户说的那句等于没说过。
-                rest = list(st.get("turns") or [])[n_consumed:]
+                rest = [m for m in (st.get("turns") or [])
+                        if int(m.get(_MEM_SEQ_KEY) or 0) > cut]
                 st["turns"] = rest
                 more = bool(rest)
             _mem_pending[session] = st
@@ -2164,6 +2240,25 @@ def _revise_point(old: str, new: str, kind: str, session: str) -> bool:
     return memory.merge_short(session, new)
 
 
+def _clip_point(text: str, cap: int = 200) -> str:
+    """超长要点按**句子边界**截断，别在数字/半句中间硬切。
+
+    ⚠️ 原来是 `val[:120]` 硬截断。而提示词自己明确写着「数字与依据**不受字数限制**，
+    宁可这条长一点也要把数据写全」—— 120 字很容易把「报名费800元、2027年3月开班、
+    学校合作项目要求」这类关键数据切掉半截。
+    实测（2026-11-18）：一条 300 字的目标要点存进去正好 120 字，末尾停在半句上。
+    """
+    text = (text or "").strip()
+    if len(text) <= cap:
+        return text
+    cut = text[:cap]
+    for sep in ("。", "；", ";", "，", ","):
+        i = cut.rfind(sep)
+        if i >= cap * 0.6:          # 太靠前就别切了，不然只剩半句话
+            return cut[:i + 1]
+    return cut
+
+
 def _apply_extract(text: str, session: str, limit: int = 4) -> int:
     """把提炼结果按行并入记忆，返回真正生效的条数。
 
@@ -2176,6 +2271,8 @@ def _apply_extract(text: str, session: str, limit: int = 4) -> int:
     """
     if not text:
         return 0
+    # 空 session 兜底：否则下面所有 merge_short/update_short/drop_short 都静默失败
+    session = _memory_sid(session)
     kept = 0
     for raw in text.splitlines():
         line = _clean_extract_line(raw)
@@ -2216,7 +2313,7 @@ def _apply_extract(text: str, session: str, limit: int = 4) -> int:
                 val = (" ".join(rest) if rest else verb).strip().strip("，。；;、 ")
                 if len(val) < 3:
                     continue
-                val = val[:120]
+                val = _clip_point(val, 200)
                 ok = memory.merge_long(val) if kind in _KIND_LONG else memory.merge_short(session, val)
                 if ok:
                     kept += 1
@@ -2225,6 +2322,30 @@ def _apply_extract(text: str, session: str, limit: int = 4) -> int:
         if kept >= limit:
             break
     return kept
+
+
+def _long_for_prompt(cur: str, budget: int = 6000) -> str:
+    """把长期记忆压到提炼模型**看得见**的长度：**头部稳定档案 + 尾部最新更新**。
+
+    ⚠️ 原来是 `known_long[-2500:]` —— 只给**最后** 2500 字。长期记忆上限 15000 字，
+    于是到上限时模型只看得到 17%，**最早的姓名/身份/专业全落在看不见的那 83% 里**。
+    实测（2026-11-18，灌到 14975 字）：「用户姓名：陈宇桐」不在可见范围内。
+    后果是提示词那句「【已知信息】里已经有的内容**绝对不要重复记**」根本做不到 ——
+    模型看不到，只能重记一遍 → 档案堆出同义句 → 更快顶到上限，恶性循环。
+
+    现在两头都给：头部是稳定档案（姓名/身份/偏好，最该被去重），
+    尾部是最近更新的目标与进展。中间省略并明确告知，免得它以为"总共就这些"。
+    """
+    cur = (cur or "").strip()
+    if len(cur) <= budget:
+        return cur
+    head_n = budget // 3
+    tail_n = budget - head_n
+    return (cur[:head_n]
+            + "\n…（中间省略了若干条已存在的记忆，仅因篇幅未列出 —— "
+              "这些**仍然是已知信息**，不要凭猜测重复记录；"
+              "要改某条时请只针对上面明确列出的条目）…\n"
+            + cur[-tail_n:])
 
 
 def _auto_extract_memory(session: str, turns: list, model: str, cfg: dict,
@@ -2257,8 +2378,9 @@ def _auto_extract_memory(session: str, turns: list, model: str, cfg: dict,
     if not convo:
         return "empty"
     known_long = memory.get_long().strip() or "（暂无）"
-    known_short = memory.get_short(session).strip() or "（暂无）"
-    prompt = _EXTRACT_PROMPT.format(long=known_long[-2500:], short=known_short[-800:],
+    known_short = memory.get_short(_memory_sid(session)).strip() or "（暂无）"
+    prompt = _EXTRACT_PROMPT.format(long=_long_for_prompt(known_long),
+                                    short=known_short[-800:],
                                     convo=convo)
     text = _llm_extract(prompt, model, cfg, abort=abort)
     if not text:

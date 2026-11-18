@@ -154,22 +154,44 @@ def _split_items(text: str) -> list:
     return [p.strip() for p in re.split(r"[；;\n]", text or "") if p.strip()]
 
 
-def _trim(text: str, cap: int) -> str:
+# 长期记忆超上限时，**最早写入的这几条不参与淘汰**。
+# 它们恰恰是姓名、身份、专业这类最稳定的档案，也恰好是最早写进来的。
+_TRIM_PROTECT = 5
+
+
+def _trim(text: str, cap: int, protect: int = 0) -> str:
     """超上限时从**最早**的条目开始丢（新的更重要）。
 
     ⚠️ 单条就超长时**不能**一路 pop 到底：那样会返回空串，而 set_short
     看到空串会把整个会话的记忆删掉（`shorts.pop(sid)`）。实测一个 1500 字的
     单条要点进来，该对话的短期记忆直接消失。超长就截断保留。
+
+    ⚠️⚠️ `protect`：给**前 N 条豁免权**。淘汰方向是"丢最早的"，
+    而最早的那几条正是姓名/身份/专业这类**最该保住的档案**。
+    实测（2026-11-18，长期记忆灌到 14975 字）：
+    「用户姓名：陈宇桐」和「用户专业：人工智能技术应用」**双双被挤掉**，
+    第一条变成了「填充条目0452」—— 用户看到的现象就是"我的名字怎么没了"。
     """
     text = (text or "").strip()
     if len(text) <= cap:
         return text
     items = _split_items(text)
-    while items and len("；".join(items)) > cap:
-        items.pop(0)
-    if not items:
+    head = items[:protect] if protect > 0 else []
+    body = items[protect:] if protect > 0 else list(items)
+    while body and len("；".join(head + body)) > cap:
+        body.pop(0)
+    if not body:
+        kept = "；".join(head)
+        if len(kept) <= cap:
+            if protect > 0:
+                logger.warning("记忆已到上限 %d 字，可淘汰的条目已全部丢完，"
+                               "仅保留最早的 %d 条稳定档案", cap, len(head))
+            return kept
         return text[:cap]
-    return "；".join(items)
+    out = "；".join(head + body)
+    if len(out) > cap:
+        logger.warning("记忆超上限 %d 字且压不下去（当前 %d）", cap, len(out))
+    return out
 
 
 def _tokenize(text):
@@ -203,7 +225,7 @@ def get_long_doc() -> dict:
 
 @_locked
 def set_long(content: str) -> dict:
-    content = _trim(content, LONG_CAP)
+    content = _trim(content, LONG_CAP, protect=_TRIM_PROTECT)
     doc = {"content": content, "updated_at": _now()}
     _write_json(LONG_FILE, doc)
     return doc
@@ -501,6 +523,28 @@ def drop_short(sid: str, point: str, threshold: float = 0.5) -> bool:
 # =====================================================================
 #  注入上下文
 # =====================================================================
+CTX_LONG_CAP = 6000     # 注入上下文时长期记忆的上限（字）
+
+
+def _ctx_trim_long(lng: str, cap: int = CTX_LONG_CAP) -> str:
+    """长期记忆过长时，注入**头部稳定档案 + 尾部最新内容**。
+
+    ⚠️ 原来是**全文注入**。长期记忆上限 15000 字，实测灌到 14975 字时
+    `build_context` 返回 15064 字 —— 而这块在 main.py 里被算进 `budget_sys`
+    （`sys_prompt + mem_ctx + rag_ctx`），于是**聊天历史被裁掉一大半**：
+    用户看到的现象是"聊到一半它不记得刚才说什么了"，根子在这里而不在记忆本身。
+    现在给一个上限，超了按头尾摘录并明确告知可以检索。
+    """
+    if len(lng) <= cap:
+        return lng
+    head_n = cap // 3
+    tail_n = cap - head_n
+    logger.warning("长期记忆 %d 字，超过注入上限 %d，按头尾摘录注入", len(lng), cap)
+    return (lng[:head_n]
+            + "\n…（记忆较长，中间部分未逐条列出；用户问到具体某条时用 search_memory 查）…\n"
+            + lng[-tail_n:])
+
+
 def build_context(sid: str, query: str = "") -> str:
     """拼装注入 system prompt 的记忆：长期（全局）+ 短期（本对话）。"""
     lng = get_long().strip()
@@ -510,7 +554,7 @@ def build_context(sid: str, query: str = "") -> str:
     parts = ["【记忆】以下是已经知道的用户信息，回答时**直接用**，不要再问一遍。"
              "有新信息用 remember 工具补充（是**追加**，不用重写旧的）："]
     if lng:
-        parts.append(f"【长期记忆 · 所有对话通用】\n{lng}")
+        parts.append(f"【长期记忆 · 所有对话通用】\n{_ctx_trim_long(lng)}")
     if sht:
         parts.append(f"【短期记忆 · 仅本次对话】\n{sht}")
     return "\n\n".join(parts)
