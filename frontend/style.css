@@ -796,6 +796,45 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
 }
 .canvas-edit-bar[hidden] { display: none; }
+
+/* 画布浮层（2026-11-18）：左侧「🎨 画布」按钮打开，显示最近一次画布，
+   不用在聊天记录里往回翻着找。z-index 55 < .canvas-edit-bar 的 60，
+   所以选中卡片时底部「就这块改」输入框仍浮在最上层。 */
+.cv-panel {
+  position: fixed; inset: 0; z-index: 55;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: rgba(0, 0, 0, .45);
+}
+.cv-panel[hidden] { display: none; }
+.cv-panel-box {
+  display: flex; flex-direction: column;
+  width: min(940px, 100%); max-height: min(82vh, 880px);
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius-md); box-shadow: 0 18px 50px rgba(0, 0, 0, .32);
+  overflow: hidden;
+}
+.cv-panel-hd {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+}
+.cv-panel-tip { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); }
+.cv-panel-x {
+  flex: none; width: 28px; height: 28px; padding: 0; cursor: pointer;
+  background: transparent; color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.cv-panel-x:hover { background: rgba(127, 127, 127, .14); }
+.cv-panel-body { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px 16px; }
+.cv-panel-empty { padding: 30px 12px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.9; }
+/* 卡片强调色（语音画布改色后显示在标题条右侧的小圆点） */
+.canvas-card-color {
+  flex: none; width: 10px; height: 10px; border-radius: 50%;
+  margin-left: 4px; box-shadow: 0 0 0 1px rgba(255, 255, 255, .28);
+}
+@media (max-width: 768px) {
+  .cv-panel { padding: 8px; }
+  .cv-panel-box { max-height: 88vh; }
+}
 .canvas-edit-id {
   flex: none;
   font-family: ui-monospace, Consolas, monospace;

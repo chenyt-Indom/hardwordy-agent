@@ -374,6 +374,18 @@
     idEl.textContent = id;
     hd.appendChild(kind);
     hd.appendChild(idEl);
+    // 强调色：语音画布「改成红色」会往卡片上写 color 字段。
+    // 这里原来**只存不渲染**，改完色卡片一点变化都看不出来（2026-11-18 实测发现）。
+    const accent = String(b.color || "").trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(accent)) {
+      el.style.borderColor = accent;
+      el.style.boxShadow = "inset 0 0 0 1px " + accent;
+      const chip = document.createElement("span");
+      chip.className = "canvas-card-color";
+      chip.style.background = accent;
+      chip.title = "卡片强调色 " + accent;
+      hd.appendChild(chip);
+    }
     el.appendChild(hd);
 
     // ---- 正文 ----

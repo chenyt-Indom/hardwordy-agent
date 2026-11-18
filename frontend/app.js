@@ -235,6 +235,9 @@
         '<p class="tq-empty">推荐面板还没加载好，请稍后再点一次。</p>'
       );
     };
+    // 【🎨 画布】：把画布拎成浮层看，不用在聊天记录里往回翻
+    const bc = document.getElementById("btnCanvas");
+    if (bc) bc.onclick = () => { openCanvasPanel(); };
     refreshTopBadges();
     // 每 60 秒刷一次角标；页面隐藏时不刷，省电
     setInterval(() => {
@@ -1237,6 +1240,105 @@
     };
     canvasCtx = { cards: cards, remount: remount };
     return grid;
+  }
+
+  // ---------- 左侧「🎨 画布」按钮：把画布拎出来看（2026-11-18）----------
+  // 画布原来只长在某条回复的气泡里，消息一多就得往回翻着找。
+  // 这个浮层显示「最近一次画布」；一次都还没有时，退回显示图库最近 6 张图当卡片
+  // （否则这个按钮点开是空的，等于没做）。
+  let cvPanel = null;
+  let cvPanelPrevCtx = null;
+
+  function closeCanvasPanel() {
+    if (!cvPanel) return;
+    cvPanel.hidden = true;
+    hideCanvasEditBar();
+    canvasCtx = cvPanelPrevCtx;        // 关掉就把上下文还给聊天里那块画布
+    cvPanelPrevCtx = null;
+  }
+
+  // 图库最近 6 张图 → 画布卡片（content 用 markdown 图片行，和正文里同一种写法）
+  async function recentImageCards() {
+    try {
+      const r = await fetch("/api/library/images");
+      const j = await r.json();
+      const list = (j && Array.isArray(j.images)) ? j.images.slice(0, 6) : [];
+      return list.map((m, i) => ({
+        id: "cv" + i,
+        type: "image",
+        content: "![" + String(m.name || "图片") + "](/api/library/images/" + m.id + "/raw)",
+      }));
+    } catch (e) { return []; }
+  }
+
+  async function openCanvasPanel() {
+    if (!cvPanel) {
+      const wrap = document.createElement("div");
+      wrap.className = "cv-panel";
+      wrap.hidden = true;
+      wrap.innerHTML = '<div class="cv-panel-box">'
+        + '<div class="cv-panel-hd"><b>🎨 画布</b>'
+        + '<span class="cv-panel-tip">点一张卡片，底部会出现「就这块改」</span>'
+        + '<button type="button" class="cv-panel-x" title="关闭">✕</button></div>'
+        + '<div class="cv-panel-body"></div></div>';
+      wrap.addEventListener("click", (e) => { if (e.target === wrap) closeCanvasPanel(); });
+      wrap.querySelector(".cv-panel-x").onclick = closeCanvasPanel;
+      document.body.appendChild(wrap);
+      cvPanel = wrap;
+    }
+    const body = cvPanel.querySelector(".cv-panel-body");
+    body.innerHTML = "";
+    cvPanel.hidden = false;
+
+    // 优先用「最近一次画布」；没有就拿图库最近几张图当卡片
+    let cards = (canvasCtx && canvasCtx.cards && canvasCtx.cards.length) ? canvasCtx.cards : null;
+    if (!cards) cards = await recentImageCards();
+    if (cvPanel.hidden) return;        // 等接口的这会儿用户已经关掉了
+    if (!cards || !cards.length) {
+      body.innerHTML = '<div class="cv-panel-empty">还没有画布。<br>'
+        + '让我先回一条带图或带文件的回复，这里就有卡片可以点了。</div>';
+      return;
+    }
+
+    let grid = null;
+    const mount = (next) => {
+      const A = window.__Artifacts;
+      try {
+        if (A && typeof A.renderCanvas === "function") {
+          return A.renderCanvas(next, {
+            key: typeof A.canvasKeyFor === "function" ? A.canvasKeyFor(next) : "panel",
+            onPick: (pick) => {
+              if (!pick) { canvasPick = null; hideCanvasEditBar(); return; }
+              canvasPick = pick;       // send() 会取走并拼进下一条消息
+              showCanvasEditBar(pick);
+            },
+          });
+        }
+      } catch (e) { return null; }     // 画布渲染失败就降级成提示，不影响别的功能
+      return null;
+    };
+    grid = mount(cards);
+    if (!grid) {
+      body.innerHTML = '<div class="cv-panel-empty">画布组件没加载出来，'
+        + '按 Ctrl+F5 刷新一下再试。</div>';
+      return;
+    }
+    body.appendChild(grid);
+
+    // 浮层里的画布成为「当前画布」：底部输入框改完就地重画这块，
+    // 而不是去改聊天记录里那块（关掉浮层时会把上下文还回去）
+    cvPanelPrevCtx = canvasCtx;
+    canvasCtx = {
+      cards: cards,
+      remount: (next) => {
+        const g2 = mount(next);
+        if (!g2) return false;
+        if (grid && grid.parentNode) grid.parentNode.replaceChild(g2, grid);
+        grid = g2;
+        canvasCtx.cards = next;
+        return true;
+      },
+    };
   }
 
   // ---------- 底部「就这块改」输入框（2026-11-19）----------
