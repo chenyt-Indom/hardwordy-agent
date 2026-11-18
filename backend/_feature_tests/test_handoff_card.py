@@ -1068,6 +1068,26 @@ def main():
     handoff.record_change("backend/_feature_tests/_pending_测试.py", "自迭代快照", 33, 0)
     _pa = len(handoff._read().get("changes") or [])
     check("record_change 跳过 _pending_ 快照", _pb == _pa, "%d -> %d" % (_pb, _pa))
+
+    # ---- 三种暂存都要拦：_pending_ / _tmp_ / _feature_tests 下无前缀中文名 .py ----
+    # 实测 2026-11-18：该目录下另有 14 个无前缀的中文名验收暂存脚本（如
+    # 「画布对话：回复变可拖拽卡片.py」），当时没进 changes 只是运气（还没被写入）。
+    for _sr in ("backend/_feature_tests/_pending_a.py",
+                "backend/_feature_tests/_tmp_a.py",
+                "backend/_feature_tests/画布对话：回复变可拖拽卡片.py",
+                "backend/_feature_tests/LLM_异常断点续跑.py"):
+        check("_is_scratch 拦暂存 " + _sr.split("/")[-1][:12],
+              handoff._is_scratch(_sr) is True, repr(_sr))
+    for _sr in ("backend/_feature_tests/test_handoff_card.py",
+                "backend/_feature_tests/test_map_city_level.py",
+                "backend/map_tools.py", "backend/handoff.py", "frontend/app.js"):
+        check("_is_scratch 不误杀真代码 " + _sr.split("/")[-1],
+              handoff._is_scratch(_sr) is False, repr(_sr))
+    _pb2 = len(handoff._read().get("changes") or [])
+    handoff.record_change("backend/_feature_tests/画布对话：回复变可拖拽卡片.py", "暂存", 5, 0)
+    check("record_change 跳过无前缀暂存脚本",
+          len(handoff._read().get("changes") or []) == _pb2,
+          "%d -> %d" % (_pb2, len(handoff._read().get("changes") or [])))
     _pd = {"ts": time.time(), "restarted_at": "2026-11-18 05:00:00",
            "reason": "t", "live_at": "2026-11-18 05:00:00", "dialog": [],
            "changes": [{"rel": "a.py", "note": "n", "added": 1, "removed": 0,

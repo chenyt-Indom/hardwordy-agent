@@ -982,8 +982,18 @@ def _is_scratch(rel) -> bool:
 
     实测 2026-11-18 的真实卡片：「最近 12 个」被 _tmp_verify_map.py 这类
     **已经删掉**的临时脚本占满，map_tools.py / amap.py 的真实改动一条都没露出来。
+
+    另有第三种：`_feature_tests/` 下**没有前缀**的中文名 .py（如「画布对话：回复变
+    可拖拽卡片.py」），也是自迭代写的验收暂存脚本 —— 实测 14 个、一条都没进
+    changes，但将来一旦被写入就会占名额。该目录里只有 `test_*.py` 是真测试。
     """
-    return os.path.basename(str(rel or "")).startswith(_SCRATCH_PREFIXES)
+    s = str(rel or "").replace("\\", "/")
+    base = os.path.basename(s)
+    if base.startswith(_SCRATCH_PREFIXES):
+        return True
+    if "/_feature_tests/" in s and base.endswith(".py") and not base.startswith("test_"):
+        return True
+    return False
 
 
 def _safe_rel(rel, cap: int = 120) -> str:
