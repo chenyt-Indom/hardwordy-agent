@@ -19,6 +19,7 @@ import os
 import re
 import json
 import time
+import hashlib
 import functools
 import threading
 import logging
@@ -230,7 +231,25 @@ def _size(path) -> int:
 
 
 def _safe_sid(sid) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]", "_", str(sid or ""))[:48]
+    """把任意 session id 变成安全的文件名片段。
+
+    ⚠️ 光做字符替换会**碰撞**，而碰撞的后果是两个对话共用一份短期记忆。
+    实测（2026-11-18）：`"中文对话"` 和 `"英文对话"` 都变成 `"____"`、
+    `"a.b"` 和 `"a b"` 都变成 `"a_b"`、`"x/y"` 和 `"x_y"` 都变成 `"x_y"`；
+    先 `set_short("a.b", …)` 再 `get_short("a b")` 直接读到了 A 的内容。
+    真实前端用的是 12 位 hex（`00db3090fb4f`），碰不到这个问题，但
+    `data/transcript/` 里确实躺着 `cm-____.jsonl`、`e2e-__.jsonl` 这类
+    被替换成下划线的归档 —— 只要 id 里出现中文/空格/点号，就可能串台。
+
+    修法：**只有在 sanitize 改动了原文、或超长被截断时**才补原 id 的短哈希；
+    纯安全字符的 id（包括所有真实 hex id）原样返回，老数据零迁移。
+    """
+    raw = str(sid or "")
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", raw)
+    if safe != raw or len(raw) > 48:
+        h = hashlib.md5(raw.encode("utf-8", "ignore")).hexdigest()[:8]
+        return (safe[:39] + "_" + h)[:48]
+    return safe[:48]
 
 
 def _norm_point(p: str) -> str:
@@ -331,6 +350,12 @@ def merge_long(point: str) -> bool:
     cur = get_long()
     if _already(cur, point):
         return False
+    flip = _neg_flip(cur, point)
+    if flip >= 0:
+        items = _split_items(cur)
+        items[flip] = point
+        set_long("；".join(items))
+        return True
     sup = _supersede(cur, point)
     if sup is not None:
         set_long(sup)
@@ -369,8 +394,70 @@ def _already(body: str, point: str) -> bool:
         if _neg_key(e) != pn:
             continue              # 一个肯定一个否定，不是同一条
         if point in e:
+            # ⚠️ 纯前缀不算涵盖：「条目1」被「条目10」包含，但两者是不同的东西。
+            # 实测（2026-11-18）60 条编号要点只落下 55 条 —— 缺的正是
+            # 1~9 这类"是别的编号前缀"的条目。真实场景：已记「2026年计划」，
+            # 新来「2026年计划表模板」是另一件事，不能因为含前缀就丢掉。
+            if _prefix_only(point, e):
+                continue
             return True           # 新要点被旧条目涵盖，确实已经有了
     return False
+
+
+def _prefix_only(short: str, long_: str) -> bool:
+    """short 是 long_ 的前缀扩展，且扩展部分是数字/字母（编号），不是补充说明。
+
+    「计划考网络工程师」→「计划考网络工程师，报名费800元」：扩展以「，」开头，
+    是补充信息，应当替换（返回 False）；
+    「条目1」→「条目10」：扩展以数字开头，是另一个编号，不是补充（返回 True）。
+    """
+    pos = (long_ or "").find(short)
+    if pos < 0:
+        return False
+    tail = long_[pos + len(short):]
+    return bool(tail) and (tail[0].isdigit() or tail[0].isalpha())
+
+
+def _bare(s: str) -> str:
+    """去掉否定标记和尾部语气词后的字面（只用于"是不是同一件事的正反说法"判断）。
+
+    ⚠️ 尾部语气词必须去：实测「打算考四级」→「不打算考四级**了**」，
+    不去"了"的话两边 bare 一个是「打算考四级」、一个是「打算考四级了」，
+    判不成同一件事，于是两条**并存**（用户的否定没生效）。
+    """
+    t = (s or "").replace("未来", "").replace("非常", "")
+    # ⚠️ 复合否定词必须**先整词删**：只删单字「没」会剩下「有每天跑步」，
+    # 和「每天跑步」对不上，实测这一条纠正就漏了。
+    # ⚠️ 只有「没有」需要整词删（否则剩个「有」）。
+    # 而「不想/不会/不能」**不能**整词删 —— 那会把「想/会/能」也删掉，
+    # 于是「想换工作」和「不想换工作」的 bare 对不上（实测 3 条纠正全漏）。
+    for w in ("没有", "不", "没", "无", "未", "别"):
+        t = t.replace(w, "")
+    t = t.strip().rstrip("了啦呢吧啊呀哦的嘛")
+    return t.strip()
+
+
+def _neg_flip(body: str, point: str):
+    """在正文里找「同一件事、但肯定/否定相反」的那一条，返回下标；没有返回 -1。
+
+    ⚠️ 修的是"改了口径却并存两句"（2026-11-18 实测）：
+    `_already` 遇到否定状态不同会 `continue`（本意是别把纠正当成重复丢掉），
+    但跳过之后 merge_* 只会**追加**，于是正文里同时留着
+    「用户不喜欢咖啡」和「用户喜欢咖啡」—— 模型读到两条互相矛盾的，
+    等于用户的纠正**从来没生效过**。
+    正确做法：认出这是同一件事的反面，**原地替换**。
+    """
+    pn = _neg_key(point)
+    pb = _bare(point)
+    if not pb:
+        return -1
+    for i, e in enumerate(_split_items(body)):
+        en = _norm_point(e)
+        if not en or _neg_key(en) == pn:
+            continue
+        if _bare(en) == pb:
+            return i
+    return -1
 
 
 def _supersede(body: str, point: str):
@@ -386,6 +473,11 @@ def _supersede(body: str, point: str):
         if not en or en == point:
             continue
         if en in point and len(point) > len(en) and _neg_key(en) == _neg_key(point):
+            # ⚠️ 同样是纯前缀的问题：已有「并发条目1」，新来「并发条目10」，
+            # 会被当成"同一件事的更详细版本"把旧条目**原地替换掉**。
+            # 实测 3 线程各写 60 条编号要点，最终只剩 55 条（被吃了 5 条）。
+            if _prefix_only(en, point):
+                continue
             items[i] = point
             return "；".join(items)
     return None
@@ -445,6 +537,12 @@ def merge_short(sid: str, point: str) -> bool:
     cur = get_short(sid)
     if _already(cur, point):
         return False
+    flip = _neg_flip(cur, point)
+    if flip >= 0:
+        items = _split_items(cur)
+        items[flip] = point
+        set_short(sid, "；".join(items))
+        return True
     sup = _supersede(cur, point)
     if sup is not None:
         set_short(sid, sup)
@@ -891,25 +989,65 @@ def _rename(path: str) -> None:
 #  历史会话归档（transcript）
 # =====================================================================
 def _transcript_path(session_id: str):
+    """归档文件路径。
+
+    ⚠️ 和 _safe_sid 同一个坑：字符替换 + 截断都会碰撞。
+    实测（2026-11-18）两个只有末尾不同的长 id（前 40 字符相同）
+    **落到了同一个 .jsonl**，两个对话的历史混在一起 —— 释放时会被
+    当成同一个对话一起沉淀，内容和归属全乱。
+    同样只在"确实改动过原文"时补哈希，纯安全字符的 id 文件名保持不变。
+    """
     os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", session_id or "session")[:40]
+    raw = session_id or "session"
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", raw)
+    if safe != raw or len(raw) > 40:
+        h = hashlib.md5(raw.encode("utf-8", "ignore")).hexdigest()[:8]
+        safe = (safe[:31] + "_" + h)[:40]
+    else:
+        safe = safe[:40]
     return os.path.join(TRANSCRIPT_DIR, f"{safe}.jsonl")
 
 
+# 单条归档消息的上限。超过就**保留头尾**，而不是只留前面 2000 字。
+# 实测（2026-11-18）：4008 字的消息进来，原来的 `[:2000]` 把结尾的
+# 「结尾重点」直接切掉了 —— 而用户真正想问的结论往往就在最后一句。
+_TRANSCRIPT_MSG_CAP = 2000
+
+
+def _clip_transcript_msg(text: str) -> str:
+    text = str(text or "")
+    if len(text) <= _TRANSCRIPT_MSG_CAP:
+        return text
+    half = _TRANSCRIPT_MSG_CAP // 2
+    return text[:half] + "…（中间省略）…" + text[-half:]
+
+
 def save_transcript(session_id: str, messages: list):
+    """把一轮对话追加进归档（jsonl）。
+
+    ⚠️ 必须**先拼成一个字符串再一次 write**，并且整体拿锁。
+    原来逐行 `f.write()` 且没有锁：6 个线程各写 40 轮，实测只落下
+    473/480 行，还产生了 **1 行坏 JSON** —— 两个线程的写入交错在了一行里。
+    坏行会被 `read_transcript` 静默跳过，等于那几条对话**永久消失**，
+    而释放归档时正是靠这些行来沉淀记忆的。
+    """
     if not session_id:
         return
     path = _transcript_path(session_id)
-    with open(path, "a", encoding="utf-8") as f:
-        for msg in messages:
-            if msg.get("role") not in ("user", "assistant"):
-                continue
-            content = msg.get("content") or ""
-            if not content or len(str(content)) < 2:
-                continue
-            f.write(json.dumps({"role": msg["role"], "content": str(content)[:2000],
-                                "ts": _now()}, ensure_ascii=False) + "\n")
-        f.write(json.dumps({"role": "sep", "ts": _now()}, ensure_ascii=False) + "\n")
+    buf = []
+    for msg in messages:
+        if msg.get("role") not in ("user", "assistant"):
+            continue
+        content = msg.get("content") or ""
+        if not content or len(str(content)) < 2:
+            continue
+        buf.append(json.dumps({"role": msg["role"],
+                               "content": _clip_transcript_msg(content),
+                               "ts": _now()}, ensure_ascii=False) + "\n")
+    buf.append(json.dumps({"role": "sep", "ts": _now()}, ensure_ascii=False) + "\n")
+    with _MEM_LOCK:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("".join(buf))
     _index_touch()      # 历史会话也是记忆的一部分，新内容要能被检索到
 
 
