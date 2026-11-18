@@ -432,30 +432,55 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
     if thinking and reasoning_effort:
         body["reasoning_effort"] = reasoning_effort
 
-    try:
-        resp = _session().post(
-            f"{BASE}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            },
-            json=body,
-            stream=True,
-            timeout=TIMEOUT,
-            proxies=NO_PROXY_MAP,
-        )
-    except requests.RequestException as e:
-        # 注意：异常消息里可能带 URL（不含 Key，但万一有 header 回显也要打码）
-        # 超时单独归类：调用方据此切 ollama 或把中间结果落盘续跑
-        _code = _code_for_exc(e)
-        # 断点续跑：把本轮已收到的消息与失败原因落盘，下一轮可从这里读回上下文
+    # ⚠️ 2026-11-18 修：这条路径**原来一次都不重试**。
+    #   2026-11-18 12:39 的定时反思就是一次 ConnectTimeout 直接挂的
+    #   （原话：「连接 DeepSeek 失败：... Max retries exceeded ... connect timeout=10」）。
+    #   带工具的 chat_stream_with_tools 早就有 3 次重试，纯文本这条却没有 —— 纯属漏了。
+    #   两条路径必须一致：550 换连接重试；连接类异常重试 2 次再放弃。
+    resp = None
+    last_exc = None
+    for _attempt in range(3):
         try:
-            _save_checkpoint(messages, model, _code, str(e))
-        except Exception:
-            logger.debug("checkpoint save failed", exc_info=True)
-        raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(e)}",
-                            code=_code) from None
+            resp = _session().post(
+                f"{BASE}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                json=body,
+                stream=True,
+                timeout=TIMEOUT,
+                proxies=NO_PROXY_MAP,
+            )
+        except requests.RequestException as e:
+            last_exc = e
+            if _attempt < 2:
+                time.sleep(0.4)
+                continue
+            # 注意：异常消息里可能带 URL（不含 Key，但万一有 header 回显也要打码）
+            # 超时单独归类：调用方据此切 ollama 或把中间结果落盘续跑
+            _code = _code_for_exc(e)
+            # 断点续跑：把本轮已收到的消息与失败原因落盘，下一轮可从这里读回上下文
+            try:
+                _save_checkpoint(messages, model, _code, str(e))
+            except Exception:
+                logger.debug("checkpoint save failed", exc_info=True)
+            raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(e)}",
+                                code=_code) from None
+        if resp.status_code == 550 and _attempt < 2:
+            # 同 with_tools：本机会随机落到腾讯 EdgeOne CDN，它对大 POST 概率性
+            # 回 550（Content-Length: 0）。换一条连接常常就落到真实服务器。
+            try:
+                resp.close()
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+            time.sleep(0.4)
+            continue
+        break
+    if resp is None:
+        _code = _code_for_exc(last_exc) if last_exc else "network"
+        raise DeepSeekError(f"连接 DeepSeek 失败：{scrub(last_exc)}", code=_code)
 
     # 非 200：把响应体前 300 字符带出去（已脱敏），前端能看懂是余额不足还是 Key 错
     if resp.status_code != 200:
