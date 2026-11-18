@@ -381,8 +381,19 @@ def _snapshot_long(old: str) -> str:
     """把即将被覆盖的长期记忆留一份（最多保留最近 20 份）。"""
     d = os.path.join(DATA_DIR, "_自动备份")
     os.makedirs(d, exist_ok=True)
-    p = os.path.join(d, "long_term-%s.json" % time.strftime("%Y%m%d-%H%M%S"))
-    with open(p, "w", encoding="utf-8") as f:
+    # ⚠️ 文件名原来只到「秒」，同一秒内两次骤减会互相覆盖 —— 而保护机制本身丢备份
+    # 是最讽刺的一种丢数据（实测 2026-11-19 02:11：连续两次骤减只剩后一份）。
+    # 用 O_EXCL 原子占位 + 递增后缀，保证每份备份都是独立文件。
+    base = os.path.join(d, "long_term-%s" % time.strftime("%Y%m%d-%H%M%S"))
+    p, n = base + ".json", 0
+    while True:
+        try:
+            fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            n += 1
+            p = "%s-%d.json" % (base, n)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump({"content": old, "updated_at": _now()}, f, ensure_ascii=False)
     logger.warning("长期记忆将被大幅缩减，已自动备份到 %s（原 %d 字）", p, len(old))
     try:
