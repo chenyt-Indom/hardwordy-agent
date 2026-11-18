@@ -41,7 +41,10 @@
     if (!box) return;
     box.textContent = "加载中…";
     try {
-      const r = await fetch("/api/actlog");
+      // ⚠️ 2026-11-19 实测：原来打的是 /api/actlog —— 这个端点**根本不存在**（404），
+      //    所以这块就算有 HTML 也永远是「读取失败」。后端只有 /api/timeline 和
+      //    /api/selfiter/actlog，两者同一份数据；用 timeline（字段已修好、无需鉴权）。
+      const r = await fetch("/api/timeline");
       const data = await r.json();
       const items = Array.isArray(data) ? data : (data.items || data.logs || []);
       const recent = items.slice(-5).reverse();
@@ -49,7 +52,9 @@
       box.innerHTML = recent.map((it) => {
         const t = it.time || it.ts || it.at || "";
         const ok = it.ok !== false && it.success !== false;
-        const res = it.result || it.msg || it.message || it.action || "";
+        // ⚠️ 不要用 it.result —— actlog 里 result 是 "ok"/"fail"，直接显示会变成
+        //    一堆「ok / fail」而不是「改了什么」。标题在 title/summary 里。
+        const res = it.title || it.summary || it.action || it.msg || it.message || "";
         return `<div class="actlog-item"><span class="actlog-time">${esc(String(t))}</span>` +
           `<span class="actlog-res ${ok ? "ok" : "fail"}">${esc(String(res))}</span></div>`;
       }).join("");

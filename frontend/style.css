@@ -481,7 +481,8 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 
 /* ---------- 最近自动执行（actlog）---------- */
 .actlog-box { margin-top: var(--space-md); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); }
-.actlog-box > summary { cursor: pointer; padding: 8px 10px; font-size: 13px; color: var(--muted); user-select: none; }
+.actlog-box > summary { cursor: pointer; padding: 10px 12px; font-size: 13px; color: var(--text); user-select: none; list-style: none; }
+.actlog-box > summary::-webkit-details-marker { display: none; }
 .actlog-box[open] > summary { border-bottom: 1px solid var(--border); }
 .actlog-list { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; max-height: 220px; overflow-y: auto; }
 .actlog-item { display: flex; gap: 8px; align-items: baseline; line-height: 1.5; }

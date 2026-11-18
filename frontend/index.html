@@ -159,6 +159,15 @@
       </details>
     </section>
 
+    <!-- 🛠 最近自动执行（2026-11-19 补上）
+         app.js 的 loadActLog()/bindActLog() 早就写好了，style.css 里 .actlog-box 等 10 条规则也齐了，
+         唯独 HTML 里没有这块结构 —— 两个函数都因为拿不到元素而静默 return，用户从来没看到过。
+         默认收起，展开时才拉 /api/actlog（避免每次开页面都多一个请求）。 -->
+    <details class="actlog-box" id="actlogBox">
+      <summary>🛠 最近自动执行</summary>
+      <div class="actlog-list" id="actlogList">展开后加载</div>
+    </details>
+
     <!-- 知识库：把 .txt/.md 丢进文件夹即可被检索，无需导入 -->
     <!-- ⏰ 定时任务已从侧栏移出（2026-11-11）：它不该占对话/侧栏的位置。
          现在是一个**独立浮层卡片**（见文件末尾 #schedFloat），点顶栏 ⏰ 开合；
