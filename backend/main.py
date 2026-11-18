@@ -11841,6 +11841,7 @@ def memory_release(body: dict):
             return {"ok": False, "reason": "未指定 session_id"}
         # 删历史前也先沉淀一遍，否则这段对话里没被记下的要点就没了
         swept = 0
+        ran = False
         arch_n = 0
         try:
             arch_n = len(memory.read_transcript(sid, limit=10))
@@ -11848,9 +11849,9 @@ def memory_release(body: dict):
             arch_n = 0
         if do_sweep:
             try:
-                swept = _sweep_one(sid)
+                ran, swept = _sweep_one_ex(sid)
             except Exception:
-                swept = 0
+                ran, swept = False, 0
         before = _tsize(sm._path(sid))
         sm.save_messages(sid, [])
         after = _tsize(sm._path(sid))
@@ -11869,7 +11870,11 @@ def memory_release(body: dict):
         #   · 归档本来就太少、不值得提炼（arch_n < _SWEEP_MIN_MSGS）→ 没有可丢的内容，可以删；
         #   · 其余情况（提炼失败 / 没有新内容）→ 保留，下次释放再处理。
         freed_arch = 0
-        if do_sweep and (swept > 0 or arch_n < _SWEEP_MIN_MSGS):
+        # ⚠️ 只有**真的跑过提炼**（或归档本来就是空的）才允许删归档。
+        # 原来是 `swept > 0 or arch_n < _SWEEP_MIN_MSGS` —— 后半个条件建立在
+        # "条数少 = 没内容可丢"这个假设上，而实测这个假设不成立
+        # （见 _sweep_one_ex 里 2026-11-19 那条说明）。宁可留着，也不能删了才发现没提炼。
+        if do_sweep and (ran or arch_n == 0):
             freed_arch = _tsize(memory._transcript_path(sid))
             try:
                 memory.purge_transcript(sid)
@@ -11977,17 +11982,22 @@ _SWEEP_MAX_SESSIONS = 8      # 单次释放最多沉淀几个对话，避免等�
 # 本次**没来得及沉淀**的归档 sid。memory_release 删归档时必须跳过它们，
 # 否则"超过 8 个归档"时后面的会被没沉淀就删掉（见 _sweep_all 的说明）。
 _sweep_skipped = set()
-_SWEEP_MIN_MSGS = 4          # 少于这么多条的归档不值得单独跑一次模型
+# ⚠️ 这个阈值**已经不再用来跳过提炼**了（2026-11-19 起）。
+# 它原来同时管两件事：① 条数太少就不跑模型；② 据此认为"没内容可丢、可以删归档"。
+# 而实测一段 4 条对话里只要有一条单字消息被过滤，就会掉到 3 条 → 判成"太少" →
+# 归档没提炼就被删，内容永久消失。现在只保留常量供参考，判断一律看
+# 「这次到底有没有真的跑过提炼」（_sweep_one_ex 的第一个返回值）。
+_SWEEP_MIN_MSGS = 4          # 仅参考：低于这个条数的归档，提炼收益通常不高
 
 
-def _sweep_one(session: str, cfg: dict = None, model: str = None) -> int:
-    """把某个对话的归档沉淀进它的记忆，返回新增要点条数。
+def _sweep_one_ex(session: str, cfg: dict = None, model: str = None):
+    """把某个对话的归档沉淀进它的记忆，返回 (是否真的提炼过, 新增要点条数)。
 
     用一次轻量模型调用把归档里的稳定信息抽成要点，合并进该对话的记忆。
     失败就返回 0（**宁可少记，也不能因为沉淀失败就把数据删了**）。
     """
     if not session:
-        return 0
+        return (False, 0)
     # ⚠️⚠️ 这里是"**归档马上要被删掉**之前的最后一次机会"，覆盖范围必须够。
     # 原来是 `read_transcript(limit=120)` 之后再 `msgs[-60:]` —— 两道削减叠加：
     # 实测（2026-11-18，造 300 条归档）：
@@ -12004,8 +12014,13 @@ def _sweep_one(session: str, cfg: dict = None, model: str = None) -> int:
     # 而这条路径跑在**归档马上要被删**的时刻，漏掉就是永久丢失。
     # 现在一步到位：均匀采样 100 条覆盖**整段**归档（第 0 条和最后一条都在）。
     msgs = memory.read_transcript(session, limit=100, sample=True)
-    if len(msgs) < _SWEEP_MIN_MSGS:
-        return 0
+    # ⚠️⚠️ 不要因为"条数少"就跳过提炼 —— 这个函数跑在**归档马上要被删**的时刻。
+    # 原来这里是 `if len(msgs) < _SWEEP_MIN_MSGS: return 0`，而调用方据此
+    # 认为"没内容可丢、可以删"。实测（2026-11-19）：一段 4 条对话（含身份证号）
+    # 里有 1 条是"好"，被 save_transcript 的单字过滤丢掉后只剩 3 条 →
+    # 判定"太少不值得提炼" → 归档直接删除 → 身份证号永久消失。
+    if not msgs:
+        return (False, 0)
     cfg = cfg or config.load_config()
     model = model or cfg.get("default_model")
     picked = msgs
@@ -12041,8 +12056,16 @@ def _sweep_one(session: str, cfg: dict = None, model: str = None) -> int:
     # 输出预算不足会让提炼静默失败（见 _EXTRACT_TOKENS），
     # 所以这里统一走 _llm_extract（它会自动在截断时加预算重试）。
     text = _llm_extract(prompt, model, cfg)
+    if not str(text or "").strip():
+        # 模型没给结果（超时/报错/空回复）→ 视为**没提炼过**，调用方不许删归档
+        return (False, 0)
     # 同理：这里是**归档马上要被删**的最后一刻，多给的行不能丢
-    return _apply_extract(text, session, limit=20)
+    return (True, _apply_extract(text, session, limit=20))
+
+
+def _sweep_one(session: str, cfg: dict = None, model: str = None) -> int:
+    """兼容旧调用：只返回新增条数。"""
+    return _sweep_one_ex(session, cfg, model)[1]
 
 
 def _sweep_all(known_sids=None) -> int:

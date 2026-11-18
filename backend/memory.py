@@ -28,6 +28,19 @@ logger = logging.getLogger(__name__)
 
 _LOG = logging.getLogger("uvicorn.error")
 
+# ---------------------------------------------------------------------------
+#  比较内核开关
+# ---------------------------------------------------------------------------
+# 去重 / 否定纠正 / 超集替换 / 定位 原来各写一套字符串特判，互相绕过（详见 memcore 模块注释）。
+# 现在统一交给 backend/memcore.py 的 Fact + relation()。
+# 旧实现**原样保留**（函数名带 _legacy 后缀），出问题可以用环境变量一键切回：
+#     MM_MEMORY_LEGACY=1   → 走旧实现
+# 默认走新内核。两套实现共用同一份存储格式，切换不需要迁移数据。
+from . import memcore
+
+_USE_LEGACY_CORE = str(os.environ.get("MM_MEMORY_LEGACY", "")).strip().lower() in (
+    "1", "true", "yes", "on")
+
 # ⚠️ 记忆是**读-改-写**：get_long → 拼一条 → set_long。
 # 没有锁时两个线程同时做，后写的会把先写的整段覆盖掉。
 # 实测（2026-11-18）：4 个线程各写 15 条长期记忆，最终只剩 20 条（丢了 40 条）；
@@ -97,7 +110,19 @@ def _read_json(path, default):
     with _MEM_LOCK:
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                _raw = f.read()
+        except Exception:
+            # ⚠️⚠️ **打不开 ≠ 文件损坏**，这里绝不能走"备份 + 重建"。
+            # 被别的进程占用、权限不足、瞬时 IO 错误都会走到这个 except；
+            # 而原来的写法把它当损坏处理：把**好的文件** rename 走、再用默认值重建，
+            # 紧接着一次 merge 落盘 —— 用户的整份档案就只剩最后那一条。
+            # 实测（2026-11-19 00:45）：长期记忆 69 条 / 2699 字被清成 1 条「用户喜欢咖啡」。
+            # 现在：读失败就**原样保留文件**，只返回默认值（不写盘、不 rename）。
+            logger.warning("记忆文件读取失败（保持原样，不做损坏处理）：%s", path,
+                           exc_info=True)
+            return default
+        try:
+            return json.loads(_raw)
         except Exception:
             # 文件存在、非空、却解析不了 → **先备份再返回默认值**。
             # 否则下一次写入会拿默认值把整份记忆覆盖掉，用户的档案就彻底没了。
@@ -336,9 +361,37 @@ def get_long_doc() -> dict:
 @_locked
 def set_long(content: str) -> dict:
     content = _trim(content, LONG_CAP, protect=_TRIM_PROTECT)
+    # ⚠️ **骤减保护**：长期记忆是"全库里最该保住的东西"，一次误写就是永久损失。
+    # 实测（2026-11-19 00:45）：69 条 / 2699 字被清成 1 条，且没有任何备份可回滚
+    # （只能靠向量索引元数据里的文本才救回来）。所以只要"条数不少、字数却腰斩"，
+    # 写之前先留一份，宁可多占几十 KB。
+    try:
+        old = str((_read_json(LONG_FILE, {}) or {}).get("content") or "")
+        if (len(_split_items(old)) >= 5
+                and len(content) < len(old) * 0.5):
+            _snapshot_long(old)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
     doc = {"content": content, "updated_at": _now()}
     _write_json(LONG_FILE, doc)
     return doc
+
+
+def _snapshot_long(old: str) -> str:
+    """把即将被覆盖的长期记忆留一份（最多保留最近 20 份）。"""
+    d = os.path.join(DATA_DIR, "_自动备份")
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "long_term-%s.json" % time.strftime("%Y%m%d-%H%M%S"))
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({"content": old, "updated_at": _now()}, f, ensure_ascii=False)
+    logger.warning("长期记忆将被大幅缩减，已自动备份到 %s（原 %d 字）", p, len(old))
+    try:
+        olds = sorted(x for x in os.listdir(d) if x.startswith("long_term-"))
+        for x in olds[:-20]:
+            os.remove(os.path.join(d, x))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    return p
 
 
 @_locked
@@ -404,8 +457,8 @@ def _neg_key(s: str) -> bool:
     return any(w in t for w in ("不", "没", "无", "未", "别"))
 
 
-def _already(body: str, point: str) -> bool:
-    """判断要点是否已在文段里（完全重复 / 被现有条目涵盖）。
+def _already_legacy(body: str, point: str) -> bool:
+    """【旧实现，保留供回退】判断要点是否已在文段里（完全重复 / 被现有条目涵盖）。
 
     ⚠️ 必须**先比否定状态**再比字面包含。原来只做子串判断，实测：
     已有「用户不喜欢咖啡」，新要点「喜欢咖啡」会被判成"已经在里面了"，
@@ -431,6 +484,23 @@ def _already(body: str, point: str) -> bool:
                 continue
             return True           # 新要点被旧条目涵盖，确实已经有了
     return False
+
+
+def _already(body: str, point: str) -> bool:
+    """判断要点是否已在文段里（完全重复 / 被现有条目涵盖）。
+
+    新实现：把整段按 `；` 拆成条目，逐条交给 memcore.relation() 判关系。
+    `relation` 一次同时处理三件旧代码分开做的事 ——
+      · 否定状态不同 → 不算涵盖（免得把"纠正"当重复丢掉）
+      · 纯编号扩展（条目1 / 条目10）→ 不算涵盖
+      · 扩展是补充说明 → 算涵盖
+    旧实现见 `_already_legacy`（MM_MEMORY_LEGACY=1 时启用）。
+    """
+    if _USE_LEGACY_CORE:
+        return _already_legacy(body, point)
+    if not body:
+        return False
+    return memcore.has_duplicate(_split_items(body), point)
 
 
 def _prefix_only(short: str, long_: str) -> bool:
@@ -469,8 +539,8 @@ def _bare(s: str) -> str:
     return t.strip()
 
 
-def _neg_flip(body: str, point: str):
-    """在正文里找「同一件事、但肯定/否定相反」的那一条，返回下标；没有返回 -1。
+def _neg_flip_legacy(body: str, point: str):
+    """【旧实现，保留供回退】找「同一件事、但肯定/否定相反」的那一条。
 
     ⚠️ 修的是"改了口径却并存两句"（2026-11-18 实测）：
     `_already` 遇到否定状态不同会 `continue`（本意是别把纠正当成重复丢掉），
@@ -499,8 +569,24 @@ def _neg_flip(body: str, point: str):
     return -1
 
 
-def _supersede(body: str, point: str):
-    """新要点**完整包含**某条旧要点且更长 → 返回替换后的正文；否则 None。
+def _neg_flip(body: str, point: str):
+    """在正文里找「同一件事、但肯定/否定相反」的那一条，返回下标；没有返回 -1。
+
+    新实现：memcore.relation() 返回 FLIP 就是它。判据是
+    **核心字面相同（剔掉否定词与语气词、假否定词换占位符）+ 否定个数不同**，
+    不再依赖布尔值 `_neg_key` —— 那一个布尔值会被「无锡/无糖/无线」这类
+    含否定字的地名技术词骗过去，正反两句都判成否定，纠正永远识别不出来。
+    旧实现见 `_neg_flip_legacy`。
+    """
+    if _USE_LEGACY_CORE:
+        return _neg_flip_legacy(body, point)
+    if not body:
+        return -1
+    return memcore.find_flip(_split_items(body), point)
+
+
+def _supersede_legacy(body: str, point: str):
+    """【旧实现，保留供回退】新要点完整包含某条旧要点且更长 → 返回替换后的正文。
 
     修的是"加信息反而丢信息"：原来「计划考网络工程师」遇到
     「计划考网络工程师，报名费800元」会被 _already 判成重复、整条丢掉，
@@ -520,6 +606,29 @@ def _supersede(body: str, point: str):
             items[i] = point
             return "；".join(items)
     return None
+
+
+def _supersede(body: str, point: str):
+    """新要点**完整包含**某条旧要点、且新要点只是"补充说明"→ 返回替换后的正文；否则 None。
+
+    修的是"加信息反而丢信息"：「计划考网络工程师」遇到
+    「计划考网络工程师，报名费800元」原来被判成重复、整条丢掉，费用永远记不上。
+    新实现把"补充说明"和"另一个东西"分开判（见 memcore 的 `_SUPPLEMENT_PREFIX`）：
+      · 扩展以「，、：（」开头 → 补充说明 → 原地替换成更全的那条
+      · 扩展以数字/字母/汉字开头（条目1→条目10、喜欢咖啡→喜欢咖啡豆）→ 另一个东西 → 各自保留
+    这一条同时解决了旧代码里**两处互相矛盾的特判**（`_prefix_only` 和 `_supersede`）。
+    旧实现见 `_supersede_legacy`。
+    """
+    if _USE_LEGACY_CORE:
+        return _supersede_legacy(body, point)
+    if not body:
+        return None
+    items = _split_items(body)
+    i = memcore.find_superset(items, point)
+    if i is None:
+        return None
+    items[i] = _norm_point(point)
+    return "；".join(items)
 
 
 # =====================================================================
@@ -642,8 +751,8 @@ def _overlap(a: str, b: str) -> float:
     return max(ratio, cov)
 
 
-def _locate(body: str, hint: str):
-    """在记忆正文里找与 hint 最像的那一条，返回 (下标, 条目列表, 相似度)。
+def _locate_legacy(body: str, hint: str):
+    """【旧实现，保留供回退】在记忆正文里找与 hint 最像的那一条。
 
     ⚠️ 定位词太短时**只认完全相同的那一条**。`_overlap` 里"被包含"直接给 1.0，
     于是删「用户」会把「用户姓名：陈宇桐」整条删掉（实测），改「喜欢」也可能
@@ -669,6 +778,20 @@ def _locate(body: str, hint: str):
                 return hits[0], items, 1.0
         return -1, items, 0.0
     return best_i, items, best_s
+
+
+def _locate(body: str, hint: str):
+    """在记忆正文里找与 hint 最像的那一条，返回 (下标, 条目列表, 相似度)。
+
+    新实现：相似度与短定位词保护都在 memcore.locate() 里，口径与去重那边一致
+    （都用同一个 parse().body，不再出现"去重时按一种归一化、定位时按另一种"）。
+    旧实现见 `_locate_legacy`。
+    """
+    if _USE_LEGACY_CORE:
+        return _locate_legacy(body, hint)
+    items = _split_items(body)
+    i, sc = memcore.locate(items, hint)
+    return i, items, sc
 
 
 MATCH_THRESHOLD = 0.5           # 低于它就认为"不是同一条"，宁可不改也不乱改
@@ -1100,7 +1223,12 @@ def save_transcript(session_id: str, messages: list):
         if msg.get("role") not in ("user", "assistant"):
             continue
         content = msg.get("content") or ""
-        if not content or len(str(content)) < 2:
+        # ⚠️ 只丢**完全空白**的消息，不要丢 1 个字的。
+        # 原来写的是 `len(str(content)) < 2` —— 用户答"好 / 嗯 / 是"这类一个字的消息
+        # 根本不落盘。实测（2026-11-19）：一段 4 条的真实对话里有 1 条是"好"，
+        # 归档里只剩 3 条 → 下游「条数太少不值得提炼」的判断误判为真 →
+        # 归档（里面还有身份证号）**没提炼就被删掉**，内容永久消失。
+        if not str(content).strip():
             continue
         buf.append(json.dumps({"role": msg["role"],
                                "content": _clip_transcript_msg(content),
