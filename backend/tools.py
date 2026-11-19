@@ -3553,12 +3553,44 @@ def _do_hive_files(arguments, context):
 
 
 # ---------- 自我迭代：代码自检 / 不达标诊断 ----------
+def _auto_fix_on(arguments):
+    """信任模式是否允许「发现问题就自动改」。
+
+    ★ 2026-11-20 用户纠正语义（原话）：「信任模式不是让你自动进行所有待批准
+      以及推荐功能的实现啊，而是在对话或任务中发现哪里有问题或可以升级的
+      地方自动完成升级」。
+      → 修 bug / 补漏洞 / 升级已有能力：信任模式开着就**默认自动做**，
+        不需要调用方再显式传 auto_fix=true（原来必须显式传，等于半个自动）。
+      → 推荐的新功能：**不**自动做（那类动作由 self_iterate.auto_approve_only
+        按 origin=="feature" 扣下，等用户判断价值）。
+    显式传 auto_fix=false 仍然尊重（用户说「只看别动」时）。
+    暂停期间一律不自动改。
+    """
+    from . import self_iterate as _si
+    a = arguments or {}
+    try:
+        s = _si.load_settings()
+    except Exception:                                   # noqa: BLE001
+        return False
+    if not s.get("trust_mode"):
+        return False
+    af = a.get("auto_fix")
+    if af is not None and not af:
+        return False
+    try:
+        if _si.is_paused():
+            return False
+    except Exception:                                   # noqa: BLE001
+        pass
+    return True
+
+
 def _do_self_audit(arguments):
     """跑一遍代码自检，把结果整理成模型能直接读的文本。"""
     from . import self_iterate as _si
     a = arguments or {}
     s = _si.load_settings()
-    auto = bool(a.get("auto_fix")) and bool(s.get("trust_mode"))
+    auto = _auto_fix_on(a)
     try:
         r = _si.run_audit(deep=bool(a.get("deep")), source="tool",
                           create_plan=True, auto_fix=auto)
@@ -3687,7 +3719,7 @@ def _do_self_diagnose(arguments):
     if not task:
         return "要告诉我「做的是什么任务」。"
     s = _si.load_settings()
-    auto = bool(a.get("auto_fix")) and bool(s.get("trust_mode"))
+    auto = _auto_fix_on(a)
     try:
         r = _si.diagnose(task=task,
                          expected=str(a.get("expected") or ""),

@@ -808,6 +808,509 @@
     }
   });
 
+  // ============================================================
+  // 常驻工作台：产出物堆在桌面上，回来接着干（2026-11-21）
+  // ------------------------------------------------------------
+  // 痛点：图片生成 / 微改、PPT / Excel、视频剪辑、数字人做出来的东西**只活在
+  //   对话流里** —— 关掉页面就找不回，只能重新让模型做一遍。
+  // 做法：
+  //   · 每次工具产出（app.js 递进来的 obj.cards 里 image / doc / ppt / video）到手
+  //     就 add() 一条 {id, kind, title, thumb, path, ts, status}；
+  //   · **双写**：localStorage 是主副本（关页面 / 断网都还在，刷新立刻显示）；后端
+  //     backend/canvas.py 再存一份（清单口径 + 批量打包都在那边）；后端没起来时
+  //     前端照常能用，起来后 hydrate() 再把差异并回来；
+  //   · 面板挂在右侧：HTML5 draggable 拖拽排序、点开预览、批量导出 zip、
+  //     删除两边同步；顶部「⟳ 接着上次」把上次的产出物带进输入框继续做。
+  // ⚠️ 缩略图**绝不存 data: base64**（几百 KB 一张，localStorage 5MB 会写满）。
+  // ============================================================
+  const WB_KEY = "artifacts_board_v1";
+  const WB_MAX = 240;                                  // 与 backend/canvas.py 同口径
+  const WB_LIST = "/api/canvas/workbench/list";
+  const WB_ADD = "/api/canvas/workbench/add";
+  const WB_RM = "/api/canvas/workbench/remove";
+  const WB_ORDER = "/api/canvas/workbench/order";
+  const WB_EXPORT = "/api/canvas/workbench/export";
+
+  // 扩展名 → 种类（与 backend/canvas.py 的 _ART_EXT_KIND 保持一致）
+  const WB_EXT_KIND = {
+    png: "image", jpg: "image", jpeg: "image", webp: "image", gif: "image",
+    bmp: "image", svg: "image",
+    pptx: "ppt", ppt: "ppt", key: "ppt",
+    docx: "doc", doc: "doc", pdf: "doc", md: "doc", txt: "doc",
+    xlsx: "sheet", xls: "sheet", csv: "sheet",
+    mp4: "video", mov: "video", webm: "video", mkv: "video",
+    mp3: "audio", wav: "audio", m4a: "audio",
+    html: "web", htm: "web", url: "web",
+  };
+  const WB_KIND_ICO = {
+    image: "🖼", ppt: "📊", doc: "📄", sheet: "📈",
+    video: "🎬", audio: "🎵", web: "🌐", other: "📦",
+  };
+  const WB_KINDS = ["image", "ppt", "doc", "sheet", "video", "audio", "web", "other"];
+
+  function wbKindOf(path, hint) {
+    const k = String(hint || "").trim().toLowerCase();
+    if (WB_KINDS.indexOf(k) >= 0) return k;
+    const ext = extOf(String(path || "").split("?")[0]);
+    return WB_EXT_KIND[ext] || "other";
+  }
+
+  function wbThumbOf(path, kind, thumb) {
+    let t = String(thumb || "").trim();
+    if (/^data:/i.test(t)) t = "";                    // 绝不把 base64 存进 localStorage
+    if (t) return t;
+    const p = String(path || "").trim();
+    if (!p || wbKindOf(p, kind) !== "image") return "";
+    if (/^(https?:|\/api\/)/i.test(p)) return p;
+    return "/api/doclib/download?rel=" + encodeURIComponent(p);
+  }
+
+  // 稳定短 id：同一个文件被重新生成 / 刷新页面后还是同一条（去重靠它）
+  function wbId(path, title) {
+    const s = String(path || "") + "\u0001" + String(title || "");
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return "a" + (h >>> 0).toString(36);
+  }
+
+  function wbNormalize(raw) {
+    const src = (raw && typeof raw === "object") ? raw : {};
+    const path = String(src.path || src.rel || src.file || "").trim();
+    let title = String(src.title || src.name || "").replace(/\s+/g, " ").trim().slice(0, 120);
+    const kind = wbKindOf(path, src.kind || src.type);
+    if (!title) title = String(path).split("?")[0].split(/[\\/]/).pop() || "产出物";
+    let ts = Number(src.ts || src.time || 0);
+    if (!isFinite(ts) || ts <= 0) ts = Date.now() / 1000;
+    return {
+      id: String(src.id || "").trim() || wbId(path, title),
+      kind: kind,
+      title: title,
+      thumb: wbThumbOf(path, kind, src.thumb),
+      path: String(path).slice(0, 400),
+      ts: ts,
+      status: String(src.status || "done").slice(0, 20) || "done",
+      tool: String(src.tool || "").slice(0, 40),
+      note: String(src.note || "").slice(0, 200),
+    };
+  }
+
+  function wbLoad() {
+    try {
+      const raw = localStorage.getItem(WB_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(arr)) return [];
+      return arr.filter((x) => x && typeof x === "object").map(wbNormalize).slice(0, WB_MAX);
+    } catch (e) { return []; }                        // 存坏了就当空桌面，不影响用
+  }
+
+  function wbSave(list) {
+    try {
+      localStorage.setItem(WB_KEY, JSON.stringify((list || []).slice(0, WB_MAX)));
+      return true;
+    } catch (e) {
+      // 配额满 / 隐私模式：只提示一次。后端那份还在，功能不至于整块失效。
+      if (!wbSave._warned) {
+        wbSave._warned = true;
+        toast("本地存不下更多产出物了（浏览器配额满），后端那份仍然保留", "warn");
+      }
+      return false;
+    }
+  }
+
+  // 并进一条：已在列表里就搬到最前、保留原时间（时间代表"什么时候做出来的"）
+  function wbMerge(list, raw) {
+    const one = wbNormalize(raw);
+    const out = (list || []).map(wbNormalize);
+    const old = out.filter((x) => x.id === one.id)[0];
+    if (old && old.ts) one.ts = old.ts;
+    const rest = out.filter((x) => x.id !== one.id);
+    rest.unshift(one);
+    return { items: rest.slice(0, WB_MAX), item: one };
+  }
+
+  function wbPost(url, body) {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).then((r) => r.json().catch(() => ({})).then((d) => d || {}));
+  }
+
+  // 加一条产出物。后端那份异步写：写失败不影响本地（界面上照样看得到）。
+  function add(raw) {
+    const merged = wbMerge(wbLoad(), raw);
+    wbSave(merged.items);
+    try { wbRender(); } catch (e) { /* 面板还没建好也不能挡住产出物落地 */ }
+    wbPost(WB_ADD, { item: merged.item }).catch(() => null);
+    return merged.item;
+  }
+
+  // 工具产出到手（app.js 每轮把 obj.cards 递进来）。只收真产出物：
+  // 地图 / 天气这类"查了一下"的卡片不进工作台 —— 桌面上只堆东西。
+  function addCards(cards) {
+    const list = Array.isArray(cards) ? cards : [];
+    let n = 0;
+    list.forEach((c) => {
+      if (!c || typeof c !== "object") return;
+      const kind = String(c.type || "");
+      if (["image", "doc", "ppt", "video"].indexOf(kind) < 0) return;
+      const p = (c.payload && typeof c.payload === "object") ? c.payload : {};
+      const path = String(p.path || p.saved_path || p.rel || "");
+      // 卡片标题里常带一个 emoji 前缀（「🎨 海边的猫」），存进工作台要去掉
+      const title = String(c.title || "").replace(/^[^\s\u4e00-\u9fa5]+\s+/, "").trim();
+      if (!path && !title) return;
+      let k = kind;
+      if (kind === "doc" && wbKindOf(path, "") === "sheet") k = "sheet";
+      add({
+        kind: k,
+        title: title || path,
+        path: path,
+        thumb: String(c.thumb || "") || String(p.source || ""),
+        tool: String(p.tool || ""),
+      });
+      n += 1;
+    });
+    return n;
+  }
+
+  function wbList() { return wbLoad(); }
+
+  function wbRemove(id) {
+    const target = String(id || "");
+    if (!target) return false;
+    const keep = wbLoad().filter((x) => x.id !== target);
+    wbSave(keep);
+    try { wbRender(); } catch (e) { /* 面板重建失败不影响"已经删掉了"这个事实 */ }
+    wbPost(WB_RM, { ids: [target] }).catch(() => null);
+    return true;
+  }
+
+  // 拖拽排序：按给定的 id 顺序重排。**只重排不增删** ——
+  // 漏发的条目按原顺序接在后面（和 backend/canvas.py 同口径）。
+  function wbReorder(orderedIds) {
+    const ids = (orderedIds || []).map(String);
+    if (!ids.length) return wbLoad();
+    const all = wbLoad();
+    const byId = {};
+    all.forEach((x) => { if (!byId[x.id]) byId[x.id] = x; });
+    const out = [];
+    ids.forEach((i) => { if (byId[i]) { out.push(byId[i]); delete byId[i]; } });
+    all.forEach((x) => { if (byId[x.id]) { out.push(byId[x.id]); delete byId[x.id]; } });
+    wbSave(out);
+    try { wbRender(); } catch (e) { /* 同上 */ }
+    wbPost(WB_ORDER, { order: out.map((x) => x.id) }).catch(() => null);
+    return out;
+  }
+
+  // 和后端那份对齐：后端有、本地没有的补进来（换浏览器 / 清了缓存也不丢东西）
+  function wbHydrate() {
+    return fetch(WB_LIST).then((r) => r.json()).then((d) => {
+      const remote = (d && d.items) || [];
+      if (!remote.length) return wbLoad();
+      let local = wbLoad();
+      const have = {};
+      local.forEach((x) => { have[x.id] = true; });
+      let n = 0;
+      remote.forEach((it) => {
+        const one = wbNormalize(it);
+        if (have[one.id]) return;
+        local = wbMerge(local, one).items;
+        n += 1;
+      });
+      if (n) { wbSave(local); try { wbRender(); } catch (e) { /* 忽略 */ } }
+      return local;
+    }).catch(() => wbLoad());
+  }
+
+  function wbTimeText(ts) {
+    const d = new Date(Number(ts) * 1000);
+    if (!isFinite(d.getTime())) return "";
+    const pad = (n) => (n < 10 ? "0" + n : "" + n);
+    return (d.getMonth() + 1) + "-" + pad(d.getDate()) + " "
+      + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  // ---------- 工作台面板 ----------
+  let wbPanel = null;
+  let wbDragId = "";
+
+  function wbEl(tag, cls, txt) {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (txt !== undefined && txt !== null) el.textContent = String(txt);
+    return el;
+  }
+
+  function wbBuild() {
+    if (wbPanel) return wbPanel;
+    const p = wbEl("section");
+    p.id = "wbPanel";
+    p.hidden = true;
+
+    const head = wbEl("div", "wb-head");
+    head.appendChild(wbEl("span", "wb-title", "🧳 工作台"));
+    const cnt = wbEl("span", "wb-count", "0");
+    cnt.id = "wbCount";
+    head.appendChild(cnt);
+    const x = wbEl("button", "wb-x", "✕");
+    x.type = "button";
+    x.title = "收起工作台";
+    x.onclick = () => { p.hidden = true; };
+    head.appendChild(x);
+    p.appendChild(head);
+
+    const bar = wbEl("div", "wb-bar");
+    const goOn = wbEl("button", "wb-btn primary", "⟳ 接着上次");
+    goOn.type = "button";
+    goOn.id = "wbGoOn";
+    goOn.title = "把上次的产出物带进输入框，接着说一句就继续做";
+    goOn.onclick = wbContinue;
+    bar.appendChild(goOn);
+    const ex = wbEl("a", "wb-btn", "⬇ 批量导出");
+    ex.href = WB_EXPORT;
+    ex.title = "把工作台上的产出物打成一个 zip（带清单）";
+    bar.appendChild(ex);
+    const clr = wbEl("button", "wb-btn", "🧹 清空");
+    clr.type = "button";
+    clr.title = "清空工作台（本地和后端一起清）";
+    clr.onclick = wbClear;
+    bar.appendChild(clr);
+    p.appendChild(bar);
+
+    p.appendChild(wbEl("div", "wb-hint",
+      "产出物关掉页面也在这儿。拖卡片左侧把手可排序，点卡片看内容。"));
+    const body = wbEl("div", "wb-body");
+    body.id = "wbBody";
+    p.appendChild(body);
+    document.body.appendChild(p);
+    wbPanel = p;
+    return p;
+  }
+
+  function wbOpen() {
+    wbBuild();
+    wbPanel.hidden = false;
+    wbRender();
+    wbHydrate();                    // 顺手和后端对一次（失败就当没有）
+  }
+
+  function wbToggle() {
+    wbBuild();
+    if (wbPanel.hidden) wbOpen();
+    else wbPanel.hidden = true;
+  }
+
+  // 一张卡片的预览区：能内联预览的就内联，不能的给下载入口
+  function wbPreviewInto(box, item) {
+    box.textContent = "";
+    const p = String(item.path || "");
+    const kind = String(item.kind || "other");
+    if (kind === "image") {
+      const img = document.createElement("img");
+      img.className = "wb-prev-img";
+      img.alt = item.title || "产出物";
+      img.src = item.thumb || ("/api/doclib/download?rel=" + encodeURIComponent(p));
+      box.appendChild(img);
+      return;
+    }
+    if (kind === "video" || kind === "audio") {
+      const m = document.createElement(kind === "video" ? "video" : "audio");
+      m.controls = true;
+      m.className = "wb-prev-media";
+      m.src = (kind === "video" && !p) ? (item.thumb || "") : ("/api/doclib/download?rel=" + encodeURIComponent(p));
+      box.appendChild(m);
+      return;
+    }
+    if (!p) {
+      box.appendChild(wbEl("div", "wb-note", "这条只有记录，源文件不在了。"));
+      return;
+    }
+    box.appendChild(wbEl("div", "wb-note", "正在读取内容…"));
+    fetch("/api/doclib/file?rel=" + encodeURIComponent(p))
+      .then((r) => r.json())
+      .then((d) => {
+        box.textContent = "";
+        const pre = wbEl("div", "wb-prev-text");
+        let text = String((d && d.text) || "");
+        if (text.length > 4000) text = text.slice(0, 4000) + "\n…（只显示前 4000 字）";
+        pre.textContent = text || "（这个文件里没有可抽取的文字，点下载看原文件）";
+        box.appendChild(pre);
+        const dl = wbEl("a", "wb-btn", "⬇ 下载原文件");
+        dl.href = "/api/doclib/download?rel=" + encodeURIComponent(p);
+        box.appendChild(dl);
+      })
+      .catch(() => {
+        box.textContent = "";
+        box.appendChild(wbEl("div", "wb-note", "读取失败，点下载看原文件。"));
+      });
+  }
+
+  function wbCardEl(item) {
+    const card = wbEl("div", "wb-card");
+    card.setAttribute("data-id", item.id);
+    card.draggable = true;
+
+    const grip = wbEl("span", "wb-grip", "⠿");
+    grip.title = "按住拖动排序";
+    card.appendChild(grip);
+
+    if (item.thumb && item.kind === "image") {
+      const im = document.createElement("img");
+      im.className = "wb-thumb";
+      im.src = item.thumb;
+      im.alt = item.title || "缩略图";
+      card.appendChild(im);
+    } else {
+      card.appendChild(wbEl("span", "wb-ico", WB_KIND_ICO[item.kind] || "📦"));
+    }
+
+    const main = wbEl("div", "wb-main");
+    const name = wbEl("div", "wb-name", item.title || item.path || "产出物");
+    name.title = item.title || item.path || "";
+    main.appendChild(name);
+    const meta = wbEl("div", "wb-meta",
+      (WB_KIND_ICO[item.kind] || "📦") + " " + item.kind
+      + (item.ts ? " · " + wbTimeText(item.ts) : "")
+      + (item.tool ? " · " + item.tool : ""));
+    main.appendChild(meta);
+    card.appendChild(main);
+
+    const del = wbEl("button", "wb-del", "🗑");
+    del.type = "button";
+    del.title = "从工作台删掉";
+    del.onclick = (e) => {
+      e.stopPropagation();
+      wbRemove(item.id);
+      toast("已从工作台删掉：" + (item.title || ""), "ok");
+    };
+    card.appendChild(del);
+
+    // 点卡片 → 展开 / 收起预览（拖拽刚结束时那一下不算点击）
+    const prev = wbEl("div", "wb-prev");
+    prev.hidden = true;
+    card.appendChild(prev);
+    card.addEventListener("click", (e) => {
+      if (wbDragId) return;
+      if (e.target && e.target.closest && e.target.closest("button,a")) return;
+      if (prev.hidden) {
+        prev.hidden = false;
+        card.classList.add("open");
+        wbPreviewInto(prev, item);
+      } else {
+        prev.hidden = true;
+        card.classList.remove("open");
+      }
+    });
+    return card;
+  }
+
+  function wbRender() {
+    const list = wbLoad();
+    if (!wbPanel) {
+      const b = document.getElementById("wbBadge");
+      if (b) { b.textContent = String(list.length); b.hidden = !list.length; }
+      return list;
+    }
+    const body = document.getElementById("wbBody");
+    const cnt = document.getElementById("wbCount");
+    if (cnt) cnt.textContent = String(list.length);
+    const badge = document.getElementById("wbBadge");
+    if (badge) { badge.textContent = String(list.length); badge.hidden = !list.length; }
+    if (!body) return list;
+    body.textContent = "";
+    if (!list.length) {
+      body.appendChild(wbEl("div", "wb-empty",
+        "还没有产出物。让助手画张图 / 做份 PPT / 剪段视频，做完就自动堆到这儿。"));
+      return list;
+    }
+    list.forEach((it) => body.appendChild(wbCardEl(it)));
+
+    // 拖拽排序：dragover 时先把 DOM 挪好（给用户实时反馈），
+    // 松手（dragend）再一次性落盘 —— 免得拖一次往 localStorage 写几十遍。
+    body.addEventListener("dragover", (e) => {
+      if (!wbDragId) return;
+      e.preventDefault();
+      const over = e.target && e.target.closest ? e.target.closest(".wb-card") : null;
+      if (!over || over.getAttribute("data-id") === wbDragId) return;
+      const dragEl = body.querySelector('.wb-card[data-id="' + wbDragId + '"]');
+      if (!dragEl) return;
+      const rect = over.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      body.insertBefore(dragEl, after ? over.nextSibling : over);
+    });
+    return list;
+  }
+
+  // 接着上次没做完的：把上次那条带进输入框（不发出去 —— 用户还要补一句）
+  function wbContinue() {
+    const list = wbLoad();
+    if (!list.length) { toast("工作台还是空的，先让助手做点东西", "warn"); return false; }
+    const it = list[0];
+    const txt = "接着上次工作台里的「" + (it.title || it.path || "产出物") + "」继续"
+      + (it.path ? "（文件：" + it.path + "）" : "")
+      + "，在这个基础上接着改 / 把它做完。";
+    const inp = document.getElementById("input");
+    if (inp) {
+      inp.value = inp.value && inp.value.trim() ? (inp.value.replace(/\s+$/, "") + "\n" + txt) : txt;
+      try { inp.focus(); } catch (e) { /* 拿不到焦点不影响内容已填入 */ }
+      toast("已填进输入框 —— 补一句要改什么，按 ↵ 就接着干", "ok");
+      return true;
+    }
+    toast(txt, "");
+    return false;
+  }
+
+  function wbClear() {
+    const list = wbLoad();
+    if (!list.length) { toast("工作台已经是空的", ""); return false; }
+    let ok = true;
+    try { ok = window.confirm("清空工作台里的 " + list.length + " 条产出物？（只删记录，不动源文件）"); }
+    catch (e) { ok = true; }
+    if (!ok) return false;
+    wbSave([]);
+    wbRender();
+    wbPost(WB_RM, { ids: list.map((x) => x.id) }).catch(() => null);
+    toast("工作台已清空（源文件没删，还在生成文库里）", "ok");
+    return true;
+  }
+
+  // 侧栏顶栏那一排快捷按钮里加一个「工作台」入口
+  function wbMountButton() {
+    const host = document.getElementById("topQuick");
+    if (!host) { setTimeout(wbMountButton, 400); return; }   // 顶栏还没画出来，稍后再试
+    if (document.getElementById("btnWorkbench")) return;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "tq-btn";
+    b.id = "btnWorkbench";
+    b.title = "工作台：生成过的图 / 文档 / PPT / 视频都堆在这儿，关页面也还在";
+    const ico = document.createElement("span");
+    ico.className = "tq-ico";
+    ico.textContent = "🧳";
+    const txt = document.createElement("span");
+    txt.className = "tq-txt";
+    txt.textContent = "工作台";
+    const badge = document.createElement("span");
+    badge.className = "tq-badge";
+    badge.id = "wbBadge";
+    badge.hidden = true;
+    b.appendChild(ico);
+    b.appendChild(txt);
+    b.appendChild(badge);
+    b.onclick = wbToggle;
+    host.appendChild(b);
+    wbRender();                       // 把已有的条数先显示出来（刷新页面后立刻对得上）
+  }
+
+  // 入口：脚本在 app.js 之后加载（见 index.html），这里自己往侧栏挂按钮
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", wbMountButton);
+  } else {
+    wbMountButton();
+  }
+
+  // [[WB-END]]
+
   window.__Artifacts = {
     begin: begin, chip: chip, flush: flush, openWithSystem: openWithSystem,
     split_blocks: split_blocks, block_context: block_context,
@@ -819,5 +1322,11 @@
     canvasPickContext: canvasPickContext,
     loadCanvasPos: loadCanvasPos, saveCanvasPos: saveCanvasPos, resetCanvasPos: resetCanvasPos,
     renderCanvasCard: renderCanvasCard, renderCanvas: renderCanvas,
+    // 常驻工作台（2026-11-21）：产出物堆在桌面上，关页面也还在
+    WB_KEY: WB_KEY,
+    add: add, addCards: addCards, list: wbList,
+    remove: wbRemove, reorder: wbReorder, hydrate: wbHydrate,
+    clear: wbClear, continueLast: wbContinue,
+    open: wbOpen, toggle: wbToggle, renderBoard: wbRender,
   };
 })();

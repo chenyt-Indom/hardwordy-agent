@@ -8058,6 +8058,14 @@
                 ? window.LiveCard.mergeLiveCards(liveCards, obj.cards)
                 : liveCards.concat(obj.cards);
             } catch (e) { liveCards = liveCards.concat(obj.cards); }
+            // ★ 2026-11-21 常驻工作台（frontend/artifacts.js）：工具一产出东西
+            //   （t2i / 微改的图、pptx_maker、video、数字人视频）就堆到桌面上，
+            //   关掉页面再回来还在 —— 不用往回翻聊天记录找文件。
+            //   地图 / 天气这类"查了一下"的卡片由 addCards 自己筛掉，不进工作台。
+            if (window.__Artifacts && typeof window.__Artifacts.addCards === "function") {
+              try { window.__Artifacts.addCards(obj.cards); }
+              catch (e) { /* 工作台坏了不能影响主回复 */ }
+            }
           }
           if (obj.tool_start) addToolChip(obj.tool_start.name);
           // 一轮里同时发起多个工具时给个提示 —— 让用户知道这是并行执行、在省时间
@@ -14702,7 +14710,7 @@
             '<input type="checkbox" class="iter-trust-cb">' +
             '<span class="iter-sw-t">信任模式</span>' +
           '</label>' +
-          '<span class="iter-trust-hint">开启后我改代码不再等你批准，改完只提示重启</span>' +
+          '<span class="iter-trust-hint">开启后：我发现的问题、能升级的地方直接改，不用你批准（推荐的新功能仍要你点头）</span>' +
         '</div>' +
         '<div class="iter-bar">' +
           '<button type="button" class="btn sm iter-run">🔄 现在反思一次</button>' +
@@ -15834,8 +15842,8 @@
     const th = el.querySelector(".iter-trust-hint");
     if (th) {
       th.textContent = s.trust_mode
-        ? "已开启：改代码不再等你批准，改完只提示重启"
-        : "开启后我改代码不再等你批准，改完只提示重启";
+        ? "已开启：发现的问题/可升级处我直接改（不等批准）；推荐的新功能仍要你批准"
+        : "开启后：发现的问题/可升级处我直接改（不等批准）；推荐的新功能仍要你批准";
       th.className = "iter-trust-hint" + (s.trust_mode ? " on" : "");
     }
 
@@ -15955,7 +15963,9 @@
 
   async function onTrustToggle(e) {
     const on = !!(e && e.target && e.target.checked);
-    if (on && !confirm("开启信任模式后，我会不经你批准直接改代码（包括 main.py 这类高风险文件）。\n" +
+    if (on && !confirm("开启信任模式后，我会把「自己发现的问题、能升级的地方」直接改掉，" +
+                       "不再等你批准（包括 main.py 这类高风险文件）。\n" +
+                       "⚠️ 但「推荐的新功能」不会自动实现，仍然要你判断后再批准。\n" +
                        "改完只提示你重启，不会自动重启；每次改动仍然会先备份、可回滚。\n\n确定开启？")) {
       e.target.checked = false;
       return;
@@ -15967,7 +15977,7 @@
       return;
     }
     if (data && data.settings) data.settings.trust_mode = on;
-    say(on ? "信任模式已开启：我改代码不再等你批准，改完提示你重启。"
+    say(on ? "信任模式已开启：我发现的问题、能升级的地方直接改，改完提示你重启；推荐的新功能仍会等你批准。"
            : "信任模式已关闭：改代码前仍会等你批准。", on ? "warn" : "good");
   }
 

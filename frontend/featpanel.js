@@ -135,6 +135,8 @@
     const d = await api("/api/selfiter/pending");
     pendData = d || { groups: [], total: 0 };
     renderPending();
+    // 健康度卡片固定贴在面板顶部：每次刷新待批准都顺手拉一次，数字不会过期
+    loadHealth(PEND);
   }
 
   function pendActionHtml(pid, a) {
@@ -178,7 +180,8 @@
     if (!groups.length) {
       setBody(PEND, '<div class="fr-empty">现在没有待批准的改进任务 🎉<br>' +
         '<span class="fr-dim">信任模式关闭时，它想改代码会先攒到这里等你点头；<br>' +
-        '想出来的「新功能」在「💡 推荐新功能」里单独列，不混在这里。</span></div>');
+        '信任模式开着时，这里只会有被护栏拦下的高风险改动 —— 它不会把整批待批准<br>' +
+        '一口气批准掉。想出来的「新功能」在「💡 推荐新功能」里单独列，永远要你点头。</span></div>');
       return;
     }
     setBody(PEND, groups.map(function (g) {
@@ -577,6 +580,11 @@
   window.FeatPanel.renderPending = renderPendingPanel;
   window.FeatPanel.renderRecommend = renderRecommendPanel;
   window.FeatPanel.refreshBadge = refreshBadgeAll;
+  // 2026-11-21：健康度卡片（自迭代面板顶部固定展示）
+  //   · renderHealthCard(dict?) —— 画卡片并返回卡片数据（纯消费后端 health_snapshot）
+  //   · refreshHealth()         —— 重新拉 /api/selfiter/health 再画
+  window.FeatPanel.renderHealthCard = renderHealthCard;
+  window.FeatPanel.refreshHealth = function () { return loadHealth(PEND); };
   // 兼容旧调用：window.__refreshSuggestBadge 仍指向 renderBadge
   window.__refreshSuggestBadge = renderBadge;
 
@@ -690,6 +698,126 @@
     }).join(""));
   }
 
+  // ============================================================ 健康度卡片
+  // 2026-11-21 用户要求：他连续多轮追问「自迭代到底能不能正常运转」——
+  // 说明成功率 / 回滚 / 熔断 / 最近一轮触发名 / 幽灵修复这几项硬指标
+  // 一直没有固定视图，每次都得靠追问。这里做成一张**固定在自迭代面板顶部**
+  // 的卡片（插在 .fr-tools 和 .fr-body 之间，切面板内容也不会被刷掉），
+  // 数据源 /api/selfiter/health（后端 self_iterate.health_snapshot()）。
+  let healthData = null;
+
+  function healthNum(v) { const n = Number(v); return isFinite(n) ? n : 0; }
+
+  // healthCardData：纯函数，dict → 卡片数据。不碰 DOM，
+  // 所以「能不能消费 health_snapshot() 返回的 dict」是可直接断言的。
+  function healthCardData(h) {
+    const d = (h && typeof h === "object" && h.health && typeof h.health === "object")
+      ? h.health : (h || {});
+    // 后端给的是 0~1 的比例；万一是百分数（>1）也接受，统一归一化到 0~1
+    let rate = healthNum(d.success_rate);
+    if (rate > 1) rate = rate / 100;
+    rate = Math.max(0, Math.min(1, rate));
+    const total = healthNum(d.total);
+    const hasData = d.has_data === undefined ? total > 0 : !!d.has_data;
+    const phantom = Math.max(0, Math.round(healthNum(d.phantom_fix_count)));
+    const rollbacks = Math.max(0, Math.round(healthNum(d.rollbacks)));
+    const breaks = Math.max(0, Math.round(healthNum(d.circuit_breaks)));
+    const trigCode = String(d.last_round_trigger || "");
+    const trigZh = String(d.last_round_trigger_zh || trigCode || "还没有跑过一轮");
+    let level = String(d.level || "");
+    if (["good", "warn", "bad", "unknown"].indexOf(level) < 0) {
+      // 后端没给 level 时按同样的口径自己判一次（老版本接口也能用）
+      level = !hasData ? "unknown"
+        : (rate >= 0.8 && !phantom && !breaks) ? "good"
+          : (rate < 0.6 || phantom >= 3) ? "bad" : "warn";
+    }
+    const tagMap = {
+      good: { cls: "fr-tag-ok", text: "✓ 运转正常" },
+      warn: { cls: "fr-tag-warn", text: "⚠ 需要盯一眼" },
+      bad: { cls: "fr-tag-bad", text: "✕ 状态偏差" },
+      unknown: { cls: "fr-tag-off", text: "— 暂无数据" },
+    };
+    return {
+      level: level,
+      hasData: hasData,
+      title: "自迭代健康度",
+      tag: tagMap[level] || tagMap.unknown,
+      metrics: [
+        { key: "success_rate",
+          label: "成功率",
+          value: hasData ? (rate * 100).toFixed(1) + "%" : "—",
+          tone: !hasData ? "plain" : rate >= 0.8 ? "ok" : rate < 0.6 ? "bad" : "mid" },
+        { key: "rollbacks", label: "回滚", value: String(rollbacks),
+          tone: rollbacks ? "mid" : "ok" },
+        { key: "circuit_breaks", label: "熔断", value: String(breaks),
+          tone: breaks ? "mid" : "ok" },
+        { key: "phantom_fix_count", label: "幽灵修复", value: String(phantom),
+          tone: phantom ? "bad" : "ok" },
+        { key: "last_round_trigger", label: "最近一轮触发", value: trigZh,
+          tone: "plain" },
+      ],
+      trigger: trigCode,
+      triggerZh: trigZh,
+      hint: String(d.hint || ""),
+      ts: String(d.last_round_ts || ""),
+    };
+  }
+
+  function healthCardHtml(data) {
+    const d = data || healthCardData(null);
+    const metrics = (d.metrics || []).map(function (m) {
+      return '<div class="fr-metric fr-tone-' + esc(m.tone || "plain") + '">' +
+        '<i>' + esc(m.label) + '</i><b>' + esc(m.value) + '</b></div>';
+    }).join("");
+    return '<div class="fr-card fr-health-card">' +
+      '<div class="fr-c-head"><b>' + esc(d.title) + '</b>' +
+        '<span class="fr-tag ' + esc(d.tag.cls) + '">' + esc(d.tag.text) + '</span>' +
+        (d.ts ? '<span class="fr-tag fr-tag-off">' + esc(d.ts) + '</span>' : '') +
+      '</div>' +
+      '<div class="fr-metrics">' + metrics + '</div>' +
+      (d.hint ? '<div class="fr-hint">' + esc(d.hint) + '</div>' : '') +
+    '</div>';
+  }
+
+  // 卡片槽位：固定在面板顶部（tools 之下、body 之上），
+  // 这样 setBody() 每次重刷列表都不会把它刷掉。
+  function healthSlot(panelId) {
+    const box = document.getElementById(panelId || PEND);
+    if (!box) return null;
+    let el = box.querySelector(".fr-health");
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "fr-health";
+      const body = box.querySelector(".fr-body");
+      if (body && body.parentNode === box) box.insertBefore(el, body);
+      else box.appendChild(el);
+    }
+    return el;
+  }
+
+  // renderHealthCard：画卡片并**返回卡片数据**（dict → 卡片，可被断言）。
+  // 三种调用都支持：renderHealthCard() / renderHealthCard(dict) / renderHealthCard(panelId)
+  function renderHealthCard(h, panelId) {
+    let src = h, pid = panelId;
+    if (typeof h === "string") { pid = h; src = null; }
+    if (!src || typeof src !== "object") src = healthData;
+    const data = healthCardData(src);
+    const el = healthSlot(pid || PEND);
+    if (el) el.innerHTML = healthCardHtml(data);
+    return data;
+  }
+
+  async function loadHealth(panelId) {
+    const pid = panelId || PEND;
+    if (!healthData) {
+      const el = healthSlot(pid);
+      if (el) el.innerHTML = '<div class="fr-hint">健康度加载中…</div>';
+    }
+    const d = await api("/api/selfiter/health");
+    healthData = (d && d.ok === false) ? null : (d || null);
+    return renderHealthCard(healthData, pid);
+  }
+
   // ============================================================ 红点
   // paintDot：把数字**真正写进**角标。
   // 2026-11-16 用户报「明明有 9 条，顶栏还是 0」：原来只设了 hidden / title，
@@ -731,6 +859,7 @@
     ensurePanel(PEND, "📋 待批准", "所有还没执行的自动迭代任务");
     openPanel(PEND);
     loadPending();
+    loadHealth(PEND);       // 打开就能看到成功率/回滚/熔断/幽灵修复，不用再问
   }
   function openFeatPanel() {
     ensurePanel(FEAT, "💡 推荐新功能", "模型想出来的、能提高体验的全新功能");

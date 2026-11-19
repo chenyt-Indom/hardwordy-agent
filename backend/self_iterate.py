@@ -239,10 +239,17 @@ _DEFAULT_SETTINGS = {
     # 自动评估 / 信任模式下的自动执行）；用户手动点的操作仍然照常跑，
     # 否则「暂停」会变成「整个功能不可用」。
     "paused": False,
-    # 信任模式：反思产出的动作**不再等批准**，直接执行。
-    # 用户明确选了「全部自动，包括高风险（改 main.py、一次改多个文件），
-    # 但高风险会单独在前端提示一声」。
+    # 信任模式：**自己发现的问题 / 能升级的地方**不再等批准，直接改。
+    # ★ 2026-11-20 用户纠正语义（原话）：「信任模式不是让你自动进行所有
+    #   待批准以及推荐功能的实现啊，而是在对话或任务中发现哪里有问题或
+    #   可以升级的地方自动完成升级」。
+    #   所以信任模式的授权范围 = 修 bug / 补漏洞 / 升级已有能力；
+    #   **不包含**「实现推荐的新功能」（那类要用户判断价值/新颖性），
+    #   也不包含「把待批准列表里堆着的旧计划统统批准掉」。
     "trust_mode": False,
+    # 信任模式下是否也自动实现「推荐的新功能」。默认 False（按用户语义）。
+    # 只有用户明确说「新功能也自动做」才打开。
+    "trust_auto_features": False,
     # ---- 计划打磨（2026-11-16 用户要求）----
     # 「不断完善计划，直到计划可以了就可以执行实施了」，
     # 判定标准：「模型自评 8 分以上，或打磨满 3 轮就执行」。
@@ -4053,7 +4060,10 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
         except Exception:                                 # noqa: BLE001
             logger.debug("silent-except", exc_info=True)
 
-    # 信任模式：用户要求「不用批准，自动迭代，改完提示重启」。
+    # 信任模式 = 「自己发现的问题 / 能升级的地方，不用等批准，直接改」。
+    # ★ 2026-11-20 用户纠正：**不**包括「把待批准/推荐功能统统自动实现」。
+    #   所以这里只自动批准「修复 / 改进 / 升级」动作；新功能动作会被
+    #   auto_approve_only 扣下（除非设置里 trust_auto_features=True）。
     # 只在真的有计划动作时才执行，避免空跑。
     if auto_execute is None:
         auto_execute = bool(load_settings().get("trust_mode"))
@@ -4072,15 +4082,38 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
         _d2, _p2 = _find_plan(plan["id"])
         if _p2:
             out["plan"] = _p2
+        _held = pre.get("held_features") or []
+        # ★ 2026-11-20：如果这一轮**只有**新功能动作（全被信任模式扣下），
+        #   就不要再往队列里塞一个「0 条已批准动作」的空任务 —— 那正是
+        #   之前出现「0.1 秒退出、没有已批准的动作」的来源之一。
+        if not (pre.get("approved") or 0):
+            out["auto"] = {"submitted": False, "auto_approved": 0,
+                           "held_features": _held,
+                           "skipped": "本轮没有需要自动修复/升级的动作"}
+            if _held:
+                out["notice"] = (out.get("notice") or "") + (
+                    "\n\n信任模式只自动修问题 / 做升级，所以这 %d 条**新功能**"
+                    "没有自动实现，已留在「推荐新功能」里等你判断。"
+                    % len(_held))
+            return out
         try:
             from . import iter_runner as _ir
             sub = _ir.submit(plan["id"], source="auto",
                              title=(plan.get("title") or "")[:80])
             out["auto"] = {"submitted": True, "queue": sub,
                            "auto_approved": pre.get("approved") or 0,
+                           "held_features": _held,
                            "high_risk": pre.get("high_risk") or []}
             out["task"] = sub
             out["need_restart"] = False
+            # ★ 2026-11-20：混合计划（既有修复/升级，又有新功能）时，
+            #   新功能被扣下了也得说一声 —— 否则用户只会看到「做了几条」，
+            #   以为新功能也被自动实现了，或者反过来以为漏掉了。
+            if _held:
+                out["notice"] = (out.get("notice") or "") + (
+                    "\n\n信任模式只自动修问题 / 做升级；另外 %d 条**新功能**"
+                    "没有自动实现，已留在「推荐新功能」里等你判断。"
+                    % len(_held))
         except Exception as e:                          # noqa: BLE001
             out["auto"] = {"submitted": False,
                            "error": "%s: %s" % (type(e).__name__, e)}
@@ -7514,16 +7547,25 @@ def audit_overview():
 
 # ---------------------------------------------------------------- 信任模式
 
-def auto_approve_only(pid, max_n=0):
-    """信任模式：把待批准的动作全部标成 approved，**不执行**。
+def auto_approve_only(pid, max_n=0, allow_feature=None):
+    """信任模式：把「该自动做的」动作标成 approved，**不执行**。
 
-    用户明确要求「全部自动，包括高风险；高风险也自动进行，但会在前端跟用户
-    说一声」—— 所以这里不按风险过滤，只把高风险挑出来放进返回值，让前端提示。
+    用户明确要求「包括高风险也自动进行，但会在前端跟用户说一声」——
+    所以这里不按风险过滤，只把高风险挑出来放进返回值，让前端提示。
+
+    ★ 2026-11-20 用户纠正：「信任模式不是让你自动进行所有待批准以及推荐
+      功能的实现，而是在对话或任务中发现哪里有问题或可以升级的地方自动
+      完成升级」。
+      所以本函数只批准**修复 / 改进 / 升级**类动作；`origin=="feature"`
+      的新功能动作**留在 pending**，等用户在「推荐新功能」里自己判断。
+      allow_feature=None → 读设置 trust_auto_features（默认 False）。
 
     2026-11-15 拆出来：执行改由 iter_runner 的队列负责（要排队、要能终止、
     要在聊天界面出代码卡片），这里只负责「批准」这一步。
     """
     s = load_settings()
+    if allow_feature is None:
+        allow_feature = bool(s.get("trust_auto_features"))
     d, plan = _find_plan(pid)
     if not plan:
         return {"ok": False, "error": "找不到这次计划"}
@@ -7562,16 +7604,29 @@ def auto_approve_only(pid, max_n=0):
         cap = min(cap, _HARD_CAP)
     if _cap_ceiling is not None:      # ← 保证成功率降级不被上面的 max() 覆盖
         cap = min(cap, _cap_ceiling)
-    # 用户要求「新功能也要自动落地」。但 bug 修复动作排在数组前面，会先占满名额，
-    # 把功能动作整批挤掉 —— 实测 cap=6 时 4 条功能动作只进了 1 条。所以给功能
-    # 留保底配额（约 cap 的 1/3），剩下的名额再按原顺序给 bug 修复。
-    feat = [a for a in pend if a.get("origin") == "feature"]
-    quota = min(len(feat), max(1, cap // 3)) if feat else 0
+    # ★ 2026-11-20 用户纠正语义后：信任模式**不**自动实现推荐的新功能。
+    #   原来这里给功能动作留保底配额（cap//3）并直接批准，实测效果就是
+    #   「开信任模式 → 体验评估跑一轮 → 自动凭空多出一个新功能」，
+    #   与用户「只自动修问题/做升级」的要求不符。
+    #   现在：allow_feature=False 时把功能动作全部排除在 pend 之外，
+    #   它们保持 pending，等用户在「推荐新功能」里批准。
+    # ★ 2026-11-20 实测补漏：原来只判 `origin == "feature"`，而 featradar 造
+    #   的计划里动作**可能没打这个标**（推荐功能那条路径），于是被当成修复
+    #   动作自动批准了 —— 正好是用户说的「信任模式自动实现推荐功能」。
+    #   改用 _is_feature_action（它同时看 origin 和 plan.trigger），两种来源都认。
+    feat = [a for a in pend if _is_feature_action(plan, a)]
+    if feat and not allow_feature:
+        pend = [a for a in pend if not _is_feature_action(plan, a)]
+        logger.info("信任模式：%d 条新功能动作不自动执行（等用户批准）", len(feat))
     picked = []
-    for a in feat[:quota]:
-        a["status"] = "approved"
-        a["auto"] = True
-        picked.append(a)
+    if allow_feature and feat:
+        # 用户明确打开 trust_auto_features 时才走这条：给功能留保底配额，
+        # 否则 bug 修复动作排在前面会把名额占满、功能整批挤掉。
+        quota = min(len(feat), max(1, cap // 3))
+        for a in feat[:quota]:
+            a["status"] = "approved"
+            a["auto"] = True
+            picked.append(a)
     for a in pend:
         if len(picked) >= cap:
             break
@@ -7585,6 +7640,9 @@ def auto_approve_only(pid, max_n=0):
     save_plans(d)
     return {"ok": bool(picked), "approved": len(picked),
             "plan": plan,
+            "held_features": ([] if allow_feature else
+                              [{"id": a.get("id"), "title": a.get("title")}
+                               for a in feat]),
             "high_risk": [{"id": a.get("id"), "title": a.get("title")}
                           for a in picked if str(a.get("risk") or "mid") == "high"]}
 
@@ -7734,6 +7792,164 @@ def stats():
             "plans": len(d["items"])}
 
 
+def health_snapshot():
+    """自迭代健康度快照 —— 成功率 / 回滚 / 熔断 / 最近一轮触发名 / 幽灵修复数。
+
+    为什么需要（用户连续多轮追问「自迭代到底能不能正常运转」）：
+      这些数字分散在 actlog.jsonl、plans.json、进程内 _RUN 三个地方，用户每问
+      一次就得翻一遍日志、数一遍失败 —— 说明「自迭代状态」根本没有固定视图。
+      这里把它们聚成一个**稳定结构**，前端在自迭代面板顶部固定展示，
+      不用再靠多轮追问确认。
+
+    phantom_fix_count（幽灵修复计数）的口径直接照 Phantom Guardrails 的
+    「反事实虚构」检测思路：一轮动作声称要修某个 fail_kind，但账本里该
+    fail_kind 在观察窗内真实出现 0 次 —— 此时**正确动作是什么都不做**，
+    这种修复就算一次幽灵修复。数据源两处，按 (plan_id, action_id) 去重，
+    同一件事不会被数两次：
+      ① actlog 行自带 phantom 标记（_log_act 写入，evidence.count == 0）；
+      ② 计划里被 _check_phantom 拒掉的动作（phantom=true / status=rejected）。
+
+    返回字段（口径自洽，任何异常都不外抛）：
+      success_rate          0~1 的浮点（没有样本时为 0.0，用 has_data 区分）
+      rollbacks             非负整数：账本 detail 里出现过「回滚」的次数
+      circuit_breaks        非负整数：熔断次数
+      last_round_trigger    最近一轮的触发名（原始代码，如 daily/manual/audit）
+      last_round_trigger_zh 上面那个的中文说明，前端直接显示
+      phantom_fix_count     非负整数：幽灵修复条数
+      另附 total / ok_count / fail_count / last_round_ts / level / hint 便于展示与自检。
+    """
+    out = {
+        "ok": True,
+        "success_rate": 0.0,
+        "rollbacks": 0,
+        "circuit_breaks": 0,
+        "last_round_trigger": "",
+        "last_round_trigger_zh": "",
+        "phantom_fix_count": 0,
+        # ---- 辅助字段（自检 / 展示用）----
+        "total": 0,
+        "ok_count": 0,
+        "fail_count": 0,
+        "has_data": False,
+        "last_round_ts": "",
+        "level": "unknown",
+        "hint": "",
+    }
+
+    # ---- 1) 成功率 / 回滚 / 熔断：全部来自 runtime_metrics 的硬数据（非模型自评）
+    try:
+        rt = runtime_metrics() or {}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        rt = {}
+    try:
+        ok_n = int(rt.get("ok") or 0)
+    except Exception:                                   # noqa: BLE001
+        ok_n = 0
+    try:
+        fail_n = int(rt.get("fail") or 0)
+    except Exception:                                   # noqa: BLE001
+        fail_n = 0
+    try:
+        total = int(rt.get("total") or 0)
+    except Exception:                                   # noqa: BLE001
+        total = 0
+    if total <= 0:
+        total = ok_n + fail_n
+    # 分母用 total（账本里的真实运行条数），分子用 ok —— 天然落在 0~1。
+    rate = round(min(1.0, max(0.0, ok_n / float(total))), 4) if total else 0.0
+    try:
+        rollbacks = max(0, int(rt.get("rollback") or 0))
+    except Exception:                                   # noqa: BLE001
+        rollbacks = 0
+    try:
+        breaks = max(0, int(rt.get("fuse") or 0))
+    except Exception:                                   # noqa: BLE001
+        breaks = 0
+    out.update({"success_rate": rate, "rollbacks": rollbacks,
+                "circuit_breaks": breaks, "total": max(0, total),
+                "ok_count": max(0, ok_n), "fail_count": max(0, fail_n),
+                "has_data": bool(total > 0)})
+
+    # ---- 2) 幽灵修复计数：actlog 的 phantom 标记 + 计划里被拒的动作，按 (计划,动作) 去重
+    phantom = 0
+    _seen = set()
+    try:
+        for row in list_actlog(500):
+            if not isinstance(row, dict) or not row.get("phantom"):
+                continue
+            key = (str(row.get("plan_id") or ""),
+                   str(row.get("action") or row.get("action_id") or row.get("title") or ""))
+            if key in _seen:
+                continue
+            _seen.add(key)
+            phantom += 1
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    try:
+        _d = load_plans()
+        for p in (_d.get("items") or []):
+            if not isinstance(p, dict):
+                continue
+            for a in (p.get("actions") or []):
+                if not isinstance(a, dict) or not a.get("phantom"):
+                    continue
+                key = (str(p.get("id") or ""), str(a.get("id") or ""))
+                if key in _seen:
+                    continue
+                _seen.add(key)
+                phantom += 1
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    out["phantom_fix_count"] = max(0, int(phantom))
+
+    # ---- 3) 最近一轮的触发名：优先计划（持久化，重启不丢），退回进程内运行状态
+    trig, ts = "", ""
+    try:
+        _d = load_plans()
+        items = [p for p in (_d.get("items") or []) if isinstance(p, dict)]
+        if items:
+            trig = str(items[0].get("trigger") or "")
+            ts = str(items[0].get("ts") or "")
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    if not trig:
+        try:
+            st = run_status() or {}
+            trig = str(st.get("trigger") or "")
+            if not ts and st.get("started"):
+                ts = time.strftime("%Y-%m-%d %H:%M:%S",
+                                   time.localtime(float(st["started"])))
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+    if not trig:
+        try:
+            _rows = list_actlog(1)
+            if _rows:
+                ts = ts or str(_rows[0].get("ts") or "")
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+    out["last_round_trigger"] = trig
+    out["last_round_trigger_zh"] = _TRIGGER_ZH.get(trig, trig or "还没有跑过一轮")
+    out["last_round_ts"] = ts
+
+    # ---- 4) 一句话健康度：卡片配色与提示语，前端不再自己判
+    if not out["has_data"]:
+        out["level"] = "unknown"
+        out["hint"] = "还没有自动改动的运行记录，跑一轮之后这里才有数"
+    elif rate >= 0.8 and phantom == 0 and breaks == 0:
+        out["level"] = "good"
+        out["hint"] = "自迭代运转正常：成功率高、没有幽灵修复"
+    elif rate < 0.6 or phantom >= 3:
+        out["level"] = "bad"
+        out["hint"] = ("成功率偏低或幽灵修复偏多 —— 先拆小改动、补可验证断言，"
+                       "别针对没发生过的失败动手")
+    else:
+        out["level"] = "warn"
+        out["hint"] = "能跑，但有回滚/熔断/幽灵修复，值得盯一眼"
+    return out
+
+
 def overview():
     """前端抽屉一次拿全：最新一次反思、待批准数、采纳率、信号数。"""
     d = load_plans()
@@ -7763,6 +7979,8 @@ def overview():
         "settings": load_settings(),
         "audit": _last_audit,
         "stats": stats(),
+        # 健康度快照：前端在自迭代面板顶部固定展示，不用再多轮追问「能不能正常运转」
+        "health": health_snapshot(),
         "history": [{"id": p.get("id"), "ts": p.get("ts"), "summary": p.get("summary"),
                      "trigger": p.get("trigger"),
                      "actions": len(p.get("actions") or [])} for p in items[:12]],
@@ -7992,6 +8210,10 @@ def list_pending_actions(days: int = 0, limit: int = 300,
                 hold = "信任模式关闭：只生成计划、不自动改代码，等你批准"
             elif any(x["status"] == "need_review" for x in acts):
                 hold = "被护栏拦下（改太频繁或高风险），需要你确认"
+            elif want_feature:
+                # ★ 2026-11-20 用户纠正信任模式语义后：新功能一律不自动做，
+                #   这里要把「为什么停在这儿」说清楚，否则看起来像信任模式失效。
+                hold = "信任模式只自动修问题/做升级，新功能要你判断价值后再批准"
             else:
                 hold = "等你批准"
             total += len(acts)

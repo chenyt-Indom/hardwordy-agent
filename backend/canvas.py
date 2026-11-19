@@ -32,7 +32,17 @@
   ⑥ 圈选兜底：前端把当前选中的 card-id 用 selected 传进来
 指不到就返回错误（不猜），前端原样提示给用户。
 """
+import hashlib
+import io
+import json
+import logging
+import os
 import re
+import time
+import urllib.parse
+import zipfile
+
+logger = logging.getLogger(__name__)
 
 # 口语里的颜色 → 卡片强调色（取一眼能分清的色相，不是精确设计色）
 COLORS = {
@@ -334,4 +344,372 @@ def handle(text, cards, selected=""):
     out["cmd"] = {k: cmd.get(k) for k in ("action", "card_ids", "color", "ok")}
     out["text"] = str(text or "")
     return out
+
+
+# ============================================================================
+# 常驻工作台：产出物堆在桌面上，回来接着干（2026-11-21）
+# ----------------------------------------------------------------------------
+# 摩擦点：图片 / PPT / Excel / 视频 / 数字人视频做出来以后**只活在对话流里**，
+# 关掉页面就再也找不回来 —— 用户只能重新让模型做一遍（最贵的一种浪费）。
+#
+# 分工（和上面的语音画布一样，刻意分层）
+#   · 本模块：**纯逻辑 + 一份 JSON 落盘**。条目口径、去重、排序、打包成 zip
+#     全在这里；不碰 DOM、不联网、不调模型 —— 所以能秒级断言。
+#   · frontend/artifacts.js：localStorage 那份镜像 + 面板渲染 + 拖拽排序。
+#     两边**双写**：后端没起来时前端照样能用，起来以后再对齐（见 sync）。
+#   · frontend/app.js：工具产出（图 / PPT / 文档 / 视频）到手时调 add。
+#
+# 条目口径（前后端共用，字段少而稳）
+#   {id, kind, title, thumb, path, ts, status, tool, note}
+#   id   —— 由 path+title 推出的稳定短哈希：同一个文件重复添加不会堆成两行
+#   kind —— image / ppt / doc / sheet / video / audio / web / other
+#   path —— 源文件路径（相对项目根，或站内下载口 /api/doclib/download?rel=）
+#   ts   —— 第一次被添加的时间（重复添加不刷新：用户要看的是"什么时候做出来的"）
+#   status —— done（默认）；别的值表示"还没做完"，供"接着上次干"用
+# ============================================================================
+WORKBENCH_KINDS = ("image", "ppt", "doc", "sheet", "video", "audio", "web", "other")
+
+# 一次最多留多少条：再多就不是"桌面"而是一面墙（前端同口径，见 artifacts.js）
+MAX_ARTIFACTS = 240
+
+STORE_NAME = "canvas_artifacts.json"
+
+# 产物扩展名 → 种类（前端 artifacts.js 的 WB_EXT_KIND 与此保持一致）
+_ART_EXT_KIND = {
+    "png": "image", "jpg": "image", "jpeg": "image", "webp": "image",
+    "gif": "image", "bmp": "image", "svg": "image",
+    "pptx": "ppt", "ppt": "ppt", "key": "ppt",
+    "docx": "doc", "doc": "doc", "pdf": "doc", "md": "doc", "txt": "doc",
+    "xlsx": "sheet", "xls": "sheet", "csv": "sheet",
+    "mp4": "video", "mov": "video", "webm": "video", "mkv": "video",
+    "mp3": "audio", "wav": "audio", "m4a": "audio",
+    "html": "web", "htm": "web", "url": "web",
+}
+
+
+def store_path():
+    """工作台条目的落盘位置（data/canvas_artifacts.json）。
+
+    ⚠️ **必须延迟解析**：config.data() 会顺手建目录，模块导入时不该有副作用
+      （自检会导入全部模块，见 regress 的 imports 用例）。
+    """
+    from . import config
+    return config.data(STORE_NAME)
+
+
+def guess_kind(path="", hint=""):
+    """按显式类型 / 扩展名判断种类。认不出返回 other（不瞎猜成图片）。"""
+    k = str(hint or "").strip().lower()
+    if k in WORKBENCH_KINDS:
+        return k
+    p = str(path or "").strip().split("?")[0]
+    ext = os.path.splitext(p)[1].lower().lstrip(".")
+    return _ART_EXT_KIND.get(ext, "other")
+
+
+def guess_thumb(path="", kind="", thumb=""):
+    """缩略图地址。
+
+    ⚠️ 两条必须守住：
+      ① `data:image/png;base64,…` 动辄几百 KB，**绝不进 localStorage**
+         （5MB 配额，十几张就写满，之后整个工作台都存不进去）；
+      ② 只给图片生成站内下载口，其它种类让前端用图标。
+    """
+    t = str(thumb or "").strip()
+    if t.lower().startswith("data:"):
+        t = ""
+    if t:
+        return t
+    p = str(path or "").strip()
+    if not p or guess_kind(p, kind) != "image":
+        return ""
+    if p.startswith(("http://", "https://", "/api/")):
+        return p
+    return "/api/doclib/download?rel=" + urllib.parse.quote(p, safe="/")
+
+
+def _art_id(path="", title=""):
+    """稳定短 id：同一个文件被重新生成 / 历史重放，永远落在同一条上。"""
+    raw = (str(path or "") + "\x01" + str(title or "")).encode("utf-8", "replace")
+    return "a" + hashlib.md5(raw).hexdigest()[:10]
+
+
+def normalize_artifact(raw):
+    """一条产出物 → 统一口径。**永不抛异常**（前端传什么都不能把工作台搞崩）。"""
+    src = dict(raw) if isinstance(raw, dict) else {}
+    path = str(src.get("path") or src.get("rel") or src.get("file") or "").strip()
+    title = " ".join(str(src.get("title") or src.get("name") or "").split())[:120]
+    kind = guess_kind(path, src.get("kind") or src.get("type"))
+    if not title:
+        title = os.path.basename(path.split("?")[0]) or "产出物"
+    item_id = str(src.get("id") or "").strip() or _art_id(path, title)
+    try:
+        ts = float(src.get("ts") or src.get("time") or 0) or time.time()
+    except (TypeError, ValueError):
+        ts = time.time()
+    status = str(src.get("status") or "done").strip() or "done"
+    return {
+        "id": item_id,
+        "kind": kind,
+        "title": title,
+        "thumb": guess_thumb(path, kind, src.get("thumb")),
+        "path": path[:400],
+        "ts": round(ts, 3),
+        "status": status[:20],
+        "tool": str(src.get("tool") or "")[:40],
+        "note": " ".join(str(src.get("note") or "").split())[:200],
+    }
+
+
+def merge_artifact(items, raw):
+    """把一条产出物并进列表：**已在列表里就搬到最前面、保留原时间**。
+
+    返回 (新列表, 归一化后的条目)。入参不被就地修改。
+    为什么重复添加要保留原 ts：用户看到的时间该是"这东西什么时候做出来的"，
+    而不是"我最后一次刷新页面"。
+    """
+    one = normalize_artifact(raw)
+    out = [dict(x or {}) for x in (items or [])]
+    keep_ts = 0.0
+    for old in out:
+        if str(old.get("id") or "") == one["id"] and old.get("ts"):
+            try:
+                keep_ts = float(old["ts"])
+            except (TypeError, ValueError):
+                keep_ts = 0.0
+            break
+    if keep_ts:
+        one["ts"] = round(keep_ts, 3)
+    out = [x for x in out if str(x.get("id") or "") != one["id"]]
+    out.insert(0, one)
+    return out[:MAX_ARTIFACTS], one
+
+
+def _load_store():
+    """读盘。文件坏了 / 没权限 → 当空桌面（**不许**把整个工作台搞挂）。"""
+    try:
+        with open(store_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        logger.debug("silent-except", exc_info=True)
+        return []
+    raw = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(raw, list):
+        return []
+    return [normalize_artifact(x) for x in raw if isinstance(x, dict)][:MAX_ARTIFACTS]
+
+
+def _save_store(items):
+    """写盘（原子替换：先写 .tmp 再 os.replace，免得写一半留下坏 JSON）。"""
+    path = store_path()
+    payload = {"version": 1, "saved_at": time.time(),
+               "items": [dict(x or {}) for x in (items or [])][:MAX_ARTIFACTS]}
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        logger.debug("silent-except", exc_info=True)
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            logger.debug("silent-except", exc_info=True)
+        return False
+
+
+def add_artifact(raw, items=None):
+    """加一条产出物。items 传进来就**只算不存**（纯逻辑，方便断言）。
+
+    返回 {ok, item, items, count, persisted, error}。
+    既没路径也没标题 → ok=False（不往桌面上放一个点不开的空壳）。
+    """
+    src = dict(raw) if isinstance(raw, dict) else {}
+    has_path = bool(str(src.get("path") or src.get("rel") or src.get("file") or "").strip())
+    has_title = bool(str(src.get("title") or src.get("name") or "").strip())
+    pure = items is not None
+    base = [dict(x or {}) for x in (items or [])] if pure else _load_store()
+    if not (has_path or has_title):
+        return {"ok": False, "item": None, "items": base, "count": len(base),
+                "persisted": False,
+                "error": "这条产出物既没有文件路径也没有标题，加不进工作台"}
+    merged, one = merge_artifact(base, src)
+    persisted = False if pure else _save_store(merged)
+    return {"ok": True, "item": one, "items": merged, "count": len(merged),
+            "persisted": persisted, "error": ""}
+
+
+def list_artifacts(items=None):
+    """列出桌面（新的在前）。附带「没做完的」一栏，给"接着上次干"用。"""
+    pure = items is not None
+    out = [normalize_artifact(x) for x in (items or [])] if pure else _load_store()
+    out = out[:MAX_ARTIFACTS]
+    pending = [x for x in out if str(x.get("status") or "done") != "done"]
+    return {"ok": True, "items": out, "count": len(out),
+            "unfinished": pending[:8], "error": ""}
+
+
+def remove_artifact(ids, items=None):
+    """删掉若干条。ids 可以是单个 id 或数组。返回 {ok, removed, items, count}。"""
+    if isinstance(ids, str):
+        want = [ids]
+    elif isinstance(ids, (list, tuple)):
+        want = [str(x) for x in ids]
+    else:
+        want = []
+    want = [w.strip() for w in want if w.strip()]
+    pure = items is not None
+    base = [normalize_artifact(x) for x in (items or [])] if pure else _load_store()
+    if not want:
+        return {"ok": False, "removed": [], "items": base, "count": len(base),
+                "error": "没指定要删哪一条"}
+    dropped = [x for x in base if str(x.get("id") or "") in want]
+    keep = [x for x in base if str(x.get("id") or "") not in want]
+    if not dropped:
+        return {"ok": False, "removed": [], "items": keep, "count": len(keep),
+                "error": "工作台上没有 %s 这一条" % "、".join(want[:4])}
+    if not pure:
+        _save_store(keep)
+    return {"ok": True, "removed": [str(x.get("id") or "") for x in dropped],
+            "items": keep, "count": len(keep), "error": ""}
+
+
+def reorder_artifacts(order, items=None):
+    """按前端拖拽后的 id 顺序重排。
+
+    ⚠️ 只重排、**不增删**：order 里没提到的条目按原相对顺序接在后面
+      （前端只发它看得到的那几条，别因为漏发就把用户的产出物弄丢）。
+    """
+    if isinstance(order, str):
+        order = [order]
+    ids = [str(x) for x in (order or []) if str(x).strip()]
+    pure = items is not None
+    base = [normalize_artifact(x) for x in (items or [])] if pure else _load_store()
+    by_id = {}
+    for it in base:
+        by_id.setdefault(str(it.get("id") or ""), it)
+    out = []
+    for i in ids:
+        if i in by_id:
+            out.append(by_id.pop(i))
+    for it in base:                      # 没被点名的保持原顺序，接在后面
+        i = str(it.get("id") or "")
+        if i in by_id:
+            out.append(by_id.pop(i))
+    if not pure:
+        _save_store(out)
+    return {"ok": True, "items": out, "count": len(out), "error": ""}
+
+
+def safe_abs(path=""):
+    """条目里的路径 → 本机真实文件（找不到 / 越界一律返回空串）。
+
+    白名单口径与 selfdev 一致：只认项目根和数据根（打包时 data_root 可能是
+    别的目录），并且必须落在其内部 —— 导出打包绝不能把 ../../ 之类的东西打进去。
+    """
+    from . import config
+    p = str(path or "").strip()
+    if not p:
+        return ""
+    if p.startswith("/api/") and "?" in p:
+        q = urllib.parse.urlparse(p).query
+        p = (urllib.parse.parse_qs(q).get("rel") or [""])[0]
+    if not p:
+        return ""
+    roots = []
+    for r in (config.PROJECT_ROOT, config.data_root()):
+        try:
+            roots.append(os.path.abspath(r))
+        except OSError:
+            logger.debug("silent-except", exc_info=True)
+    cands = [p] if os.path.isabs(p) else [os.path.join(r, p) for r in roots]
+    for c in cands:
+        try:
+            ap = os.path.abspath(c)
+        except OSError:
+            continue
+        inside = any(ap == r or ap.startswith(r + os.sep) for r in roots)
+        if not inside:
+            continue
+        if os.path.isfile(ap):
+            return ap
+    return ""
+
+
+def _manifest_md(items, packed, missing):
+    """包里那份「清单.md」：用户打开 zip 第一眼就知道这些都是什么。"""
+    lines = ["# 工作台产出物", "",
+             "- 导出时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+             "- 条目：%d（打进包 %d 个文件）" % (len(items), len(packed)), ""]
+    for it in items:
+        name = packed.get(str(it.get("id") or ""), "")
+        stamp = ""
+        try:
+            stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(it.get("ts") or 0)))
+        except (TypeError, ValueError, OSError):
+            stamp = ""
+        lines.append("## %s" % (it.get("title") or it.get("id")))
+        lines.append("- 种类：%s%s" % (it.get("kind") or "other",
+                                       ("（%s）" % it.get("tool")) if it.get("tool") else ""))
+        if stamp:
+            lines.append("- 时间：%s" % stamp)
+        if it.get("path"):
+            lines.append("- 源文件：%s" % it.get("path"))
+        lines.append("- 包内文件：%s" % (name or "（源文件不在本机了，只留记录）"))
+        if it.get("note"):
+            lines.append("- 备注：%s" % it.get("note"))
+        lines.append("")
+    if missing:
+        lines.append("## 找不到源文件的条目")
+        for m in missing:
+            lines.append("- %s" % m)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def export_artifacts(items=None):
+    """把桌面上的产出物打成一个 zip（在内存里打，不写临时文件）。
+
+    返回 {ok, name, blob, count, missing, error}；条目一个文件都找不到时
+    仍然给一个只含「清单.md」的包（ok=True + missing 列表），别让用户点了没反应。
+    """
+    pure = items is not None
+    base = [normalize_artifact(x) for x in (items or [])] if pure else _load_store()
+    buf = io.BytesIO()
+    packed, missing, used = {}, [], set()
+    try:
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for it in base:
+                ap = safe_abs(it.get("path"))
+                if not ap:
+                    missing.append(it.get("title") or it.get("id"))
+                    continue
+                name = os.path.basename(ap) or ("file_%d" % len(packed))
+                base_name, ext = os.path.splitext(name)
+                k = 2
+                while name in used:
+                    name = "%s_%d%s" % (base_name, k, ext)
+                    k += 1
+                try:
+                    z.write(ap, name)
+                except OSError:
+                    logger.debug("silent-except", exc_info=True)
+                    missing.append(it.get("title") or it.get("id"))
+                    continue
+                used.add(name)
+                packed[str(it.get("id") or "")] = name
+            z.writestr("清单.md", _manifest_md(base, packed, missing))
+            z.writestr("manifest.json", json.dumps(
+                {"exported_at": time.time(), "count": len(packed),
+                 "items": base, "packed": packed, "missing": missing},
+                ensure_ascii=False, indent=1))
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:      # noqa: BLE001
+        return {"ok": False, "name": "", "blob": b"", "count": 0, "missing": [],
+                "error": "打包失败：%s: %s" % (type(exc).__name__, exc)}
+    blob = buf.getvalue()
+    return {"ok": True, "name": "工作台产出物_%s.zip" % time.strftime("%Y%m%d_%H%M"),
+            "blob": blob, "count": len(packed), "missing": missing,
+            "error": "" if packed or not base else "工作台上还没有产出物"}
 

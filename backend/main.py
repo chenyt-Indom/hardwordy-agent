@@ -3198,6 +3198,21 @@ def selfiter_overview():
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfiter/health")
+def selfiter_health():
+    """自迭代健康度卡片：成功率 / 回滚 / 熔断 / 最近一轮触发名 / 幽灵修复计数。
+
+    用户连续多轮追问「自迭代到底能不能正常运转」—— 数据原来散在
+    actlog.jsonl、plans.json 和进程内运行状态三处，每次都得翻日志数失败。
+    这个接口把 health_snapshot() 直接吐给前端，面板顶部固定展示一张卡片。
+    """
+    from . import self_iterate as _si
+    try:
+        return _si.health_snapshot()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/selfiter/status")
 def selfiter_status():
     """运行状态：现在在做什么、跑到哪个阶段、已经用了多少秒。
@@ -8960,6 +8975,68 @@ def canvas_artifacts(body: dict = None):
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
         return {"ok": False, "artifacts": [], "error": "拆分失败"}
+
+
+# ================== 常驻工作台：产出物堆在桌面上（2026-11-21）==================
+# 痛点：图片 / PPT / Excel / 视频做出来以后只活在对话流里，关掉页面就找不回，
+# 只能重新让模型做一遍。这里给它一个**能长期停留的桌面**：
+#   · 前端 artifacts.js 维护 localStorage 那份镜像（断网也能用），
+#     这里同步一份到后端（data/canvas_artifacts.json），并能批量打包下载；
+#   · 纯逻辑全在 backend/canvas.py，这里只做薄薄一层 HTTP 转发。
+# ⚠️ 导出走内存（io.BytesIO），不落临时文件 —— 少一处需要清理的垃圾。
+@app.get("/api/canvas/workbench/list")
+def canvas_workbench_list():
+    """工作台现有产出物（新的在前，附带「没做完的」）。"""
+    from . import canvas as _canvas
+    return _canvas.list_artifacts()
+
+
+@app.post("/api/canvas/workbench/add")
+def canvas_workbench_add(body: dict = None):
+    """新增一条产出物（前端每次工具产出都会调一次；重复添加自动去重）。"""
+    from . import canvas as _canvas
+    b = body if isinstance(body, dict) else {}
+    item = b.get("item") if isinstance(b.get("item"), dict) else b
+    return _canvas.add_artifact(item)
+
+
+@app.post("/api/canvas/workbench/remove")
+def canvas_workbench_remove(body: dict = None):
+    """删掉一条 / 多条产出物（id 或 ids）。"""
+    from . import canvas as _canvas
+    b = body if isinstance(body, dict) else {}
+    ids = b.get("ids")
+    if ids is None:
+        ids = b.get("id")
+    return _canvas.remove_artifact(ids)
+
+
+@app.post("/api/canvas/workbench/order")
+def canvas_workbench_order(body: dict = None):
+    """拖拽后的顺序（id 数组）。只重排，不增删。"""
+    from . import canvas as _canvas
+    b = body if isinstance(body, dict) else {}
+    order = b.get("order")
+    if order is None:
+        order = b.get("ids") or []
+    return _canvas.reorder_artifacts(order)
+
+
+@app.get("/api/canvas/workbench/export")
+def canvas_workbench_export():
+    """把工作台上的产出物打成一个 zip 下载（里面带「清单.md」）。"""
+    from . import canvas as _canvas
+    r = _canvas.export_artifacts()
+    if not r.get("ok"):
+        raise HTTPException(status_code=500, detail=r.get("error") or "打包失败")
+    name = str(r.get("name") or "workbench.zip")
+    return StreamingResponse(
+        io.BytesIO(r.get("blob") or b""),
+        media_type="application/zip",
+        headers={"Content-Disposition":
+                 "attachment; filename=\"workbench.zip\"; filename*=UTF-8''%s"
+                 % urllib.parse.quote(name)},
+    )
 
 
 # ================== DeepSeek 纯对话（流式）==================

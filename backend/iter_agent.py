@@ -516,6 +516,24 @@ def _t_grep(ctx, args):
     return ("命中 %d 处：\n%s" % (len(hits), "\n".join(hits))) if hits else "没有命中"
 
 
+def _kill_tree(pid):
+    """杀掉整棵进程树。
+
+    ★ 为什么必须单独做：Windows 上 `p.kill()` 只杀 cmd.exe，它派生的
+      node.exe / python.exe 会变成孤儿继续跑、并且**继续持有管道的写端**。
+      实测 11-20 04:18 那条 `cmd /c "node -e "..."` 就是因此把 worker 卡死。
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, timeout=15)
+        else:
+            import signal as _sg
+            os.killpg(os.getpgid(pid), _sg.SIGKILL)
+    except Exception:                                       # noqa: BLE001
+        logger.debug("杀进程树失败（忽略）", exc_info=True)
+
+
 def _t_cmd(ctx, args):
     cmd = str(args.get("command") or "").strip()
     if not cmd:
@@ -526,16 +544,44 @@ def _t_cmd(ctx, args):
             return "拒绝执行：这条命令有毁坏机器的风险（%s）" % pat
     timeout = max(5, min(int(args.get("timeout") or 120), 600))
     t0 = time.time()
+    # ★ 2026-11-20 修（用户报「迭代卡住不动了」）：
+    #   原来用 `subprocess.run(cmd, shell=True, timeout=timeout)`。
+    #   Windows 上它超时后还会再调一次 `communicate()` 去读剩余输出 ——
+    #   此时 cmd.exe 已被 kill，但它派生的 node.exe 还活着并持有管道写端，
+    #   这次 communicate() 会**永久阻塞**，「120 秒超时」形同虚设。
+    #   实测：04:18:08 一条 `cmd /c "node -e "global.document={...}"`
+    #   （嵌套双引号让 cmd 一直等输入）把 worker 线程卡了 11 分钟以上，
+    #   任务永远停在「正在迭代」，事件流一条都不再增加。
+    #   改法：Popen + stdin=DEVNULL（不再等输入）+ 超时杀整棵进程树 +
+    #   **超时后绝不再 communicate()**，立刻返回。
     try:
-        r = subprocess.run(cmd, shell=True, cwd=str(_ROOT),
-                           capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return "命令超时（%d 秒），已终止：%s" % (timeout, cmd[:120])
+        p = subprocess.Popen(
+            cmd, shell=True, cwd=str(_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP
+                           if os.name == "nt" else 0))
     except Exception as e:                                  # noqa: BLE001
         return "命令执行失败：%s: %s" % (type(e).__name__, e)
-    out = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
+    try:
+        out_b, _ = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(p.pid)
+        try:
+            if p.stdout:
+                p.stdout.close()
+        except Exception:                                   # noqa: BLE001
+            pass
+        try:
+            p.wait(timeout=5)
+        except Exception:                                   # noqa: BLE001
+            pass
+        return ("命令超时（%d 秒），已强制终止整棵进程树：%s\n"
+                "提示：多半是命令在等输入或引号没闭合，换个写法再试。"
+                % (timeout, cmd[:120]))
+    out = (out_b or b"").decode("utf-8", "replace")
     return "退出码 %d（%.1f 秒）\n%s" % (
-        r.returncode, time.time() - t0, out[-6000:] or "（无输出）")
+        p.returncode, time.time() - t0, out[-6000:] or "（无输出）")
 
 
 def _t_check(ctx, args):
