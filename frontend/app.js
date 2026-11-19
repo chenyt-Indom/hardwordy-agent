@@ -14923,6 +14923,35 @@
         if (el) render();     // 首次打开时数据是空的，拿到后重渲染一次
       }
     } catch (e) { /* 论文库拿不到不影响抽屉其它部分 */ }
+    autoFetchCnki();          // 不 await：抓知网慢，不能挡住面板显示
+  }
+
+  // ★ 2026-11-19 用户要求「打开论文雷达时自动抓知网，确保库里有知网的论文」。
+  //   ⚠️ 知网按 IP 限流（后端已有 4s 节流 + 10min 结果缓存 + 60s 熔断），
+  //      这里再用内存标记挡一层：同一会话 30 分钟内只自动抓一次，
+  //      否则每开一次抽屉都要等 4 秒以上。
+  let cnkiAutoAt = 0;
+  async function autoFetchCnki() {
+    const now = Date.now();
+    if (now - cnkiAutoAt < 30 * 60 * 1000) return;
+    cnkiAutoAt = now;
+    try {
+      const q = encodeURIComponent("人工智能 多模态");
+      const r = await api("/api/selfiter/papers/external?sources=CNKI&max_n=6&q=" + q);
+      const n = ((r && r.items) || []).length;
+      if (n) {
+        say("已自动从知网抓回 " + n + " 篇（入库后参与向量检索）", "good");
+        await loadPapersNoAuto();
+      }
+    } catch (e) { /* 知网抓不到不影响面板，notes 里会有原因 */ }
+  }
+
+  // 抓完刷新列表时别再触发一次自动抓（否则会互相递归）
+  async function loadPapersNoAuto() {
+    try {
+      const r = await api("/api/selfiter/papers?only_high=true&top_k=8");
+      if (r && r.ok) { papersData = r; if (el) render(); }
+    } catch (e) { /* 同上 */ }
   }
 
   // ★ 2026-11-19 用户要求：论文雷达区放几个按钮，点一下直接跳转。
@@ -14938,12 +14967,42 @@
                  q: "https://xueshu.baidu.com/s?wd=" },
     "arXiv":   { home: "https://arxiv.org/",
                  q: "https://arxiv.org/search/?searchtype=all&query=" },
+    // ★ 2026-11-19 新增两个免费学术站（和 backend jump_url 同口径）
+    "Semantic Scholar": { home: "https://www.semanticscholar.org/",
+                 q: "https://www.semanticscholar.org/search?q=" },
+    "PubMed":  { home: "https://pubmed.ncbi.nlm.nih.gov/",
+                 q: "https://pubmed.ncbi.nlm.nih.gov/?term=" },
+  };
+
+  // 站点按钮的显示名（中文短名，比英文全名好认）
+  const PAPER_SITE_LABEL = {
+    "CNKI": "知网", "GitHub": "GitHub", "百度学术": "百度学术",
+    "arXiv": "arXiv", "Semantic Scholar": "Semantic Scholar", "PubMed": "PubMed",
   };
 
   function paperJumpUrl(site, q) {
     const s = PAPER_SITES[site];
     if (!s) return "";
     return q ? (s.q + encodeURIComponent(q)) : s.home;
+  }
+
+  // ★ 2026-11-19 用户要求：「在论文雷达这一节**外面**单独放一排（不进折叠）」，
+  //   每个站两个按钮（上排带词跳转 / 下排开首页），常用所以常驻显示。
+  //   上排用深色实底（醒目、区分「会带词」），下排保持淡色 ghost。
+  function paperSitesBar() {
+    const sites = Object.keys(PAPER_SITES);
+    const lbl = function (s) { return PAPER_SITE_LABEL[s] || s; };
+    const row = function (cls, suffix, tip) {
+      return sites.map(function (s) {
+        return '<button type="button" class="btn sm ' + cls + '" data-site="' +
+          esc(s) + '" title="' + esc(tip + lbl(s)) + '">' + esc(lbl(s)) + '</button>';
+      }).join("");
+    };
+    return '<div class="iter-sites">' +
+      '<div class="iter-sites-t">📚 论文网站（上排＝带检索词跳转，下排＝开首页）</div>' +
+      '<div class="iter-sites-row">' + row("iter-site-q", "q", "带上检索词搜 ") + '</div>' +
+      '<div class="iter-sites-row">' + row("iter-site-h ghost", "h", "打开首页 ") + '</div>' +
+      '</div>';
   }
 
   // ★ 2026-11-19 用户要求「按作者或其他内容找出指定论文；不知道题目也能按主题找」。
@@ -15539,7 +15598,8 @@
     }
 
     const body = el.querySelector(".iter-body");
-    let h = expHtml() + sec("🛠️ 最近自动执行（信任模式）", actlogHtml());
+    // ★ 常驻站点条放在最前面：用户要求「外面单独放一排、不进折叠、每次打开都在」
+    let h = paperSitesBar() + expHtml() + sec("🛠️ 最近自动执行（信任模式）", actlogHtml());
     const p = d.latest;
     if (!p) {
       body.innerHTML = h + '<div class="iter-empty">还没有反思过。<br><br>' +
@@ -16327,6 +16387,22 @@
         return;
       }
       // 平台跳转：读同一行的检索框，有词就带词，没词开首页
+      // ★ 2026-11-19 常驻站点条：上排 iter-site-q（带词）、下排 iter-site-h（首页）
+      if (t.classList.contains("iter-site-q") || t.classList.contains("iter-site-h")) {
+        const site = t.getAttribute("data-site") || "";
+        let q = "";
+        if (t.classList.contains("iter-site-q")) {
+          const box = layer();
+          const qi = box ? box.querySelector(".iter-paper-q") : null;
+          q = qi ? (qi.value || "").trim() : "";
+          if (!q) {
+            say("输入框是空的，这次先给你开首页；要带词搜就在「论文雷达」输入框里写主题。", "warn");
+          }
+        }
+        const url = paperJumpUrl(site, q);
+        if (url) window.open(url, "_blank", "noopener");
+        return;
+      }
       if (t.classList.contains("iter-paper-jump")) {
         const site = t.getAttribute("data-site") || "";
         const box = layer();

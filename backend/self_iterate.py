@@ -309,6 +309,13 @@ _DEFAULT_SETTINGS = {
     "iter_agent_retries": 3,        # 外层「回滚重来」次数（共 retries+1 次尝试）
     "iter_agent_repairs": 2,        # 内层「就地修复」轮数（不回滚，喂回报错再修）
     "iter_agent_total_seconds": 2400,  # 整条动作总耗时上限（秒）
+    # ---- 学术源的 API key（2026-11-19 追加）----
+    # 用户要求「除了跳转，还要能把结果抓回来入库」。
+    # ⚠️ 实测：Semantic Scholar 无 key 的公共池现在限得极严 —— 连续 3 次请求
+    #    全部 HTTP 429。申请一个免费 key（semanticscholar.org/product/api）
+    #    填在这里或设环境变量 SEMANTIC_SCHOLAR_API_KEY 即可正常抓。
+    #    没填也不影响使用：会如实报「429 限流」，跳转按钮照样能用。
+    "semantic_scholar_key": "",
 }
 
 
@@ -2136,6 +2143,140 @@ def fetch_github_search(keyword, max_n=6):
     return out, (("OK %d 条" % len(out)) if out else "0 条命中") + note_pre
 
 
+def _zh2en_kw(kw):
+    """中文关键词转英文（英文平台用）。返回 (英文词, 备注)。
+
+    ⚠️ 2026-11-19 实测：Semantic Scholar / PubMed 以英文论文为主，
+       直接拿中文词去搜基本是 0 条，所以先走 need2query 的本地规则表。
+    """
+    kw = str(kw or "").strip()
+    if not kw or not re.search(r"[\u4e00-\u9fff]", kw):
+        return kw, ""
+    try:
+        from . import need2query
+        _ens = [x for x in (need2query.to_queries(kw, 3) or [])
+                if not re.search(r"[\u4e00-\u9fff]", x)]
+        if _ens:
+            q = " ".join(_ens[:2])
+            return q, "（中文→英文：%s）" % q
+    except Exception:                                   # noqa: BLE001
+        logger.debug("need2query failed", exc_info=True)
+    return kw, ""
+
+
+def fetch_semantic_scholar(keyword, max_n=6):
+    """Semantic Scholar 检索（官方免费 API，无需 key）。返回 (items, note)。
+
+    ⚠️ 无 key 时约 1 次/秒限流，连续调用会 429。失败如实返回原因，
+       绝不把「被限流」说成「0 条命中」。
+    """
+    from urllib.parse import quote
+    kw = str(keyword or "").strip()
+    if not kw:
+        return [], "无关键词"
+    q_kw, note_pre = _zh2en_kw(kw)
+    url = ("https://api.semanticscholar.org/graph/v1/paper/search"
+           "?query=%s&limit=%d&fields=title,abstract,url,year,authors,venue"
+           % (quote(q_kw), max(1, min(max_n, 20))))
+    # ⚠️ 2026-11-19 实测：无 key 的公共池**连续 3 次全部 HTTP 429**，
+    #    所以支持可选 key（环境变量优先，其次 settings.json）。
+    #    没填也不影响使用：如实报「429 限流」，跳转按钮照样能用。
+    _key = ""
+    try:
+        import os as _os
+        _key = str(_os.environ.get("SEMANTIC_SCHOLAR_API_KEY") or "").strip()
+        if not _key:
+            _key = str((load_settings() or {}).get("semantic_scholar_key") or "").strip()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("read s2 key failed", exc_info=True)
+    _j, _code = None, 0
+    try:
+        import requests
+        _hd = dict(_UA)
+        if _key:
+            _hd["x-api-key"] = _key
+        _r = requests.get(url, headers=_hd, timeout=15)
+        _code = _r.status_code
+        if _code == 200:
+            _j = _r.json()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("s2 request failed", exc_info=True)
+    if not isinstance(_j, dict):
+        if _code == 429:
+            return [], ("429 限流：无 key 的公共池被限得很严"
+                        "（可在设置 semantic_scholar_key 填免费 key，"
+                        "或先点「跳转」去官网搜）") + note_pre
+        return [], ("Semantic Scholar 无响应（HTTP %s）"
+                    % (_code or "连接失败")) + note_pre
+    j = _j
+    out = []
+    for it in (j.get("data") or [])[:max_n]:
+        t = str((it or {}).get("title") or "").strip()
+        if not t:
+            continue
+        aus = [str((x or {}).get("name") or "").strip()
+               for x in (it.get("authors") or [])]
+        aus = [x for x in aus if x][:12]
+        out.append({
+            "source": "Semantic Scholar",
+            "title": t[:200],
+            "url": str(it.get("url") or ""),
+            "summary": re.sub(r"\s+", " ", str(it.get("abstract") or ""))[:400],
+            "authors": aus,
+            "year": int(it.get("year") or 0),
+            "venue": str(it.get("venue") or "")[:80],
+        })
+    return out, (("OK %d 条" % len(out)) if out else "0 条命中") + note_pre
+
+
+def fetch_pubmed(keyword, max_n=6):
+    """PubMed 检索（NCBI E-utilities，免费无需 key）。返回 (items, note)。
+
+    两步：esearch 拿 id → esummary 拿标题/作者/年份/期刊。
+    摘要要额外 efetch(XML)，这里不取（省一次请求），summary 如实留空。
+    """
+    from urllib.parse import quote
+    kw = str(keyword or "").strip()
+    if not kw:
+        return [], "无关键词"
+    q_kw, note_pre = _zh2en_kw(kw)
+    n = max(1, min(max_n, 20))
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+    j1 = _http_json("%s/esearch.fcgi?db=pubmed&retmode=json&retmax=%d&term=%s"
+                    % (base, n, quote(q_kw)), timeout=15)
+    ids = []
+    if isinstance(j1, dict):
+        ids = ((j1.get("esearchresult") or {}).get("idlist") or [])[:n]
+    if not ids:
+        return [], "PubMed 无命中或接口无响应" + note_pre
+    j2 = _http_json("%s/esummary.fcgi?db=pubmed&retmode=json&id=%s"
+                    % (base, ",".join(str(x) for x in ids)), timeout=15)
+    res = ((j2 or {}).get("result") or {}) if isinstance(j2, dict) else {}
+    out = []
+    for pid in ids:
+        it = res.get(str(pid)) or {}
+        t = str(it.get("title") or "").strip()
+        if not t:
+            continue
+        aus = [str((x or {}).get("name") or "").strip()
+               for x in (it.get("authors") or [])]
+        aus = [x for x in aus if x][:12]
+        yr = 0
+        _m = re.search(r"(\d{4})", str(it.get("pubdate") or ""))
+        if _m:
+            yr = int(_m.group(1))
+        out.append({
+            "source": "PubMed",
+            "title": t[:200],
+            "url": "https://pubmed.ncbi.nlm.nih.gov/%s/" % pid,
+            "summary": "",
+            "authors": aus,
+            "year": yr,
+            "venue": str(it.get("fulljournalname") or it.get("source") or "")[:80],
+        })
+    return out, (("OK %d 条" % len(out)) if out else "0 条命中") + note_pre
+
+
 def fetch_baidu_xueshu(keyword, max_n=6):
     """百度学术检索（尽力而为）。返回 (items, note)。
 
@@ -2394,6 +2535,9 @@ _JUMP_TPL = {
     "百度学术": "https://xueshu.baidu.com/s?wd={q}",
     "GitHub": "https://github.com/search?q={q}&type=repositories",
     "arXiv": "https://arxiv.org/search/?query={q}&searchtype={st}",
+    # ★ 2026-11-19 用户要求加这两个：都是免费开放、检索页可直接带参访问
+    "Semantic Scholar": "https://www.semanticscholar.org/search?q={q}",
+    "PubMed": "https://pubmed.ncbi.nlm.nih.gov/?term={q}",
 }
 
 
@@ -2512,6 +2656,11 @@ _SRC_ALIAS = {
     "xueshu": "百度学术", "xueshu.baidu": "百度学术",
     "github": "GitHub", "gh": "GitHub",
     "arxiv": "arXiv",
+    # ★ 2026-11-19 新增两个学术源（都是免费官方 API，能真抓、也能跳转）
+    "semantic": "Semantic Scholar", "s2": "Semantic Scholar",
+    "semanticscholar": "Semantic Scholar", "semantic scholar": "Semantic Scholar",
+    "语义学者": "Semantic Scholar",
+    "pubmed": "PubMed", "pm": "PubMed", "医学文献": "PubMed",
 }
 
 
@@ -2546,7 +2695,8 @@ def external_search(q="", author="", sources=None, max_n=6):
     # ★ 源名先归一化（2026-11-19 修：原来大小写敏感，传 "github" 会静默 0 条）
     _raw = [str(x).strip() for x in (sources or []) if str(x or "").strip()]
     want, unknown = [], []
-    for _x in (_raw or ["CNKI", "百度学术", "GitHub", "arXiv"]):
+    for _x in (_raw or ["CNKI", "百度学术", "GitHub", "arXiv",
+                        "Semantic Scholar", "PubMed"]):
         _k = _norm_src(_x)
         if _k and _k not in want:
             want.append(_k)
@@ -2554,7 +2704,8 @@ def external_search(q="", author="", sources=None, max_n=6):
             unknown.append(_x)
     if not want:
         return {"ok": False,
-                "error": "不认识的来源：%s（可选 CNKI / 百度学术 / GitHub / arXiv）"
+                "error": "不认识的来源：%s（可选 CNKI / 百度学术 / GitHub / "
+                         "arXiv / Semantic Scholar / PubMed）"
                          % "、".join(unknown or ["（空）"]),
                 "items": [], "notes": {}, "jumps": {}, "total": 0}
     # 每个源的抓取函数签名都是 (keyword, max_n) -> (items, note)
@@ -2563,12 +2714,15 @@ def external_search(q="", author="", sources=None, max_n=6):
         "百度学术": lambda k, m: fetch_baidu_xueshu(k or a, m),
         "GitHub": lambda k, m: fetch_github_search(k or a, m),
         "arXiv": lambda k, m: fetch_arxiv_query(k, a, m),
+        "Semantic Scholar": lambda k, m: fetch_semantic_scholar(k or a, m),
+        "PubMed": lambda k, m: fetch_pubmed(k or a, m),
     }
     items, notes, jumps = [], {}, {}
     for s in want:
         jumps[s] = jump_url(s, q, a)
     if unknown:
-        notes["未识别"] = ("已忽略不认识的来源：%s（可选 CNKI / 百度学术 / GitHub / arXiv）"
+        notes["未识别"] = ("已忽略不认识的来源：%s（可选 CNKI / 百度学术 / GitHub / "
+                         "arXiv / Semantic Scholar / PubMed）"
                          % "、".join(unknown))
     with ThreadPoolExecutor(max_workers=max(1, len(want))) as ex:
         futs = {ex.submit(fns[s], q, n): s for s in want if s in fns}
