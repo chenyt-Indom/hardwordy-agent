@@ -14987,21 +14987,20 @@
   }
 
   // ★ 2026-11-19 用户要求：「在论文雷达这一节**外面**单独放一排（不进折叠）」，
-  //   每个站两个按钮（上排带词跳转 / 下排开首页），常用所以常驻显示。
-  //   上排用深色实底（醒目、区分「会带词」），下排保持淡色 ghost。
+  //   每个站一个按钮，常用所以常驻显示。
+  // ★ 2026-11-19 晚 用户改口：「只剩下一排感觉更好一些」——两排压成一排，
+  //   一个按钮同时干两件事：输入框有词就带词搜，没词就开首页。功能不丢，版面省一半。
   function paperSitesBar() {
     const sites = Object.keys(PAPER_SITES);
     const lbl = function (s) { return PAPER_SITE_LABEL[s] || s; };
-    const row = function (cls, suffix, tip) {
-      return sites.map(function (s) {
-        return '<button type="button" class="btn sm ' + cls + '" data-site="' +
-          esc(s) + '" title="' + esc(tip + lbl(s)) + '">' + esc(lbl(s)) + '</button>';
-      }).join("");
-    };
+    const btns = sites.map(function (s) {
+      return '<button type="button" class="btn sm iter-site" data-site="' +
+        esc(s) + '" title="' + esc("搜 " + lbl(s) + "（输入框有词就带词，空则开首页）") +
+        '">' + esc(lbl(s)) + '</button>';
+    }).join("");
     return '<div class="iter-sites">' +
-      '<div class="iter-sites-t">📚 论文网站（上排＝带检索词跳转，下排＝开首页）</div>' +
-      '<div class="iter-sites-row">' + row("iter-site-q", "q", "带上检索词搜 ") + '</div>' +
-      '<div class="iter-sites-row">' + row("iter-site-h ghost", "h", "打开首页 ") + '</div>' +
+      '<div class="iter-sites-t">📚 论文网站（有检索词就带词搜，输入框空则开首页）</div>' +
+      '<div class="iter-sites-row">' + btns + '</div>' +
       '</div>';
   }
 
@@ -16386,19 +16385,13 @@
         runPaperLive(qi ? (qi.value || "").trim() : "");
         return;
       }
-      // 平台跳转：读同一行的检索框，有词就带词，没词开首页
-      // ★ 2026-11-19 常驻站点条：上排 iter-site-q（带词）、下排 iter-site-h（首页）
-      if (t.classList.contains("iter-site-q") || t.classList.contains("iter-site-h")) {
+      // 平台跳转：读「论文雷达」的检索框，有词就带词，没词开首页
+      // ★ 2026-11-19 晚 站点条压成一排后只有一个类 iter-site，两种行为合一
+      if (t.classList.contains("iter-site")) {
         const site = t.getAttribute("data-site") || "";
-        let q = "";
-        if (t.classList.contains("iter-site-q")) {
-          const box = layer();
-          const qi = box ? box.querySelector(".iter-paper-q") : null;
-          q = qi ? (qi.value || "").trim() : "";
-          if (!q) {
-            say("输入框是空的，这次先给你开首页；要带词搜就在「论文雷达」输入框里写主题。", "warn");
-          }
-        }
+        const box = layer();
+        const qi = box ? box.querySelector(".iter-paper-q") : null;
+        const q = qi ? (qi.value || "").trim() : "";
         const url = paperJumpUrl(site, q);
         if (url) window.open(url, "_blank", "noopener");
         return;

@@ -6341,8 +6341,9 @@ html[data-theme="light"] .composer {
 .iter-act-btns { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ★ 2026-11-19 常驻论文站点条（迭代面板顶部，不进折叠）
-   上排深色实底＝会带检索词跳转；下排淡色 ghost＝只开首页。
-   深色是默认主题，浅色主题下把深色按钮换成更深的灰，保证白字看得清。 */
+   ★ 2026-11-19 晚 用户改口「只剩下一排感觉更好一些」——两排压成一排：
+   一个按钮两种行为，输入框有词就带词跳转，空则开首页。
+   深色是默认主题，浅色主题下把按钮换成更深的灰，保证白字看得清。 */
 .iter-sites { margin-bottom: 10px; }
 .iter-sites-t {
   font-size: 11px; color: var(--muted, #8a8f98);
@@ -6354,14 +6355,14 @@ html[data-theme="light"] .composer {
 .iter-sites-row .btn {
   font-size: 12px; padding: 4px 10px; line-height: 1.5;
 }
-.iter-site-q {
+.iter-site {
   background: #2b3138; color: #e8eaed; border: 1px solid #3a4149;
 }
-.iter-site-q:hover { background: #363d46; border-color: #4a525c; }
-html[data-theme="light"] .iter-site-q {
+.iter-site:hover { background: #363d46; border-color: #4a525c; }
+html[data-theme="light"] .iter-site {
   background: #2f3540; color: #ffffff; border-color: #2f3540;
 }
-html[data-theme="light"] .iter-site-q:hover {
+html[data-theme="light"] .iter-site:hover {
   background: #444c58; border-color: #444c58;
 }
 .iter-note {
