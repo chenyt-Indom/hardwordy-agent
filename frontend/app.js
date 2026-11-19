@@ -15971,8 +15971,13 @@
             '<div class="if-think-title">🧠 思考过程（0 字）</div>' +
             '<div class="if-think-body" hidden></div>' +
           '</div>' +
+          '<div class="if-queue-list" hidden></div>' +
           '<div class="if-steps"></div>' +
           '<div class="if-cards"></div>' +
+          '<div class="if-paused" hidden>' +
+            '⏸ 本轮已连续完成上限个功能，队列里还有任务。' +
+            '<button type="button" class="btn sm if-continue">▶ 继续跑</button>' +
+          '</div>' +
         '</div>' +
       '</div>';
     root.appendChild(el);
@@ -15991,26 +15996,37 @@
   }
 
   // 思考过程的增量渲染。
-  // 后端已把碎片合并成 160 字左右的块，但一轮下来仍可能有几十块 ——
-  // 所以只保留最近 4000 字（DOM 无限增长会让长任务越跑越卡），
-  // 并且只有用户展开时才自动滚到底（收起状态下滚动没有意义）。
+  // ★ 2026-11-19 用户反馈：「最大字数卡在 4008 字就不变了」——
+  //   根因就是这里原来只保留最近 4000 字（加 8 个字的前缀正好 4008）。
+  //   用户明确选择「完全不截断，几万字也全留」，所以这里不再截断，
+  //   只在用户展开时自动滚到底（收起状态下滚动没有意义）。
+  // ★ 2026-11-19 用户要求「一字一字的实时输出，目前一卡一卡的」：
+  //   后端是按 160 字左右的块推过来的，直接 textContent += 就会「一块一块蹦」。
+  //   这里改成打字机：新文本先进待播队列，每帧只吐 1 个字
+  //   （积压多时自动提速，免得几万字播半天）。
   function feedThink(el, text) {
     const box = el.querySelector(".if-think");
     if (!box || !text) return;
     const body = box.querySelector(".if-think-body");
-    const title = box.querySelector(".if-think-title");
     if (!body) return;
-    body.textContent += text;
-    if (body.textContent.length > 4000) {
-      // 反复截断时先去掉旧前缀再切，否则 slice(-4000) 会把前缀本身切掉，
-      // 用户就看不到「前面省略」的提示、误以为这是全部思考过程。
-      var PREFIX = "…（前面省略）\n";
-      var t = body.textContent;
-      if (t.indexOf(PREFIX) === 0) t = t.slice(PREFIX.length);
-      body.textContent = PREFIX + t.slice(-4000);
-    }
-    if (title) title.textContent = "🧠 思考过程（" + body.textContent.length + " 字）";
-    if (!body.hidden) body.scrollTop = body.scrollHeight;
+    box.__pend = (box.__pend || "") + text;
+    if (box.__typing) return;
+    box.__typing = true;
+    const tick = function () {
+      const b = box.querySelector(".if-think-body");
+      const ttl = box.querySelector(".if-think-title");
+      if (!b) { box.__typing = false; return; }
+      const pend = box.__pend || "";
+      if (!pend) { box.__typing = false; return; }
+      // 积压越多吐得越快：保证「实时」不落后，又保留逐字观感
+      const n = pend.length > 1200 ? 8 : (pend.length > 400 ? 4 : (pend.length > 120 ? 2 : 1));
+      b.textContent += pend.slice(0, n);
+      box.__pend = pend.slice(n);
+      if (ttl) ttl.textContent = "🧠 思考过程（" + b.textContent.length + " 字）";
+      if (!b.hidden) b.scrollTop = b.scrollHeight;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   }
 
   function feedStatus(el, text, state) {
@@ -16088,6 +16104,39 @@
     box.appendChild(card);
   }
 
+  // 等待队列明细：每个任务一行，写明要做什么功能，右侧可单独取消。
+  function feedQueue(el, list) {
+    const box = el.querySelector(".if-queue-list");
+    if (!box) return;
+    if (!list.length) { box.hidden = true; box.innerHTML = ""; return; }
+    box.innerHTML = list.map(function (t, i) {
+      return '<div class="if-q-item">' +
+        '<span class="if-q-no">' + (i + 1) + "</span>" +
+        '<span class="if-q-ttl">' + ifEsc(t.title || t.plan_id || "（未命名任务）") + "</span>" +
+        '<button type="button" class="if-q-x" data-tid="' + ifEsc(t.tid || "") +
+          '" title="从队列里取消这个任务">×</button>' +
+      "</div>";
+    }).join("");
+  }
+
+  // 每个功能验证通过后的 markdown 报告（用户要求「以 markdown 形式给出具体报告」）。
+  function feedReport(el, ev) {
+    const box = el.querySelector(".if-cards");
+    if (!box) return;
+    const d = document.createElement("div");
+    d.className = "if-report";
+    const ok = String(ev.text || "").indexOf("✅") >= 0;
+    d.innerHTML =
+      '<div class="if-report-hd">' + (ok ? "✅" : "⚠️") + " 迭代报告 · " +
+        ifEsc(ev.title || "") + "</div>" +
+      '<div class="if-report-md">' +
+        (typeof mdToHtml === "function" ? mdToHtml(ev.text || "") : ifEsc(ev.text || "")) +
+      "</div>";
+    box.appendChild(d);
+    const root = feedRoot();
+    if (root) root.scrollTop = root.scrollHeight;
+  }
+
   function feedFold(el, fold) {
     const body = el.querySelector(".if-body");
     const btn = el.querySelector(".if-fold");
@@ -16116,6 +16165,51 @@
 
   let feedFirst = true;
 
+  // 单条事件 → 渲染。SSE 和轮询共用这一份，保证两条路的行为完全一致。
+  function feedApplyEvent(ev) {
+    if (!ev) return;
+    const el = feedEnsure(ev.tid);
+    if (!el) return;
+    if (ev.kind === "status") feedStatus(el, ev.text, ev.state);
+    else if (ev.kind === "think") feedThink(el, ev.text);
+    else if (ev.kind === "step") feedStep(el, ev.text);
+    else if (ev.kind === "code") feedCard(el, ev);
+    else if (ev.kind === "report") feedReport(el, ev);
+    else if (ev.kind === "error") feedStep(el, "错误：" + ev.text);
+    else if (ev.kind === "restart") {
+      // 改完要提示重启（用户明确要求）。抽屉可能没开着，所以除了
+      // 抽屉里的按钮，也在聊天区留一条提示。
+      feedStep(el, ev.text || "改了代码，需要重启才生效");
+      el.setAttribute("data-restart", "1");
+      feedRestartHint(el, ev.files || []);
+      try { showRestart(true); } catch (e) { /* 抽屉没打开就算了 */ }
+    }
+  }
+
+  // ★ 2026-11-19 用户选「SSE 为主，断线自动退回轮询」。
+  let feedES = null;
+  function feedStartSSE() {
+    if (feedES) return;
+    if (typeof EventSource === "undefined") { feedStart(); return; }
+    try {
+      feedES = new EventSource("/api/selfiter/stream?since=" + feedSeq);
+    } catch (e) { feedES = null; feedStart(); return; }
+    feedES.onmessage = function (m) {
+      let ev;
+      try { ev = JSON.parse(m.data); } catch (e) { return; }
+      if (!ev || !ev.kind) return;
+      if (ev.seq && ev.seq > feedSeq) feedSeq = ev.seq;
+      if (feedFirst) { feedFirst = false; }
+      feedApplyEvent(ev);
+    };
+    // 断线（多半是后端在自动重启）→ 关掉 SSE，退回轮询；轮询本身会重连后端
+    feedES.onerror = function () {
+      try { feedES.close(); } catch (e) {}
+      feedES = null;
+      feedStart();
+    };
+  }
+
   async function feedPoll() {
     let r;
     try {
@@ -16133,21 +16227,7 @@
     }
     evs.forEach(function (ev) {
       if (only && ev.tid !== only) return;
-      const el = feedEnsure(ev.tid);
-      if (!el) return;
-      if (ev.kind === "status") feedStatus(el, ev.text, ev.state);
-      else if (ev.kind === "think") feedThink(el, ev.text);
-      else if (ev.kind === "step") feedStep(el, ev.text);
-      else if (ev.kind === "code") feedCard(el, ev);
-      else if (ev.kind === "error") feedStep(el, "错误：" + ev.text);
-      else if (ev.kind === "restart") {
-        // 改完要提示重启（用户明确要求）。抽屉可能没开着，所以除了
-        // 抽屉里的按钮，也在聊天区留一条提示。
-        feedStep(el, ev.text || "改了代码，需要重启才生效");
-        el.setAttribute("data-restart", "1");
-        feedRestartHint(el, ev.files || []);
-        try { showRestart(true); } catch (e) { /* 抽屉没打开就算了 */ }
-      }
+      feedApplyEvent(ev);
     });
     const run = r.running;
     if (run) {
@@ -16157,7 +16237,16 @@
         const e2 = el.querySelector(".if-elapsed");
         if (e2) e2.textContent = run.elapsed + "s";
         const q = el.querySelector(".if-queue");
-        if (q) q.textContent = r.queue_len ? "（后面还有 " + r.queue_len + " 个任务等待）" : "";
+        if (q) {
+          // 用户要求「等待进行的任务也要写明功能以及可以取消」——
+          // 点这一行展开明细，每个任务带 × 单独取消。
+          q.textContent = r.queue_len
+            ? "（后面还有 " + r.queue_len + " 个任务等待 · 点这里看明细）" : "";
+          q.style.cursor = r.queue_len ? "pointer" : "";
+        }
+        feedQueue(el, r.queue || []);
+        const pz = el.querySelector(".if-paused");
+        if (pz) pz.hidden = r.state !== "paused";
       }
     }
     if (r.state === "idle" && !run) {
@@ -16193,10 +16282,28 @@
     }
   }
 
+  // ★ 2026-11-19：用户要求「一字一字实时输出，现在一卡一卡」。
+  //   1.2 秒一轮的话，思考内容要等一秒才蹦一块。改成 300ms 一轮；
+  //   并且用「跑完再排下一轮」而不是 setInterval —— 网络慢时不会堆积请求。
+  const FEED_POLL_MS = 300;        // SSE 不可用时的轮询间隔
+  const FEED_POLL_SLOW = 1500;     // SSE 正常时只管状态刷新，慢一点省资源
   function feedStart() {
     if (feedTimer) return;
-    feedTimer = setInterval(feedPoll, 1200);
-    feedPoll();
+    feedTimer = 1;  // 占位：表示已在跑
+    const loop = async function () {
+      if (!feedTimer) return;
+      try { await feedPoll(); } catch (e) { /* 单轮失败不影响下一轮 */ }
+      if (feedTimer) feedTimer = setTimeout(loop, feedES ? FEED_POLL_SLOW : FEED_POLL_MS);
+    };
+    // ⚠️ 必须先同步拉一次（把 feedSeq 推到最新）再开 SSE ——
+    //   否则 SSE 会以 since=0 连上去，后端把两千条历史事件整批重放，
+    //   聊天区瞬间冒出一堆旧卡片。
+    (async function () {
+      try { await feedPoll(); } catch (e) { /* 第一次失败就按轮询走 */ }
+      if (!feedTimer) return;
+      feedStartSSE();
+      loop();
+    })();
   }
 
   // 低频探测：用户可能根本没打开抽屉（比如定时任务触发了反思），
@@ -16212,7 +16319,15 @@
   setTimeout(feedProbe, 4000);
 
   function feedStop() {
-    if (feedTimer) { clearInterval(feedTimer); feedTimer = null; }
+    if (feedTimer) {
+      clearTimeout(feedTimer);
+      clearInterval(feedTimer);   // 兼容旧路径（万一还有地方是 setInterval）
+      feedTimer = null;
+    }
+    if (feedES) {
+      try { feedES.close(); } catch (e) { /* 已断开 */ }
+      feedES = null;
+    }
   }
 
   function onFeedClick(e) {
@@ -16250,6 +16365,33 @@
     if (t.classList.contains("if-restart")) {
       e.preventDefault();
       doRestart();
+      return;
+    }
+    // 从等待队列里取消某一个任务
+    if (t.classList.contains("if-q-x")) {
+      e.preventDefault();
+      e.stopPropagation();
+      const tid = t.getAttribute("data-tid") || "";
+      api("/api/selfiter/queue_drop", { tid: tid }).then(function (r) {
+        if (r && r.ok) say("已从等待队列里取消", "ok");
+        else say((r && r.error) || "取消失败", "warn");
+      });
+      return;
+    }
+    // 点「后面还有 N 个任务等待」→ 展开/收起明细
+    if (t.classList.contains("if-queue")) {
+      e.preventDefault();
+      const ql = el.querySelector(".if-queue-list");
+      if (ql && ql.innerHTML) ql.hidden = !ql.hidden;
+      return;
+    }
+    // 达到连续上限后点「继续跑」
+    if (t.classList.contains("if-continue")) {
+      e.preventDefault();
+      api("/api/selfiter/continue", {}).then(function (r) {
+        if (r && r.ok) say("继续跑队列里剩下的 " + (r.queue_len || 0) + " 个任务", "ok");
+        else say((r && r.error) || "继续失败", "warn");
+      });
       return;
     }
   }

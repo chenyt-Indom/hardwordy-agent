@@ -6480,6 +6480,56 @@ html[data-theme="light"] .iter-site:hover {
     font-size: 12px; line-height: 1.65; color: var(--muted);
     white-space: pre-wrap; word-break: break-word;
   }
+  /* 等待队列明细：每个任务一行，右侧 × 可单独取消 */
+  .if-queue-list {
+    margin: 4px 0 6px; border: 1px solid var(--border);
+    border-radius: 6px; overflow: hidden;
+  }
+  .if-q-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 8px; font-size: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .if-q-item:last-child { border-bottom: 0; }
+  .if-q-no { color: var(--muted); font-size: 11px; min-width: 14px; }
+  .if-q-ttl {
+    flex: 1; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .if-q-x {
+    border: 0; background: transparent; color: var(--muted);
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 0 4px;
+    border-radius: 4px;
+  }
+  .if-q-x:hover { background: var(--danger); color: #fff; }
+  /* 迭代报告卡片（markdown） */
+  .if-report {
+    margin-top: 8px; border: 1px solid var(--border);
+    border-left: 3px solid var(--green); border-radius: 8px;
+    background: var(--bg); overflow: hidden;
+  }
+  .if-report-hd {
+    padding: 7px 10px; font-size: 12px; font-weight: 600;
+    color: var(--text); background: var(--hover-bg);
+  }
+  .if-report-md {
+    padding: 8px 12px; font-size: 12.5px; line-height: 1.7;
+    color: var(--text); max-height: 420px; overflow-y: auto;
+  }
+  .if-report-md h3 { font-size: 13.5px; margin: 4px 0 6px; }
+  .if-report-md ul { margin: 4px 0 4px 18px; padding: 0; }
+  .if-report-md li { margin: 2px 0; }
+  .if-report-md code {
+    background: var(--hover-bg); padding: 1px 4px; border-radius: 3px;
+    font-size: 11.5px;
+  }
+  /* 达到连续上限后的「继续跑」 */
+  .if-paused {
+    margin-top: 8px; padding: 8px 10px; font-size: 12px;
+    color: var(--text); background: var(--hover-bg);
+    border-radius: 6px; display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap;
+  }
   .if-steps { max-height: 150px; overflow-y: auto; }
   .if-step { font-size: 12px; color: var(--muted); line-height: 1.7; }
   .if-card {

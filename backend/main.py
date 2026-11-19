@@ -3668,6 +3668,42 @@ def selfiter_cancel(body: dict):
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfiter/stream")
+async def selfiter_stream(since: int = 0):
+    """SSE：把迭代事件**实时**推给前端（用户要求「一字一字实时输出」）。
+
+    前端用 EventSource 连这里；连不上/断开时自动退回 /api/selfiter/task 轮询
+    （重启期间必然断开，重连后页面会重新初始化）。
+    """
+    import asyncio as _aio
+    import json as _json
+    from fastapi.responses import StreamingResponse
+    from . import iter_runner as _ir
+
+    async def _gen():
+        last = int(since or 0)
+        yield "retry: 2000\n\n"          # 断线后浏览器 2 秒自动重连
+        n = 0
+        while True:
+            try:
+                evs = (_ir.snapshot(last) or {}).get("events") or []
+                for e in evs:
+                    if int(e.get("seq") or 0) > last:
+                        last = int(e.get("seq") or 0)
+                        yield "data: " + _json.dumps(e, ensure_ascii=False) + "\n\n"
+                n += 1
+                if n % 60 == 0:          # 约 7 秒一次心跳，防止中间层掐断
+                    yield ": ping\n\n"
+            except Exception:            # noqa: BLE001
+                break
+            await _aio.sleep(0.12)       # 120ms 一轮：比 300ms 轮询更跟手
+
+    return StreamingResponse(
+        _gen(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "Connection": "keep-alive"})
+
+
 @app.get("/api/selfiter/task_events")
 def selfiter_task_events(tid: str = ""):
     """取某个任务的完整事件流（跑完收起成摘要后，点开看详情用）。"""
@@ -3675,6 +3711,37 @@ def selfiter_task_events(tid: str = ""):
     try:
         return {"ok": True, "tid": tid, "events": _ir.task_events(tid)}
     except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/continue")
+def selfiter_continue():
+    """连续完成数达到上限后，用户点「继续」接着跑队列。"""
+    from . import iter_runner as _ir
+    try:
+        return _ir.continue_queue()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfiter/reports")
+def selfiter_reports(limit: int = 10):
+    """每个功能完成后的 markdown 报告。"""
+    from . import iter_runner as _ir
+    try:
+        return {"ok": True, "reports": _ir.reports(limit=limit)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/selfiter/queue_drop")
+def selfiter_queue_drop(body: dict):
+    """从等待队列里取消某一个任务（用户要求「等待进行的任务要可以取消」）。"""
+    from . import iter_runner as _ir
+    b = body or {}
+    try:
+        return _ir.queue_drop(str(b.get("tid") or ""))
+    except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
@@ -10768,6 +10835,28 @@ def _mt_online() -> bool:
         return bool(_mt.online())
     except Exception:
         return False
+
+
+@app.on_event("startup")
+def _resume_iter_queue():
+    """启动后接着上次没跑完的迭代队列 / 待验证任务。
+
+    用户 2026-11-19 要求：「全自动完成一个接一个的任务而不因重启而丢失进度
+    以及等待进行的任务」。iter_runner 已在 _load() 里把 queue / verify 读回来了，
+    这里起个线程接着跑（延迟 2.5 秒，等 FastAPI 完全起来）。
+    """
+    def _boot():
+        try:
+            from . import iter_runner as _ir
+            _ir.boot_resume()
+        except Exception as e:                          # noqa: BLE001
+            logger.warning("恢复迭代队列失败：%s", e)
+    try:
+        import threading as _th
+        _th.Thread(target=_boot, name="iter-resume", daemon=True).start()
+        logger.info("已启动迭代队列恢复线程")
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("启动迭代恢复线程失败：%s", e)
 
 
 @app.on_event("startup")

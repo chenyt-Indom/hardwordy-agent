@@ -332,6 +332,28 @@ def on_task_end(info):
         logger.warning("selfloop.on_task_end 失败：%s: %s", type(e).__name__, e)
 
 
+def request_next(reason="上一个功能验证通过，接着推荐下一个功能"):
+    """连续迭代的「接力棒」：一个功能做完并验证通过后，让引擎接着想下一个。
+
+    用户 2026-11-19 要求：「推荐新功能实现一件之后，就停下来，我需要可以连续
+    实现多种功能连续迭代」。原来 on_task_end 只在**失败**时反思，成功了就停，
+    所以永远只能做一件。
+
+    source="chain" 只豁免「启动冷却 / 最小间隔」（链式推进本来就该紧接着跑），
+    配额、积压、忙碌这几道闸门照样管 —— 不会失控烧 token。
+    """
+    try:
+        d = cfg()
+        if not d.get("enabled"):
+            return {"ok": True, "skipped": "总开关关着"}
+        if not d.get("chain_mode", True):
+            return {"ok": True, "skipped": "连续模式关着"}
+        return _maybe_think(reason, source="chain", gap=0)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("selfloop.request_next 失败：%s: %s", type(e).__name__, e)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     """三重检查都过了才真的开线程。"""
     d = cfg()
@@ -359,7 +381,10 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     # ★ 2026-11-16 用户报「每次启动都要自动迭代一轮，134.9 秒」：
     #   进程刚起来时，前端可能还在重推历史、队列也可能在补跑，这时候自动开跑
     #   会让用户觉得「一开机它就自己忙上了」。所以给一段冷却期，只接受手动点击。
-    if source != "manual":
+    # ★ 2026-11-19：chain（连续迭代接力）要豁免启动冷却 ——
+    #   每做完一个功能都会重启，如果链式推进也被「刚启动 180 秒」挡住，
+    #   那就永远只能做完第一个，正是用户抱怨的「实现一件就停」。
+    if source not in ("manual", "chain"):
         try:
             boot_gap = float(d.get("boot_gap_sec", 180) or 0)
         except Exception:                               # noqa: BLE001
