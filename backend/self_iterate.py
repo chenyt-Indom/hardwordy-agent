@@ -331,12 +331,37 @@ def _read_json(path, default):
     return default
 
 
-def _write_json(path, obj):
+def _write_json(path, obj, retries=6):
+    """原子写 JSON。⚠️ 必须带重试 —— Windows 上 `os.replace` 会撞「文件被占用」。
+
+    2026-11-19 实测：删测试计划时 `delete_plan` 返回 `ok:False`，
+    日志里是 `PermissionError: [WinError 5] 拒绝访问: plans.json.tmp -> plans.json`。
+    原因是后端进程还在跑，别的线程正在读同一个 json，替换那一下就被拒了。
+    更糟的是 `save_plans` 的兜底也调本函数 —— 兜底跟着一起失败，等于没有兜底。
+    这里加短重试（50/100/…ms），最后退化为原地覆盖写（不原子，但不会丢这次改动）。
+    """
     _ensure()
     tmp = str(path) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    last = None
+    for i in range(retries):
+        try:
+            os.replace(tmp, path)
+            return True
+        except OSError as e:
+            last = e
+            time.sleep(0.05 * (i + 1))
+    # ⚠️ 这里**不能**再用任何「覆盖写」兜底。实测两种都危险：
+    #   · `open(path,"w")` → 目标被占用时先截断再报错，文件变成空；
+    #   · `shutil.copyfile(tmp,path)` → 同样是先以 "wb" 打开目标，一样截断成空。
+    #   也就是说「兜底」比失败本身更伤数据。所以只保留原子替换：
+    #   要么整体换上去，要么一个字都不动，新内容留在 .tmp 里等人处理。
+    logger.warning("写 %s 失败（原文件未改动，新内容留在 %s）：%s",
+                   path, tmp, last)
+    if last is not None:
+        raise last
+    raise OSError("写入 %s 失败" % path)
 
 
 def load_settings():
@@ -760,6 +785,67 @@ def _plans_funlock(fh):
         logger.debug("silent-except", exc_info=True)
 
 
+_PLANS_KEEP_DONE = 60      # 已完结的计划最多留这么多
+# ⚠️ 2026-11-19：原来设 40，但实测现有 118 个计划还挂着 pending/approved 动作，
+#   一次保存就会把其中 78 个标成 expired —— 那是**擅自归档用户的待办**，
+#   不是修 bug 该做的事。放宽到 120，只防止未来无限增长，存量由用户自己决定。
+_PLANS_KEEP_OPEN = 120     # 还挂着未完成动作的计划最多留这么多（更早的自动过期）
+_PLANS_KEEP_MAX = 180      # 兜底硬上限
+
+
+def _trim_plans(items):
+    """截断计划列表。**必须在 save 合并之后做**，否则等于没做。
+
+    ⚠️ 2026-11-19 实测发现的 bug：`_make_plan` 里写了 `d["items"][:60]`，
+    但 `save_plans` 走的是 `_merge_plans(disk, d)` —— 合并时会把**磁盘上的
+    全部旧计划**都拼回来，于是那个 `[:60]` 完全失效。结果 plans.json 一路
+    涨到 154 个计划 / 3.4MB（设计上限 60），而且每天还在加。
+
+    ⚠️ 不能在这里一刀切 `[:60]`：实测有 118 个计划还挂着 pending/approved
+    动作（用户批准了但没执行），按条数硬截会把**待用户处理的东西静默删掉**。
+    所以：先保住「还有未完成动作」的计划，再对已完结的按时间留最近 60 个。
+
+    对超量的未完成计划，不删除，只把动作标成 `expired`（保留可查，
+    否则每日反思一天生成 5~8 条建议，几天就能把列表撑爆）。
+    """
+    if not isinstance(items, list):
+        return []
+    live, done = [], []
+    for p in items:
+        if not isinstance(p, dict):
+            continue
+        acts = p.get("actions") or []
+        has_open = any(
+            isinstance(a, dict) and a.get("status") in ("pending", "approved", "need_review")
+            for a in acts
+        )
+        (live if has_open else done).append(p)
+    try:
+        live.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+        done.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    if len(live) > _PLANS_KEEP_OPEN:
+        overflow = live[_PLANS_KEEP_OPEN:]
+        for p in overflow:
+            for a in (p.get("actions") or []):
+                if isinstance(a, dict) and a.get("status") in ("pending", "approved"):
+                    a["status"] = "expired"
+                    a["note"] = (str(a.get("note") or "") + " [超期归档]").strip()
+        live = live[:_PLANS_KEEP_OPEN]
+        # ⚠️ 归档的必须并进 done 池 —— 第一版忘了这一步，超量的计划
+        #    标完 expired 就被丢掉，等于「静默删除用户待办」（实测 80 个只剩 40 个）。
+        done = overflow + done
+    keep = live + done[:_PLANS_KEEP_DONE]
+    if len(keep) > _PLANS_KEEP_MAX:
+        keep = keep[:_PLANS_KEEP_MAX]
+    try:
+        keep.sort(key=lambda x: str(x.get("id") or ""), reverse=True)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return keep
+
+
 def _merge_plans(disk, mem):
     """按 id 合并两份 plans：内存版优先（它是最新状态），磁盘独有的保留。
 
@@ -798,7 +884,7 @@ def _merge_plans(disk, mem):
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
     merged = dict(mem)
-    merged["items"] = out
+    merged["items"] = _trim_plans(out)
     if gone:
         merged["deleted"] = sorted(gone)[-500:]
     return merged
@@ -3029,6 +3115,9 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
                               "error": "%s: %s" % (type(e).__name__, e)}
             logger.warning("计划打磨失败（用原始计划继续）：%s",
                            plan["polish"]["error"])
+
+    # 写记忆放在打磨之后：记的应该是**最终**建议，不是打磨前的旧动作
+    _remember_plan(plan)
 
     out = {"ok": True, "plan": plan, "notice": plan["notice"]}
 
@@ -5411,6 +5500,48 @@ def rollback(pid):
 
 # ---------------------------------------------------------------- 计划构造
 
+# ⚠️ 前缀里必须带「自我反思 / 自我维护」这两个词 —— 用户实际就是这么问的
+#   （定时任务标题是「【自我维护·自我反思】」）。实测只写「自迭代最近一轮」时，
+#   问「自我反思」「自我维护」检索都是 0 条，词面完全对不上。
+_MEM_HINT = "自迭代最近一轮（自我反思·自我维护）"
+
+
+def _remember_plan(plan):
+    """把本轮计划的要点写进长期记忆（**只维护一条滚动摘要**）。
+
+    ⚠️ 2026-11-19 用户实测发现：问「上次反思推荐了什么」时记忆检索**答不上来** ——
+    因为 self_iterate.py 里 `memory`/`long_term`/`remember` 出现 0 次，
+    产物全在 data/self_iterate/plans.json，压根没进记忆链路。
+    这里补上：每轮结束把「时间 + 触发 + N 条建议的标题」压成一行写进长期记忆。
+
+    只保留一条（用固定前缀做定位，update_long 找到就替换），
+    否则每天反思一条，长期记忆很快被系统自述撑满、把用户自己的信息挤掉。
+    测试类计划不写（selftest / 测试召回），否则记忆里全是测试垃圾。
+    """
+    try:
+        from . import memory as _mem
+        trig = str(plan.get("trigger") or "")
+        if trig in ("selftest", "测试召回", "probe"):
+            return
+        acts = [a for a in (plan.get("actions") or []) if isinstance(a, dict)]
+        if not acts:
+            return
+        titles = [str(a.get("title") or "").strip()[:24]
+                  for a in acts[:5] if str(a.get("title") or "").strip()]
+        if not titles:
+            return
+        # 存中文触发名而不是 audit/experience 这类英文键 —— 用户是按
+        # 「代码自检」「体验评估」这种中文说法来问的，存英文键检索对不上。
+        zh = _TRIGGER_ZH.get(trig) or trig or "unknown"
+        line = "%s（%s，%s）：%s 共 %d 条推荐建议：%s" % (
+            _MEM_HINT, str(plan.get("ts") or "")[:16], zh,
+            str(plan.get("summary") or "").strip()[:40] or "无摘要",
+            len(acts), "、".join(titles))
+        _mem.update_long(_MEM_HINT, line[:200])
+    except Exception:                                   # noqa: BLE001
+        logger.debug("写迭代记忆失败", exc_info=True)
+
+
 def _make_plan(trigger, summary, actions, extra=None):
     """建一个 plan 并落盘（反思、自检、诊断都走这里，保证结构一致）。"""
     norm = []
@@ -5439,6 +5570,7 @@ def _make_plan(trigger, summary, actions, extra=None):
     d["items"].insert(0, plan)
     d["items"] = d["items"][:60]
     save_plans(d)
+    _remember_plan(plan)
     return plan
 
 
@@ -6775,6 +6907,8 @@ _TRIGGER_ZH = {
     "daily": "每日定时反思",
     "experience": "体验评估发现体验变差",
     "audit": "代码自检发现问题",
+    "audit:daily": "代码自检发现问题",
+    "audit:manual": "代码自检发现问题",
     "audit:tool": "代码自检发现问题",
     "manual": "你手动点的反思",
     "manual_added": "你手动记下的待办",

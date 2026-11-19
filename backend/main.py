@@ -3197,6 +3197,12 @@ def api_actlog_append(payload: dict = Body(...)):
         if not isinstance(payload, dict):
             return {"ok": False, "error": "payload 必须是对象"}
         entry = dict(payload)
+        # ⚠️ 2026-11-19 实测：日志里混进了 6 条只有 {ts, source} 的记录 ——
+        #   没有 name/action/title/result 任何一个，前端「最近自动执行」渲染成空白行，
+        #   既排查不了问题也占位置。空 payload 直接拒绝，别写进去。
+        if not any(str(entry.get(k) or "").strip()
+                   for k in ("name", "action", "title", "result", "note")):
+            return {"ok": False, "error": "至少要带 name/action/title/result/note 之一"}
         entry.setdefault("ts", time.strftime("%Y-%m-%d %H:%M:%S"))
         entry["source"] = entry.get("source") or "frontend"
         _si._actlog(entry)
