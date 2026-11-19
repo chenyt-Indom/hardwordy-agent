@@ -5710,6 +5710,11 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
             _ev("step", text="收到终止请求，剩余 %d 条动作不再执行" % skipped)
             break
         _pk, _pwhy = precheck.get(a.get("id"), (True, ""))
+        # ★ 2026-11-20 用户要求「卡片上说明正在迭代什么功能」——
+        #   一个计划里有多条动作（多个功能），每条开始前发一次，
+        #   iter_runner 收到后把卡片标题换成当前这条，用户就知道现在在做什么。
+        _ev("action_start", action_id=str(a.get("id") or ""),
+            title=str(a.get("title") or ""), index=_i + 1, total=len(todo))
         if not _pk:
             a["status"] = "done"
             a["note"] = ((a.get("note") or "") + "｜" + _pwhy).strip("｜")

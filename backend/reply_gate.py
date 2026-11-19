@@ -1343,3 +1343,241 @@ def format_reply(conclusion, process=None, artifacts=None, max_chars=DEFAULT_MAX
     out = "\n\n".join([head] + kept) if head else "\n\n".join(kept)
     # 出口硬上限：软预算截断后再过一道硬闸，保证最终不超过 HARD_MAX_CHARS
     return _enforce_hard_cap(out[:limit])
+
+
+# ── finalize：单条回复的最终形态（结论前置 + 过程折叠 + 长度上限）──────
+# 与上面 enforce / format_reply / postprocess 的分工（读代码前先分清，别重复实现）：
+#   · enforce / format_reply = 「就地改写一段文本」，永远返回 str；
+#   · finalize = 「出口形态决定者」—— 需要时返回 list[str]（parts），
+#     由前端**分段渲染**，从根上避免「一整坨长文被前端/平台在任意位置硬截断」。
+#
+# 依据：Hansel: Output Length Controlling Framework for Large Language Models
+# （生成期就追踪「剩余目标长度」，从而避免突兀截断）。本功能不引入训练，只做
+# 工程侧的「先算长度、再决定形态」：结论段永远在第一段，过程收进 <details>，
+# 总长超过 FINALIZE_SPLIT_THRESHOLD 就按段落切成多段返回。
+FINALIZE_SPLIT_THRESHOLD = 1200
+# 切段时每段的目标长度上限（单段超长会被继续按行切开，保证没有一段是巨无霸）
+FINALIZE_PART_MAX = 1200
+# 思考段识别：段落首行以这些标记开头 → 整段属于「思考 / 过程」
+_FINALIZE_THINK_MARKERS = ("🧠", "💭", "思考过程", "思考内容", "思考块",
+                          "推理过程", "过程记录")
+# 思考段之后，以这些开头的段落算「新的一节」，不再并进思考块
+_FINALIZE_THINK_STOPS = _CONCLUSION_PREFIXES + ("改动", "验证", "待办", "下一步",
+                                               "产物", "已改文件")
+# 思考块「续段」判据：像步骤（第一步 / 1. / ①② / - / ```）或本身不长
+_FINALIZE_STEP_RE = (r"^(?:第[一二三四五六七八九十百\d]+步|步骤|Step\s*\d|"
+                     r"\d+[.、)）]|[①②③④⑤⑥⑦⑧⑨⑩]|[-*·•>]|```)")
+# 「续段」长度上限：超过这个长度的段落不并进思考块（多半是正文/详情）
+_FINALIZE_THINK_TAIL_MAX = 200
+
+
+def _finalize_split_paras(text: str) -> list:
+    """按空行切段，但**不切开 ``` 代码围栏**（围栏里的空行不算分段）。
+
+    为什么不用 `text.split("\\n\\n")`：回复里经常有代码块，里面有大量空行，
+    按空行一刀切会把一个代码块拆成好几段，后续折叠/切段就把它切碎了。
+    """
+    out, buf, in_fence = [], [], False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            buf.append(line)
+            continue
+        if not in_fence and not line.strip():
+            if buf:
+                out.append("\n".join(buf).strip())
+                buf = []
+            continue
+        buf.append(line)
+    if buf:
+        out.append("\n".join(buf).strip())
+    return [p for p in out if p]
+
+
+def _finalize_is_think(para: str) -> bool:
+    """这一段是不是「思考 / 过程」段：首行以 🧠 等标记开头即算。"""
+    s = (para or "").strip()
+    if not s:
+        return False
+    first = s.splitlines()[0].strip()
+    return any(first.startswith(m) for m in _FINALIZE_THINK_MARKERS)
+
+
+def _finalize_looks_like_step(para: str) -> bool:
+    """思考块的「续段」判据：像步骤、或本身不长（长段落当正文，不并进思考块）。"""
+    s = (para or "").strip()
+    if not s:
+        return False
+    if len(s) <= _FINALIZE_THINK_TAIL_MAX:
+        return True
+    import re as _re
+    return bool(_re.match(_FINALIZE_STEP_RE, s.splitlines()[0].strip()))
+
+
+def _finalize_wrap_details(body: str, title: str = "🧠 思考过程") -> str:
+    """把一段过程包进 <details> 折叠块（前端 mdToHtml 已支持 details）。
+
+    折叠 **不丢内容**：原文整段留在块里，用户点开就能看 —— 与「截断」有本质区别。
+    """
+    body = (body or "").strip()
+    if not body:
+        return ""
+    return "<details><summary>%s（%d 字，点开看）</summary>\n\n%s\n\n</details>" % (
+        title, len(body), body)
+
+
+def _finalize_chunk_text(text: str, limit: int) -> list:
+    """把超长文本按**行**切成每块不超过 limit 的若干块（超长单行按字符硬切）。
+
+    切在 ``` 围栏中间时，本块补一个收尾 ```，下一块补一个开头 ``` —— 保证
+    每一块自己都是配平的，不会出现「未闭合围栏把后面内容全吞掉」。
+    """
+    if not text:
+        return []
+    try:
+        limit = max(200, int(limit))
+    except Exception:                                   # noqa: BLE001
+        limit = FINALIZE_PART_MAX
+    chunks, buf, size, in_fence = [], [], 0, False
+    for line in text.split("\n"):
+        pieces = ([line] if len(line) <= limit
+                  else [line[i:i + limit] for i in range(0, len(line), limit)])
+        for piece in pieces:
+            if size + len(piece) + 1 > limit and buf:
+                if in_fence:
+                    buf.append("```")      # 本块补收尾，避免留下未闭合围栏
+                chunks.append("\n".join(buf))
+                buf = ["```"] if in_fence else []
+                size = 4 if in_fence else 0
+            buf.append(piece)
+            size += len(piece) + 1
+            if piece.lstrip().startswith("```"):
+                in_fence = not in_fence
+    if buf:
+        chunks.append("\n".join(buf))
+    return [c for c in chunks if c.strip()]
+
+
+def _finalize_split_details(block: str, limit: int) -> list:
+    """把超长 <details> 块拆成**多个各自配平**的折叠块（绝不留下半截标签）。"""
+    import re as _re
+    m = _re.match(r"<details[^>]*>\s*(?:<summary>(.*?)</summary>)?(.*?)</details>\s*$",
+                  block, flags=_re.S)
+    title = (m.group(1).strip() if (m and m.group(1)) else "🧠 思考过程")
+    inner = (m.group(2) if m else block).strip()
+    overhead = len(title) + len("<details><summary></summary>\n\n\n\n</details>")
+    room = max(400, limit - overhead)
+    pieces = _finalize_chunk_text(inner, room)
+    if len(pieces) <= 1:
+        return [block]
+    out = []
+    for i, piece in enumerate(pieces):
+        head = title if i == 0 else title + "（续 %d）" % (i + 1)
+        out.append("<details><summary>%s</summary>\n\n%s\n\n</details>" % (head, piece))
+    return out
+
+
+def _finalize_pack(blocks: list, limit: int) -> list:
+    """把已排好序的段落块打包成 parts（每段不超过 limit，块本身超长就继续切）。"""
+    parts, buf, size = [], [], 0
+    for b in blocks:
+        b = (b or "").strip()
+        if not b:
+            continue
+        if len(b) > limit:
+            if buf:
+                parts.append("\n\n".join(buf))
+                buf, size = [], 0
+            if b.startswith("<details"):
+                parts.extend(_finalize_split_details(b, limit))
+            else:
+                parts.extend(_finalize_chunk_text(b, limit))
+            continue
+        if size + len(b) + 2 > limit and buf:
+            parts.append("\n\n".join(buf))
+            buf, size = [], 0
+        buf.append(b)
+        size += len(b) + 2
+    if buf:
+        parts.append("\n\n".join(buf))
+    return [p for p in parts if p.strip()]
+
+
+def finalize(text):
+    """回复出口的最终形态闸门：**结论前置 + 过程折叠 + 长度上限**。
+
+    参数
+    ----
+    text : 模型产出的原始回复（str / list / dict 均可，会先 _as_text）
+
+    返回
+    ----
+    · str        —— 正常长度的回复（结论在最前、过程已折叠）；
+    · list[str]  —— 总长超过 FINALIZE_SPLIT_THRESHOLD 时，按段落切成多段，
+                    由前端按 parts 分段渲染（**首段必定含结论**，内容不丢失）。
+
+    行为
+    ----
+      ① 结论前置：结论段 = **首个非思考段落**，永远排在最前；
+      ② 过程折叠：🧠 / 思考过程 等思考段落包进 <details>（内容保留，点开可看）；
+      ③ 长度上限：超 FINALIZE_SPLIT_THRESHOLD 就按段落切 parts；单块超长时
+         再按行/字符切，<details> 块绝不切半截（每块自己配平）。
+
+    保守性：既没有思考段、也没超长的回复**一个字都不改** —— 闲聊/解释类
+    完全不受影响；任何异常都退回原文，绝不因为格式化而丢内容。
+    """
+    raw = _as_text(text)
+    try:
+        s = raw.strip()
+        if not s:
+            return raw
+        paras = _finalize_split_paras(s)
+        if not paras:
+            return raw
+
+        think, already, rest = [], [], []
+        in_think = False
+        for p in paras:
+            if p.startswith("<details"):
+                # 已经是折叠块：原样保留，绝不再套一层 <details>
+                already.append(p)
+                in_think = False
+                continue
+            if _finalize_is_think(p):
+                think.append(p)
+                in_think = True
+                continue
+            if (in_think and not any(p.startswith(x) for x in _FINALIZE_THINK_STOPS)
+                    and _finalize_looks_like_step(p)):
+                # 思考段紧接着的分步正文，仍然算过程的一部分
+                think.append(p)
+                continue
+            in_think = False
+            rest.append(p)
+
+        # 没有思考段、也没超长 → 一个字都不改（短回复/闲聊不受影响）
+        if not think and not already and len(s) <= FINALIZE_SPLIT_THRESHOLD:
+            return s
+
+        # ① 结论前置：首个非思考段落当结论，其余按原序跟在后面
+        blocks = []
+        if rest:
+            blocks.append(rest[0])          # 结论段：永远排第一
+            blocks.extend(rest[1:])         # 详情/正文
+        # ② 过程折叠：思考段整块收进 <details>，放在正文之后当附录
+        blocks.extend(already)
+        if think:
+            blocks.append(_finalize_wrap_details("\n\n".join(think)))
+        if not blocks:
+            return s
+
+        # ③ 长度上限：没超阈值就返回 str（形态已修正），超了返回 parts 列表
+        full = "\n\n".join(b for b in blocks if b)
+        if len(full) <= FINALIZE_SPLIT_THRESHOLD:
+            return full
+        parts = _finalize_pack(blocks, FINALIZE_PART_MAX)
+        if len(parts) <= 1:
+            return parts[0] if parts else full
+        return parts
+    except Exception:                                   # noqa: BLE001
+        return raw

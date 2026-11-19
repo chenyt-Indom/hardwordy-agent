@@ -8869,7 +8869,34 @@ async def chat(req: ChatRequest,
         if len(_shown) < len(final_text):
             logger.warning("[reply-clip] 回复 %d 字超上限，展示裁到 %d 字（历史保留全文）",
                            len(final_text), len(_shown))
-        yield json.dumps({"done": True, "text": _shown, "thinking": final_thinking}, ensure_ascii=False) + "\n"
+        # 回复形态闸门（2026-11-18 接线 reply_gate.finalize）：
+        # 结论前置 + 过程折叠 + 长度上限。超长时 finalize 返回 parts 列表，
+        # 这里把 `parts` 一并带给前端分段渲染；`text` 仍是拼好的整段（兜底/落盘用）。
+        # 对应「回复被截断」「过程淹没结论」两个最高频摩擦 —— 用户第一眼先看到结论，
+        # 想看过程点开 <details>，超长则分段而不是让前端在任意位置硬截断。
+        # 任何异常都退回原文（只 debug 记一笔），绝不影响主回复。
+        _parts = None
+        try:
+            from .reply_gate import finalize as _shape_finalize
+            _shaped = _shape_finalize(_shown)
+            if isinstance(_shaped, (list, tuple)):
+                _cand = [str(x) for x in _shaped if str(x or "").strip()]
+                if len(_cand) > 1:
+                    _parts = _cand
+                    _shown = "\n\n".join(_cand)
+                    logger.info("[reply-shape] 回复 %d 字，已拆成 %d 段（结论在前）",
+                                len(final_text), len(_cand))
+            elif isinstance(_shaped, str) and _shaped.strip():
+                if _shaped != _shown:
+                    logger.info("[reply-shape] 回复已重排为「结论前置 + 过程折叠」")
+                _shown = _shaped
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+            _parts = None
+        _done_payload = {"done": True, "text": _shown, "thinking": final_thinking}
+        if _parts:
+            _done_payload["parts"] = _parts
+        yield json.dumps(_done_payload, ensure_ascii=False) + "\n"
 
     # 用 _track_chat 包一层：登记"有聊天在跑"，后台记忆提炼会主动让路（见 _chat_busy）
     return StreamingResponse(_track_chat(gen()), media_type="application/x-ndjson")

@@ -1354,6 +1354,165 @@ window.LiveCard = (function () {
     return grid;
   }
 
+  // ================================================================
+  // 回复内嵌实时卡片（2026-11-21）——「边说边出画面」
+  // ----------------------------------------------------------------
+  // 摩擦点（用户原话）：回答是一面文字墙，地图 / 天气 / 生成的图 / 文档
+  // 全散在正文和折叠块里，想看得自己去翻面板。
+  // 做法：后端在工具结果里附一份 cards 元数据（backend/livecard_meta.py），
+  // 气泡里内嵌一排小卡片，点一下就能看细节（图片放大 / 坐标 / 文件名）。
+  //
+  // 约定：
+  //   · renderLiveCard(list) 返回**一个容器节点**，里面每张卡一个子节点，
+  //     子节点数 === 输入条数（无 DOM 环境下返回同构的最小节点，纯逻辑可断言）；
+  //   · 卡片 class 带类型（.livecard-map / .livecard-weather / …），标题在
+  //     .lc-title 的文本里，方便"按类型找卡 / 按文字找卡"；
+  //   · 点卡片 → opts.onOpen(card, node)；没给回调就就地展开 payload 详情，
+  //     所以单看这个文件也能点，不依赖 app.js。
+  // ================================================================
+  const LC_META = {
+    map: { ico: "🗺", label: "地图" },
+    weather: { ico: "🌤", label: "天气" },
+    image: { ico: "🖼", label: "图片" },
+    doc: { ico: "📄", label: "文档" },
+    ppt: { ico: "📊", label: "演示" },
+    video: { ico: "🎬", label: "视频" },
+  };
+
+  // 建节点：浏览器里用真 DOM；node 里跑断言时给同构的最小节点（够断言用）
+  function lcNode(tag, cls) {
+    if (typeof document !== "undefined" && document && document.createElement) {
+      const el = document.createElement(tag);
+      if (cls) el.className = cls;
+      return el;
+    }
+    const n = {
+      tagName: String(tag).toUpperCase(), className: cls || "",
+      childNodes: [], children: [], textContent: "", style: {},
+      setAttribute: function () {}, appendChild: function (c) {
+        this.childNodes.push(c); this.children.push(c); return c;
+      },
+      addEventListener: function () {}, remove: function () {},
+      classList: { add: function () {}, remove: function () {}, contains: function () { return false; } },
+    };
+    return n;
+  }
+
+  function lcPayloadLines(payload) {
+    const out = [];
+    if (!payload || typeof payload !== "object") return out;
+    Object.keys(payload).forEach(function (k) {
+      const v = payload[k];
+      if (v == null || v === "" || v === false) return;
+      if (Array.isArray(v)) {
+        const flat = v.map(function (x) {
+          if (x && typeof x === "object") return x.name || x.title || JSON.stringify(x);
+          return String(x);
+        }).filter(Boolean);
+        if (flat.length) out.push(k + "：" + flat.slice(0, 6).join("、"));
+      } else if (typeof v === "object") {
+        const inner = v.name || v.title || v.from || v.path;
+        if (inner) out.push(k + "：" + String(inner));
+      } else {
+        out.push(k + "：" + String(v));
+      }
+    });
+    return out.slice(0, 8);
+  }
+
+  // 单张卡
+  function renderOneCard(card, opts) {
+    opts = opts || {};
+    const c = (card && typeof card === "object") ? card : {};
+    const type = LC_META[c.type] ? c.type : "doc";
+    const meta = LC_META[type];
+    const title = String(c.title == null ? "" : c.title).trim() || (meta.label + "结果");
+
+    const node = lcNode("div", "livecard livecard-" + type);
+    try { node.setAttribute("data-type", type); } catch (e) { /* 无 DOM 环境 */ }
+    node.title = title;
+
+    const ico = lcNode("span", "lc-ico");
+    ico.textContent = meta.ico;
+    node.appendChild(ico);
+
+    if (c.thumb) {
+      const img = lcNode("img", "lc-thumb");
+      try {
+        img.setAttribute("src", String(c.thumb));
+        img.setAttribute("alt", title);
+        img.setAttribute("loading", "lazy");
+      } catch (e) { /* 无 DOM 环境 */ }
+      node.appendChild(img);
+    }
+
+    const tEl = lcNode("span", "lc-title");
+    tEl.textContent = title;
+    node.appendChild(tEl);
+
+    const badge = lcNode("span", "lc-kind");
+    badge.textContent = meta.label;
+    node.appendChild(badge);
+
+    // 详情面板：默认收起，点卡片展开（有 onOpen 就交给调用方）
+    const detail = lcNode("div", "lc-detail");
+    detail.hidden = true;
+    const lines = lcPayloadLines(c.payload);
+    detail.textContent = lines.length ? lines.join("\n") : "（没有更多细节）";
+    node.appendChild(detail);
+
+    const onOpen = typeof opts.onOpen === "function" ? opts.onOpen : null;
+    const click = function (e) {
+      try { if (e && e.stopPropagation) e.stopPropagation(); } catch (err) { /* 忽略 */ }
+      if (onOpen) { onOpen(c, node); return; }
+      detail.hidden = !detail.hidden;
+      node.classList.toggle && node.classList.toggle("open", !detail.hidden);
+    };
+    if (typeof node.addEventListener === "function") node.addEventListener("click", click);
+    else node.onclick = click;
+
+    return node;
+  }
+
+  /**
+   * 把 [{type,title,thumb,payload}] 渲染成一排可点的小卡片。
+   * @returns {Element} 容器节点（子节点数 === 有效卡片数）
+   */
+  function renderCards(list, opts) {
+    const box = lcNode("div", "livecards");
+    const arr = Array.isArray(list) ? list : [];
+    arr.forEach(function (c) {
+      if (!c || typeof c !== "object") return;
+      box.appendChild(renderOneCard(c, opts));
+    });
+    if (!box.childNodes.length) box.className = "livecards livecards-empty";
+    return box;
+  }
+
+  // 挂到容器上（append 语义）——app.js 用这一个入口，不用关心内部结构
+  function mountCards(host, list, opts) {
+    if (!host) return null;
+    const box = renderCards(list, opts);
+    if (!box || !box.childNodes.length) return null;
+    host.appendChild(box);
+    return box;
+  }
+
+  // 合并去重（同类型 + 同标题只留一张）：后端分批送 cards 时用
+  function mergeCards(base, more) {
+    const out = Array.isArray(base) ? base.slice() : [];
+    const seen = {};
+    out.forEach(function (c) { if (c) seen[c.type + "|" + c.title] = 1; });
+    (Array.isArray(more) ? more : []).forEach(function (c) {
+      if (!c || typeof c !== "object") return;
+      const k = c.type + "|" + c.title;
+      if (seen[k]) return;
+      seen[k] = 1;
+      out.push(c);
+    });
+    return out.slice(0, 12);
+  }
+
   return {
     esc: esc,
     escAttr: escAttr,
@@ -1379,5 +1538,13 @@ window.LiveCard = (function () {
     canvasContext: canvasContext,
     renderCanvas: renderCanvas,
     mountCanvas: mountCanvas,
+    // 回复内嵌实时卡片（边说边出画面）：renderLiveCard 是正式入口，
+    // renderCards 是同一份实现的别名（计划里用的名字，两边都能调）。
+    LC_META: LC_META,
+    renderLiveCard: renderCards,
+    renderCards: renderCards,
+    renderLiveCardItem: renderOneCard,
+    mountLiveCard: mountCards,
+    mergeLiveCards: mergeCards,
   };
 })();

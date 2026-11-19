@@ -4446,6 +4446,19 @@ html[data-theme="light"] .composer {
 .bubble .tts-btn:hover { opacity: 1; border-color: var(--accent, #4a9eff); }
 .bubble .tts-btn:disabled { cursor: default; opacity: .8; }
 
+/* ---------- 回复分段（回复形态闸门 reply_gate.finalize 的 parts） ----------
+   超长回复被后端切成多段后按段渲染：段与段之间一条浅色分隔线 + 「第 i / n 段」，
+   让「这是一段连续回答」看得出来，但不抢正文的注意力。 */
+.bubble .reply-part { display: block; }
+.bubble .reply-part-sep {
+  margin: 10px 0 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+  opacity: .5;
+  user-select: none;
+}
+
 /* 右键音色菜单（fixed 定位，由 app.js 按按钮位置摆） */
 .tts-menu {
   position: fixed;
@@ -7009,3 +7022,34 @@ html[data-theme="light"] .iter-site:hover {
 .loop-st-hint { color: var(--muted); }
 .loop-st-hint.bad { color: var(--danger); }
 @media (max-width: 420px) { .loop-st-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ===== 回复内嵌实时卡片（livecard.js renderLiveCard 渲染）=====
+   2026-11-21：「边说边出画面」。答案气泡顶部一排小卡（地图 / 天气 / 图片 /
+   文档 / 演示 / 视频），横着刷，点一下展开细节或交给 app.js 放大。
+   卡片是**附加层**：没有 cards 的回复完全不受影响（容器都不会创建）。 */
+.livecards { display: flex; gap: 6px; flex-wrap: wrap; align-items: stretch;
+  margin: 0 0 8px; padding: 0; }
+.livecards-empty { display: none; }
+.livecard { position: relative; display: inline-flex; align-items: center; gap: 5px;
+  max-width: 230px; min-height: 30px; padding: 4px 8px;
+  border: 1px solid var(--border, #2a2f3a); border-radius: 9px;
+  background: var(--panel2, rgba(255, 255, 255, .04));
+  color: var(--text, #e6e9ef); font-size: 12px; line-height: 1.35;
+  cursor: pointer; user-select: none; transition: border-color .12s, transform .12s; }
+.livecard:hover { border-color: var(--accent, #4a9eff); transform: translateY(-1px); }
+.livecard.open { border-color: var(--accent, #4a9eff); }
+.lc-ico { flex: 0 0 auto; font-size: 13px; }
+.lc-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lc-kind { flex: 0 0 auto; font-size: 10px; color: var(--muted, #8a93a6);
+  border: 1px solid var(--border, #2a2f3a); border-radius: 5px; padding: 0 4px; }
+.lc-thumb { width: 26px; height: 26px; object-fit: cover; border-radius: 5px; flex: 0 0 auto; }
+/* 详情：默认收起；点卡片就地展开（有 onOpen 回调时由 app.js 决定动作） */
+.lc-detail { flex: 1 0 100%; display: none; margin-top: 4px; padding: 5px 6px;
+  border-radius: 7px; background: rgba(255, 255, 255, .03);
+  color: var(--muted, #8a93a6); font-size: 11px; white-space: pre-wrap; }
+.livecard.open .lc-detail { display: block; }
+.livecard[hidden] { display: none; }
+@media (max-width: 640px) {
+  .livecard { max-width: 100%; }
+  .livecards { gap: 5px; }
+}

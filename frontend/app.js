@@ -1154,6 +1154,39 @@
     if (window.__Artifacts) window.__Artifacts.flush(bubble);
   }
 
+  // 回复形态闸门（2026-11-18 接线 reply_gate.finalize）：后端超长回复会切成 parts，
+  // 这里按段渲染 —— 每段之间一条「第 i / n 段」分隔线，而不是一整坨长文。
+  // 背景：用户反复报「回复被截断 + 过程淹没结论」；首段永远是结论，后面是可展开的
+  // 过程/详情。渲染失败就返回 false，调用方退回原来的整段渲染，绝不留白。
+  function renderReplyParts(bubble, parts) {
+    if (!bubble || !Array.isArray(parts) || parts.length < 2) return false;
+    try {
+      bubble.innerHTML = "";
+      const frag = document.createDocumentFragment();
+      parts.forEach((p, i) => {
+        if (i) {
+          const sep = document.createElement("div");
+          sep.className = "reply-part-sep";
+          sep.textContent = "—— 第 " + (i + 1) + " / " + parts.length + " 段 ——";
+          frag.appendChild(sep);
+        }
+        const box = document.createElement("div");
+        box.className = "reply-part";
+        const s = String(p == null ? "" : p);
+        try {
+          box.innerHTML = (typeof mdToHtml === "function")
+            ? mdToHtml(typeof stripToolLeak === "function" ? stripToolLeak(s) : s)
+            : s;
+        } catch (e) { box.textContent = s; }
+        frag.appendChild(box);
+      });
+      bubble.appendChild(frag);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   // ============================================================
   // 画布即对话：回复变成可圈选追问的卡片画布（2026-11-17）
   // ------------------------------------------------------------
@@ -1302,6 +1335,69 @@
     };
     canvasCtx = { cards: cards, remount: remount };
     return grid;
+  }
+
+  // ============================================================
+  // 回复内嵌实时卡片（2026-11-21）——「边说边出画面」
+  // ------------------------------------------------------------
+  // 摩擦点：答案是一面文字墙，地图 / 天气 / 生成的图 / 文档缩略图都得去面板里翻。
+  // 做法：后端把工具结果压成 {type,title,thumb,payload} 元数据随流下发
+  //      （backend/livecard_meta.py），这里把它内嵌到回答气泡的**顶部**，
+  //      点一张卡 → 跳到气泡里对应的产物，或就地展开坐标 / 文件名这些细节。
+  // 纯文字回复没有 cards 字段 → 这里一次都不会调用，观感与原来完全一致。
+  // ============================================================
+  // 内容 → 卡片。持久化时用它把卡片一起存进会话（history 本身保持干净，
+  // 否则多出来的字段会被当成上下文发给模型）。
+  const liveCardsOf = {};
+
+  function liveCardTarget(bubble, type) {
+    if (!bubble) return null;
+    const sel = {
+      map: ".map-card, .cv-grid, .lc-canvas",
+      image: ".media-card",
+      weather: "",
+      doc: ".artifacts, .dl-group, .media-card",
+      ppt: ".artifacts, .dl-group",
+      video: ".media-card, .artifacts",
+    }[type] || "";
+    if (!sel) return null;
+    try { return bubble.querySelector(sel); } catch (e) { return null; }
+  }
+
+  function mountLiveCards(bubble, cards) {
+    if (!bubble || !cards || !cards.length) return null;
+    if (!window.LiveCard || typeof window.LiveCard.renderLiveCard !== "function") return null;
+    try {
+      const box = window.LiveCard.renderLiveCard(cards, {
+        onOpen: (card, node) => {
+          // ① 气泡里真有对应的产物 → 滚过去并闪一下（图片/地图本来就在下面）
+          const target = liveCardTarget(bubble, card && card.type);
+          let jumped = false;
+          if (target) {
+            try {
+              if (typeof target.scrollIntoView === "function") {
+                target.scrollIntoView({ block: "center", behavior: "smooth" });
+              }
+              target.classList.add("lc-flash");
+              setTimeout(() => { try { target.classList.remove("lc-flash"); } catch (e) {} }, 1200);
+              jumped = true;
+            } catch (e) { jumped = false; }
+          }
+          // ② 找不到产物（天气 / 只是元数据）→ 就地展开细节。
+          //    两种情况都给反馈：点了没反应是最容易让人以为"坏了"的。
+          if (!jumped && node && node.classList) {
+            if (typeof node.classList.toggle === "function") node.classList.toggle("open");
+            else node.classList.add("open");
+          }
+        },
+      });
+      if (!box || !box.childNodes || !box.childNodes.length) return null;
+      // 放在气泡最上面：先看到画面，再读解释（用户要的"刷信息流一样看结果"）
+      bubble.insertBefore(box, bubble.firstChild || null);
+      return box;
+    } catch (e) {
+      return null;        // 卡片出错绝不影响正文
+    }
   }
 
   // ---------- 左侧「🎨 画布」按钮：把画布拎出来看（2026-11-18）----------
@@ -6954,6 +7050,11 @@
     let sourcesData = null;
 
     let thinking = "", answer = "";
+    // 回复形态闸门：后端把超长回复切成多段时，这里收下 parts，收尾按段渲染
+    let answerParts = null;
+    // 本轮工具产出的「实时卡片」元数据（后端随工具结果附上：地图坐标 / 图片 /
+    // 文档名…）。收尾时内嵌进回答气泡顶部，用户不用去面板里翻产出。
+    let liveCards = [];
     // ★ 2026-11-08：流式时也**边到边渲染 Markdown**（节流 ~120ms）。
     //   以前是 textContent 原样贴，用户看到的是「**PPT**」「### 」这种原始符号，
     //   观感像"没有格式化 / 不是流式"。现在每 120ms 重渲染一次，收尾再定稿。
@@ -7948,6 +8049,16 @@
               paintAnswer(false);
             }
           }
+          // ★ 2026-11-21 回复内嵌实时卡片：后端在工具结果里附带 cards 元数据
+          //   （地图坐标 / 图片路径 / 文档名），这里先攒着，收尾时内嵌到气泡里。
+          //   ⚠️ 必须在收尾渲染之前收集 —— done 事件里也带一份（历史回放要靠它）。
+          if (obj.cards && obj.cards.length) {
+            try {
+              liveCards = (window.LiveCard && typeof window.LiveCard.mergeLiveCards === "function")
+                ? window.LiveCard.mergeLiveCards(liveCards, obj.cards)
+                : liveCards.concat(obj.cards);
+            } catch (e) { liveCards = liveCards.concat(obj.cards); }
+          }
           if (obj.tool_start) addToolChip(obj.tool_start.name);
           // 一轮里同时发起多个工具时给个提示 —— 让用户知道这是并行执行、在省时间
           if (obj.tool_parallel) {
@@ -8013,6 +8124,11 @@
             if (_full && _full.length > answer.length) {
               answer = _full;
               paintAnswer(true);
+            }
+            // 后端 finalize 把超长回复切成了多段 → 收下 parts，收尾按段渲染
+            if (Array.isArray(obj.parts) && obj.parts.length > 1) {
+              answerParts = obj.parts.filter((p) => typeof p === "string" && p.trim());
+              if (answerParts.length < 2) answerParts = null;
             }
             const _fullThink = (typeof obj.thinking === "string") ? obj.thinking : "";
             if (_fullThink && _fullThink.length > thinking.length) {
@@ -8109,6 +8225,25 @@
       // 默认开启纯文本渲染（先保证"一个字都不少"），格式化模式可用 ?plain=0 关掉。
       // 统一走 renderFinal：纯文本 / 格式化 + 尾部核对（见函数定义处）
       renderFinal(answerBubble, answer, promptText);
+      // 分段渲染（回复形态闸门）：后端 finalize 给了 parts 就按段渲染 ——
+      // 第 1 段永远是结论，第 2 段起是详情/可展开的过程，段间有「第 i/n 段」分隔。
+      // 失败就把渲染结果退回 renderFinal 的整段形态，绝不留白。
+      try {
+        if (answerParts && renderReplyParts(answerBubble, answerParts)) {
+          answerBubble.style.whiteSpace = "";
+          // 分段渲染会重设 innerHTML → 朗读按钮要重新挂回去
+          try {
+            if (typeof attachSpeak === "function") attachSpeak(answerBubble, answer);
+          } catch (e) { /* 朗读按钮失败不影响正文 */ }
+        }
+      } catch (e) { /* 分段渲染失败就维持整段渲染结果 */ }
+      // 边说边出画面：本轮工具产出的卡片内嵌到气泡顶部（没有卡片就什么都不做）
+      try {
+        if (liveCards.length) {
+          liveCardsOf[answer] = liveCards;
+          mountLiveCards(answerBubble, liveCards);
+        }
+      } catch (e) { /* 卡片失败不影响正文 */ }
       try { localStorage.setItem("__last_answer", String(answer || "")); } catch (e) {}
       if (!answer) {
         answerBubble.textContent = notes.length
@@ -8152,6 +8287,10 @@
             console.warn("[stream] 服务端原文更长，按它重绘：", answer.length, "→", srv.length);
             answer = srv;
             renderFinal(answerBubble, answer, promptText);
+            // 重绘会把气泡洗掉 → 卡片要跟着补回来（否则回读一次卡片就没了）
+            try {
+              if (liveCards.length) mountLiveCards(answerBubble, liveCards);
+            } catch (e) { /* 卡片失败不影响正文 */ }
             for (let i = history.length - 1; i >= 0; i--) {
               if (history[i] && history[i].role === "assistant") { history[i].content = srv; break; }
             }
@@ -15974,10 +16113,14 @@
           '<div class="if-queue-list" hidden></div>' +
           '<div class="if-steps"></div>' +
           '<div class="if-cards"></div>' +
-          '<div class="if-paused" hidden>' +
-            '⏸ 本轮已连续完成上限个功能，队列里还有任务。' +
-            '<button type="button" class="btn sm if-continue">▶ 继续跑</button>' +
-          '</div>' +
+        '</div>' +
+        // ★ 2026-11-20：暂停条原来在 .if-body 里面，卡片一收起就跟着被藏掉，
+        //   用户根本看不到「继续跑」。移到 bubble 下、body 外面 —— 收起也可见。
+        '<div class="if-paused" hidden>' +
+          // ★ 2026-11-20 用户报「显示的是上限个功能」：文案原来写死成「上限」，
+          //   真实数字由 feedSync 填进 .if-paused-txt。
+          '<span class="if-paused-txt"></span>' +
+          '<button type="button" class="btn sm if-continue">▶ 继续跑</button>' +
         '</div>' +
       '</div>';
     root.appendChild(el);
@@ -16108,7 +16251,21 @@
   function feedQueue(el, list) {
     const box = el.querySelector(".if-queue-list");
     if (!box) return;
-    if (!list.length) { box.hidden = true; box.innerHTML = ""; return; }
+    list = list || [];
+    if (!list.length) {
+      box.hidden = true; box.innerHTML = ""; box.__sig = ""; el.__qOpen = false;
+      return;
+    }
+    // ★ 2026-11-20 修（用户报「排列方式也很奇怪」）：
+    //   原来这里每轮轮询（300ms 一次）都无条件 hidden=false 重建一遍 ——
+    //   ① 明细被强行顶出来，夹在思考过程和步骤中间，把卡片撑得很乱；
+    //   ② 每 300ms 重建一次 DOM，列表一闪一闪。
+    //   现在：内容没变就不重建；默认收起，点「后面还有 N 个等待」才展开。
+    const sig = list.map(function (t) {
+      return (t.tid || "") + "|" + (t.title || t.plan_id || "");
+    }).join("\n");
+    if (box.__sig === sig) { box.hidden = !el.__qOpen; return; }
+    box.__sig = sig;
     box.innerHTML = list.map(function (t, i) {
       return '<div class="if-q-item">' +
         '<span class="if-q-no">' + (i + 1) + "</span>" +
@@ -16117,6 +16274,8 @@
           '" title="从队列里取消这个任务">×</button>' +
       "</div>";
     }).join("");
+    // 默认收起：只有用户点过「后面还有 N 个等待」才展开
+    box.hidden = !el.__qOpen;
   }
 
   // 每个功能验证通过后的 markdown 报告（用户要求「以 markdown 形式给出具体报告」）。
@@ -16246,7 +16405,48 @@
         }
         feedQueue(el, r.queue || []);
         const pz = el.querySelector(".if-paused");
-        if (pz) pz.hidden = r.state !== "paused";
+        if (pz) pz.hidden = true;
+        // ★ 2026-11-20 用户报「进行时也显示暂停条，没有变化」：
+        //   暂停条挂在被暂停的那张旧卡上；点了「继续跑」后新任务开的是新卡片，
+        //   旧卡片上的暂停条没人清，于是一边在跑一边还挂着「已暂停」。
+        //   这里把除当前卡以外的暂停条全部收起来，并把旧卡状态改回 done。
+        const feedRoot0 = feedRoot();
+        if (feedRoot0) {
+          Array.prototype.forEach.call(
+            feedRoot0.querySelectorAll(".iter-feed"), function (c) {
+              if (c === el) return;
+              const p = c.querySelector(".if-paused");
+              if (p && !p.hidden) p.hidden = true;
+              if (c.getAttribute("data-state") === "paused") {
+                c.setAttribute("data-state", "done");
+              }
+            });
+        }
+        // 点过「继续跑」/被恢复后，把上一轮的「暂停」外观收回来
+        if (el.__folded) { el.__folded = false; feedFold(el, false); }
+        if (el.getAttribute("data-state") === "paused") el.setAttribute("data-state", "running");
+      }
+    }
+    // ★ 2026-11-20 用户报「好像卡住不动了」：
+    //   达到连续上限时后端返回 state=paused 且 running=null。原来这段只在
+    //   `if (run)` 里更新暂停条、只在 state==="idle" 时收尾卡片 —— 于是 paused
+    //   状态下卡片永远停在「正在迭代中 37s」，看着就是卡死。
+    if (!run && r.state === "paused") {
+      const root = feedRoot();
+      const cards = root ? root.querySelectorAll(".iter-feed") : [];
+      const last = cards.length ? cards[cards.length - 1] : null;
+      if (last) {
+        last.setAttribute("data-state", "paused");
+        const stop = last.querySelector(".if-stop");
+        if (stop) stop.hidden = true;
+        const t = last.querySelector(".if-title");
+        if (t) t.textContent = "⏸ 已暂停：本轮连续完成 " + (r.budget || 0) + " 个功能";
+        const q = last.querySelector(".if-queue");
+        if (q) q.textContent = "";
+        feedQueue(last, []);
+        const pz = last.querySelector(".if-paused");
+        if (pz) pz.hidden = false;
+        if (!last.__folded) { last.__folded = true; feedFold(last, true); }
       }
     }
     if (r.state === "idle" && !run) {

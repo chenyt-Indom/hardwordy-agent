@@ -55,9 +55,39 @@ _FILE = _si._DATA / "task.json"
 _MAX_AUTO_ROUNDS = 10
 # 同一个功能验证不过时的重试上限。用户选的是「继续重试直到通过」，
 # 但必须有兜底 —— 否则一个死循环功能会把队列永远卡住。
-_MAX_VERIFY_TRIES = 12
+# ★ 2026-11-20 用户：「假如一个功能过于复杂呢？」→ 复杂功能改动多、自检问题也多，
+#   原来 12 轮很容易修不完就被跳过。改为 30 轮，复杂功能有足够时间修完。
+_MAX_VERIFY_TRIES = 30
+
+# 队列里「等待中」的任务最多几个（★ 2026-11-20 用户明确要求：不能超过 10 个）。
+# 注意这和上面的 _MAX_AUTO_ROUNDS（本轮已完成功能数）是两回事：
+#   · _MAX_QUEUE      = 队列能排多长（满了拒绝新任务）
+#   · _MAX_AUTO_ROUNDS= 一轮连续做完几个就停下来等你点「继续」
+_MAX_QUEUE = 10
+
+# 单个功能最长允许跑多久（秒，含反复修）。用户要求「设上限但要可调」，
+# 所以真正生效的值从 settings.json 的 iter_task_timeout_min 读，这里是默认值。
+_DEFAULT_TASK_TIMEOUT_MIN = 30
 # 自动重启前等的秒数：给前端一次轮询把「正在重启」事件收下来的机会。
 _RESTART_DELAY = 1.5
+# 撞上「另一个执行占着锁」时，隔多久把任务重新提上来（秒）。
+_LOCK_RETRY_DELAY = 20
+
+
+def task_timeout_sec():
+    """单个功能的最长执行时间（秒）。settings.json 里 iter_task_timeout_min 可改。
+
+    用户 2026-11-20：「设上限但要可调」—— 默认 30 分钟，设成 0 表示不限制。
+    读不到设置就用默认值，绝不因为设置文件坏了把迭代卡死。
+    """
+    try:
+        v = _si.load_settings().get("iter_task_timeout_min", _DEFAULT_TASK_TIMEOUT_MIN)
+        mins = float(v)
+    except Exception:                                   # noqa: BLE001
+        mins = float(_DEFAULT_TASK_TIMEOUT_MIN)
+    if mins <= 0:
+        return 0
+    return int(mins * 60)
 
 
 # ------------------------------------------------------------------ 落盘
@@ -151,6 +181,10 @@ def snapshot(since=0):
             "running": _brief(run) if run else None,
             "queue": [_brief(x) for x in q],
             "queue_len": len(q),
+            # ★ 2026-11-20 用户要「两者都要」：卡片显示「队列 7/10」+ 列出排队任务。
+            #   所以除了 queue 明细，还要给上限和剩余位。
+            "max_queue": _MAX_QUEUE,
+            "queue_free": max(0, _MAX_QUEUE - len(q)),
             "events": evs,
             "history": _STATE["history"][:_MAX_HISTORY],
             "state": _state_name(run, q),
@@ -176,6 +210,30 @@ def _state_name(run, q):
             return "paused"
         return "queue_only"
     return "idle"
+
+
+def _plan_title(plan_id):
+    """从计划里推断一个能给人看的「功能名」。
+
+    ★ 2026-11-20 用户要求「自迭代卡片上说明正在迭代什么功能」——
+      但入队时前端只传 plan_id，不传标题，于是卡片一直显示「正在迭代中…」。
+      这里退一步自己推断：优先第一条动作标题（那就是实际要做的事），
+      其次用计划的 summary（诊断结论，稍抽象但能看懂）。
+    """
+    try:
+        r = _si.get_plan(plan_id)
+        p = (r or {}).get("plan") or {}
+        for a in (p.get("actions") or []):
+            if isinstance(a, dict):
+                t = str(a.get("title") or "").strip()
+                if t:
+                    return t[:60]
+        s = str(p.get("summary") or "").strip()
+        if s:
+            return s[:60]
+    except Exception:                                    # noqa: BLE001
+        logger.debug("推断计划标题失败", exc_info=True)
+    return ""
 
 
 def _brief(t):
@@ -207,8 +265,11 @@ def submit(plan_id, source="auto", title="", max_n=0):
         return {"ok": False, "error": "缺少计划 id"}
 
     tid = "t_%s" % _si._pid()
+    # ★ 2026-11-20：前端 enqueue 只传 id，不传 title —— 这里自己补，
+    #   否则卡片永远只有一句「正在迭代中…」，看不出在做什么功能。
+    _ttl = str(title or "").strip() or _plan_title(plan_id)
     item = {"tid": tid, "plan_id": plan_id, "source": str(source or "auto"),
-            "title": str(title or ""), "at": time.time(),
+            "title": _ttl, "at": time.time(),
             "max_n": int(max_n or 0)}
 
     with _LOCK:
@@ -222,6 +283,15 @@ def submit(plan_id, source="auto", title="", max_n=0):
             if _x.get("plan_id") == plan_id:
                 return {"ok": True, "state": "waiting", "tid": _x["tid"],
                         "ahead": len(_STATE["queue"]), "dup": True}
+        # ★ 2026-11-20 用户：「队列里不能超过十个等待的任务」——
+        #   满了就直接拒绝并说清楚，不要静默排进去让用户以为接住了。
+        #   注意只有「已有任务在跑、新任务要排队」时才算占用队列位；
+        #   没有任务在跑时直接开跑，不受这个上限影响。
+        if run and len(_STATE["queue"]) >= _MAX_QUEUE:
+            return {"ok": False, "state": "rejected",
+                    "error": "队列已满 %d 个，先等或取消几个再提交"
+                             % _MAX_QUEUE,
+                    "queue_len": len(_STATE["queue"]), "max_queue": _MAX_QUEUE}
         if run:
             _STATE["queue"].append(item)
             ahead = len(_STATE["queue"])
@@ -276,6 +346,17 @@ def _worker(item):
     err_all = ""
     # 改了文件且开启自动重启时置 True —— finally 里据此决定「重启」还是「接下一个」
     auto_rst = False
+    # ★ 2026-11-20：撞到「另一个执行占着锁」时置 True —— 把任务放回队首稍后重试，
+    #   而不是报一张「没有可执行的动作」的假失败卡。
+    requeued = False
+
+    # ★ 2026-11-20：只有 running 槽位确实是自己时才干活。
+    #   防止被别的路径顶掉之后出现两个 worker 同时改代码。
+    with _LOCK:
+        _cur = _STATE.get("running")
+        if not _cur or str(_cur.get("tid")) != str(tid):
+            logger.warning("iter worker %s 的槽位已被别的任务占用，本次直接退出", tid)
+            return
 
     def on_event(kind, **kw):
         _emit(tid, kind, **kw)
@@ -318,6 +399,22 @@ def _worker(item):
                 _step_no[0] += 1
                 _stage("agent_step",
                        kw.get("text") or ("第 %d 步" % _step_no[0]))
+            elif kind == "action_start":
+                # ★ 2026-11-20：一个计划里有多条动作，每开始一条就把卡片标题
+                #   换成这条的功能名，用户一眼能看出「现在在迭代哪个功能」。
+                _t = str(kw.get("title") or "").strip()
+                if _t:
+                    with _LOCK:
+                        if _STATE.get("running"):
+                            _STATE["running"]["title"] = _t[:60]
+                    try:
+                        _stage("action_start",
+                               "第 %s/%s 条：%s" % (kw.get("index") or "?",
+                                                   kw.get("total") or "?", _t))
+                    except Exception:                    # noqa: BLE001
+                        logger.debug("写阶段流水失败（不影响迭代）", exc_info=True)
+                    _emit(tid, "status", text="正在迭代：%s" % _t[:60],
+                          state="running")
 
         r = _si.execute_approved(plan_id, on_event=_on_event,
                                  should_cancel=should_cancel)
@@ -331,6 +428,22 @@ def _worker(item):
                     changed.append(f)
         if not r.get("ok") and r.get("error"):
             err_all = str(r["error"])
+
+        # ★ 2026-11-20：执行锁被另一个执行占着（比如用户手动点了「执行」，
+        #   或上一个 worker 还没退干净）。这不是本任务的问题 —— 把它放回队首，
+        #   过一会儿重试，别报「这次没有可执行的动作」误导用户。
+        if err_all and "已有一个自动执行在进行中" in err_all:
+            with _LOCK:
+                _STATE["queue"].insert(0, item)
+                _STATE["running"] = None
+            _save()
+            _emit(tid, "step",
+                  text="另一个执行正在进行，本任务已放回队列，%d 秒后自动重试…"
+                       % _LOCK_RETRY_DELAY)
+            _emit(tid, "status", text="等待重试（另一个执行正在进行）", state="waiting")
+            threading.Timer(_LOCK_RETRY_DELAY, _next).start()
+            requeued = True
+            return
 
         cancelled = bool(r.get("cancelled"))
         if cancelled:
@@ -413,7 +526,11 @@ def _worker(item):
         _finish(tid, "error", ok_n, fail_n, skip_n, changed,
                 "%s: %s" % (type(e).__name__, e))
     finally:
-        if auto_rst:
+        if requeued:
+            # 已经放回队列、并挂了一个延迟的 _next —— 这里不能再接下一个，
+            # 否则会立刻把同一个任务再捞起来，空转。
+            pass
+        elif auto_rst:
             # 走「重启 → 自动验证 → 再接下一个」这条链，
             # 这里**不能**调 _next()：否则下一个任务会在重启前抢跑，
             # 跑到一半进程被替换掉，进度就丢了。
@@ -449,10 +566,22 @@ def _finish(tid, state, ok_n, fail_n, skip_n, changed, err):
 
 
 def _next():
-    """当前任务结束后：把队列里的下一个提上来接着跑。"""
+    """当前任务结束后：把队列里的下一个提上来接着跑。
+
+    ★ 2026-11-20 修（用户报「好像卡住不动了」）：
+      原来这里**无条件**先 `_STATE["running"] = None` 再取队首。
+      重启后 boot_resume 会等 2.5 秒再调它，而这两秒半里自迭代很可能已经
+      submit 了一个任务（running 已占位）—— 于是正在跑的那个被顶掉，
+      变成**两个 worker 同时改代码**：抢同一个执行锁，输的那个立刻报
+      「已有一个自动执行在进行中，本次跳过」，界面上就是一张永远停在
+      「正在迭代中 37s」的卡片 + 一串「没有可执行的动作」的假失败卡
+      （实测 task.json 的 history 里连留了两条这个错误）。
+      所以：已经有任务在跑时，这里必须什么都不做。
+    """
     nxt = None
     with _LOCK:
-        _STATE["running"] = None
+        if _STATE.get("running"):
+            return
         if _STATE["queue"]:
             nxt = _STATE["queue"].pop(0)
             _STATE["running"] = {"tid": nxt["tid"], "plan_id": nxt["plan_id"],
@@ -746,10 +875,18 @@ def boot_resume():
         v = _STATE.get("verify")
         qn = len(_STATE["queue"])
         first = (_STATE["queue"][0] if _STATE["queue"] else None)
+        # ★ 2026-11-20：这两秒半里自迭代可能已经 submit 并开跑了。
+        #   那种情况下**绝不能**再 _next()（会顶掉正在跑的，见 _next 的注释）。
+        busy = bool(_STATE.get("running"))
     if v:
         _emit_sys("重启后恢复：先验证上一个功能「%s」，之后接着跑队列（还有 %d 个）"
                   % (v.get("title") or "", qn), state="running")
         _verify_worker()
+        return
+    if busy:
+        # 已经在跑了：只把队列情况说出来，不碰 running
+        _emit_sys("重启后恢复：已有任务在跑，队列里还有 %d 个等待，会依次接着跑" % qn,
+                  state="running")
         return
     if first:
         with _LOCK:
@@ -772,10 +909,12 @@ def continue_queue():
     with _LOCK:
         _STATE["budget"] = 0
         qn = len(_STATE["queue"])
+        busy = bool(_STATE.get("running"))
     _save()
-    if qn:
+    # 已经有任务在跑就只清计数 —— 不能再起一个（同 _next 的双 worker 问题）
+    if qn and not busy:
         _next()
-    return {"ok": True, "queue_len": qn}
+    return {"ok": True, "queue_len": qn, "running": busy}
 
 
 _load()
