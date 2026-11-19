@@ -715,10 +715,18 @@
       ? h.health : (h || {});
     // 后端给的是 0~1 的比例；万一是百分数（>1）也接受，统一归一化到 0~1
     let rate = healthNum(d.success_rate);
+    const attempts = Math.max(0, Math.round(healthNum(
+      d.attempts === undefined ? healthNum(d.ok_count) + healthNum(d.fail_count) : d.attempts)));
+    // 老版本接口只给了 ok_count/fail_count（没有 success_rate）时现算一次，
+    // 口径与后端一致：分母是「真执行过的条数」，不含批准/拒绝这类事件。
+    if (d.success_rate === undefined && attempts > 0) {
+      rate = healthNum(d.ok_count) / attempts;
+    }
     if (rate > 1) rate = rate / 100;
     rate = Math.max(0, Math.min(1, rate));
     const total = healthNum(d.total);
-    const hasData = d.has_data === undefined ? total > 0 : !!d.has_data;
+    const hasData = d.has_data === undefined
+      ? (attempts > 0 || total > 0) : !!d.has_data;
     const phantom = Math.max(0, Math.round(healthNum(d.phantom_fix_count)));
     const rollbacks = Math.max(0, Math.round(healthNum(d.rollbacks)));
     const breaks = Math.max(0, Math.round(healthNum(d.circuit_breaks)));
@@ -740,6 +748,8 @@
     return {
       level: level,
       hasData: hasData,
+      attempts: attempts,
+      total: total,
       title: "自迭代健康度",
       tag: tagMap[level] || tagMap.unknown,
       metrics: [
@@ -772,6 +782,8 @@
     return '<div class="fr-card fr-health-card">' +
       '<div class="fr-c-head"><b>' + esc(d.title) + '</b>' +
         '<span class="fr-tag ' + esc(d.tag.cls) + '">' + esc(d.tag.text) + '</span>' +
+        // 成功率旁边永远带着样本量：3 次里中 2 次的 66% 和 300 次里的 66% 不是一回事
+        (d.attempts ? '<span class="fr-tag fr-tag-off">样本 ' + d.attempts + ' 次</span>' : '') +
         (d.ts ? '<span class="fr-tag fr-tag-off">' + esc(d.ts) + '</span>' : '') +
       '</div>' +
       '<div class="fr-metrics">' + metrics + '</div>' +

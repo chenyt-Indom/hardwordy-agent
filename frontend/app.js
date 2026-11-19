@@ -10868,6 +10868,34 @@
     const clearBtn = document.querySelector("#stCacheClear");
     if (!listEl) return;
 
+    // 折叠（2026-11-20）：缓存最多 50 条，侧栏里一直展开会把下方内容顶得很远。
+    // 点标题折叠，默认收起；收起时标题上仍显示「N 条 · 最近 HH:MM:SS 全绿」，信息不丢。
+    const boxEl = document.querySelector("#selftestCacheBox");
+    const toggleBtn = document.querySelector("#stCacheToggle");
+    const countEl = document.querySelector("#stCacheCount");
+    const FOLD_KEY = "selftest_cache_folded";
+    function setFold(fold, persist) {
+      if (boxEl) boxEl.classList.toggle("collapsed", !!fold);
+      if (toggleBtn) toggleBtn.setAttribute("aria-expanded", fold ? "false" : "true");
+      if (persist) {
+        try { localStorage.setItem(FOLD_KEY, fold ? "1" : "0"); } catch (e) { /* 静默 */ }
+      }
+    }
+    (function initFold() {
+      let fold = true;                          // 默认收起
+      try {
+        const v = localStorage.getItem(FOLD_KEY);
+        if (v !== null) fold = (v === "1");     // 用户上次的选择优先
+      } catch (e) { /* 隐私模式：用默认值 */ }
+      setFold(fold, false);
+    })();
+    if (toggleBtn) {
+      toggleBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        setFold(!(boxEl && boxEl.classList.contains("collapsed")), true);
+      });
+    }
+
     function readAll() {
       try {
         const raw = localStorage.getItem(KEY);
@@ -10905,8 +10933,18 @@
         .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }
 
+    // 标题摘要：收起时也能看到「N 条 · 最近 HH:MM:SS 全绿」
+    function updateSummary(arr) {
+      if (!countEl) return;
+      if (!arr.length) { countEl.textContent = ""; return; }
+      const lv = levelOf(arr[0]);
+      const badge = lv === "ok" ? "全绿" : (lv === "skip" ? "全跳过" : "有失败");
+      countEl.textContent = arr.length + " 条 · 最近 " + fmtTime(arr[0].time).slice(6) + " " + badge;
+    }
+
     function render() {
       const arr = readAll();
+      updateSummary(arr);
       if (!arr.length) {
         listEl.innerHTML = '<div class="st-cache-empty">暂无自检缓存</div>';
         if (clearBtn) clearBtn.hidden = true;

@@ -7816,7 +7816,14 @@ def health_snapshot():
       last_round_trigger    最近一轮的触发名（原始代码，如 daily/manual/audit）
       last_round_trigger_zh 上面那个的中文说明，前端直接显示
       phantom_fix_count     非负整数：幽灵修复条数
-      另附 total / ok_count / fail_count / last_round_ts / level / hint 便于展示与自检。
+      另附 total / attempts / ok_count / fail_count / last_round_ts / level / hint
+      便于展示与自检。
+
+    ★ 成功率的分母是 attempts（ok+fail），不是 total：
+      账本里除了真跑过的动作，还混着 approve() 写的 kind=review_approve 事件
+      （result=approved/noop）。实测 291 行里只有 200 行是真尝试，拿 total 当
+      分母会算出 39%，而真实成功率是 114/200=57% —— 卡片把「还行」显示成
+      「状态偏差」，用户反而更不信这个数。这里把非执行事件从分母里剔掉。
     """
     out = {
         "ok": True,
@@ -7828,6 +7835,7 @@ def health_snapshot():
         "phantom_fix_count": 0,
         # ---- 辅助字段（自检 / 展示用）----
         "total": 0,
+        "attempts": 0,
         "ok_count": 0,
         "fail_count": 0,
         "has_data": False,
@@ -7856,8 +7864,13 @@ def health_snapshot():
         total = 0
     if total <= 0:
         total = ok_n + fail_n
-    # 分母用 total（账本里的真实运行条数），分子用 ok —— 天然落在 0~1。
-    rate = round(min(1.0, max(0.0, ok_n / float(total))), 4) if total else 0.0
+    # ★ attempts = 真正执行过的动作条数（ok+fail）。账本里的 review_approve
+    #   事件（result=approved/noop）不是执行样本，混进分母会把成功率算低
+    #   （实测 114/291=39% vs 真实 114/200=57%）。分母只用 attempts，天然落在 0~1。
+    attempts = max(0, ok_n + fail_n)
+    # 没有一次真执行（只有批准/拒绝事件）→ 分母 0，返回 0.0 且 has_data=False，
+    # 卡片会显示「还没有运行记录」，而不是伪造一个 0% 成功率吓人。
+    rate = round(min(1.0, max(0.0, ok_n / float(attempts))), 4) if attempts else 0.0
     try:
         rollbacks = max(0, int(rt.get("rollback") or 0))
     except Exception:                                   # noqa: BLE001
@@ -7868,8 +7881,11 @@ def health_snapshot():
         breaks = 0
     out.update({"success_rate": rate, "rollbacks": rollbacks,
                 "circuit_breaks": breaks, "total": max(0, total),
+                "attempts": attempts,
                 "ok_count": max(0, ok_n), "fail_count": max(0, fail_n),
-                "has_data": bool(total > 0)})
+                # has_data 看的是「有没有真执行过」，跟账本总行数无关 ——
+                # 只有批准事件时不该显示成「成功率 0%」。
+                "has_data": bool(attempts > 0)})
 
     # ---- 2) 幽灵修复计数：actlog 的 phantom 标记 + 计划里被拒的动作，按 (计划,动作) 去重
     phantom = 0

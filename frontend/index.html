@@ -149,7 +149,14 @@
                列表由 app.js 的 loadSelftestCache() 渲染，每条显示 time / level / 发现数。 -->
           <div class="st-cache" id="selftestCacheBox">
             <div class="st-cache-head">
-              <span class="st-cache-title">🗂 自检缓存</span>
+              <!-- 标题即折叠开关（2026-11-20）：缓存最多 50 条，一直展开会把下方内容
+                   顶得很远。默认收起，收起时标题右侧仍显示「N 条 · 最近 04:37 全绿」。 -->
+              <button type="button" class="st-cache-title" id="stCacheToggle"
+                      aria-expanded="false" title="展开 / 收起自检缓存列表">
+                <span class="st-cache-arrow">▸</span>
+                <span>🗂 自检缓存</span>
+                <span class="st-cache-count" id="stCacheCount"></span>
+              </button>
               <button type="button" id="stCacheClear" class="dl-mini"
                       title="清空全部自检缓存记录">清空</button>
             </div>

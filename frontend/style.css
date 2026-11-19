@@ -3649,6 +3649,48 @@ html[data-theme="light"] body {
    app.js 里用到了 st-cache-list / -item / -time / -lv / -found / -del / -empty，
    但样式表里**一个都没有** —— 元素是裸 span，时间和结论挤在一行互相重叠。
    侧边栏只有 260px 左右，这里用两行网格：第一行时间，第二行徽标+结论，删除按钮靠右跨两行。 */
+/* 自检缓存折叠（2026-11-20）
+   用户反馈「这个自检太长了，我需要能够折叠」—— 缓存最多 50 条，
+   侧栏里一直展开会把下方内容顶到很远处。改成点标题折叠、默认收起；
+   收起时标题右侧仍显示「N 条 · 最近 04:37:35 全绿」，信息不丢。 */
+.st-cache-head { display: flex; align-items: center; gap: 6px; }
+.st-cache-title {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;      /* 收起时摘要换到第二行，完整显示不被截断 */
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.st-cache-title:hover { opacity: .78; }
+.st-cache-arrow {
+  display: inline-block;
+  flex: 0 0 auto;
+  font-size: 10px;
+  opacity: .7;
+  transition: transform .15s;
+}
+.st-cache:not(.collapsed) .st-cache-arrow { transform: rotate(90deg); }
+.st-cache-count {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 400;
+  opacity: .72;
+}
+.st-cache.collapsed .st-cache-count { flex: 1 1 100%; padding-left: 14px; }
+.st-cache.collapsed .st-cache-list { display: none; }
 .st-cache-list { display: flex; flex-direction: column; gap: 4px; }
 .st-cache-item {
   display: grid;
