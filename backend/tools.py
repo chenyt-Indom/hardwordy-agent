@@ -3131,6 +3131,14 @@ def _do_self_audit(arguments):
         return "自检失败：%s: %s" % (type(e).__name__, e)
     if not r.get("ok"):
         return "自检失败：%s" % r.get("error")
+    # ⚠️ 2026-11-19 实测：run_audit 因「60 秒冷却 / 已有一次在跑」跳过时，
+    #   返回的是 {"ok": True, "skipped": True}，**没有 audit 字段**。
+    #   这里原来只判 ok，于是拿空字典去取 files/seconds/counts，
+    #   打出「扫了 None 个 py + None 个 js，用时 None 秒」——
+    #   同一分钟连调两次必然复现，看着像自检坏了。
+    if r.get("skipped"):
+        return "自检这次被跳过：%s\n（不是自检坏了；等冷却过去再调一次即可）" % (
+            r.get("error") or "同一来源刚跑过")
     res = r.get("audit") or {}
     cnt = res.get("counts") or {}
     lines = ["代码自检完成：扫了 %s 个 py + %s 个 js，用时 %s 秒。"

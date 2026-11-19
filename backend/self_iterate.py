@@ -1656,7 +1656,7 @@ def evaluate(limit=12, use_llm=True, trigger="manual"):
            "llm": False}
     for i, it in enumerate(items, 1):
         h = it.get("heur") or _heur_eval(it.get("user"), it.get("assistant"), it.get("meta"))
-        rec["turns"].append({"i": i, "task": (it.get("user") or "").replace("\n", " ")[:70],
+        rec["turns"].append({"i": i, "task": _clip((it.get("user") or "").replace("\n", " "), 70),
                              "completion": h["score"], "efficiency": h["score"],
                              "sentiment": ("不满" if h["score"] < 5 else
                                            ("满意" if h["score"] >= 8 else "中性")),
@@ -2373,7 +2373,7 @@ def _creative_seeds(force=False):
             if not t or not w:
                 continue
             seeds.append({
-                "title": t[:40], "what": w[:200],
+                "title": _clip(t, 40), "what": _clip(w, 200),
                 "feel": str(s.get("feel") or "")[:120],
                 "files": [str(x) for x in (s.get("files") or [])][:4],
                 "effort": str(s.get("effort") or "M")[:2],
@@ -4010,11 +4010,11 @@ def _retry_fix(plan, a, first_fail, orig_tag, base_fails, base_ok, on_ev=None):
     for i in range(1, _FIX_ROUNDS + 1):
         try:
             set_stage("patch", "%s 第 %d 次修正：%s" % (
-                a.get("id"), i, str(fail)[:60]))
+                a.get("id"), i, _clip(fail, 60)))
         except Exception:                           # noqa: BLE001
             logger.debug("silent-except", exc_info=True)
         _ev2("step", text="%s 没通过校验（%s），让模型带着失败原因重改（第 %d/%d 次）…"
-            % (a.get("id"), str(fail)[:70], i, _FIX_ROUNDS))
+            % (a.get("id"), _clip(fail, 70), i, _FIX_ROUNDS))
         _restore(orig_tag)                          # 先退回干净状态再重来
         patches, err = _plan_patch_for_action(plan, a, prev_fail=fail)
         if err:
