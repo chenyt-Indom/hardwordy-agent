@@ -129,6 +129,273 @@ def _already_known(d: dict, title: str) -> bool:
     return False
 
 
+# 向量粗筛阈值 —— 2026-11-20 用 bge-small-zh 在真实数据上标定的，不是拍的：
+#   · 库里 14 条**互不相同**的功能，两两相似度中位 0.663、最高 0.799；
+#   · 我手写的「换个说法、其实是同一个功能」的候选，命中真身落在 0.73~0.87。
+#   两者**有重叠**（0.80 vs 0.73），所以单一阈值必然要么误杀要么漏放：
+#     ≥0.86 → 可以断定是同一件事，直接拦；
+#     ≥0.68 → 灰区，交给模型判「做的是不是同一件事」。
+#   ⚠️ 实测过 n-gram Jaccard：同义改写只有 0.035，完全不可用，别退回去。
+_SIM_HARD = 0.86
+_SIM_GRAY = 0.68
+
+
+def _llm_judge_dups(pairs: list) -> dict:
+    """让模型判断「候选功能 vs 已有功能」是不是同一件事。返回 {序号: True/False}。
+
+    模型判不了就退回保守阈值（≥0.84 才判重）—— 宁可漏放一个重复，
+    也不能把真正的新功能误杀（用户要的是「别重复加」，不是「别加」）。
+    """
+    lines = []
+    for k, (cand, old_title, old_text, _sim) in enumerate(pairs):
+        lines.append(
+            "【第 %d 组】\n候选功能：%s\n候选做法：%s\n已有功能：%s\n已有做法：%s"
+            % (k + 1, cand.get("title") or "",
+               str(cand.get("idea") or "")[:220],
+               old_title, str(old_text or "")[:220]))
+    prompt = (
+        "下面是几组「候选新功能」和「已有功能」。判断每组两者**是不是同一个功能**："
+        "做的是同一件事、只是换了说法或换了入口，就算同一个；"
+        "只要有实质不同的能力或交互方式，就算不同。\n\n"
+        + "\n\n".join(lines)
+        + "\n\n只输出 JSON：{\"same\": [判为同一个功能的组号，从 1 开始]}\n"
+          "都不相同就输出 {\"same\": []}"
+    )
+    try:
+        from . import self_iterate as _si
+        raw, err = _si._llm_text(prompt, max_tokens=800, temperature=0.1,
+                                 want_json=True)
+        if err or not raw:
+            raise RuntimeError(str(err or "模型返回空"))
+        from . import jsonfix
+        j = jsonfix.parse(raw)
+        same = set(int(x) for x in ((j or {}).get("same") or []))
+        return {k: ((k + 1) in same) for k in range(len(pairs))}
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("模型判重没跑成，退回保守阈值：%s: %s", type(e).__name__, e)
+        return {k: (float(pairs[k][3]) >= 0.84) for k in range(len(pairs))}
+
+
+def _cos_dups(d: dict, cands: list, extra_olds=None) -> list:
+    """语义查重：候选功能 vs 库里已有功能，返回 [(候选下标, 原因)]。
+
+    ★ 用户 2026-11-20 要求「推荐功能加入前查一下是否已经有这个功能，
+      防止重复加入」。只比标题不够 —— 「一键打包」和「成品打包」是同一个
+      功能，字面却完全不同。这里用本机中文向量模型算相似度，灰区再让模型判。
+
+    ★ 2026-11-20 补（用户：「推荐功能时也需要复查一下推荐的功能是否已经加了」）：
+      extra_olds 传**迭代历史里已经做完的功能名**。实测真实数据：迭代历史
+      5 个功能（一句话多步任务 / 会等你回来的工作台 / 回复形态闸门 …）
+      **一个都不在 featradar 的 items 里** —— 语义查重原来完全看不到它们，
+      只能靠标题级兜，换个说法就又推荐一遍。现在把它们一起喂进向量比对。
+    """
+    olds = []
+    for it in (d.get("items") or []):
+        txt = ("%s %s" % (it.get("idea") or "", it.get("how") or "")).strip()
+        if len(txt) >= 12:
+            olds.append((str(it.get("title") or ""), txt))
+    for t in (extra_olds or []):
+        tt = str(t or "").strip()
+        if len(tt) >= 4 and not any(tt == o[0] for o in olds):
+            # 迭代历史里只有功能名、没有做法正文 —— 拿名字本身当文本比
+            olds.append((tt, tt))
+    if not olds or not cands:
+        return []
+    try:
+        from . import embed as _emb
+        import numpy as _np
+        texts = [("%s %s" % (c.get("idea") or "", c.get("how") or "")).strip()
+                 for c in cands] + [t for _, t in olds]
+        mat = _emb.embed_texts(texts)
+        if mat is None:
+            return []
+        norms = _np.linalg.norm(mat, axis=1)
+        norms[norms == 0] = 1.0
+        unit = mat / norms[:, None]
+        n = len(cands)
+        sim = unit[:n] @ unit[n:].T                     # (候选数, 已有数)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("语义查重没跑成（跳过这一步）", exc_info=True)
+        return []
+
+    hard, gray = [], []
+    for i in range(len(cands)):
+        row = sim[i]
+        j = int(row.argmax())
+        best = float(row[j])
+        if best >= _SIM_HARD:
+            hard.append((i, "和已有的「%s」几乎是同一个功能（相似度 %.2f）"
+                            % (olds[j][0], best)))
+        elif best >= _SIM_GRAY:
+            gray.append((i, j, best))
+    if not gray:
+        return hard
+
+    verdict = _llm_judge_dups([(cands[i], olds[j][0], olds[j][1], best)
+                               for i, j, best in gray])
+    out = list(hard)
+    for k, (i, j, _best) in enumerate(gray):
+        if verdict.get(k):
+            out.append((i, "和已有的「%s」其实是同一件事（模型判定）"
+                           % olds[j][0]))
+    return out
+
+
+def _cos_self_dups(cands: list) -> list:
+    """**同一轮生成的多条推荐**之间互相查重，返回 [(候选下标, 原因)]。
+
+    ★ 2026-11-20 实测缺口：_cos_dups 只拿候选和**历史**比，本轮 cands 之间
+      完全不比 —— 造出「一键打包」和「成品打包」两条同义推荐时，实测返回 []，
+      **两条会一起入库**，用户看到的就是「同一个功能被推了两遍」。
+      这里补上：只保留前一条，后面的判重。
+
+    标记的是**下标大的那条**（保留先出现的那条），和 _cos_dups 的语义一致。
+    """
+    if not cands or len(cands) < 2:
+        return []
+    try:
+        from . import embed as _emb
+        import numpy as _np
+        texts = [("%s %s" % (c.get("idea") or "", c.get("how") or "")).strip()
+                 for c in cands]
+        mat = _emb.embed_texts(texts)
+        if mat is None:
+            return []
+        norms = _np.linalg.norm(mat, axis=1)
+        norms[norms == 0] = 1.0
+        unit = mat / norms[:, None]
+        sim = unit @ unit.T
+    except Exception:                                   # noqa: BLE001
+        logger.debug("同轮互比没跑成（跳过这一步）", exc_info=True)
+        return []
+
+    hard, gray = [], []
+    for j in range(1, len(cands)):
+        # 只看它和**前面**那些候选的相似度：和后面的比，保留下标小的那条
+        best_i, best = -1, 0.0
+        for i in range(j):
+            if float(sim[j][i]) > best:
+                best_i, best = i, float(sim[j][i])
+        if best_i < 0:
+            continue
+        if best >= _SIM_HARD:
+            hard.append((j, best_i, best))
+        elif best >= _SIM_GRAY:
+            gray.append((j, best_i, best))
+    out = [(j, "和本轮另一条推荐「%s」几乎是同一个功能（相似度 %.2f）"
+               % (str(cands[i].get("title") or ""), best))
+           for j, i, best in hard]
+    if gray:
+        verdict = _llm_judge_dups(
+            [(cands[j], str(cands[i].get("title") or ""),
+              ("%s %s" % (cands[i].get("idea") or "",
+                          cands[i].get("how") or "")).strip(), best)
+             for j, i, best in gray])
+        for k, (j, i, _b) in enumerate(gray):
+            if verdict.get(k):
+                out.append((j, "和本轮另一条推荐「%s」其实是同一件事（模型判定）"
+                               % str(cands[i].get("title") or "")))
+    return out
+
+
+def _implemented_titles(d: dict) -> list:
+    """「已经做完 / 正在做」的功能名 —— 防止把已实现的功能又推荐一遍。
+
+    三个来源：
+      ① 本模块自己的条目（已批准 / 执行中 / 已完成）；
+      ② 迭代队列的历史与报告（真跑完的功能名）；
+      ③ 队列里排着的（正在等做的，别重复加）。
+    """
+    out = []
+    for it in (d.get("items") or []):
+        if str(it.get("state") or "") in ("approved", "running", "done",
+                                          "executing", "verified"):
+            t = str(it.get("title") or "").strip()
+            if t:
+                out.append(t)
+    try:
+        from . import iter_runner as _ir
+        out.extend(_ir.done_titles(limit=60))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读迭代历史查重失败（跳过这一步）", exc_info=True)
+    seen, res = set(), []
+    for t in out:
+        if t in seen:
+            continue
+        seen.add(t)
+        res.append(t)
+    return res
+
+
+def _dup_reason(d: dict, title: str, idea: str = "", how: str = "") -> str:
+    """这条推荐是不是「已经有了 / 已经做过了」。返回原因，空串表示不重复。
+
+    用户 2026-11-20 要求：「推荐功能加入前查一下是否已经有这个功能，
+    防止重复加入」。这里只做**标题级**硬判重（确定性、不花钱）：
+      ① 想过 / 在待批准里 / 已批准的标题；
+      ② 已经跑完的功能（迭代历史 + 报告 + 队列）。
+    「换个说法但其实是同一件事」交给 _cos_dups()（向量 + 模型判）——
+    实测字面判重对同义改写完全无效，别指望标题能兜住。
+    """
+    t = str(title or "").strip()
+    if not t:
+        return "标题为空"
+    if _already_known(d, t):
+        return "标题和已有/想过的功能太像"
+    for old in _implemented_titles(d):
+        if _too_similar(t, old):
+            return "「%s」已经做过" % old
+    return ""
+
+
+def _dup_running_reason(title: str, exclude_id: str = "") -> str:
+    """**批准前**的最后一道复查：这个功能是不是已经在跑 / 在排队 / 做完了。
+
+    ★ 2026-11-20 用户：「推荐功能时也需要复查一下推荐的功能是否已经加了，
+      不要推送已经加进去的功能」。入库时已经查过两道，但那是**当时**；
+      从推荐到用户点批准之间，他可能已经批准过另一条同义的、或者队列里
+      已经排上了同名任务。批准是会真去改代码的动作，这一步必须再查。
+
+    ⚠️ 这里**刻意比入库判重更保守**（只认「完全同名」和相似度 ≥ _SIM_HARD）：
+      入库拦错了只是少一条推荐，批准拦错了是「点了没反应」—— 后者用户
+      2026-11-16 已经报过一次，不能再犯。灰区一律放行。
+    """
+    t = str(title or "").strip()
+    if not t:
+        return ""
+    nt = _norm(t)
+    names = []
+    try:
+        from . import iter_runner as _ir
+        names = [str(x) for x in (_ir.done_titles(limit=80) or []) if x]
+    except Exception:                                   # noqa: BLE001
+        logger.debug("批准前查重读队列失败（跳过这一步）", exc_info=True)
+
+    for old in names:
+        if nt and nt == _norm(old):
+            return "「%s」已经在队列里 / 已经做过了，别重复执行" % old
+
+    try:
+        from . import embed as _emb
+        import numpy as _np
+        texts = [t] + names
+        if len(texts) >= 2:
+            mat = _emb.embed_texts(texts)
+            if mat is not None:
+                norms = _np.linalg.norm(mat, axis=1)
+                norms[norms == 0] = 1.0
+                unit = mat / norms[:, None]
+                sim = unit[0] @ unit[1:].T
+                k = int(sim.argmax())
+                best = float(sim[k])
+                if best >= _SIM_HARD:
+                    return ("「%s」和它几乎是同一个功能（相似度 %.2f）"
+                            "，别重复执行" % (names[k], best))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("批准前向量查重没跑成（跳过这一步）", exc_info=True)
+    return ""
+
+
 # ------------------------------------------------------------------ 构思
 
 _PROMPT = """你在帮一个「私人 AI 助理应用」想**新功能**。这个应用长这样：
@@ -206,6 +473,12 @@ def think(force: bool = False, reason: str = "") -> dict:
         # 已经想过的标题，喂给模型让它避开
         known = [str(x.get("title") or "") for x in (d.get("items") or [])][-40:]
         known += [str(t) for t in (d.get("seen_titles") or [])][-40:]
+        # ★ 2026-11-20 用户要求「防止重复加入」：把**已经做完的功能**也喂进去，
+        #   让模型一开始就避开；否则它会给一个换个说法、其实是已实现功能的点子。
+        try:
+            known += _implemented_titles(d)[-30:]
+        except Exception:                               # noqa: BLE001
+            logger.debug("收集已实现功能失败（跳过）", exc_info=True)
         known_txt = "、".join([k for k in known if k]) or "（暂无）"
 
         prompt = _PROMPT % (_MAX_PER_ROUND, known_txt)
@@ -247,6 +520,9 @@ def think(force: bool = False, reason: str = "") -> dict:
             return {"ok": False, "error": "模型返回的不是合法 JSON", "added": 0}
 
         added = []
+        dups = []
+        # 第一道：标题级硬判重（确定性、不花钱）—— 先筛掉一眼就是重复的
+        cands = []
         for it in (j.get("items") or [])[:_MAX_PER_ROUND]:
             if not isinstance(it, dict):
                 continue
@@ -254,7 +530,45 @@ def think(force: bool = False, reason: str = "") -> dict:
             idea = str(it.get("idea") or "").strip()
             if not title or len(idea) < 20:
                 continue                            # 空壳，不要
-            if _already_known(d, title):
+            _why = _dup_reason(d, title, idea, str(it.get("how") or ""))
+            if _why:
+                dups.append({"title": title, "why": _why})
+                logger.info("推荐被查重挡下（标题级）：%s（%s）", title, _why)
+                continue
+            cands.append(it)
+        # 第二道：语义级判重 —— 换个说法、其实是同一个功能的也挡掉
+        _bad = {}
+        if cands:
+            # ★ 2026-11-20（用户：「推荐功能时也要复查一下是否已经加了」）：
+            #   把迭代历史里**已经做完的功能**也喂进语义比对。实测真实数据
+            #   5 个历史功能一个都不在 items 里，原来这一道完全看不到它们。
+            _impl = []
+            try:
+                _impl = _implemented_titles(d)
+            except Exception:                       # noqa: BLE001
+                logger.debug("收集已实现功能失败（语义查重用）", exc_info=True)
+            try:
+                for _idx, _why in _cos_dups(d, cands, extra_olds=_impl):
+                    _bad[_idx] = _why
+            except Exception:                           # noqa: BLE001
+                logger.debug("语义判重异常（跳过这一道）", exc_info=True)
+            # 第三道：本轮几条推荐之间互相查重。
+            # ★ 2026-11-20 实测缺口：原来只跟历史比，本轮两条同义推荐
+            #   （「一键打包」/「成品打包」）会**一起入库**，用户看到重复推送。
+            try:
+                _orig = [i for i in range(len(cands)) if i not in _bad]
+                _rest = [cands[i] for i in _orig]
+                for _idx, _why in _cos_self_dups(_rest):
+                    if _idx < len(_orig):
+                        _bad[_orig[_idx]] = _why
+            except Exception:                       # noqa: BLE001
+                logger.debug("同轮互比异常（跳过这一道）", exc_info=True)
+        for _idx, it in enumerate(cands):
+            title = str(it.get("title") or "").strip()[:24]
+            idea = str(it.get("idea") or "").strip()
+            if _idx in _bad:
+                dups.append({"title": title, "why": _bad[_idx]})
+                logger.info("推荐被查重挡下（语义级）：%s（%s）", title, _bad[_idx])
                 continue
             item = {
                 "id": "f" + time.strftime("%Y%m%d_%H%M%S") + "_%d" % len(added),
@@ -287,7 +601,12 @@ def think(force: bool = False, reason: str = "") -> dict:
         d["last_think"] = _now()
         d["seen_titles"] = list(d.get("seen_titles") or [])[-200:]
         save(d)
-        return {"ok": True, "added": len(added), "items": added}
+        out = {"ok": True, "added": len(added), "items": added}
+        if dups:
+            # 让界面能说清「为什么这几条没加进去」，而不是静默少几条
+            out["dups"] = dups[:10]
+            out["dup_count"] = len(dups)
+        return out
 
 
 def _record_stage_safe(si_mod, plan_id: str = "", stage: str = "",
@@ -557,6 +876,15 @@ def approve(iid: str, note: str = "", execute: bool = True) -> dict:
         if not it:
             return {"ok": False, "error": "找不到这条推荐"}
         _st = str(it.get("state") or "")
+        # ★ 2026-11-20 用户：「不要推送已经加进去的功能」—— 批准这一步也复查。
+        #   只在**真要执行**、且不是「用户主动重跑已完成项」时查：done 那条
+        #   路径是用户明确要重跑，拦了就是又犯「点了没反应」的老毛病。
+        if execute and _st != "done":
+            _dupw = _dup_running_reason(str(it.get("title") or ""), iid)
+            if _dupw:
+                logger.info("批准被查重挡下：%s（%s）", it.get("title"), _dupw)
+                return {"ok": False, "error": _dupw, "item": it,
+                        "duplicate": True}
         # ★ 2026-11-16 用户报「我都批准了肯定立刻执行啊」的配套修复：
         #   旧版本会把「提交进队列但一条都没跑」的记录标成 done，用户再点批准
         #   只被告知「已经处理过了（done）」—— 这条就永久废了，只能眼睁睁看着。

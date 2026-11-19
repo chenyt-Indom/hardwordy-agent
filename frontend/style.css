@@ -6515,6 +6515,11 @@ html[data-theme="light"] .iter-site:hover {
     border-radius: 4px;
   }
   .if-q-x:hover { background: var(--danger); color: #fff; }
+  /* ★ 2026-11-20：计划文件找不到时的提示（任务内容已存在快照里） */
+  .if-q-miss {
+    color: var(--danger); font-size: 11px; white-space: nowrap;
+    flex: 0 0 auto;
+  }
   /* 迭代报告卡片（markdown） */
   .if-report {
     margin-top: 8px; border: 1px solid var(--border);

@@ -80,6 +80,88 @@ _LOCK_RETRY_DELAY = 20
 #   结果队列里排着的任务永远轮不到，界面上就是一张卡死不动、秒数一直涨的卡片。
 #   判据：started_at 早于本进程启动时间 ⇒ 必是上一个进程留下的孤儿。
 _BOOT_AT = time.time()
+# ★ 2026-11-20 用户要求「重启时要能继续验证」：
+#   验证线程同一时刻只允许一个。原来 boot_resume 直接调 _verify_worker()，
+#   如果那时恰好有任务在跑，验证会和「改代码」同时进行 —— 验的是改到一半的文件，
+#   还会和 _next() 抢着起任务。用这个标记 + _start_verify() 统一入口。
+_VERIFYING = [False]
+
+
+def done_titles(limit=60):
+    """已经跑完/在跑/在排的功能名（给 featradar 查重用，避免重复推荐）。"""
+    out = []
+    with _LOCK:
+        for h in (_STATE.get("history") or [])[:int(limit or 60)]:
+            t = str(h.get("title") or "").strip()
+            if t:
+                out.append(t)
+        for r in (_STATE.get("reports") or [])[:int(limit or 60)]:
+            t = str(r.get("title") or "").strip()
+            if t:
+                out.append(t)
+        for q in (_STATE.get("queue") or []):
+            t = str(q.get("title") or "").strip()
+            if t:
+                out.append(t)
+        run = _STATE.get("running")
+        if run and str(run.get("title") or "").strip():
+            out.append(str(run.get("title")).strip())
+    # 去重但保持顺序
+    seen, res = set(), []
+    for t in out:
+        if t in seen:
+            continue
+        seen.add(t)
+        res.append(t)
+    return res
+
+
+def _start_verify(wait_busy=True):
+    """起一个验证线程（同一时刻只允许一个）。返回是否真的起来了。
+
+    ★ 用户要求「重启之后立即进行验证」，但**不能**和正在跑的任务并发：
+      有任务在跑时先等它跑完（最多等一个任务超时），再验证。
+    """
+    with _LOCK:
+        if _VERIFYING[0]:
+            return False
+        if not _STATE.get("verify"):
+            return False
+        _VERIFYING[0] = True
+
+    def _run():
+        try:
+            if wait_busy:
+                deadline = time.time() + max(60, int(task_timeout_sec() or 1800))
+                waited = False
+                while time.time() < deadline:
+                    with _LOCK:
+                        r = _STATE.get("running")
+                        if not r or float(r.get("started_at") or 0) < _BOOT_AT - 0.5:
+                            break
+                    if not waited:
+                        _emit_sys("有待验证的功能，等当前任务跑完再验证（不打断它）…",
+                                  state="restarting")
+                        waited = True
+                    time.sleep(2)
+            _verify_worker()
+        except Exception as e:                          # noqa: BLE001
+            logger.warning("验证线程异常：%s: %s", type(e).__name__, e)
+            _emit_sys("自动验证出错：%s: %s（不影响应用使用）"
+                      % (type(e).__name__, e), state="error")
+        finally:
+            _VERIFYING[0] = False
+
+    try:
+        threading.Thread(target=_run, daemon=True, name="iter-verify").start()
+    except Exception as e:                              # noqa: BLE001
+        # 线程起不来（极少见，如资源耗尽）必须复位标记 —— 否则 _VERIFYING
+        # 永远是 True，以后再也起不了验证，队列会静默停住。
+        _VERIFYING[0] = False
+        logger.warning("验证线程起不来：%s: %s", type(e).__name__, e)
+        _emit_sys("自动验证启动失败：%s: %s" % (type(e).__name__, e), state="error")
+        return False
+    return True
 
 
 def task_timeout_sec():
@@ -125,14 +207,44 @@ def _load():
                 # 队列恢复：把上次「正在跑」的那个放回队首（它没跑完）
                 q = list(d.get("queue") or [])
                 run = d.get("running")
+                hist = _STATE["history"] or []
+                # ★ 2026-11-20 用户要求「重启后能继续任务或验证，别重复做」：
+                #   原来这里**无条件**把 running 放回队首。可 running 有两种死法：
+                #     ① 真没跑完（进程被杀）→ 必须放回队首接着跑；
+                #     ② 其实已经跑完、只是占位没清（老版本的 bug 留下的）→
+                #        放回去就会**把做完的功能重跑一遍**，白烧一轮。
+                #   判据：history 里有同 tid 的结束记录 ⇒ 它已经完成了，不再排队。
+                #   （boot_resume 里那段「已结束的不重跑」其实永远走不到 —— 本函数
+                #    在 import 时就跑了，早把 running 置成 None，所以必须修在这里。）
                 if run and run.get("plan_id"):
-                    q.insert(0, {"tid": run.get("tid"), "plan_id": run.get("plan_id"),
-                                 "source": run.get("source") or "auto",
-                                 "title": run.get("title") or "",
-                                 "at": run.get("started_at") or time.time(),
-                                 "max_n": run.get("max_n") or 0,
-                                 "resumed": True})
-                _STATE["queue"] = q
+                    _tid = str(run.get("tid") or "")
+                    _done = bool(_tid) and any(
+                        str(h.get("tid") or "") == _tid for h in hist)
+                    if _done:
+                        logger.warning("上次的 running 其实已结束（history 有记录），"
+                                       "不再重跑：%s", run.get("plan_id"))
+                    else:
+                        q.insert(0, {"tid": run.get("tid"),
+                                     "plan_id": run.get("plan_id"),
+                                     "source": run.get("source") or "auto",
+                                     "title": run.get("title") or "",
+                                     "at": run.get("started_at") or time.time(),
+                                     "max_n": run.get("max_n") or 0,
+                                     # ★ 2026-11-20：内容快照要跟着恢复，
+                                     #   否则重启后卡片只剩一个 plan_id。
+                                     "brief": run.get("brief") or {},
+                                     "resumed": True})
+                # 去重：同 tid 在队列里只留一条（旧数据可能重复写盘）
+                _seen = set()
+                _q2 = []
+                for x in q:
+                    k = str(x.get("tid") or "") or str(x.get("plan_id") or "")
+                    if k and k in _seen:
+                        continue
+                    if k:
+                        _seen.add(k)
+                    _q2.append(x)
+                _STATE["queue"] = _q2
                 _STATE["running"] = None
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
@@ -244,6 +356,35 @@ def _plan_title(plan_id):
     return ""
 
 
+def _plan_brief(plan_id):
+    """把计划里的**任务内容**抽成一份小快照，存进队列项 / running。
+
+    ★ 2026-11-20 用户：「防止任务内容因中断补充重启后丢失」。
+      队列原来只存 plan_id 一个引用 —— 计划缓存被删、被覆盖，或 plans.json
+      损坏时，队列里那条就只剩一个死 id，用户完全看不出当初要做什么，
+      重启后也没法接着做。这里把「要做什么」抄一份进队列项（很小：
+      摘要 + 动作标题 + 目标文件），重启后即使计划找不到，也能在卡片上
+      说清任务内容、并明确告诉用户「计划文件丢了」而不是静默消失。
+    """
+    out = {"summary": "", "actions": [], "files": []}
+    try:
+        r = _si.get_plan(plan_id)
+        p = (r or {}).get("plan") or {}
+        out["summary"] = str(p.get("summary") or "").strip()[:200]
+        for a in (p.get("actions") or [])[:8]:
+            if not isinstance(a, dict):
+                continue
+            t = str(a.get("title") or "").strip()
+            if t:
+                out["actions"].append(t[:60])
+            for f in (a.get("files") or [])[:6]:
+                if isinstance(f, str) and f and f not in out["files"]:
+                    out["files"].append(f)
+    except Exception:                                    # noqa: BLE001
+        logger.debug("抽计划快照失败", exc_info=True)
+    return out
+
+
 def _brief(t):
     if not t:
         return None
@@ -251,7 +392,10 @@ def _brief(t):
             "source": t.get("source"), "title": t.get("title"),
             "state": t.get("state"), "started_at": t.get("started_at"),
             "elapsed": round(time.time() - (t.get("started_at") or time.time()), 1),
-            "cancel": bool(t.get("cancel"))}
+            "cancel": bool(t.get("cancel")),
+            # 任务内容快照（用户 2026-11-20：中断/重启后不能丢内容）
+            "brief": t.get("brief") or {},
+            "plan_missing": bool(t.get("plan_missing"))}
 
 
 def task_events(tid):
@@ -278,7 +422,10 @@ def submit(plan_id, source="auto", title="", max_n=0):
     _ttl = str(title or "").strip() or _plan_title(plan_id)
     item = {"tid": tid, "plan_id": plan_id, "source": str(source or "auto"),
             "title": _ttl, "at": time.time(),
-            "max_n": int(max_n or 0)}
+            "max_n": int(max_n or 0),
+            # ★ 2026-11-20 用户：「防止任务内容因中断 / 重启后丢失」——
+            #   把要做什么抄一份进队列项，别只留一个 plan_id 死引用。
+            "brief": _plan_brief(plan_id)}
 
     with _LOCK:
         run = _STATE["running"]
@@ -313,7 +460,8 @@ def submit(plan_id, source="auto", title="", max_n=0):
         _STATE["running"] = {"tid": tid, "plan_id": plan_id,
                              "source": item["source"], "title": item["title"],
                              "state": "running", "started_at": time.time(),
-                             "cancel": False, "max_n": item["max_n"]}
+                             "cancel": False, "max_n": item["max_n"],
+                             "brief": item.get("brief") or {}}
         # 用户要求：「自迭代卡片上说明正在迭代什么功能」——
         # 有标题就直接写出来，别只给一句「正在迭代中」让人猜。
         _emit(tid, "status",
@@ -352,6 +500,14 @@ def _worker(item):
     ok_n = fail_n = skip_n = 0
     changed = []
     err_all = ""
+    # ★ 2026-11-20 修：这个任务「真正在做的功能名」。
+    #   item["title"] 是入队时用 _plan_title() 推断的「计划首条动作」，
+    #   但一个计划往往有 7~8 条动作，这次实际执行的是后面某一条 ——
+    #   action_start 会把 _STATE["running"]["title"] 更新成真正在做的那条。
+    #   状态事件 / verify 若还拿 item["title"]，界面上就会出现
+    #   「显示在验证 A，实际改的是 B」，用户以为「重启后没验证」。
+    #   （实测 11-20 03:22 那次：显示「回复形态闸门」，实际改的是 jobplan/studio.js）
+    _cur_title = ""
     # 改了文件且开启自动重启时置 True —— finally 里据此决定「重启」还是「接下一个」
     auto_rst = False
     # ★ 2026-11-20：撞到「另一个执行占着锁」时置 True —— 把任务放回队首稍后重试，
@@ -492,6 +648,10 @@ def _worker(item):
             except Exception:                            # noqa: BLE001
                 logger.debug("标记自动迭代改动失败（不影响迭代）", exc_info=True)
             _auto = True
+            # 真正在做的那条动作名（action_start 已把 running.title 更新过）
+            with _LOCK:
+                _cur_title = (str((_STATE.get("running") or {}).get("title") or "").strip()
+                              or str(item.get("title") or "").strip())
             try:
                 _auto = bool(_si.load_settings().get("auto_restart_after_iter", True))
             except Exception:                            # noqa: BLE001
@@ -501,7 +661,7 @@ def _worker(item):
                     prev = _STATE.get("verify") or {}
                     _STATE["verify"] = {
                         "tid": tid, "plan_id": plan_id,
-                        "title": item.get("title") or "",
+                        "title": _cur_title,
                         "files": changed[:20],
                         # 同一功能反复修时轮次要累加，不能每轮清零
                         "tries": int(prev.get("tries") or 0)
@@ -511,7 +671,7 @@ def _worker(item):
                 _save()
                 _emit(tid, "status",
                       text="✅ 任务完成：%s（改了 %d 个文件，马上自动重启验证）"
-                           % (item.get("title") or "未命名功能", len(changed)),
+                           % (_cur_title or "未命名功能", len(changed)),
                       state="running", verified=False)
                 _emit(tid, "restart",
                       text="这次改了 %d 个文件，稍后自动重启并验证" % len(changed),
@@ -546,7 +706,7 @@ def _worker(item):
             # 走「重启 → 自动验证 → 再接下一个」这条链，
             # 这里**不能**调 _next()：否则下一个任务会在重启前抢跑，
             # 跑到一半进程被替换掉，进度就丢了。
-            _auto_restart(reason=item.get("title") or plan_id, tid=tid)
+            _auto_restart(reason=_cur_title or item.get("title") or plan_id, tid=tid)
         else:
             _next()
 
@@ -598,6 +758,7 @@ def _next():
       所以：已经有任务在跑时，这里必须什么都不做。
     """
     nxt = None
+    need_verify = False
     with _LOCK:
         run = _STATE.get("running")
         # 孤儿（线程已随旧进程消失）不能挡住队列，直接清掉继续取下一个
@@ -608,7 +769,13 @@ def _next():
             run = None
         if run:
             return
-        if _STATE["queue"]:
+        # ★ 2026-11-20 用户要求「重启时要能继续任务或验证」：
+        #   有待验证的功能时，**先验证再起下一个任务**。否则会出现
+        #   「任务A的改动还没验证，任务B已经在改同一批文件」——
+        #   验的是改到一半的代码，报告也就不可信了。
+        if _STATE.get("verify"):
+            need_verify = True
+        elif _STATE["queue"]:
             nxt = _STATE["queue"].pop(0)
             # 老队列项（旧代码提交的）标题是空的 → 提上来时补推断一次，
             # 否则卡片只能显示「正在迭代中…」，看不出在做什么功能。
@@ -627,6 +794,10 @@ def _next():
                        if nxt.get("title") else "前面的任务结束了，开始执行这个计划…",
                   state="running")
     _save()
+    if need_verify:
+        # 有待验证的功能：先把验证做完（它会自己接着 _next）
+        _start_verify()
+        return
     if nxt:
         th = threading.Thread(target=_worker, args=(nxt,), daemon=True,
                               name="iter-%s" % (nxt.get("tid") or "x"))
@@ -838,6 +1009,16 @@ def _auto_restart(reason="", tid=""):
         except Exception as e:                          # noqa: BLE001
             _emit_sys("自动重启失败：%s: %s（请手动点「立即重启」）"
                       % (type(e).__name__, e), state="error")
+            # ★ 2026-11-20 用户要求「重启时要能继续任务或验证」：
+            #   重启这一步没做成，verify 就永远没人消费 —— 整条链停在这里，
+            #   队列里排着的任务也不会再动。所以退一步：**本进程内直接验证**
+            #   （改动已经在磁盘上，验证是有意义的），过了就接着跑队列。
+            try:
+                if _start_verify(wait_busy=False):
+                    _emit_sys("改为在本进程内直接验证（不用等重启）…",
+                              state="running")
+            except Exception:                           # noqa: BLE001
+                logger.debug("验证兜底也没起来", exc_info=True)
     threading.Thread(target=_do, daemon=True, name="auto-restart").start()
 
 
@@ -967,12 +1148,35 @@ def boot_resume():
                                            "title": run.get("title") or "",
                                            "max_n": run.get("max_n") or 0,
                                            "at": run.get("started_at") or time.time(),
+                                           "brief": run.get("brief") or {},
                                            "resumed": True})
         qn = len(_STATE["queue"])
         first = (_STATE["queue"][0] if _STATE["queue"] else None)
         # ★ 2026-11-20：这两秒半里自迭代可能已经 submit 并开跑了。
         #   那种情况下**绝不能**再 _next()（会顶掉正在跑的，见 _next 的注释）。
         busy = bool(_STATE.get("running"))
+
+    # ★ 2026-11-20 用户：「防止任务内容因中断补充重启后丢失」——
+    #   重启后逐个确认计划文件还在。计划被删 / plans.json 损坏时，队列项
+    #   只剩一个死引用；这里标 plan_missing，并保留 brief 里的任务内容，
+    #   让用户能看到「原本要做什么」，而不是卡片上一片空白、任务静默消失。
+    #   放在锁外做：读 plans.json 可能慢，别占着 _LOCK 卡住执行。
+    _missing = 0
+    for _x in (_STATE.get("queue") or []):
+        _pid = str(_x.get("plan_id") or "")
+        if not _pid or _x.get("plan_missing"):
+            continue
+        try:
+            _r = _si.get_plan(_pid)
+            if not (_r or {}).get("ok"):
+                _x["plan_missing"] = True
+                _missing += 1
+        except Exception:                               # noqa: BLE001
+            logger.debug("检查计划是否还在失败：%s", _pid, exc_info=True)
+    if _missing:
+        _emit_sys("队列里有 %d 个任务找不到对应的计划文件（可能被删了），"
+                  "任务内容已保留在卡片上，可以取消后重新提交" % _missing,
+                  state="waiting")
     if orphan:
         _save()
         _name = orphan.get("title") or orphan.get("plan_id") or "未命名任务"
@@ -987,7 +1191,10 @@ def boot_resume():
     if v:
         _emit_sys("重启后恢复：先验证上一个功能「%s」，之后接着跑队列（还有 %d 个）"
                   % (v.get("title") or "", qn), state="running")
-        _verify_worker()
+        # ★ 2026-11-20：走 _start_verify()，它会「有任务在跑就先等它跑完」
+        #   再验证 —— 原来直接 _verify_worker()，会和正在跑的任务并发改/验同一批文件。
+        if not _start_verify(wait_busy=True):
+            _emit_sys("验证线程已经在跑了，不重复启动", state="running")
         return
     if busy:
         # 已经在跑了：只把队列情况说出来，不碰 running

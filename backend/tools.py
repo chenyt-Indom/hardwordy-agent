@@ -3021,6 +3021,221 @@ def job_step(job, step, ui_events=None) -> dict:
     return st
 
 
+# =====================================================================
+#  一句话多步任务：run_plan() —— 按 depends_on 顺序把拆好的步骤跑完
+# =====================================================================
+# 用户的真实用法是把一整件事**一句话**丢过来（「把知网这篇论文 + GitHub 仓库 +
+# 百度资料按作者检索并提炼要点，最后出文档」），期望助手自己拆解、自己一步步做完。
+# 一句话 → 目标拆解（main.plan_multi_step / jobplan.plan_steps）已经有实现，
+# 但「拆完谁按顺序跑」此前是空的：jobplan 里现写了一个循环，别处要用就得再抄一遍。
+# 所以顺序执行统一收到这里，两个约定：
+#   · 干活仍然一律走 job_step() → dispatch()，本函数**不重新实现任何工具**；
+#   · 每步跑完写一条进度到 actlog（工具动作账本 + 阶段流水），
+#     用户问「做到哪一步了 / 为什么这步没跑」时有真实记录可查，不靠回忆。
+#
+# 状态口径跟 jobplan 一致（别把 status 当成败）：
+#   step['status']  pending / running / done / error —— 只表示这一步跑过了没有；
+#   step['ok']      这一步的工具自己有没有报错（True/False/None）。
+#   depends_on 没满足（上游失败）→ 这步记 error 并写清原因，不硬跑。
+
+def _plan_actlog():
+    """拿 actlog 模块；导入失败返回 None —— 账本坏了绝不能拦住任务本身。"""
+    try:
+        from . import actlog as _al
+        return _al
+    except Exception:                                     # noqa: BLE001
+        try:
+            import actlog as _al                      # 直接当顶层模块跑（验收断言）
+            return _al
+        except Exception:                                 # noqa: BLE001
+            logger.debug("actlog 不可用，多步任务进度只落 job 文件", exc_info=True)
+            return None
+
+
+def plan_steps_of(plan) -> list:
+    """把计划规整成 [{id, tool, args, depends_on, status, ...}]。
+
+    plan 可以是 list，也可以是 {"goal":..., "steps":[...]}；模型给的字段名五花八门
+    （tool / name / act），这里统一收敛，**就地改原来那些 dict** —— 调用方
+    （jobplan.run_job）要靠同一批对象回填结果后落盘，不能换成副本。
+    """
+    raw = plan
+    if isinstance(plan, dict):
+        raw = plan.get("steps") or plan.get("plan") or []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out = []
+    for i, it in enumerate(raw, 1):
+        if isinstance(it, str):
+            it = {"tool": it}
+        if not isinstance(it, dict):
+            continue
+        st = it
+        if not st.get("id"):
+            st["id"] = i
+        if not st.get("tool"):
+            st["tool"] = st.get("name") or st.get("act") or ""
+        if not isinstance(st.get("args"), dict):
+            st["args"] = {}
+        dep = st.get("depends_on")
+        if dep is None:
+            dep = []
+        elif isinstance(dep, (str, int)) and not isinstance(dep, bool):
+            dep = [dep]
+        if isinstance(dep, (list, tuple)):
+            st["depends_on"] = [d for d in dep if str(d or "").strip()]
+        else:
+            st["depends_on"] = []
+        out.append(st)
+    return out
+
+
+def _plan_title(st) -> str:
+    return str(st.get("title") or st.get("tool") or st.get("id") or "")
+
+
+def run_plan(plan, job=None, ui_events=None, session: str = "",
+             prepare=None, persist: bool = True) -> dict:
+    """顺序执行一份计划，逐步把进度写到 actlog。返回执行结果摘要（不改调用方状态）。
+
+    参数：
+      plan     步骤列表（见 plan_steps_of），或 {"goal":..., "steps":[...]}
+      job      可选的任务 dict（jobplan 的 job）。给了就：① 用它的 id 记阶段流水；
+               ② persist=True 时每步跑完就地落盘 —— 断点/重启后前端轮询还能看到进度。
+      prepare  可选回调 prepare(step)：执行前补内容用（jobplan 传 _fill_content）。
+               放成回调而不是把填充逻辑搬进来：本函数只管「顺序 + 进度 + 分发」。
+      persist  是否把 job 落盘（jobplan 传 True；只想本地试跑就传 False）。
+      session  actlog 工具账本的会话名，默认用任务 id（一个任务一条线）。
+
+    返回 {ok, plan_id, goal, steps, total, finished, failed, percent,
+          warnings, secs, result}。
+    """
+    steps = plan_steps_of(plan)
+    j = job if isinstance(job, dict) else None
+    plan_id = str((j or {}).get("id") or "")
+    if not plan_id and isinstance(plan, dict):
+        plan_id = str(plan.get("id") or plan.get("plan_id") or "")
+    if not plan_id:
+        plan_id = "plan_%s" % time.strftime("%Y%m%d_%H%M%S")
+    sess = str(session or plan_id)
+    al = _plan_actlog()
+
+    def _stage(stage: str, detail: str) -> None:
+        if al is None:
+            return
+        try:
+            al.record_stage(plan_id, stage, detail)
+        except Exception:                                 # noqa: BLE001
+            logger.debug("写多步任务阶段流水失败", exc_info=True)
+
+    def _note(st, ok: bool) -> None:
+        """把这一笔记进工具动作账本（摘要，不落原文）。"""
+        if al is None:
+            return
+        try:
+            al.record(sess, "plan_step",
+                      {"act": str(st.get("id") or ""),
+                       "kind": str(st.get("tool") or "")},
+                      ok=bool(ok),
+                      result=str(st.get("error") or st.get("result") or "")[:200])
+        except Exception:                                 # noqa: BLE001
+            logger.debug("写多步任务动作账本失败", exc_info=True)
+
+    def _save() -> None:
+        if not (persist and j is not None and j.get("id")):
+            return
+        try:
+            from . import jobplan as _jp
+            _jp.save_job(j)
+        except Exception:                                 # noqa: BLE001
+            logger.debug("多步任务落盘失败", exc_info=True)
+
+    t_all = time.time()
+    ran_ids, ok_ids = [], []
+    for st in steps:
+        sid = st.get("id")
+        if str(st.get("status") or "") == "done":
+            # 已经跑过的不重复跑（同一个任务被重试/轮询时不会重复生成文件）
+            ran_ids.append(sid)
+            ok_ids.append(sid)
+            continue
+        miss = [d for d in (st.get("depends_on") or []) if d not in ok_ids]
+        if miss:
+            st["status"] = "error"
+            st["ok"] = False
+            st["error"] = ("上游步骤 %s 没跑成，这步跳过（依赖没满足）"
+                           % "、".join(str(m) for m in miss))
+            st["secs"] = 0
+            _note(st, False)
+            _save()
+            _stage("failed", "第 %s 步跳过：%s" % (sid, st["error"]))
+            continue
+        st["status"] = "running"
+        st["error"] = ""
+        t0 = time.time()
+        _save()
+        _stage("agent_step", "第 %s 步：%s" % (sid, _plan_title(st)))
+        try:
+            if callable(prepare):
+                prepare(st)
+            job_step(j if j is not None else {"id": plan_id},
+                     st, ui_events)
+            # job_step 认不出工具 / 分发炸了会把原因写进 step['error']：
+            # 这种也算**跑过但没成**，状态必须落成 error，不能停在 running
+            # （停在 running 的话进度条永远差一格，用户以为还在跑）。
+            st["status"] = "error" if st.get("error") else "done"
+        except Exception as exc:                          # noqa: BLE001
+            # 单步炸掉不许拖垮整个任务：记下来接着跑下一步（后面的步骤照样有价值）
+            st["status"] = "error"
+            st["error"] = "%s: %s" % (type(exc).__name__, exc)
+            logger.warning("多步任务 %s 第 %s 步失败", plan_id, sid, exc_info=True)
+        st["secs"] = round(time.time() - t0, 1)
+        ran_ids.append(sid)
+        if st.get("status") == "done":
+            ok_ids.append(sid)
+        _save()
+        _note(st, st.get("status") == "done")
+        _stage("done" if st.get("status") == "done" else "failed",
+               "第 %s 步%s：%s" % (sid,
+                                  "完成" if st.get("status") == "done" else "失败",
+                                  st.get("error") or _plan_title(st)))
+
+    total = len(steps)
+    bad = [s for s in steps if s.get("status") == "error"]
+    soft = [s for s in steps if s.get("status") == "done" and s.get("ok") is False]
+    finished = len([s for s in steps if s.get("status") in ("done", "error")])
+    warnings = ["第 %s 步「%s」没跑成：%s" % (s.get("id"), _plan_title(s),
+                                         str(s.get("error") or "")[:120])
+                for s in bad]
+    warnings += ["第 %s 步「%s」的工具有报错（数据可能不全）" % (s.get("id"), _plan_title(s))
+                 for s in soft]
+    lines = ["多步任务 %s：%d 步，跑过 %d 步，失败 %d 步。" % (plan_id, total, finished,
+                                                         len(bad))]
+    for s in steps:
+        seg = "· %s %s（%s）" % (s.get("id"), _plan_title(s), s.get("status"))
+        if s.get("ok") is False:
+            seg += " ⚠️工具报错"
+        if s.get("files"):
+            seg += " → " + "、".join(str(f) for f in s["files"])
+        lines.append(seg)
+    if warnings:
+        lines.append("注意：")
+        lines += ["  - " + w for w in warnings]
+    return {
+        "ok": (not bad) and (not soft),
+        "plan_id": plan_id,
+        "goal": str((j or {}).get("goal") or (plan.get("goal") if isinstance(plan, dict) else "") or ""),
+        "steps": steps,
+        "total": total,
+        "finished": finished,
+        "failed": len(bad),
+        "percent": int(round(100.0 * finished / total)) if total else 0,
+        "warnings": warnings,
+        "secs": round(time.time() - t_all, 1),
+        "result": "\n".join(lines),
+    }
+
+
 # ---------- 论文雷达：检索 / 四维评估 ----------
 _CLIP_PAIRS = (("「", "」"), ("『", "』"), ("《", "》"), ("（", "）"), ("【", "】"), ("(", ")"))
 

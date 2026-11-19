@@ -1139,10 +1139,309 @@
      已经删掉，只留 ensureVs() 负责"起进程 + 指到当前项目"。
      停进程用后端「■ 停掉」也可以：POST /api/ide/stop。 */
 
+  // ==================================================================
+  //  多步任务：侧栏进度条（一句话 → 拆步 → 逐步跑 → 成品打包）
+  // ==================================================================
+  /* 用户经常把一整件事**一句话**丢过来（「把知网这篇论文 + GitHub 仓库 + 百度资料
+     按作者检索并提炼要点，最后出文档」），期望助手自己拆步、一步步做完、给一个
+     成品包 —— 而不是又问又答、让他手动把四个步骤串联起来。
+
+     这一块只管「看得见」：总进度条 + 每步一行（等待 / 进行中 / 完成 / 失败）
+     + 跑完给 ⬇ 下载成品包。状态机**全在后端**（backend/jobplan.py 的 public_job），
+     前端只画它给的东西，不自己推演进度 —— 两边各推一遍必然对不上。
+
+     后端三条接口（别自己另造）：
+       POST /api/job/plan           一句话 → 拆步并在后台开跑
+       GET  /api/plan/status/<id>   每 1.2 秒问一次每步状态
+                                    （轮询不 SSE：任务最长几十秒，SSE 一被代理掐断，
+                                      进度就永远停在半路，比不显示更糟）
+       GET  /api/job/zip?job=<id>   跑完的成品包
+
+     和聊天区那个面板（frontend/jobplan.js）**不是两套逻辑**：同一批接口、同一份
+     字段，这里只是开发台侧栏的紧凑版；window.Studio.renderPlanProgress 对外暴露，
+     别处（比如 AI 自己发起的一条多步任务）也能直接拿来渲染同一条进度。 */
+  var PLAN_START = "/api/job/plan";
+  var PLAN_STATUS = "/api/plan/status/";
+  var PLAN_ZIP = "/api/job/zip";
+  var PLAN_POLL_MS = 1200;
+
+  var planPanel = null;    // 侧栏面板根节点（惰性建）
+  var planTimer = null;    // 轮询句柄
+  var planCur = null;      // 当前展示的 job（后端 public_job 口径）
+  var planWatching = "";   // 正在轮询的 job_id（防重复起表）
+
+  var PLAN_CSS = "" +
+    "#stPlanPanel{position:fixed;top:64px;right:14px;width:340px;max-height:72vh;z-index:1300;" +
+    "background:#1b1e24;color:#e8eaed;border:1px solid rgba(255,255,255,.12);border-radius:14px;" +
+    "box-shadow:0 12px 36px rgba(0,0,0,.42);display:flex;flex-direction:column;overflow:hidden;}" +
+    "#stPlanPanel[hidden]{display:none;}" +
+    ".stp-head{display:flex;align-items:center;gap:8px;padding:10px 12px;" +
+    "border-bottom:1px solid rgba(255,255,255,.10);font-size:13px;font-weight:600;}" +
+    ".stp-title{flex:1;}" +
+    ".stp-x{border:0;background:transparent;color:inherit;opacity:.7;cursor:pointer;font-size:14px;}" +
+    ".stp-body{padding:10px 12px;overflow:auto;}" +
+    ".stp-in{width:100%;box-sizing:border-box;min-height:50px;resize:vertical;border-radius:9px;" +
+    "border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.05);color:inherit;" +
+    "padding:8px;font:inherit;font-size:12.5px;}" +
+    ".stp-row{display:flex;gap:8px;margin-top:8px;}" +
+    ".stp-go{flex:1;border:0;border-radius:9px;padding:8px 10px;cursor:pointer;font-size:12.5px;" +
+    "background:#3b7dd8;color:#fff;font-weight:600;}" +
+    ".stp-go[disabled]{opacity:.55;cursor:default;}" +
+    ".stp-bar{height:6px;border-radius:6px;background:rgba(255,255,255,.12);overflow:hidden;" +
+    "margin:10px 0 4px;}" +
+    ".stp-fill{height:100%;width:0;background:#3fa66a;transition:width .25s ease;}" +
+    ".stp-meta{font-size:11.5px;opacity:.72;display:flex;justify-content:space-between;gap:8px;}" +
+    ".stp-hint{font-size:11.5px;opacity:.62;margin-top:6px;line-height:1.5;}" +
+    ".stp-step{border:1px solid rgba(255,255,255,.10);border-radius:9px;padding:7px 9px;" +
+    "margin-top:7px;font-size:12px;}" +
+    ".stp-step .t{display:flex;gap:6px;align-items:center;}" +
+    ".stp-step .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
+    ".stp-step .s{opacity:.72;font-size:11px;white-space:nowrap;}" +
+    ".stp-step .e{color:#e5534b;font-size:11px;margin-top:3px;word-break:break-all;}" +
+    ".stp-step .b{opacity:.62;font-size:11px;margin-top:3px;white-space:pre-wrap;" +
+    "max-height:52px;overflow:hidden;}" +
+    ".stp-zip{display:block;text-align:center;margin-top:10px;padding:9px;border-radius:9px;" +
+    "background:#3fa66a;color:#fff;font-weight:600;text-decoration:none;font-size:12.5px;}" +
+    ".stp-warn{margin-top:8px;font-size:11.5px;color:#e8883a;white-space:pre-wrap;}";
+
+  function planInjectCss() {
+    if ($("stPlanStyle")) return;
+    var st = document.createElement("style");
+    st.id = "stPlanStyle";
+    st.textContent = PLAN_CSS;
+    document.head.appendChild(st);
+  }
+
+  function planEl(tag, cls, txt) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (txt !== undefined && txt !== null) e.textContent = String(txt);
+    return e;
+  }
+
+  /* 面板（惰性建）。**不依赖开发台的 DOM** —— 开发台收起来、或者根本没有那一块
+     标记时也能看进度，所以直接挂在 body 上（fixed 定位，跟聊天区并列）。 */
+  function planBox() {
+    if (planPanel) return planPanel;
+    planInjectCss();
+    planPanel = planEl("section");
+    planPanel.id = "stPlanPanel";
+    planPanel.hidden = true;
+
+    var head = planEl("div", "stp-head");
+    head.appendChild(planEl("span", "stp-title", "🧩 多步任务"));
+    var x = planEl("button", "stp-x", "✕");
+    x.type = "button";
+    x.title = "收起";
+    x.onclick = closePlanPanel;
+    head.appendChild(x);
+    planPanel.appendChild(head);
+
+    var body = planEl("div", "stp-body");
+    var ta = planEl("textarea", "stp-in");
+    ta.id = "stPlanGoal";
+    ta.placeholder = "一句话交代整件事，例如：把这几个来源的同一主题资料按作者检索并提炼要点，出文档";
+    body.appendChild(ta);
+
+    var row = planEl("div", "stp-row");
+    var go = planEl("button", "stp-go", "▶ 拆解并执行");
+    go.type = "button";
+    go.id = "stPlanGo";
+    go.onclick = function () { runMultiStep(ta.value || ""); };
+    row.appendChild(go);
+    body.appendChild(row);
+    body.appendChild(planEl("div", "stp-hint",
+      "助手会把这句话拆成几步（能跑：查天气 / 查路线 / 写文档 / 做 PPT），" +
+      "按顺序跑完，成品自动打成一个 zip。"));
+
+    var prog = planEl("div");
+    prog.id = "stPlanProg";
+    prog.appendChild(planEl("div", "stp-hint", "还没有任务。"));
+    body.appendChild(prog);
+
+    planPanel.appendChild(body);
+    document.body.appendChild(planPanel);
+    // Ctrl/⌘ + Enter 直接开工，省得再找按钮
+    ta.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        runMultiStep(ta.value || "");
+      }
+    });
+    return planPanel;
+  }
+
+  function openPlanPanel() {
+    planBox().hidden = false;
+    var ta = $("stPlanGoal");
+    if (ta) { try { ta.focus(); } catch (e) { /* 焦点拿不到不影响用 */ } }
+    return planPanel;
+  }
+
+  function closePlanPanel() {
+    if (planPanel) planPanel.hidden = true;
+    stopPlanPoll();
+  }
+
+  var PLAN_MARK = { pending: "○", running: "◐", done: "✔", error: "✕" };
+  var PLAN_WORD = {
+    pending: "排队中", running: "执行中", done: "已完成",
+    partial: "部分完成", error: "失败"
+  };
+
+  function planStepWord(st) {
+    var s = String(st.status || "pending");
+    if (s === "done") return st.ok === false ? "完成（有报错）" : "完成";
+    if (s === "error") return "失败";
+    if (s === "running") return "进行中…";
+    return "等待中";
+  }
+
+  function planStepRow(st) {
+    var row = planEl("div", "stp-step");
+    var top = planEl("div", "t");
+    top.appendChild(planEl("span", "", PLAN_MARK[String(st.status || "pending")] || "○"));
+    top.appendChild(planEl("span", "n",
+      (st.id ? st.id + ". " : "") + (st.title || st.tool || "")));
+    var label = planStepWord(st);
+    if (st.secs) label += " · " + st.secs + "s";
+    top.appendChild(planEl("span", "s", label));
+    row.appendChild(top);
+    if (st.error) row.appendChild(planEl("div", "e", st.error));
+    else if (st.brief) {
+      var b = planEl("div", "b", String(st.brief).slice(0, 220));
+      b.title = String(st.brief).slice(0, 1200);
+      row.appendChild(b);
+    }
+    return row;
+  }
+
+  /** 把后端给的 job 画成侧栏进度（总进度条 + 每步一行 + 跑完的下载按钮）。
+   *
+   *  job 的口径就是 backend/jobplan.py 的 public_job()：
+   *    {id, goal, status, percent, finished, total, steps:[...], zip_ready, warnings}
+   *  这里只**画**：状态机在后端，前端不自己推演，免得两边对不上。
+   *  返回进度容器（调用方可以往里塞东西，也方便断言）。
+   */
+  function renderPlanProgress(job) {
+    planBox();
+    var box = $("stPlanProg");
+    if (!box) return null;
+    box.textContent = "";
+    if (!job) {
+      box.appendChild(planEl("div", "stp-hint", "还没有任务。"));
+      return box;
+    }
+    planCur = job;
+
+    var pct = Number(job.percent || 0);
+    if (!isFinite(pct)) pct = 0;
+    pct = Math.max(0, Math.min(100, pct));
+    var bar = planEl("div", "stp-bar");
+    var fill = planEl("div", "stp-fill");
+    fill.style.width = pct + "%";
+    if (String(job.status) === "partial") fill.style.background = "#e8883a";
+    bar.appendChild(fill);
+    box.appendChild(bar);
+
+    var meta = planEl("div", "stp-meta");
+    meta.appendChild(planEl("span", "", "进度 " + pct + "%（" +
+      Number(job.finished || 0) + "/" + Number(job.total || 0) + "）"));
+    meta.appendChild(planEl("span", "", PLAN_WORD[String(job.status)] ||
+      String(job.status || "")));
+    box.appendChild(meta);
+
+    if (job.goal) box.appendChild(planEl("div", "stp-hint", "目标：" + job.goal));
+
+    (job.steps || []).forEach(function (s) { box.appendChild(planStepRow(s || {})); });
+
+    if (job.zip_ready) {
+      var files = (job.zip_files && job.zip_files.length) || 0;
+      var a = planEl("a", "stp-zip", "⬇ 下载成品包（" + files + " 个文件 + 任务说明）");
+      a.href = PLAN_ZIP + "?job=" + encodeURIComponent(job.id);
+      a.target = "_blank";
+      a.rel = "noopener";
+      box.appendChild(a);
+    }
+    (job.warnings || []).forEach(function (w) {
+      box.appendChild(planEl("div", "stp-warn", "⚠ " + w));
+    });
+
+    var go = $("stPlanGo");
+    if (go) {
+      var busy = String(job.status) === "running" || String(job.status) === "pending";
+      go.disabled = busy;
+      go.textContent = busy ? "…正在跑" : "▶ 拆解并执行";
+    }
+    return box;
+  }
+
+  function stopPlanPoll() {
+    if (planTimer) { clearInterval(planTimer); planTimer = null; }
+    planWatching = "";
+  }
+
+  /* 轮询每步状态。到终态（done / partial / error）就停表 —— 任务结束后还每秒问
+     一次纯属浪费；用户想看就在面板里再点一次。 */
+  function watchPlan(jobId) {
+    var jid = String(jobId || "");
+    if (!jid) return;
+    if (planWatching === jid && planTimer) return;
+    stopPlanPoll();
+    planWatching = jid;
+    planTimer = setInterval(function () {
+      jget(PLAN_STATUS + encodeURIComponent(jid)).then(function (d) {
+        if (!d || !d.ok) {
+          stopPlanPoll();
+          toast((d && d.error) || "进度取不到", "warn");
+          return;
+        }
+        var job = d.job || {};
+        renderPlanProgress(job);
+        var s = String(job.status || "");
+        if (s === "done" || s === "partial" || s === "error") {
+          stopPlanPoll();
+          if (job.zip_ready) toast("多步任务做完了 —— 点面板里的「下载成品包」", "ok");
+          else toast("多步任务跑完了，但成品包没打出来（看面板里的提示）", "warn");
+        }
+      }).catch(function (e) {
+        stopPlanPoll();
+        toast("进度轮询失败：" + (e && e.message ? e.message : e), "warn");
+      });
+    }, PLAN_POLL_MS);
+  }
+
+  /** 一句话 → 拆步 → 后台开跑 → 面板立刻有进度。返回 job（后端 public_job）。 */
+  async function runMultiStep(goal) {
+    var g = String(goal || "").trim();
+    openPlanPanel();
+    if (!g) { toast("先说一句要办的事"); return null; }
+    var go = $("stPlanGo");
+    if (go) { go.disabled = true; go.textContent = "…正在拆步"; }
+    try {
+      var d = await jpost(PLAN_START, { goal: g });
+      if (!d || !d.ok) {
+        if (go) { go.disabled = false; go.textContent = "▶ 拆解并执行"; }
+        toast((d && d.error) || "任务没建起来", "warn");
+        return null;
+      }
+      var job = d.job || {};
+      renderPlanProgress(job);
+      if (job.id) watchPlan(job.id);
+      return job;
+    } catch (e) {
+      if (go) { go.disabled = false; go.textContent = "▶ 拆解并执行"; }
+      toast("开工失败：" + String(e && e.message ? e.message : e), "warn");
+      return null;
+    }
+  }
+
   // ---------- 事件绑定 ----------
   function bind() {
     var btn = $("openStudioBtn");
     if (btn) btn.onclick = toggle;
+    // 多步任务：开发台工具栏上有入口就绑上（没有也不影响 window.Studio 调用）
+    if ($("stPlanBtn")) $("stPlanBtn").onclick = function () { openPlanPanel(); };
     if (!$("studio")) return;
     $("stClose").onclick = close;
     $("stChatToggle").onclick = function () { setChatCollapsed(!chatCollapsed); };
@@ -1227,6 +1526,14 @@
     onDropFiles: onDropFiles, loadChanges: loadChanges,
     // 打开开发台并把某个文件摆到编辑器里（聊天区的"写进开发台"按钮用它）
     reveal: revealFile, openFile: openFile,
+    // 多步任务：一句话拆步跑完 + 侧栏进度条 + 成品 zip 下载
+    //   runMultiStep("一句话")        → 建任务、开跑、面板开始轮询 /api/plan/status
+    //   renderPlanProgress(job)      → 别处发起的那条任务也能拿同一份进度来画
+    //   watchPlan / stopPlanPoll     → 盯进度 / 停表（离开开发台时别让它空转）
+    runMultiStep: runMultiStep, renderPlanProgress: renderPlanProgress,
+    watchPlan: watchPlan, stopPlanPoll: stopPlanPoll,
+    openPlanPanel: openPlanPanel, closePlanPanel: closePlanPanel,
+    get planJob() { return planCur; },
     // 有没有还没保存的改动 —— 界面自更新要重载页面前必须先问，
     // 否则会把用户改了一半的文件冲掉。
     hasUnsaved: function () {

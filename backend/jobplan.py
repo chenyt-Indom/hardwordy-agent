@@ -204,6 +204,11 @@ _PLAN_PROMPT = """你是任务编排器。把用户这一句需求拆成**按顺
   make_pptx    做一份 PPT           {"title": "汕头两日游", "slides": [{"title": "第一天",
                                     "bullets": ["要点一", "要点二"]}]}
 
+每一步的字段：tool / args / depends_on / title
+  depends_on 是**上游步骤的序号数组**（例如 [1, 2]），表示这步要等前几步跑成才做。
+  真的要依赖才写；写文档这种「上游没数据也能靠常识写」的步骤就别依赖，
+  否则上游一失败，用户最想要的成品会被连着跳过。没有依赖就写 []。
+
 规则：
 1. 3~5 步；顺序符合依赖（先查数据，再写成品）；
 2. 只排真正需要的步骤 —— 用户只要文档就别硬加 PPT；
@@ -324,11 +329,28 @@ def _norm_step(item, idx: int) -> dict:
     if not isinstance(args, dict):
         args = {}
     title = str(item.get("title") or item.get("desc") or "").strip()
+    # depends_on：这一步必须等哪几步跑成（步骤序号）。**只在调用方/模型显式给了
+    # 的时候才记**，默认空 —— 默认成"依赖上一步"会让一次失败把后面的文档/PPT
+    # 全连带跳过（天气查不到不该拦住成品，那才是用户真正要的东西）。
+    deps = []
+    raw_dep = item.get("depends_on")
+    if raw_dep is None:
+        raw_dep = item.get("after")
+    if raw_dep is not None and not isinstance(raw_dep, (list, tuple)):
+        raw_dep = [raw_dep]
+    for d in (raw_dep or []):
+        try:
+            v = int(str(d).strip())
+        except Exception:                                # noqa: BLE001
+            continue
+        if 0 < v < idx and v not in deps:                # 只认上游，防自己依赖自己
+            deps.append(v)
     return {
         "id": int(idx),
         "tool": tool,
         "title": (title or STEP_TOOLS[tool])[:60],
         "args": args,
+        "depends_on": deps,
         "status": PENDING,
         "ok": None,
         "result": "",
@@ -585,8 +607,9 @@ def create_job(goal: str, steps=None, llm=None) -> dict:
 def run_job(job_or_id, llm=None, ui_events=None, pack: bool = True) -> dict:
     """按顺序把任务跑完，然后打成一个 zip。返回跑完的 job（已落盘）。
 
-    已经 done 的步骤会被跳过 —— 同一个任务重复跑不会重复生成文件
-    （前端轮询 / 用户重试都用得上）。
+    顺序执行本身在 `tools.run_plan()` 里（那边负责依赖检查 + 每步写 actlog 进度 +
+    逐步落盘），这里只做三件事：起手记一条阶段、把「补内容」当回调递进去、
+    收尾算状态与打包。**别再在本地另写一份步骤循环** —— 两份循环必然走岔。
     """
     job = load_job(job_or_id) if isinstance(job_or_id, str) else dict(job_or_id or {})
     if not job.get("id"):
@@ -597,42 +620,17 @@ def run_job(job_or_id, llm=None, ui_events=None, pack: bool = True) -> dict:
     job["ok"] = None
     save_job(job)
     _stage(job, "executing", "开始执行：%d 步" % len(job["steps"]))
-    for st in job["steps"]:
-        if st.get("status") == DONE:
-            continue
-        st["status"] = RUNNING
-        st["error"] = ""
-        t0 = time.time()
-        save_job(job)
-        _stage(job, "agent_step", "第 %s 步：%s" % (st.get("id"), st.get("title")))
-        try:
-            _fill_content(job, st, llm=llm)
-            _tools.job_step(job, st, ui_events)
-            if not st.get("error"):
-                st["status"] = DONE
-        except Exception as exc:                          # noqa: BLE001
-            # 单步炸掉不许拖垮整个任务：记下来接着跑下一步（后面的步骤照样有价值）
-            st["status"] = ERROR
-            st["error"] = "%s: %s" % (type(exc).__name__, exc)
-            logger.warning("任务 %s 第 %s 步失败", job.get("id"), st.get("id"),
-                           exc_info=True)
-        st["secs"] = round(time.time() - t0, 1)
-        save_job(job)
-        _stage(job, "done" if st["status"] == DONE else "failed",
-               "第 %s 步%s：%s" % (st.get("id"),
-                                  "完成" if st["status"] == DONE else "失败",
-                                  st.get("error") or st.get("title") or ""))
-    steps = job["steps"]
-    bad = [s for s in steps if s.get("status") == ERROR]
-    soft = [s for s in steps if s.get("status") == DONE and s.get("ok") is False]
-    job["status"] = "partial" if bad else DONE
-    job["ok"] = (not bad) and (not soft)
-    job["warnings"] = ["第 %s 步「%s」没跑成：%s" % (s.get("id"), s.get("title"),
-                                                str(s.get("error") or "")[:120])
-                       for s in bad]
-    job["warnings"] += ["第 %s 步「%s」的工具有报错（数据可能不全）" % (s.get("id"),
-                                                              s.get("title"))
-                        for s in soft]
+
+    def _prepare(st):
+        # 只补内容（blocks / slides），生成文件一律留给 tools.job_step → dispatch
+        _fill_content(job, st, llm=llm)
+
+    ran = _tools.run_plan(job["steps"], job=job, ui_events=ui_events,
+                          prepare=_prepare)
+    job["steps"] = ran["steps"]
+    job["status"] = "partial" if ran["failed"] else DONE
+    job["ok"] = bool(ran["ok"])
+    job["warnings"] = list(ran["warnings"])
     if pack:
         try:
             pack_zip(job)

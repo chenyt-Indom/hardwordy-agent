@@ -1361,6 +1361,57 @@ def _split_changes(changes: list, restarted: str):
     return pre[-SHOW_CHANGES:], post[-SHOW_CHANGES:]
 
 
+def _task_lines() -> list:
+    """把自迭代任务状态摘成几行，塞进交接卡。
+
+    ★ 2026-11-20 用户：「如果我中断任务时在下一句开启任务时还需要回忆
+      刚才的对话以及任务，防止任务内容因中断补充重启后丢失」。
+      交接卡原来只记**对话**和**改过的文件**，完全不记任务状态 ——
+      重启/中断之后用户说「继续」，模型根本不知道队列里还排着什么、
+      哪个被打断了、哪个已经做完不该重做。
+
+    只摘**还要继续的**（正在跑 / 排队中 / 待验证），做完的不写，省上下文。
+    """
+    try:
+        from . import iter_runner as _ir
+        snap = _ir.snapshot(since=0)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读自迭代任务状态失败（跳过）", exc_info=True)
+        return []
+    run = snap.get("running") or None
+    q = snap.get("queue") or []
+    v = snap.get("verify") or None
+    if not run and not q and not v:
+        return []
+
+    def _one(x, tag):
+        t = str(x.get("title") or "").strip() or "（未命名）"
+        br = x.get("brief") or {}
+        acts = [str(a) for a in (br.get("actions") or [])[:3] if a]
+        tail = ("；要做：%s" % " / ".join(acts)) if acts else ""
+        if not tail:
+            s = str(br.get("summary") or "").strip()
+            if s:
+                tail = "；内容：%s" % _inline(s, 80)
+        miss = "（⚠️ 计划文件已找不到）" if x.get("plan_missing") else ""
+        return "  - %s：%s%s%s" % (tag, _inline(t, 60), tail, miss)
+
+    out = ["· 自迭代任务（中断 / 重启后要接着做的）："]
+    if run:
+        out.append(_one(run, "正在跑"))
+    for i, x in enumerate(q[:6]):
+        out.append(_one(x, "排队第 %d" % (i + 1)))
+    if len(q) > 6:
+        out.append("  - 还有 %d 个排队的没列出来" % (len(q) - 6))
+    if v:
+        out.append("  - 待验证：%s（第 %s 轮）"
+                   % (_inline(str(v.get("title") or "（未命名）"), 60),
+                      v.get("tries") or 1))
+    out.append("  ⚠️ 用户说「继续」时先看这里：别重复做已经做完的，"
+               "也别把队列里的任务弄丢。")
+    return out
+
+
 def render(session: str = "") -> str:
     """生成要注入的交接卡文本；没有可注入的内容就返回空串。"""
     d = _read()
@@ -1374,7 +1425,15 @@ def render(session: str = "") -> str:
     changes = [c for c in (d.get("changes") or [])
                if isinstance(c, dict) and not _is_scratch(c.get("rel"))]
     dialog = [m for m in (d.get("dialog") or []) if isinstance(m, dict)]
-    if not changes and not dialog:
+    # ★ 2026-11-20 用户：「中断任务后下一句要能回忆任务」。所以只有任务、
+    #   没有对话和文件改动时，这张卡也得出来 —— 否则「中断后重启」正好
+    #   是最该交代任务的那一刻，卡却是空的。
+    _tasks = []
+    try:
+        _tasks = _task_lines()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("交接卡取任务状态失败（跳过）", exc_info=True)
+    if not changes and not dialog and not _tasks:
         return ""
 
     restarted = str(d.get("restarted_at") or "")
@@ -1433,6 +1492,9 @@ def render(session: str = "") -> str:
         if post:
             lines.append("· 重启之后又改过的文件（最近 %d 个）：" % len(post))
             lines.extend(_fmt_change(c) for c in post)
+
+    if _tasks:
+        lines.extend(_tasks)
 
     lines.append(
         "⚠️ 这张卡是**上一次会话的背景**，用来接上前文（用户可能正在接着问刚才的事）；"

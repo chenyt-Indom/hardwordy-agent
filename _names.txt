@@ -1,0 +1,17 @@
+test_canvas_command.py
+test_handoff_card.py
+test_llm_retry.py
+test_map_city_level.py
+test_reachability.py
+test_scratch_filter.py
+test_selfdev_write_guard.py
+test_tool_registry.py
+_pending_一句话多步任务：目标拆解_+_侧栏进度_+_成品打包.py
+_pending_一句话订好整件事（目标→多步任务→行程包）.py
+_pending_回复内嵌可交互实时卡片.py
+_pending_实时卡片：回复气泡内嵌可交互小卡片.py
+_pending_实时卡片：回复气泡里嵌可交互结果卡.py
+_pending_自检报告卡：一键输出通过_失败清单+证据.py
+_quarantine
+__pycache__
+回复形态闸门：结论前置_+_过程折叠_+_长度上限.py

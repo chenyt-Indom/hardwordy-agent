@@ -16482,7 +16482,12 @@ def deploy_stop():
 #   本文件              plan_and_run() + 两个接口（前端轮询进度 / 下 zip）
 #   frontend/jobplan.js renderJobProgress() 侧栏进度条 + 下载入口
 def plan_multi_step(goal: str, llm=None, steps=None) -> list:
-    """把一句话拆成可执行步骤（真正的拆解规则在 jobplan.plan_steps）。"""
+    """把一句话拆成可执行步骤（真正的拆解规则在 jobplan.plan_steps）。
+
+    返回 [{id, tool, args, depends_on, title, status, ...}]：depends_on 是上游步骤
+    序号数组，执行时由 tools.run_plan 按它把关（上游没跑成就不硬跑这步）；
+    模型没声明依赖就是 []。**永不抛异常**：模型不可用时走规则兜底。
+    """
     from . import jobplan
     return jobplan.plan_steps(goal, llm=llm, steps=steps)
 

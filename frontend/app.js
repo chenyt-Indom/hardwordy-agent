@@ -16262,14 +16262,26 @@
     //   ② 每 300ms 重建一次 DOM，列表一闪一闪。
     //   现在：内容没变就不重建；默认收起，点「后面还有 N 个等待」才展开。
     const sig = list.map(function (t) {
-      return (t.tid || "") + "|" + (t.title || t.plan_id || "");
+      // ★ 2026-11-20：计划丢失状态也要进签名，否则状态变了界面不刷新
+      return (t.tid || "") + "|" + (t.title || t.plan_id || "") +
+        (t.plan_missing ? "|miss" : "");
     }).join("\n");
     if (box.__sig === sig) { box.hidden = !el.__qOpen; return; }
     box.__sig = sig;
     box.innerHTML = list.map(function (t, i) {
+      // ★ 2026-11-20 用户：「防止任务内容因中断 / 重启后丢失」——
+      //   队列项现在带一份内容快照（brief）。悬停就能看到「原本要做什么」，
+      //   计划文件真的丢了时明确标出来，而不是只剩一个看不懂的标题。
+      const _acts = (t.brief && t.brief.actions) || [];
+      const _tip = _acts.length ? _acts.join(" / ")
+        : ((t.brief && t.brief.summary) || "");
+      const _miss = t.plan_missing
+        ? ' <span class="if-q-miss" title="计划文件已找不到，任务内容已保留在快照里">⚠️ 计划已丢失</span>'
+        : "";
       return '<div class="if-q-item">' +
         '<span class="if-q-no">' + (i + 1) + "</span>" +
-        '<span class="if-q-ttl">' + ifEsc(t.title || t.plan_id || "（未命名任务）") + "</span>" +
+        '<span class="if-q-ttl" title="' + ifEsc(_tip) + '">' +
+          ifEsc(t.title || t.plan_id || "（未命名任务）") + "</span>" + _miss +
         '<button type="button" class="if-q-x" data-tid="' + ifEsc(t.tid || "") +
           '" title="从队列里取消这个任务">×</button>' +
       "</div>";
