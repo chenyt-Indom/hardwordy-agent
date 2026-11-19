@@ -2501,6 +2501,30 @@ def fetch_arxiv_query(query="", author="", max_n=8):
     return got, ("OK %d 条" % len(got)) if got else "0 条命中"
 
 
+# 源名别名表：大小写、中英文都认。
+# ⚠️ 2026-11-19 实测缺陷：源名原本**大小写敏感** —— 传 "github"（小写）时
+#    `s in fns` 为 False，没有任何抓取任务，结果**静默**返回 0 条、notes 和
+#    jumps 全空。用户看到的是「0 条结果」，而不是「源名不认识」，这违反了
+#    本模块「抓不到也要如实说」的原则。所以统一在这里归一化。
+_SRC_ALIAS = {
+    "cnki": "CNKI", "知网": "CNKI", "中国知网": "CNKI",
+    "baidu": "百度学术", "百度": "百度学术", "百度学术": "百度学术",
+    "xueshu": "百度学术", "xueshu.baidu": "百度学术",
+    "github": "GitHub", "gh": "GitHub",
+    "arxiv": "arXiv",
+}
+
+
+def _norm_src(name):
+    """把来源名归一化成 fns 里的键；认不出返回空串（由调用方如实报错）。"""
+    s = str(name or "").strip()
+    if not s:
+        return ""
+    if s in _SRC_ALIAS.values():
+        return s
+    return _SRC_ALIAS.get(s.lower(), "")
+
+
 def external_search(q="", author="", sources=None, max_n=6):
     """知网 / 百度学术 / GitHub / arXiv **实时**检索（并发，单源失败不影响其它）。
 
@@ -2519,7 +2543,20 @@ def external_search(q="", author="", sources=None, max_n=6):
         n = max(1, min(int(max_n or 6), 12))
     except Exception:                                   # noqa: BLE001
         n = 6
-    want = [x for x in (sources or []) if x] or ["CNKI", "百度学术", "GitHub", "arXiv"]
+    # ★ 源名先归一化（2026-11-19 修：原来大小写敏感，传 "github" 会静默 0 条）
+    _raw = [str(x).strip() for x in (sources or []) if str(x or "").strip()]
+    want, unknown = [], []
+    for _x in (_raw or ["CNKI", "百度学术", "GitHub", "arXiv"]):
+        _k = _norm_src(_x)
+        if _k and _k not in want:
+            want.append(_k)
+        elif not _k:
+            unknown.append(_x)
+    if not want:
+        return {"ok": False,
+                "error": "不认识的来源：%s（可选 CNKI / 百度学术 / GitHub / arXiv）"
+                         % "、".join(unknown or ["（空）"]),
+                "items": [], "notes": {}, "jumps": {}, "total": 0}
     # 每个源的抓取函数签名都是 (keyword, max_n) -> (items, note)
     fns = {
         "CNKI": lambda k, m: fetch_cnki(k or a, m),
@@ -2530,6 +2567,9 @@ def external_search(q="", author="", sources=None, max_n=6):
     items, notes, jumps = [], {}, {}
     for s in want:
         jumps[s] = jump_url(s, q, a)
+    if unknown:
+        notes["未识别"] = ("已忽略不认识的来源：%s（可选 CNKI / 百度学术 / GitHub / arXiv）"
+                         % "、".join(unknown))
     with ThreadPoolExecutor(max_workers=max(1, len(want))) as ex:
         futs = {ex.submit(fns[s], q, n): s for s in want if s in fns}
         for fu, s in [(f, futs[f]) for f in futs]:

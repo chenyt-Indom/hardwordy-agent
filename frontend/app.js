@@ -15102,7 +15102,9 @@
       const pts = core.points || [];
       h += '<div class="iter-act risk-low">' +
         '<div class="iter-act-head">' +
-          '<span class="iter-act-t">' + esc(it.title_zh || it.title || "") + '</span>' +
+          // ★ 2026-11-19 修：后端字段是 zh_title，原来写成 title_zh，
+          //   取不到就退回英文 title —— 中文标题白抓了，卡片上永远只有英文。
+          '<span class="iter-act-t">' + esc(it.zh_title || it.title_zh || it.title || "") + '</span>' +
           '<span class="iter-risk">' + esc(ev.verdict || "") + '</span>' +
           '<span class="iter-act-st">均分 ' + (it.avg == null ? "—" : it.avg) + '</span>' +
         '</div>' +
