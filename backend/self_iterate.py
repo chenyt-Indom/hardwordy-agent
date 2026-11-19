@@ -5624,8 +5624,11 @@ def _remember_plan(plan):
         except Exception:                               # noqa: BLE001
             prev = ""
         hist = _mem_history(prev, _MEM_HISTORY_ZH.get(trig) or zh)
-        line = "%s ｜ %s：%s" % (base[:200], _MEM_HISTORY_KEY, "、".join(hist))
-        _mem.update_long(_MEM_HINT, line[:320])
+        # ⚠️ 这里必须用 _clip 而不是 base[:200]：摘要满 40 字 + 5 个标题各 24 字时
+        #   base 能到 204 字，硬切正好可能把某个标题的「切开，留下孤立的开引号，
+        #   而且这条会永久写进长期记忆（2026-11-19 实测可达）。
+        line = "%s ｜ %s：%s" % (_clip(base, 200), _MEM_HISTORY_KEY, "、".join(hist))
+        _mem.update_long(_MEM_HINT, _clip(line, 320))
     except Exception:                                   # noqa: BLE001
         logger.debug("写迭代记忆失败", exc_info=True)
 
