@@ -16353,4 +16353,95 @@ def deploy_stop():
     return deploy_keys.stop_deploy()
 
 
+# =====================================================================
+#  一句话订好整件事：多步任务编排 + 侧栏进度（2026-11-21）
+# =====================================================================
+# 用户此前是「查天气 → 查路线 → 写行程 → 做 PPT」一件一件交代，
+# 每件事都得重新开口，中间的衔接全靠人做调度 —— 这是「同一需求被重复发送」
+# 里最贵的一种。这里给出那个调度：一句话 → 拆步 → 逐步跑完 → 打成一个包。
+#
+# 分工（谁都不许越界）：
+#   backend/jobplan.py  拆步 / 落盘 / 执行 / 打包（不重写任何工具）
+#   backend/tools.py    job_step() 按 tool 分发到已有工具并回填结果
+#   本文件              plan_and_run() + 两个接口（前端轮询进度 / 下 zip）
+#   frontend/jobplan.js renderJobProgress() 侧栏进度条 + 下载入口
+def plan_multi_step(goal: str, llm=None, steps=None) -> list:
+    """把一句话拆成可执行步骤（真正的拆解规则在 jobplan.plan_steps）。"""
+    from . import jobplan
+    return jobplan.plan_steps(goal, llm=llm, steps=steps)
+
+
+def plan_and_run(goal: str, steps=None, llm=None, pack: bool = True,
+                 wait: bool = True) -> dict:
+    """一句话 → 多步任务：拆步、跑完、成品打成 zip。返回**给前端的任务视图**。
+
+    参数（都能不传，全都有兜底）：
+      goal   用户的整句话，例如「帮我订好汕头两日游，出文档和 PPT」
+      steps  已经拆好的步骤（不传就让模型拆；模型不可用走规则兜底）
+      llm    拆步/写作用的模型调用 `llm(prompt)->str`。
+             ⚠️ 做成参数而不是模块级变量：回归是在服务进程里跑的，
+             直接给模块属性赋值会把全局状态永久改掉（踩过一次，断言被判拒）。
+      pack   跑完是否打 zip（默认打）
+      wait   True=阻塞跑完再返回；False=后台线程跑，立刻返回任务（供前端轮询）
+
+    返回 jobplan.public_job()：含 steps（每步 status/ok/files）、percent、
+    zip_ready。步骤 status 只表示「跑过没有」，工具自己的成败看 ok。
+    """
+    from . import jobplan
+    # 允许把 llm 当第二个位置参数传（plan_and_run(goal, fake_llm)），别悄悄当成 steps
+    if callable(steps) and llm is None:
+        steps, llm = None, steps
+    job = jobplan.create_job(goal, steps=steps, llm=llm)
+    if not wait:
+        threading.Thread(target=jobplan.run_job, args=(job["id"],),
+                         kwargs={"llm": llm, "pack": pack},
+                         name="jobplan-%s" % job["id"], daemon=True).start()
+        return jobplan.public_job(job)
+    done = jobplan.run_job(job["id"], llm=llm, pack=pack)
+    return jobplan.public_job(done)
+
+
+@app.post("/api/job/plan")
+def job_plan(body: dict):
+    """一句话 → 建任务并**立刻开跑**（后台线程），返回任务让前端轮询进度。
+
+    为什么不在这个请求里跑完：拆步 + 查天气 + 生成 docx/pptx 动辄几十秒，
+    同步等会让前端以为卡死（浏览器 30 秒也会先断）。
+    """
+    b = body or {}
+    goal = str(b.get("goal") or b.get("text") or "").strip()
+    if not goal:
+        return {"ok": False,
+                "error": "先说一句要办的事，例如：帮我订好汕头两日游，出文档和 PPT"}
+    job = plan_and_run(goal, wait=False)
+    return {"ok": True, "job": job}
+
+
+@app.get("/api/plan/status/{job_id}")
+def plan_status(job_id: str):
+    """侧栏进度条轮询这个：返回每步状态、总体百分比、成品列表。"""
+    from . import jobplan
+    job = jobplan.load_job(job_id)
+    if not job:
+        return {"ok": False, "error": "没有这个任务：%s" % job_id}
+    return {"ok": True, "job": jobplan.public_job(job)}
+
+
+@app.get("/api/job/zip")
+def job_zip(job: str):
+    """下载某个任务的成品包（各步生成的文档/PPT + 任务说明.md）。"""
+    from . import jobplan
+    j = jobplan.load_job(job)
+    if not j:
+        raise HTTPException(status_code=404, detail="没有这个任务：%s" % job)
+    path = str(j.get("zip_path") or "")
+    if not path or not os.path.exists(path):
+        path = jobplan.pack_zip(j)          # 没打包过（或文件被删）就现打一份
+        jobplan.save_job(j)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=500, detail="打包失败：成品包没生成出来")
+    return FileResponse(path, filename="%s.zip" % j.get("id"),
+                        media_type="application/zip")
+
+
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")

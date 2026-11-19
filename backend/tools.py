@@ -2947,6 +2947,80 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
     return f"[未知工具] {name}"
 
 
+# =====================================================================
+#  多步任务（jobplan）的单步执行
+# =====================================================================
+# 为什么要单独一个入口（2026-11-21）
+# ---------------------------------
+# 「一句话订好整件事」会把用户的需求拆成几步（查天气 → 查路线 → 写文档 → 做 PPT）。
+# 这些活**这里一个都不重写**：天气有天气的 key、路线有路线的联网条件、
+# docx/pptx 有模板和图片基底 —— 重写一遍就等于分叉出第二套实现，改了这边忘了那边。
+# 所以 `job_step` 只做三件事：
+#   ① 把 step['tool'] 收敛成 dispatch 认识的名字；
+#   ② 走已有的 dispatch()（含它前面那些文件名还原之类的兜底）；
+#   ③ 把返回值和产出的文件名回填进 step，供 jobplan 落盘 / 打包。
+_JOB_TOOL_CANON = {
+    "get_weather": "get_weather", "weather": "get_weather",
+    "map_plan": "map_plan", "map": "map_plan",
+    "make_docx": "make_docx", "docx": "make_docx", "word": "make_docx",
+    "make_pptx": "make_pptx", "pptx": "make_pptx", "ppt": "make_pptx",
+}
+
+# 工具用**正常返回**表达失败（不走异常）时的开头语，用来填 step['ok']。
+_JOB_FAIL_RE = re.compile(
+    r"^(?:错误|失败|生成文档失败|生成 PPT 失败|生成表格失败|天气查询失败|"
+    r"写入生成文库失败|读取生成的临时文件失败|请提供|\[未知工具\])")
+# make_docx / make_pptx 返回的下载链接里带着库内相对路径，打包时要靠它找文件。
+_JOB_FILE_RE = re.compile(r"/api/doclib/download\?rel=([^\s\"'>)]+)")
+
+
+def job_step(job, step, ui_events=None) -> dict:
+    """跑 job 里的一步：按 tool 分发到**已有**工具函数，结果回填进 step。
+
+    返回 step 本身（就地回填），字段：
+      result  工具返回的文本（截断到 8000 字，够看结论/链接）
+      ok      None=没判定 / True=工具说成了 / False=工具自己报了错
+      files   这一步产出的库内文件名（打包用）
+      error   分发层面的硬错误（认不出工具等），由 jobplan 决定步骤状态
+    """
+    st = step if isinstance(step, dict) else {}
+    if not st:
+        return {"error": "step 必须是 dict"}
+    from . import jobplan as _jp
+    raw = st.get("tool")
+    tool = _jp.canon_tool(raw) or ""
+    if not tool:
+        msg = "不认识的任务类型：%s（只支持 天气 / 路线 / 文档 / PPT）" % (raw,)
+        st["result"] = msg
+        st["error"] = msg
+        st["ok"] = False
+        return st
+    args = st.get("args")
+    if not isinstance(args, dict):
+        args = {}
+    events = ui_events if isinstance(ui_events, list) else []
+    context = {"job": str((job or {}).get("id") or ""),
+               "job_goal": str((job or {}).get("goal") or "")}
+    try:
+        out = dispatch(_JOB_TOOL_CANON.get(tool, tool), args, events, context)
+    except Exception as exc:                              # noqa: BLE001
+        # 工具内部异常不该由这里吞掉再上报成"成功" —— 明确记进 step，让用户看见
+        st["result"] = ""
+        st["ok"] = False
+        st["error"] = "%s: %s" % (type(exc).__name__, exc)
+        return st
+    text = str(out or "")
+    st["result"] = text[:8000]
+    st["ok"] = not bool(_JOB_FAIL_RE.match(text.strip()))
+    files = []
+    for m in _JOB_FILE_RE.finditer(text):
+        rel = urllib.parse.unquote(m.group(1))
+        if rel and rel not in files:
+            files.append(rel)
+    st["files"] = files
+    return st
+
+
 # ---------- 论文雷达：检索 / 四维评估 ----------
 _CLIP_PAIRS = (("「", "」"), ("『", "』"), ("《", "》"), ("（", "）"), ("【", "】"), ("(", ")"))
 

@@ -1413,8 +1413,11 @@
       var v = String(Date.now());
       // ★ 2026-11-15：livecard.js 必须在 app.js **之前** ——
       //   app.js 一启动就要读 LiveCard.LABELS，晚了就会拿到空对象。
+      // ★ 2026-11-21：jobplan.js 是「一句话订整件事」的侧栏进度面板。
+      //   它自己往 #topQuick 里挂按钮、自己建面板，不依赖 app.js，
+      //   所以放最后加载也不会漏入口（mountButton 里还有重试）。
       ["/static/livecard.js", "/static/app.js", "/static/artifacts.js",
-       "/static/featpanel.js"].forEach(function (src) {
+       "/static/featpanel.js", "/static/jobplan.js"].forEach(function (src) {
         document.write('<script src="' + src + '?v=' + v + '"><\/script>');
       });
     })();
