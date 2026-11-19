@@ -7049,6 +7049,15 @@ html[data-theme="light"] .iter-site:hover {
   color: var(--muted, #8a93a6); font-size: 11px; white-space: pre-wrap; }
 .livecard.open .lc-detail { display: block; }
 .livecard[hidden] { display: none; }
+
+/* ★ 2026-11-20 用户报「任务正在跑，底部却挂着『继续跑』，不是遇阻才弹吗？」
+   根因：`.if-paused { display: flex }` 的优先级高于浏览器默认的
+   `[hidden] { display: none }`，于是 hidden 属性完全失效 —— 暂停条从
+   卡片创建的第一刻起就永久可见，跟后端状态无关。
+   同类漏网的还有 .if-q-item / .if-think-body / .if-card-body 等。
+   这里对迭代卡片内部统一兜底，作用域限定在 .iter-feed 内，不影响别处。 */
+.iter-feed [hidden] { display: none !important; }
+
 @media (max-width: 640px) {
   .livecard { max-width: 100%; }
   .livecards { gap: 5px; }
