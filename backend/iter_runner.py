@@ -73,6 +73,14 @@ _RESTART_DELAY = 1.5
 # 撞上「另一个执行占着锁」时，隔多久把任务重新提上来（秒）。
 _LOCK_RETRY_DELAY = 20
 
+# ★ 2026-11-20 修（用户报「卡住不动了」）：
+#   重启后 _STATE["running"] 会从 task.json 恢复出来，但那条的 worker 线程
+#   已经随**旧进程**消失了 —— 它是个「孤儿」。boot_resume 原来只判断
+#   `busy = bool(running)`，看见孤儿就以为还有活干，直接 return，
+#   结果队列里排着的任务永远轮不到，界面上就是一张卡死不动、秒数一直涨的卡片。
+#   判据：started_at 早于本进程启动时间 ⇒ 必是上一个进程留下的孤儿。
+_BOOT_AT = time.time()
+
 
 def task_timeout_sec():
     """单个功能的最长执行时间（秒）。settings.json 里 iter_task_timeout_min 可改。
@@ -501,6 +509,10 @@ def _worker(item):
                         "at": time.time(),
                     }
                 _save()
+                _emit(tid, "status",
+                      text="✅ 任务完成：%s（改了 %d 个文件，马上自动重启验证）"
+                           % (item.get("title") or "未命名功能", len(changed)),
+                      state="running", verified=False)
                 _emit(tid, "restart",
                       text="这次改了 %d 个文件，稍后自动重启并验证" % len(changed),
                       files=changed[:12])
@@ -534,7 +546,7 @@ def _worker(item):
             # 走「重启 → 自动验证 → 再接下一个」这条链，
             # 这里**不能**调 _next()：否则下一个任务会在重启前抢跑，
             # 跑到一半进程被替换掉，进度就丢了。
-            _auto_restart(reason=item.get("title") or plan_id)
+            _auto_restart(reason=item.get("title") or plan_id, tid=tid)
         else:
             _next()
 
@@ -554,6 +566,13 @@ def _finish(tid, state, ok_n, fail_n, skip_n, changed, err):
                 "at": time.strftime("%m-%d %H:%M:%S")}
         _STATE["history"].insert(0, item)
         _STATE["history"] = _STATE["history"][:_MAX_HISTORY]
+        # ★ 2026-11-20 修（用户报「卡住不动了」，截图里队列有任务却一直不跑）：
+        #   原来 _finish **不清** running，而 _next() 开头是「有 running 就 return」。
+        #   于是任务一结束（尤其没改文件、走 _next 这条路的），running 还挂着自己，
+        #   _next 看到就以为还有活干，直接返回 —— 队列永远不动，界面卡死。
+        #   这里任务确实结束了，必须把占位清掉，下一个才能被提上来。
+        if (_STATE.get("running") or {}).get("tid") == tid:
+            _STATE["running"] = None
     _save()
     # ★ 2026-11-16：把「任务失败」告诉活跃迭代引擎，让它反思为什么改失败了。
     #   只在失败时回调（selfloop 内部判断），成功也触发会变成
@@ -580,22 +599,37 @@ def _next():
     """
     nxt = None
     with _LOCK:
-        if _STATE.get("running"):
+        run = _STATE.get("running")
+        # 孤儿（线程已随旧进程消失）不能挡住队列，直接清掉继续取下一个
+        if run and float(run.get("started_at") or 0) < _BOOT_AT - 0.5:
+            logger.warning("发现重启前残留的孤儿任务，已回收：%s",
+                           run.get("plan_id"))
+            _STATE["running"] = None
+            run = None
+        if run:
             return
         if _STATE["queue"]:
             nxt = _STATE["queue"].pop(0)
-            _STATE["running"] = {"tid": nxt["tid"], "plan_id": nxt["plan_id"],
-                                 "source": nxt["source"], "title": nxt["title"],
+            # 老队列项（旧代码提交的）标题是空的 → 提上来时补推断一次，
+            # 否则卡片只能显示「正在迭代中…」，看不出在做什么功能。
+            if not str(nxt.get("title") or "").strip() and nxt.get("plan_id"):
+                nxt["title"] = _plan_title(nxt.get("plan_id"))
+            # ★ 2026-11-20：一律用 .get() —— 队列项来自落盘恢复，老数据可能缺字段，
+            #   直接 nxt["source"] 会 KeyError 把整个队列卡死（实测复现）。
+            _STATE["running"] = {"tid": nxt.get("tid") or "",
+                                 "plan_id": nxt.get("plan_id") or "",
+                                 "source": nxt.get("source") or "manual",
+                                 "title": nxt.get("title") or "",
                                  "state": "running", "started_at": time.time(),
                                  "cancel": False, "max_n": nxt.get("max_n") or 0}
-            _emit(nxt["tid"], "status",
+            _emit(nxt.get("tid") or "_sys", "status",
                   text=("前面的任务结束了，开始迭代：%s" % nxt["title"])
                        if nxt.get("title") else "前面的任务结束了，开始执行这个计划…",
                   state="running")
     _save()
     if nxt:
         th = threading.Thread(target=_worker, args=(nxt,), daemon=True,
-                              name="iter-%s" % nxt["tid"])
+                              name="iter-%s" % (nxt.get("tid") or "x"))
         th.start()
 
 
@@ -725,25 +759,61 @@ def _report_md(v, ok, problems):
         len(files),
         ("（" + "、".join("`%s`" % x for x in files[:6]) +
          ("等" if len(files) > 6 else "") + "）") if files else ""))
-    out.append("- **验证**：第 %d 轮 · %s" % (tries, "通过" if ok else "未通过"))
+    out.append("- **验证**：第 %d 轮 · %s" % (
+        tries, "✅ 通过（已验证）" if ok else "❌ 未通过"))
+    out.append("- **验证方式**：改动文件语法编译 + 代码自检（high/mid）+ 后端导入与运行状态")
     if ok:
-        out.append("- **结果**：语法、代码自检、运行状态全部正常")
+        out.append("- **结果**：语法、代码自检、运行状态全部正常，改动已生效")
+        with _LOCK:
+            qn = len(_STATE.get("queue") or [])
+            done_n = int(_STATE.get("budget") or 0)
+        out.append("- **状态**：任务完成（已验证）· 本轮第 %d 个" % done_n)
+        out.append("- **下一步**：%s" % (
+            "队列里还有 %d 个功能，自动接着做下一个" % qn if qn
+            else "队列已空，自动推荐并开始下一个功能"))
     else:
         out.append("- **结果**：还有 %d 个问题" % len(problems))
         for p in problems[:8]:
             out.append("  - %s" % p)
+        out.append("- **下一步**：自动生成修复任务继续修，修完再验证")
     out.append("- **时间**：%s" % _now())
     return "\n".join(out)
 
 
-def _auto_restart(reason=""):
+def _auto_restart(reason="", tid=""):
     """后台延迟重启，让改动生效。
 
     安全闸：先 verify_import，导入都过不去就**绝不重启**（否则应用直接起不来），
     只在界面报错等人工处理。
+
+    ★ 2026-11-20 用户要求：「如果需要自动重启时有正在跑的内容，要等当前任务
+      完成之后再自动重启，重启之后立即进行验证」。
+      所以这里分两步：
+        ① 调用方（_worker 的 finally）保证**本任务已经跑完**才进来；
+        ② 进来后再确认没有别的任务在跑 —— 有就等它结束，绝不在别人改代码
+           改到一半时把进程换掉（那会留下改了一半的文件）。
     """
     def _do():
         time.sleep(_RESTART_DELAY)
+        # ① 先把**自己**的 running 清掉（任务已结束，只是状态还没回收）
+        with _LOCK:
+            run = _STATE.get("running")
+            if run and (not tid or run.get("tid") == tid):
+                _STATE["running"] = None
+        _save()
+        # ② 若还有别的任务在跑，等它跑完再重启（最多等一个任务超时）
+        deadline = time.time() + max(60, int(task_timeout_sec() or 1800))
+        waited = False
+        while time.time() < deadline:
+            with _LOCK:
+                run = _STATE.get("running")
+                if not run or float(run.get("started_at") or 0) < _BOOT_AT - 0.5:
+                    break
+            if not waited:
+                _emit_sys("还有任务在跑，等它跑完再自动重启（不打断当前工作）…",
+                          state="restarting")
+                waited = True
+            time.sleep(2)
         try:
             from . import selfdev as _sd
             v = _sd.verify_import()
@@ -802,8 +872,10 @@ def _verify_worker():
             _STATE["budget"] = int(_STATE.get("budget") or 0) + 1
             done_n = _STATE["budget"]
             qn = len(_STATE["queue"])
-        _emit(tid, "status", text="验证通过 ✅「%s」完成（本轮第 %d 个）"
-              % (v.get("title") or "", done_n), state="done")
+        _emit(tid, "status",
+              text="✅ 任务完成（已验证）：%s（本轮第 %d 个）"
+                   % (v.get("title") or "未命名功能", done_n),
+              state="done", verified=True)
         _emit(tid, "report", text=md, title=v.get("title") or "")
         _save()
         if done_n >= _MAX_AUTO_ROUNDS:
@@ -871,13 +943,47 @@ def boot_resume():
     工具进程都会意外开始执行任务）。
     """
     time.sleep(2.5)                                     # 等 FastAPI 起来
+    orphan = None
     with _LOCK:
         v = _STATE.get("verify")
+        # ★ 2026-11-20：先回收「孤儿」—— 重启前在跑、但线程已随旧进程消失的任务。
+        #   它的 started_at 早于本进程启动时间，不可能还活着。
+        run = _STATE.get("running")
+        if run and float(run.get("started_at") or 0) < _BOOT_AT - 0.5:
+            orphan = run
+            _STATE["running"] = None
+            # ★ 已结束的任务只是没清占位（history 里有它）→ 直接丢掉，别重跑一遍
+            _done = any((h.get("tid") or "") == (run.get("tid") or "")
+                        for h in (_STATE.get("history") or []))
+            if _done:
+                logger.warning("孤儿任务其实早已结束（history 里有记录），不再重跑：%s",
+                               run.get("plan_id"))
+                orphan = dict(orphan, finished=True)
+            else:
+                # 真没跑完：放回队首，重启后接着把它跑完 —— 不丢进度
+                _STATE["queue"].insert(0, {"tid": run.get("tid"),
+                                           "plan_id": run.get("plan_id"),
+                                           "source": run.get("source") or "manual",
+                                           "title": run.get("title") or "",
+                                           "max_n": run.get("max_n") or 0,
+                                           "at": run.get("started_at") or time.time(),
+                                           "resumed": True})
         qn = len(_STATE["queue"])
         first = (_STATE["queue"][0] if _STATE["queue"] else None)
         # ★ 2026-11-20：这两秒半里自迭代可能已经 submit 并开跑了。
         #   那种情况下**绝不能**再 _next()（会顶掉正在跑的，见 _next 的注释）。
         busy = bool(_STATE.get("running"))
+    if orphan:
+        _save()
+        _name = orphan.get("title") or orphan.get("plan_id") or "未命名任务"
+        if orphan.get("finished"):
+            _emit(orphan.get("tid") or "_sys", "status",
+                  text="「%s」上次已经跑完，只是占位没清，已回收" % _name,
+                  state="done")
+        else:
+            _emit(orphan.get("tid") or "_sys", "status",
+                  text="上次重启时「%s」还没跑完，已放回队列接着做" % _name,
+                  state="running")
     if v:
         _emit_sys("重启后恢复：先验证上一个功能「%s」，之后接着跑队列（还有 %d 个）"
                   % (v.get("title") or "", qn), state="running")
