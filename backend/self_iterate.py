@@ -5531,6 +5531,34 @@ _MEM_HISTORY_ZH = {
 }
 
 
+def _clip(s, n):
+    """按长度截断，且**不留未闭合的引号**。
+
+    ⚠️ 2026-11-19 实测：摘要按 40 字硬切，把「同时落地「实时卡片」
+    切成「同时落地「实时」，记忆里留下一个孤零零的「，读起来像坏数据。
+    这里截断后若开闭引号数量不等，回退到那个开引号之前。
+    """
+    s = str(s or "").strip()
+    if len(s) <= n:
+        return s
+    s = s[:n]
+    pairs = (("「", "」"), ("『", "』"), ("【", "】"),
+             ("（", "）"), ("《", "》"), ("(", ")"))
+    # 修剪一种引号可能把另一种的闭合号一起切掉，所以循环到稳定为止。
+    # 最多 3 轮：嵌套再深也够，且保证一定退出。
+    for _ in range(3):
+        changed = False
+        for op, cl in pairs:
+            if s.count(op) > s.count(cl):
+                i = s.rfind(op)
+                if i >= 0:
+                    s = s[:i] if i > 0 else s[1:]
+                    changed = True
+        if not changed:
+            break
+    return s.rstrip(" ，、：:·-—")
+
+
 def _mem_history(prev_line, zh):
     """把当前触发名并进历史清单：新的在前、去重、最多 _MEM_HISTORY_N 个。
 
@@ -5573,7 +5601,7 @@ def _remember_plan(plan):
         acts = [a for a in (plan.get("actions") or []) if isinstance(a, dict)]
         if not acts:
             return
-        titles = [str(a.get("title") or "").strip()[:24]
+        titles = [_clip(a.get("title"), 24)
                   for a in acts[:5] if str(a.get("title") or "").strip()]
         if not titles:
             return
@@ -5582,7 +5610,7 @@ def _remember_plan(plan):
         zh = _TRIGGER_ZH.get(trig) or trig or "unknown"
         base = "%s（%s，%s）：%s 共 %d 条推荐建议：%s" % (
             _MEM_HINT, str(plan.get("ts") or "")[:16], zh,
-            str(plan.get("summary") or "").strip()[:40] or "无摘要",
+            _clip(plan.get("summary"), 40) or "无摘要",
             len(acts), "、".join(titles))
         # ⚠️ 单条里不能出现「；」：长期记忆是按「；」切条目的，混进去会被切成两条，
         #   下一轮只替换得到前半段，后半段变成永远清不掉的垃圾条目（每轮多一条）。
