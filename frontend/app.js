@@ -14925,6 +14925,139 @@
     } catch (e) { /* 论文库拿不到不影响抽屉其它部分 */ }
   }
 
+  // ★ 2026-11-19 用户要求：论文雷达区放几个按钮，点一下直接跳转。
+  //   有检索词就**带词**跳到该站的搜索结果页，没词就开首页。
+  //   ⚠️ 只用各站公开、稳定的检索地址（和 backend 的 jump_url 同一套口径），
+  //      不拼需要登录/动态参数的内部接口 —— 那种地址过两天就失效。
+  const PAPER_SITES = {
+    "CNKI":    { home: "https://www.cnki.net/",
+                 q: "https://kns.cnki.net/kns8s/defaultresult/index?kw=" },
+    "GitHub":  { home: "https://github.com/",
+                 q: "https://github.com/search?type=repositories&q=" },
+    "百度学术": { home: "https://xueshu.baidu.com/",
+                 q: "https://xueshu.baidu.com/s?wd=" },
+    "arXiv":   { home: "https://arxiv.org/",
+                 q: "https://arxiv.org/search/?searchtype=all&query=" },
+  };
+
+  function paperJumpUrl(site, q) {
+    const s = PAPER_SITES[site];
+    if (!s) return "";
+    return q ? (s.q + encodeURIComponent(q)) : s.home;
+  }
+
+  // ★ 2026-11-19 用户要求「按作者或其他内容找出指定论文；不知道题目也能按主题找」。
+  //   这里把检索框做成**条件语法**，一个输入框同时满足三种找法：
+  //     「作者:张三」/「作者 张三」 → 按作者
+  //     「2024」/「年:2024」        → 按年份
+  //     「来源:CNKI」              → 按来源（arXiv/CNKI/GitHub/百度学术）
+  //     其余                        → 当主题走向量检索（不知道题目时用这个）
+  function parsePaperQuery(text) {
+    let s = String(text || "").trim();
+    const out = { q: "", author: "", year: 0, source: "" };
+    const take = function (re, key) {
+      const m = s.match(re);
+      if (m) { out[key] = (m[1] || "").trim(); s = s.replace(m[0], " ").trim(); }
+    };
+    take(/作者[:：]?\s*([^\s]+)/, "author");
+    take(/来源[:：]?\s*([^\s]+)/, "source");
+    const ym = s.match(/^(?:年[:：])?(\d{4})$/);
+    if (ym) { out.year = parseInt(ym[1], 10); s = ""; }
+    out.q = s.trim();
+    return out;
+  }
+
+  async function runPaperSearch(text) {
+    if (busy) return;
+    const p = parsePaperQuery(text);
+    if (!p.q && !p.author && !p.year && !p.source) {
+      say("先在输入框写条件：主题词，或「作者:张三」「2024」「来源:CNKI」", "warn");
+      return;
+    }
+    busy = true;
+    say("正在检索论文库…");
+    const qs = ["top_k=8"];
+    if (p.q) qs.push("q=" + encodeURIComponent(p.q));
+    if (p.author) qs.push("author=" + encodeURIComponent(p.author));
+    if (p.year) qs.push("year=" + p.year);
+    if (p.source) qs.push("source=" + encodeURIComponent(p.source));
+    const r = await api("/api/selfiter/papers?" + qs.join("&"));
+    busy = false;
+    if (!r || !r.ok) { say((r && r.error) || "检索失败", "bad"); return; }
+    papersData = r;
+    if (el) render();
+    const cond = [];
+    if (p.author) cond.push("作者 " + p.author);
+    if (p.year) cond.push(p.year + " 年");
+    if (p.source) cond.push("来源 " + p.source);
+    if (p.q) cond.push("主题 " + p.q);
+    say("检索到 " + ((r.items || []).length) + " 条（" + cond.join("｜") + "）",
+        (r.items || []).length ? "good" : "warn");
+  }
+
+  // ★ 2026-11-19 用户要求「接入知网、GitHub、百度这些」。
+  //   原来只有「跳转」按钮（点开对方网站自己搜），本应用里看不到任何结果。
+  //   这里补一条真正抓取的链路：能抓的真抓，抓不到就**如实说被拦**并给跳转。
+  let paperLive = null;
+
+  async function runPaperLive(text) {
+    if (busy) return;
+    const p = parsePaperQuery(text);
+    if (!p.q && !p.author) {
+      say("实时抓取需要主题或作者（如「口型同步」或「作者:张三」）", "warn");
+      return;
+    }
+    busy = true;
+    say("正在实时检索知网 / 百度学术 / GitHub / arXiv…" +
+        "（知网、百度学术常有反爬，抓不到会如实告诉你）");
+    const qs = ["max_n=4"];
+    if (p.q) qs.push("q=" + encodeURIComponent(p.q));
+    if (p.author) qs.push("author=" + encodeURIComponent(p.author));
+    const r = await api("/api/selfiter/papers/external?" + qs.join("&"));
+    busy = false;
+    if (!r || !r.ok) { say((r && r.error) || "实时检索失败", "bad"); return; }
+    paperLive = r;
+    if (el) render();
+    const notes = Object.keys(r.notes || {}).map(function (k) {
+      return k + " " + r.notes[k];
+    }).join(" · ");
+    say("实时抓到 " + (r.total || 0) + " 条｜" + notes,
+        (r.total ? "good" : "warn"));
+  }
+
+  function paperLiveHtml() {
+    const r = paperLive;
+    if (!r) return "";
+    const items = r.items || [];
+    const notes = r.notes || {};
+    const jumps = r.jumps || {};
+    const noteTxt = Object.keys(notes).map(function (k) {
+      return k + " " + notes[k];
+    }).join(" · ");
+    // 用 <details> 默认收起：不点开不占版面，符合「页面保持简洁」
+    let h = '<details class="iter-li" style="margin-bottom:8px">' +
+      '<summary><b>🌐 外部实时结果 ' + items.length + ' 条</b>　' +
+      esc(noteTxt) + '</summary>';
+    items.forEach(function (it) {
+      const au = (it.authors || []).slice(0, 3).join("、");
+      h += '<div style="margin:6px 0">· <b>' + esc(it.title || "") + '</b> ' +
+        '<span class="iter-risk">' + esc(it.source || "") + '</span>' +
+        (au ? '<br>　' + esc(au) + (it.year ? '（' + it.year + '）' : '') : '') +
+        (it.url ? '<br>　<a href="' + esc(it.url) +
+          '" target="_blank" rel="noopener">原文</a>' : '') +
+        (it.summary ? '<br>　' + esc(String(it.summary).slice(0, 140)) : '') +
+        '</div>';
+    });
+    const jl = Object.keys(jumps).map(function (k) {
+      return '<a href="' + esc(jumps[k]) + '" target="_blank" rel="noopener">' +
+        esc(k) + '</a>';
+    }).join(" · ");
+    if (jl) {
+      h += '<div style="margin-top:6px">抓不到就去官网自己搜：' + jl + '</div>';
+    }
+    return h + '</details>';
+  }
+
   function papersHtml() {
     const pd = papersData || {};
     const st = pd.stats || {};
@@ -14934,11 +15067,21 @@
       '<span class="iter-chip">值得做 <b>' + (st.adopted || 0) + '</b></span>' +
       (st.vec_ready ? '' : '<span class="iter-chip">⚠️ 向量模型未就绪，已退化为关键词</span>') +
       '</div>' +
+      // 平台跳转：带上面输入框里的检索词一起跳（没词就开首页）
+      '<div class="iter-act-btns" style="margin-bottom:8px">' +
+        '<button type="button" class="btn sm ghost iter-paper-jump" data-site="CNKI">知网</button>' +
+        '<button type="button" class="btn sm ghost iter-paper-jump" data-site="GitHub">GitHub</button>' +
+        '<button type="button" class="btn sm ghost iter-paper-jump" data-site="百度学术">百度学术</button>' +
+        '<button type="button" class="btn sm ghost iter-paper-jump" data-site="arXiv">arXiv</button>' +
+      '</div>' +
       '<div class="iter-act-btns" style="margin-bottom:10px">' +
         '<button type="button" class="btn sm ghost iter-paper-eval">📡 评估未评估的论文</button>' +
+        '<button type="button" class="btn sm ghost iter-paper-search">🔍 检索</button>' +
+        '<button type="button" class="btn sm ghost iter-paper-live">🌐 实时抓取</button>' +
         '<input class="iter-focus iter-paper-q" maxlength="60" ' +
-          'placeholder="或按主题检索并评估（如：显存占用 / 口型同步）">' +
-      '</div>';
+          'placeholder="主题 / 作者:张三 / 2024 / 来源:CNKI">' +
+      '</div>' +
+      paperLiveHtml();
     const items = pd.items || [];
     if (!items.length) {
       return h + '<div class="iter-li">还没有「值得做」的论文。' +
@@ -14952,6 +15095,11 @@
         const x = ev[k] || {};
         return (x.score === null || x.score === undefined) ? "—" : x.score;
       };
+      // ★ 2026-11-19：显示后端提炼的「核心」（一句话 + 3 条要点 + 有没有用）。
+      //   没有 core 时退回原来的一句话结论，不留空白。
+      const core = it.core || {};
+      const coreTxt = core.core || ev.verdict_reason || "";
+      const pts = core.points || [];
       h += '<div class="iter-act risk-low">' +
         '<div class="iter-act-head">' +
           '<span class="iter-act-t">' + esc(it.title_zh || it.title || "") + '</span>' +
@@ -14960,7 +15108,12 @@
         '</div>' +
         '<div class="iter-act-d">可行 ' + sc("feasibility") + ' · 创新 ' + sc("novelty") +
           ' · 效益 ' + sc("benefit") + ' · 效率 ' + sc("efficiency") + '<br>' +
-          esc(ev.verdict_reason || "") + '</div>';
+          esc(coreTxt) +
+          (pts.length ? ('<br>' + pts.map(function (p, i) {
+            return (i + 1) + ". " + esc(p);
+          }).join('<br>')) : '') +
+          (core.useful ? ('<br><b>有没有用：</b>' + esc(core.useful)) : '') +
+          '</div>';
       const plan = ev.plan || [];
       if (plan.length) {
         h += '<div class="iter-act-f">' + plan.map(function (s, i) {
@@ -16155,6 +16308,30 @@
         const box = layer();
         const qi = box ? box.querySelector(".iter-paper-q") : null;
         runPaperEval(qi ? (qi.value || "").trim() : "");
+        return;
+      }
+      // 按条件检索论文库（作者 / 年份 / 来源 / 主题）
+      if (t.classList.contains("iter-paper-search")) {
+        const box = layer();
+        const qi = box ? box.querySelector(".iter-paper-q") : null;
+        runPaperSearch(qi ? (qi.value || "").trim() : "");
+        return;
+      }
+      // 实时抓取外部源（知网/百度学术/GitHub/arXiv）
+      if (t.classList.contains("iter-paper-live")) {
+        const box = layer();
+        const qi = box ? box.querySelector(".iter-paper-q") : null;
+        runPaperLive(qi ? (qi.value || "").trim() : "");
+        return;
+      }
+      // 平台跳转：读同一行的检索框，有词就带词，没词开首页
+      if (t.classList.contains("iter-paper-jump")) {
+        const site = t.getAttribute("data-site") || "";
+        const box = layer();
+        const qi = box ? box.querySelector(".iter-paper-q") : null;
+        const q = qi ? (qi.value || "").trim() : "";
+        const url = paperJumpUrl(site, q);
+        if (url) window.open(url, "_blank", "noopener");
         return;
       }
       // ★ 2026-11-16：点「💡 换一批点子」→ 强制跳过 24h 缓存重想一批。

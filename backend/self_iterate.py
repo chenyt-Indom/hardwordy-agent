@@ -1967,9 +1967,18 @@ def fetch_arxiv(max_n=8):
         title = re.sub(r"\s+", " ", (t.group(1) if t else "")).strip()
         summ = re.sub(r"\s+", " ", (s.group(1) if s else "")).strip()[:280]
         if title:
+            # ★ 2026-11-19 用户要求「按作者找指定论文」：Atom 里本来就有
+            #   <author><name>，以前全丢掉了，导致库内 authors 字段恒为空。
+            #   <published> 是**真正的发表年月**，比入库时间更能回答「2024 年那篇」。
+            aus = [re.sub(r"\s+", " ", x).strip()
+                   for x in re.findall(r"<author>\s*<name>(.*?)</name>", blk, re.S)]
+            aus = [x for x in aus if x][:12]
+            pub = re.search(r"<published>(\d{4})", blk)
             out.append({"source": "arXiv", "title": title,
                         "url": (u.group(1).strip() if u else ""),
-                        "summary": summ})
+                        "summary": summ,
+                        "authors": aus,
+                        "year": int(pub.group(1)) if pub else 0})
     return out
 
 
@@ -2054,6 +2063,557 @@ def fetch_cn_media(max_n=6):
                 out.append({"source": "中文媒体", "title": title[:160],
                             "url": (l.group(1).strip() if l else ""), "summary": ""})
     return out[:max_n * 2]
+
+
+# ---------------------------------------------- 学术平台「尽力抓取」（2026-11-19）
+# 用户要求：反思时把知网 / GitHub / 百度学术的检索结果**尽力抓取入库**，
+# 一起参与向量检索和四维评估。
+# ⚠️ 这三个站**不是**保证能抓的，必须在实现里就承认：
+#   · 中国知网 kns 走 POST + 动态参数 + 强反爬，匿名请求基本被拦；
+#   · 百度学术对没有 cookie 的请求常返回验证页；
+#   · GitHub 有官方 Search API，是三个里唯一稳定的。
+# 所以统一约定：**抓不到就返回 (空列表, 原因字符串)**，绝不编造条目。
+# 调用方把原因写进状态，前端如实显示「知网：被拦」，而不是假装成功。
+_ACAD_UA = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/120.0 Safari/537.36"),
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+
+def _http_html(url, timeout=10):
+    """取 HTML 页面，返回 (text, status)。status 用来区分「被拦」和「网络不通」。"""
+    try:
+        import requests
+        r = requests.get(url, headers=_ACAD_UA, timeout=timeout)
+        return (r.text or ""), int(r.status_code)
+    except Exception as e:                              # noqa: BLE001
+        return "", "ERR:%s" % type(e).__name__
+
+
+def fetch_github_search(keyword, max_n=6):
+    """GitHub 按关键词搜仓库（官方 API）。返回 (items, note)。"""
+    from urllib.parse import quote
+    kw = str(keyword or "").strip()
+    if not kw:
+        return [], "无关键词"
+    # ⚠️ 2026-11-19 实测：GitHub 的仓库搜索对**中文关键词几乎无效** ——
+    #   搜「口型同步」返回的是「书库」「x86 裸机示例」甚至政治仓库，
+    #   因为中文被当成分隔符，等于没有检索条件。所以先把中文转成英文
+    #   （need2query 的规则表，纯本地、不联网），转不出来才退回原词。
+    q_kw = kw
+    note_pre = ""
+    if re.search(r"[\u4e00-\u9fff]", kw):
+        try:
+            from . import need2query
+            _ens = [x for x in (need2query.to_queries(kw, 3) or [])
+                    if not re.search(r"[\u4e00-\u9fff]", x)]
+            if _ens:
+                q_kw = " ".join(_ens[:2])
+                note_pre = "（中文→英文：%s）" % q_kw
+        except Exception:                               # noqa: BLE001
+            logger.debug("need2query failed", exc_info=True)
+    url = ("https://api.github.com/search/repositories?q=%s"
+           "&sort=stars&order=desc&per_page=%d"
+           % (quote(q_kw), max(1, min(max_n, 20))))
+    j = _http_json(url, timeout=12)
+    if not isinstance(j, dict):
+        return [], "GitHub API 无响应"
+    out = []
+    for it in (j.get("items") or [])[:max_n]:
+        name = it.get("full_name") or ""
+        if not name:
+            continue
+        out.append({
+            "source": "GitHub",
+            "title": "%s ★%s" % (name, it.get("stargazers_count", "")),
+            "url": it.get("html_url") or ("https://github.com/" + name),
+            "summary": (it.get("description") or "")[:200],
+            # owner 就是作者/组织，用户按作者找项目时用得上
+            "authors": [str((it.get("owner") or {}).get("login") or "")],
+        })
+    return out, (("OK %d 条" % len(out)) if out else "0 条命中") + note_pre
+
+
+def fetch_baidu_xueshu(keyword, max_n=6):
+    """百度学术检索（尽力而为）。返回 (items, note)。
+
+    ⚠️ 实测背景：百度学术对无 cookie 的直连请求，经常返回一个
+    「请输入验证码」的页面（HTTP 200 但正文是验证页）。所以这里**必须**
+    检查正文里有没有真实的条目结构，否则会把验证页当成「0 条结果」。
+    """
+    from urllib.parse import quote
+    kw = str(keyword or "").strip()
+    if not kw:
+        return [], "无关键词"
+    url = "https://xueshu.baidu.com/s?wd=%s" % quote(kw)
+    html, st = _http_html(url, timeout=12)
+    if not html:
+        return [], "请求失败（%s）" % st
+    if ("验证" in html and "安全验证" in html) or "wappass.baidu.com" in html:
+        return [], "被反爬拦住（要验证码），只能走跳转"
+    out = []
+    # 结果块：<h3 class="t c_font"> <a href="...">标题</a>
+    for m in re.finditer(
+            r'<h3[^>]*class="[^"]*t[^"]*"[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            html, re.S):
+        href, raw = m.group(1), m.group(2)
+        title = re.sub(r"<[^>]+>", "", raw)
+        title = re.sub(r"\s+", " ", title).strip()
+        if len(title) < 6:
+            continue
+        if href.startswith("/"):
+            href = "https://xueshu.baidu.com" + href
+        out.append({"source": "百度学术", "title": title[:200],
+                    "url": href, "summary": "", "authors": []})
+        if len(out) >= max_n:
+            break
+    if not out:
+        return [], "页面结构变了或被拦（0 条可解析）"
+    return out, "OK %d 条" % len(out)
+
+
+def _cnki_clean(s):
+    """去掉知网返回里的高亮标记 `~#@词@#~` 与首尾空白。"""
+    s = re.sub(r"~#@|@#~", "", str(s or ""))
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _cnki_url(it):
+    """构造知网详情页地址。
+
+    ⚠️ 接口里的 `articleUrl` 实测是字符串 'None'（不是真链接），
+    所以只能用 fileName + dbcode 拼。这是知网**长期可用**的传统详情页格式，
+    打开后会跳到 kns 的详情/摘要页（看全文仍需机构订阅，这是知网的限制）。
+    """
+    fn = str(it.get("fileName") or "").strip()
+    if not fn:
+        return ""
+    db = str(it.get("dbType") or "CJFD").strip() or "CJFD"
+    dbn = str(it.get("dbName") or "").strip()
+    base = ("https://kns.cnki.net/kcms/detail/detail.aspx"
+            "?dbcode=%s&filename=%s" % (db, fn))
+    if dbn:
+        base += "&dbname=" + dbn
+    return base
+
+
+# 知网频次限制的应对（2026-11-19 实测：连续两次调用第二次必 ReadTimeout）
+# · 同一进程内两次知网请求至少隔 4 秒；
+# · 同一 (主题, 作者) 10 分钟内直接复用上次结果，不重复打接口。
+_CNKI_LAST = [0.0]
+_CNKI_CACHE = {}
+_CNKI_BLOCK = [0.0]      # 熔断时间戳：刚失败过就先别打接口
+_CNKI_SESS = [None]      # 复用的 session（带 cookie）
+_CNKI_GAP = 4.0
+_CNKI_TTL = 600.0
+
+
+def _cnki_session():
+    """复用一个已预热（带 cookie）的 session。
+
+    ⚠️ 为什么复用：实测每次新建 session 都要重新 GET 一次检索页拿 cookie，
+    请求数直接翻倍，而知网是按频次限流的 —— 请求越多越容易被 ReadTimeout。
+    """
+    import requests
+    s = _CNKI_SESS[0]
+    if s is not None:
+        return s
+    s = requests.Session()
+    s.headers.update(_ACAD_UA)
+    s.headers.update({"X-Requested-With": "XMLHttpRequest",
+                      "Referer": "https://search.cnki.com.cn/Search/Result"})
+    try:
+        s.get("https://search.cnki.com.cn/Search/Result", timeout=10)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    _CNKI_SESS[0] = s
+    return s
+# 三平台并发抓的总时长上限（秒）。超过就不等了，如实标「超时已跳过」。
+ACADEMIC_TOTAL_TIMEOUT = 30.0
+
+
+def fetch_cnki(keyword, max_n=6, author=""):
+    """中国知网检索。返回 (items, note)。
+
+    ★ 2026-11-19 实测确认的可用入口（这是本次最关键的技术发现）：
+        POST https://search.cnki.com.cn/api/search/listresult
+        data={"content": 主题词, "page": 1}            # 主题检索
+        data={"content": "", "author": 作者名, "page": 1}  # 作者检索
+    返回 JSON 的 `articleList` 里有：title / summary（真摘要）/ author /
+    originate（期刊）/ publishTime / year / keyWord / downloadCount。
+    也就是说**标题、摘要、作者、年份全都能拿到**，不只是跳转。
+
+    ⚠️ 但它有**频次限制**：实测连续两次调用，第二次 ReadTimeout（15s）。
+       所以这里必须：预热 session → 25s 超时 → 最多 3 次重试 + 递增退避。
+       全部失败才如实返回原因，绝不编造条目。
+    """
+    kw = str(keyword or "").strip()
+    au = str(author or "").strip()
+    if not kw and not au:
+        return [], "无关键词"
+
+    payload = {"content": kw, "page": 1}
+    if au:
+        payload["author"] = au
+
+    import time as _t
+    ck = (kw, au, int(max_n))
+    hit = _CNKI_CACHE.get(ck)
+    if hit and (_t.time() - hit[0]) < _CNKI_TTL:
+        return list(hit[1]), hit[2] + "（缓存）"
+    # 熔断：上一次重试仍失败时，60 秒内不再打接口（越试越被限流）
+    if (_t.time() - _CNKI_BLOCK[0]) < 60:
+        return [], "知网刚被限流过，%.0f 秒后再试（或点按钮去官网搜）" % (
+            60 - (_t.time() - _CNKI_BLOCK[0]))
+    gap = _CNKI_GAP - (_t.time() - _CNKI_LAST[0])
+    if gap > 0:
+        _t.sleep(min(gap, _CNKI_GAP))
+
+    last = ""
+    for attempt in range(2):
+        try:
+            import requests
+            # 复用同一个 session：实测每次新建 session 都要重新拿 cookie，
+            # 请求数翻倍，更容易触发限流。
+            s = _cnki_session()
+            if s is None:
+                return [], "requests 不可用"
+            # ⚠️ 实测波动极大：有时 1 秒回，有时挂 25 秒才超时。
+            #   反思/检索不能被一个源拖死，所以单次只给 8 秒。
+            r = s.post("https://search.cnki.com.cn/api/search/listresult",
+                       data=payload, timeout=8)
+            if r.status_code != 200:
+                last = "HTTP %s" % r.status_code
+            else:
+                j = r.json()
+                out = []
+                for it in (j.get("articleList") or [])[:max_n]:
+                    title = _cnki_clean(it.get("title"))
+                    if len(title) < 4:
+                        continue
+                    aus = [_cnki_clean(x) for x in
+                           re.split(r"[;；,，]", str(it.get("author") or ""))]
+                    aus = [x for x in aus if x][:12]
+                    try:
+                        yr = int(_cnki_clean(it.get("year")) or 0)
+                    except Exception:                   # noqa: BLE001
+                        yr = 0
+                    out.append({
+                        "source": "CNKI",
+                        "title": title[:200],
+                        "url": _cnki_url(it),
+                        "summary": _cnki_clean(it.get("summary"))[:600],
+                        "authors": aus,
+                        "year": yr,
+                        "venue": _cnki_clean(it.get("originate"))[:80],
+                    })
+                _CNKI_LAST[0] = _t.time()
+                if out:
+                    note = "OK %d 条" % len(out)
+                    _CNKI_CACHE[ck] = (_t.time(), list(out), note)
+                    if len(_CNKI_CACHE) > 40:       # 别让缓存无限涨
+                        for k in sorted(_CNKI_CACHE,
+                                        key=lambda x: _CNKI_CACHE[x][0])[:10]:
+                            _CNKI_CACHE.pop(k, None)
+                    return out, note
+                return [], "0 条命中"
+        except Exception as e:                          # noqa: BLE001
+            last = type(e).__name__
+        _t.sleep(3.0 * (attempt + 1))       # 限流要冷却，1 秒没用
+    _CNKI_BLOCK[0] = _t.time()
+    return [], "知网限流/超时（%s），重试 2 次仍失败，60 秒内自动跳过" % last
+
+
+def fetch_academic(keyword, max_n=6, author=""):
+    """知网 / GitHub / 百度学术 三平台并发抓。返回 (items, notes)。
+
+    notes 形如 {"GitHub": "OK 5 条", "CNKI": "被拦…"}，直接进状态给前端显示。
+    **任何一个平台失败都不影响其它**，也不影响反思主流程。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    jobs = (("CNKI", lambda k, n: fetch_cnki(k, n, author)),
+            ("GitHub", fetch_github_search),
+            ("百度学术", fetch_baidu_xueshu))
+    items, notes = [], {}
+    if not str(keyword or "").strip() and not str(author or "").strip():
+        return [], {k: "无关键词" for k, _ in jobs}
+    # ⚠️ 必须有总超时：知网实测会挂 12s×2 次重试，百度学术也可能慢，
+    #   不设总闸的话一次反思会被单个源拖到一两分钟。
+    from concurrent.futures import wait as _wait
+    ex = ThreadPoolExecutor(max_workers=len(jobs))
+    try:
+        futs = {ex.submit(fn, keyword, max_n): name for name, fn in jobs}
+        done, pending = _wait(list(futs.keys()), timeout=ACADEMIC_TOTAL_TIMEOUT)
+        for fu in futs:
+            name = futs[fu]
+            if fu in pending:
+                notes[name] = "超时（>%.0fs）未返回，已跳过" % ACADEMIC_TOTAL_TIMEOUT
+                continue
+            try:
+                got, note = fu.result(timeout=0)
+            except Exception as e:                      # noqa: BLE001
+                got, note = [], "异常：%s" % type(e).__name__
+            notes[name] = note
+            items.extend(got or [])
+    finally:
+        # 不等挂住的线程：cancel_futures 让排队的不再启动，
+        # 已经跑着的靠它自己的 12s 超时自然结束（守护线程，不阻塞退出）。
+        try:
+            ex.shutdown(wait=False, cancel_futures=True)
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+    return items, notes
+
+
+# ---------------------------------------------------------------- 外部学术检索
+# ★ 2026-11-19 用户要求：「接入中国知网 / GitHub / 百度，论文雷达区域有几个
+#   按钮可以点击直接跳转；检索时还要能按作者找出指定论文」。
+#   补两件事：
+#     ① `fetch_arxiv_query` —— arXiv 官方 API 支持 au:/ti:/all: 字段查询，
+#        是目前唯一能**免费、实时、按作者**查全网的源；
+#     ② `external_search` —— 统一入口，把「能抓的抓、抓不到给跳转地址」收在一处，
+#        每个源都带 jump，抓不到也能让用户一键去官网自己搜。
+# arXiv 官方要求请求间隔 ≥3 秒，否则会被拒（表现为「无响应」）。
+# ⚠️ 2026-11-19 实测：连续调两次 fetch_arxiv_query，第二次就返回「arXiv 无响应」。
+_ARXIV_LAST = [0.0]
+
+
+def _arxiv_throttle():
+    """让 arXiv 请求之间至少隔 3 秒（官方礼貌要求）。"""
+    import time as _t
+    gap = _t.time() - _ARXIV_LAST[0]
+    if gap < 3.0:
+        _t.sleep(3.0 - gap)
+    _ARXIV_LAST[0] = _t.time()
+
+
+_JUMP_TPL = {
+    "CNKI": "https://kns.cnki.net/kns8s/defaultresult/index?kw={q}",
+    "百度学术": "https://xueshu.baidu.com/s?wd={q}",
+    "GitHub": "https://github.com/search?q={q}&type=repositories",
+    "arXiv": "https://arxiv.org/search/?query={q}&searchtype={st}",
+}
+
+
+def jump_url(source, q="", author=""):
+    """各平台的检索跳转地址。**抓不到时用户点这个自己搜，不让他卡住**。
+
+    ⚠️ 这里只用各站公开、稳定的检索地址（和 fetch_* 里实际请求的域名一致），
+       不拼任何需要登录/动态参数的内部接口 —— 那种地址过两天就失效。
+    """
+    from urllib.parse import quote
+    q = str(q or "").strip()
+    a = str(author or "").strip()
+    if source == "arXiv":
+        # arXiv 自己的检索页支持 searchtype=author，比把名字塞进 all: 更准
+        if a and not q:
+            return _JUMP_TPL["arXiv"].format(q=quote(a), st="author")
+        return _JUMP_TPL["arXiv"].format(q=quote(q or a), st="all")
+    tpl = _JUMP_TPL.get(source)
+    if not tpl:
+        return ""
+    key = ("%s %s" % (q, a)).strip() or a
+    return tpl.format(q=quote(key))
+
+
+def _parse_arxiv_entries(txt, max_n):
+    """把 arXiv Atom 的 <entry> 解析成条目列表（fetch_arxiv / fetch_arxiv_query 共用）。"""
+    out = []
+    for blk in re.findall(r"<entry>(.*?)</entry>", txt or "", re.S)[:max_n]:
+        t = re.search(r"<title>(.*?)</title>", blk, re.S)
+        s = re.search(r"<summary>(.*?)</summary>", blk, re.S)
+        u = re.search(r"<id>(.*?)</id>", blk, re.S)
+        title = re.sub(r"\s+", " ", (t.group(1) if t else "")).strip()
+        if not title:
+            continue
+        summ = re.sub(r"\s+", " ", (s.group(1) if s else "")).strip()[:400]
+        aus = [re.sub(r"\s+", " ", x).strip()
+               for x in re.findall(r"<author>\s*<name>(.*?)</name>", blk, re.S)]
+        aus = [x for x in aus if x][:12]
+        pub = re.search(r"<published>(\d{4})", blk)
+        out.append({"source": "arXiv", "title": title,
+                    "url": (u.group(1).strip() if u else ""),
+                    "summary": summ, "authors": aus,
+                    "year": int(pub.group(1)) if pub else 0})
+    return out
+
+
+def fetch_arxiv_query(query="", author="", max_n=8):
+    """arXiv **实时检索**（官方 Atom API）。支持按作者精确查。返回 (items, note)。
+
+    ⚠️ 和 `fetch_arxiv` 的分工：那个只抓「最新 cs.AI/CV/CL」，不接受任何条件；
+    这个接受 au:/all: 字段 —— 用户说「找张三那篇论文」时就靠它。
+    """
+    from urllib.parse import quote
+    q = str(query or "").strip()
+    a = str(author or "").strip()
+    if not q and not a:
+        return [], "无检索条件"
+    parts = []
+    if a:
+        # au: 后面加引号才能匹配「姓 名」这种多词姓名
+        parts.append('au:"%s"' % a.replace('"', ""))
+    if q:
+        qq = q.replace('"', "").replace(":", " ")
+        # ★ 2026-11-19：arXiv 是**全英文库**，中文关键词命中率是 0
+        #   （实测「大模型」→ 0 条）。先用 need2query 的规则表转成英文，
+        #   转不出来才退回中文原文 —— 宁可 0 条，也不假装搜到了。
+        if re.search(r"[\u4e00-\u9fff]", qq):
+            try:
+                from . import need2query as _n2q
+                ens = [x for x in _n2q.to_queries(qq, 3)
+                       if x and not re.search(r"[\u4e00-\u9fff]", x)]
+            except Exception:                           # noqa: BLE001
+                ens = []
+            if ens:
+                parts.append("(" + " OR ".join("all:%s" % x for x in ens[:2]) + ")")
+            else:
+                parts.append("all:%s" % qq)
+        else:
+            parts.append("all:%s" % qq)
+    sq = quote(" AND ".join(parts))
+    # ⚠️ 2026-11-19 实测：纯作者查询用 relevance 排序，arXiv 返回的是
+    #   2010~2012 年的老论文（Yann LeCun 明明有大量 2024 年后的新作）。
+    #   按作者查时改成「按提交时间倒序」—— 用户要的是「某人最近的论文」。
+    _sort = "submittedDate" if (a and not q) else "relevance"
+    url = ("http://export.arxiv.org/api/query?search_query=%s"
+           "&sortBy=%s&sortOrder=descending&max_results=%d"
+           % (sq, _sort, max(1, min(int(max_n or 8), 20))))
+    _arxiv_throttle()          # 连续请求会被 arXiv 拒答，先等够 3 秒
+    txt = _http(url, timeout=15)
+    if not txt:
+        return [], "arXiv 无响应"
+    got = _parse_arxiv_entries(txt, max_n)
+    # ⚠️ 2026-11-19 实测：`au:"Shunyu Yao"` 返回的是作者叫「Shu Yao」「Jus…」
+    #   这类**不同人**的论文（arXiv 的 au: 是宽松匹配，会按姓氏命中）。
+    #   不本地核一遍，「按作者找指定论文」就是假的 —— 宁可说没找到，
+    #   也不能把别人的论文当成本人的返回。
+    if a and got:
+        strict = [x for x in got
+                  if any(_author_eq(y, a) for y in (x.get("authors") or []))]
+        if strict:
+            got = strict
+        else:
+            return [], ("arXiv 没给出严格匹配「%s」的条目"
+                        "（它只按姓氏做了宽松匹配，已全部剔除）" % a)
+    return got, ("OK %d 条" % len(got)) if got else "0 条命中"
+
+
+def external_search(q="", author="", sources=None, max_n=6):
+    """知网 / 百度学术 / GitHub / arXiv **实时**检索（并发，单源失败不影响其它）。
+
+    返回 {ok, items, notes, jumps, total}：
+      · notes —— 每个源的**真实**结果（"OK 3 条" / "被反爬拦住" / "无响应"），
+                 前端如实显示，绝不把「被拦」说成「0 条」；
+      · jumps —— 每个源的官网检索地址，抓不到也能一键跳过去。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    q = str(q or "").strip()
+    a = str(author or "").strip()
+    if not q and not a:
+        return {"ok": False, "error": "没有检索条件（主题或作者至少给一个）",
+                "items": [], "notes": {}, "jumps": {}, "total": 0}
+    try:
+        n = max(1, min(int(max_n or 6), 12))
+    except Exception:                                   # noqa: BLE001
+        n = 6
+    want = [x for x in (sources or []) if x] or ["CNKI", "百度学术", "GitHub", "arXiv"]
+    # 每个源的抓取函数签名都是 (keyword, max_n) -> (items, note)
+    fns = {
+        "CNKI": lambda k, m: fetch_cnki(k or a, m),
+        "百度学术": lambda k, m: fetch_baidu_xueshu(k or a, m),
+        "GitHub": lambda k, m: fetch_github_search(k or a, m),
+        "arXiv": lambda k, m: fetch_arxiv_query(k, a, m),
+    }
+    items, notes, jumps = [], {}, {}
+    for s in want:
+        jumps[s] = jump_url(s, q, a)
+    with ThreadPoolExecutor(max_workers=max(1, len(want))) as ex:
+        futs = {ex.submit(fns[s], q, n): s for s in want if s in fns}
+        for fu, s in [(f, futs[f]) for f in futs]:
+            try:
+                got, note = fu.result()
+            except Exception as e:                      # noqa: BLE001
+                got, note = [], "异常：%s" % type(e).__name__
+            notes[s] = note
+            items.extend(got or [])
+    # 按作者检索时，把「明显不含该作者」的条目剔掉（各站解析质量不一，
+    # 宁可少给，也不要塞一堆无关的让用户自己挑）
+    if a:
+        kept = [x for x in items
+                if not x.get("authors")
+                or any(_author_eq(y, a) for y in x["authors"])]
+        # 只有真的筛出东西才用筛后的结果 —— 各站解析质量不一，
+        # 万一 authors 全是空的会让结果变成 0 条，那还不如保留原样让用户自己看
+        if kept:
+            items = kept
+    # 相关性过滤：只对**HTML 解析**出来的源（知网 / 百度学术）做。
+    # GitHub / arXiv 是官方 API，结果本身按条件返回；GitHub 还把中文转成了
+    # 英文去搜，再用原始中文 query 去滤必然误杀。
+    if q:
+        _rel, _drop = [], 0
+        for x in items:
+            if x.get("source") in ("CNKI", "百度学术") and not _relevant_item(x, q):
+                _drop += 1
+                continue
+            _rel.append(x)
+        if _drop:
+            notes["过滤"] = "已剔除 %d 条无关结果（检索页的相关推荐）" % _drop
+            items = _rel
+    return {"ok": True, "items": items, "notes": notes, "jumps": jumps,
+            "total": len(items), "q": q, "author": a}
+
+
+def _relevant_item(it, q):
+    """这条结果是否真的和查询相关（防止把「相关推荐」当成检索结果）。
+
+    ⚠️ 2026-11-19 实测：知网搜「lip sync」返回的是《新藤黄酸纳米脂质体》
+    《蛋壳膜固定化酯化酶交联条件优化》—— 那是检索页上的「相关推荐」，
+    被当成搜索结果解析了。判据：英文按**整词**、中文按 2-gram 过半命中，
+    任一成立即算相关（宁可少给，也不能给错）。
+    """
+    q = str(q or "").strip()
+    if not q:
+        return True
+    blob = ("%s %s" % (it.get("title") or "", it.get("summary") or "")).lower()
+    for w in re.findall(r"[a-z][a-z\-]{2,}", q.lower()):
+        if re.search(r"(?<![a-z])%s(?![a-z])" % re.escape(w), blob):
+            return True
+    zh = re.sub(r"[^\u4e00-\u9fff]", "", q)
+    if zh:
+        grams = [zh[i:i + 2] for i in range(len(zh) - 1)] or [zh]
+        if sum(1 for g in grams if g in blob) >= max(1, len(grams) // 2):
+            return True
+    return False
+
+
+def _norm_author(s):
+    """作者名归一：去掉空格、逗号、点，转小写。"""
+    return re.sub(r"[\s,.\-_·]+", "", str(s or "")).lower()
+
+
+def _author_tokens(s):
+    return [t for t in re.split(r"[\s,.\-_·]+", str(s or "").strip().lower()) if t]
+
+
+def _author_eq(a, b):
+    """两个人名是否指同一人 —— **词序无关**。
+
+    ⚠️ 2026-11-19 离线核对发现：只去符号的话「Zhang, San」→ zhangsan、
+    「San Zhang」→ sanzhang，双向包含都不成立 —— 按英文作者名筛外部结果
+    会把真实命中全部漏掉。这里补词序无关判据（切词后正序或逆序相等）。
+    """
+    na, nb = _norm_author(a), _norm_author(b)
+    if not na or not nb:
+        return False
+    if na in nb or nb in na:
+        return True
+    ta, tb = _author_tokens(a), _author_tokens(b)
+    if not ta or not tb:
+        return False
+    return ta == tb or ta == list(reversed(tb))
 
 
 def fetch_tech_all(progress=None):
@@ -2842,6 +3402,43 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
             progress=lambda n, done: set_stage(
                 "fetch", "已抓 %d 条（%s）" % (n, " · ".join(done))))
         set_stage("fetch", "抓到 %d 条技术动态" % (tech_total or 0))
+        # ★ 2026-11-19 用户要求「自迭代中也可以参考知网/GitHub/百度这些内容」。
+        #   ⚠️ 查证发现：`fetch_academic` 早就写好了，却**从没被调用过**（死代码）——
+        #   反思只抓 arXiv/GitHub 趋势/HN/中文媒体，知网与百度学术一次都没进过流程。
+        #   这里补上：用本轮焦点或最近痛点当关键词，三站并发**尽力**抓。
+        #   任何一站被反爬拦住都只记进 notes（前端如实显示），绝不影响主流程。
+        try:
+            _kw = str(focus or "").strip()
+            if not _kw:
+                _ex = experience_brief() or ""
+                _kw = re.sub(r"\s+", " ", _ex).strip()[:60]
+            if _kw:
+                set_stage("fetch", "并发抓取知网/百度学术/GitHub…")
+                # ⚠️ 知网有反爬限流，最坏要 ReadTimeout 12s × 重试 2 次 ≈ 36s，
+                #   会把反思从 65 秒拖到 100 秒。这里给 25 秒上限：超时就本轮跳过，
+                #   线程留在后台自己跑完（shutdown(wait=False)），不阻塞主流程。
+                from concurrent.futures import ThreadPoolExecutor as _TPE
+                _ex = _TPE(max_workers=1)
+                _fut = _ex.submit(fetch_academic, _kw, 4)
+                try:
+                    _ac, _notes = _fut.result(timeout=25)
+                except Exception:                       # noqa: BLE001
+                    _ac, _notes = [], {"_": "学术源超时（25s），本轮跳过"}
+                finally:
+                    _ex.shutdown(wait=False)
+                if _ac:
+                    tech = dict(tech or {})
+                    tech["academic"] = _ac
+                    tech_total = (tech_total or 0) + len(_ac)
+                _sig = load_signals()
+                _sig["academic_notes"] = _notes
+                _sig["academic_kw"] = _kw
+                save_signals(_sig)
+                set_stage("fetch", "学术源：%s" % " · ".join(
+                    "%s %s" % (k, v) for k, v in (_notes or {}).items()))
+        except Exception:                               # noqa: BLE001
+            # 学术源抓不到只是少一批输入，反思必须继续跑完
+            logger.debug("academic fetch failed", exc_info=True)
     sig = load_signals().get("items", [])
     journal = _journal_tail()
     exp_txt = experience_brief()
@@ -2909,6 +3506,26 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
                                   "error": r.get("error") or ""}
             set_stage("paper", "已评估 %d 篇" % (r.get("evaluated") or 0))
         paper_brief = papervec.brief_for_prompt(5)
+        # ★ 2026-11-19 用户要求「自迭代中也要参考知网/GitHub/百度这些内容，
+        #   即使不照搬原文也要能精准点出其中的核心」。
+        #   ⚠️ brief_for_prompt 只覆盖**已评估的高价值**论文，本轮新抓的外部条目
+        #   还没评估、进不了 brief —— 等于白抓。这里用 core_of 提炼一句话核心
+        #   补进去（标注清楚「是提炼不是原文」），模型才知道这些来源讲了什么。
+        try:
+            _ext = (tech or {}).get("academic") or []
+            if _ext:
+                _el = []
+                for _it in _ext[:6]:
+                    _c = papervec.core_of(_it)
+                    _el.append("- 《%s》[%s] %s" % (
+                        (_it.get("title") or "")[:90], _it.get("source"),
+                        (_c.get("core") or "")[:150]))
+                if _el:
+                    paper_brief += ("\n\n【本轮外部来源（知网/百度学术/GitHub）"
+                                    "—— 以下是提炼出的核心，不是原文】\n"
+                                    + "\n".join(_el))
+        except Exception:                               # noqa: BLE001
+            logger.debug("external brief failed", exc_info=True)
         paper_meta["stats"] = papervec.stats()
         paper_meta["recalled"] = len(recalled)
     except Exception as e:                              # noqa: BLE001

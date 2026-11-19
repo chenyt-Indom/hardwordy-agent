@@ -2586,18 +2586,26 @@ _PAPER_RADAR_SCHEMA = {
             "· action=evaluate：对一批论文做**四维评估** —— 可行性 / 创新性 / "
             "对用户的效益 / 效率提升，各 1~10 分并给理由，同时产出分步骤落地计划"
             "（改哪个文件、风险、工作量、怎么验证）；\n"
-            "· action=high：列出已评估里最值得做的（verdict=adopt_now/evaluate）。\n"
-            "用户问「最近有什么新技术能用」「这篇论文对我们有用吗」→ 用它。"
+            "· action=high：列出已评估里最值得做的（verdict=adopt_now/evaluate）；\n"
+            "· action=author：**按作者**（可加年份）找指定论文，查本地库 + arXiv 实时；\n"
+            "· action=external：**实时**查知网 / 百度学术 / GitHub / arXiv，"
+            "抓不到会给官网跳转地址。\n"
+            "用户问「最近有什么新技术能用」「这篇论文对我们有用吗」"
+            "「找张三 2024 年那篇」→ 用它。"
             "**不要凭记忆编论文标题或结论**，库里没有就说没有。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {"type": "string",
-                           "enum": ["search", "evaluate", "high"],
+                           "enum": ["search", "evaluate", "high", "author",
+                                    "external"],
                            "description": "要做哪种操作"},
                 "query": {"type": "string",
                           "description": "检索/评估的主题（search 必填）"},
+                "author": {"type": "string",
+                           "description": "作者名（author 必填；external 可只给作者）"},
+                "year": {"type": "integer", "description": "限定发表年份，可空"},
                 "top_k": {"type": "integer", "description": "返回/评估几条，默认 6"},
             },
             "required": ["action"],
@@ -2940,6 +2948,31 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
 
 
 # ---------- 论文雷达：检索 / 四维评估 ----------
+_CLIP_PAIRS = (("「", "」"), ("『", "』"), ("《", "》"), ("（", "）"), ("【", "】"), ("(", ")"))
+
+
+def _clip_text(s, n):
+    """截到 n 字以内；若切在引号中间，回退到开引号之前（避免留下孤立「）。
+
+    论文要点里常带《…》「…」，硬切会切出半个引号，读起来像坏数据。
+    """
+    s = str(s or "")
+    if n <= 0 or len(s) <= n:
+        return s
+    s = s[:n]
+    for _ in range(4):
+        changed = False
+        for a, b in _CLIP_PAIRS:
+            if s.count(a) > s.count(b):
+                i = s.rfind(a)
+                if i >= 0:
+                    s = s[:i]
+                    changed = True
+        if not changed:
+            break
+    return s.rstrip("，、；：,;: ")
+
+
 def _do_paper_radar(arguments):
     """论文雷达工具。库是累积的（反思每次抓的都会入库去重）。"""
     from . import papervec as _pv
@@ -2958,37 +2991,149 @@ def _do_paper_radar(arguments):
             lines = ["[论文雷达] 最值得做的 %d 条：" % len(hv)]
             for it in hv:
                 ev = it["eval"]
-                lines.append("\n· 《%s》[%s] 均分 %.1f → %s\n  结论：%s\n  计划：%s" % (
+                # ⚠️ 2026-11-19：这里原来只有标题和计划、**没有原文链接**，
+                #    用户问「最值得做的论文」时根本拿不到地址。补上 url 与中文要点。
+                lines.append("\n· 《%s》[%s] 均分 %.1f → %s\n  原文：%s\n  要点：%s\n  结论：%s\n  计划：%s" % (
                     it.get("zh_title") or it["title"], it.get("source"), it["avg"],
-                    ev.get("verdict"), ev.get("verdict_reason") or "",
+                    ev.get("verdict"),
+                    it.get("url") or "（库内无链接）",
+                    _clip_text(it.get("zh_points") or it.get("summary") or "", 160) or "（无）",
+                    ev.get("verdict_reason") or "",
                     "；".join("%s（%s/%s，验证：%s）" % (
                         s.get("step"), s.get("risk"), s.get("effort"), s.get("verify"))
                         for s in (ev.get("plan") or []) if isinstance(s, dict)) or "无"))
             return "\n".join(lines)
 
+        def _meta(it):
+            """作者 + 年份 + 评估分，拼成一行附加信息（没有就留空，不写「None」）。"""
+            au = "、".join([x for x in (it.get("authors") or [])[:3] if x])
+            yr = str(it.get("year") or "")
+            ev = it.get("eval") or {}
+            bits = [x for x in [au, yr] if x]
+            if ev:
+                bits.append("可行%s 创新%s 效益%s 效率%s → %s" % (
+                    (ev.get("feasibility") or {}).get("score"),
+                    (ev.get("novelty") or {}).get("score"),
+                    (ev.get("benefit") or {}).get("score"),
+                    (ev.get("efficiency") or {}).get("score"), ev.get("verdict")))
+            return ("｜" + "｜".join(bits)) if bits else ""
+
+        def _core_block(it):
+            """核心提炼：一句话核心 + 最多 3 条要点。不照搬原文，给「这篇到底讲什么」。"""
+            try:
+                c = it.get("core") or _pv.core_of(it)
+            except Exception:                           # noqa: BLE001
+                c = {}
+            out = []
+            if c.get("core"):
+                out.append("  核心：%s" % _clip_text(c["core"], 180))
+            pts = [p for p in (c.get("points") or []) if p][:3]
+            if pts:
+                out.append("  要点：" + " / ".join(_clip_text(p, 90) for p in pts))
+            if not out:
+                # 库里确实只有标题（中文媒体条目常见）—— 如实说，不编内容
+                out.append("  核心：（库内只有标题，没有摘要可提炼）")
+            return "\n".join(out)
+
         if act == "search":
             q = str(a.get("query") or "").strip()
-            if not q:
-                return "[论文雷达] search 需要 query。"
-            hits = _pv.search(q, top_k=n)
+            au = str(a.get("author") or "").strip()
+            try:
+                yr = int(a.get("year") or 0)
+            except (TypeError, ValueError):
+                yr = 0
+            src = str(a.get("source") or "").strip()
+            if not q and not (au or yr or src):
+                return ("[论文雷达] search 需要 query；"
+                        "只想按作者/年份找就用 action=author。")
+            if q:
+                hits = _pv.search(q, top_k=n, author=au, year=yr, source=src)
+            else:
+                hits = _pv.filter_items(author=au, year=yr, source=src, top_k=n)
             if not hits:
                 st = _pv.stats()
+                cond = " + ".join([x for x in [q, ("作者 " + au) if au else "",
+                                               ("%d 年" % yr) if yr else ""] if x])
                 return ("[论文雷达] 库里没有「%s」相关的内容（当前共 %d 篇，已评估 %d 篇）。"
-                        "可以让我跑一次「反思」去抓最新的，或换关键词再查。"
-                        % (q, st.get("total", 0), st.get("evaluated", 0)))
-            lines = ["[论文雷达] 「%s」命中 %d 条：" % (q, len(hits))]
+                        "可以让我跑一次「反思」去抓最新的，或换关键词再查；"
+                        "要查全网就 action=external。"
+                        % (cond, st.get("total", 0), st.get("evaluated", 0)))
+            lines = ["[论文雷达] 「%s」命中 %d 条：" % (q or au or "条件", len(hits))]
             for it in hits:
-                ev = it.get("eval") or {}
-                tag = ""
-                if ev:
-                    tag = "｜可行%s 创新%s 效益%s 效率%s → %s" % (
-                        (ev.get("feasibility") or {}).get("score"),
-                        (ev.get("novelty") or {}).get("score"),
-                        (ev.get("benefit") or {}).get("score"),
-                        (ev.get("efficiency") or {}).get("score"), ev.get("verdict"))
-                lines.append("\n· 《%s》[%s]%s\n  %s\n  %s" % (
-                    it.get("zh_title") or it["title"], it.get("source"), tag,
-                    it.get("url") or "", (it.get("summary") or "")[:200]))
+                brief = _clip_text(it.get("zh_points") or it.get("summary") or "", 200)
+                lines.append("\n· 《%s》[%s]%s\n%s\n  原文：%s" % (
+                    it.get("zh_title") or it["title"], it.get("source"), _meta(it),
+                    _core_block(it), it.get("url") or "（库内无链接）"))
+                if brief and not (it.get("core") or {}).get("core"):
+                    lines.append("  概要：%s" % brief)
+            return "\n".join(lines)
+
+        if act == "author":
+            au = str(a.get("author") or a.get("query") or "").strip()
+            if not au:
+                return "[论文雷达] author 需要 author（作者名）。"
+            try:
+                yr = int(a.get("year") or 0)
+            except (TypeError, ValueError):
+                yr = 0
+            local = _pv.filter_items(author=au, year=yr, top_k=n)
+            lines = ["[论文雷达] 按作者「%s」%s找到 %d 条（本地库）：" % (
+                au, ("（%d 年）" % yr) if yr else "", len(local))]
+            for it in local:
+                lines.append("\n· 《%s》[%s]%s\n%s\n  原文：%s" % (
+                    it.get("zh_title") or it["title"], it.get("source"), _meta(it),
+                    _core_block(it), it.get("url") or "（库内无链接）"))
+            if not local:
+                lines.append("（本地库里没有该作者的条目）")
+            # 再查一次 arXiv 实时 —— 本地库只有 172 篇，按作者查必须能查全网
+            from . import self_iterate as _si
+            got, note = _si.fetch_arxiv_query("", au, n)
+            if got:
+                lines.append("\n[arXiv 实时] 该作者 %d 条"
+                             "（⚠️ arXiv 上同名作者可能不止一位，请按标题/年份确认）："
+                             % len(got))
+                for it in got:
+                    _aus = [y for y in (it.get("authors") or []) if y]
+                    # 显示**匹配到的那位**，而不是前三个 —— 同名不同人时，
+                    # 用户要能一眼看出这篇是谁写的（原来截成「｜Jus」根本没法认）
+                    _hit = [y for y in _aus if _si._author_eq(y, au)]
+                    _who = _hit[0] if _hit else (_aus[0] if _aus else "")
+                    _more = ("（共 %d 位作者）" % len(_aus)) if len(_aus) > 1 else ""
+                    lines.append("· 《%s》｜%s%s（%s）\n  %s" % (
+                        _clip_text(it.get("title"), 120), _who, _more,
+                        it.get("year") or "年份未知", it.get("url") or ""))
+            else:
+                lines.append("\n[arXiv 实时] %s。可去 %s 自己查。" % (
+                    note, _si.jump_url("arXiv", "", au)))
+            return "\n".join(lines)
+
+        if act == "external":
+            from . import self_iterate as _si
+            q = str(a.get("query") or "").strip()
+            au = str(a.get("author") or "").strip()
+            srcs = a.get("sources")
+            if isinstance(srcs, str):
+                srcs = [x.strip() for x in srcs.split(",") if x.strip()]
+            r = _si.external_search(q, au, srcs if isinstance(srcs, list) else None, n)
+            if not r.get("ok"):
+                return "[论文雷达] %s" % (r.get("error") or "外部检索失败")
+            lines = ["[论文雷达] 实时检索「%s%s」：抓到 %d 条" % (
+                q, ("｜作者 " + au) if au else "", r.get("total") or 0)]
+            # 每个源的真实结果 —— 被反爬拦住就写「被拦」，绝不说成 0 条
+            lines.append("来源状态：" + " · ".join(
+                "%s %s" % (k, v) for k, v in (r.get("notes") or {}).items()))
+            for it in (r.get("items") or [])[:n * 2]:
+                au_s = "、".join((it.get("authors") or [])[:3])
+                lines.append("\n· 《%s》[%s]%s\n  原文：%s%s" % (
+                    _clip_text(it.get("title"), 140), it.get("source"),
+                    ("｜" + au_s) if au_s else "",
+                    it.get("url") or "（无链接）",
+                    ("\n  概要：" + _clip_text(it.get("summary"), 160))
+                    if it.get("summary") else ""))
+            jumps = r.get("jumps") or {}
+            if jumps:
+                lines.append("\n官网检索（抓不到时自己点）：" + " · ".join(
+                    "%s %s" % (k, v) for k, v in jumps.items()))
             return "\n".join(lines)
 
         if act == "evaluate":
@@ -3019,7 +3164,8 @@ def _do_paper_radar(arguments):
                            for s in (ev.get("plan") or []) if isinstance(s, dict)) or "无"))
             return "\n".join(lines)
 
-        return "[论文雷达] 不认识的 action：%s（可用 search / evaluate / high）" % act
+        return ("[论文雷达] 不认识的 action：%s"
+                "（可用 search / author / external / evaluate / high）" % act)
     except Exception as e:                              # noqa: BLE001
         return "[论文雷达] 操作失败：%s: %s" % (type(e).__name__, e)
 

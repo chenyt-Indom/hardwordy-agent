@@ -154,6 +154,19 @@ def add_batch(items, source_hint: str = "") -> dict:
                 "eval": None,            # 四维评估结果（评估过才有）
                 "eval_ts": 0,
             }
+            # ★ 2026-11-19 用户要求「按作者/年份/来源找指定论文」：
+            #   原来入库只留 title/url/summary/source，作者和年份全丢了，
+            #   导致「找张三 2024 年的那篇」根本无从过滤。这里补两个字段。
+            #   authors 统一存**列表**，抓取层没给就留空列表（不编造）。
+            _au = it.get("authors") or []
+            if isinstance(_au, str):
+                _au = [x.strip() for x in re.split(r"[,，;；、]", _au) if x.strip()]
+            row["authors"] = [str(x)[:80] for x in _au[:12] if str(x).strip()]
+            try:
+                row["year"] = int(it.get("year") or 0)
+            except Exception:                               # noqa: BLE001
+                row["year"] = 0
+            row["venue"] = str(it.get("venue") or "")[:80]
             old.append(row)
             seen[k] = row
             added += 1
@@ -171,8 +184,43 @@ def add_batch(items, source_hint: str = "") -> dict:
 
 
 # ------------------------------------------------------------------ 索引
+# 否定表述：出现在中文要点里时，整句都不能进索引文本。
+# ⚠️ 为什么必须有这条（2026-11-19 实测）：172 篇里有 **31 篇**（18%）的
+#    zh_points 是「…和本地多模态助手、**口型同步**、文档生成、知识库检索
+#    完全**无关**。」这种否定句。否定句里恰好堆满了主题词，于是查「口型同步」
+#    时它靠这句话拿到 gram=3 / cov=1.00，把「清理你的电视」「FAA 全国停飞令」
+#    「微软故障致氯气中毒」全召回了 —— 语义与用户要的**完全相反**。
+#    实测修复前「口型同步」top5 全无关，修复后只剩真正讲口型/唇动的。
+_NEG_RE = re.compile(r"(无关|不相关|不适用|不具备|不涉及|并非|没有直接|无直接|无关联|关系不大)")
+# 指代「本项目」的词：只有和否定词同时出现，才判定为「与本项目的关系判断句」。
+# ⚠️ 为什么需要这两张表配合（2026-11-19 实测第二轮）：第一版只列了「无关/不相关」，
+#    结果还有 3 篇用的是「均**无技术关联**」「**没有任何**可迁移的」「**没有可识**」——
+#    换个说法就漏了。但反过来，只凭「没有」二字就删句会误伤论文正文
+#    （如「该方法与基线相比没有显著提升」是有效内容）。所以要求：句子里
+#    必须出现指代本项目的词，才说明这句是在讲「和我们有没有关系」。
+_SELF_REF = ("本地多模态助手", "本项目", "本功能", "该项目", "本助手", "技术栈", "助手")
+_NEG_LOOSE = ("均无", "没有任何", "无任何", "没有可", "无法确认", "没有", "无技术", "不适用")
+_SENT_SPLIT = re.compile(r"[。；;\n]+")
+
+
+def _is_neg_sentence(p: str) -> bool:
+    if _NEG_RE.search(p):
+        return True
+    return any(w in p for w in _SELF_REF) and any(w in p for w in _NEG_LOOSE)
+
+
+def _strip_neg(text: str) -> str:
+    """剔除「与本项目无关」这类关系判断句（整句丢弃，不做局部删词）。"""
+    s = str(text or "")
+    if not s:
+        return ""
+    parts = _SENT_SPLIT.split(s)
+    kept = [p.strip() for p in parts if p.strip() and not _is_neg_sentence(p)]
+    return "。".join(kept)
+
+
 def _doc_text(it: dict) -> str:
-    """索引用的文本 = 原标题 + 中文标题 + 原摘要 + 中文要点。
+    """索引用的文本 = 原标题 + 中文标题 + 原摘要 + 中文要点（去掉否定句）。
 
     ⚠️ 为什么必须加中文（2026-11-15 实测）：库里 30 条里 arXiv 那 8 条是
     纯英文摘要，而用户提问是中文。用 bge-small-zh 检索「向量检索」「显存」
@@ -186,7 +234,8 @@ def _doc_text(it: dict) -> str:
     if it.get("summary"):
         parts.append(str(it["summary"]))
     if it.get("zh_points"):
-        parts.append(str(it["zh_points"]))
+        # 见 _NEG_RE 上方注释：否定句会把「完全无关」变成强相关证据
+        parts.append(_strip_neg(it["zh_points"]))
     return "\n".join(p for p in parts if p)
 
 
@@ -234,19 +283,62 @@ def _chars(s):
 _STOP = set("的了吗呢吧啊呀是在有和与及对把被从到就都很也还要会能可以这那个我你他她它们什么怎么如何为哪")
 
 
-def _coverage(qchars, text):
-    if not qchars:
-        return 0.0
-    qs = [c for c in qchars if c not in _STOP] or list(qchars)
-    ts = set(_chars(text))
-    if not ts:
-        return 0.0
-    return sum(1 for c in qs if c in ts) / float(len(qs))
+_EN_WORD = re.compile(r"[A-Za-z]{3,}")
+
+
+def _coverage(q, text):
+    """查询覆盖度：中文按**字**，英文按**整词**。
+
+    ⚠️ 英文为什么必须按词（2026-11-19 实测，这是「口型同步」翻车的真凶）：
+    原来一律按字符算，而中文查询会被 need2query 扩展成英文（「口型同步」→
+    `lip sync`）。"lip sync" 拆成 l/i/p/s/y/n/c 七个字母，**任何英文摘要**
+    都能覆盖满，cov 直接 1.00 —— 这道门槛对英文查询等于完全不存在，
+    于是「清理你的电视」「FAA 停飞令」全被当成口型同步的命中。
+    改成按词后：`lip`/`sync` 两个词在库里一篇都没有 → cov=0，正确拒绝。
+    """
+    q = str(q or "")
+    zh = [c for c in q if "\u4e00" <= c <= "\u9fff"]
+    en = _EN_WORD.findall(q)
+    scores = []
+    if zh:
+        qs = [c for c in zh if c not in _STOP] or zh
+        ts = set(_chars(text))
+        scores.append(sum(1 for c in qs if c in ts) / float(len(qs)) if ts else 0.0)
+    if en:
+        tl = str(text or "").lower()
+        scores.append(sum(1 for w in en if _en_word_in(w.lower(), tl)) / float(len(en)))
+    return max(scores) if scores else 0.0
 
 
 def _grams(s, n=2):
-    t = "".join(_chars(s))
-    return [t[i:i + n] for i in range(len(t) - n + 1)] if len(t) >= n else []
+    """**只对中文连续段**生成 2-gram。
+
+    ⚠️ 拉丁字符不生成（2026-11-19 实测）：`lip sync` 的 `li`/`ip`/`sy`/`nc`
+    在英文摘要里几乎必然出现（in / encoder / limiting 全中），
+    `_GENERIC_GRAM` 又只收了中文词，英文 2-gram 门槛形同虚设。
+    英文交给 `_en_hits` 按整词判。
+    """
+    out = []
+    for seg in re.findall(r"[\u4e00-\u9fff]+", str(s or "")):
+        if len(seg) >= n:
+            out.extend(seg[i:i + n] for i in range(len(seg) - n + 1))
+    return out
+
+
+def _en_word_in(w: str, tl: str) -> bool:
+    """整词判断（带边界）。⚠️ 不能用 `w in tl`：子串匹配下 `lip` 会命中
+    `ellipse`（e-l-l-i-p-s-e 里正好有 l-i-p），实测把「椭圆采样」判成了口型同步。"""
+    return re.search(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", tl) is not None
+
+
+def _en_hits(q, text):
+    """英文查询有多少个**完整单词**出现在文本里（长度>=3，泛词不计）。"""
+    ws = [w.lower() for w in _EN_WORD.findall(str(q or ""))]
+    ws = [w for w in ws if w not in _GENERIC_EN]
+    if not ws:
+        return 0
+    tl = str(text or "").lower()
+    return sum(1 for w in ws if _en_word_in(w, tl))
 
 
 # 通用词 bigram：命中它们**不算**有效命中。
@@ -260,6 +352,26 @@ _GENERIC_GRAM = {
     "结果", "方式", "过程", "结构", "性能", "质量", "效率", "成本", "时间", "内容",
     "信息", "知识", "学习", "训练", "推理", "支持", "实现", "设计", "开发", "服务",
     "功能", "需求", "用户", "任务", "工作", "产品", "项目", "管理", "不同", "主要",
+    # ⚠️ 2026-11-19 补：实测查「口型同步」时，某篇 VLA 延迟基准的中文要点里
+    #    有「同步」二字 → zh_gram=1、cov=0.75，于是被判成命中。
+    #    这类词在科技文本里到处都是，单独出现不能证明主题相关。
+    "同步", "测试", "部署", "框架", "算法", "架构", "流程", "指标", "场景",
+    "模块", "接口", "版本", "配置", "检测", "识别", "分割", "压缩", "检索",
+    "问答", "对话", "翻译", "摘要", "分类", "预测", "评估", "标注", "存储",
+    "传输", "加密", "权限", "日志", "监控", "调度", "并发", "缓存", "集群",
+}
+
+# 英文泛词：理由同上（2026-11-19 实测）。need2query 会把「口型同步」扩成
+# `talking head generation`，而 `head`/`generation` 在论文标题里遍地都是，
+# 命中一个就算过门槛 → 无关论文被召回。主体名词（video/image/model）**故意
+# 不列**，否则「视频生成」这类真查询会被削成 0。
+_GENERIC_EN = {
+    "generation", "generative", "head", "based", "approach", "method", "methods",
+    "framework", "frameworks", "system", "systems", "data", "learning", "training",
+    "train", "inference", "task", "tasks", "performance", "efficiency", "efficient",
+    "quality", "analysis", "large", "neural", "network", "networks", "deep",
+    "towards", "using", "via", "for", "and", "the", "with", "from", "into",
+    "sync", "synchronization", "synchronized",
 }
 
 
@@ -281,8 +393,182 @@ def _gram_hits(qgrams, text):
     return sum(1 for g in qgrams if g in ts and g not in _GENERIC_GRAM)
 
 
-def search(query: str, top_k: int = 8, only_unevaluated: bool = False) -> list:
-    """按主题召回历史论文（语义 + 关键词混合）。"""
+# ------------------------------------------------ 按作者/年份/来源过滤（2026-11-19）
+# 用户要求：「检索时能按作者或其他内容找出指定论文」。
+# 判据全部基于真实字段，不做拼音/模糊联想 —— 宁可查不到，也不要张冠李戴。
+def _norm_name(s: str) -> str:
+    """人名归一：去空格、点、连字符，转小写。
+
+    ⚠️ 为什么必须归一（真实数据）：arXiv 返回的作者名有 "Yao, Shunyu" 和
+    "Shunyu Yao" 两种写法，GitHub 的 owner 又是 "openai" 这种全小写；
+    不归一的话「Shunyu Yao」搜不到 "Yao, Shunyu"。
+    """
+    s = str(s or "").strip().lower()
+    return re.sub(r"[\s\.\-_,，、]+", "", s)
+
+
+def _name_tokens(s: str) -> list:
+    """按空格/逗号/点/连字符切词（人名用）。"""
+    return [t for t in re.split(r"[\s\.\-_,，、]+", str(s or "").strip().lower())
+            if t]
+
+
+def _name_eq(a: str, b: str) -> bool:
+    """两个人名是否指同一人 —— **词序无关**。
+
+    ⚠️ 2026-11-19 实测缺陷：上面 `_norm_name` 的注释说「不归一的话
+    『Shunyu Yao』搜不到『Yao, Shunyu』」，但归一后是 shunyuyao / yaoshunyu，
+    `want in got` 两个方向**都不成立** —— 按英文作者名查其实永远 0 条。
+    这里补一条词序无关的判据：切词后正序或逆序相等即算同一人。
+    中文名没有空格、切词只有一个 token，仍走原子串逻辑，不受影响。
+    """
+    na, nb = _norm_name(a), _norm_name(b)
+    if not na or not nb:
+        return False
+    if na in nb or nb in na:
+        return True
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if not ta or not tb:
+        return False
+    return ta == tb or ta == list(reversed(tb))
+
+
+def _year_of(it: dict) -> int:
+    """取条目的年份：优先显式 year 字段，否则从 ts 推算。"""
+    try:
+        y = int(it.get("year") or 0)
+        if y > 1900:
+            return y
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        import datetime
+        return datetime.datetime.fromtimestamp(
+            float(it.get("ts") or 0)).year
+    except Exception:                                   # noqa: BLE001
+        return 0
+
+
+def _author_match(it: dict, author: str) -> bool:
+    """这条论文的作者里是否包含 author。
+
+    · 先比 authors 列表（归一后双向包含，兼容「姓, 名」与「名 姓」）；
+    · authors 为空时**退回标题/摘要**里找 —— 老条目（2026-11-19 之前入库的
+      172 篇）根本没有 authors 字段，不退回的话用户搜任何作者都是 0 条。
+    """
+    want = _norm_name(author)
+    if not want:
+        return True
+    for a in (it.get("authors") or []):
+        # 用 _name_eq：兼容「Yao, Shunyu」与「Shunyu Yao」两种写法
+        if _name_eq(a, author):
+            return True
+    blob = _norm_name("%s %s" % (it.get("title") or "", it.get("summary") or ""))
+    return bool(want and want in blob)
+
+
+def filter_items(author: str = "", year: int = 0, source: str = "",
+                 top_k: int = 20) -> list:
+    """不带主题、只按条件筛（用户说「找张三 2024 年的那篇」但没给题目时用）。
+
+    排序：有评估分的按均分降序，其余按入库时间降序 —— 保证「最值得看的」在前。
+    """
+    items = load_all()
+    if author:
+        items = [i for i in items if _author_match(i, author)]
+    if year:
+        items = [i for i in items if _year_of(i) == int(year)]
+    if source:
+        _s = str(source).strip().lower()
+        items = [i for i in items if _s in str(i.get("source") or "").lower()]
+
+    def _k(it):
+        ev = it.get("eval") or {}
+        try:
+            avg = float(ev.get("avg") or 0)
+        except Exception:                               # noqa: BLE001
+            avg = 0.0
+        return (avg, float(it.get("ts") or 0))
+
+    items.sort(key=_k, reverse=True)
+    return items[:int(top_k)]
+
+
+# ------------------------------------------------ 核心提炼（2026-11-19）
+# 用户原话：「即使不照搬原文也要能精准点出其中的核心」。
+# 所以这里不复制摘要，而是给出：一句话核心 + 3 条要点 + 一句「对我们有没有用」。
+_VERDICT_ZH = {
+    "adopt_now": "现在就值得做",
+    "evaluate": "值得做个小实验验证",
+    "watch": "先记着，等它成熟",
+    "skip": "和我们关系不大",
+}
+_PT_SPLIT = re.compile(r"[。；;\n]+")
+
+
+def _split_sents(text: str, n: int = 3) -> list:
+    """把中文要点切成句子，丢掉否定句和过短的碎片。"""
+    out = []
+    for p in _PT_SPLIT.split(str(text or "")):
+        p = p.strip(" 　·-—、,，")
+        if len(p) < 4 or _is_neg_sentence(p):
+            continue
+        out.append(p)
+        if len(out) >= n:
+            break
+    return out
+
+
+def core_of(it: dict) -> dict:
+    """提炼一篇论文的核心：{core, points, useful}。
+
+    · core   —— 一句话核心贡献（优先用评估时的一句话结论，其次中文要点首句，
+                再退回英文摘要首句）
+    · points —— 最多 3 条要点（中文要点切句；没有就退回摘要）
+    · useful —— 一句「对我们有没有用」：有评估就给 verdict 中文 + 理由，
+                没评估就如实说「还没评估」，不编结论。
+    """
+    ev = it.get("eval") or {}
+    zh = str(it.get("zh_points") or "")
+    summ = str(it.get("summary") or "")
+
+    core = str(ev.get("verdict_reason") or "").strip()
+    sents = _split_sents(zh, 6)
+    if not core and sents:
+        core = sents[0]
+    if not core and summ:
+        core = _PT_SPLIT.split(summ)[0][:160]
+    if not core:
+        # ⚠️ 2026-11-19 实测：中文媒体（机器之心/量子位）抓来的条目 summary 是空串，
+        #    zh_points 也没评估过 → core 会是空字符串，调用方显示成「核心：」。
+        #    这里如实标注「只有标题」，而不是编一段内容出来。
+        _t = str(it.get("title") or "").strip()
+        core = ("（库内只有标题，没有摘要）" + _t) if _t else "（库内这条没有可用信息）"
+    core = core[:180]
+
+    points = sents[1:4] if (sents and sents[0] == core) else sents[:3]
+    if not points and summ:
+        # 英文摘要：按句号切，保留原文（不翻译、不改写）
+        points = [x.strip()[:150] for x in re.split(r"(?<=[.!?])\s+", summ)
+                  if len(x.strip()) > 20][:3]
+
+    v = str(ev.get("verdict") or "").strip()
+    if v:
+        useful = "%s（%s）" % (_VERDICT_ZH.get(v, v), ev.get("verdict_reason") or "")
+    else:
+        useful = "还没做过四维评估，暂时给不出「有没有用」的结论"
+    return {"core": core, "points": points[:3], "useful": useful[:200],
+            "verdict": v or ""}
+
+
+def search(query: str, top_k: int = 8, only_unevaluated: bool = False,
+           author: str = "", year: int = 0, source: str = "") -> list:
+    """按主题召回历史论文（语义 + 关键词混合）。
+
+    2026-11-19 用户要求「按作者或其他条件找指定论文」：新增 author / year /
+    source 三个过滤条件。**过滤必须和向量行用同一套下标**（见下面 idx 注释），
+    否则会重演 only_unevaluated 那次的广播错误。
+    """
     query = str(query or "").strip()
     all_items = load_all()
     if not all_items or not query:
@@ -306,6 +592,16 @@ def search(query: str, top_k: int = 8, only_unevaluated: bool = False) -> list:
     idx = list(range(len(all_items)))
     if only_unevaluated:
         idx = [i for i in idx if not all_items[i].get("eval")]
+    # ★ 2026-11-19：作者/年份/来源过滤。⚠️ 一律作用在 idx 上，
+    #   不要单独去筛 items —— mat[idx] 用的就是这份 idx，分开筛必然错位。
+    if author:
+        idx = [i for i in idx if _author_match(all_items[i], author)]
+    if year:
+        idx = [i for i in idx if _year_of(all_items[i]) == int(year)]
+    if source:
+        _s = str(source).strip().lower()
+        idx = [i for i in idx
+               if _s in str(all_items[i].get("source") or "").lower()]
     if not idx:
         return []
     items = [all_items[i] for i in idx]
@@ -323,9 +619,10 @@ def search(query: str, top_k: int = 8, only_unevaluated: bool = False) -> list:
     except Exception:
         logger.debug("silent-except", exc_info=True)
 
-    qchars_list = [_chars(q) for q in queries]
-    cov = np.asarray([max(_coverage(qc, _doc_text(i)) for qc in qchars_list) for i in items],
-                     dtype=np.float32)
+    # 文本只算一次：下面 cov / gram 都要用，原实现对每篇重复调 6 次 _doc_text
+    texts = [_doc_text(i) for i in items]
+    cov = np.asarray([max(_coverage(q, texts[k]) for q in queries)
+                      for k in range(len(items))], dtype=np.float32)
     vec = None
     if mat is not None:
         qv = embed.embed_texts(queries, is_query=True)
@@ -339,8 +636,11 @@ def search(query: str, top_k: int = 8, only_unevaluated: bool = False) -> list:
     else:
         final = cov.copy()
 
+    # 硬门槛：中文靠 2-gram，英文靠整词（见 _grams / _en_hits 注释）
     qgrams_list = [_grams(q) for q in queries]
-    gram = [max(_gram_hits(qg, _doc_text(i)) for qg in qgrams_list) for i in items]
+    gram = [max([_gram_hits(qg, texts[k]) for qg in qgrams_list]
+                + [_en_hits(q, texts[k]) for q in queries])
+            for k in range(len(items))]
 
     picked = []
     for i in range(len(items)):
@@ -676,7 +976,7 @@ def check_citation(theory: str, feature_text: str = "",
                     sims = dv @ qv[0]
                     score, rank = float(np.max(sims)), 1
         if score <= 0:      # embedding 不可用 → 退化为字面覆盖
-            score = max(_coverage(_chars(ft), _doc_text(it)) for it in found)
+            score = max(_coverage(ft, _doc_text(it)) for it in found)
 
     rt = ("第%d名" % rank) if scope == "corpus" else ""
     fl = [{"title": str(it.get("title") or "")[:120], "score": round(score, 4)}
@@ -962,9 +1262,13 @@ def high_value(top_n: int = 6) -> list:
                 sc.append(float((ev.get(k) or {}).get("score") or 0))
             except Exception:
                 sc.append(0.0)
-        out.append({"title": it.get("title"), "url": it.get("url"),
-                    "source": it.get("source"), "eval": ev,
-                    "avg": round(sum(sc) / 4.0, 2)})
+        # ⚠️ 必须带上 zh_title / zh_points / summary（2026-11-19）：
+        #    原来只回 title/url/source，工具层去取中文标题和要点全是空，
+        #    卡片上显示英文标题 +「要点：（无）」。
+        out.append({"title": it.get("title"), "zh_title": it.get("zh_title"),
+                    "url": it.get("url"), "source": it.get("source"),
+                    "zh_points": it.get("zh_points"), "summary": it.get("summary"),
+                    "eval": ev, "avg": round(sum(sc) / 4.0, 2)})
     out.sort(key=lambda x: x["avg"], reverse=True)
     return out[:top_n]
 

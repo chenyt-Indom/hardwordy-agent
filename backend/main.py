@@ -4174,25 +4174,74 @@ def selfiter_work(q: str = "", top_k: int = 8):
 
 
 @app.get("/api/selfiter/papers")
-def selfiter_papers(q: str = "", top_k: int = 12, only_high: bool = False):
+def selfiter_papers(q: str = "", top_k: int = 12, only_high: bool = False,
+                    author: str = "", year: int = 0, source: str = ""):
     """论文情报库：不传 q 就按时间列最新的；传 q 就走**向量检索**。
 
     only_high=true 只返回四维评估里 verdict=adopt_now/evaluate 的高价值项。
+    ★ 2026-11-19 用户要求「按作者或其他条件找出指定论文」，新增三个过滤参数：
+      · 带 q：向量检索 + 条件过滤（search 内部按同一套下标筛，不会错位）；
+      · 不带 q 但有 author/year/source：走 filter_items 纯条件筛。
+    每条额外带 `core`（一句话核心 + 3 条要点 + 有没有用）——
+    用户不必自己读英文摘要，也不会看到「照搬原文」式的复制。
     """
     from . import papervec as _pv
     try:
+        n = max(1, min(int(top_k or 12), 50))
+        author = str(author or "").strip()
+        source = str(source or "").strip()
+        try:
+            year = int(year or 0)
+        except (TypeError, ValueError):
+            year = 0
         if only_high:
-            return {"ok": True, "items": _pv.high_value(int(top_k or 12)),
-                    "stats": _pv.stats()}
-        q = str(q or "").strip()
-        if q:
-            return {"ok": True, "items": _pv.search(q, top_k=int(top_k or 12)),
-                    "stats": _pv.stats()}
-        items = sorted(_pv.load_all(), key=lambda x: float(x.get("ts") or 0),
-                       reverse=True)[:max(1, int(top_k or 12))]
-        return {"ok": True, "items": items, "stats": _pv.stats()}
+            items = _pv.high_value(n)
+        else:
+            q = str(q or "").strip()
+            if q:
+                items = _pv.search(q, top_k=n, author=author, year=year,
+                                   source=source)
+            elif author or year or source:
+                items = _pv.filter_items(author=author, year=year,
+                                         source=source, top_k=n)
+            else:
+                items = sorted(_pv.load_all(),
+                               key=lambda x: float(x.get("ts") or 0),
+                               reverse=True)[:n]
+        # 核心提炼：一句话核心 + 3 条要点 + 有没有用。失败只影响这一个字段，
+        # 不能让整个列表报错（core_of 里已经对空摘要做过兜底）。
+        for it in items:
+            try:
+                if not it.get("core"):
+                    it["core"] = _pv.core_of(it)
+            except Exception:                           # noqa: BLE001
+                logger.debug("core_of failed", exc_info=True)
+        return {"ok": True, "items": items, "stats": _pv.stats(),
+                "filter": {"author": author, "year": year, "source": source}}
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfiter/papers/external")
+def selfiter_papers_external(q: str = "", author: str = "", sources: str = "",
+                             max_n: int = 6):
+    """**实时**检索外部学术源：知网 / 百度学术 / GitHub / arXiv。
+
+    2026-11-19 用户要求「接入知网、GitHub、百度，按钮点了能直接跳转；
+    检索时能按作者找指定论文」。这里做两件事：
+      · 能抓的真抓（GitHub 官方 API、arXiv Atom API 稳定；知网/百度学术
+        有强反爬，抓不到就**如实报告原因**，绝不当成 0 条结果）；
+      · 每个源都回一个 jump 地址 —— 抓不到时用户一键去官网自己搜。
+    """
+    from . import self_iterate as _si
+    try:
+        srcs = [x.strip() for x in str(sources or "").split(",") if x.strip()]
+        r = _si.external_search(q=q, author=author, sources=srcs,
+                                max_n=max(1, min(int(max_n or 6), 12)))
+        return r
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                "items": [], "notes": {}, "jumps": {}}
 
 
 @app.post("/api/selfiter/papers/evaluate")

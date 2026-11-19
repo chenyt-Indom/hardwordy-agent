@@ -65,6 +65,21 @@ _ZH2EN = (
     (("一致性", "时序", "连贯"), ("temporal consistency",)),
     (("进度", "长任务", "耗时"), ("long running task", "task scheduling")),
     (("架构", "重构"), ("software architecture", "refactoring")),
+    # ★ 2026-11-19 用户要求「检索质量与准确度」：实测「大模型」「显存优化」
+    #   原来一条英文词都产不出来 → 查 arXiv/GitHub 必然 0 条（那两个站全英文）。
+    #   这里补一批最常用的技术词；放在表尾，让上面更具体的长词先匹配。
+    (("大语言模型", "大模型", "llm"), ("large language model",)),
+    (("显存", "vram", "gpu内存"), ("GPU memory", "memory efficient inference")),
+    (("量化",), ("quantization",)),
+    (("微调", "finetune"), ("fine-tuning",)),
+    (("推理",), ("inference",)),
+    (("知识库",), ("knowledge base",)),
+    (("文档", "排版", "导出"), ("document generation",)),
+    (("图像生成", "画图"), ("image generation", "diffusion model")),
+    (("语音识别",), ("speech recognition",)),
+    (("部署", "上线"), ("deployment", "model serving")),
+    (("代码",), ("code generation",)),
+    (("搜索", "检索增强"), ("retrieval augmented generation",)),
 )
 
 # 英文检索词最短长度：太短的（如 a / of）没意义
