@@ -82,9 +82,17 @@ def _write_json(p, obj):
 
 
 def _key(it: dict) -> str:
-    """去重键：优先 url，其次归一化标题。"""
+    """去重键：优先 url，其次归一化标题。
+
+    ⚠️ 2026-11-19 实测缺陷：arXiv 同一篇论文的 v1 / v2 是**两条不同的 url**，
+    原来直接拿整条 url 当键，于是同一篇论文在库里存了 2 条
+    （实测 2611.03103 的 v1 与 v2 各一条，标题、作者完全相同）。
+    后果：检索时一篇占掉两个 top_k 名额，四维评估也算两遍（白花算力）。
+    这里先把 arXiv 的版本号去掉再比 —— v1/v2/v3 就是同一篇。
+    """
     u = str(it.get("url") or "").strip().lower()
     if u:
+        u = re.sub(r"(arxiv\.org/abs/[^/?#\s]+?)v\d+(?=$|[?#])", r"\1", u)
         return "u:" + u.rstrip("/")
     t = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(it.get("title") or "").lower())
     return "t:" + t[:120]
@@ -452,9 +460,19 @@ def _year_of(it: dict) -> int:
 def _author_match(it: dict, author: str) -> bool:
     """这条论文的作者里是否包含 author。
 
-    · 先比 authors 列表（归一后双向包含，兼容「姓, 名」与「名 姓」）；
-    · authors 为空时**退回标题/摘要**里找 —— 老条目（2026-11-19 之前入库的
-      172 篇）根本没有 authors 字段，不退回的话用户搜任何作者都是 0 条。
+    · 比 authors 列表（词序无关，兼容「姓, 名」与「名 姓」）；
+    · **有 authors 字段就只认字段**，不再退回摘要里找。
+
+    ⚠️ 2026-11-19 实测缺陷（旧注释写着「authors 为空时退回标题/摘要」，
+    但代码是**无条件**退回，和注释不符）：
+      搜作者「OpenAI」命中了《The Compression Paradox in LLM Inference》，
+      它的作者是 Warren Johnson —— 只是摘要里提到 OpenAI 而已。
+      「摘要里提到某人」≠「他是作者」，这种误命中会让「按作者找指定论文」
+      变得不可信。
+    为什么现在敢改严格：库里 118/171 条已有真实 authors（arXiv 107 条按
+    arXiv 官方 API 回填、GitHub 12 条按仓库 API 回填），覆盖了全部论文类
+    条目；剩下 53 条是 HN / 中文媒体的**新闻**，本来就没有论文作者，
+    让它们出现在「按作者查论文」的结果里只会误导。
     """
     want = _norm_name(author)
     if not want:
@@ -463,8 +481,7 @@ def _author_match(it: dict, author: str) -> bool:
         # 用 _name_eq：兼容「Yao, Shunyu」与「Shunyu Yao」两种写法
         if _name_eq(a, author):
             return True
-    blob = _norm_name("%s %s" % (it.get("title") or "", it.get("summary") or ""))
-    return bool(want and want in blob)
+    return False
 
 
 def filter_items(author: str = "", year: int = 0, source: str = "",
