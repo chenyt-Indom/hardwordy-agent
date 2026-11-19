@@ -5505,6 +5505,53 @@ def rollback(pid):
 #   问「自我反思」「自我维护」检索都是 0 条，词面完全对不上。
 _MEM_HINT = "自迭代最近一轮（自我反思·自我维护）"
 
+# 摘要里额外保留「最近 N 轮出现过的触发名」。
+# ⚠️ 2026-11-19 用户要求「加」：只留最新一轮时，「代码自检」「体验评估」在
+#   那一轮过去后就检索不到了 —— 实测问「代码自检」最高分 0.46、问「体验评估」
+#   0.35，返回的全是捕蝇草、实训基地这类无关内容。四类定时任务名
+#   （自我反思 / 自我维护 / 代码自检 / 体验评估）必须长期可查。
+#   触发名总共就 7 个，去重后清单长度天然有界，不会撑大记忆。
+_MEM_HISTORY_N = 8
+_MEM_HISTORY_KEY = "近期轮次"
+
+# 历史清单里存**短名**而不是 _TRIGGER_ZH 那种整句（「代码自检发现问题」）。
+# 用户搜的就是「代码自检」「体验评估」这四个字，整句会让词面被稀释。
+_MEM_HISTORY_ZH = {
+    "event": "事件反思",
+    "daily": "定时反思",
+    "experience": "体验评估",
+    "audit": "代码自检",
+    "audit:daily": "代码自检",
+    "audit:manual": "代码自检",
+    "audit:tool": "代码自检",
+    "manual": "手动反思",
+    "manual_added": "手动待办",
+    "featradar": "推荐新功能",
+    "diagnose": "不达标诊断",
+}
+
+
+def _mem_history(prev_line, zh):
+    """把当前触发名并进历史清单：新的在前、去重、最多 _MEM_HISTORY_N 个。
+
+    旧格式（没有「近期轮次」段）解析不出来就只留当前这一个，不影响写入。
+    """
+    names = []
+    try:
+        if prev_line and _MEM_HISTORY_KEY in prev_line:
+            tail = prev_line.split(_MEM_HISTORY_KEY, 1)[1]
+            names = [s.strip() for s in re.split(r"[：:、,，/｜|]", tail) if s.strip()]
+    except Exception:                                   # noqa: BLE001
+        names = []
+    out = []
+    for n in [zh] + names:
+        n = str(n or "").strip()
+        if n and n not in out:
+            out.append(n)
+        if len(out) >= _MEM_HISTORY_N:
+            break
+    return out
+
 
 def _remember_plan(plan):
     """把本轮计划的要点写进长期记忆（**只维护一条滚动摘要**）。
@@ -5533,11 +5580,24 @@ def _remember_plan(plan):
         # 存中文触发名而不是 audit/experience 这类英文键 —— 用户是按
         # 「代码自检」「体验评估」这种中文说法来问的，存英文键检索对不上。
         zh = _TRIGGER_ZH.get(trig) or trig or "unknown"
-        line = "%s（%s，%s）：%s 共 %d 条推荐建议：%s" % (
+        base = "%s（%s，%s）：%s 共 %d 条推荐建议：%s" % (
             _MEM_HINT, str(plan.get("ts") or "")[:16], zh,
             str(plan.get("summary") or "").strip()[:40] or "无摘要",
             len(acts), "、".join(titles))
-        _mem.update_long(_MEM_HINT, line[:200])
+        # ⚠️ 单条里不能出现「；」：长期记忆是按「；」切条目的，混进去会被切成两条，
+        #   下一轮只替换得到前半段，后半段变成永远清不掉的垃圾条目（每轮多一条）。
+        base = re.sub(r"[；;\n]+", "，", base)
+        prev = ""
+        try:
+            for it in str(_mem.get_long() or "").split("；"):
+                if it.strip().startswith(_MEM_HINT):
+                    prev = it.strip()
+                    break
+        except Exception:                               # noqa: BLE001
+            prev = ""
+        hist = _mem_history(prev, _MEM_HISTORY_ZH.get(trig) or zh)
+        line = "%s ｜ %s：%s" % (base[:200], _MEM_HISTORY_KEY, "、".join(hist))
+        _mem.update_long(_MEM_HINT, line[:320])
     except Exception:                                   # noqa: BLE001
         logger.debug("写迭代记忆失败", exc_info=True)
 
