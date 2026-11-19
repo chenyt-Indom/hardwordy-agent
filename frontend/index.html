@@ -135,6 +135,16 @@
             <span id="stSummary">🔄 自检中…</span>
           </button>
           <div id="stDetail" class="st-detail" hidden></div>
+          <!-- 自检报告卡（2026-11-20）
+               痛点：用户反复问「有没有问题」，助手每次都要重新跑一遍验证、再在聊天里
+               解释一大段。这里一键把「环境自检 + 行为回归」聚合成一张卡片：
+               通过项 ✅ 一行带证据，失败项 ❌ 带证据行号，一眼看清系统状态。
+               数据来自 GET /api/selftest/report，渲染在 app.js 的「自检报告卡」段。 -->
+          <button type="button" id="btnSelftestReport" class="dl-mini st-rep-btn"
+                  title="一键生成自检报告卡：通过/失败清单 + 证据行号（约 10-20 秒）">
+            🧾 自检报告卡
+          </button>
+          <div id="selftestReport" class="st-report" hidden></div>
           <!-- 自检缓存（2026-11-16）：每次自检结果都留一份，可回看历史、单条删除或清空。
                列表由 app.js 的 loadSelftestCache() 渲染，每条显示 time / level / 发现数。 -->
           <div class="st-cache" id="selftestCacheBox">

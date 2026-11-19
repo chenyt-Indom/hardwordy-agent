@@ -2812,6 +2812,46 @@ def api_selftest(run: int = 0, model: str = ""):
     return {"ok": True, **r}
 
 
+@app.get("/api/selftest/report")
+def api_selftest_report(model: str = "", scope: str = "quick", fresh: int = 1,
+                        regress: int = 1):
+    """自检报告卡：一次返回「通过清单 + 失败清单（带证据行号）」。
+
+    用户反复问「有没有问题」，每次都要把验证重跑一遍、再靠聊天里的长文字解释，
+    白耗轮次。这里把 **环境自检** 和 **行为回归** 聚合成一张结构化卡片：
+
+        {ts, time, ok, model, scope,
+         passed: [{name, evidence, detail, source}, ...],
+         failed: [{name, evidence, detail, hint, source, severity}, ...],
+         passed_count, failed_count, error_count, warn_count, total,
+         regress: {ran, via, ok, passed, failed, seconds}, summary}
+
+    `evidence` 就是「证据」：`backend/selftest.py:114` 这样的文件:行号，
+    用户（或下一个助手）能直接跳到出事那一行，不用再猜。
+
+    参数
+    ----
+    · `model`   界面当前选用的模型（""=跟随 config），影响本地/云端项是否参与
+    · `scope`   "quick"（默认）/ "full"
+    · `fresh`   1=现场重跑环境自检（默认，约 5-10 秒）；0=先用启动时的缓存
+    · `regress` 1=附带跑一遍行为回归（默认，约 10-20 秒）；0=只出环境自检
+
+    ⚠️ `severity`：`error` = 真的失败（红叉）；`warn` = 老式断言脚本本身加载不了
+       （测试写法过时，系统本身没坏，卡片上给黄叹号）。`ok` 只看 error。
+    """
+    mdl = (model or "").strip()
+    sc = (scope or "quick").strip().lower()
+    if sc not in ("quick", "full"):
+        sc = "quick"
+    try:
+        rep = selftest.build_report(mdl, scope=sc, fresh=bool(fresh),
+                                   include_regress=bool(regress))
+    except Exception as exc:                   # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail="生成自检报告失败：%s: %s" % (type(exc).__name__, exc))
+    return {"ok": True, **rep}
+
+
 # ---------- 自检缓存：增删改查 ----------
 # 用户 2026-11-16 要求：自检结果要能像普通数据一样被查看 / 重跑 / 删除 / 清空。
 # 为什么单独开一组接口而不是复用 /api/selftest：

@@ -28,6 +28,7 @@ import importlib
 import os
 import shutil
 import socket
+import sys
 import tempfile
 import time
 from typing import Any
@@ -575,3 +576,293 @@ def run_all(model: str = "") -> dict:
 def get(model: str = "") -> dict:
     """读缓存。没跑过就返回空壳（调用方据此决定要不要现场跑一遍）。"""
     return dict(_CACHE.get(_norm(model)) or _empty(model))
+
+
+# ---------------------------------------------------------------- 报告卡
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _locate(fn: Any, default: str = "") -> str:
+    """把一个函数定位成 `backend/xxx.py:123` 这样的证据行号。
+
+    为什么报告卡一定要带这个：用户问「有没有问题」时，只回一句"失败了"
+    等于没说 —— 他没法判断该不该管、也从不知道去哪儿看。带上文件:行号，
+    他（或下一个助手）能直接跳到出事的那一行。
+    """
+    import inspect
+    try:
+        path = inspect.getsourcefile(fn) or ""
+        _, line = inspect.getsourcelines(fn)
+        if not path or not line:
+            return default
+        rel = os.path.relpath(path, _ROOT).replace("\\", "/")
+        return "%s:%d" % (rel, line)
+    except Exception:                                    # noqa: BLE001
+        return default
+
+
+def _regress_evidence(name: str) -> str:
+    """回归用例名 → `backend/regress.py:行号`（找不到就退回文件名）。
+
+    动态用例（`feature.xxx`）本身没有注册在 `_CASES` 里，证据直接指向
+    它自己的断言文件 `backend/_feature_tests/xxx.py`。
+    """
+    if name.startswith("feature."):
+        stem = name[len("feature."):]
+        return "backend/_feature_tests/%s.py" % stem
+    try:
+        from . import regress as _regress
+        for c in getattr(_regress, "_CASES", None) or []:
+            if (c or {}).get("name") == name:
+                return _locate(c.get("fn"), "backend/regress.py")
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    return "backend/regress.py"
+
+
+def _regress_severity(why: str) -> str:
+    """把「用例本身加载失败」和「断言真的挂了」分开。
+
+    `backend/_feature_tests/` 里有一批老脚本（模块级直接执行、没有 run()），
+    regress 一律记成"加载失败" —— 这是**测试写法过时**，不是系统坏了。
+    报告卡上必须能分辨：前者给 ⚠️（amber），后者才是 ❌（red），
+    否则用户每次点自检都看到一片红，很快就学会无视它了。
+    """
+    w = why or ""
+    if "断言文件加载失败" in w or "缺少 run() 函数" in w:
+        return "warn"
+    return "error"
+
+
+_REGRESS_MARK = "@@SELFTEST_REPORT@@"
+
+# 在**子进程**里跑回归。
+# 为什么不用现成的 regress.run_disk()：`backend/_feature_tests/` 里有几个历史断言
+# 文件是在模块级直接执行脚本的（结尾就是 `sys.exit(...)`），而
+# `regress._load_dynamic()` 只捕获 `Exception` —— `SystemExit` 会穿透把整个回归
+# 进程带走，run_disk() 于是拿不到结果（"子进程没跑起来"）。报告卡不能因此长期
+# 报红，所以在子进程里先把 `sys.exit` 换成普通异常：那几个文件会被 regress 记成
+# "加载失败"，其余用例照常跑完，结论才真实可用。
+_REGRESS_RUNNER = r'''
+import io
+import json
+import sys
+
+sys.path.insert(0, ".")
+# 子进程 stdout 在 Windows 上默认是 GBK，父进程按 utf-8 解码 → 中文全变乱码，
+# 于是「加载失败」这类关键字都匹配不上。这里强制 utf-8。
+try:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
+                                  errors="replace")
+except Exception:
+    pass
+_out = sys.stdout
+
+
+class _FakeExit(Exception):
+    pass
+
+
+def _fake_exit(*a, **k):
+    raise _FakeExit("sys.exit")
+
+
+sys.exit = _fake_exit
+try:
+    import os as _os
+    from backend import regress
+    # ⚠️ 用 /dev/null 而不是 StringIO：有几个用例会拿 `sys.stdout.buffer`
+    #    再包一层 TextIOWrapper，StringIO 没有 buffer，会把好用例误判成加载失败。
+    _buf = open(_os.devnull, "w", encoding="utf-8", errors="replace")
+    _old = sys.stdout
+    sys.stdout = _buf
+    try:
+        _r = regress.run(scope=sys.argv[1])
+    finally:
+        sys.stdout = _old
+except BaseException as _e:                       # noqa: BLE001
+    _r = {"ok": False, "items": [], "passed": 0, "failed": 1, "skipped": 0,
+          "total": 0, "seconds": 0.0,
+          "failed_items": [{"name": "regress",
+                            "why": "%s: %s" % (type(_e).__name__, _e)}],
+          "summary": "回归子进程异常：%s" % type(_e).__name__}
+_out.write("@@SELFTEST_REPORT@@" + json.dumps(_r, ensure_ascii=False) + "\n")
+_out.flush()
+'''
+
+
+def _run_regress(scope: str = "quick", timeout: int = 240) -> dict:
+    """跑一遍行为回归，返回和 `regress.run()` 同构的结果（永不抛异常）。
+
+    优先子进程（读的是磁盘上最新的代码，也不会污染服务进程）；子进程起不来时
+    退回进程内跑 —— 两条路径都把 `sys.exit` 换成普通异常，绝不让报告把整个
+    服务带走。
+    """
+    import json as _j
+    import subprocess
+    t0 = time.time()
+    try:
+        p = subprocess.run([sys.executable, "-c", _REGRESS_RUNNER, scope],
+                           cwd=_ROOT, capture_output=True, timeout=timeout)
+        txt = (p.stdout or b"").decode("utf-8", "replace")
+        line = ""
+        for ln in txt.splitlines():
+            if ln.startswith(_REGRESS_MARK):
+                line = ln[len(_REGRESS_MARK):]
+        if line:
+            r = _j.loads(line)
+            r["via"] = "subprocess"
+            return r
+        logger.warning("回归子进程没输出（rc=%s），退回进程内", p.returncode)
+    except Exception:                                # noqa: BLE001
+        logger.warning("回归子进程失败，退回进程内", exc_info=True)
+
+    # 退化路径：进程内跑
+    try:
+        import contextlib
+
+        from . import regress as _regress
+        _orig_exit = sys.exit
+        sys.exit = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sys.exit"))
+        try:
+            # 同上：用 /dev/null（有 .buffer），不用 StringIO
+            with open(os.devnull, "w", encoding="utf-8", errors="replace") as _dn, \
+                    contextlib.redirect_stdout(_dn):
+                r = _regress.run(scope=scope)
+        finally:
+            sys.exit = _orig_exit
+        r["via"] = "inproc"
+        return r
+    except BaseException as e:                       # noqa: BLE001
+        return {"ok": False, "items": [], "passed": 0, "failed": 1, "skipped": 0,
+                "total": 0, "seconds": round(time.time() - t0, 2),
+                "failed_items": [{"name": "regress",
+                                  "why": "%s: %s" % (type(e).__name__, e)}],
+                "summary": "回归跑不起来：%s" % type(e).__name__}
+
+
+def build_report(model: str = "", scope: str = "quick", fresh: bool = True,
+                 include_regress: bool = True) -> dict:
+    """自检报告卡：把「环境自检 + 行为回归」聚合成一张通过/失败清单。
+
+    为什么需要它（用户痛点）
+    ------------------------
+    「有没有问题」这句话用户要反复问，每问一次就得把验证重跑一遍、再靠聊天
+    里的一堆文字去解释 —— 白白浪费轮次。这里一次性把结论固化成结构化的卡片：
+        passed = [{"name": ..., "evidence": "backend/xxx.py:123", "detail": ...}]
+        failed = [{"name": ..., "evidence": "backend/xxx.py:123",
+                   "detail": 真实报错, "hint": 怎么修}]
+        ts     = 生成时间（秒级时间戳，另给 time 便于直接显示）
+    前端拿到它就能画「通过绿勾 / 失败红叉+证据」，不用自己拼字符串。
+
+    参数
+    ----
+    model           界面当前选用的模型（""/"auto" = 跟随 config）
+    scope           "quick"（秒级）/ "full"（追加全量自检 + 全模块导入）
+    fresh           True = 现场重跑环境自检；False = 先用缓存（毫秒级）
+    include_regress False = 只出环境自检（回归较慢时用）
+
+    口径
+    ----
+    · 环境自检里 `skip=True` 的项（与当前模型无关）**不进任何一个清单** ——
+      既不冒充"通过"，也不算"失败"，避免误导。
+    · 任何一侧抛异常都不会让整个报告消失：异常本身作为一条 failed 写进卡片。
+    """
+    t0 = time.time()
+    mdl = _norm(model)
+    sc = scope if scope in ("quick", "full") else "quick"
+    passed: list[dict] = []
+    failed: list[dict] = []
+
+    # ---- 1) 环境自检 ----
+    checks = {e[0]: e[2] for e in _CHECKS if len(e) >= 3}
+    try:
+        st = get(mdl) if not fresh else {}
+        if not (st.get("items") or []):
+            st = run_all(mdl)
+    except Exception as e:                               # noqa: BLE001
+        st = {"items": []}
+        failed.append({
+            "name": "自检·整体执行",
+            "evidence": _locate(run_all, "backend/selftest.py"),
+            "detail": "%s: %s" % (type(e).__name__, e),
+            "hint": "看后端日志里的完整堆栈",
+        })
+    for it in st.get("items") or []:
+        it = it or {}
+        if it.get("skip"):
+            continue
+        key = str(it.get("key") or "")
+        entry = {
+            "name": "自检·" + str(it.get("label") or key or "未知项"),
+            "evidence": _locate(checks.get(key), "backend/selftest.py"),
+            "detail": str(it.get("detail") or ""),
+            "source": "selftest",
+        }
+        if it.get("ok"):
+            passed.append(entry)
+        else:
+            entry["severity"] = "error"
+            entry["hint"] = str(it.get("hint") or "")
+            failed.append(entry)
+
+    # ---- 2) 行为回归 ----
+    reg: dict = {}
+    if include_regress:
+        reg = _run_regress(sc)
+        for it in reg.get("items") or []:
+            it = it or {}
+            if it.get("skipped"):
+                continue
+            nm = str(it.get("name") or "")
+            why = str(it.get("why") or "")
+            entry = {
+                "name": "回归·" + nm,
+                "evidence": _regress_evidence(nm),
+                "detail": why,
+                "source": "regress",
+            }
+            if it.get("ok"):
+                passed.append(entry)
+            else:
+                entry["severity"] = _regress_severity(why)
+                entry["hint"] = ("单独跑 `python -m backend.regress %s` 可复现；"
+                                 "再看 %s" % (sc, entry["evidence"]))
+                failed.append(entry)
+
+    ts = time.time()
+    errs = [x for x in failed if (x.get("severity") or "error") == "error"]
+    warns = [x for x in failed if (x.get("severity") or "error") != "error"]
+    ok = not errs
+    head = ("全部通过（%d 项）" % len(passed)) if ok else \
+           ("%d 项通过 / %d 项失败：%s" % (
+               len(passed), len(errs),
+               "；".join(str(x.get("name")) for x in errs[:3])))
+    if warns:
+        head += "（另有 %d 条用例文件无法加载，不影响系统本身）" % len(warns)
+    return {
+        "ts": ts,
+        "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)),
+        "ok": ok,
+        "model": mdl,
+        "scope": sc,
+        "passed": passed,
+        "failed": failed,
+        "passed_count": len(passed),
+        "failed_count": len(failed),
+        "error_count": len(errs),
+        "warn_count": len(warns),
+        "total": len(passed) + len(failed),
+        "regress": {
+            "ran": bool(include_regress),
+            "via": reg.get("via") or "",
+            "ok": bool(reg.get("ok")),
+            "passed": int(reg.get("passed") or 0),
+            "failed": int(reg.get("failed") or 0),
+            "skipped": int(reg.get("skipped") or 0),
+            "seconds": reg.get("seconds") or 0,
+        },
+        "seconds": round(ts - t0, 2),
+        "summary": head,
+    }

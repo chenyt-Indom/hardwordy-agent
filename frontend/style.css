@@ -2792,6 +2792,72 @@ select.pill-select option {
   line-height: 1.5;
 }
 
+/* ============ 自检报告卡（2026-11-20）============
+   一键输出「通过 / 失败清单 + 证据行号」。失败项红叉、无法加载的老脚本黄叹号、
+   通过项绿勾；列表限高滚动，绝不把侧栏越撑越长。 */
+.st-rep-btn { margin-top: 6px; width: 100%; }
+.st-report {
+  margin-top: 6px;
+  border: 1px solid #2f3a4a;
+  border-radius: 8px;
+  background: rgba(30, 34, 42, .72);
+  font-size: 11.5px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 6px 8px;
+}
+/* display 会覆盖 [hidden]，显式兜底（同 .st-detail） */
+.st-report[hidden] { display: none !important; }
+.st-rep-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding-bottom: 5px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, .08);
+}
+.st-rep-head b { font-weight: 600; color: #d6dde8; }
+.st-rep-ok { color: #4ade80; }
+.st-rep-bad { color: #f87171; }
+.st-rep-warn { color: #f0b34a; }
+.st-rep-sub { color: #9a9aa2; }
+.st-rep-sec {
+  margin: 6px 0 3px;
+  color: #9a9aa2;
+  font-size: 11px;
+  letter-spacing: .3px;
+}
+.st-rep-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 2px 0;
+  line-height: 1.5;
+}
+.st-rep-row .nm { color: #d6dde8; }
+.st-rep-row .det {
+  color: #9a9aa2;
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+.st-rep-evi {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10.5px;
+  color: #6ea8fe;
+  white-space: nowrap;
+}
+.st-rep-hint {
+  color: #f0b34a;
+  font-size: 11px;
+  padding-left: 18px;
+  width: 100%;
+  word-break: break-all;
+}
+.st-rep-wait { color: #9a9aa2; padding: 2px 0; }
+
 /* ================= 自开发改动卡片（2026-11-08）=================
    用户要求：「改了哪个文件、改了什么可以点开查看详细内容，但不撑坏页面」。
    所以：默认只显示一行摘要；展开后 diff 在**固定最大高度**的容器里滚动，
@@ -3758,6 +3824,21 @@ html[data-theme="light"] .st-detail { border-top-color: #d4d4ce; }
 html[data-theme="light"] .st-row b { color: #14161a; }
 html[data-theme="light"] .st-det { color: #4a4e57; }
 html[data-theme="light"] .st-hint { color: #92400e; }
+/* 自检报告卡（2026-11-20）：浅色下白底 + 深字，证据行号用蓝色可辨识 */
+html[data-theme="light"] .st-report {
+  background: #ffffff;
+  border-color: #b8b8b0;
+}
+html[data-theme="light"] .st-rep-head { border-bottom-color: #d4d4ce; }
+html[data-theme="light"] .st-rep-head b,
+html[data-theme="light"] .st-rep-row .nm { color: #14161a; }
+html[data-theme="light"] .st-rep-sub,
+html[data-theme="light"] .st-rep-row .det,
+html[data-theme="light"] .st-rep-sec { color: #4a4e57; }
+html[data-theme="light"] .st-rep-evi { color: #1d4ed8; }
+html[data-theme="light"] .st-rep-ok { color: #15803d; }
+html[data-theme="light"] .st-rep-bad { color: #b91c1c; }
+html[data-theme="light"] .st-rep-hint { color: #92400e; }
 
 /* ---- 4. 卡片层次（2026-11-18 用户反馈「浅色对比度不如深色、显得难看」）----
    根因：浅色下 .sidebar 是 transparent，卡片用 --panel2 直接压在 --bg 上，

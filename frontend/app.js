@@ -10743,6 +10743,110 @@
     setInterval(() => load(false), 60000);
   })();
 
+  // ================== 自检报告卡（2026-11-20）==================
+  // 痛点：用户反复问「有没有问题」，每次都要重新跑一遍验证、再在聊天里解释一大段，
+  // 白耗轮次。点这个按钮 → 后端把「环境自检 + 行为回归」聚合成一张卡片：
+  //   · 通过项 ✅ 一行（名称 + 实测值 + 证据行号）
+  //   · 失败项 ❌ + 证据（backend/xxx.py:123）+ 修复提示
+  //   · 「用例文件无法加载」单独一栏 ⚠️（老脚本没提供 run()，不是系统坏了）
+  // 数据来源：GET /api/selftest/report（后端 build_report），前端只负责画。
+  (() => {
+    const btn = document.querySelector("#btnSelftestReport");
+    const box = document.querySelector("#selftestReport");
+    if (!btn || !box) return;
+    let busy = false;
+
+    function esc(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    function curModel() {
+      const el = document.querySelector("#modelSelect");
+      return el ? el.value : "auto";
+    }
+
+    function row(icon, it) {
+      it = it || {};
+      const evi = it.evidence
+        ? '<span class="st-rep-evi" title="证据位置">' + esc(it.evidence) + "</span>"
+        : "";
+      return '<div class="st-rep-row"><span>' + icon + "</span>" +
+        '<span class="nm">' + esc(it.name) + "</span>" +
+        '<span class="det">' + esc(it.detail) + "</span>" + evi + "</div>" +
+        (it.hint ? '<div class="st-rep-hint">→ ' + esc(it.hint) + "</div>" : "");
+    }
+
+    function render(d) {
+      const passed = d.passed || [];
+      const failed = (d.failed || []).filter((x) => (x.severity || "error") === "error");
+      const warns = (d.failed || []).filter((x) => (x.severity || "error") !== "error");
+      const r = d.regress || {};
+      const regTxt = r.ran === false
+        ? "未跑回归"
+        : ("回归 " + (r.passed || 0) + " 条通过" +
+           (r.failed ? " / " + r.failed + " 条未通过" : "") +
+           (r.seconds ? " · " + Number(r.seconds).toFixed(1) + "s" : ""));
+      let html = '<div class="st-rep-head">' +
+        "<b>" + (d.ok
+          ? '<span class="st-rep-ok">✅ 自检通过</span>'
+          : '<span class="st-rep-bad">❌ 有 ' + failed.length + " 项失败</span>") + "</b>" +
+        '<span class="st-rep-sub">' + esc(d.time || "") + "</span>" +
+        '<span class="st-rep-sub">通过 ' + passed.length + " / 失败 " + failed.length +
+          (warns.length ? " / 无法加载 " + warns.length : "") + "</span>" +
+        '<span class="st-rep-sub">' + esc(regTxt) + "</span>" +
+        '<span class="st-rep-sub">' + esc(d.seconds || 0) + "s</span></div>";
+      if (failed.length) {
+        html += '<div class="st-rep-sec">❌ 失败（' + failed.length + "）</div>" +
+          failed.map((it) => row("❌", it)).join("");
+      }
+      if (warns.length) {
+        html += '<div class="st-rep-sec">⚠️ 用例文件无法加载（' + warns.length +
+          "，测试写法过时，不影响系统本身）</div>" +
+          warns.map((it) => row("⚠️", it)).join("");
+      }
+      html += '<div class="st-rep-sec">✅ 通过（' + passed.length + "）</div>" +
+        (passed.length ? passed.map((it) => row("✅", it)).join("")
+                       : '<div class="st-rep-wait">没有通过的项</div>');
+      box.innerHTML = html;
+      box.dataset.loaded = "1";
+    }
+
+    async function load() {
+      if (busy) return;
+      busy = true;
+      btn.disabled = true;
+      box.hidden = false;
+      box.dataset.loaded = "";
+      box.innerHTML = '<div class="st-rep-wait">🔄 正在跑自检 + 回归…' +
+        "（约 10-20 秒）</div>";
+      try {
+        const q = "?model=" + encodeURIComponent(curModel()) + "&scope=quick";
+        const resp = await fetch("/api/selftest/report" + q);
+        const d = await resp.json();
+        if (!d || !Array.isArray(d.passed)) {
+          box.innerHTML = '<div class="st-rep-wait">❌ 后端拒绝：' +
+            esc((d && (d.detail || d.error)) || "未知错误") + "</div>";
+          return;
+        }
+        render(d);
+      } catch (e) {
+        box.innerHTML = '<div class="st-rep-wait">❌ 报告生成失败：' +
+          esc(e && e.message ? e.message : e) + "</div>";
+      } finally {
+        busy = false;
+        btn.disabled = false;
+      }
+    }
+
+    btn.onclick = () => {
+      // 已有报告 → 再点收起；收起状态下点 = 重新生成一份
+      if (!box.hidden && box.dataset.loaded === "1") { box.hidden = true; return; }
+      load();
+    };
+  })();
+
   // ================== 自检缓存列表（2026-11-16）==================
   // 每次自检结果都留一份，可回看历史、单条删除或清空。
   // 存储：localStorage.selftest_cache（数组，最新在前，最多 50 条）。

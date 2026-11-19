@@ -853,6 +853,58 @@ def _trim_plans(items):
     return keep
 
 
+# 动作的「终态」：一旦到这几种状态，就是真实执行过的结果，不该被旧快照改回去。
+_PLAN_TERMINAL = ("done", "failed", "skipped", "expired")
+
+
+def _plan_upd(p):
+    try:
+        return float((p or {}).get("_upd") or 0)
+    except Exception:                                   # noqa: BLE001
+        return 0.0
+
+
+def _pick_plan(disk_p, mem_p):
+    """同一份计划在磁盘 / 内存各有一版时，决定保留哪一版。
+
+    ★ 2026-11-20 修「排队中的任务被静默作废」：
+      执行器开工时把**整份** plans 读进内存，一跑十几分钟，收尾 save_plans()
+      把旧快照写回来 —— 这中间 approve() 写进磁盘的批准就被冲成 pending，
+      任务轮到时只会报一句「这次反思没有已批准的动作」，白排一次队。
+      实测：11-20 03:38:02 批了 f5 → 03:38:25 又变回 pending。
+
+    规则：
+      · 动作级——已是终态（done/failed/…）的一律保留，那是真实执行结果；
+      · 其余——比 _upd（谁最后改的），新的赢；都没有 _upd 的老数据仍按内存优先。
+    """
+    disk_newer = _plan_upd(disk_p) > _plan_upd(mem_p)
+    base, other = (disk_p, mem_p) if disk_newer else (mem_p, disk_p)
+    if base is other:
+        return base
+    b_acts, o_acts = base.get("actions"), other.get("actions")
+    if not isinstance(b_acts, list) or not isinstance(o_acts, list):
+        return base
+    o_by = {a.get("id"): a for a in o_acts if isinstance(a, dict)}
+    acts, changed = [], False
+    for a in b_acts:
+        if not isinstance(a, dict):
+            acts.append(a)
+            continue
+        o = o_by.get(a.get("id"))
+        if (o is not None
+                and str(o.get("status") or "") in _PLAN_TERMINAL
+                and str(a.get("status") or "") not in _PLAN_TERMINAL):
+            acts.append(o)
+            changed = True
+        else:
+            acts.append(a)
+    if not changed:
+        return base
+    out = dict(base)
+    out["actions"] = acts
+    return out
+
+
 def _merge_plans(disk, mem):
     """按 id 合并两份 plans：内存版优先（它是最新状态），磁盘独有的保留。
 
@@ -881,7 +933,15 @@ def _merge_plans(disk, mem):
         pid = str(p.get("id") or "")
         if pid in gone:
             continue
-        out.append(m_by.pop(p.get("id"), p))
+        # ★ 2026-11-20 修「排队中的任务被静默作废」：
+        #   原来这里是「内存版无条件优先」。但执行器开工时把**整份** plans
+        #   读进内存、一跑就是十几分钟，收尾 save_plans() 会把那份旧快照
+        #   写回来 —— 这中间 approve() 写进磁盘的批准状态就被冲掉了。
+        #   实测（11-20 03:38:02 批了 f5 → 03:38:25 又变回 pending，
+        #   03:57:42 该任务跑起来报「没有已批准的动作」，等于白排队）。
+        #   改成：两份都有 _upd 时取更新的那份；老数据（无 _upd）仍按内存优先。
+        _m = m_by.pop(p.get("id"), None)
+        out.append(p if _m is None else _pick_plan(p, _m))
     for pid, p in list(m_by.items()):
         if str(pid or "") in gone:
             continue
@@ -4057,6 +4117,9 @@ def approve(pid, action_ids=None, note=""):
             a["note"] = str(note or "")[:800]
             approved_ids.append(str(a.get("id")))
             hit += 1
+    # ★ 2026-11-20：记下这次改动的时间，save_plans 的合并靠它判断谁的版本更新。
+    #   没有它，一个跑了十几分钟的执行器收尾时会拿旧快照把这次批准覆盖掉。
+    p["_upd"] = time.time()
     save_plans(d)
     # ★ 2026-11-17 用户要求「人工放行需要可追溯：谁批的、批了哪条、执行结果如何」。
     #   在 approve 里写一条 actlog 事件 kind=review_approve，前端时间线可查。
@@ -4091,6 +4154,7 @@ def reject(pid, action_ids=None, note=""):
             a["status"] = "rejected"
             a["note"] = str(note or "")[:800]
             hit += 1
+    p["_upd"] = time.time()
     save_plans(d)
     return {"ok": True, "rejected": hit, "plan": p}
 
@@ -4120,6 +4184,7 @@ def force_execute(pid, action_ids=None):
     if not ids:
         return {"ok": False, "error": "没有待人工复核的动作"}
     p["_force"] = list(dict.fromkeys(list(p.get("_force") or []) + ids))
+    p["_upd"] = time.time()
     save_plans(d)
     reset_loop(files)
     # ★ 2026-11-16 收尾核对：确认 force_execute 真的把动作放行到执行器。
@@ -5598,7 +5663,14 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
         return {"ok": False, "error": "找不到这次反思"}
     todo = [a for a in (plan.get("actions") or []) if a.get("status") == "approved"]
     if not todo:
-        return {"ok": False, "error": "这次反思没有已批准的动作"}
+        # ★ 2026-11-20：原来只回一句「没有已批准的动作」，用户完全看不出为什么
+        #   明明点过批准却跑不了。把待批准条数一并说清，指向可操作的动作。
+        _pend = sum(1 for a in (plan.get("actions") or [])
+                    if a.get("status") == "pending")
+        _msg = "这次反思没有已批准的动作"
+        if _pend:
+            _msg += "（还有 %d 条是待批准状态 —— 批准被取消或被并发写覆盖了，重新批准即可）" % _pend
+        return {"ok": False, "error": _msg}
     # 人工复核放行名单：本次调用传进来的 + 计划里持久化的（重启后仍然有效）
     _force = set(str(x) for x in (force or []))
     _force |= set(str(x) for x in (plan.get("_force") or []))
@@ -6166,6 +6238,8 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
             if a.get("status") == "approved":
                 a["status"] = "pending"
                 a["error"] = "上一轮被终止，尚未执行"
+        # 终止也是真实状态变更：打上时间戳，否则会被「更新一点的批准」覆盖回去
+        plan["_upd"] = time.time()
     save_plans(d)
     ok_n = sum(1 for r in results if r["ok"])
     out = {"ok": ok_n > 0, "done": ok_n, "total": len(results), "results": results,
@@ -6202,6 +6276,7 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                                 _a2["status"] = "pending"
                                 _a2["error"] = ("改动让自检问题从 %d 增到 %d，已自动回滚"
                                                 % (_base, _post_n))
+                        plan["_upd"] = time.time()
                         save_plans(d)
                         try:
                             from . import code_audit as _CA2
@@ -7505,6 +7580,8 @@ def auto_approve_only(pid, max_n=0):
         a["status"] = "approved"
         a["auto"] = True
         picked.append(a)
+    if picked:
+        plan["_upd"] = time.time()
     save_plans(d)
     return {"ok": bool(picked), "approved": len(picked),
             "plan": plan,
