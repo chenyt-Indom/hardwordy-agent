@@ -7346,7 +7346,15 @@ html[data-theme="light"] .iter-site:hover {
 .bubble .viz-labels { display: flex; gap: 10px; margin-top: 6px; }
 .bubble .viz-labels span { flex: 1 1 0; text-align: center; font-size: 11px;
   color: var(--muted, #8a93a6); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bubble .viz-svg { width: 100%; height: 118px; display: block; }
+.bubble .viz-svg { width: 100%; height: auto; max-width: 760px; margin: 0 auto; display: block; }
+.bubble .viz-chart { margin: 2px 0 0; }
+.bubble .viz-chart .viz-legend { margin-top: 8px; justify-content: center; }
+.bubble .viz-pie-wrap { position: relative; width: 132px; margin: 4px auto 10px; }
+.bubble .viz-pie-wrap .viz-pie { margin: 0; }
+.bubble .viz-donut-c { position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; pointer-events: none; }
+.bubble .viz-donut-c b { font-size: 17px; font-variant-numeric: tabular-nums; color: var(--text); }
+.bubble .viz-donut-c span { font-size: 10.5px; color: var(--muted, #8a93a6); }
 .bubble .viz-pie { width: 132px; height: 132px; border-radius: 50%; margin: 4px auto 10px; }
 .bubble .viz-pie.is-donut { -webkit-mask: radial-gradient(circle, transparent 44%, #000 45%);
   mask: radial-gradient(circle, transparent 44%, #000 45%); }
@@ -7405,3 +7413,75 @@ html[data-theme="light"] .iter-site:hover {
   .bubble .viz-cmp { flex-direction: column; }
   .bubble .viz-bar-l { flex-basis: 70px; }
 }
+
+/* ★★ 2026-11-20 桌面端横向溢出根治（用户报「屏幕变形挤压严重」）
+   ------------------------------------------------------------------
+   真因：上面那套 min-width:0 / max-width:100% 的防护**只写在
+        @media (max-width:768px) 里**，桌面端一行都不生效。
+        而 body 是 display:flex（横向），.main 是它的 flex 子项，
+        flex 子项默认 min-width:auto —— 意思是「最小宽度 = 内容最小宽度」。
+        于是消息里任何超宽内容（图表 SVG 680px / 宽表格 / 长代码行）
+        都会把 .main 的最小宽度顶到那个内容宽度，撑爆视口；
+        body 又有 overflow:hidden，右侧直接被裁掉，
+        气泡被拉成超宽横条 → 看起来就是「一整片横向条纹 + 挤压变形」。
+   修法：把防护提到全局，并且让超宽内容自己横向滚动，而不是撑父级。 */
+.main { min-width: 0; max-width: 100%; overflow-x: hidden; }
+.messages, #messages, .composer, .composer > *,
+.msg, .msg.bot, .bubble, .chat-header { min-width: 0; max-width: 100%; }
+.bubble { overflow-wrap: anywhere; }
+/* 图表：不撑破气泡，超宽时自己在框内滚动 */
+.bubble .viz-bubble { max-width: 100%; overflow-x: auto; }
+
+/* ★ 2026-11-21 用户要求「图表要三维形状」。
+   饼图/环图的厚度是 12 层暗色圆盘向下堆叠（JS 里生成），这里只负责尺寸、圆角和顶层高光。
+   刻意不用 transform-style: preserve-3d —— 它遇到 mask 会被压平，各浏览器表现也不一致。 */
+.viz-3d-wrap {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  padding: 16px 0 26px;
+  max-width: 100%;
+  overflow: hidden;
+}
+.viz-3d-pie {
+  position: relative;
+  width: 188px;
+  height: 188px;
+  flex: 0 0 auto;
+}
+.viz-3d-pie > i {
+  position: absolute;
+  inset: 0;
+  display: block;
+  border-radius: 50%;
+}
+.viz-3d-pie > i.viz-3d-top {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .5), 0 -2px 6px rgba(20, 30, 60, .12);
+}
+/* 环图的洞：只挖顶层，透出下面暗色侧壁，看上去像圆柱内壁 */
+.viz-3d-top.is-donut {
+  -webkit-mask: radial-gradient(circle at 50% 50%, transparent 0 51%, #000 52%);
+  mask: radial-gradient(circle at 50% 50%, transparent 0 51%, #000 52%);
+}
+/* ⚠️ 这里必须用两级选择器。上面 `.bubble .viz-donut-c` 的 inset:0 特异性更高，
+   单用 .viz-3d-c 盖不住它 —— inset:0 会把 left/top 冲掉，而 translate(-50%,-50%)
+   仍然生效，结果文字被推到左上角外面（实测只露出一个「计」字）。 */
+.viz-3d-wrap .viz-donut-c {
+  position: absolute;
+  inset: auto;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  pointer-events: none;
+}
+@media (max-width: 640px) {
+  .viz-3d-pie { width: 150px; height: 150px; }
+  .viz-3d-wrap { padding: 12px 0 20px; }
+}
+.bubble .viz-svg { max-width: min(760px, 100%); }
+/* 表格 / 代码块：同上，避免长内容把整条消息拉宽 */
+.bubble .md-table-wrap { max-width: 100%; overflow-x: auto; }
+.bubble table { max-width: 100%; }
+.bubble pre, .bubble .md-pre { max-width: 100%; overflow-x: auto; }
+.bubble img, .bubble video, .bubble svg { max-width: 100%; height: auto; }

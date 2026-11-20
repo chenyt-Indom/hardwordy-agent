@@ -1042,6 +1042,220 @@
   //   纯 SVG + CSS 绘制，不引第三方库（和 mdToHtml 一样保持零依赖）。
   //   支持的 type：bar 条形 / column 柱形 / line 折线 / pie 饼图 / donut 环图 /
   //                progress 进度 / steps 步骤 / compare 对比 / kpi 大数字 / card 知识卡
+  // ★ 2026-11-20 折线/柱状图重写。旧实现用 viewBox 300x110 + preserveAspectRatio="none"，
+  //   铺满整行后被横向拉伸：折线被压成近乎水平、圆点拉成椭圆、右侧超出 viewBox 被裁掉，
+  //   而且没有 Y 轴刻度、没有网格、没有数值标签（用户反馈「难看，数据啥都没有」）。
+  //   现在改成真实比例绘制：Y 轴刻度 + 虚线网格 + 数值标签 + 面积渐变 + 多系列图例。
+  let _vizSeq = 0;
+  const _vizStep = (v) => {
+    const a = Math.abs(Number(v) || 0) || 1;
+    const e = Math.pow(10, Math.floor(Math.log10(a)));
+    const n = a / e;
+    const m = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+    return m * e;
+  };
+  const _vizNum = (v, unit) => {
+    const n = Number(v) || 0;
+    const r = Math.round(n * 10) / 10;
+    const s = Math.abs(r) >= 1000 ? (Math.round(r / 100) / 10) + "k" : String(r);
+    return s + (unit || "");
+  };
+  const _vizSeries = (spec, it) => {
+    if (Array.isArray(spec.series) && spec.series.length) {
+      return spec.series.slice(0, 4).map((s, i) => ({
+        name: String((s && s.name) || ("系列" + (i + 1))),
+        values: (Array.isArray(s && s.values) ? s.values : []).map((v) => Number(v) || 0)
+      }));
+    }
+    return [{ name: String(spec.series_name || ""), values: it.map((x) => x.value) }];
+  };
+  const _vizCurve = (p, lo, hi) => {
+    if (!p.length) return "";
+    if (p.length < 3) return "M" + p.map((q) => q[0].toFixed(1) + "," + q[1].toFixed(1)).join("L");
+    const cl = (y) => Math.max(lo, Math.min(hi, y));
+    let d = "M" + p[0][0].toFixed(1) + "," + p[0][1].toFixed(1);
+    for (let i = 0; i < p.length - 1; i++) {
+      const p0 = p[i - 1] || p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] || p2;
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = cl(p1[1] + (p2[1] - p0[1]) / 6);
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = cl(p2[1] - (p3[1] - p1[1]) / 6);
+      d += "C" + c1x.toFixed(1) + "," + c1y.toFixed(1) + " " + c2x.toFixed(1) + "," + c2y.toFixed(1) +
+        " " + p2[0].toFixed(1) + "," + p2[1].toFixed(1);
+    }
+    return d;
+  };
+  // ★ 2026-11-21 用户要求「图表要三维形状」。
+  //   做的是伪 3D（等轴测）：柱状图拆成正面/顶面/右侧面三块，饼图用多层圆盘堆出厚度。
+  //   好处是不依赖任何库、数据仍是精确的（AI 生成的立体图会把数字画糊，这里不会）。
+  //   f > 0 提亮，f < 0 压暗；用于从同一个主色派生三面的明暗。
+  //   ⚠️ 必须定义在 _vizXY 外面：饼图分支在 _vizHtml 里也要用，放在 _vizXY 内部会变成局部变量。
+  const _vizShade = (hex, f) => {
+    const h = String(hex || "#4f8cff").replace("#", "");
+    const p = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) || 0);
+    const m = (c) => Math.max(0, Math.min(255, Math.round(f > 0 ? c + (255 - c) * f : c * (1 + f))));
+    return "#" + p.map((c) => m(c).toString(16).padStart(2, "0")).join("");
+  };
+  function _vizXY(o) {
+    const W = 680, H = 252;
+    // ★ 3D 时柱顶再向上抬 11px，数值标签还要在顶面上方留一行，
+    //   所以上边距必须从 20 加到 34 —— 否则最高柱的标签会跑到 y<0 被画布裁掉。
+    const padL = 56, padR = 30, padT = o.d3 ? 34 : 20, padB = 38;
+    const cats = o.cats && o.cats.length ? o.cats : [" "];
+    const ser = o.ser && o.ser.length ? o.ser : [{ name: "", values: [0] }];
+    const P = o.palette;
+    const flat = [];
+    ser.forEach((s) => s.values.forEach((v) => flat.push(Math.abs(Number(v) || 0))));
+    const rawMax = Math.max.apply(null, [0].concat(flat));
+    const _step = rawMax > 0 ? _vizStep(rawMax / 4) : 1;
+    const _T = rawMax > 0 ? Math.max(1, Math.ceil(rawMax / _step)) : 1;
+    const max = rawMax > 0 ? _step * _T : 1;
+    const iw = W - padL - padR, ih = H - padT - padB;
+    const n = cats.length;
+    const isCol = o.type === "column";
+    const xs = [];
+    for (let i = 0; i < n; i++) {
+      xs.push(isCol ? padL + (iw / n) * (i + 0.5) : (n > 1 ? padL + (iw / (n - 1)) * i : padL + iw / 2));
+    }
+    const yAt = (v) => padT + ih - (Math.min(max, Math.abs(Number(v) || 0)) / max) * ih;
+    const uid = "vz" + (++_vizSeq);
+    let defs = "", g = "";
+
+    // Y 轴刻度 + 虚线网格
+    const T = _T;
+    for (let t = 0; t <= T; t++) {
+      const y = padT + ih - (ih * t / T);
+      const val = max * t / T;
+      g += '<line x1="' + padL + '" y1="' + y.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + y.toFixed(1) +
+        '" stroke="' + (t === 0 ? "#c6d0e2" : "#e9eef7") + '" stroke-width="1"' +
+        (t === 0 ? "" : ' stroke-dasharray="3 5"') + "/>";
+      g += '<text x="' + (padL - 9) + '" y="' + (y + 3.8).toFixed(1) +
+        '" text-anchor="end" font-size="11" fill="#93a0b8" stroke="#fff" stroke-width="3" paint-order="stroke">' +
+        escapeHtml(_vizNum(val, o.unit || "")) + "</text>";
+    }
+
+    if (isCol) {
+      const slot = iw / n;
+      const d3 = !!o.d3;
+      const kx = d3 ? 11 : 0, ky = d3 ? -11 : 0;
+      const bw = Math.min(52, slot * (ser.length > 1 ? 0.72 / ser.length : 0.56)) * (d3 ? 0.78 : 1);
+      const grp = bw * ser.length + 5 * (ser.length - 1) + (d3 ? kx : 0);
+      const showV = n * ser.length <= 10;
+      ser.forEach((s, si) => {
+        const col = P[si % P.length];
+        defs += '<linearGradient id="' + uid + "c" + si + '" x1="0" y1="0" x2="0" y2="1">' +
+          '<stop offset="0" stop-color="' + col + '"/><stop offset="1" stop-color="' + col + '" stop-opacity="0.5"/></linearGradient>';
+        for (let i = 0; i < n; i++) {
+          const v = Number(s.values[i]) || 0;
+          const y = yAt(v);
+          const h = Math.max(2, padT + ih - y);
+          const x = xs[i] - grp / 2 + si * (bw + 5);
+          const tip = "<title>" + escapeHtml(cats[i] + "：" + _vizNum(v, o.unit)) + "</title>";
+          if (d3) {
+            g += '<polygon points="' +
+              [x + bw, y, x + bw + kx, y + ky, x + bw + kx, y + ky + h, x + bw, y + h]
+                .map((q) => q.toFixed(1)).join(" ") + '" fill="' + _vizShade(col, -0.44) + '">' + tip + "</polygon>";
+            g += '<polygon points="' +
+              [x, y, x + kx, y + ky, x + bw + kx, y + ky, x + bw, y]
+                .map((q) => q.toFixed(1)).join(" ") + '" fill="' + _vizShade(col, 0.52) + '"></polygon>';
+            g += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
+              '" height="' + h.toFixed(1) + '" fill="url(#' + uid + "c" + si + ')">' + tip + "</rect>";
+          } else {
+            g += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
+              '" height="' + h.toFixed(1) + '" rx="4" fill="url(#' + uid + "c" + si + ')">' + tip + "</rect>";
+          }
+          if (showV) {
+            g += '<text x="' + (x + bw / 2 + kx / 2).toFixed(1) + '" y="' + Math.max(13, y + ky - 7).toFixed(1) +
+              '" text-anchor="middle" font-size="11.5" font-weight="600" fill="#4a566e"' +
+              ' stroke="#fff" stroke-width="3.2" paint-order="stroke">' +
+              escapeHtml(_vizNum(v, o.unit)) + "</text>";
+          }
+        }
+      });
+    } else {
+      const labs = [];
+      ser.forEach((s, si) => {
+        const col = P[si % P.length];
+        const pts = [];
+        for (let i = 0; i < n; i++) pts.push([xs[i], yAt(Number(s.values[i]) || 0)]);
+        const d = _vizCurve(pts, padT, padT + ih);
+        if ((o.fill || o.d3) && si === 0) {
+          defs += '<linearGradient id="' + uid + "a" + si + '" x1="0" y1="0" x2="0" y2="1">' +
+            '<stop offset="0" stop-color="' + col + '" stop-opacity="0.32"/>' +
+            '<stop offset="1" stop-color="' + col + '" stop-opacity="0.02"/></linearGradient>';
+          g += '<path d="' + d + "L" + pts[pts.length - 1][0].toFixed(1) + "," + (padT + ih) +
+            "L" + pts[0][0].toFixed(1) + "," + (padT + ih) + 'Z" fill="url(#' + uid + "a" + si + ')"/>';
+        }
+        if (o.d3) {
+          // 三层等轴测挤出。实测：线宽 3px + 偏移 ≤6px 时肉眼几乎看不出立体，
+          // 必须加粗到 5px、偏移放大到 (9,15) 才有「厚度」感。
+          // 由远及近逐渐加深，最远那层最淡，避免抢主线。
+          const _dk = _vizShade(col, -0.42);
+          [3, 2, 1].forEach((k) => {
+            g += '<path d="' + d + '" fill="none" stroke="' + _dk +
+              '" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="' +
+              (0.1 + (3 - k) * 0.1).toFixed(2) + '" transform="translate(' + (k * 3) + "," + (k * 5) + ')"/>';
+          });
+        }
+        g += '<path d="' + d + '" fill="none" stroke="' + col +
+          '" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>';
+        for (let i = 0; i < pts.length; i++) {
+          const v = Number(s.values[i]) || 0;
+          g += '<circle cx="' + pts[i][0].toFixed(1) + '" cy="' + pts[i][1].toFixed(1) +
+            '" r="4.2" fill="#fff" stroke="' + col + '" stroke-width="2.4">' +
+            "<title>" + escapeHtml(cats[i] + "：" + _vizNum(v, o.unit)) + "</title></circle>";
+        }
+        // 数值标签：点少时全标，点多时隔点标，避免糊成一片
+        const gap = n > 1 ? iw / (n - 1) : iw;
+        const every = Math.max(1, Math.ceil(30 / Math.max(1, gap)));
+        for (let i = 0; i < pts.length; i++) {
+          // 多系列时只标首尾：几条线在同一个 x 上的标签会挤成一团
+          if (ser.length > 1 ? (i !== 0 && i !== n - 1) : (i % every !== 0 && i !== n - 1)) continue;
+          const v = Number(s.values[i]) || 0;
+          labs.push({
+            x: i === 0 ? pts[i][0] - 2 : i === n - 1 ? pts[i][0] + 2 : pts[i][0],
+            y: pts[i][1] - 11,
+            a: i === 0 ? "start" : i === n - 1 ? "end" : "middle",
+            c: col,
+            t: _vizNum(v, o.unit)
+          });
+        }
+      });
+      // 标签避让：多系列时几条线的数值常在同一高度挨在一起，按 y 排序后强制拉开
+      labs.sort((p, q) => p.y - q.y);
+      for (let i = 0; i < labs.length; i++) {
+        if (labs[i].y < 14) labs[i].y = 14;
+        if (i && labs[i].y - labs[i - 1].y < 17) labs[i].y = labs[i - 1].y + 17;
+      }
+      labs.forEach((L) => {
+        g += '<text x="' + L.x.toFixed(1) + '" y="' + L.y.toFixed(1) + '" text-anchor="' + L.a +
+          '" font-size="11.5" font-weight="600" fill="' + L.c +
+          '" stroke="#fff" stroke-width="3.2" paint-order="stroke">' + escapeHtml(L.t) + "</text>";
+      });
+    }
+
+    // X 轴标签：太密就抽稀，最后一格必显示
+    const perCat = isCol ? iw / n : (n > 1 ? iw / (n - 1) : iw);
+    const skip = Math.max(1, Math.ceil(40 / Math.max(1, perCat)));
+    const shown = [];
+    for (let i = 0; i < n; i += skip) shown.push(i);
+    if (shown[shown.length - 1] !== n - 1) {
+      if (n - 1 - shown[shown.length - 1] < skip * 0.6) shown.pop();
+      shown.push(n - 1);
+    }
+    shown.forEach((i) => {
+      g += '<text x="' + xs[i].toFixed(1) + '" y="' + (H - 16) +
+        '" text-anchor="middle" font-size="11.5" fill="#7a869e">' + escapeHtml(cats[i]) + "</text>";
+    });
+
+    const legend = (ser.length > 1 || (ser[0] && ser[0].name))
+      ? '<div class="viz-legend">' + ser.map((s, i) =>
+          '<span><i style="background:' + P[i % P.length] + '"></i>' + escapeHtml(s.name) + "</span>").join("") + "</div>"
+      : "";
+
+    return '<div class="viz-chart"><svg class="viz-svg" viewBox="0 0 ' + W + " " + H +
+      '" preserveAspectRatio="xMidYMid meet" role="img">' +
+      (defs ? "<defs>" + defs + "</defs>" : "") + g + "</svg>" + legend + "</div>";
+  }
+
   function _vizHtml(src) {
     const P = ["#4f8cff", "#38b2ac", "#f6ad55", "#f56565", "#9f7aea", "#48bb78", "#ed8936", "#4299e1"];
     const esc = (s) => escapeHtml(String(s == null ? "" : s));
@@ -1060,32 +1274,64 @@
     const max = Math.max.apply(null, [1].concat(it.map((x) => Math.abs(x.value))));
     const pct = (v) => Math.round(Math.abs(v) / max * 1000) / 10;
     let body = "";
-    if (type === "column" || type === "line") {
-      const W = 300, H = 110, n = Math.max(1, it.length);
-      if (type === "line") {
-        const pts = it.map((x, i) => [n === 1 ? W / 2 : (i * W / (n - 1)) + 2, H - (Math.abs(x.value) / max) * (H - 16) - 6]);
-        body = '<svg class="viz-svg" viewBox="0 0 ' + W + " " + (H + 6) + '" preserveAspectRatio="none">' +
-          '<polyline points="' + pts.map((p) => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ") +
-          '" fill="none" stroke="' + P[0] + '" stroke-width="2.5" stroke-linejoin="round"/>' +
-          pts.map((p, i) => '<circle cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="3.4" fill="' + P[i % P.length] + '"/>').join("") +
-          "</svg>";
-      } else {
-        body = '<div class="viz-cols">' + it.map((x, i) =>
-          '<div class="viz-col"><div class="viz-col-v">' + esc(x.value) + unit + "</div>" +
-          '<div class="viz-col-bar" style="height:' + Math.max(3, pct(x.value)) + "%;background:" + P[i % P.length] + '"></div></div>').join("") + "</div>";
-      }
-      body += '<div class="viz-labels">' + it.map((x) => "<span>" + esc(x.label) + "</span>").join("") + "</div>";
+    if (type === "column" || type === "line" || type === "area") {
+      body = _vizXY({
+        type: type === "area" ? "line" : type,
+        fill: type === "area" || !!spec.fill,
+        cats: (function () {
+          const _s = _vizSeries(spec, it);
+          const _len = _s.reduce((a, s) => Math.max(a, s.values.length), 0);
+          const _c = it.length ? it.map((x) => x.label)
+            : (Array.isArray(spec.categories) ? spec.categories.map((c) => String(c)) : []);
+          const _out = _c.slice(0, Math.max(_len, _c.length));
+          while (_out.length < _len) _out.push(String(_out.length + 1));
+          return _out;
+        })(),
+        ser: _vizSeries(spec, it),
+        unit: spec.unit ? String(spec.unit) : "",
+        palette: P,
+        d3: !!spec.d3
+      });
     } else if (type === "pie" || type === "donut") {
       const total = it.reduce((a, b) => a + Math.abs(b.value), 0) || 1;
+      const d3 = !!spec.d3;
       let acc = 0;
       const stops = it.map((x, i) => {
         const a = acc;
         acc += Math.abs(x.value) / total * 100;
         return P[i % P.length] + " " + a.toFixed(2) + "% " + acc.toFixed(2) + "%";
       });
-      body = '<div class="viz-pie' + (type === "donut" ? " is-donut" : "") + '" style="background:conic-gradient(' + stops.join(",") + ')"></div>' +
-        '<div class="viz-legend">' + it.map((x, i) => '<span><i style="background:' + P[i % P.length] + '"></i>' +
-          esc(x.label) + " " + esc(x.value) + unit + "</span>").join("") + "</div>";
+      const pctOf = (v) => Math.round(Math.abs(Number(v) || 0) / total * 1000) / 10;
+      const legend = '<div class="viz-legend">' + it.map((x, i) =>
+        '<span><i style="background:' + P[i % P.length] + '"></i>' +
+        esc(x.label) + " <b>" + esc(x.value) + unit + "</b>" +
+        (unit === "%" ? "" : " · " + esc(pctOf(x.value)) + "%") + "</span>").join("") + "</div>";
+      const ctr = type === "donut" ? esc(_vizNum(total, spec.unit ? String(spec.unit) : "")) : "";
+      if (d3) {
+        // 3D 饼：12 层同扇区暗色圆盘向下堆叠形成「厚度」，顶层叠亮色原图。
+        // 用 2D 位移而不是 preserve-3d —— 后者遇到 mask 会被压平，浏览器差异也大。
+        let acc2 = 0;
+        const dark = it.map((x, i) => {
+          const a = acc2;
+          acc2 += Math.abs(x.value) / total * 100;
+          return _vizShade(P[i % P.length], -0.34) + " " + a.toFixed(2) + "% " + acc2.toFixed(2) + "%";
+        }).join(",");
+        const layers = [];
+        for (let k = 12; k >= 1; k--) {
+          layers.push('<i style="transform:translateY(' + (k * 2) +
+            'px);background:conic-gradient(' + dark + ')"></i>');
+        }
+        layers.push('<i class="viz-3d-top' + (type === "donut" ? " is-donut" : "") +
+          '" style="background:conic-gradient(' + stops.join(",") + ')"></i>');
+        body = '<div class="viz-3d-wrap"><div class="viz-3d-pie">' + layers.join("") + "</div>" +
+          (ctr ? '<div class="viz-donut-c viz-3d-c"><b>' + ctr + "</b><span>合计</span></div>" : "") +
+          "</div>" + legend;
+      } else {
+        body = '<div class="viz-pie-wrap"><div class="viz-pie' + (type === "donut" ? " is-donut" : "") +
+          '" style="background:conic-gradient(' + stops.join(",") + ')"></div>' +
+          (ctr ? '<div class="viz-donut-c"><b>' + ctr + "</b><span>合计</span></div>" : "") +
+          "</div>" + legend;
+      }
     } else if (type === "steps") {
       body = '<ol class="viz-steps">' + it.map((x) =>
         "<li><b>" + esc(x.label) + "</b>" + (x.note ? "<span>" + esc(x.note) + "</span>" : "") + "</li>").join("") + "</ol>";
