@@ -165,6 +165,23 @@ if os.path.isdir(_F3D_ROOT):
 else:
     print("[spec] 提示：没找到 %s —— 2.5D/3D 数字人将不可用" % _F3D_ROOT)
 
+# —— 向量检索模型 bge-small-zh-v1.5（2026-11-20 / 11.20b 补）——
+#   backend/embed.py 的 ONNX 回退路径会去 <程序根>/data/models/embed/bge-small-zh-v1.5/
+#   找 model.onnx（91MB）+ tokenizer.json（420KB）。
+#   ⚠️ 实证：11.20a 的包里 data/models/embed 是 **0 条**（zip 清单核对过），
+#   而开发机上有 —— 于是打包版上记忆检索 / 知识库 / featradar 去重全部退化。
+#   featradar 那两档阈值（0.86 / 0.68）本来就是拿 bge 在真实数据上标定的，
+#   没有模型时算出来的相似度不是同一套口径 —— 这就是用户说的「下载后功能有差异」。
+#   机器上没装 Ollama 的 bge-m3 时，这是打包版唯一的本地向量通道。
+_EMBED_ROOT = os.path.join(root, "data", "models", "embed")
+_embed_onnx = [_f for _r, _, _fs in os.walk(_EMBED_ROOT) for _f in _fs if _f.endswith(".onnx")] \
+    if os.path.isdir(_EMBED_ROOT) else []
+if _embed_onnx:
+    all_datas += _dir_datas(_EMBED_ROOT, "data/models/embed")
+    print("[spec] 已收集 bge 向量模型 %d 个 onnx" % len(_embed_onnx))
+else:
+    print("[spec] ⚠ 没找到 %s —— 打包版语义检索会退化（记忆/知识库/featradar）" % _EMBED_ROOT)
+
 # Wav2Lip 生成式口型权重（2026-11-14 / 11.14c 起本机已有）
 #   运行时只要这几个：
 #     wav2lip_gan.onnx + wav2lip_gan.onnx.data（139MB，外部权重，必须同目录）

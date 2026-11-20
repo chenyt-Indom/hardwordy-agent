@@ -32,7 +32,17 @@ logger = logging.getLogger(__name__)
 _LOG = logging.getLogger("uvicorn.error")
 
 # 模型目录：data/models/embed/<模型名>/
-_MODEL_DIR = config.data("data", "models", "embed")
+# ⚠️ 2026-11-20（11.20b）：打包版里这个模型是**随包发的**（spec 收 data/models/embed），
+#   落在 _internal/data/models/embed；而 config.data() 在 frozen 下指向 **exe 同级目录**，
+#   两者不是一个地方。只查 data() 的话，包里的模型永远读不到 —— 用户装完就是
+#   「记忆检索 / 知识库 / featradar 去重全部退回关键词」，而源码版一切正常。
+#   所以两个根都查：先只读资源根（随包），再可写数据根（用户自己放）。
+_MODEL_DIRS = []
+for _d in (config.res("data", "models", "embed"),
+           config.data("data", "models", "embed")):
+    if _d not in _MODEL_DIRS:
+        _MODEL_DIRS.append(_d)
+_MODEL_DIR = _MODEL_DIRS[-1]        # 用户可放置的那个（提示文案 / model_dir() 用）
 
 # 后端候选，**按优先级从上到下**尝试。
 #
@@ -143,7 +153,14 @@ def _ollama_embed(texts, model):
 # ---------- ONNX ----------
 def _onnx_load(name):
     """加载本地 ONNX 模型 + tokenizer，返回 (tok, sess, input_names) 或 None。"""
+    # 先随包的那份，再用户自己放的那份（见文件顶部 _MODEL_DIRS 的说明）
     d = os.path.join(_MODEL_DIR, name)
+    for _root in _MODEL_DIRS:
+        _cand = os.path.join(_root, name)
+        if all(os.path.isfile(os.path.join(_cand, f))
+               for f in ("model.onnx", "tokenizer.json")):
+            d = _cand
+            break
     mpath = os.path.join(d, "model.onnx")
     tpath = os.path.join(d, "tokenizer.json")
     if not (os.path.isfile(mpath) and os.path.isfile(tpath)):
