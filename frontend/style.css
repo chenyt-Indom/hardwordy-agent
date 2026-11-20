@@ -7431,69 +7431,7 @@ html[data-theme="light"] .iter-site:hover {
 .bubble { overflow-wrap: anywhere; }
 /* 图表：不撑破气泡，超宽时自己在框内滚动 */
 .bubble .viz-bubble { max-width: 100%; overflow-x: auto; }
-
-/* ★ 2026-11-21 用户要求「图表要三维形状」。
-   饼图/环图的厚度是 12 层暗色圆盘向下堆叠（JS 里生成），这里只负责尺寸、圆角和顶层高光。
-   刻意不用 transform-style: preserve-3d —— 它遇到 mask 会被压平，各浏览器表现也不一致。 */
-.viz-3d-wrap {
-  position: relative;
-  display: flex;
-  justify-content: center;
-  padding: 16px 0 26px;
-  max-width: 100%;
-  overflow: hidden;
-}
-.viz-3d-pie {
-  position: relative;
-  width: 188px;
-  height: 188px;
-  flex: 0 0 auto;
-}
-.viz-3d-pie > i {
-  position: absolute;
-  inset: 0;
-  display: block;
-  border-radius: 50%;
-}
-.viz-3d-pie > i.viz-3d-top {
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .5), 0 -2px 6px rgba(20, 30, 60, .12);
-}
-/* 环图的洞：只挖顶层，透出下面暗色侧壁，看上去像圆柱内壁 */
-.viz-3d-top.is-donut {
-  -webkit-mask: radial-gradient(circle at 50% 50%, transparent 0 51%, #000 52%);
-  mask: radial-gradient(circle at 50% 50%, transparent 0 51%, #000 52%);
-}
-/* ⚠️ 这里必须用两级选择器。上面 `.bubble .viz-donut-c` 的 inset:0 特异性更高，
-   单用 .viz-3d-c 盖不住它 —— inset:0 会把 left/top 冲掉，而 translate(-50%,-50%)
-   仍然生效，结果文字被推到左上角外面（实测只露出一个「计」字）。 */
-.viz-3d-wrap .viz-donut-c {
-  position: absolute;
-  inset: auto;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  margin: 0;
-  pointer-events: none;
-}
-@media (max-width: 640px) {
-  .viz-3d-pie { width: 150px; height: 150px; }
-  .viz-3d-wrap { padding: 12px 0 20px; }
-}
 .bubble .viz-svg { max-width: min(760px, 100%); }
-
-/* ★ 2026-11-21 真透视 3D 图表（第三版）：容器 + 环图中心文字 */
-.bubble .viz-3d-hold { position: relative; width: 100%; max-width: 760px; margin: 0 auto; }
-.bubble .viz-3d-hold .viz-svg { max-width: 100%; margin: 0; }
-.bubble .viz-3d-ctr {
-  position: absolute;
-  transform: translate(-50%, -50%);
-  text-align: center;
-  pointer-events: none;
-  line-height: 1.15;
-  white-space: nowrap;
-}
-.bubble .viz-3d-ctr b { display: block; font-size: 15px; font-weight: 700; color: #2d3a52; }
-.bubble .viz-3d-ctr span { display: block; font-size: 10.5px; color: #8b97ad; }
 /* 表格 / 代码块：同上，避免长内容把整条消息拉宽 */
 .bubble .md-table-wrap { max-width: 100%; overflow-x: auto; }
 .bubble table { max-width: 100%; }
