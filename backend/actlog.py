@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 
 MAX_KEEP = 120          # 每个会话最多留多少条（滚动覆盖）
 SHOW = 12               # 注入时最多列几条
+# 🧾 改动证据卡的计数口径（2026-11-17 用户要求）：fail_kind 的「真实计数」
+#   从**最近 300 条日志**里统计 —— 不猜常量、不沿用调用方传进来的占位数。
+#   注意 MAX_KEEP 只有 120（单会话滚动覆盖），所以"近 300 条"必须跨会话拼，
+#   见 _recent_session_rows()；task.json 的事件也按"最近 300 条"截断。
+COUNT_WINDOW = 300
 
 # 从工具参数里挑"一眼能看出在干什么"的字段
 _BRIEF_KEYS = ("rel", "path", "file", "filename", "project", "query", "keyword",
@@ -114,21 +119,64 @@ def record(session: str, name: str, args=None, ok: bool = True,
 
     evidence（2026-11-17 改动证据卡）：可选 dict，形如
       {"fail_kind": "...", "count": N, "regression": "pass|fail|skip"}
-    会原样落到账本行里，前端动作卡片据此渲染「针对哪个真实失败 + 计数 + 回归结果」。
+    落到账本行的 "ev" 字段（白名单），前端改动卡片据此渲染
+    「针对 XX 失败 N 次 · 回归 通过/失败」。
+
+    ⚠️ count 不以调用方传的为准：只要带了 fail_kind，就先用
+      count_fail_kind_recent(fail_kind, window=COUNT_WINDOW=300) 从**近 300 条日志**
+      统计真实次数并覆盖 —— 这样卡片上的 N 永远和 actlog 统计一致；
+      只有账本读不出来时才退回调用方给的数（不猜常量）。
     """
     try:
         row = {"t": time.strftime("%m-%d %H:%M"),
                "n": str(name or "?")[:40],
                "a": _brief(args),
                "ok": bool(ok)}
-        if isinstance(evidence, dict) and evidence:
-            # 只留白名单字段，避免把大对象塞进账本
-            ev = {}
-            for k in ("fail_kind", "count", "regression", "evidence"):
+        # 🧾 改动证据卡（2026-11-17 / 本次补全）：写入时**必须**带上 fail_kind 与
+        #   「从近 COUNT_WINDOW(300) 条日志统计出来的真实计数」，前端改动卡片据此
+        #   渲染「针对 XX 失败 N 次 · 回归 通过/失败」。三条硬规矩：
+        #     ① fail_kind：优先取 evidence 里的，evidence 没给就看 args（工具参数
+        #        里也可能带 fail_kind），都没有就不写 ev —— 不编一个分类出来；
+        #     ② count：一律以**账本统计**为准（count_fail_kind_recent，近 300 条），
+        #        调用方传进来的数只当"账本查不到时的兜底"，绝不让卡片上的数字
+        #        和 actlog 统计对不上；
+        #     ③ regression / phantom 等字段按白名单落盘，避免把大对象塞进账本。
+        ev = {}
+        if isinstance(evidence, dict):
+            for k in ("fail_kind", "count", "regression", "phantom", "rel",
+                      "history", "line", "lines", "root_cause"):
                 if k in evidence and evidence[k] is not None:
                     ev[k] = evidence[k]
-            if ev:
-                row["ev"] = ev
+        elif isinstance(evidence, str) and evidence.strip():
+            ev["note"] = _first_line(evidence, 120)
+        _fk = str(ev.get("fail_kind") or "").strip()
+        if not _fk and isinstance(args, dict):
+            _fk = str(args.get("fail_kind") or "").strip()
+        if _fk:
+            ev["fail_kind"] = _fk
+            try:
+                _n = int(count_fail_kind_recent(_fk, window=COUNT_WINDOW,
+                                                session=session))
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+                _n = -1
+            _given = ev.get("count")
+            if _n >= 0:
+                ev["count"] = _n          # 账本能读 → 数字以账本为准
+            elif isinstance(_given, int) and not isinstance(_given, bool) and _given >= 0:
+                ev["count"] = int(_given)  # 账本读不出来 → 用调用方给的（不猜常量）
+            else:
+                ev.pop("count", None)
+        elif "count" in ev:
+            # 没有 fail_kind 时 count 没法核对，落一个假数字进账本只会误导前端
+            ev.pop("count", None)
+        _rr = str(ev.get("regression") or "").strip().lower()
+        if _rr in ("pass", "fail", "skip"):
+            ev["regression"] = _rr
+        else:
+            ev.pop("regression", None)
+        if ev:
+            row["ev"] = ev
         if note:
             row["m"] = _first_line(note, 90)
         elif not ok:
@@ -336,6 +384,91 @@ def aggregate_fail_kind(window: int = 100, path: str = "") -> dict:
         return {}
 
 
+def _recent_session_rows(window: int = COUNT_WINDOW) -> list:
+    """读账本目录下**最近 window 条**会话日志行（跨会话，按文件修改时间排序）。
+
+    为什么要跨会话：每个会话只留 MAX_KEEP(120) 条，单会话日志未必攒得出 300 条，
+    「近 300 条日志」只能把各会话账本按时间拼起来再取尾部。
+    任何异常都返回已读到的部分（不抛）—— 账本坏了不能影响主流程。
+    """
+    rows = []
+    try:
+        d = _dir()
+        names = [n for n in os.listdir(d) if n.endswith(".jsonl")]
+        names.sort(key=lambda n: os.path.getmtime(os.path.join(d, n)))
+        for n in names:
+            rows.extend(_read(os.path.join(d, n)))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    try:
+        k = int(window)
+    except (TypeError, ValueError):
+        k = COUNT_WINDOW
+    if k <= 0:
+        k = COUNT_WINDOW
+    return rows[-k:]
+
+
+def count_fail_kind_recent(fail_kind: str, window: int = COUNT_WINDOW,
+                           session: str = "", path: str = "") -> int:
+    """从**最近 window 条日志**统计某个 fail_kind 的真实发生次数（证据卡计数口径）。
+
+    这是「改动证据卡」上那个 N 的唯一来源 —— 2026-11-17 用户要求：
+      卡片必须显示「针对 XX 失败 N 次」，且 N 要和 actlog 统计一致，不许猜常量。
+
+    数据源（两处都是日志，谁有数用谁，都没有就是 0，不编）：
+      1) task.json 的 events 里带 fail_kind 的事件，取最近 window 条
+         （即 aggregate_fail_kind / fail_stats 的语义）；
+      2) 会话账本行（data/actlog/*.jsonl）里 ev.fail_kind / fail_kind / w.fail_kind
+         命中的行，取最近 window 条。给「只写了账本、没有 task.json」的场景兜底。
+
+    参数：
+      fail_kind  失败分类名（空 → 直接 0）
+      window     看最近多少条日志（默认 COUNT_WINDOW = 300）
+      session    非空 → 只统计该会话账本；空 → 跨会话取最近的
+      path       显式指定 task.json 路径（测试用）
+
+    返回 int，任何异常都返回 0。
+    """
+    fk = str(fail_kind or "").strip()
+    if not fk:
+        return 0
+    try:
+        n = int(aggregate_fail_kind(window=window, path=path).get(fk) or 0)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        n = 0
+    if n > 0:
+        return n
+    # events 里没有 → 退回会话账本行统计（同样的"最近 window 条"口径）
+    try:
+        try:
+            k = int(window)
+        except (TypeError, ValueError):
+            k = COUNT_WINDOW
+        if k <= 0:
+            k = COUNT_WINDOW
+        rows = _read(_path(session))[-k:] if session else _recent_session_rows(k)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return n
+    c = 0
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        k2 = ""
+        ev = r.get("ev")
+        if isinstance(ev, dict):
+            k2 = str(ev.get("fail_kind") or "")
+        if not k2:
+            k2 = str(r.get("fail_kind") or "")
+        if not k2 and isinstance(r.get("w"), dict):
+            k2 = str(r["w"].get("fail_kind") or "")
+        if k2.strip() == fk:
+            c += 1
+    return c
+
+
 def top_fail_kinds(n: int = 10, path: str = "") -> list:
     """从现有 actlog 记录里按 fail_kind 聚合，返回 top N 失败类型及次数。
 
@@ -364,7 +497,7 @@ def top_fail_kinds(n: int = 10, path: str = "") -> list:
     return out[:k]
 
 
-def build_evidence(fail_kind: str = "", window: int = 100,
+def build_evidence(fail_kind: str = "", window: int = COUNT_WINDOW,
                    regress_result: str = "", path: str = "") -> dict:
     """组装「改动证据卡」：针对哪个真实失败 + 计数 + 回归结果。
 

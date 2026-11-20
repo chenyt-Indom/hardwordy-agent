@@ -1036,6 +1036,83 @@
   // 之前回复是 textContent + <br>，所以 `### 标题`、`- 列表`、`**重点**` 全是原样字符。
   // 这里做一层**受控**的渲染：先 escapeHtml（防注入），再套少量块级/行内语法。
   // 刻意不引第三方库：只支持对话里真正会用到的几种，出错面小。
+
+  // ★ 2026-11-20 用户要求：「涉及知识点时用图表或形象化卡片呈现」。
+  //   做法：回复里写 ```viz 围栏块，内容是一段 JSON，这里渲染成卡片式可视化。
+  //   纯 SVG + CSS 绘制，不引第三方库（和 mdToHtml 一样保持零依赖）。
+  //   支持的 type：bar 条形 / column 柱形 / line 折线 / pie 饼图 / donut 环图 /
+  //                progress 进度 / steps 步骤 / compare 对比 / kpi 大数字 / card 知识卡
+  function _vizHtml(src) {
+    const P = ["#4f8cff", "#38b2ac", "#f6ad55", "#f56565", "#9f7aea", "#48bb78", "#ed8936", "#4299e1"];
+    const esc = (s) => escapeHtml(String(s == null ? "" : s));
+    let spec;
+    try { spec = JSON.parse(src); } catch (e) {
+      return '<div class="viz viz-err">图表数据不是合法 JSON：' + esc(e && e.message) + "</div>";
+    }
+    if (!spec || typeof spec !== "object") return '<div class="viz viz-err">图表数据为空</div>';
+    const type = String(spec.type || "bar").toLowerCase();
+    const title = spec.title ? '<div class="viz-title">' + esc(spec.title) + "</div>" : "";
+    const unit = spec.unit ? esc(spec.unit) : "";
+    const rows = Array.isArray(spec.data) ? spec.data : (Array.isArray(spec.points) ? spec.points : []);
+    const it = rows.map((d) => (typeof d === "number"
+      ? { label: "", value: d, note: "" }
+      : { label: String(d && d.label != null ? d.label : ""), value: Number(d && d.value) || 0, note: d && d.note != null ? String(d.note) : "" }));
+    const max = Math.max.apply(null, [1].concat(it.map((x) => Math.abs(x.value))));
+    const pct = (v) => Math.round(Math.abs(v) / max * 1000) / 10;
+    let body = "";
+    if (type === "column" || type === "line") {
+      const W = 300, H = 110, n = Math.max(1, it.length);
+      if (type === "line") {
+        const pts = it.map((x, i) => [n === 1 ? W / 2 : (i * W / (n - 1)) + 2, H - (Math.abs(x.value) / max) * (H - 16) - 6]);
+        body = '<svg class="viz-svg" viewBox="0 0 ' + W + " " + (H + 6) + '" preserveAspectRatio="none">' +
+          '<polyline points="' + pts.map((p) => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ") +
+          '" fill="none" stroke="' + P[0] + '" stroke-width="2.5" stroke-linejoin="round"/>' +
+          pts.map((p, i) => '<circle cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="3.4" fill="' + P[i % P.length] + '"/>').join("") +
+          "</svg>";
+      } else {
+        body = '<div class="viz-cols">' + it.map((x, i) =>
+          '<div class="viz-col"><div class="viz-col-v">' + esc(x.value) + unit + "</div>" +
+          '<div class="viz-col-bar" style="height:' + Math.max(3, pct(x.value)) + "%;background:" + P[i % P.length] + '"></div></div>').join("") + "</div>";
+      }
+      body += '<div class="viz-labels">' + it.map((x) => "<span>" + esc(x.label) + "</span>").join("") + "</div>";
+    } else if (type === "pie" || type === "donut") {
+      const total = it.reduce((a, b) => a + Math.abs(b.value), 0) || 1;
+      let acc = 0;
+      const stops = it.map((x, i) => {
+        const a = acc;
+        acc += Math.abs(x.value) / total * 100;
+        return P[i % P.length] + " " + a.toFixed(2) + "% " + acc.toFixed(2) + "%";
+      });
+      body = '<div class="viz-pie' + (type === "donut" ? " is-donut" : "") + '" style="background:conic-gradient(' + stops.join(",") + ')"></div>' +
+        '<div class="viz-legend">' + it.map((x, i) => '<span><i style="background:' + P[i % P.length] + '"></i>' +
+          esc(x.label) + " " + esc(x.value) + unit + "</span>").join("") + "</div>";
+    } else if (type === "steps") {
+      body = '<ol class="viz-steps">' + it.map((x) =>
+        "<li><b>" + esc(x.label) + "</b>" + (x.note ? "<span>" + esc(x.note) + "</span>" : "") + "</li>").join("") + "</ol>";
+    } else if (type === "compare") {
+      body = '<div class="viz-cmp">' + it.map((x, i) =>
+        '<div class="viz-cmp-c"><div class="viz-cmp-h" style="border-color:' + P[i % P.length] + '">' + esc(x.label) + "</div>" +
+        '<div class="viz-cmp-b">' + esc(x.note) + "</div></div>").join("") + "</div>";
+    } else if (type === "kpi") {
+      body = '<div class="viz-kpis">' + it.map((x) =>
+        '<div class="viz-kpi"><b>' + esc(x.value) + unit + "</b><span>" + esc(x.label) + "</span></div>").join("") + "</div>";
+    } else if (type === "card") {
+      const pts = (Array.isArray(spec.points) ? spec.points : it.map((x) => x.label)).filter(Boolean);
+      return '<div class="viz viz-card">' + (spec.icon ? '<span class="viz-icon">' + esc(spec.icon) + "</span>" : "") +
+        '<div class="viz-card-main">' + title +
+        (spec.sub ? '<div class="viz-sub">' + esc(spec.sub) + "</div>" : "") +
+        (pts.length ? '<ul class="viz-points">' + pts.map((p) => "<li>" + esc(p) + "</li>").join("") + "</ul>" : "") +
+        (spec.note ? '<div class="viz-note">' + esc(spec.note) + "</div>" : "") +
+        "</div></div>";
+    } else {
+      body = '<div class="viz-bars">' + it.map((x, i) =>
+        '<div class="viz-bar-row"><span class="viz-bar-l">' + esc(x.label) + "</span>" +
+        '<span class="viz-bar-t"><i style="width:' + pct(x.value) + "%;background:" + P[i % P.length] + '"></i></span>' +
+        '<span class="viz-bar-v">' + esc(x.value) + unit + "</span></div>").join("") + "</div>";
+    }
+    return '<div class="viz">' + title + body + "</div>";
+  }
+
   function mdToHtml(text) {
     const raw = String(text == null ? "" : text);
     // ★ 2026-11-15 支持 <details> 折叠块（reply_gate 用它折叠长过程，替代「超长就丢弃」）。
@@ -1064,14 +1141,33 @@
     const _restore = (s) => (_folds.length
       ? s.replace(/\u0001F(\d+)\u0001/g, (m, i) => _renderFold(_folds[+i]))
       : s);
-    let esc = escapeHtml(_body);
+    // ★ 2026-11-20 围栏代码块（```lang）。同样必须在转义前整块摘出：
+    //   否则每行会被当成独立段落包进 <p>，缩进和换行全丢。
+    //   lang 为 viz/chart/card 时交给 _vizHtml 渲染成图表或知识卡。
+    const _blocks = [];
+    const _body2 = _body.replace(/```([a-zA-Z0-9_+-]*)[ \t]*\r?\n?([\s\S]*?)```/g, (m, lang, code) => {
+      _blocks.push({ lang: String(lang || "").toLowerCase(), code: String(code).replace(/\s+$/, "") });
+      return "\u0002B" + (_blocks.length - 1) + "\u0002";
+    });
+    const _renderBlock = (i) => {
+      const b = _blocks[i] || { lang: "", code: "" };
+      if (b.lang === "viz" || b.lang === "chart" || b.lang === "card") return _vizHtml(b.code);
+      return '<div class="md-pre-wrap">' +
+        (b.lang ? '<span class="md-pre-lang">' + escapeHtml(b.lang) + "</span>" : "") +
+        '<pre class="md-pre"><code>' + escapeHtml(b.code) + "</code></pre></div>";
+    };
+    const _restoreBlocks = (s) => (_blocks.length
+      ? s.replace(/\u0002B(\d+)\u0002/g, (m, i) => _renderBlock(+i))
+      : s);
+    let esc = escapeHtml(_body2);
     // ★ 2026-11-08 用户要求：「简单情况下就不用 markdown 了」。
     //   没有标题/列表/粗体/引用/表格这类标记的短文本，直接按纯文本渲染
     //   （保留原来的换行观感，也不会因为 <p> 的间距显得"空荡荡"）。
     const _hasMd = /(^|\n)\s*(#{1,4}\s|[-*•]\s|\d+[.、)]\s|>\s|\|)/.test(raw)
-      || /\*\*[^*\n]+\*\*/.test(raw) || /`[^`\n]+`/.test(raw) || /https?:\/\//.test(raw) || /\[[^\]\n]{1,60}\]\([^)\s]+\)/.test(raw);
+      || /\*\*[^*\n]+\*\*/.test(raw) || /`[^`\n]+`/.test(raw) || /https?:\/\//.test(raw) || /\[[^\]\n]{1,60}\]\([^)\s]+\)/.test(raw)
+      || raw.indexOf("```") >= 0;
     if (!_hasMd && raw.length < 400) {
-      return _restore(esc).replace(/\r?\n/g, "<br>");
+      return _restoreBlocks(_restore(esc)).replace(/\r?\n/g, "<br>");
     }
     // 行内：`code` / **粗** / *斜* / [文字](链接) / 裸网址 / 裸本地路径
     // ★ 2026-11-10 用户要求：回答里写的本地路径、网址要能点开
@@ -1112,16 +1208,45 @@
     const out = [];
     let list = "";
     const closeList = () => { if (list) { out.push("</" + list + ">"); list = ""; } };
-    for (const line of lines) {
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
       const t = line.trim();
       if (!t) { closeList(); out.push('<div class="md-gap"></div>'); continue; }
+      // 代码块 / 图表块占位符：整行原样输出（块级元素包进 <p> 会被浏览器拆开）
+      if (/^\u0002B\d+\u0002$/.test(t)) { closeList(); out.push(t); continue; }
+      // 表格：本行含 |，且下一行是 |---|---| 分隔行
+      // ★ 2026-11-20 补上 —— 原来完全没有表格分支，`| a | b |` 会原样漏成一行文字
+      if (t.indexOf("|") >= 0 && li + 1 < lines.length) {
+        const sep = lines[li + 1].trim();
+        if (sep.indexOf("|") >= 0 && /^\|?[\s:|-]*-{2,}[\s:|-]*\|?$/.test(sep)) {
+          closeList();
+          const cells = (s) => s.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((x) => inline(x.trim()));
+          let h = '<div class="md-table-wrap"><table class="md-table"><thead><tr>' +
+            cells(t).map((c) => "<th>" + c + "</th>").join("") + "</tr></thead><tbody>";
+          li += 2;
+          while (li < lines.length && lines[li].trim() && lines[li].indexOf("|") >= 0) {
+            h += "<tr>" + cells(lines[li].trim()).map((c) => "<td>" + c + "</td>").join("") + "</tr>";
+            li++;
+          }
+          li--;
+          out.push(h + "</tbody></table></div>");
+          continue;
+        }
+      }
       // <details> 折叠块占位符：整行原样输出，**不要**包 <p>（块级元素套在 p 里会被浏览器拆开）
       if (/^\u0001F\d+\u0001$/.test(t)) { closeList(); out.push(t); continue; }
       let m = /^(#{1,4})\s+(.*)$/.exec(t);
       if (m) { closeList(); const lv = Math.min(5, m[1].length + 2); out.push('<h' + lv + ' class="md-h">' + inline(m[2]) + '</h' + lv + '>'); continue; }
       if (/^([-*_]{3,})$/.test(t)) { closeList(); out.push('<hr class="md-hr">'); continue; }
       m = /^[-*•]\s+(.*)$/.exec(t);
-      if (m) { if (list !== "ul") { closeList(); out.push('<ul class="md-ul">'); list = "ul"; } out.push("<li>" + inline(m[1]) + "</li>"); continue; }
+      if (m) {
+        if (list !== "ul") { closeList(); out.push('<ul class="md-ul">'); list = "ul"; }
+        // ★ 2026-11-20：缩进 ≥2 空格的列表项当二级要点（模型常这么写），
+        //   原来 trim 之后全被拍平成一级，看着像没分层。
+        const _ind = (line.match(/^\s*/) || [""])[0].length;
+        out.push("<li" + (_ind >= 2 ? ' class="md-li2"' : "") + ">" + inline(m[1]) + "</li>");
+        continue;
+      }
       m = /^(\d+)[.、)]\s+(.*)$/.exec(t);
       if (m) { if (list !== "ol") { closeList(); out.push('<ol class="md-ol">'); list = "ol"; } out.push("<li>" + inline(m[2]) + "</li>"); continue; }
       // ⚠️ 这里是**转义之后**的文本，行首的 > 已经变成 &gt;，要按转义后的形式匹配
@@ -1131,7 +1256,7 @@
       out.push('<p class="md-p">' + inline(t) + "</p>");
     }
     closeList();
-    return _restore(out.join(""));
+    return _restoreBlocks(_restore(out.join("")));
   }
 
   // ★ 2026-11-15 用户要求「流式正文也按 markdown 输出」。
@@ -14846,6 +14971,24 @@
     } catch (e) { /* 聊天区可能还没渲染，忽略 */ }
   }
 
+  // 🧾 改动证据卡（2026-11-17 用户要求）：把后端给的 evidence 压成一句话
+  //   「针对 XX 失败 N 次 · 回归 通过/失败」。
+  //   数据来源只有一个：后端（actlog 从近 300 条日志统计的 count + 真跑回归的结论）。
+  //   前端**绝不补默认值** —— count 缺失就写「次数未知」，回归没跑就整段不写，
+  //   否则又变成「卡片上有个看起来很像证据的假数字」。
+  function eviText(evi) {
+    if (!evi || typeof evi !== "object" || !evi.fail_kind) return "";
+    const fk = String(evi.fail_kind);
+    const cnt = (typeof evi.count === "number" && evi.count >= 0) ? evi.count : null;
+    const rr = evi.regression ? String(evi.regression) : "";
+    const rrTxt = rr === "pass" ? "通过" : rr === "fail" ? "失败"
+      : rr === "skip" ? "跳过" : "";
+    let seg = "针对 " + fk + " 失败" + (cnt === null ? "（次数未知）" : " " + cnt + " 次");
+    if (rrTxt) seg += " · 回归 " + rrTxt;
+    if (evi.phantom) seg += " · ⚠ 无真实失败依据";
+    return seg;
+  }
+
   function actionsHtml(actions) {
     actions = actions || [];
     if (!actions.length) {
@@ -14912,6 +15055,13 @@
       if (a.changelog && a.changelog.summary) {
         h += '<div class="iter-li iter-chg"><b>这次改了什么：</b>' +
              esc(a.changelog.summary) + '</div>';
+      }
+      // 🧾 改动证据卡：动作自带 evidence（{fail_kind, count, regression}）时，直接
+      //   摊一句「针对 XX 失败 N 次 · 回归 通过/失败」，不用点开复核卡才知道依据。
+      //   need_review 那条分支已经画了更详细的证据卡，这里不重复。
+      if (a.status !== "need_review") {
+        const _evTex = eviText(a.evidence);
+        if (_evTex) h += '<div class="iter-li iter-act-evi">🔎 ' + esc(_evTex) + '</div>';
       }
       if (a.error) {
         // 2026-11-15：失败分类显示。用户问「为什么信任模式下迭代会显示失败」——
@@ -14983,6 +15133,9 @@
             : rr === "fail" ? "❌ 回归失败"
             : rr === "skip" ? "⏭ 回归跳过" : "";
           eviBody = '<div class="iter-act-evidence-body">' +
+            '<div class="iter-act-evidence-row iter-act-evi">' +
+              '<b>🔎 ' + esc(eviText(eviObj) || ("针对 " + fk + " 失败")) + '</b>' +
+            '</div>' +
             '<div class="iter-act-evidence-row">' +
               '<span class="iter-act-evidence-k">针对失败</span>' +
               '<code class="iter-act-evidence-v">' + esc(fk) + '</code>' +
@@ -15647,6 +15800,13 @@
         });
         chg = '<details class="iter-chg-det"><summary>逐文件明细</summary>' + rows2 + '</details>';
       }
+      // 🧾 改动证据卡（2026-11-17 用户要求）：这张卡是「这次自动改动到底针对
+      //   什么真实问题」的唯一凭据，必须显示「针对 XX 失败 N 次 · 回归 通过/失败」。
+      //   数据来自后端 actlog 行的 evidence 字段：
+      //     count      —— actlog 从**近 300 条日志**统计出的真实次数（不是猜的）
+      //     regression —— 执行时真跑回归的结论 pass/fail/skip
+      //   缺字段时宁可少写一句，也不在前端补默认值。
+      const eviLine = eviText(x.evidence);
       h += '<div class="iter-act ' + (ok ? "risk-low" : "risk-high") + '">' +
         '<div class="iter-act-head">' +
           '<span class="iter-act-t">' + esc(x.title || x.action || "") + '</span>' +
@@ -15660,7 +15820,9 @@
             ? '<b>改了什么：</b>' + esc(cl.summary)
             : '改了：' + esc((x.files || []).join("、") || "—")) +
           (showDet ? '<br>' + esc(det) : '') +
-          (x.backup ? '<br>备份：' + esc(x.backup) : '') + '</div>' +
+          (x.backup ? '<br>备份：' + esc(x.backup) : '') +
+          (eviLine ? '<div class="iter-act-evi">🔎 ' + esc(eviLine) + '</div>' : '') +
+          '</div>' +
         chg +
         '</div>';
     });

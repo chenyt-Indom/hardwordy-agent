@@ -1026,23 +1026,38 @@ def _log_act(plan, act, ok, detail=""):
     _fk = ""
     _fk_count = 0
     _phantom = False
+    _rg = ""
     try:
         _fk = str((act or {}).get("fail_kind") or "").strip()
+        # 🧾 改动证据卡（2026-11-17）：回归结论由执行循环写进 act["_regression"]
+        #   （pass / fail / skip），这里只负责落到日志行 —— 前端卡片据此显示
+        #   「针对 XX 失败 N 次 · 回归 通过/失败」。
+        _rg = str((act or {}).get("_regression") or "").strip().lower()
         if _fk:
-            # ★ 2026-11-16 修 NameError：本文件从未定义/导入过 fail_kind_summary，
-            #   运行到这一行会直接抛 NameError（被 except 吞掉 → evidence 永远是
-            #   count=0/phantom 判不出来）。这里改为直接复用本文件已有的
-            #   `_count_fail_kind`（读 actlog.jsonl 统计真实失败次数），
-            #   语义与「取当前计数」一致，且不引入新的外部依赖。
-            _cnt = _count_fail_kind(_fk, days=7)
-            if isinstance(_cnt, dict):
-                _fk_count = int(_cnt.get("count") or 0)
-            else:
-                _fk_count = int(_cnt or 0)
+            # ★ 计数口径（2026-11-17 改动证据卡补全）：
+            #   N 必须和 actlog 统计一致，所以统一走
+            #   actlog.count_fail_kind_recent —— 从**最近 300 条日志**统计。
+            #   原来这里用 `_count_fail_kind(...).get("count")`，而该函数返回的是
+            #   {fail_kind: n}，取 "count" 永远拿 0 → 每条改动都被判成 phantom、
+            #   卡片上永远显示「0 次」。这是个真 bug，一并修掉。
+            _fk_count = -1
+            try:
+                from . import actlog as _ALOG
+                _fk_count = int(_ALOG.count_fail_kind_recent(_fk) or 0)
+            except Exception:                           # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+            if _fk_count < 0:
+                _cnt = _count_fail_kind(_fk, days=7)
+                if isinstance(_cnt, dict):
+                    _fk_count = int(_cnt.get(_fk) or 0)
+                else:
+                    _fk_count = int(_cnt or 0)
             _phantom = (_fk_count == 0)
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
     _evidence = {"fail_kind": _fk, "count": _fk_count}
+    if _rg in ("pass", "fail", "skip"):
+        _evidence["regression"] = _rg
     if _phantom:
         _evidence["phantom"] = True
     _actlog({"ts": _now(),
@@ -5809,6 +5824,8 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
 
     for _i, a in enumerate(todo):
         _rp = {}                     # 自修轮的结果（没走自修就是空）
+        # 🧾 改动证据卡：每条动作独立的回归结论（pass/fail/skip），别沿用上一条。
+        a["_regression"] = "skip"
         if _stop():
             cancelled = True
             skipped = len(todo) - _i
@@ -6119,6 +6136,10 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 _now_fails = {str(x.get("name"))
                               for x in (_rr.get("failed_items") or [])}
                 _new_fails = _now_fails - _base_fails
+                # 🧾 改动证据卡：记下本条动作的回归结论（pass/fail），
+                #    _log_act 会把它写进日志行的 evidence，前端改动卡片显示
+                #    「针对 XX 失败 N 次 · 回归 通过/失败」。
+                a["_regression"] = "fail" if (_new_fails and _base_ok) else "pass"
                 if _new_fails and _base_ok:
                     # 只有**本动作引入**的失败才算它的问题
                     rbad = "行为回归新增失败 %d 条：%s" % (
@@ -6142,6 +6163,7 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 # 原来是「跳过、放行改动」，但那样一旦回归自身坏掉，就等于所有
                 # 自动改动都不受检验 —— 用户要求「保证程序稳定」，所以宁可回滚。
                 logger.warning("行为回归跑不起来", exc_info=True)
+                a["_regression"] = "fail"
                 rbad = "行为回归跑不起来（%s: %s），无法确认改动安全" % (
                     type(_e).__name__, _e)
         if rbad:
@@ -6161,6 +6183,8 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 _ev("code", **_card(a, patches, False, a["error"], True))
                 continue
             patches = _p2
+            # 回归曾判失败，但修正轮已改好并重新校验通过 → 结论回到 pass
+            a["_regression"] = "pass"
             _ev("step", text="%s 回归失败已被修正轮修好" % a.get("id"))
 
         # 修复质量闸门：语法过了、回归过了，也可能是「占位式修补」

@@ -571,6 +571,103 @@ def _force_conclusion_first(reply: str, user_msg: str = "") -> str:
     if len([ln for ln in body.splitlines()[1:] if ln.strip()]) < 1:
         return s
     return _CONCLUSION_PLACEHOLDER + "\n" + s
+# ---------------------------------------------------------------- 回滚查证（2026-11-18）
+# 用户要求：「问『上次回滚成功了吗』，首行直接给成功 / 失败 / 无记录。」
+# 为什么要在 main 里先查一遍：回滚是**最不能靠猜**的事，而模型最擅长的正是
+# 顺着上下文编一句「已回滚成功」。事实只在 journal + git 里
+# （见 backend/rollback_query.py，只读），所以命中「回滚/撤销/还原」的**问结果**轮次，
+# 先把事实查出来（写进系统提示 + 兜底顶到首行），模型只负责解读，不负责回忆。
+_ROLLBACK_WORDS = ("回滚", "撤销", "还原", "回退")
+_ROLLBACK_ASK_WORDS = ("成功", "失败", "了吗", "成功没", "结果", "记录", "是否",
+                       "有没有", "怎么样", "好不好", "查一下", "查查", "看看",
+                       "上次", "上一次", "最近", "刚才", "状态", "正常")
+# 「回滚到 …」「撤销这次回滚」是**命令**，不是问结果 —— 不许接管
+_ROLLBACK_CMD_WORDS = ("回滚到", "还原到", "回到", "撤销这次", "帮我回滚",
+                       "就回滚", "把它回滚", "执行回滚")
+
+_RBQ_CACHE = {}
+
+
+def _rollback_query_hint(user_msg: str):
+    """这句是不是在问「回滚成了没」？是 → 返回时间线索串；不是 → None。"""
+    u = str(user_msg or "").strip()
+    if not u:
+        return None
+    if not any(w in u for w in _ROLLBACK_WORDS):
+        return None
+    if not any(w in u for w in _ROLLBACK_ASK_WORDS):
+        return None
+    if any(w in u for w in _ROLLBACK_CMD_WORDS) and not any(
+            w in u for w in ("成功", "失败", "了吗", "结果", "记录")):
+        return None
+    return u
+
+
+def _rollback_info(user_msg: str) -> dict:
+    """查一次的带缓存包装（同一句话 30 秒内只查一次，避免每次起 git 子进程）。"""
+    hint = _rollback_query_hint(user_msg)
+    if hint is None:
+        return {}
+    now = time.time()
+    hit = _RBQ_CACHE.get(hint)
+    if hit and now - hit[0] < 30:
+        return hit[1]
+    try:
+        from . import rollback_query as _rq
+        info = _rq.query_rollback(hint)
+    except Exception as e:            # noqa: BLE001
+        logger.debug("回滚查证失败：%s", e)
+        return {}
+    if len(_RBQ_CACHE) > 32:
+        _RBQ_CACHE.clear()
+    _RBQ_CACHE[hint] = (now, info)
+    return info
+
+
+def _rollback_query_ctx(user_msg: str) -> str:
+    """写进系统提示的「回滚实测事实」块（只有问结果那一轮才给）。"""
+    info = _rollback_info(user_msg)
+    if not info:
+        return ""
+    lines = [str(info.get("line") or "")]
+    lines += [str(d) for d in (info.get("detail") or [])]
+    body = "\n".join(x for x in lines if x.strip())
+    if not body:
+        return ""
+    return ("【本轮已实测：回滚状态】\n" + body + "\n"
+            "（上面是刚从 journal + git 查出来的事实。回答**首行照它写**："
+            "成功 / 失败 / 无记录 + 时间 + 涉及文件；不要另编结论，"
+            "也不要因为「没印象」就说没回滚过。）")
+
+
+def _rollback_status_first(reply: str, user_msg: str = "") -> str:
+    """问回滚结果的轮次：把**实测结论**顶到首行（成功 / 失败 / 无记录）。
+
+    为什么不交给模型编：模型对「回滚成功了吗」几乎总是顺着上下文答「已回滚」，
+    而这句话要么对、要么把用户骗回坏代码上。所以这里直接给查证结果：
+      · 首段已经是关于回滚的「结论：」→ **替换**成实测那句（不叠两条结论）；
+      · 其它情况 → 在正文最前面加一行实测结论；
+      · 用户这轮不是问回滚结果（或只是命令我回滚）→ 一个字都不改。
+    """
+    info = _rollback_info(user_msg)
+    line = str(info.get("line") or "").strip()
+    if not line:
+        return str(reply or "")
+    body = str(reply or "")
+    if not body.strip():
+        extra = [str(d) for d in (info.get("detail") or []) if str(d).strip()]
+        return "\n".join([line] + extra)
+    lines = body.splitlines()
+    for i, ln in enumerate(lines):
+        if not ln.strip():
+            continue
+        if ln.lstrip().startswith("结论：") and any(w in ln for w in _ROLLBACK_WORDS):
+            lines[i] = line          # 用实测事实替换掉可能编出来的那句
+            return "\n".join(lines)
+        break
+    return line + "\n" + body
+
+
 # 三段标题（用于识别与保留）
 _REPLY_SECTION_HEADS = ("结论：", "改动：", "验证：")
 
@@ -6803,7 +6900,25 @@ class _SystemPrompt:
             "### 👉 你需要做什么\n"
             "- 需要用户操作的步骤；没有就写「不需要，可以直接用」\n"
             "⚠️ 正文里**不要贴大段代码/日志**（超过 10 行就该调工具落盘或让界面折叠显示）；\n"
-            "⚠️ 不要重复工具已经展示过的内容；⚠️ 不确定的事不要写进总结。\n",
+            "⚠️ 不要重复工具已经展示过的内容；⚠️ 不确定的事不要写进总结。\n"
+            # ★ 2026-11-20 用户要求：「涉及知识点或其他内容时，用图表或形象化卡片呈现」，
+            #   同时「markdown 格式不稳定、不美观」—— 前端已补齐表格 / 代码块 / viz 图表卡。
+            #   这段是稳定文本（不随用户输入变化），不会破坏前缀缓存。
+            "\n【排版：能画图就别堆长段文字】\n"
+            "界面支持的 Markdown：标题、列表、**粗体**、`行内代码`、> 引用、表格、``` 围栏代码块。\n"
+            "⚠️ 表格**必须**带第二行分隔线（`|---|---|`），否则整张表会漏成一行竖线；"
+            "列数别超过 5 列，窄屏会挤。\n"
+            "涉及知识点、概念、数据对比、占比、趋势、流程时，**优先用 ```viz 块**画出来（内容是 JSON，本地渲染，不联网）：\n"
+            '  · 条形 {"type":"bar","title":"标题","unit":"%","data":[{"label":"A","value":30}]}（竖柱写 column）\n'
+            '  · 折线 {"type":"line","title":"趋势","data":[{"label":"1月","value":3}]}\n'
+            '  · 饼图 {"type":"pie","title":"占比","data":[{"label":"前端","value":60}]}（环形写 donut）\n'
+            '  · 步骤 {"type":"steps","title":"流程","data":[{"label":"第一步","note":"说明"}]}\n'
+            '  · 对比 {"type":"compare","title":"方案对比","data":[{"label":"A 方案","note":"优点…"}]}\n'
+            '  · 大数字 {"type":"kpi","title":"指标","data":[{"label":"耗时","value":12}]}\n'
+            '  · 知识卡 {"type":"card","icon":"🧠","title":"概念名","sub":"一句话定义","points":["要点1","要点2"],"note":"补充"}'
+            "——**讲清一个知识点时首选这个**\n"
+            "⚠️ JSON 必须合法：双引号、无注释、无尾逗号；数值写数字别加引号；一个 viz 块只画一个图。"
+            "**寒暄、短回答、纯文字结论不要画图**，别为了炫技硬塞图表。\n",
             # 告诉模型时间去哪儿找（这句本身是稳定的，不会破坏缓存）
             "需要知道「现在几点/今天几号」时，看**用户消息末尾附的「当前时间」**，"
             "或调用 get_time 工具；不要凭训练数据猜日期。",
@@ -7779,6 +7894,16 @@ async def chat(req: ChatRequest,
         # ⚠️ 历史摘要**不能并进系统提示** —— 它会随上下文裁剪而变，
         #    同样会把它后面的工具定义一起废掉（见 _attach_live_ctx 的说明）。
         full_sys = sys_prompt
+        # ★ 回滚查证（2026-11-18）：用户这一轮在问「回滚成功了吗」时，
+        #   先把 journal + git 查出来的**事实**写进系统提示 —— 模型对回滚结果
+        #   最容易凭上下文编一句「已回滚」，所以这里不让它靠记忆，直接给数据。
+        #   查证是纯读（见 backend/rollback_query.py），失败也只是不注入，绝不影响对话。
+        try:
+            _rbq_ctx = _rollback_query_ctx(last_user)
+            if _rbq_ctx:
+                full_sys += "\n\n" + _rbq_ctx
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
         # 代码模型走不了原生工具通道 → 改用它能用的"文本协议"（见 _split_text_tool_call）
         code_text_tools = _code_text_tools(cfg) if code_model_on else {}
         if code_model_on:
@@ -8908,6 +9033,17 @@ async def chat(req: ChatRequest,
         if _filled != final_text:
             logger.warning("[empty-reply] 模型返回空回复，已替换为占位回复")
             final_text = _filled
+        # ★ 回滚查证（2026-11-18 接线）：用户问「上次回滚成功了吗」这类问题时，
+        #   首行必须是**实测**的成功 / 失败 / 无记录（+ 时间 + 涉及文件），
+        #   不能是模型顺着上下文编的「已回滚」。查证来源见 backend/rollback_query.py。
+        #   ⚠️ 同样必须在 _clip_reply / reply_gate 之前 —— 否则刚顶上去的首行会被裁掉。
+        try:
+            _rbf = _rollback_status_first(final_text, last_user)
+            if _rbf != final_text:
+                logger.info("[rollback-query] 首行已替换为实测回滚状态")
+                final_text = _rbf
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
         # ⚠️ 必须在 _clip_reply 之前做：否则刚加到首行的引导会被长度裁剪切掉。
         _pre = _force_conclusion_first(final_text, last_user)
         if _pre != final_text:
