@@ -1151,7 +1151,10 @@
     });
     const _renderBlock = (i) => {
       const b = _blocks[i] || { lang: "", code: "" };
-      if (b.lang === "viz" || b.lang === "chart" || b.lang === "card") return _vizHtml(b.code);
+      // ★ 2026-11-20 统一套一层 .viz-bubble 气泡框：这条路径（历史回放 / 分段渲染）
+      //   原来直接返回裸 .viz，和 renderAnswerWithCode 那条路径观感不一致。
+      if (b.lang === "viz" || b.lang === "chart" || b.lang === "card")
+        return '<div class="viz-bubble">' + _vizHtml(b.code) + "</div>";
       return '<div class="md-pre-wrap">' +
         (b.lang ? '<span class="md-pre-lang">' + escapeHtml(b.lang) + "</span>" : "") +
         '<pre class="md-pre"><code>' + escapeHtml(b.code) + "</code></pre></div>";
@@ -2669,13 +2672,21 @@
       return;
     }
     try {
-      const wantTail = raw.replace(/\*\*|`|^\s*[-*]\s+/gm, "").trim().slice(-24)
-                          .replace(/\s+/g, "");
-      const shown = (bubble.innerText || "").replace(/\s+/g, "");
-      if (wantTail && shown && !shown.includes(wantTail)) {
-        console.warn("[stream] 渲染丢了结尾，退回纯文本：", JSON.stringify(wantTail));
-        bubble.textContent = raw;
-        bubble.style.whiteSpace = "pre-wrap";
+      // ★ 2026-11-20 用户报「markdown 格式没有激活 / 卡片里没有图表」的**真凶**就在这：
+      //   这项「结尾是否还在」的兜底是给纯文本流式用的。一旦回复里有 ``` 围栏，
+      //   围栏内容（JSON / 代码）会被渲染成图表卡或代码卡，innerText 里根本不存在
+      //   那段原文 → wantTail 永远匹配不上 → 整条回复被打回 textContent 纯文本，
+      //   于是表格变成一行竖线、图表变成一段 JSON，看着就像「markdown 没生效」。
+      //   所以：只要正文里有围栏，就跳过这项检查（渲染失败另有 try/catch 兜底）。
+      if (raw.indexOf("```") < 0) {
+        const wantTail = raw.replace(/\*\*|`|^\s*[-*]\s+/gm, "").trim().slice(-24)
+                            .replace(/\s+/g, "");
+        const shown = (bubble.innerText || "").replace(/\s+/g, "");
+        if (wantTail && shown && !shown.includes(wantTail)) {
+          console.warn("[stream] 渲染丢了结尾，退回纯文本：", JSON.stringify(wantTail));
+          bubble.textContent = raw;
+          bubble.style.whiteSpace = "pre-wrap";
+        }
       }
     } catch (e) { /* 忽略 */ }
     // 画布即对话：多模态结果（文字 + 图片/文件/表格/网页）再挂一层可圈选卡片画布。
@@ -7710,15 +7721,21 @@
       let last = 0, m;
       while ((m = re.exec(text)) !== null) {
         if (m.index > last) parts.push({ t: "text", v: text.slice(last, m.index) });
+        const _lg = String(m[1] || "").toLowerCase();
         if (looksLikeToolCall(m[1], m[2])) {
           parts.push({ t: "raw" });          // 内部工具调用：不渲染成代码卡片
+        } else if (_lg === "viz" || _lg === "chart" || _lg === "card") {
+          // ★ 2026-11-20 修（用户报「卡片里没有图表」）：
+          //   以前所有围栏都走 makeCodeCard → ```viz 变成一张带「▶ 运行」的代码卡片，
+          //   界面上只看到一段 JSON，看不到图。图表围栏必须单独成 viz 段。
+          parts.push({ t: "viz", v: m[2].replace(/\s+$/, "") });
         } else {
           parts.push({ t: "code", lang: m[1] || "", v: m[2].replace(/\n$/, "") });
         }
         last = m.index + m[0].length;
       }
       if (last < text.length) parts.push({ t: "text", v: text.slice(last) });
-      if (!parts.some((p) => p.t === "code")) { bubble.textContent = text; return; }
+      if (!parts.some((p) => p.t === "code" || p.t === "viz")) { bubble.textContent = text; return; }
       bubble.textContent = "";
       parts.forEach((p) => {
         if (p.t === "text") {
@@ -7731,6 +7748,13 @@
           const d = document.createElement("div");
           d.className = "md-text muted";
           d.textContent = "（这里原本是一次内部工具调用，已折叠）";
+          bubble.appendChild(d);
+        } else if (p.t === "viz") {
+          // ★ 2026-11-20 用户要求：「卡片里能嵌套一个气泡框直接把图表展现出来」
+          const d = document.createElement("div");
+          d.className = "viz-bubble";
+          try { d.innerHTML = _vizHtml(p.v); }
+          catch (e) { d.textContent = "图表渲染失败：" + p.v.slice(0, 200); }
           bubble.appendChild(d);
         } else {
           appendCodeCard(bubble, makeCodeCard(

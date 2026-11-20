@@ -7373,6 +7373,34 @@ html[data-theme="light"] .iter-site:hover {
 .bubble .viz-points li { font-size: 12.5px; line-height: 1.7; margin: 3px 0; }
 .bubble .viz-note { margin-top: 7px; padding-top: 6px; font-size: 11.5px;
   border-top: 1px dashed var(--chip-border, rgba(140,150,170,.3)); color: var(--muted, #8a93a6); }
+
+  /* ★ 2026-11-20 用户要求「卡片里能嵌套一个气泡框，直接把图表展现出来」：
+     图表单独套一层气泡（圆角 + 浅底 + 细边 + 轻投影 + 右上角角标），
+     和正文段落视觉上分开，一眼能认出「这是一张图」。 */
+  .bubble .viz-bubble {
+    position: relative;
+    margin: 12px 0 14px;
+    padding: 14px 14px 12px;
+    border-radius: 14px;
+    background: var(--chip-bg, rgba(140,150,170,.08));
+    border: 1px solid var(--chip-border, rgba(140,150,170,.22));
+    box-shadow: 0 2px 6px rgba(20, 30, 60, .06);
+    box-sizing: border-box;
+    max-width: 100%;
+  }
+  /* 气泡内部不再重复画一层卡片底 */
+  .bubble .viz-bubble > .viz {
+    margin: 0; padding: 0; background: none; border: 0; border-radius: 0;
+  }
+  .bubble .viz-bubble .viz-title { padding-right: 22px; }
+  .bubble .viz-bubble::after {
+    content: "📊";
+    position: absolute; top: 9px; right: 10px;
+    font-size: 12px; opacity: .45; pointer-events: none;
+  }
+  @media (max-width: 640px) {
+    .bubble .viz-bubble { padding: 12px 10px 10px; border-radius: 12px; }
+  }
 @media (max-width: 640px) {
   .bubble .viz-cmp { flex-direction: column; }
   .bubble .viz-bar-l { flex-basis: 70px; }
