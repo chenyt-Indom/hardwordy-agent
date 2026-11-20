@@ -1264,7 +1264,15 @@
   //   每个面单独投影，按平均深度从远到近绘制（画家算法），
   //   遮挡关系由几何算出，不是靠贴图假装。数据仍精确：坐标由数值计算。
   // ═══════════════════════════════════════════════════════════════════
-  function _viz3DView(yawDeg, pitchDeg, fov, dist) {
+  // ★ 2026-11-21（第四版）：改成正交投影。
+  //   上一版用真透视，实测左右两端柱子屏上宽度差 33%（28.8px vs 42.6px）、
+  //   高度差 15% —— 同样的数值画出不一样大小的柱子，用户看到的就是「严重扭曲」。
+  //   根因：yaw 让 x 直接进入深度 z1 = x*sin(yaw) + z*cos(yaw)，
+  //   spanX=420 配 dist=700 时左右深度差 210，透视除法把差距放大了。
+  //   数据图表不该有透视（Excel / Highcharts 的 3D 柱状也是正交）：
+  //   立体感来自「能同时看到顶面、正面、侧面」，不靠近大远小。
+  //   正交后柱宽差 0.00%、高差 0.00%，数值可比；顶面 32~37px、侧面 21~30px 仍清晰。
+  function _viz3DView(yawDeg, pitchDeg, fov, dist, ortho) {
     const yaw = (yawDeg == null ? -20 : yawDeg) * Math.PI / 180;
     const pit = (pitchDeg == null ? 20 : pitchDeg) * Math.PI / 180;
     const fv = fov || 900, dz = dist || 1000;
@@ -1273,8 +1281,14 @@
     const proj = (x, y, z) => {
       const x1 = x * cyw - z * syw;
       const z1 = x * syw + z * cyw;
-      const y2 = y * cpt - z1 * spt;
-      const z2 = y * spt + z1 * cpt;
+      // ★ 这两个符号曾经是反的：y*cpt - z1*spt 配 z2 = y*spt + z1*cpt，
+      //   会让「近侧边缘」投影到屏幕上方、「顶面」被判成更远 —— 画出来是仰视，
+      //   饼图的侧壁被画到椭圆上沿，看着就像「只有一个扁面、方向倒了」。
+      //   正确的俯视：z 越大（越远）屏幕越靠上；y 越高（顶面）离相机越近。
+      const y2 = y * cpt + z1 * spt;
+      const z2 = -y * spt + z1 * cpt;
+      // 正交：缩放恒定，深度只用于排序，不参与缩放
+      if (ortho) return [x1 * (fv / dz), -y2 * (fv / dz), z2];
       const d = z2 + dz;
       const s = fv / (d > 90 ? d : 90);
       return [x1 * s, -y2 * s, d];
@@ -1350,9 +1364,9 @@
     const spanX = 420, maxH = 158;
     const slot = spanX / n;
     const bw = Math.max(10, Math.min(44, (slot * 0.68) / ns));
-    // ★ 透视强度取决于 dist 与物体跨度之比：dist=1000 配 spanX=420 时近远差仅 ~15%，
-    //   肉眼等于没有透视。柱深也要够（bd=34 + 20° 俯角，顶面在屏上仅约 10px）。
-    const bd = Math.max(22, Math.min(52, bw * 1.05));
+    // ★ 正交投影下立体感全靠「能看到顶面和侧面」，柱深必须够：
+    //   bd=46 时顶面只有 23px，bd=66 时顶面约 33px、侧面约 26px，才看得出是立方体。
+    const bd = Math.max(40, Math.min(72, bw * 1.5));
     const gap = ns > 1 ? Math.min(6, bw * 0.2) : 0;
     const xOf = (i, j) => {
       const xc = -spanX / 2 + slot * (i + 0.5);
@@ -1380,7 +1394,8 @@
     wp.push([gx0, 0, gz0], [gx1, 0, gz0], [gx0, 0, gz1], [gx1, 0, gz1]);
     wp.push([gx0, 0, gz1 + 18], [gx1, 0, gz1 + 18]);
 
-    const view = _viz3DView(-30, 26, 700, 700);
+    // yaw 收小到 -18°：侧面仍有 66*sin(18°)≈20px 可见，但柱顶的倾斜观感更小
+    const view = _viz3DView(-18, 32, 700, 700, true);
     const T = view.fit(wp, W, H, pad);
     let g = "";
 
@@ -1472,7 +1487,9 @@
 
   // ── 真透视饼图 / 环图：切成小块后逐面排序，厚度与遮挡都是几何算的 ──
   function _viz3DPie(o) {
-    const W = 680, H = 350, pad = 22;
+    // ★ 画布比例必须贴近饼图自身比例（约 1.13:1），否则 fit 受短边限制，
+    //   横向留白能到 40%。680×350(1.94:1) 配 1.13 的内容就是这个毛病。
+    const W = 470, H = 416, pad = 22;
     const it = o.items || [];
     const P = o.palette || ["#4f8cff"];
     const unit = o.unit || "";
@@ -1487,7 +1504,9 @@
       wp.push([Math.cos(a) * R, TH, Math.sin(a) * R]);
       wp.push([Math.cos(a) * R, 0, Math.sin(a) * R]);
     }
-    const view = _viz3DView(-20, 30, 780, 760);
+    // ★ 俯角 30° 时圆盘高/宽 = sin(30°) = 0.50，看起来就是「被压扁的椭圆」。
+    //   40° → 0.64 仍偏扁，50° → 0.77 才饱满；侧壁还有 46*cos(50°)≈30px 可见。
+    const view = _viz3DView(-20, 50, 780, 760, true);
     const T = view.fit(wp, W, H, pad);
 
     // ★ 顶面：**每个扇区一个整体多边形**，沿弧采样后一次成形。
@@ -1584,7 +1603,7 @@
     }
     wp.push([gx0, 0, -spanZ], [gx1, 0, -spanZ], [gx0, 0, spanZ + 18], [gx1, 0, spanZ + 18]);
 
-    const view = _viz3DView(-28, 30, 720, 720);
+    const view = _viz3DView(-24, 32, 720, 720, true);
     const T = view.fit(wp, W, H, pad);
     let g = "";
 
