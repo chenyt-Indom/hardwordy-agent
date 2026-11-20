@@ -2664,10 +2664,26 @@
       return;
     }
     try {
-      if (raw.indexOf("```") >= 0) renderAnswerWithCode(bubble, raw, userText || "");
-      else renderAnswerLinks(bubble, raw);
+      // ★★ 2026-11-20 真凶（已用括号配对实测确认，不是猜的）：
+      //   renderAnswerWithCode 是 doSend() 内部（7098 行起的 async 函数）的局部 const，
+      //   而 renderFinal 定义在 IIFE 顶层（块链 [2]）—— 它**根本看不见** doSend 里的局部函数。
+      //   于是任何带 ``` 的回复都必然抛 ReferenceError → 被下面的 catch 兜成 textContent=raw：
+      //   表格变一行竖线、viz 变一段 JSON、行内代码和 **加粗** 也全丢。
+      //   这正是用户反复报的「markdown 没激活 / 卡片里没有图表」。
+      //   修法：三级解析 —— 作用域内优先 → window 暴露（doSend 里赋值）→ mdToHtml 兜底。
+      let _rac = null;
+      try { if (typeof renderAnswerWithCode === "function") _rac = renderAnswerWithCode; } catch (e0) { _rac = null; }
+      if (!_rac && typeof window.__renderAnswerWithCode === "function") _rac = window.__renderAnswerWithCode;
+      if (raw.indexOf("```") >= 0) {
+        if (_rac) _rac(bubble, raw, userText || "");
+        else bubble.innerHTML = mdToHtml(raw);     // mdToHtml 自带围栏/表格/图表渲染
+      } else {
+        renderAnswerLinks(bubble, raw);
+      }
     } catch (e) {
-      bubble.textContent = raw;
+      // 兜底也换掉：原来直接 textContent=raw 等于放弃 markdown。现在先试 mdToHtml。
+      try { bubble.innerHTML = mdToHtml(raw); }
+      catch (e2) { bubble.textContent = raw; bubble.style.whiteSpace = "pre-wrap"; }
       attachSpeak(bubble, raw);
       return;
     }
@@ -7763,6 +7779,11 @@
         }
       });
     };
+    // ★ 2026-11-20：上面这个 renderAnswerWithCode 是 doSend 的**局部**函数，而 renderFinal
+    //   定义在 IIFE 顶层，作用域上根本看不见它（实测块链 [2] vs [2, 7098]）。
+    //   以前带 ``` 的回复因此抛 ReferenceError 被打回纯文本。这里显式暴露给顶层用。
+    //   历史回放发生在 doSend 之前，取不到就走 mdToHtml 兜底，同样能渲染表格/图表。
+    try { window.__renderAnswerWithCode = renderAnswerWithCode; } catch (e) { /* 忽略 */ }
 
     // 危险操作确认：模型要删文件/起进程/联网时，**先问一句**而不是直接拒绝
     const showConfirm = (ui) => {
