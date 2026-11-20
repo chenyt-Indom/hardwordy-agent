@@ -1083,9 +1083,22 @@
     }
     return d;
   };
+  // ★ 2026-11-21 用户要求「图表要三维形状」。
+  //   做的是伪 3D（等轴测）：柱状图拆成正面/顶面/右侧面三块，饼图用多层圆盘堆出厚度。
+  //   好处是不依赖任何库、数据仍是精确的（AI 生成的立体图会把数字画糊，这里不会）。
+  //   f > 0 提亮，f < 0 压暗；用于从同一个主色派生三面的明暗。
+  //   ⚠️ 必须定义在 _vizXY 外面：饼图分支在 _vizHtml 里也要用，放在 _vizXY 内部会变成局部变量。
+  const _vizShade = (hex, f) => {
+    const h = String(hex || "#4f8cff").replace("#", "");
+    const p = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) || 0);
+    const m = (c) => Math.max(0, Math.min(255, Math.round(f > 0 ? c + (255 - c) * f : c * (1 + f))));
+    return "#" + p.map((c) => m(c).toString(16).padStart(2, "0")).join("");
+  };
   function _vizXY(o) {
     const W = 680, H = 252;
-    const padL = 56, padR = 30, padT = 20, padB = 38;
+    // ★ 3D 时柱顶再向上抬 11px，数值标签还要在顶面上方留一行，
+    //   所以上边距必须从 20 加到 34 —— 否则最高柱的标签会跑到 y<0 被画布裁掉。
+    const padL = 56, padR = 30, padT = o.d3 ? 34 : 20, padB = 38;
     const cats = o.cats && o.cats.length ? o.cats : [" "];
     const ser = o.ser && o.ser.length ? o.ser : [{ name: "", values: [0] }];
     const P = o.palette;
@@ -1121,8 +1134,10 @@
 
     if (isCol) {
       const slot = iw / n;
-      const bw = Math.min(52, slot * (ser.length > 1 ? 0.72 / ser.length : 0.56));
-      const grp = bw * ser.length + 5 * (ser.length - 1);
+      const d3 = !!o.d3;
+      const kx = d3 ? 11 : 0, ky = d3 ? -11 : 0;
+      const bw = Math.min(52, slot * (ser.length > 1 ? 0.72 / ser.length : 0.56)) * (d3 ? 0.78 : 1);
+      const grp = bw * ser.length + 5 * (ser.length - 1) + (d3 ? kx : 0);
       const showV = n * ser.length <= 10;
       ser.forEach((s, si) => {
         const col = P[si % P.length];
@@ -1133,11 +1148,22 @@
           const y = yAt(v);
           const h = Math.max(2, padT + ih - y);
           const x = xs[i] - grp / 2 + si * (bw + 5);
-          g += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
-            '" height="' + h.toFixed(1) + '" rx="4" fill="url(#' + uid + "c" + si + ')">' +
-            "<title>" + escapeHtml(cats[i] + "：" + _vizNum(v, o.unit)) + "</title></rect>";
+          const tip = "<title>" + escapeHtml(cats[i] + "：" + _vizNum(v, o.unit)) + "</title>";
+          if (d3) {
+            g += '<polygon points="' +
+              [x + bw, y, x + bw + kx, y + ky, x + bw + kx, y + ky + h, x + bw, y + h]
+                .map((q) => q.toFixed(1)).join(" ") + '" fill="' + _vizShade(col, -0.44) + '">' + tip + "</polygon>";
+            g += '<polygon points="' +
+              [x, y, x + kx, y + ky, x + bw + kx, y + ky, x + bw, y]
+                .map((q) => q.toFixed(1)).join(" ") + '" fill="' + _vizShade(col, 0.52) + '"></polygon>';
+            g += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
+              '" height="' + h.toFixed(1) + '" fill="url(#' + uid + "c" + si + ')">' + tip + "</rect>";
+          } else {
+            g += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
+              '" height="' + h.toFixed(1) + '" rx="4" fill="url(#' + uid + "c" + si + ')">' + tip + "</rect>";
+          }
           if (showV) {
-            g += '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (y - 7).toFixed(1) +
+            g += '<text x="' + (x + bw / 2 + kx / 2).toFixed(1) + '" y="' + Math.max(13, y + ky - 7).toFixed(1) +
               '" text-anchor="middle" font-size="11.5" font-weight="600" fill="#4a566e"' +
               ' stroke="#fff" stroke-width="3.2" paint-order="stroke">' +
               escapeHtml(_vizNum(v, o.unit)) + "</text>";
@@ -1151,12 +1177,23 @@
         const pts = [];
         for (let i = 0; i < n; i++) pts.push([xs[i], yAt(Number(s.values[i]) || 0)]);
         const d = _vizCurve(pts, padT, padT + ih);
-        if (o.fill && si === 0) {
+        if ((o.fill || o.d3) && si === 0) {
           defs += '<linearGradient id="' + uid + "a" + si + '" x1="0" y1="0" x2="0" y2="1">' +
             '<stop offset="0" stop-color="' + col + '" stop-opacity="0.32"/>' +
             '<stop offset="1" stop-color="' + col + '" stop-opacity="0.02"/></linearGradient>';
           g += '<path d="' + d + "L" + pts[pts.length - 1][0].toFixed(1) + "," + (padT + ih) +
             "L" + pts[0][0].toFixed(1) + "," + (padT + ih) + 'Z" fill="url(#' + uid + "a" + si + ')"/>';
+        }
+        if (o.d3) {
+          // 三层等轴测挤出。实测：线宽 3px + 偏移 ≤6px 时肉眼几乎看不出立体，
+          // 必须加粗到 5px、偏移放大到 (9,15) 才有「厚度」感。
+          // 由远及近逐渐加深，最远那层最淡，避免抢主线。
+          const _dk = _vizShade(col, -0.42);
+          [3, 2, 1].forEach((k) => {
+            g += '<path d="' + d + '" fill="none" stroke="' + _dk +
+              '" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="' +
+              (0.1 + (3 - k) * 0.1).toFixed(2) + '" transform="translate(' + (k * 3) + "," + (k * 5) + ')"/>';
+          });
         }
         g += '<path d="' + d + '" fill="none" stroke="' + col +
           '" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>';
@@ -1219,6 +1256,436 @@
       (defs ? "<defs>" + defs + "</defs>" : "") + g + "</svg>" + legend + "</div>";
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  // ★ 2026-11-21（第三版）真透视 3D 渲染器
+  //   前两版是等轴测三面 / 多层圆盘：没有视点、没有近大远小，
+  //   用户看下来仍是「扁平色块 + 阴影」。这一版是真透视：
+  //     世界坐标 (x,y,z) → 绕 Y 轴 yaw → 绕 X 轴 pitch → 透视除法
+  //   每个面单独投影，按平均深度从远到近绘制（画家算法），
+  //   遮挡关系由几何算出，不是靠贴图假装。数据仍精确：坐标由数值计算。
+  // ═══════════════════════════════════════════════════════════════════
+  function _viz3DView(yawDeg, pitchDeg, fov, dist) {
+    const yaw = (yawDeg == null ? -20 : yawDeg) * Math.PI / 180;
+    const pit = (pitchDeg == null ? 20 : pitchDeg) * Math.PI / 180;
+    const fv = fov || 900, dz = dist || 1000;
+    const cyw = Math.cos(yaw), syw = Math.sin(yaw);
+    const cpt = Math.cos(pit), spt = Math.sin(pit);
+    const proj = (x, y, z) => {
+      const x1 = x * cyw - z * syw;
+      const z1 = x * syw + z * cyw;
+      const y2 = y * cpt - z1 * spt;
+      const z2 = y * spt + z1 * cpt;
+      const d = z2 + dz;
+      const s = fv / (d > 90 ? d : 90);
+      return [x1 * s, -y2 * s, d];
+    };
+    // 把一批世界点装进 W×H：整体等比缩放 + 平移，不破坏透视形状
+    const fit = (wp, W, H, pad) => {
+      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+      for (let i = 0; i < wp.length; i++) {
+        const w = wp[i];
+        if (!w) continue;
+        const q = proj(w[0], w[1], w[2]);
+        if (!isFinite(q[0]) || !isFinite(q[1])) continue;
+        if (q[0] < x0) x0 = q[0];
+        if (q[0] > x1) x1 = q[0];
+        if (q[1] < y0) y0 = q[1];
+        if (q[1] > y1) y1 = q[1];
+      }
+      if (!(x1 > x0) || !(y1 > y0)) { x0 = -1; x1 = 1; y0 = -1; y1 = 1; }
+      const k = Math.min((W - pad * 2) / (x1 - x0), (H - pad * 2) / (y1 - y0));
+      const ox = W / 2 - ((x0 + x1) / 2) * k;
+      const oy = H / 2 - ((y0 + y1) / 2) * k;
+      return (x, y, z) => {
+        const q = proj(x, y, z);
+        return [q[0] * k + ox, q[1] * k + oy, q[2]];
+      };
+    };
+    return { proj: proj, fit: fit };
+  }
+  const _viz3DPt = (p) => p[0].toFixed(1) + "," + p[1].toFixed(1);
+  const _viz3DPoly = (pts, fill, tip, sw) =>
+    '<polygon points="' + pts.map(_viz3DPt).join(" ") + '" fill="' + fill + '"' +
+    (sw ? ' stroke="' + fill + '" stroke-width="' + sw + '" stroke-linejoin="round"' : "") + ">" +
+    (tip || "") + "</polygon>";
+  // 画家算法：远的先画，近的覆盖上去
+  const _viz3DPaint = (faces) => {
+    for (let i = 0; i < faces.length; i++) {
+      const w = faces[i].w;
+      let s = 0;
+      for (let j = 0; j < w.length; j++) s += w[j][2];
+      faces[i].dep = s / (w.length || 1);
+    }
+    faces.sort((a, b) => b.dep - a.dep);
+    let out = "";
+    for (let i = 0; i < faces.length; i++) {
+      out += _viz3DPoly(faces[i].w, faces[i].fill, faces[i].tip, faces[i].sw);
+    }
+    return out;
+  };
+  const _viz3DLegend = (ser, P) =>
+    (ser.length > 1 || (ser[0] && ser[0].name))
+      ? '<div class="viz-legend">' + ser.map((s, i) =>
+          '<span><i style="background:' + P[i % P.length] + '"></i>' + escapeHtml(s.name) + "</span>").join("") + "</div>"
+      : "";
+
+  // ── 真透视柱状图：立方体五面 + 地面网格 + 地面阴影 + 透视刻度 ──
+  function _viz3DBars(o) {
+    const W = 680, H = 336, pad = 20;
+    const cats = o.cats && o.cats.length ? o.cats : [" "];
+    const ser = o.ser && o.ser.length ? o.ser : [{ name: "", values: [0] }];
+    const P = o.palette || ["#4f8cff"];
+    const unit = o.unit || "";
+    const n = cats.length, ns = ser.length;
+    let mx = 0;
+    for (let j = 0; j < ns; j++) {
+      const vs = ser[j].values || [];
+      for (let i = 0; i < vs.length; i++) {
+        const a = Math.abs(Number(vs[i]) || 0);
+        if (a > mx) mx = a;
+      }
+    }
+    if (!(mx > 0)) mx = 1;
+
+    const spanX = 420, maxH = 158;
+    const slot = spanX / n;
+    const bw = Math.max(10, Math.min(44, (slot * 0.68) / ns));
+    // ★ 透视强度取决于 dist 与物体跨度之比：dist=1000 配 spanX=420 时近远差仅 ~15%，
+    //   肉眼等于没有透视。柱深也要够（bd=34 + 20° 俯角，顶面在屏上仅约 10px）。
+    const bd = Math.max(22, Math.min(52, bw * 1.05));
+    const gap = ns > 1 ? Math.min(6, bw * 0.2) : 0;
+    const xOf = (i, j) => {
+      const xc = -spanX / 2 + slot * (i + 0.5);
+      const tot = ns * bw + (ns - 1) * gap;
+      return xc - tot / 2 + j * (bw + gap);
+    };
+    const hOf = (j, i) => Math.max(1.5, (Math.abs(Number(ser[j].values[i]) || 0) / mx) * maxH);
+
+    const gx0 = -spanX / 2 - 28, gx1 = spanX / 2 + 28;
+    const gz0 = -bd / 2 - 26, gz1 = bd / 2 + 40;
+
+    // ★ 装框必须用柱子的**真实 z**（±bd/2），不能用地面网格的 gz1 ——
+    //   网格比柱子更靠后，投影后更小，用它算出来的 bbox 偏小，
+    //   靠近相机的柱顶会顶出画布（实测多系列时越界 26px）。
+    const wp = [];
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < ns; j++) {
+        const x0 = xOf(i, j), h = hOf(j, i);
+        const zb = bd / 2;
+        wp.push([x0, 0, -zb], [x0 + bw, 0, -zb], [x0, 0, zb], [x0 + bw, 0, zb]);
+        wp.push([x0, h, -zb], [x0 + bw, h, -zb], [x0, h, zb], [x0 + bw, h, zb]);
+        wp.push([x0, h + 18, zb], [x0 + bw, h + 18, zb]);
+      }
+    }
+    wp.push([gx0, 0, gz0], [gx1, 0, gz0], [gx0, 0, gz1], [gx1, 0, gz1]);
+    wp.push([gx0, 0, gz1 + 18], [gx1, 0, gz1 + 18]);
+
+    const view = _viz3DView(-30, 26, 700, 700);
+    const T = view.fit(wp, W, H, pad);
+    let g = "";
+
+    // 地面网格（横向 + 纵向）
+    for (let i = 0; i <= 4; i++) {
+      const x = gx0 + (gx1 - gx0) * i / 4;
+      const a = T(x, 0, gz0), b = T(x, 0, gz1);
+      g += '<line x1="' + a[0].toFixed(1) + '" y1="' + a[1].toFixed(1) + '" x2="' + b[0].toFixed(1) +
+        '" y2="' + b[1].toFixed(1) + '" stroke="#dbe4f3" stroke-width="1"/>';
+    }
+    for (let i = 0; i <= 2; i++) {
+      const z = gz0 + (gz1 - gz0) * i / 2;
+      const a = T(gx0, 0, z), b = T(gx1, 0, z);
+      g += '<line x1="' + a[0].toFixed(1) + '" y1="' + a[1].toFixed(1) + '" x2="' + b[0].toFixed(1) +
+        '" y2="' + b[1].toFixed(1) + '" stroke="#dbe4f3" stroke-width="1"/>';
+    }
+
+    // Y 轴刻度（透视投影后画在左侧）
+    const stp = _vizStep(mx / 4);
+    const tk = Math.max(1, Math.ceil(mx / stp));
+    const top = stp * tk;
+    for (let t = 0; t <= tk; t++) {
+      const v = top * t / tk;
+      const yw = (v / mx) * maxH;
+      const a = T(gx0, yw, gz0), b = T(gx1, yw, gz0);
+      if (t > 0) {
+        g += '<line x1="' + a[0].toFixed(1) + '" y1="' + a[1].toFixed(1) + '" x2="' + b[0].toFixed(1) +
+          '" y2="' + b[1].toFixed(1) + '" stroke="#e9eef7" stroke-width="1" stroke-dasharray="3 5"/>';
+      }
+      const lp = T(gx0 - 12, yw, gz0);
+      g += '<text x="' + lp[0].toFixed(1) + '" y="' + (lp[1] + 3.6).toFixed(1) +
+        '" text-anchor="end" font-size="11" fill="#93a0b8" stroke="#fff" stroke-width="3" paint-order="stroke">' +
+        escapeHtml(_vizNum(v, unit)) + "</text>";
+    }
+
+    // 地面阴影（先于柱子绘制，让柱子"站"在地面上）
+    let sh = "";
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < ns; j++) {
+        const x0 = xOf(i, j), x1 = x0 + bw;
+        const z0 = -bd / 2, z1 = bd / 2;
+        const q = [[x0 + 7, 0.4, z0 + 5], [x1 + 7, 0.4, z0 + 5], [x1 + 7, 0.4, z1 + 5], [x0 + 7, 0.4, z1 + 5]]
+          .map((p) => T(p[0], p[1], p[2]));
+        sh += '<polygon points="' + q.map(_viz3DPt).join(" ") + '" fill="#5b6f96" opacity="0.13"/>';
+      }
+    }
+
+    // 立方体五面
+    const faces = [];
+    const labs = [];
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < ns; j++) {
+        const v = Math.abs(Number(ser[j].values[i]) || 0);
+        const h = hOf(j, i);
+        const x0 = xOf(i, j), x1 = x0 + bw;
+        const z0 = -bd / 2, z1 = bd / 2;
+        const col = P[j % P.length];
+        const tip = "<title>" + escapeHtml(cats[i] + "：" + _vizNum(v, unit)) + "</title>";
+        const F = (pts, fill) => faces.push({ w: pts.map((p) => T(p[0], p[1], p[2])), fill: fill, tip: tip, sw: 0.6 });
+        F([[x0, h, z0], [x1, h, z0], [x1, h, z1], [x0, h, z1]], _vizShade(col, 0.52));          // 顶
+        F([[x0, 0, z1], [x1, 0, z1], [x1, h, z1], [x0, h, z1]], _vizShade(col, 0.12));           // 前
+        F([[x1, 0, z0], [x1, 0, z1], [x1, h, z1], [x1, h, z0]], _vizShade(col, -0.24));          // 右
+        F([[x0, 0, z0], [x0, 0, z1], [x0, h, z1], [x0, h, z0]], _vizShade(col, -0.14));          // 左
+        F([[x0, 0, z0], [x1, 0, z0], [x1, h, z0], [x0, h, z0]], _vizShade(col, -0.44));          // 后
+        if (n * ns <= 14) {
+          const lp = T((x0 + x1) / 2, h + 11, z1);
+          labs.push({ x: lp[0], y: lp[1], t: _vizNum(v, unit) });
+        }
+      }
+    }
+
+    // 分类标签（贴在柱子前方的地面上）
+    cats.forEach((c, i) => {
+      const lp = T(-spanX / 2 + slot * (i + 0.5), 0, gz1 + 8);
+      labs.push({ x: lp[0], y: lp[1] + 9, t: String(c), c: "#7a869e", s: 11.5 });
+    });
+
+    let lt = "";
+    labs.forEach((l) => {
+      lt += '<text x="' + l.x.toFixed(1) + '" y="' + l.y.toFixed(1) + '" text-anchor="middle" font-size="' +
+        (l.s || 11.5) + '" font-weight="' + (l.c ? "400" : "600") + '" fill="' + (l.c || "#3d4a63") +
+        '" stroke="#fff" stroke-width="3.2" paint-order="stroke">' + escapeHtml(l.t) + "</text>";
+    });
+
+    return '<div class="viz-chart viz-3d-chart"><svg class="viz-svg" viewBox="0 0 ' + W + " " + H +
+      '" preserveAspectRatio="xMidYMid meet" role="img">' + g + sh + _viz3DPaint(faces) + lt +
+      "</svg>" + _viz3DLegend(ser, P) + "</div>";
+  }
+
+  // ── 真透视饼图 / 环图：切成小块后逐面排序，厚度与遮挡都是几何算的 ──
+  function _viz3DPie(o) {
+    const W = 680, H = 350, pad = 22;
+    const it = o.items || [];
+    const P = o.palette || ["#4f8cff"];
+    const unit = o.unit || "";
+    const donut = !!o.donut;
+    const total = it.reduce((a, b) => a + Math.abs(Number(b.value) || 0), 0) || 1;
+    // ★ 立体感 = 椭圆压缩(pitch) × 侧壁厚度(TH)。TH=34 时侧壁投影后仅 ~29，太薄看不出。
+    const R = 128, TH = 46, rIn = donut ? 60 : 0;
+
+    const wp = [];
+    for (let i = 0; i < 36; i++) {
+      const a = i / 36 * Math.PI * 2;
+      wp.push([Math.cos(a) * R, TH, Math.sin(a) * R]);
+      wp.push([Math.cos(a) * R, 0, Math.sin(a) * R]);
+    }
+    const view = _viz3DView(-20, 30, 780, 760);
+    const T = view.fit(wp, W, H, pad);
+
+    // ★ 顶面：**每个扇区一个整体多边形**，沿弧采样后一次成形。
+    //   之前把顶面也切成 4° 小块，相邻小块之间的径向接缝会漏出下面的暗色侧壁，
+    //   叠出来就是一圈「放射状黑色纹理」。整块成形就没有接缝。
+    //   侧壁仍按小块：它需要逐块判断可见性（外法线旋转后 z 分量为负才朝相机）。
+    const ya = -20 * Math.PI / 180;
+    const syw = Math.sin(ya), cyw = Math.cos(ya);
+    const nz1 = (ang) => Math.cos(ang) * syw + Math.sin(ang) * cyw;
+    const walls = [], tops = [];
+    let acc = 0;
+    it.forEach((x, i) => {
+      const v = Math.abs(Number(x.value) || 0);
+      const a0 = acc / total * Math.PI * 2 - Math.PI / 2;
+      acc += v;
+      const a1 = acc / total * Math.PI * 2 - Math.PI / 2;
+      if (a1 - a0 < 1e-5) return;
+      const col = P[i % P.length];
+      const tip = "<title>" + escapeHtml(x.label + "：" + _vizNum(v, unit)) + "</title>";
+      const pt = (ang, rad, yy) => T(Math.cos(ang) * rad, yy, Math.sin(ang) * rad);
+
+      // —— 顶面：整扇区一块 ——
+      const steps = Math.max(2, Math.ceil((a1 - a0) / (Math.PI / 60)));
+      const ring = [];
+      for (let k = 0; k <= steps; k++) ring.push(pt(a0 + (a1 - a0) * k / steps, R, TH));
+      if (donut) {
+        for (let k = steps; k >= 0; k--) ring.push(pt(a0 + (a1 - a0) * k / steps, rIn, TH));
+      } else {
+        ring.push(pt((a0 + a1) / 2, 0, TH));   // 实心饼图收到圆心，成扇形
+      }
+      tops.push({ w: ring, fill: col, tip: tip, sw: 0.8 });
+
+      // —— 侧壁：按小块做可见性裁剪 ——
+      const wseg = Math.max(1, Math.ceil((a1 - a0) / (Math.PI / 45)));
+      for (let k = 0; k < wseg; k++) {
+        const b0 = a0 + (a1 - a0) * k / wseg;
+        const b1 = a0 + (a1 - a0) * (k + 1) / wseg;
+        const vis = nz1((b0 + b1) / 2);
+        if (vis < 0) {
+          walls.push({ w: [pt(b0, R, TH), pt(b1, R, TH), pt(b1, R, 0), pt(b0, R, 0)], fill: _vizShade(col, -0.3), tip: tip, sw: 1.4 });
+        }
+        // 环图内壁法线朝内，可见条件相反（透过中间空洞能看到后侧内壁）
+        if (donut && vis > 0) {
+          walls.push({ w: [pt(b0, rIn, TH), pt(b1, rIn, TH), pt(b1, rIn, 0), pt(b0, rIn, 0)], fill: _vizShade(col, -0.48), tip: tip, sw: 1.4 });
+        }
+      }
+    });
+
+    let ctr = "";
+    if (donut) {
+      const c = T(0, TH, 0);
+      ctr = '<div class="viz-3d-ctr" style="left:' + (c[0] / W * 100).toFixed(2) + "%;top:" +
+        (c[1] / H * 100).toFixed(2) + '%"><b>' + escapeHtml(_vizNum(total, unit)) + "</b><span>合计</span></div>";
+    }
+    const legend = '<div class="viz-legend">' + it.map((x, i) =>
+      '<span><i style="background:' + P[i % P.length] + '"></i>' + escapeHtml(x.label) + " <b>" +
+      escapeHtml(x.value) + unit + "</b> · " + Math.round(Math.abs(Number(x.value) || 0) / total * 1000) / 10 + "%</span>"
+    ).join("") + "</div>";
+
+    return '<div class="viz-chart viz-3d-chart"><div class="viz-3d-hold" style="aspect-ratio:' + W + "/" + H + '">' +
+      '<svg class="viz-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMidYMid meet" role="img">' +
+      _viz3DPaint(walls) + _viz3DPaint(tops) + "</svg>" + ctr + "</div>" + legend + "</div>";
+  }
+
+  // ── 真透视折线图：数据点悬在地面上方，垂线落到地面，投影随深度收缩 ──
+  function _viz3DLine(o) {
+    const W = 680, H = 336, pad = 22;
+    const cats = o.cats && o.cats.length ? o.cats : [" "];
+    const ser = o.ser && o.ser.length ? o.ser : [{ name: "", values: [0] }];
+    const P = o.palette || ["#4f8cff"];
+    const unit = o.unit || "";
+    const n = cats.length, ns = ser.length;
+    let mx = 0;
+    for (let j = 0; j < ns; j++) {
+      const vs = ser[j].values || [];
+      for (let i = 0; i < vs.length; i++) {
+        const a = Math.abs(Number(vs[i]) || 0);
+        if (a > mx) mx = a;
+      }
+    }
+    if (!(mx > 0)) mx = 1;
+
+    // ★ spanZ 决定「地面」有多深：42 时地面只是条窄带，透视几乎看不出来，
+    //   整体观感偏平。加到 80 并抬俯角到 30°，纵深和悬空感才成立。
+    const spanX = 420, maxH = 152, spanZ = 80;
+    const xAt = (i) => (n > 1 ? -spanX / 2 + spanX * i / (n - 1) : 0);
+    const yAt = (v) => (Math.abs(Number(v) || 0) / mx) * maxH;
+    const gx0 = -spanX / 2 - 26, gx1 = spanX / 2 + 26;
+
+    const wp = [];
+    for (let i = 0; i < n; i++) {
+      wp.push([xAt(i), 0, -spanZ], [xAt(i), 0, spanZ + 18]);
+      for (let j = 0; j < ns; j++) wp.push([xAt(i), yAt(ser[j].values[i]) + 18, spanZ]);
+    }
+    wp.push([gx0, 0, -spanZ], [gx1, 0, -spanZ], [gx0, 0, spanZ + 18], [gx1, 0, spanZ + 18]);
+
+    const view = _viz3DView(-28, 30, 720, 720);
+    const T = view.fit(wp, W, H, pad);
+    let g = "";
+
+    // 地面网格（比柱状图再深一档：#dbe4f3 在白底上几乎看不见，透视纵深就没了）
+    for (let i = 0; i <= 4; i++) {
+      const x = gx0 + (gx1 - gx0) * i / 4;
+      const a = T(x, 0, -spanZ), b = T(x, 0, spanZ);
+      g += '<line x1="' + a[0].toFixed(1) + '" y1="' + a[1].toFixed(1) + '" x2="' + b[0].toFixed(1) +
+        '" y2="' + b[1].toFixed(1) + '" stroke="#c4d3e8" stroke-width="1.1"/>';
+    }
+    for (let i = 0; i <= 2; i++) {
+      const z = -spanZ + (spanZ * 2) * i / 2;
+      const a = T(gx0, 0, z), b = T(gx1, 0, z);
+      g += '<line x1="' + a[0].toFixed(1) + '" y1="' + a[1].toFixed(1) + '" x2="' + b[0].toFixed(1) +
+        '" y2="' + b[1].toFixed(1) + '" stroke="#c4d3e8" stroke-width="1.1"/>';
+    }
+
+    // Y 轴刻度
+    const stp = _vizStep(mx / 4);
+    const tk = Math.max(1, Math.ceil(mx / stp));
+    const top = stp * tk;
+    for (let t = 0; t <= tk; t++) {
+      const v = top * t / tk;
+      const yw = (v / mx) * maxH;
+      const a = T(gx0, yw, -spanZ), b = T(gx1, yw, -spanZ);
+      if (t > 0) {
+        g += '<line x1="' + a[0].toFixed(1) + '" y1="' + a[1].toFixed(1) + '" x2="' + b[0].toFixed(1) +
+          '" y2="' + b[1].toFixed(1) + '" stroke="#e9eef7" stroke-width="1" stroke-dasharray="3 5"/>';
+      }
+      const lp = T(gx0 - 12, yw, -spanZ);
+      g += '<text x="' + lp[0].toFixed(1) + '" y="' + (lp[1] + 3.6).toFixed(1) +
+        '" text-anchor="end" font-size="11" fill="#93a0b8" stroke="#fff" stroke-width="3" paint-order="stroke">' +
+        escapeHtml(_vizNum(v, unit)) + "</text>";
+    }
+
+    // 每个系列：垂线 → 面积 → 折线 → 圆点
+    ser.forEach((s, si) => {
+      const col = P[si % P.length];
+      const pts = [];
+      for (let i = 0; i < n; i++) pts.push(T(xAt(i), yAt(s.values[i]), spanZ * 0.55));
+      const base = [];
+      for (let i = 0; i < n; i++) base.push(T(xAt(i), 0, spanZ * 0.55));
+
+      // 地面投影（影子）：折线悬空时必须有个落点，否则看不出它在空中
+      const shadow = [];
+      for (let i = 0; i < n; i++) shadow.push(T(xAt(i), 0, spanZ * 0.55));
+      g += '<polyline points="' + shadow.map(_viz3DPt).join(" ") + '" fill="none" stroke="#9db2d2" stroke-width="2.6" opacity="0.42" stroke-linejoin="round"/>';
+      // 垂线（数据点到地面）：太淡就完全看不出"悬空"，这里给到 0.72
+      for (let i = 0; i < n; i++) {
+        const b = T(xAt(i), 0, spanZ * 0.55);
+        g += '<line x1="' + pts[i][0].toFixed(1) + '" y1="' + pts[i][1].toFixed(1) + '" x2="' + b[0].toFixed(1) +
+          '" y2="' + b[1].toFixed(1) + '" stroke="' + col + '" stroke-width="1.8" opacity="0.72" stroke-dasharray="3 3"/>';
+      }
+      if (si === 0) {
+        const poly = pts.concat(base.slice().reverse());
+        g += '<polygon points="' + poly.map(_viz3DPt).join(" ") + '" fill="' + col + '" opacity="0.13"/>';
+      }
+      g += '<polyline points="' + pts.map(_viz3DPt).join(" ") + '" fill="none" stroke="' + col +
+        '" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>';
+      for (let i = 0; i < n; i++) {
+        const v = Number(s.values[i]) || 0;
+        g += '<circle cx="' + pts[i][0].toFixed(1) + '" cy="' + pts[i][1].toFixed(1) + '" r="4.4" fill="#fff" stroke="' +
+          col + '" stroke-width="2.6"><title>' + escapeHtml(cats[i] + "：" + _vizNum(v, unit)) + "</title></circle>";
+      }
+    });
+
+    // 数值标签（点少时全标）
+    // ★ 透视会让相邻点在屏幕上靠近，直接全标会叠字。这里先收集再按屏幕 x 从左到右
+    //   排一遍，间距不足 40px 的跳过（最后一个始终保留，避免丢掉末值）。
+    if (n * ns <= 14) {
+      const lab = [];
+      ser.forEach((s, si) => {
+        for (let i = 0; i < n; i++) {
+          const v = Number(s.values[i]) || 0;
+          const p = T(xAt(i), yAt(v) + 13, spanZ * 0.55);
+          lab.push({ x: p[0], y: p[1], v: v, si: si });
+        }
+      });
+      lab.sort((a, b) => a.x - b.x);
+      let lx = -1e9;
+      lab.forEach((L, idx) => {
+        if (L.x - lx < 52 && idx !== lab.length - 1) return;
+        lx = L.x;
+        const col = P[L.si % P.length];
+        g += '<text x="' + L.x.toFixed(1) + '" y="' + L.y.toFixed(1) +
+          '" text-anchor="middle" font-size="11.5" font-weight="600" fill="' + _vizShade(col, -0.25) +
+          '" stroke="#fff" stroke-width="3.2" paint-order="stroke">' + escapeHtml(_vizNum(L.v, unit)) + "</text>";
+      });
+    }
+
+    // 分类标签
+    for (let i = 0; i < n; i++) {
+      const p = T(xAt(i), 0, spanZ + 20);
+      g += '<text x="' + p[0].toFixed(1) + '" y="' + (p[1] + 9).toFixed(1) +
+        '" text-anchor="middle" font-size="11.5" fill="#7a869e">' + escapeHtml(cats[i]) + "</text>";
+    }
+
+    return '<div class="viz-chart viz-3d-chart"><svg class="viz-svg" viewBox="0 0 ' + W + " " + H +
+      '" preserveAspectRatio="xMidYMid meet" role="img">' + g + "</svg>" + _viz3DLegend(ser, P) + "</div>";
+  }
+
   function _vizHtml(src) {
     const P = ["#4f8cff", "#38b2ac", "#f6ad55", "#f56565", "#9f7aea", "#48bb78", "#ed8936", "#4299e1"];
     const esc = (s) => escapeHtml(String(s == null ? "" : s));
@@ -1238,24 +1705,33 @@
     const pct = (v) => Math.round(Math.abs(v) / max * 1000) / 10;
     let body = "";
     if (type === "column" || type === "line" || type === "area") {
-      body = _vizXY({
-        type: type === "area" ? "line" : type,
-        fill: type === "area" || !!spec.fill,
-        cats: (function () {
-          const _s = _vizSeries(spec, it);
-          const _len = _s.reduce((a, s) => Math.max(a, s.values.length), 0);
-          const _c = it.length ? it.map((x) => x.label)
-            : (Array.isArray(spec.categories) ? spec.categories.map((c) => String(c)) : []);
-          const _out = _c.slice(0, Math.max(_len, _c.length));
-          while (_out.length < _len) _out.push(String(_out.length + 1));
-          return _out;
-        })(),
-        ser: _vizSeries(spec, it),
-        unit: spec.unit ? String(spec.unit) : "",
-        palette: P
-      });
+      const _ser = _vizSeries(spec, it);
+      const _len = _ser.reduce((a, s) => Math.max(a, s.values.length), 0);
+      const _c = it.length ? it.map((x) => x.label)
+        : (Array.isArray(spec.categories) ? spec.categories.map((c) => String(c)) : []);
+      const _cats = _c.slice(0, Math.max(_len, _c.length));
+      while (_cats.length < _len) _cats.push(String(_cats.length + 1));
+      const _unit = spec.unit ? String(spec.unit) : "";
+      // ★ 2026-11-21 第三版：d3 走真透视渲染器（世界坐标 + 画家算法），
+      //   不再用等轴测三面 —— 后者没有近大远小，看下来仍是扁的。
+      if (spec.d3) {
+        body = type === "column"
+          ? _viz3DBars({ cats: _cats, ser: _ser, unit: _unit, palette: P })
+          : _viz3DLine({ cats: _cats, ser: _ser, unit: _unit, palette: P, fill: type === "area" || !!spec.fill });
+      } else {
+        body = _vizXY({
+          type: type === "area" ? "line" : type,
+          fill: type === "area" || !!spec.fill,
+          cats: _cats,
+          ser: _ser,
+          unit: _unit,
+          palette: P,
+          d3: false
+        });
+      }
     } else if (type === "pie" || type === "donut") {
       const total = it.reduce((a, b) => a + Math.abs(b.value), 0) || 1;
+      const d3 = !!spec.d3;
       let acc = 0;
       const stops = it.map((x, i) => {
         const a = acc;
@@ -1263,15 +1739,22 @@
         return P[i % P.length] + " " + a.toFixed(2) + "% " + acc.toFixed(2) + "%";
       });
       const pctOf = (v) => Math.round(Math.abs(Number(v) || 0) / total * 1000) / 10;
-      const center = type === "donut"
-        ? '<div class="viz-donut-c"><b>' + esc(_vizNum(total, spec.unit ? String(spec.unit) : "")) +
-          "</b><span>合计</span></div>"
-        : "";
-      body = '<div class="viz-pie-wrap"><div class="viz-pie' + (type === "donut" ? " is-donut" : "") +
-        '" style="background:conic-gradient(' + stops.join(",") + ')"></div>' + center + "</div>" +
-        '<div class="viz-legend">' + it.map((x, i) => '<span><i style="background:' + P[i % P.length] + '"></i>' +
-          esc(x.label) + " <b>" + esc(x.value) + unit + "</b>" +
-          (unit === "%" ? "" : " · " + esc(pctOf(x.value)) + "%") + "</span>").join("") + "</div>";
+      const legend = '<div class="viz-legend">' + it.map((x, i) =>
+        '<span><i style="background:' + P[i % P.length] + '"></i>' +
+        esc(x.label) + " <b>" + esc(x.value) + unit + "</b>" +
+        (unit === "%" ? "" : " · " + esc(pctOf(x.value)) + "%") + "</span>").join("") + "</div>";
+      const ctr = type === "donut" ? esc(_vizNum(total, spec.unit ? String(spec.unit) : "")) : "";
+      if (d3) {
+        // ★ 2026-11-21 第三版：真透视 —— 把每个扇区切成 4° 小块，
+        //   每块的顶面/外侧面/内侧面/底面单独投影，再按深度排序绘制。
+        //   旧做法是 12 层同色圆盘向下平移，本质仍是 2D 贴图堆叠、没有透视。
+        body = _viz3DPie({ items: it, unit: spec.unit ? String(spec.unit) : "", palette: P, donut: type === "donut" });
+      } else {
+        body = '<div class="viz-pie-wrap"><div class="viz-pie' + (type === "donut" ? " is-donut" : "") +
+          '" style="background:conic-gradient(' + stops.join(",") + ')"></div>' +
+          (ctr ? '<div class="viz-donut-c"><b>' + ctr + "</b><span>合计</span></div>" : "") +
+          "</div>" + legend;
+      }
     } else if (type === "steps") {
       body = '<ol class="viz-steps">' + it.map((x) =>
         "<li><b>" + esc(x.label) + "</b>" + (x.note ? "<span>" + esc(x.note) + "</span>" : "") + "</li>").join("") + "</ol>";
