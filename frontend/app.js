@@ -3833,6 +3833,9 @@
       memory_enabled: $('.pill[data-cfg="memory_enabled"]').classList.contains("on"),
       rag_enabled: $('.pill[data-cfg="rag_enabled"]').classList.contains("on"),
       web_enabled: $('.pill[data-cfg="web_enabled"]').classList.contains("on"),
+      // 2026-11-21：局域网访问（绑 0.0.0.0）。后端只认 DEFAULT_CONFIG 里的键，
+      // 这个键已加进 config.DEFAULT_CONFIG，改完要重启程序才生效（见 run.py）。
+      allow_lan: $('.pill[data-cfg="allow_lan"]').classList.contains("on"),
       auto_memorize: $('.pill[data-cfg="auto_memorize"]').classList.contains("on"),
       code_auto_route: $('.pill[data-cfg="code_auto_route"]').classList.contains("on"),
       code_exec_enabled: $('.pill[data-cfg="code_exec_enabled"]').classList.contains("on"),
@@ -3891,6 +3894,13 @@
       // 开启"本地算代码"是**有风险的操作**，必须明确说清而不是默默打开
       if (key === "code_exec_enabled" && p.classList.contains("on")) {
         showToast("已开启：模型写的 Python 会在你电脑上真实执行（临时目录 + 时限，会拦截删除/联网类操作）", "warn");
+      }
+      // 局域网访问：绑定只发生在启动那一刻，必须明确告诉用户「重启才生效」，
+      //   否则他会以为点了没反应（这正是上一版被误判成"功能坏了"的那类体验）
+      if (key === "allow_lan") {
+        const on = p.classList.contains("on");
+        showToast(on ? "已允许局域网访问 —— 重启程序后生效（同一 WiFi 的手机可打开）"
+                     : "已关闭局域网访问 —— 重启程序后生效（只留本机）", on ? "warn" : "");
       }
       // 开了代码模型但本机没装时，别让用户以为坏了
       if (key === "code_auto_route" && p.classList.contains("on")) {

@@ -65,11 +65,26 @@ import uvicorn
 from backend import config
 from backend.main import app
 
-# 监听地址：默认 0.0.0.0，同一局域网里的手机/平板也能打开。
-#   · 想恢复「只有本机能访问」，启动前设环境变量 MM_HOST=127.0.0.1
-#   · ⚠️ 应用本身没有登录口令，绑 0.0.0.0 等于同网段任何人都能用（含跑代码/改源码），
-#     在不信任的网络（宿舍、公司、公共 WiFi）里建议改回 127.0.0.1。
-HOST = (os.environ.get("MM_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+# 监听地址（2026-11-21 / 11.21b 改）：
+#   默认**只绑回环 127.0.0.1**。理由不是洁癖：本应用没有登录口令，
+#   绑 0.0.0.0 等于同网段任何人都能打开界面，还能让它跑代码、改自己的源码。
+#   手机/平板要访问时，在顶栏「局域网」开关里打开（写进 config.json 的 allow_lan），
+#   改完要重启程序才生效 —— 绑定只发生在启动这一刻。
+#   优先级：环境变量 MM_HOST（临时调试）> config.allow_lan > 127.0.0.1。
+def _resolve_host() -> str:
+    env = (os.environ.get("MM_HOST") or "").strip()
+    if env:
+        return env
+    try:
+        from backend import config as _cfg
+        if (_cfg.load_config() or {}).get("allow_lan"):
+            return "0.0.0.0"
+    except Exception:                  # 配置读不出来就按最安全的来
+        pass
+    return "127.0.0.1"
+
+
+HOST = _resolve_host()
 PORT = 8000
 # 浏览器打开 / 健康检查统一走回环地址：
 #   0.0.0.0 只是「监听所有网卡」的意思，它不是一个能去连的地址。
