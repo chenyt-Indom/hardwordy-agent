@@ -56,6 +56,11 @@ _GUARD_FILES = (
     "backend/selfdev.py",       # 回撤机制自身（改坏了就退不回来）
     "backend/regress.py",       # 行为回归的断言来源（改了等于自己判自己及格）
     "backend/iter_agent.py",    # 本模块（它不该改自己的护栏）
+    # ★ 2026-11-22 补：品牌盖章文件必须纳入护栏。
+    #   此前 iter_agent 的 _t_write / _t_edit 直接 write_text 落盘，
+    #   能绕过 brand.py 的密码闸门改掉 hardwordy / 开发者署名 —— 等于
+    #   把「必须输密码才能改品牌」这条保护开了个后门。
+    "backend/brand.py",
 )
 _GUARD_DIRS = ("backend/_feature_tests/",)
 
@@ -138,6 +143,23 @@ def _is_guard(rel):
     if r in _GUARD_FILES:
         return True
     return any(r.startswith(d) for d in _GUARD_DIRS)
+
+
+def _mark_dirty(rel, note=""):
+    """迭代改过的文件也要纳入评分闸门（2026-11-22 用户要求）。
+
+    用户原话：「增加新功能以及加入推荐的功能或者优化改进时有没有也进行
+              跑分评测然后反思报告？」。
+    之前 _t_write / _t_edit 是**直接 write_text 落盘**，绕过了 selfdev_write，
+    于是不打「待评分」标记 —— 一旦这轮迭代因为修不好 / 用户终止 / 超预算
+    而没走到 selfdev_apply_restart，这次改动就完全没被评分记录过。
+    现在每次写入成功都打标记，保证「只要动了代码，收尾必评分」。
+    """
+    try:
+        from . import scoregate as _scg
+        _scg.mark_dirty(str(rel or ""), str(note or "LLM 直接操作"))
+    except Exception:                                       # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
 
 
 def _read_text(rel):
@@ -415,6 +437,7 @@ def _t_write(ctx, args):
         return "写入失败：%s: %s" % (type(e).__name__, e)
     if rel not in ctx.touched:
         ctx.touched.append(rel)
+    _mark_dirty(rel, "迭代写入")
     return "已写入 %s（%d 字符）" % (rel, len(content))
 
 
@@ -451,6 +474,7 @@ def _t_edit(ctx, args):
         return "写入失败：%s: %s" % (type(e).__name__, e)
     if rel not in ctx.touched:
         ctx.touched.append(rel)
+    _mark_dirty(rel, "迭代修改")
     return "已修改 %s（替换 1 处，净变化 %+d 字符）" % (rel, len(new) - len(body))
 
 

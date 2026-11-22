@@ -1297,8 +1297,8 @@ def city_of(place: str, allow_net=None) -> str:
         r = amap.geocode(s)
         if r:
             return _city_from_admin_name(r[0].get("name"))
-    except Exception:                                       # noqa: BLE001 反查失败就用调用方给的原名
-        logger.debug("按区县名反查城市失败：%s", s, exc_info=True)
+    except Exception:                                       # noqa: BLE001
+        logger.debug("反查城市失败（按表外处理）", exc_info=True)
     return ""
 
 
