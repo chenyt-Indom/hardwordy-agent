@@ -240,10 +240,68 @@ _MISS_N = 0
 
 
 def _split_path(path) -> list:
-    """'a.b.c' → ['a','b','c']；也接受已经拆好的序列。空段直接丢掉。"""
+    """'a.b.c' → ['a','b','c']；也接受已经拆好的序列。空段直接丢掉。
+
+    ★ 2026-11-22 补：支持**方括号下标 / 带点的键名**写法，可与点分混用 ——
+        'items[0].name'  → ['items', '0', 'name']
+        'items[-1].name' → ['items', '-1', 'name']
+        'a["k.w"].b'     → ['a', 'k.w', 'b']   （引号里的点不再被拆开）
+
+    以前只认纯点分：'items[0].name' 会去找字面上的 'items[0]' 键 ——
+    数据明明在，却被判成缺字段，field_miss 账本里堆一堆**假缺失**，
+    排查时反而被误导。
+    """
     if isinstance(path, (list, tuple)):
         return [str(p).strip() for p in path if str(p).strip()]
-    return [p.strip() for p in str(path or "").split(".") if p.strip()]
+    s = str(path or "").strip()
+    if not s:
+        return []
+    parts, buf, i, n = [], [], 0, len(s)
+    while i < n:
+        ch = s[i]
+        if ch == ".":
+            seg = "".join(buf).strip()
+            if seg:
+                parts.append(seg)
+            buf = []
+            i += 1
+            continue
+        if ch == "[":
+            # 先把方括号前面那一段推进去（'items' 之类）
+            seg = "".join(buf).strip()
+            if seg:
+                parts.append(seg)
+            buf = []
+            j, quote = i + 1, ""
+            while j < n:
+                c = s[j]
+                if quote:
+                    if c == quote:
+                        quote = ""
+                elif c in "'\"":
+                    quote = c
+                elif c == "]":
+                    break
+                j += 1
+            if j >= n:                  # 括号没闭合 → 还原成普通键名，保持老的宽松行为
+                if seg and parts and parts[-1] == seg:
+                    parts.pop()         # 刚才推过头了，退回去
+                buf = list(seg) + [ch]
+                i += 1
+                continue
+            inner = s[i + 1:j].strip()
+            if len(inner) >= 2 and inner[0] in "'\"" and inner[-1] == inner[0]:
+                inner = inner[1:-1].strip()     # 去引号：'k.w' 是一个完整的键
+            if inner:
+                parts.append(inner)
+            i = j + 1
+            continue
+        buf.append(ch)
+        i += 1
+    seg = "".join(buf).strip()
+    if seg:
+        parts.append(seg)
+    return parts
 
 
 def _avail_keys(obj) -> list:
@@ -353,6 +411,8 @@ def safe_get(obj, path, default=None, *, session="", where=""):
         safe_get({'a': {'b': 1}}, 'a.c')            -> None   （并记 field_miss）
         safe_get({'a': {'b': 1}}, 'a.c', 0)         -> 0
         safe_get({'a': [{'b': 1}]}, 'a.0.b')        -> 1      （支持下标）
+        safe_get({'a': [{'b': 1}]}, 'a[0].b')       -> 1      （下标也可贴写）
+        safe_get({'a': {'k.w': 1}}, 'a["k.w"]')     -> 1      （带点的键用引号）
         safe_get(None, 'a.b', '默认')                -> '默认'
 
     参数：

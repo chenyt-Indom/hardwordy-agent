@@ -19,9 +19,9 @@ import os
 import time
 
 try:                                    # 包内导入（正常路径）
-    from .jsonfix import safe_get as _get
+    from .jsonfix import safe_get as _get, safe_list as _get_list
 except ImportError:                     # 允许作为顶层模块被直接导入（如验收断言）
-    from jsonfix import safe_get as _get
+    from jsonfix import safe_get as _get, safe_list as _get_list
 
 logger = logging.getLogger(__name__)
 
@@ -146,8 +146,8 @@ def _blk_failattr(days: int) -> dict:
             "kind": str(_get(r, "kind_zh", where=w) or _get(r, "kind", where=w) or ""),
             "why": str(_get(r, "why_failed", where=w) or "")[:600],
             "rollback": str(_get(r, "why_rollback", where=w) or "")[:400],
-            "files": (_get(r, "files", where=w) or [])[:5]
-                     if isinstance(_get(r, "files", where=w), list) else [],
+            # safe_list 一次到位：取不到/类型不对都给 []，且只记一次 field_miss
+            "files": _get_list(r, "files", where=w)[:5],
             "vague": bool(_get(r, "too_vague", where=w)),
         })
     lessons = []
@@ -193,13 +193,9 @@ def _blk_reflect() -> dict:
         logger.debug("iterpanel 读 journal 失败", exc_info=True)
     try:
         from . import self_iterate as _si
-        plans = _get(_si.load_plans(), "items", where="reflect.plans") or []
-        if not isinstance(plans, list):
-            plans = []
+        plans = _get_list(_si.load_plans(), "items", where="reflect.plans")
         for p in plans[-_PLANS_SHOWN:][::-1]:
-            acts = _get(p, "actions", where="reflect.plan.actions") or []
-            if not isinstance(acts, list):
-                acts = []
+            acts = _get_list(p, "actions", where="reflect.plan.actions")
             done = [a for a in acts if str(_get(a, "status") or "") in
                     ("done", "approved", "executed")]
             out["plans"].append({
@@ -251,9 +247,7 @@ def _blk_health(days: int) -> dict:
     from . import iterhealth as _IH
     d = _IH.check(days=days) or {}
     cnt = {"ok": 0, "degrade": 0, "idle": 0}
-    items = _get(d, "items", where="health.items") or []
-    if not isinstance(items, list):
-        items = []
+    items = _get_list(d, "items", where="health.items")
     for it in items:
         k = str(_get(it, "state") or "")
         if k in cnt:
