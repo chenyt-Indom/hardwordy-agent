@@ -134,6 +134,14 @@ def pending() -> Dict[str, Any]:
 
 # ---------------------------------------------------------------- 比对逻辑
 
+# ★ 2026-11-22 用户要求「评分没有上限，超过 100 也继续往上加」——口径从
+#   「0~100 归一化」改成「质量基线(≤100) + 能力跑分(无上限)」。
+#   口径一变，**上次的分数和新分数不可直接相减**（会凭空多出能力段那 49 分，
+#   累计分一次虚涨 49，看着像巨大进步，其实是换尺子）。
+#   所以记一个口径版本：对不上就把本轮当「重建基准」，delta 记 0、不判进退。
+_SCHEMA = 2
+
+
 def _prev_score(d: Dict[str, Any]):
     """上一次的**完整**评分（分项都在，才能算清是哪一块掉的）。"""
     s = d.get("last_score")
@@ -160,8 +168,22 @@ def _msg(rec: Dict[str, Any]) -> str:
     else:
         head = ("评分闸门：上一次 %s → 这次 %s（%+.2f，%s）"
                 % (pv, tv, d, {"improved": "进步", "regressed": "退步",
-                               "flat": "持平"}.get(rec.get("verdict"), "未知")))
+                               "flat": "持平",
+                               "rebased": "评分口径升级，本轮重建基准、不计进退"}
+                   .get(rec.get("verdict"), "未知")))
     lines = [head]
+    # ★ 2026-11-22 总分改无上限后，必须把两段拆开说，否则模型看到「143.8 分」
+    #   会误以为质量段超过 100（其实质量段永远 ≤100，超出部分来自能力跑分）。
+    q = rec.get("quality")
+    ab = rec.get("ability") if isinstance(rec.get("ability"), dict) else {}
+    if q is not None:
+        rows = [r for r in (ab.get("rows") or []) if isinstance(r, dict)
+                and int(r.get("count") or 0)]
+        det = "、".join("%s×%s" % (r.get("label"), r.get("count")) for r in rows)
+        lines.append("拆开看：质量基线 %s/100（有上限，扣分点都在这段）"
+                     " + 能力跑分 %s（无上限%s）= 总分 %s（**总分无上限**）"
+                     % (q, ab.get("score"),
+                        ("，" + det) if det else "", rec.get("total")))
     per = rec.get("per_part") or {}
     bits = []
     for k, zh in (("static", "静态"), ("regress", "回归"), ("func", "功能")):
@@ -285,12 +307,19 @@ def gate(force: bool = False, note: str = "",
     try:
         from . import iterloop as _il
         prev = _prev_score(d)
+        # 上次是旧口径（没有 schema 标记 / 版本不同）→ 这轮重建基准
+        rebased = bool(prev) and prev.get("schema") != _SCHEMA
         t0 = time.time()
         now = _il.score(full=True)
         cost = round(time.time() - t0, 1)
         total = now.get("total")
         pv = (prev or {}).get("total")
-        if pv is None or total is None:
+        if rebased:
+            # 换尺子：不判进退、delta 记 0，只把新口径的分数立成新基准
+            delta = 0.0
+            verdict = "rebased"
+            pv = None
+        elif pv is None or total is None:
             delta = None
             verdict = "unknown"
         else:
@@ -300,14 +329,20 @@ def gate(force: bool = False, note: str = "",
         # 写进累计分账本（累加 + 归因 + history 一条）
         res = {}
         try:
-            res = _il.commit_round(before=prev, after=now,
-                                   note=(note or "自动评分闸门")[:200]) or {}
+            res = _il.commit_round(before=(None if rebased else prev), after=now,
+                                   note=((note or "自动评分闸门")
+                                         + ("；评分口径升级，本轮重建基准、不计进退"
+                                            if rebased else ""))[:200],
+                                   rebased=rebased) or {}
         except Exception:                               # noqa: BLE001
             logger.debug("scoregate commit_round 失败", exc_info=True)
         jd = res if isinstance(res, dict) else {}
         ex = jd.get("explain") or {}
         rec = {"iso": _now(), "ts": time.time(), "prev": pv, "total": total,
                "delta": delta, "verdict": verdict, "cost_s": cost,
+               "quality": (now or {}).get("quality"),
+               "ability": (now or {}).get("ability"),
+               "rebased": bool(rebased),
                "blocked": False,
                "files": list(d.get("files") or []),
                "note": str(note or "")[:200],
@@ -345,6 +380,8 @@ def gate(force: bool = False, note: str = "",
             rec["drop"] = _record_drop(rec, blocked)
         d["dirty"] = False
         d["files"] = []
+        if isinstance(now, dict):
+            now["schema"] = _SCHEMA
         d["last_score"] = now
         d["last_gate"] = rec
         gs = list(d.get("gates") or [])

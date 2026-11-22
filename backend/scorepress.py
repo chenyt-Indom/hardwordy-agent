@@ -7,7 +7,9 @@
 
 与相邻模块的分工（四个模块各管一段，别互相塞）
 --------------------------------------------
-    iterloop.score()   只管「算出一个 0-100 的分」，明细散在 static.findings 里；
+    iterloop.score()   只管「算出一个分」= 质量基线(0~100，有上限) +
+                       能力跑分(无上限) 两段相加，明细散在 static.findings 里；
+                       **压分点只属于质量段**（能力段只会往上加，不存在失分）；
     scoregate.gate()   只管「比上次高还是低、拦不拦」；
     scoredrop          只管「**变化**」：这一轮我改坏了什么、掉了多少、起自动修复；
     scorepress（本模块）只管「**存量**」：当前这一版到底哪些地方在压分、
@@ -227,9 +229,15 @@ def build(sc: Dict[str, Any], note: str = "") -> Dict[str, Any]:
     lost = round(sum(float(p.get("lost") or 0.0) for p in parts), 2)
     # 理论可挽回：不能超过实际失分（扣到 0 封顶时两者会不等）
     recoverable = round(min(lost, sum(float(x.get("cost") or 0.0) for x in top)), 2)
+    # ★ 2026-11-22 总分改「无上限」后，报告必须把两段分开说清：
+    #   quality 质量基线（0~100，才有「被压掉多少分」）
+    #   ability 能力跑分（无上限，只会往上加，不存在「失分」）
+    quality = sc.get("quality")
+    ab = sc.get("ability") if isinstance(sc.get("ability"), dict) else {}
     return {
         "iso": _now(), "ts": time.time(),
-        "total": total, "lost": lost,
+        "total": total, "quality": quality, "ability": ab,
+        "lost": lost,
         "recoverable": recoverable,
         "parts": parts, "top": top,
         "items_total": len(items),
@@ -300,10 +308,15 @@ def stats() -> Dict[str, Any]:
     for r in rows[-6:]:
         trend.append({"iso": r.get("iso"), "total": r.get("total"),
                       "lost": r.get("lost")})
+    ab = rep.get("ability") if isinstance(rep.get("ability"), dict) else {}
     return {
         "has": bool(rep),
         "iso": rep.get("iso", ""),
         "total": rep.get("total"),
+        "quality": rep.get("quality"),
+        "ability": ab.get("score"),
+        "ability_rows": ab.get("rows") or [],
+        "unbounded": True,
         "lost": rep.get("lost"),
         "recoverable": rep.get("recoverable"),
         "parts": [{k: p.get(k) for k in ("key", "label", "score", "max", "lost", "count")}
@@ -343,9 +356,17 @@ def brief(n: int = 3, query: str = "") -> str:
         return "（还没有压分报告 —— 下一次评分会自动生成）"
     total = rep.get("total")
     lost = rep.get("lost")
+    q = rep.get("quality")
+    ab = rep.get("ability") if isinstance(rep.get("ability"), dict) else {}
     lines = ["## 📊 当前压分清单（每次评分都出，本轮必须重点参考）"]
-    lines.append("当前综合分 %s / 100，共被压掉 %s 分；报告时间 %s。"
-                 % (total, lost, rep.get("iso") or "?"))
+    lines.append("当前跑分 %s（= 质量基线 %s/100 + 能力跑分 %s，**总分无上限**），"
+                 "质量段共被压掉 %s 分；报告时间 %s。"
+                 % (total, q, ab.get("score"), lost, rep.get("iso") or "?"))
+    for r in (ab.get("rows") or []):
+        if isinstance(r, dict) and int(r.get("count") or 0):
+            lines.append("  · 能力加分：%s %s 个 × %s = +%s"
+                         % (r.get("label"), r.get("count"), r.get("unit"),
+                            r.get("score")))
     for p in (rep.get("parts") or []):
         lines.append("  · %s %s / %s（失 %s 分，%s 处）"
                      % (p.get("label"), p.get("score"), p.get("max"),
@@ -371,7 +392,8 @@ def brief(n: int = 3, query: str = "") -> str:
                      "或改它风险大于收益），必须在动作里写清「为什么不改」。"
                      "只提新功能、不动压分点的计划视为不合格。")
     else:
-        lines.append("★ 当前没有任何压分点（满分）—— 计划应聚焦新功能与健壮性。")
+        lines.append("★ 质量段当前没有任何压分点（满分）—— 计划应聚焦新功能与健壮性；"
+                     "注意总分无上限，新增**被验证的能力**（测试用例、只读端点）会继续涨分。")
     hist = history(5)
     if len(hist) >= 2:
         seq = " → ".join("%s" % h.get("total") for h in hist)

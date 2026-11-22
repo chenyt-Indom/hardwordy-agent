@@ -4271,7 +4271,13 @@ def selfiter_loop_score(body: dict = None):
             _rg = s.get("regress") or {}
             _fn = s.get("func") or {}
             with open(_os.path.join(_d, "last_score.json"), "w", encoding="utf-8") as _f:
-                _json.dump({"total": s.get("total"), "iso": s.get("iso"),
+                _ab = s.get("ability") or {}
+                _json.dump({"total": s.get("total"),
+                            "quality": s.get("quality"),
+                            "ability": _ab.get("score"),
+                            "ability_rows": _ab.get("rows"),
+                            "unbounded": True,
+                            "iso": s.get("iso"),
                             "static": _st.get("score"), "static_max": _st.get("max"),
                             "high": _st.get("high"), "mid": _st.get("mid"),
                             "regress": _rg.get("score"), "regress_max": _rg.get("max"),

@@ -1475,8 +1475,12 @@
       // 当前版本绝对值（账本只记进退净值，这一行才是「现在这份代码值多少分」）
       var LM = S.last_manual || {};
       if (LM.total != null && LM.total !== '') {
+        // ★ 2026-11-22 总分改无上限：必须拆成「质量基线（≤100）」+「能力跑分
+        //   （无上限）」，否则看到 143 分会以为质量分爆了。
         h += '<div class="ip-now">当前版本 <b>' + _ipEsc(LM.total) + '</b> 分' +
-          '<i>静态 ' + _ipEsc(LM.static) + '/' + _ipEsc(LM.static_max) +
+          '<i>（无上限）= 质量基线 ' + _ipEsc(LM.quality != null ? LM.quality : '—') +
+          '/100 + 能力跑分 ' + _ipEsc(LM.ability != null ? LM.ability : '—') +
+          '<br>静态 ' + _ipEsc(LM.static) + '/' + _ipEsc(LM.static_max) +
           '（high ' + _ipEsc(LM.high) + ' mid ' + _ipEsc(LM.mid) + '）· 回归 ' +
           _ipEsc(LM.regress) + '/' + _ipEsc(LM.regress_max) + ' · 功能 ' +
           _ipEsc(LM.func) + '/' + _ipEsc(LM.func_max) + ' · 量于 ' +
@@ -1494,8 +1498,12 @@
       //   （file:line + 能挽回多少分 + 修法）+ 最近趋势。只读，不触发评分。
       var PR = D.press || {}, prh = '';
       if (PR.has) {
-        prh += '<div class="ip-sub">当前综合分 ' + _ipEsc(PR.total) + '，共被压掉 <b>' +
-          _ipEsc(PR.lost) + '</b> 分；修前几条最多可挽回 ' +
+        // ★ 2026-11-22 总分无上限：这里同时给出「质量段被压掉多少」（有上限的那段）
+        //   和「能力段加了多少」（无上限的那段），两者加起来才是总分。
+        prh += '<div class="ip-sub">当前跑分 <b>' + _ipEsc(PR.total) + '</b>' +
+          '（无上限）= 质量基线 ' + _ipEsc(PR.quality != null ? PR.quality : '—') +
+          '/100 + 能力跑分 ' + _ipEsc(PR.ability != null ? PR.ability : '—') +
+          '；质量段共被压掉 <b>' + _ipEsc(PR.lost) + '</b> 分，修前几条最多可挽回 ' +
           _ipEsc(PR.recoverable) + ' 分</div>';
         (PR.parts || []).forEach(function (p) {
           prh += '<div class="ip-row"><b>' + _ipEsc(p.label) + '</b><span>' +
@@ -1772,8 +1780,12 @@
           if (!D || D.ok === false) throw new Error((D && D.error) || '跑分失败');
           var s = D.score || {}, P = s.static || {}, G = s.regress || {}, Fn = s.func || {};
           if (st) {
-            st.innerHTML = '当前版本 <b>' + _ipEsc(s.total) + '</b> 分 · 静态 ' +
-              _ipEsc(P.score) + '/' + _ipEsc(P.max) + '（high ' + _ipEsc(P.high) + '）· 回归 ' +
+            var AB = s.ability || {};
+            st.innerHTML = '当前版本 <b>' + _ipEsc(s.total) + '</b> 分（无上限）= 质量 ' +
+              _ipEsc(s.quality != null ? s.quality : '—') + '/100 + 能力 ' +
+              _ipEsc(AB.score != null ? AB.score : '—') +
+              ' · 静态 ' + _ipEsc(P.score) + '/' + _ipEsc(P.max) +
+              '（high ' + _ipEsc(P.high) + '）· 回归 ' +
               _ipEsc(G.score) + '/' + _ipEsc(G.max) + ' · 功能 ' +
               _ipEsc(Fn.score) + '/' + _ipEsc(Fn.max) + ' · ' + _ipEsc(s.seconds) + ' 秒';
           }

@@ -46,10 +46,31 @@ _LOCK = threading.RLock()
 #   直接拿来算分会让累计分凭空抖动 —— 这里记一个预热标记，首次评分时空跑一遍。
 _AUDIT_WARMED = False
 
-# 权重
+# 权重（quality 质量基线，合计 100 —— 这一段是「有上限」的）
 W_STATIC = 40
 W_REGRESS = 30
 W_FUNC = 30
+
+# ★★ 2026-11-22 用户要求：
+#   「我希望评分是没有上限的，超过一百分也继续往上加，就好比手机跑分一样，
+#     但需要能够看到扣分点并且详细记录上报并反思等体系化协同运作」
+#
+# 于是把总分拆成**两段相加**，语义完全分开：
+#   · quality 质量基线 0~100（有上限）：静态 40 + 回归 30 + 功能 30 加权。
+#     回答「这一版有多健康」。扣分点、压分报告、低分日志全部来自这一段。
+#   · ability 能力跑分（**无上限**）：按「被真实验证到的能力」累加 ——
+#     每通过一个回归用例、每通过一个冒烟端点、每守住一个关键符号、
+#     每编译通过一个后端文件，都往上加。加测试、加端点、加模块就涨，
+#     删掉就掉，像手机跑分一样能一直往上叠。
+#   · total = quality + ability，**不封顶**（质量段永远 ≤100，超出的部分
+#     全部来自能力段，所以「超过 100」的含义很明确：能力比基线多）。
+#
+# ⚠️ 刻意**不按代码行数**给分（那是鼓励灌水）：文件只按「能编译通过」计
+#    极低单价（0.03），主体分来自「被验证到的行为」。
+ABILITY_PER_TEST = 1.0        # 每个通过的回归用例
+ABILITY_PER_SMOKE = 1.5       # 每个通过的冒烟端点
+ABILITY_PER_SYMBOL = 2.0      # 每个守住的关键符号
+ABILITY_PER_FILE = 0.03       # 每个编译通过的后端文件（广度，弱权重）
 
 # 冒烟端点：挑**只读、轻量、不触发外部请求**的四个。
 # ⚠️ 刻意不碰 /api/selfiter/stream（长连接）、/api/net/check（联网）、
@@ -192,16 +213,23 @@ def regress_part(timeout=180):
 
 
 def _syntax_ok():
-    """编译 backend 下所有 .py。返回 (ok, 坏掉的相对路径列表)。"""
+    """编译 backend 下所有 .py。
+
+    返回 (ok, 坏掉的相对路径列表, 参与编译的文件总数)。
+    ⚠️ 2026-11-22 加第三个返回值：能力跑分要按「编译通过的文件数」给极低单价
+    的广度分（见 ability_part 的注释），需要知道总数。
+    """
     bad = []
     base = os.path.join(_ROOT, "backend")
     try:
         names = sorted(os.listdir(base))
     except Exception:                                   # noqa: BLE001
-        return False, ["<backend 目录读不到>"]
+        return False, ["<backend 目录读不到>"], 0
+    total = 0
     for n in names:
         if not n.endswith(".py"):
             continue
+        total += 1
         p = os.path.join(base, n)
         try:
             with open(p, encoding="utf-8") as fh:
@@ -210,7 +238,7 @@ def _syntax_ok():
             bad.append("%s:%s" % (n, e.lineno))
         except Exception:                               # noqa: BLE001
             bad.append(n)
-    return (not bad), bad
+    return (not bad), bad, total
 
 
 _PROBE_CODE = r'''
@@ -280,7 +308,7 @@ def _subproc_probe(timeout=150):
 
 def func_part():
     """功能分 30 = 语法 10 + 关键符号 10 + 冒烟 10。"""
-    syn_ok, syn_bad = _syntax_ok()
+    syn_ok, syn_bad, py_files = _syntax_ok()
     sym_ok, sym_bad, sm_ok, sm_detail = _subproc_probe()
     score = 0.0
     if syn_ok:
@@ -299,11 +327,49 @@ def func_part():
         "syntax_ok": syn_ok, "syntax_bad": syn_bad[:6],
         "symbols_ok": sym_ok, "symbols_bad": sym_bad[:6],
         "smoke_ok": sm_ok, "smoke": sm_detail,
+        "py_files": int(py_files or 0),
+    }
+
+
+def ability_part(rg=None, fn=None):
+    """能力跑分（**无上限**）—— 只累加「真实被验证到」的能力。
+
+    每一条都带 count / unit / score，所以「为什么涨了、涨在哪一项」
+    可以直接读出来，和压分报告一样能详细记录与上报。
+    """
+    rg = rg if isinstance(rg, dict) else {}
+    fn = fn if isinstance(fn, dict) else {}
+    rows = []
+    if rg:
+        n = int(rg.get("passed") or 0)
+        rows.append({"key": "regress_pass", "label": "回归用例通过",
+                     "count": n, "unit": ABILITY_PER_TEST,
+                     "score": round(n * ABILITY_PER_TEST, 2)})
+    smoke = [s for s in (fn.get("smoke") or []) if isinstance(s, dict)]
+    if smoke:
+        n = sum(1 for s in smoke if s.get("ok"))
+        rows.append({"key": "smoke_pass", "label": "冒烟端点通过",
+                     "count": n, "unit": ABILITY_PER_SMOKE,
+                     "score": round(n * ABILITY_PER_SMOKE, 2)})
+    if fn:
+        n = len(_KEY_SYMBOLS) if fn.get("symbols_ok") else 0
+        rows.append({"key": "symbol_ok", "label": "关键符号守住",
+                     "count": n, "unit": ABILITY_PER_SYMBOL,
+                     "score": round(n * ABILITY_PER_SYMBOL, 2)})
+        n = int(fn.get("py_files") or 0)
+        if n:
+            rows.append({"key": "file_compile", "label": "后端文件编译通过",
+                         "count": n, "unit": ABILITY_PER_FILE,
+                         "score": round(n * ABILITY_PER_FILE, 2)})
+    return {
+        "score": round(sum(float(r["score"]) for r in rows), 2),
+        "max": None, "unbounded": True, "rows": rows,
+        "note": "无上限：随被验证到的能力累加，删测试/端点会掉分",
     }
 
 
 def score(full=True):
-    """综合评分 0-100。
+    """综合评分 = quality 质量基线(0~100) + ability 能力跑分(无上限)。
 
     full=False 时跳过回归（回归要几秒，用于快速探针）；
     任一分项为 None 时按比例重分配权重，不当 0 分处理。
@@ -324,8 +390,15 @@ def score(full=True):
     #    （实测踩过：静态 35.5 配权重 40 得出 total=3314）。
     acc = sum((float(v["score"]) / float(v.get("max") or w)) * w
               for v, w in got) / float(wsum) * 100.0
+    quality = round(acc, 2)
+    # ★ 能力跑分与质量基线**相加**，total 不封顶（见文件头常量处的口径说明）
+    ab = ability_part(rg, fn)
+    total = round(quality + float(ab.get("score") or 0.0), 2)
     return {
-        "total": round(acc, 2),
+        "total": total,
+        "quality": quality,
+        "ability": ab,
+        "unbounded": True,
         "ts": time.time(),
         "iso": _now(),
         "static": st, "regress": rg, "func": fn,
@@ -558,7 +631,7 @@ def explain_delta(before, after, actions=None):
 
 
 def commit_round(before=None, after=None, actions=None, rollback=None,
-                 note="", pid=""):
+                 note="", pid="", rebased=False):
     """把这一轮进退**累加**到累计分，并把原因与代码位置写进日志。
 
     返回 {"cum": 累计分, "delta": 本轮进退, "verdict": ..., "explain": {...}}
@@ -577,12 +650,13 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
     # ★ 2026-11-22 修：原来只在 before 非空时记 base —— 于是**第一次**评分
     #   （还没有上一次可比）base 永远是空的，账本里就查不到基准分，
     #   体检/面板「基准分」一栏永远显示不出来。现在 before 为空就退回取 after。
-    if d.get("base") is None:
+    if d.get("base") is None or rebased:
         _base_v = (before or {}).get("total")
         if _base_v is None:
             _base_v = (after or {}).get("total")
         if _base_v is not None:
-            d["base"] = {"total": _base_v, "iso": _now()}
+            d["base"] = {"total": _base_v, "iso": _now(),
+                         "rebased": bool(rebased)}
     rec = {
         "iso": _now(), "ts": time.time(), "plan_id": str(pid or ""),
         "cum_before": cum_before, "cum": cum,

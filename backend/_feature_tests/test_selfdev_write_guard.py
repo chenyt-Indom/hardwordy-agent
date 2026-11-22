@@ -12,7 +12,39 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from backend import config as CFG  # noqa: E402
 from backend import tools as T  # noqa: E402
+
+# ★ 2026-11-22 修：这条断言原来**依赖全局「自开发模式」开关已打开**。
+#   实测：把数据目录换成一个全新空目录（Docker / 便携包首次启动就是这种）
+#   后，开关默认是关的 → _do_selfdev 一律返回「自开发模式没打开」→
+#   15 项里 9 项失败，回归少过 1 条、能力跑分少 1 分，评分凭空虚低 0.79。
+#   断言不该依赖外部状态，这里自己打开、跑完恢复。
+#   同理还有第二道闸门 self_dev_full_access（「完全访问」）：关着时不许改
+#   backend/ 下的任何文件，[3] 的「正常写入」照样会被拒。两个开关一起备好。
+_CFG_ORIG = dict(CFG.load_config() or {})
+_NEED = {"self_dev_enabled": True, "self_dev_full_access": True}
+_ORIG_FLAGS = {k: bool(_CFG_ORIG.get(k)) for k in _NEED}
+if any(not _ORIG_FLAGS[k] for k in _NEED):
+    _c = dict(_CFG_ORIG)
+    _c.update(_NEED)
+    CFG.save_config(_c)
+
+
+def _restore_dev_flag():
+    """把两个自开发开关恢复到跑之前的状态（不污染用户配置）。"""
+    try:
+        cur = dict(CFG.load_config() or {})
+        changed = False
+        for k, was in _ORIG_FLAGS.items():
+            if bool(cur.get(k)) != was:
+                cur[k] = was
+                changed = True
+        if changed:
+            CFG.save_config(cur)
+    except Exception:                                   # noqa: BLE001
+        pass
+
 
 REL = "backend/_guard_probe_target.py"
 ABS = os.path.join(ROOT, REL)
@@ -76,6 +108,7 @@ check("被拒绝", out.startswith(REFUSED))
 check("文件大小没变", size() == before)
 
 fresh()
+_restore_dev_flag()
 print("cleaned:", not os.path.exists(ABS))
 print()
 if bad:

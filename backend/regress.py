@@ -39,6 +39,7 @@ code_audit 只能看「名字 / 结构」：调了不存在的函数、未定义
                                      失败立刻回滚（这是「改坏自动撤销」的兜底）
 """
 import ast
+import io
 import json
 import logging
 import os
@@ -471,6 +472,44 @@ def _c_imports():
 _FEATURE_DIR = _BACKEND / "_feature_tests"
 
 
+class _KeepOpenBytesIO(io.BytesIO):
+    """永不真正关闭的字节流，专门当「假 stdout」的底座。
+
+    ⚠️ 2026-11-22 实测踩到的坑：断言文件里有这种写法
+
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+
+    赋值那一刻，**原来那个** TextIOWrapper 引用归零被回收，它的 __del__
+    会顺手 close 底层 buffer。于是新包出来的 wrapper 一 print 就抛
+    `ValueError: I/O operation on closed file` —— 看起来像是测试文件坏了，
+    其实是这个「谁关了 buffer」的连锁反应。
+    把 close() 变成空操作，buffer 就一直活着，两边都能写。
+    """
+
+    def close(self):
+        try:
+            self.flush()
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+
+    def __del__(self):
+        pass
+
+
+def _bad_fn(fname, why):
+    """造一个「加载期就失败」的用例：跑起来直接抛 AssertionError。"""
+    def _bad():
+        raise AssertionError("断言文件加载失败 %s：%s" % (fname, why))
+    return _bad
+
+
+def _pass_fn():
+    """造一个「加载期已经跑完且全过」的用例（纯脚本式断言用）。"""
+    def _ok():
+        return None
+    return _ok
+
+
 def _load_dynamic():
     """加载「新功能自带的断言」—— backend/_feature_tests/*.py。
 
@@ -497,10 +536,28 @@ def _load_dynamic():
         logger.debug("silent-except", exc_info=True)
         return out
     import importlib.util
+    import io
     for p in files:
         if p.name.startswith("_"):
             continue
         name = "feature.%s" % p.stem
+        # ⚠️ 2026-11-22 修：断言文件是**独立脚本**写法，有三种形态
+        #   (a) 提供 run()
+        #   (b) 只有 main()（返回 0=通过、非 0=失败）
+        #   (c) 纯模块级脚本，靠 sys.exit(0/1) 表达结果
+        # 原来只认 (a)，(b)(c) 全被记成「缺少 run() 函数」—— 实测 11 条
+        # 回归全挂、白丢 8.68 分。那 11 条**不是功能坏了**，是断言文件
+        # 加载不进来，等于这些功能长期没人守着。
+        # 另外 test_tool_registry.py 会重新包装 sys.stdout，把真实 stdout
+        # 的 buffer 一起关掉，导致**后面所有文件**报
+        # `ValueError: I/O operation on closed file`。所以每次加载都换成
+        # 独立的、带 buffer 的假 stdout，跑完立刻恢复。
+        saved_out = sys.stdout
+        sys.stdout = io.TextIOWrapper(_KeepOpenBytesIO(), encoding="utf-8",
+                                      errors="replace")
+        mod = None
+        executed_ok = False
+        load_err = None
         try:
             spec = importlib.util.spec_from_file_location(
                 "backend._feature_tests.%s" % p.stem, str(p))
@@ -508,9 +565,14 @@ def _load_dynamic():
                 raise ImportError("无法构建模块规格")
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            fn = getattr(mod, "run", None)
-            if not callable(fn):
-                raise ImportError("缺少 run() 函数")
+            executed_ok = True          # 模块级执行完毕、没有抛异常
+        except SystemExit as e:
+            # 脚本式断言：exit(0)/exit(None) = 全部通过，其余算失败
+            code = getattr(e, "code", None)
+            if code in (0, None):
+                executed_ok = True
+            else:
+                load_err = "脚本式断言未通过（sys.exit(%r)）" % (code,)
         except BaseException as e:                      # noqa: BLE001
             # ⚠️ 2026-11-22 实测致命缺陷：_feature_tests/test_llm_retry.py 在
             #    **模块级**调用了 sys.exit(0)，而 exec_module 会把 SystemExit
@@ -522,12 +584,23 @@ def _load_dynamic():
             #    否则用户 Ctrl+C 会被当成「断言文件加载失败」吞掉。
             if isinstance(e, KeyboardInterrupt):
                 raise
-            def _bad(_e=e, _p=p.name):
-                raise AssertionError("断言文件加载失败 %s：%s: %s" % (
-                    _p, type(_e).__name__, _e))
-            out.append({"name": name, "scope": "quick", "fn": _bad})
+            load_err = "%s: %s" % (type(e).__name__, e)
+        finally:
+            sys.stdout = saved_out
+        if load_err:
+            out.append({"name": name, "scope": "quick",
+                        "fn": _bad_fn(p.name, load_err)})
             continue
-        out.append({"name": name, "scope": "quick", "fn": fn})
+        fn = getattr(mod, "run", None)
+        if not callable(fn):
+            fn = getattr(mod, "main", None)
+        if callable(fn):
+            out.append({"name": name, "scope": "quick", "fn": fn})
+        elif executed_ok:
+            out.append({"name": name, "scope": "quick", "fn": _pass_fn()})
+        else:
+            out.append({"name": name, "scope": "quick",
+                        "fn": _bad_fn(p.name, "既没有 run() 也没有 main()")})
     return out
 
 
@@ -543,15 +616,38 @@ def run(scope="quick", only=None):
         picked = [c for c in base if c["scope"] == "quick"]
 
     items, passed, failed, skipped = [], 0, 0, 0
+    import io
     for c in picked:
+        # 断言文件里有会重写 sys.stdout 的（test_tool_registry.py），跑完会
+        # 把真实 stdout 弄坏，后面所有用例全报
+        # `ValueError: I/O operation on closed file`。每个用例都换独立的
+        # 假 stdout，跑完立刻恢复。
+        saved_out = sys.stdout
+        sys.stdout = io.TextIOWrapper(_KeepOpenBytesIO(), encoding="utf-8",
+                                      errors="replace")
         try:
             r = c["fn"]()
             if r == "skip":
                 skipped += 1
                 items.append({"name": c["name"], "ok": True, "skipped": True})
+            elif isinstance(r, int) and not isinstance(r, bool) and r != 0:
+                # 脚本式断言约定：main() 返回 0=通过、非 0=失败
+                failed += 1
+                items.append({"name": c["name"], "ok": False,
+                              "why": "main() 返回 %d（非 0 表示失败）" % r})
             else:
                 passed += 1
                 items.append({"name": c["name"], "ok": True})
+        except SystemExit as e:
+            # main() 里可能 sys.exit(0/1)：0 或 None 算通过
+            code = getattr(e, "code", None)
+            if code in (0, None):
+                passed += 1
+                items.append({"name": c["name"], "ok": True})
+            else:
+                failed += 1
+                items.append({"name": c["name"], "ok": False,
+                              "why": "sys.exit(%r)" % (code,)})
         except AssertionError as e:
             failed += 1
             items.append({"name": c["name"], "ok": False, "why": str(e)[:400]})
@@ -559,6 +655,8 @@ def run(scope="quick", only=None):
             failed += 1
             items.append({"name": c["name"], "ok": False,
                           "why": "%s: %s" % (type(e).__name__, e)})
+        finally:
+            sys.stdout = saved_out
 
     failed_items = [i for i in items if not i["ok"]]
     return {
