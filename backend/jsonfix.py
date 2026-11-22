@@ -154,15 +154,31 @@ def parse(txt: str | None):
     if not txt:
         return None
     s = strip_notice(txt.strip())
-    m = re.search(r"```(?:json)?\s*(.+?)```", s, re.S)
-    if m:
-        s = m.group(1).strip()
+    # ★ 2026-11-22 修：**先原样解析，再考虑剥代码围栏**。
+    #   原顺序是先跑 `re.search(r"```(?:json)?\s*(.+?)```")` 抠围栏内容，
+    #   但 JSON 正文里本身就可能带 ```（反思动作的 detail 里写测试代码、举例说明），
+    #   于是两个围栏之间的几百字被当成"整个 JSON"——实测 8224 字的合法输出
+    #   被砍成 654 字碎片 → parse 返回 None → 报「模型返回的不是合法 JSON」
+    #   → 每日自我反思整轮作废（data/self_iterate/last_bad_reflect.txt 就是这份）。
+    #   证据：那份输出 json.loads 直接成功，被围栏正则砍坏后才失败。
     try:
         v = json.loads(s)
         if isinstance(v, dict) and v:
             return v
     except Exception:                       # noqa: BLE001
         logger.debug("json 直接解析失败", exc_info=True)
+    # 只有**整段被围栏包住**（开头 ``` 且结尾 ```）时才剥，绝不中途截取
+    if s.startswith("```"):
+        m = re.match(r"```(?:json)?[ \t]*\r?\n?(.*?)\r?\n?```[ \t]*$", s, re.S)
+        if m:
+            s2 = m.group(1).strip()
+            try:
+                v = json.loads(s2)
+                if isinstance(v, dict) and v:
+                    return v
+            except Exception:                   # noqa: BLE001
+                logger.debug("json 剥围栏后解析失败", exc_info=True)
+            s = s2
     i, j = s.find("{"), s.rfind("}")
     if i >= 0 and j > i:
         try:

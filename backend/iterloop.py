@@ -229,6 +229,13 @@ def _syntax_ok():
     for n in names:
         if not n.endswith(".py"):
             continue
+        # ★ 2026-11-22 修：临时脚本 / 探针脚本不算「产品代码」，不计入能力分。
+        #   能力跑分按「编译通过的文件数 × 0.03」给广度分，而排查时留下的
+        #   `_tmp_xxx.py` / `_probe_xxx.py` 也在这个目录里，会让分数虚高；
+        #   清理它们时分数反而掉 0.03/个（实测删 3 个掉 0.09，被判退步）。
+        #   这类文件本来就不是产品代码，一律排除。
+        if n.startswith(("_tmp", "_probe")):
+            continue
         total += 1
         p = os.path.join(base, n)
         try:
