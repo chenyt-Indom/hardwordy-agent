@@ -1538,6 +1538,22 @@ def render(session: str = "") -> str:
 
 WATCH_FILE = os.path.join(DIR, "watch.json")
 WATCH_MAX = 40                 # 最多同时盯多少条（超了就滚动丢最老的）
+
+
+def _watch_file() -> str:
+    """监视清单的路径 —— **按当前 DIR 现算**，不要用模块常量。
+
+    ★ 2026-11-22 修真 bug：原来 `_watch_read` / `_watch_write` 用的是导入时
+      算好的常量 WATCH_FILE，而回归断言 test_handoff_card 会把 `handoff.DIR`
+      指到临时目录做隔离、且**跑完不恢复**。于是后面所有盯梢操作变成：
+        · `os.makedirs(DIR)` 建的是临时目录（成功）
+        · `open(WATCH_FILE + ".tmp")` 写的是真实数据目录下的文件（目录没建 → 失败）
+        · 而 `_watch_write` 把异常吞了只记日志 → **清单一条也存不下来**
+      表现就是回归里「盯梢小助手」用例稳定失败（check_watch 找不到记录返回
+      False），而单独跑它又通过 —— 典型的环境状态污染。
+      改成现算之后，DIR 被指到哪儿，清单就写到哪儿，隔离才是真隔离。
+    """
+    return os.path.join(DIR, "watch.json")
 WATCH_HISTORY = 24             # 每条监视最多留多少条变化历史
 WATCH_DEFAULT_MINUTES = 30     # 用户没说间隔时的默认值
 WATCH_MAX_FILES = 1500         # 一个目录最多扫多少个文件（防巨目录）
@@ -1576,7 +1592,7 @@ def _md5(b) -> str:
 def _watch_read() -> dict:
     """读监视清单（坏文件不覆盖，只当空处理并留日志）。"""
     try:
-        with open(WATCH_FILE, "r", encoding="utf-8") as f:
+        with open(_watch_file(), "r", encoding="utf-8") as f:
             d = json.load(f)
         if isinstance(d, dict) and isinstance(d.get("watches"), list):
             return d
@@ -1590,11 +1606,12 @@ def _watch_read() -> dict:
 def _watch_write(d: dict) -> None:
     """原子写监视清单（写一半断电也不会把整份清单写坏）。"""
     try:
-        os.makedirs(DIR, exist_ok=True)
-        tmp = WATCH_FILE + ".tmp"
+        wf = _watch_file()
+        os.makedirs(os.path.dirname(wf) or DIR, exist_ok=True)
+        tmp = wf + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, WATCH_FILE)
+        os.replace(tmp, wf)
     except Exception:
         logger.warning("盯梢 watch.json 写入失败", exc_info=True)
 

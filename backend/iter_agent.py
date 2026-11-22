@@ -1681,6 +1681,9 @@ def _run_once(plan, action, ev=None, stop=None, prev_fail="", attempt=0):
         "action_id": aid, "title": act.get("title"),
         "model": "%s:%s" % (kind, model), "ok": bool(ok), "error": why,
         "steps": ctx.n_calls, "seconds": round(ctx.elapsed(), 1),
+        # ★ 2026-11-22 补：外层重试次数由 run_action 汇总，这里先留位，
+        #   否则日志里 attempts 永远是 None，看不出「试了几次才成」。
+        "attempts": None,
         "changed": changed, "rolled_back": rolled, "verify": detail,
         "summary": (ctx.finish_args or {}).get("summary") or "",
         "finished": ctx.finished, "cancelled": cancelled,
@@ -1778,6 +1781,19 @@ def run_action(plan, action, ev=None, stop=None):
     if tries:
         last["tries"] = tries
         last["attempts"] = len(tries)
+        # ★ 2026-11-22 补：日志文件是 _run_once 里写的，那时还不知道外层试了几次。
+        #   这里回写，否则「试了 4 次才成」这件事在日志里完全看不到。
+        _lp = str(last.get("log") or "")
+        if _lp:
+            try:
+                with open(_lp, "r", encoding="utf-8") as _fh:
+                    _lg = json.load(_fh)
+                _lg["attempts"] = len(tries)
+                _lg["tries"] = tries
+                with open(_lp, "w", encoding="utf-8") as _fh:
+                    json.dump(_lg, _fh, ensure_ascii=False, indent=1)
+            except Exception:                               # noqa: BLE001
+                logger.debug("回写重试次数失败", exc_info=True)
         if len(tries) > 1 and not last.get("ok"):
             _note("%s 连续 %d 次都没做成，已停在最后一次（每次都回滚了，代码是干净的）"
                   % (aid, len(tries)))

@@ -264,7 +264,7 @@ def auto_state() -> Dict[str, Any]:
     return {"alive": bool(w is not None and getattr(w, "is_alive", lambda: False)()),
             "runs": int(_auto_state.get("runs") or 0),
             "total": a.get("total"), "iso": a.get("iso"),
-            "cost_s": a.get("cost_s"), "files": list(a.get("files") or []),
+            "cost_s": a.get("cost_s"), "files": _live(a.get("files")),
             "fresh": (float(d.get("auto_ts") or 0) >= float(d.get("dirty_ts") or 0)
                       and a.get("total") is not None)}
 
@@ -318,11 +318,29 @@ def mark_dirty(rel: str = "", note: str = "") -> None:
         logger.debug("silent-except", exc_info=True)
 
 
+def _live(fs) -> list:
+    """读时过滤：剔除已经不存在的文件。
+
+    ⚠️ 2026-11-22 修：只在 mark_dirty 写入时过滤**不够**。
+    回归断言 test_selfdev_write_guard 会真的建一个探针文件再删掉，
+    打标记那一刻文件**确实存在**（过滤通过），删掉之后就成了幽灵项，
+    永远留在脏列表里，让「本轮改过哪些文件」和扣分归因指向不存在的文件。
+    所以读的时候必须再过滤一次。
+    """
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = []
+    for x in (fs or []):
+        s = str(x or "").replace("\\", "/")
+        if s and os.path.exists(os.path.join(base, s.replace("/", os.sep))):
+            out.append(s)
+    return out
+
+
 def pending() -> Dict[str, Any]:
     """本轮有没有还没评分的改动。"""
     d = _load()
     return {"dirty": bool(d.get("dirty")),
-            "files": list(d.get("files") or []),
+            "files": _live(d.get("files")),
             "since": d.get("dirty_iso") or ""}
 
 
