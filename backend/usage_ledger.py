@@ -369,7 +369,7 @@ def prune(keep_days: int = _KEEP_DAYS):
         for p in files[:-max(1, int(keep_days))]:
             try:
                 os.remove(p)
-            except OSError:
+            except OSError:                             # noqa: BLE001 单个过期账本删不掉不影响其余清理
                 pass
     except Exception:                                   # noqa: BLE001
         logger.debug("prune failed", exc_info=True)

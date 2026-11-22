@@ -15,11 +15,14 @@
 
 import datetime
 import json
+import logging
 import os
 import re
 import time
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 def _now():
@@ -46,8 +49,8 @@ def _memory_pending(limit=6):
         # 长期记忆（跨对话）
         try:
             texts.append(str(memory.get_long() or ""))
-        except Exception:
-            pass
+        except Exception:                                   # noqa: BLE001 读不到就少一段预告，不影响整体
+            logger.debug("预告：读长期记忆失败", exc_info=True)
         # 短期记忆：所有会话都扫一遍（用户可能在不同对话里记了不同的事）
         # 注意：memory 模块没有 list_sessions()，会话列表由 memory.get_sessions()
         # 或 memory.list_conversations() 提供；这里做兼容探测，避免 AttributeError。
@@ -67,8 +70,8 @@ def _memory_pending(limit=6):
                     texts.append(str(memory.get_short(sid) or ""))
                 except Exception:
                     continue
-        except Exception:
-            pass
+        except Exception:                                   # noqa: BLE001 会话列表拿不到就只用长期记忆
+            logger.debug("预告：遍历短期记忆失败", exc_info=True)
     except Exception:
         return out
 

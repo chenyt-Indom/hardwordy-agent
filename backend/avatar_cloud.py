@@ -131,7 +131,7 @@ def _cfg() -> dict:
             raw = json.load(f)
         if isinstance(raw, dict):
             d.update(raw)
-    except FileNotFoundError:
+    except FileNotFoundError:                               # noqa: BLE001 首次运行没有配置文件，用默认值
         pass
     except Exception:                                       # noqa: BLE001
         logger.warning("cloud.json 读不出来，用默认值", exc_info=True)
@@ -597,7 +597,7 @@ def _fit_video(src: str, target_sec: float, out_path: str) -> str:
     finally:
         try:
             os.remove(unit)
-        except OSError:
+        except OSError:                                     # noqa: BLE001 临时文件清理失败不该影响成片
             pass
     return out_path
 
@@ -710,7 +710,7 @@ def concat_videos(paths: list, out_path: str) -> str:
                        capture_output=True, timeout=600)
     try:
         os.remove(lst)
-    except OSError:
+    except OSError:                                         # noqa: BLE001 拼接清单删不掉不影响结果
         pass
     if p.returncode != 0 or not os.path.isfile(out_path):
         raise RuntimeError("视频拼接失败：%s"
@@ -950,7 +950,7 @@ def generate(image_path: str, audio_path: str, resolution: str = "",
                 try:
                     if os.path.isfile(p):
                         os.remove(p)
-                except OSError:
+                except OSError:                             # noqa: BLE001 中间产物清理失败不影响结果
                     pass
 
 

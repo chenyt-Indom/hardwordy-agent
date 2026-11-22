@@ -53,6 +53,13 @@ def _py_files():
             continue
         if p.name in _SKIP_FILES:
             continue
+        # ★ 2026-11-22 修：`_pending_*`（还没做的功能）和 `_quarantine/`（隔离区旧文件）
+        #   不是产品代码。它们被扫进来时，压分明细里会出现
+        #   「backend/_feature_tests/_pending_图表几何自检闸门….py:27」这种条目 ——
+        #   用户看到的扣分点是「一个还没做的功能的草稿」，改它没有意义，
+        #   而且会让静态分被永久压着 0.5 分/条（实测 2 条虚压 1.0 分）。
+        if "_pending_" in p.name or "_quarantine" in p.parts:
+            continue
         try:
             if p.stat().st_size > _MAX_BYTES:
                 continue

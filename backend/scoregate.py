@@ -111,11 +111,22 @@ def mark_dirty(rel: str = "", note: str = "") -> None:
             #   留着会让「本轮改过哪些文件」和扣分归因指向不存在的文件
             #   （实测脏列表里出现过 backend/_guard_probe_target.py 这种幽灵项）。
             _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            fs = [x for x in (d.get("files") or [])
-                  if x and os.path.exists(os.path.join(_base, str(x).replace("/", os.sep)))]
-            r = str(rel or "").replace("\\", "/").lstrip("./")
+            # ⚠️ 2026-11-22 修两个真 bug：
+            #   ① 原来只过滤**已有**列表，刚 append 进来的 rel 不再校验 ——
+            #      于是测试调 mark_dirty("backend/_guard_probe_target.py")
+            #      （文件根本不存在）时，幽灵项又回到了脏列表里（实测复现）。
+            #   ② `str(...).lstrip("./")` 是**按字符集**剥离，不是按前缀：
+            #      `"../foo"` → `"foo"`、`"./a"` → `"a"`，连正常路径都会被改坏。
+            #      改成显式去 `./` 前缀。
+            fs = list(d.get("files") or [])
+            r = str(rel or "").replace("\\", "/")
+            while r.startswith("./"):
+                r = r[2:]
             if r and r not in fs:
                 fs.append(r)
+            # 统一过滤一次（含刚 append 的），不存在的文件一律剔除
+            fs = [x for x in fs
+                  if x and os.path.exists(os.path.join(_base, str(x).replace("/", os.sep)))]
             d["files"] = fs[-40:]
             if note:
                 d["note"] = str(note)[:200]

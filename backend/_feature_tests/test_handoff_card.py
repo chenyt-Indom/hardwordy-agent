@@ -33,7 +33,7 @@ FAILS = []
 # Windows 控制台默认 GBK，打不出「…」这类字符会直接抛 UnicodeEncodeError
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
+except Exception:                                       # noqa: BLE001 重配失败只影响中文显示
     pass
 
 
@@ -465,7 +465,7 @@ def main():
         try:
             import shutil as _sh
             _sh.rmtree(_tmpd, ignore_errors=True)
-        except Exception:
+        except Exception:                               # noqa: BLE001 临时目录清理失败不影响断言
             pass
 
     # ---- 46. last.json 损坏时，绝不能拿空字典覆盖整份历史（数据丢失级）----
@@ -496,7 +496,7 @@ def main():
             for _n in os.listdir(dirpath):
                 try:
                     os.remove(os.path.join(dirpath, _n))
-                except Exception:
+                except Exception:                       # noqa: BLE001 临时文件删不掉不影响断言
                     pass
 
         _wipe(_tmpd2)
@@ -527,7 +527,7 @@ def main():
         for _n in os.listdir(_tmpd2):
             try:
                 os.remove(os.path.join(_tmpd2, _n))
-            except Exception:
+            except Exception:                           # noqa: BLE001 临时文件删不掉不影响断言
                 pass
         with open(handoff.LAST, "w", encoding="utf-8") as _f:
             _f.write("{坏掉了")
@@ -543,7 +543,7 @@ def main():
         try:
             import shutil as _sh2
             _sh2.rmtree(_tmpd2, ignore_errors=True)
-        except Exception:
+        except Exception:                               # noqa: BLE001 临时目录清理失败不影响断言
             pass
 
     # ---- 50. render 过期判断：NaN / Infinity / 未来时间都不能永久注入 ----
@@ -578,7 +578,7 @@ def main():
         try:
             import shutil as _sh3
             _sh3.rmtree(_tmpd3, ignore_errors=True)
-        except Exception:
+        except Exception:                               # noqa: BLE001 临时目录清理失败不影响断言
             pass
 
     # ---- 50. 重写 markdown 安全层后新增的不变量（2026-11-18）----
@@ -1109,7 +1109,7 @@ def main():
     finally:
         try:
             os.remove(_pl)
-        except Exception:
+        except Exception:                               # noqa: BLE001 临时文件删不掉不影响断言
             pass
 
     # ---- 间隔重复：同一段 assistant 回复被记两遍，中间隔着别的消息也不能漏 ----

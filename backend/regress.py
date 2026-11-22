@@ -718,7 +718,7 @@ def run_disk(scope="quick", timeout=300):
     os.close(_fd)
     try:
         os.unlink(_out_path)                 # 先删，跑完再看有没有重新写出来
-    except OSError:
+    except OSError:                                     # noqa: BLE001 删临时结果文件失败不影响后续流程
         pass
     try:
         r = subprocess.run([sys.executable, "-c", _DISK_RUNNER, scope, _out_path],
@@ -737,7 +737,7 @@ def run_disk(scope="quick", timeout=300):
         line = ""
     try:
         os.unlink(_out_path)
-    except OSError:
+    except OSError:                                     # noqa: BLE001 清理临时结果文件失败不影响结果
         pass
     if not line:
         err = (r.stderr or b"").decode("utf-8", "replace")[-500:]

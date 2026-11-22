@@ -149,8 +149,8 @@ def _rec_failed(rec: dict) -> bool:
     try:
         if int(rec.get("failed") or 0) > 0:
             return True
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError):                         # noqa: BLE001 非数字属正常，下面还有别的判据
+        logger.debug("failed 字段不是数字，跳过这条判据：%r", rec.get("failed"))
     act = str(rec.get("act") or "").strip().lower()
     return act in _BAD_ACTS or "fail" in act or "reject" in act
 
