@@ -56,7 +56,12 @@ DEFAULTS = {
     #   降到 12：单条计划的质量（打磨轮数/评分门槛）完全不变，只是少想一些。
     #   想多要就改这个数或点「立即反思」（手动永远放行）。
     "daily_plans": 12,      # 每天最多几个计划（按计划数算，打磨几轮只算 1 个）
-    "min_gap_sec": 90,      # 两次触发之间至少隔多久（秒）
+    # ★ 2026-11-23 用户要求「反思节流 90 → 300 秒」：
+    #   90 秒的间隔意味着同一次对话里改两句就又能触发一轮反思，实测一天能烧出
+    #   几十轮（触发日志里 12:19:51 一行三条就是证据）。拉长到 300 秒（5 分钟）
+    #   后，5 分钟内的自动触发一律让路；用户想立刻跑就点「立即反思」
+    #   （think_now / source="manual" 不经过这道节流，永远放行）。
+    "min_gap_sec": 300,     # 两次触发之间至少隔多久（秒）
     "task_fail_gap": 300,   # 任务失败触发的额外间隔（秒），防自我循环
     "web_every": 3,         # 每 N 次触发才联网抓一次技术动态（其余用已入库论文）
     "slow_ratio": 2.0,      # 耗时超过历史均值这么多倍，算「明显变长」
@@ -68,6 +73,43 @@ DEFAULTS = {
     #   设 0 = 关闭闸门。
     "backlog_gate": 30,
 }
+
+# ★ 2026-11-23：老默认值的一次性迁移。
+#   为什么必须迁移（不是只改 DEFAULTS 就够）：`cfg()` 的补默认逻辑是
+#   「键**不存在**才补」，而真实的 `data/selfloop.json` 里早就写死了
+#   `"min_gap_sec": 90`（历史上第一次 cfg()/set_cfg 就把默认值落盘了）。
+#   所以光把 DEFAULTS 改成 300，跑起来读到的仍然是 90 —— 用户要求的
+#   节流压根没生效。这里给旧值 90 做一次性升级（写进 schema，只做一次），
+#   之后用户自己在界面上调成任何值（包括 90）都不会再被覆盖。
+_LEGACY_DEFAULTS = {"min_gap_sec": 90}   # 旧版默认值 → 需要升级掉的存量值
+_SCHEMA = 2                              # 配置结构版本（1 = 未标记的老数据）
+
+
+def _migrate(d):
+    """就地升级老落盘配置。返回 True 表示改动过（需要写回）。
+
+    只做「存量旧默认值 → 新默认值」，绝不碰用户显式调过的其它值：
+      · schema 已经是当前版本 → 直接返回，绝不重复迁移；
+      · 存量值等于旧默认值 → 升级成新默认值；
+      · 其它值（用户自己调过）→ 原样保留。
+    """
+    changed = False
+    try:
+        ver = int(d.get("schema") or 1)
+    except Exception:                                   # noqa: BLE001
+        ver = 1
+    if ver >= _SCHEMA:
+        return False
+    for k, old in _LEGACY_DEFAULTS.items():
+        try:
+            if float(d.get(k) or 0) == float(old):
+                d[k] = DEFAULTS.get(k, old)
+                changed = True
+        except Exception:                               # noqa: BLE001
+            logger.debug("migrate %s 失败", k, exc_info=True)
+    d["schema"] = _SCHEMA
+    return True
+
 
 # 积压条数的缓存：每次对话结束都读一遍 plans.json 没必要（几百 KB）。
 _BACKLOG_CACHE = {"at": 0.0, "n": 0}
@@ -233,12 +275,20 @@ def record_trigger(reason, source):
 
 
 def cfg():
-    """配置 + 状态（扁平一份）。缺的键用 DEFAULTS 补齐。"""
+    """配置 + 状态（扁平一份）。缺的键用 DEFAULTS 补齐。
+
+    ★ 2026-11-23：补默认之后再过一遍 `_migrate()` —— 老落盘文件里
+      `min_gap_sec` 是显式写着的 90，光补默认改不动它（详见 _migrate 注释）。
+      迁移只发生一次（写 schema），之后用户怎么调都不再被覆盖。
+    """
     d = load()
     for k, v in DEFAULTS.items():
         if k not in d:
             d[k] = v
-    return _roll(d)
+    _roll(d)
+    if _migrate(d):
+        _save(d)
+    return d
 
 
 def set_cfg(**kw):
@@ -402,7 +452,16 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
             _LAST_AT[0] = float(d.get("last_at") or 0)
         except Exception:                               # noqa: BLE001
             _LAST_AT[0] = 0.0
-    need = float(gap if gap is not None else (d.get("min_gap_sec") or 90))
+    # ★ 2026-11-23 节流 90 → 300 秒。兜底值也要跟着改 —— 原来这里写死 `or 90`，
+    #   配置里一旦是空/0/坏值就退回 90，等于把用户要求的 5 分钟节流绕过去了。
+    #   现在兜底取 DEFAULTS 里的同一份值，只留一个真源。
+    # ★ 手动触发（source="manual"）永远放行：用户点「立即反思」就是「我现在就要想」，
+    #   被节流挡掉等于按钮失效（配额/积压闸门同样对 manual 放行，这里保持一致）。
+    if source == "manual":
+        need = 0.0
+    else:
+        need = float(gap if gap is not None
+                     else (d.get("min_gap_sec") or DEFAULTS["min_gap_sec"]))
     with _LOCK:
         if _BUSY[0]:
             return {"ok": True, "skipped": "上一轮思考还没结束"}
