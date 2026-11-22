@@ -3337,6 +3337,45 @@ def _creative_block():
     return "\n".join(lines)
 
 
+def _user_profile_brief(max_chars: int = 1400) -> str:
+    """长期记忆 + 跨模型传承 → 一段「用户画像」，注入反思提示词。
+
+    ★ 2026-11-22 用户要求：「推荐机制有没有根据记忆库以及平时任务相结合去
+      思考新功能，做到根据用户身份或习惯进行不断迭代？」
+      查下来的答案是**没有**：提示词里只有「对用户的观察」（从最近对话现推），
+      长期记忆和跨模型传承档案一个字都没进提示词 —— 于是每轮反思都从零推断
+      用户是谁、在意什么，跨会话累积的记忆完全没参与「提什么新功能」的决策。
+      这里把两者拼进来，让创意发散有身份与习惯依据。
+    """
+    parts = []
+    try:
+        from . import memory as _mem
+        s = str(_mem.get_long() or "").strip()
+        if s:
+            parts.append("【长期记忆里的用户档案（跨会话保留）】\n" + s)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("取长期记忆失败", exc_info=True)
+    try:
+        from . import memtransfer as _MT
+        b = str(_MT.brief(max_chars=700) or "").strip()
+        if b:
+            parts.append(b)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("取跨模型传承摘要失败", exc_info=True)
+    if not parts:
+        return ""
+    body = "\n\n".join(parts)[:max_chars]
+    return (
+        "## 🧑 用户画像（长期记忆 + 跨模型传承，**真实数据，不是猜测**）\n"
+        + body + "\n"
+        "⚠️ 用法（用户 2026-11-22 明确要求「根据用户身份或习惯进行不断迭代」）：\n"
+        "· 提**新功能**时先想「他这个人、这个专业、这个项目，哪一步最费时间」——\n"
+        "  不要提跟他完全无关的通用功能；\n"
+        "· 他反复提过的诉求要接着做深，他明确拒绝过的方向不要再提一遍；\n"
+        "· 上面没写的**不许编**：没有证据的「他可能想要」比不提更糟。\n"
+    )
+
+
 def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief="",
                           gap="", task_brief=""):
     sig_lines = []
@@ -3352,7 +3391,7 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
                                                 it.get("url") or ""))
     jr = ["- %s %s %s" % (x.get("ts"), x.get("rel"), x.get("note")) for x in journal[-40:]]
 
-    return """你是这个本地多模态助手项目的"自我迭代引擎"。请做一次**诚实、具体、不客套**的自我审视。
+    _prompt = """你是这个本地多模态助手项目的"自我迭代引擎"。请做一次**诚实、具体、不客套**的自我审视。
 
 %s
 
@@ -3572,6 +3611,16 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
                          + str(gap or "")[:400])),
         _loop_brief(),
         ("## 用户这次的额外关注点\n" + focus) if focus else "")
+    # ★ 2026-11-22 用户要求「推荐要结合记忆库、按用户身份或习惯不断迭代」：
+    #   提示词里原本**没有用户画像**（只有从最近对话现推的「对用户的观察」），
+    #   长期记忆 2982 字、跨模型传承 71 条一个字都没进来。这里注入到「创意发散」
+    #   之前 —— 让「提什么新功能」有身份与习惯依据，而不是每轮从零猜他是谁。
+    #   ⚠️ 必须在 **% 格式化之后** 注入：档案里可能出现 % 号，提前拼进去会让
+    #   这条有 11 个 %s 的提示词直接 TypeError。
+    _prof = _user_profile_brief()
+    if _prof and "## 🎨 创意发散" in _prompt:
+        _prompt = _prompt.replace("## 🎨 创意发散", _prof + "\n## 🎨 创意发散", 1)
+    return _prompt
 
 
 # ---------------------------------------------------------------- 计划打磨

@@ -1264,6 +1264,14 @@
       // ★ 自循环状态卡（后端 /api/selfloop/status 与 app.js renderLoopStatus 早已写好，
       //   只差这个容器和 CSS —— 补上它这块功能才真正可见）。
       '  <section class="sd-sec" id="sdLoopSec"><div class="loop-st-card" id="loopStatusCard"></div></section>',
+      // ★ 2026-11-22 用户要求：「增加一个按钮让我查看这些东西详细内容，包括日志
+      //   评分以及迭代报告，还有反思机制我也要能够直观看到」。默认收起，
+      //   点开才拉 /api/iter/panel（只读，不触发评分/反思）。
+      '  <section class="sd-sec" id="sdIterPanelSec">',
+      '    <button type="button" class="sd-fold" id="sdIterPanelToggle" aria-expanded="false">',
+      '      <span>🔬 体系详情</span><i class="sd-badge" id="sdIterPanelBadge">—</i><i class="sd-caret">▸</i></button>',
+      '    <div class="iter-panel" id="iterPanelBox" hidden></div>',
+      '  </section>',
       '  <section class="sd-sec">',
       '    <button type="button" class="sd-fold" id="sdKeysToggle" aria-expanded="false">',
       '      <span>🔑 需要配 API Key</span><i class="sd-badge">3 项</i><i class="sd-caret">▸</i></button>',
@@ -1409,6 +1417,127 @@
         kl.hidden = !kl.hidden;
         kt.setAttribute('aria-expanded', kl.hidden ? 'false' : 'true');
         kt.classList.toggle('open', !kl.hidden);
+      };
+    }
+
+    // ⑦b 体系详情：默认收起，点开才请求（只读接口，不会触发评分/反思）。
+    //     ★ 2026-11-22 用户要求「增加一个按钮让我查看详细内容，包括日志评分
+    //     以及迭代报告，还有反思机制我也要能够直观看到」。
+    var ipt = $('#sdIterPanelToggle'), ipb = $('#iterPanelBox'), ipBadge = $('#sdIterPanelBadge');
+    function _ipEsc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+    function _ipSec(title, inner, open) {
+      return '<details class="ip-sec"' + (open ? ' open' : '') + '><summary>' +
+        title + '</summary><div class="ip-body">' + inner + '</div></details>';
+    }
+    function _ipRows(rows) {
+      if (!rows || !rows.length) return '<div class="ip-empty">暂无</div>';
+      return rows.map(function (r) {
+        return '<div class="ip-row"><b>' + _ipEsc(r.k) + '</b><span>' + _ipEsc(r.v) + '</span></div>';
+      }).join('');
+    }
+    function renderIterPanel(D) {
+      if (!ipb) return;
+      if (!D || D.ok === false && !D.score) {
+        ipb.innerHTML = '<div class="ip-empty bad">读取失败：' + _ipEsc((D && D.error) || '空响应') + '</div>';
+        return;
+      }
+      var S = D.score || {}, F = D.failattr || {}, R = D.reflect || {},
+          M = D.memory || {}, V = D.semantic || {}, H = D.health || {}, C = D.chain || {};
+      var cum = (S.cumulative && S.cumulative.cum) || 0;
+      var h = '<div class="ip-kpi"><b>' + (cum > 0 ? '+' : '') + Number(cum).toFixed(2) +
+        '</b><i>累计跑分</i><span>' + (S.rounds || 0) + ' 轮 · 进步 ' + (S.improved || 0) +
+        ' · 退步 ' + (S.regressed || 0) + ' · 回滚 ' + (S.rollbacks || 0) + '</span></div>';
+
+      // 评分：最近几轮进退 + 日志原文
+      var hist = (S.history || []).map(function (x) {
+        var d = Number(x.delta || 0);
+        return { k: String(x.ts || '').slice(5, 16) + ' ' + (x.verdict || ''),
+                 v: (d > 0 ? '+' : '') + d.toFixed(2) + (x.rollback ? ' ⏪' + (x.why || '') : '') };
+      });
+      h += _ipSec('📊 评分与进退（最近 ' + hist.length + ' 轮）', _ipRows(hist), true);
+      var log = S.log || [];
+      h += _ipSec('📜 评分日志原文（最近 ' + log.length + ' 行）',
+        log.length ? '<pre class="ip-pre">' + _ipEsc(log.join('\n')) + '</pre>'
+                   : '<div class="ip-empty">暂无（还没跑过评分轮）</div>');
+
+      // 失败归因
+      var kinds = F.by_kind_zh || {};
+      var krows = Object.keys(kinds).map(function (k) { return { k: k, v: kinds[k] + ' 次' }; });
+      var rec = (F.recent || []).map(function (r) {
+        return { k: (r.ts || '').slice(5, 16) + ' ' + (r.kind || ''),
+                 v: (r.why || '').slice(0, 120) + (r.rollback ? ' ｜ 回滚：' + r.rollback.slice(0, 60) : '') };
+      });
+      h += _ipSec('🧾 失败归因（共 ' + (F.total || 0) + ' 条，回滚 ' + (F.rollback || 0) + '）',
+        (krows.length ? _ipRows(krows) : '<div class="ip-empty">暂无记录</div>') +
+        (rec.length ? '<div class="ip-sub">最近明细</div>' + _ipRows(rec) : ''));
+
+      // 改进方法
+      var les = (F.lessons || []).map(function (x) {
+        return { k: x.kind || '', v: (x.root_cause || '') + ' → ' + (x.fix || '') };
+      });
+      h += _ipSec('💡 已构思的改进方法（' + les.length + ' 条）',
+        les.length ? _ipRows(les) : '<div class="ip-empty">暂无（反思还没产出 fail_lessons）</div>');
+
+      // 反思记录 + 迭代报告
+      var jr = (R.journal || []).map(function (x) {
+        return { k: (x.ts || '').slice(5, 16) + ' ' + (x.rel || ''), v: x.note || '' };
+      });
+      h += _ipSec('🧠 反思与改动记录（最近 ' + jr.length + ' 条）',
+        jr.length ? _ipRows(jr) : '<div class="ip-empty">暂无</div>');
+      var pl = (R.plans || []).map(function (p) {
+        return { k: (p.ts || '').slice(5, 16) + ' · ' + (p.trigger || ''),
+                 v: (p.summary || '') + ' ｜ 动作 ' + p.actions + '（完成 ' + p.done +
+                    '）· 新功能 ' + p.features + ' · 教训 ' + p.fail_lessons };
+      });
+      h += _ipSec('📋 迭代报告（最近 ' + pl.length + ' 个计划）',
+        pl.length ? _ipRows(pl) : '<div class="ip-empty">暂无计划</div>');
+
+      // 记忆层 + 跨模型
+      var T = M.transfer || {};
+      h += _ipSec('🧩 记忆层与跨模型传承',
+        _ipRows([
+          { k: '长期记忆', v: (M.long_chars || 0) + ' 字 / ' + (M.long_items || 0) + ' 条' },
+          { k: '传承档案', v: (T.items || 0) + ' 条 · ' + ((T.models || []).join('、') || '—') },
+          { k: '多模型确认', v: (T.multi_model_items || 0) + ' 条' },
+          { k: '语义检索', v: (V.vec_ready ? '就绪' : '未就绪') + ' · 记录 ' + (V.records || 0) +
+                 ' 条 · 缓存 ' + (V.cached_vectors || 0) }
+        ]));
+
+      // 体检 + 协同
+      var sum = H.summary || {};
+      var hi = (H.items || []).map(function (it) {
+        return { k: (it.icon || '') + ' ' + (it.name || ''),
+                 v: (it.value || '') + ' ' + (it.hint || '') };
+      });
+      h += _ipSec('🩺 体系体检（✅' + (sum.ok || 0) + ' ⚠️' + (sum.degrade || 0) +
+        ' ⏸' + (sum.idle || 0) + '）',
+        hi.length ? _ipRows(hi) : '<div class="ip-empty">暂无</div>');
+      h += _ipSec('🔗 模块协同（' + (C.alive || 0) + '/' + (C.total || 0) + ' 存活）',
+        (C.bad && C.bad.length) ? _ipRows(C.bad.map(function (b) { return { k: '✗', v: b }; }))
+                                : '<div class="ip-empty">全部模块可加载</div>');
+      ipb.innerHTML = h;
+      if (ipBadge) ipBadge.textContent = '累计 ' + (cum > 0 ? '+' : '') + Number(cum).toFixed(1);
+    }
+    function loadIterPanel() {
+      if (!ipb) return;
+      ipb.innerHTML = '<div class="ip-empty">读取中…</div>';
+      fetch('/api/iter/panel?days=30')
+        .then(function (r) { return r.json(); })
+        .then(renderIterPanel)
+        .catch(function (e) {
+          ipb.innerHTML = '<div class="ip-empty bad">读取失败：' + _ipEsc(e && e.message) + '</div>';
+        });
+    }
+    if (ipt && ipb) {
+      ipt.onclick = function () {
+        ipb.hidden = !ipb.hidden;
+        ipt.setAttribute('aria-expanded', ipb.hidden ? 'false' : 'true');
+        ipt.classList.toggle('open', !ipb.hidden);
+        if (!ipb.hidden) loadIterPanel();
       };
     }
 

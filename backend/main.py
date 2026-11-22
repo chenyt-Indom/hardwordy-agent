@@ -4098,6 +4098,25 @@ def iter_health(days: int = 30):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+@app.get("/api/iter/panel")
+def iter_panel(days: int = 30):
+    """自迭代体系「详情面板」—— 一个接口喂满前端那张卡。
+
+    ★ 2026-11-22 用户要求：「前端能不能增加一个按钮让我查看这些东西详细内容，
+    包括日志评分以及迭代报告，还有反思机制我也要能够直观看到」。
+
+    与 /api/iter/health 的分工：health 只给「8 项三态结论」（要不要担心），
+    panel 给「结论背后的原始数据」（评分日志原文、迭代报告、反思 journal、
+    归因明细与已构思的改法、记忆体量、语义检索状态）。
+    同样**只读**：不触发评分/回归/反思，点开即出。
+    """
+    from . import iterpanel as _IP
+    try:
+        return _IP.panel(days=int(days or 30))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 @app.get("/api/selfiter/loop")
 def selfiter_loop():
     """闭环进退看板：最近几轮是进步还是退步、进退多少、回滚原因。

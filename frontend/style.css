@@ -7190,6 +7190,29 @@ html[data-theme="light"] .iter-site:hover {
 .loop-st-hint.bad { color: var(--danger); }
 @media (max-width: 420px) { .loop-st-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
+/* ===== 体系详情面板（设置抽屉内，默认收起）=====
+   2026-11-22 用户要求「一个按钮看详细内容：日志、评分、迭代报告、反思」。
+   容器固定最大高度 + 内部滚动，**不参与主布局**，展开也不会把页面撑高。 */
+.iter-panel { margin-top: 6px; max-height: 380px; overflow: auto; font-size: 12px; }
+.ip-kpi { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+  padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, .04); }
+.ip-kpi b { font-size: 17px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.ip-kpi i { font-style: normal; color: var(--muted); font-size: 11px; }
+.ip-kpi span { color: var(--muted); font-size: 11px; }
+.ip-sec > summary { cursor: pointer; padding: 3px 0; color: var(--text); user-select: none; }
+.ip-sec > summary:hover { color: var(--accent); }
+.ip-body { padding: 2px 0 4px 8px; display: flex; flex-direction: column; gap: 2px; }
+.ip-row { display: flex; gap: 8px; line-height: 1.45; }
+.ip-row b { flex: 0 0 auto; max-width: 46%; color: var(--muted); font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ip-row span { flex: 1 1 auto; min-width: 0; color: var(--text); word-break: break-word; }
+.ip-sub { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.ip-empty { color: var(--muted); padding: 3px 0; }
+.ip-empty.bad { color: var(--danger); }
+.ip-pre { margin: 2px 0 0; padding: 6px; max-height: 180px; overflow: auto;
+  background: rgba(0, 0, 0, .22); border-radius: 6px; font-size: 11px; line-height: 1.45;
+  white-space: pre-wrap; word-break: break-all; color: var(--text); }
+
 /* ===== 回复内嵌实时卡片（livecard.js renderLiveCard 渲染）=====
    2026-11-21：「边说边出画面」。答案气泡顶部一排小卡（地图 / 天气 / 图片 /
    文档 / 演示 / 视频），横着刷，点一下展开细节或交给 app.js 放大。
