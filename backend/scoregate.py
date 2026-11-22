@@ -151,6 +151,44 @@ def _auto_score_once(force: bool = False) -> Dict[str, Any]:
             _il.write_last_score(now)     # 面板「当前版本」立刻可见
         except Exception:                               # noqa: BLE001
             logger.debug("后台写 last_score 失败", exc_info=True)
+        # ★ 2026-11-22 用户要求：「跑分低于原来还可以不断反思以及改进还可以写日志」。
+        #   原来这条路**只评分、不比对** —— 而迭代改完代码自动重启后走的正是这里
+        #   （rescore_if_stale → _auto_score_once），于是「分数掉了」既不进低分日志、
+        #   也不会触发自动修复，用户看到的只是面板上数字变小了。
+        #   现在补上：和上一版比，退步就记日志 + 沉淀教训 + 起自动修复（最多 3 轮）。
+        try:
+            _prev = d.get("last_score") or {}
+            _pv = _prev.get("total")
+            _tot = (now or {}).get("total")
+            if _pv is not None and _tot is not None:
+                _delta = round(float(_tot) - float(_pv), 2)
+                if _delta < 0:
+                    _rec = {"iso": _now(), "ts": time.time(), "prev": _pv,
+                            "total": _tot, "delta": _delta,
+                            "verdict": "regressed", "cost_s": cost,
+                            "quality": (now or {}).get("quality"),
+                            "ability": (now or {}).get("ability"),
+                            "rebased": False, "blocked": False,
+                            "files": list(d.get("files") or []),
+                            "note": "后台自动评分：比上一版低 %.2f" % _delta}
+                    try:
+                        _r2 = _il.commit_round(
+                            before=_prev, after=now,
+                            note="后台自动评分（发现退步）") or {}
+                        _ex = (_r2 or {}).get("explain") or {}
+                        _rec["per_part"] = (_r2 or {}).get("per_part") or {}
+                        _rec["suspects"] = (_ex.get("suspects") or [])[:8]
+                        _rec["codes"] = (_ex.get("new_codes") or [])[:20]
+                        _rec["summary"] = str(_ex.get("summary") or "")[:400]
+                    except Exception:                   # noqa: BLE001
+                        logger.debug("自动评分退步记账失败", exc_info=True)
+                    # blocked=True：自动评分这条路上也要真的去修，不能只记不修
+                    _rec["drop"] = _record_drop(_rec, True)
+                    logger.info("后台自动评分发现退步：%s → %s（%+.2f），"
+                                "已记低分日志并启动自动修复", _pv, _tot, _delta)
+        except Exception:                               # noqa: BLE001
+            logger.debug("自动评分退步比对失败（不影响评分本身）", exc_info=True)
+
         with _LOCK:
             d2 = _load()
             d2["auto_score"] = {"iso": _now(), "ts": time.time(),

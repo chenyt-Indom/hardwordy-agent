@@ -86,6 +86,43 @@ _BOOT_AT = time.time()
 #   还会和 _next() 抢着起任务。用这个标记 + _start_verify() 统一入口。
 _VERIFYING = [False]
 
+# ★ 2026-11-22 用户报「推荐迭代完自动重启之后没有继续」：
+#   _BOOT_AT 只能识别「上个进程留下的孤儿」，识别不出**本进程内**线程死掉
+#   的任务（worker 异常退出 / 被硬杀，finally 没跑到）。那种情况下 running
+#   记录会一直留着，submit 的 dup 判断永远返回「已在跑」，
+#   于是同一个计划再也提交不进去，界面上看就是「重启之后没继续」。
+#   这里登记「这个 tid 的 worker 是否还在」，用线程对象自己判存活。
+_LIVE = {}
+
+
+def _run_alive(run) -> bool:
+    """running 里的那个任务，它的 worker 线程是否真的还活着（不是僵尸）。
+
+    判僵尸的三种情况：
+      ① 没有 running 记录 —— 本来就没任务；
+      ② started_at 早于本进程启动时间 —— 上一个进程留下的孤儿；
+      ③ 本进程没登记过它的 worker，或线程已 not is_alive() —— 线程死了但记录没清。
+    """
+    if not run:
+        return False
+    try:
+        if float(run.get("started_at") or 0) < _BOOT_AT - 0.5:
+            return False
+    except (TypeError, ValueError):
+        return False
+    tid = str(run.get("tid") or "")
+    th = _LIVE.get(tid)
+    if th is None:
+        # 刚 submit、还没登记完的极短窗口：给 20 秒宽限，别把刚起的任务误杀。
+        try:
+            return (time.time() - float(run.get("started_at") or 0)) < 20
+        except (TypeError, ValueError):
+            return False
+    try:
+        return bool(th.is_alive())
+    except Exception:                                   # noqa: BLE001
+        return False
+
 
 def done_titles(limit=60):
     """已经跑完/在跑/在排的功能名（给 featradar 查重用，避免重复推荐）。"""
@@ -450,6 +487,14 @@ def submit(plan_id, source="auto", title="", max_n=0):
 
     with _LOCK:
         run = _STATE["running"]
+        # ★ 2026-11-22：僵尸任务（worker 线程已死、记录还留着）必须先回收。
+        #   否则下面的 dup 判断会永远返回「已在跑」，这个计划再也提交不进去，
+        #   表现就是「重启之后没继续」。
+        if run and not _run_alive(run):
+            logger.warning("提交时发现僵尸任务（线程已不在），已回收：%s",
+                           run.get("plan_id"))
+            _STATE["running"] = None
+            run = None
         # 同一份计划不要重复排队：动作跑完就是 done 了，再排一次只会
         # 立刻失败（「没有已批准的动作」），白占一个队列位、还让用户以为出了问题。
         if run and run.get("plan_id") == plan_id:
@@ -492,6 +537,10 @@ def submit(plan_id, source="auto", title="", max_n=0):
 
     th = threading.Thread(target=_worker, args=(item,), daemon=True,
                           name="iter-%s" % tid)
+    # 先登记再 start：start 之前 is_alive() 还是 False，
+    # 若这中间有别的请求进来判存活，会被误判成僵尸、把刚起的任务回收掉。
+    with _LOCK:
+        _LIVE[str(tid)] = th
     th.start()
     return {"ok": True, "state": "running", "tid": tid, "ahead": 0}
 
@@ -719,6 +768,11 @@ def _worker(item):
         _finish(tid, "error", ok_n, fail_n, skip_n, changed,
                 "%s: %s" % (type(e).__name__, e))
     finally:
+        # ★ 2026-11-22：注销本任务的存活登记。必须放在 _next()/_auto_restart()
+        #   之前 —— 它们要用 _run_alive() 判「还有没有任务在跑」，
+        #   注销晚了会让刚结束的任务被当成还活着，接下一个 / 重启都要白等。
+        with _LOCK:
+            _LIVE.pop(str(tid), None)
         if requeued:
             # 已经放回队列、并挂了一个延迟的 _next —— 这里不能再接下一个，
             # 否则会立刻把同一个任务再捞起来，空转。
@@ -783,8 +837,8 @@ def _next():
     with _LOCK:
         run = _STATE.get("running")
         # 孤儿（线程已随旧进程消失）不能挡住队列，直接清掉继续取下一个
-        if run and float(run.get("started_at") or 0) < _BOOT_AT - 0.5:
-            logger.warning("发现重启前残留的孤儿任务，已回收：%s",
+        if run and not _run_alive(run):
+            logger.warning("发现残留的孤儿/僵尸任务（线程已不在），已回收：%s",
                            run.get("plan_id"))
             _STATE["running"] = None
             run = None
@@ -999,7 +1053,7 @@ def _auto_restart(reason="", tid=""):
         while time.time() < deadline:
             with _LOCK:
                 run = _STATE.get("running")
-                if not run or float(run.get("started_at") or 0) < _BOOT_AT - 0.5:
+                if not _run_alive(run):
                     break
             if not waited:
                 _emit_sys("还有任务在跑，等它跑完再自动重启（不打断当前工作）…",
