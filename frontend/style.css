@@ -2915,6 +2915,12 @@ select.pill-select option {
   margin: -2px 0 8px;
 }
 .sd-unseal .pill-btn { font-size: 11.5px; padding: 3px 9px; }
+/* 已解锁时按钮变成「立即上锁」，给个明显的视觉区分，免得用户以为还是解锁键 */
+.sd-unseal .pill-btn.on {
+  border-color: rgba(240, 180, 80, .75);
+  color: #f0b450;
+  background: rgba(240, 180, 80, .12);
+}
 .sd-unseal-st {
   font-size: 11px;
   color: var(--muted, #8a93a6);

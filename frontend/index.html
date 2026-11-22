@@ -1563,24 +1563,58 @@
       var btn = $('#sdUnsealBtn'), pwd = $('#sdUnsealPwd'),
           ok = $('#sdUnsealOk'), st = $('#sdUnsealSt');
       if (!btn || !pwd) return;
-      function paint(u) {
-        if (!st) return;
-        if (u && u.unlocked) {
-          st.className = 'sd-unseal-st on';
-          st.textContent = '已解锁 ' + Math.max(0, Number(u.seconds_left) || 0) + ' 秒';
-        } else {
-          st.className = 'sd-unseal-st';
-          st.textContent = '已上锁';
-        }
-      }
+      var unlocked = false, left = 0, ticker = null;
       function close() { pwd.value = ''; pwd.hidden = true; ok.hidden = true; }
+      function apply(u) {
+        unlocked = !!(u && u.unlocked);
+        left = Math.max(0, Number(u && u.seconds_left) || 0);
+        if (st) {
+          if (unlocked) {
+            st.className = 'sd-unseal-st on';
+            st.textContent = '已解锁 ' + left + ' 秒';
+          } else {
+            st.className = 'sd-unseal-st';
+            st.textContent = '已上锁';
+          }
+        }
+        // ★ 2026-11-22 修（用户报「解锁之后按下确定没有重新上锁」）：
+        //   原来只有「解锁」一条路，按钮永远叫「解锁品牌」，解锁后再点只是
+        //   又开一次密码框，永远锁不回去。现在解锁后按钮变成「立即上锁」。
+        btn.textContent = unlocked ? '🔒 立即上锁' : '🔓 解锁品牌';
+        btn.className = 'pill pill-btn' + (unlocked ? ' on' : '');
+        if (!unlocked) close();
+      }
+      // 倒计时在本地走，不每秒打接口（/api/brand 要扫 4 个文件，太重）。
+      // 每次打开抽屉都会重新拉一次和服务端对表，所以不会和真实状态漂移。
+      function paint(u) {
+        apply(u);
+        if (ticker) { clearInterval(ticker); ticker = null; }
+        if (!unlocked) return;
+        ticker = setInterval(function () {
+          left = Math.max(0, left - 1);
+          if (st) st.textContent = '已解锁 ' + left + ' 秒';
+          if (left <= 0) {
+            apply({ unlocked: false });
+            if (ticker) { clearInterval(ticker); ticker = null; }
+          }
+        }, 1000);
+      }
+      function doLock() {
+        if (ok) ok.disabled = true;
+        fetch('/api/brand/lock', { method: 'POST' })
+          .then(function (r) { return r.json(); })
+          .then(function (D) { if (ok) ok.disabled = false; paint(D && D.unlock); })
+          .catch(function () { if (ok) ok.disabled = false; });
+      }
       btn.onclick = function () {
+        if (unlocked) { doLock(); return; }     // 已解锁 → 点一下立刻锁回去
         if (!pwd.hidden) { close(); return; }
         pwd.hidden = false; ok.hidden = false;
         pwd.value = ''; pwd.placeholder = '输入密码后回车';
         try { pwd.focus(); } catch (e) { /* 忽略 */ }
       };
       function submit() {
+        if (unlocked) { doLock(); return; }     // 兜底：已解锁时按「确认」＝上锁
         var v = (pwd.value || '').trim();
         if (!v || ok.disabled) return;
         ok.disabled = true;
