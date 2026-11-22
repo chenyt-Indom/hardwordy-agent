@@ -390,7 +390,24 @@ MOSS 与 Ratchet 的核心贡献是**单调改进保证**：在特定条件下�
 
 ### A.1 一键包（Windows）
 
-从 Releases 下载全量包，解压后双击 `一键启动.bat`。脚本会检查 Ollama、等待端口、打开界面。
+**方式一 · GitHub 分卷（推荐，速度最稳）**
+
+在 [Releases](https://github.com/chenyt-Indom/hardwordy-agent/releases) 下最新一条，下载三卷，放同一目录后合并：
+
+```cmd
+copy /b HardwordyAgent-Source-2026.11.21b.zip.part1 + HardwordyAgent-Source-2026.11.21b.zip.part2 + HardwordyAgent-Source-2026.11.21b.zip.part3 HardwordyAgent-Source-2026.11.21b.zip
+```
+
+合并后 SHA256 应为 `411b29c3e784a4243ecf1e29d64ac73cea5fbf93476af70928d9f6e2db80542a`（4,407,603,004 字节）。
+
+**方式二 · 网盘整包**
+
+各版发布说明里附有网盘地址与提取码，整包不用合并。
+
+解压后双击 `一键启动.bat`（不要进 `app\` 里双击 `run.py`）。启动器会预检代码、起服务、等健康检查、成功后自动打快照。
+
+> 注：包内是**源码版**（`app\` 为项目根 + 便携 Python 3.14.4 运行时），不是 PyInstaller 的单 exe。
+> 早期 exe 版把后端编译进了 exe，自迭代改的源码不参与运行，且存在「只读资源在 `_internal\`、可写数据在 exe 同级」的双根问题，已废弃。
 
 ### A.2 源码运行
 
