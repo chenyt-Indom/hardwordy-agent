@@ -419,7 +419,12 @@ def record_act(name: str, ok: bool = True, summary: str = "",
     一层薄封装。任何异常都吞掉：账本坏了绝不能拦住写入本身。
     """
     try:
-        record(session, name, {}, ok=bool(ok), result=str(summary or ""))
+        # ★ 2026-11-23：record() 只在 note 有值或 ok=False 时才写摘要字段 m，
+        #   而这里原来只传了 result —— 于是「验证通过」「跑分 155.09」这类
+        #   ok=True 的记录在账本里只剩 {"t","n","a","ok"}，看不到任何内容。
+        #   摘要必须同时传 note，日志才看得出验了什么、分数多少。
+        record(session, name, {}, ok=bool(ok),
+               result=str(summary or ""), note=str(summary or ""))
     except Exception:                                     # noqa: BLE001
         logger.debug("record_act 兼容封装写账本失败", exc_info=True)
 

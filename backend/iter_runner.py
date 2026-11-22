@@ -1509,8 +1509,13 @@ def boot_resume():
                   text="上次重启时「%s」还没跑完，已放回队列接着做" % _name,
                   state="running")
     if v:
-        _emit_sys("重启后恢复：先验证上一个功能「%s」，之后接着跑队列（还有 %d 个）"
-                  % (v.get("title") or "", qn), state="running")
+        # ★ 2026-11-23 用户要求「重启后卡片自动弹出来」：这条提示原来走 _emit_sys，
+        #   会挂到**上一个任务**的 tid 上（history[0]），用户看到的是一张旧卡片上多一行字，
+        #   新任务卡片迟迟不出现。改成挂到 verify 自己的 tid —— 前端 feedEnsure(tid)
+        #   会立刻把这张卡片建出来，验证过程也接在同一张卡上。
+        _emit(v.get("tid") or "_sys", "status",
+              text="重启后恢复：先验证上一个功能「%s」，之后接着跑队列（还有 %d 个）"
+                   % (v.get("title") or "", qn), state="running")
         # ★ 2026-11-20：走 _start_verify()，它会「有任务在跑就先等它跑完」
         #   再验证 —— 原来直接 _verify_worker()，会和正在跑的任务并发改/验同一批文件。
         if not _start_verify(wait_busy=True):
