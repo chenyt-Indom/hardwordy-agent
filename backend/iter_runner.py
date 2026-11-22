@@ -1189,10 +1189,13 @@ def _report_md(v, ok, problems):
         with _LOCK:
             qn = len(_STATE.get("queue") or [])
             done_n = int(_STATE.get("budget") or 0)
-        out.append("- **状态**：任务完成（已验证）· 本轮第 %d 个" % done_n)
+        # 注意：报告是在 budget 递增**之前**生成的，这里写「本轮第 N 个」
+        # 会永远比 status 事件少 1（2026-11-23 演练实测：报告 0、事件 1）。
+        # 轮次以 status 事件为准，报告只写状态，两处口径不再打架。
+        out.append("- **状态**：任务完成（已验证）")
         out.append("- **下一步**：%s" % (
             "队列里还有 %d 个功能，自动接着做下一个" % qn if qn
-            else "队列已空，自动推荐并开始下一个功能"))
+            else "队列已空，本次迭代结束"))
     else:
         out.append("- **结果**：还有 %d 个问题" % len(problems))
         for p in problems[:8]:
@@ -1440,19 +1443,12 @@ def _verify_worker():
         if qn:
             _next()
             return
-        # 队列空了 —— 用户要求「连续实现多种功能连续迭代」，
-        # 这里把接力棒交给推荐引擎，让它接着想下一个功能。
-        try:
-            from . import selfloop as _sl
-            rr = _sl.request_next()
-            if (rr or {}).get("started"):
-                _emit_sys("上一个功能验证通过，正在推荐下一个功能…", state="running")
-            elif (rr or {}).get("skipped"):
-                _emit_sys("队列已空，这次没有继续推荐下一个：%s"
-                          % rr.get("skipped"), state="done")
-        except Exception as e:                          # noqa: BLE001
-            _emit_sys("推荐下一个功能失败：%s: %s" % (type(e).__name__, e),
-                      state="error")
+        # ★ 2026-11-23 用户要求：「队列空闲时一般如果已验证的话就结束了」。
+        #   所以队列一空就收工，**不再**把接力棒交给推荐引擎自动生成新功能
+        #   （原来会 request_next() 接着推荐，等于永不收尾）。
+        #   推荐引擎自己的定时 tick 不受影响，它仍会按配额/冷却慢慢攒推荐，
+        #   攒出来的待批准项等用户批准后才进入队列。
+        _emit_sys("队列已空，本次迭代结束（已验证）", state="done")
         return
 
     # 没过 —— 先累加「跨计划连续失败链」（每轮修复都是新 plan_id，
