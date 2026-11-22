@@ -1959,6 +1959,43 @@ def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
 # 自动自查的节流（同一次对话里别每改一行就截一次图，太贵）
 _AUTO_REVIEW = {"at": 0.0, "rounds": 0}
 _SD_NOTE = {"note": ""}   # 交接卡：暂存本次自开发工具的 note（见 backend/handoff.py）
+
+
+
+def _brand_write_guard(rel: str, old: str, new: str) -> str:
+    """品牌写入闸门（2026-11-22 用户要求）。
+
+    用户原话：「如果需要修改作者或者 hardwordy 这些内容，必须输入密码，
+              则弹出输入密码框」。
+
+    为什么拦在**写入层**而不是只弹个前端框：只在界面上拦，绕过前端直接调
+    工具/接口就没了 —— 那是假保护。真正的闸门必须在落盘之前。
+
+    返回空串 = 放行；否则返回给模型看的拒绝原因。
+    """
+    try:
+        from . import brand as _bd
+        g = _bd.guard_write(rel, old, new)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return ""          # 闸门自己坏了不能挡住正常改动
+    if g.get("ok"):
+        return ""
+    return "写入被拒绝：%s" % (g.get("reason") or "品牌信息需要密码解锁")
+
+
+def _read_raw(rel: str) -> str:
+    """读磁盘原文（不带行号），供品牌闸门比对。读不到返回空串。"""
+    try:
+        from . import selfdev as _sd
+        p = os.path.join(_sd.project_root(), _sd.safe_rel(rel))
+        with open(p, encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return ""
+
+
 def _sd_patch_fixed(rel: str, find: str, replace: str, note: str = "") -> dict:
     """修正版 selfdev.patch（2026-11-11 实测发现的严重 bug）。
 
@@ -2143,6 +2180,11 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             code2 = _strip_code_fence(code or "").strip()
             if not code2:
                 return "代码模型没有输出内容（可能被截断）。换个说法或换个代码模型再试。"
+            # ★ 2026-11-22：代码模型能整份重写文件，所以这里也必须过品牌闸门 ——
+            #   否则「换个工具写」就能绕过密码，前面三处拦截全白做。
+            _bg = _brand_write_guard(rel, _read_raw(rel), code2)
+            if _bg:
+                return _bg
             r = _sd.write(rel, code2, str(a.get("note") or inst))
             if not r.get("ok"):
                 return "写入被拒绝：%s" % r.get("error")
@@ -2192,6 +2234,10 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             if not str(_c).strip():
                 return ("写入被拒绝：content 是空字符串，这会把文件清空成 0 字节。"
                         "要新建文件就先写一行占位内容；要删文件请用删除工具。")
+            _bg = _brand_write_guard(str(a.get("rel") or ""),
+                                     _read_raw(str(a.get("rel") or "")), str(_c))
+            if _bg:
+                return _bg
             r = _sd.write(str(a.get("rel") or ""), str(_c),
                           str(a.get("note") or ""))
             if not r.get("ok"):
@@ -2204,6 +2250,12 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                      % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
                     + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
         if name == "selfdev_insert_after":
+            # 插入不删除原文，但能「追加一行同名常量」覆盖前面的定义
+            #（Python 后定义生效）—— 所以改 brand.py 同样要密码。
+            _bg = _brand_write_guard(str(a.get("rel") or ""), "",
+                                     str(a.get("text") or ""))
+            if _bg:
+                return _bg
             r = _sd.insert_after(str(a.get("rel") or ""),
                                  str(a.get("anchor") or ""),
                                  str(a.get("text") or ""),
@@ -2218,6 +2270,11 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                      % (r["rel"], d.get("added", 0), d.get("removed", 0)))
                     + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
         if name == "selfdev_patch":
+            _bg = _brand_write_guard(str(a.get("rel") or ""),
+                                     str(a.get("find") or ""),
+                                     str(a.get("replace") or ""))
+            if _bg:
+                return _bg
             r = _sd.patch(str(a.get("rel") or ""), str(a.get("find") or ""),
                           str(a.get("replace") or ""), str(a.get("note") or ""))
             if not r.get("ok"):

@@ -4136,7 +4136,43 @@ def brand_info():
         c = _B.check()
         v = _B.verify_files()
         return {"ok": bool(c["ok"] and v["ok"]), "seal": c,
-                "files": v, "guard": _B.guard_text()}
+                "files": v, "guard": _B.guard_text(),
+                "unlock": _B.unlock_state()}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+@app.post("/api/brand/unseal")
+async def brand_unseal(payload: dict | None = None):
+    """输密码解锁品牌修改（2026-11-22 用户要求）。
+
+    用户原话：「如果需要修改作者或者 hardwordy 这些内容，必须输入密码，
+              则弹出输入密码框」。
+
+    密码不存明文，只比 sha256；解锁只开一个 5 分钟的窗口，存在内存里，
+    重启即失效 —— 不会留下永久后门。真正的拦截在写入层（tools 的品牌闸门），
+    这个接口只是「开门」。
+    """
+    from . import brand as _B
+    pwd = str((payload or {}).get("password") or "")
+    try:
+        r = _B.unlock(pwd)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    if not r.get("ok"):
+        return {"ok": False, "error": r.get("error") or "密码不正确",
+                "unlock": _B.unlock_state()}
+    return {"ok": True, "unlock": _B.unlock_state(),
+            "msg": "已解锁，%d 分钟内可以修改品牌信息" % int(r.get("ttl") or 300)}
+
+
+@app.post("/api/brand/lock")
+def brand_lock():
+    """立即上锁（不用等 5 分钟窗口自然过期）。"""
+    from . import brand as _B
+    try:
+        _B.lock()
+        return {"ok": True, "unlock": _B.unlock_state()}
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 

@@ -2906,6 +2906,32 @@ select.pill-select option {
 }
 .sd-seal.ok { color: #57c98a; }
 .sd-seal.bad { color: #ff8a7a; }
+/* 品牌解锁行：一行放得下，密码框默认 hidden 不占位 */
+.sd-unseal {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: -2px 0 8px;
+}
+.sd-unseal .pill-btn { font-size: 11.5px; padding: 3px 9px; }
+.sd-unseal-st {
+  font-size: 11px;
+  color: var(--muted, #8a93a6);
+}
+.sd-unseal-st.on { color: #57c98a; }
+.sd-pwd {
+  flex: 1 1 110px;
+  min-width: 90px;
+  font-size: 11.5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(120, 140, 170, .45);
+  background: rgba(20, 26, 38, .6);
+  color: inherit;
+  outline: none;
+}
+.sd-pwd:focus { border-color: rgba(90, 169, 255, .75); }
 .sd-badge {
   flex: 0 0 auto;
   font-size: 11px;

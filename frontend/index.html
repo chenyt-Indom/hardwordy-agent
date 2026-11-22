@@ -1265,6 +1265,15 @@
       //   任何版本、任何机器都不许改。这行是**看得见**的凭据；打开抽屉时
       //   会拉 /api/brand 把「✅ 盖章完好 / ⚠️ 已被改动」补在后面。
       '  <div class="sd-seal" id="sdSealLine">hardwordy · 开发者 陈宇桐</div>',
+      // ★ 2026-11-22 用户要求：「如果需要修改作者或者 hardwordy 这些内容，
+      //   必须输入密码，则弹出输入密码框」。这里只是**开门**（密码框 + 确认），
+      //   真正的拦截在后端写入层，绕过这个界面直接调工具同样会被拒。
+      '  <div class="sd-unseal">',
+      '    <button type="button" class="pill pill-btn" id="sdUnsealBtn" title="改 hardwordy 或开发者名字需要密码">🔓 解锁品牌</button>',
+      '    <span class="sd-unseal-st" id="sdUnsealSt">已上锁</span>',
+      '    <input type="password" class="sd-pwd" id="sdUnsealPwd" placeholder="输入密码后回车" autocomplete="off" hidden>',
+      '    <button type="button" class="pill pill-btn" id="sdUnsealOk" hidden>确认</button>',
+      '  </div>',
       // ★ 自循环状态卡（后端 /api/selfloop/status 与 app.js renderLoopStatus 早已写好，
       //   只差这个容器和 CSS —— 补上它这块功能才真正可见）。
       '  <section class="sd-sec" id="sdLoopSec"><div class="loop-st-card" id="loopStatusCard"></div></section>',
@@ -1396,6 +1405,7 @@
         // ★ 2026-11-22 品牌盖章：打开抽屉时拉一次 /api/brand，把校验状态
         //   补在署名后面（✅ 盖章完好 / ⚠️ 已被改动）。只读，很轻。
         try { loadBrandSeal(); } catch (e) { /* 可选功能，出错不挡抽屉 */ }
+        try { initBrandUnseal(); } catch (e) { /* 同上 */ }
       } else {
         dw.classList.remove('in');
         mask.hidden = true;
@@ -1546,6 +1556,51 @@
           el.textContent = base + ' · ⚠️ 盖章被改动，请查日志';
         }
       }).catch(function () { /* 离线或接口未就绪：保留初始静态文案 */ });
+    }
+    // ★ 品牌解锁（2026-11-22）：密码只发后端校验，前端不留存、不记明文。
+    //   成功后后端开一个 5 分钟窗口，期间才允许改 hardwordy / 开发者名字。
+    function initBrandUnseal() {
+      var btn = $('#sdUnsealBtn'), pwd = $('#sdUnsealPwd'),
+          ok = $('#sdUnsealOk'), st = $('#sdUnsealSt');
+      if (!btn || !pwd) return;
+      function paint(u) {
+        if (!st) return;
+        if (u && u.unlocked) {
+          st.className = 'sd-unseal-st on';
+          st.textContent = '已解锁 ' + Math.max(0, Number(u.seconds_left) || 0) + ' 秒';
+        } else {
+          st.className = 'sd-unseal-st';
+          st.textContent = '已上锁';
+        }
+      }
+      function close() { pwd.value = ''; pwd.hidden = true; ok.hidden = true; }
+      btn.onclick = function () {
+        if (!pwd.hidden) { close(); return; }
+        pwd.hidden = false; ok.hidden = false;
+        pwd.value = ''; pwd.placeholder = '输入密码后回车';
+        try { pwd.focus(); } catch (e) { /* 忽略 */ }
+      };
+      function submit() {
+        var v = (pwd.value || '').trim();
+        if (!v || ok.disabled) return;
+        ok.disabled = true;
+        fetch('/api/brand/unseal', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: v })
+        }).then(function (r) { return r.json(); }).then(function (D) {
+          ok.disabled = false;
+          if (D && D.ok) { close(); paint(D.unlock); }
+          else { pwd.value = ''; pwd.placeholder = '密码不正确，重试'; try { pwd.focus(); } catch (e) { } }
+        }).catch(function () { ok.disabled = false; pwd.placeholder = '网络错误，重试'; });
+      }
+      ok.onclick = submit;
+      pwd.onkeydown = function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); submit(); }
+        else if (e.key === 'Escape') { close(); }
+      };
+      fetch('/api/brand').then(function (r) { return r.json(); })
+        .then(function (D) { paint(D && D.unlock); })
+        .catch(function () { /* 接口未就绪：保留「已上锁」文案 */ });
     }
     function loadIterPanel() {
       if (!ipb) return;
