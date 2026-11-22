@@ -1144,6 +1144,163 @@ WATCH_MAX_TIMELINE = 60          # 每条盯事任务最多留多少个时间点
 WATCH_DEFAULT_MINUTES = 60       # 用户没说间隔时的默认值
 
 
+# ================================================================ 主动弹卡
+# 2026-11-22（盯梢小助手 + 主动弹卡）
+#
+# 痛点：用户反复问「盯到了吗」。盯梢任务确实在后台跑，但**变化时没人在前台
+# 告诉他** —— 结果只能靠用户自己回来问。这就是「同一需求被重复发送」。
+#
+# 为什么是队列而不是直接推：
+#   · 调度线程跑的时候浏览器可能根本没开（半夜、切走、关页面），
+#     这时候没有任何一条 HTTP 连接可推；
+#   · 所以卡片先落盘排队，前端侧栏轮询时一次性取走，用**同一条**渲染路径
+#     （frontend/livecard.js 的 renderLiveCard）画出来 —— 不另建一套通知 UI。
+#   · 落盘还顺手解决了「进程重启后卡片就没了」。
+_LIVE_LOCK = threading.Lock()
+_LIVE_MAX = 40                   # 队列上限（用户没取就滚动丢最老的）
+
+
+def _live_path() -> str:
+    return config.data("data", "livecard_queue.json")
+
+
+def _live_read() -> list:
+    try:
+        with open(_live_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, list) else []
+    except FileNotFoundError:      # 首次运行还没有队列文件，属正常
+        return []
+    except Exception:                                     # noqa: BLE001
+        logger.warning("主动弹卡队列读不出来，本次按空处理", exc_info=True)
+        return []
+
+
+def _live_write(items) -> None:
+    try:
+        p = _live_path()
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(list(items)[-_LIVE_MAX:], f, ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+    except Exception:                                     # noqa: BLE001
+        logger.warning("主动弹卡队列写不进去（不影响监视本身）", exc_info=True)
+
+
+def push_livecard(card, session: str = "", source: str = "") -> dict:
+    """把一张卡放进「待弹」队列，等前台来取（走现有的 livecard 通道）。
+
+    card 的口径与 backend/livecard_meta.py 一致：{type,title,thumb,payload}，
+    这里额外补 ts / session / source，方便前端按会话归位、按时间排序。
+    任何异常都不抛 —— 弹卡坏了绝不能影响监视本身。
+    """
+    try:
+        c = dict(card) if isinstance(card, dict) else {}
+    except Exception:                                     # noqa: BLE001
+        c = {}
+    if not c:
+        return {"ok": False, "error": "卡片是空的"}
+    c.setdefault("type", "watch")
+    c["title"] = str(c.get("title") or "盯梢提醒")[:120]
+    c.setdefault("thumb", "")
+    if not isinstance(c.get("payload"), dict):
+        c["payload"] = {}
+    c["ts"] = str(c.get("ts") or _now())
+    c["session"] = str(session or c.get("session") or "")
+    c["source"] = str(source or c.get("source") or "scheduler")
+    with _LIVE_LOCK:
+        items = _live_read()
+        items.append(c)
+        _live_write(items)
+        n = len(items[-_LIVE_MAX:])
+    return {"ok": True, "queued": n}
+
+
+def pop_livecards(session: str = "", drain: bool = True) -> list:
+    """取走待弹的卡（默认取完就清）。
+
+    drain=False 只看看不清，给「只想知道有几张」的场景用。
+    session 给了就只取「这段会话 + 不属于任何会话」的卡，别把别人的弹给当前用户。
+    """
+    sid = str(session or "").strip()
+    with _LIVE_LOCK:
+        items = [c for c in _live_read() if isinstance(c, dict)]
+        picked = []
+        keep = []
+        for c in items:
+            mine = (not sid) or str(c.get("session") or "") in (sid, "")
+            (picked if mine else keep).append(c)
+        if drain and picked:
+            _live_write(keep)
+    return picked
+
+
+def _watch_card(name: str, target: str, before: str = "", after: str = "",
+                actions=None, extra: dict = None) -> dict:
+    """把「哪条监视变了」压成一张卡（前端 livecard.js 直接吃）。"""
+    payload = {"目标": str(target or "")[:120]}
+    if before:
+        payload["上次"] = str(before)[:160]
+    if after:
+        payload["这次"] = str(after)[:160]
+    acts = [str(a)[:80] for a in (actions or []) if str(a or "").strip()]
+    if acts:
+        payload["已办"] = acts[:4]
+    if isinstance(extra, dict):
+        for k, v in extra.items():
+            if v not in (None, "", [], {}):
+                payload[str(k)] = v
+    return {
+        "type": "watch",
+        "title": str(name or "盯梢提醒")[:80],
+        "thumb": "",
+        "payload": payload,
+    }
+
+
+def _push_watch_change(job: dict, changed: bool, *,
+                       added: int = 0, removed: int = 0,
+                       preview: str = "") -> dict:
+    """盯梢发现变化时主动推一张卡（local 路径类会去 handoff 取最近一次变化）。
+
+    抽成一个函数是为了**只有一条推送路径**：_run_watch_once 与 run_watch
+    两处都调它，卡片口径就不会各写一套（以前这种「同一个东西两处拼」
+    最后总是有一处少字段）。
+    """
+    if not changed:
+        return {"ok": False, "error": "没有变化，不弹卡"}
+    k = str(job.get("watch_kind") or "web").strip().lower()
+    sid = str(job.get("session") or "")
+    target = str(job.get("watch_query") or job.get("name") or "")
+    if k in ("path", "file", "dir"):
+        view = {}
+        try:
+            from . import handoff as _ho
+            view = _ho.get_watch(str(job.get("watch_ref") or "")) or {}
+        except Exception:                                 # noqa: BLE001
+            logger.debug("取监视详情失败（卡片降级成摘要）", exc_info=True)
+        last = (view.get("last_change") or {}) if isinstance(view, dict) else {}
+        card = _watch_card(
+            str(view.get("name") or job.get("name") or "盯梢提醒"),
+            str(view.get("target") or target),
+            before=str(last.get("before") or ""),
+            after=str(last.get("after") or ""),
+            actions=last.get("actions") or [],
+            extra={"状态": view.get("status") or "", "变化次数": view.get("changes") or 0,
+                   "监视": view.get("id") or job.get("watch_ref") or ""},
+        )
+    else:
+        card = _watch_card(
+            str(job.get("name") or "盯梢提醒"),
+            target,
+            before=str(job.get("last_status") or ""),
+            after=str(preview or "")[:160],
+            extra={"新增": int(added or 0), "删除": int(removed or 0)},
+        )
+    return push_livecard(card, session=sid, source="watch_change")
+
+
 def _watch_snapshot(query: str, kind: str = "web") -> dict:
     """抓一次当前状态，返回 {ok, text, error}。
 
@@ -1266,6 +1423,15 @@ def tick_watch() -> dict:
                 errors.append({"id": job.get("id"), "error": r.get("error")})
             elif r.get("changed"):
                 changed += 1
+                # ★ 有变化就**主动弹一张卡**（用户不用再问「盯到了吗」）。
+                #   放在改 last_status 之前推：卡片上的「上次」才是上一轮的状态。
+                try:
+                    _push_watch_change(job, True,
+                                       added=int(r.get("added") or 0),
+                                       removed=int(r.get("removed") or 0),
+                                       preview=str(job.get("last_preview") or "")[:160])
+                except Exception:                         # noqa: BLE001
+                    logger.warning("盯事变化弹卡失败（不影响监视本身）", exc_info=True)
                 job["last_status"] = "有变化（+%s / -%s）" % (r.get("added") or 0,
                                                               r.get("removed") or 0)
             elif r.get("baseline"):
@@ -1492,6 +1658,13 @@ def _run_watch_once(job: dict) -> dict:
             logger.warning("盯梢检查失败：%s", e)
             return {"answer": "盯梢检查失败：%s" % e, "changed": False,
                     "watch_id": wid}
+        # ★ check_watch 命中变化 → 立刻推一张卡到前端（走现有 livecard 通道）。
+        #   用户要的不是"下次问的时候再说"，而是"变了就自己告诉我"。
+        if changed:
+            try:
+                _push_watch_change(job, True)
+            except Exception:                             # noqa: BLE001
+                logger.warning("盯梢变化弹卡失败（不影响监视本身）", exc_info=True)
         return {"answer": "（盯梢「%s」）%s" % (
                     label, "发现了变化，已汇报并执行预设动作" if changed else "这次没变化"),
                 "changed": changed, "watch_id": wid}
@@ -1617,6 +1790,78 @@ def run_watch(job: dict) -> dict:
 
     return {"ok": True, "changed": True, "added": added,
             "removed": removed, "error": ""}
+
+
+def watch_panel(session: str = "", drain: bool = True) -> dict:
+    """侧栏「盯梢」面板的一次性数据源。
+
+    后端有两种盯梢，用户视角里只有一种「我在盯什么」：
+      · handoff 的**本地路径监视**（快照比对 + 预设动作 + 变化历史）；
+      · 本模块的**联网盯事**（关键词 / 网址，抓取 diff + 时间线）。
+    这里把两者合成一份**同口径**的列表（id / name / target / period / status /
+    最近一次触发时间），前端只渲染这一份，不用知道背后是哪套实现。
+    附带待弹的卡（cards，取完即清），前端直接交给 livecard.js 画。
+    """
+    items = []
+    try:
+        from . import handoff as _ho
+        group = _ho.watch_group()
+    except Exception:                                     # noqa: BLE001
+        logger.warning("读本地监视清单失败（面板只显示联网盯事）", exc_info=True)
+        group = {"group": "watch", "title": "盯梢", "count": 0, "pending": 0,
+                 "changed": 0, "items": []}
+    for w in (group.get("items") or []):
+        last = w.get("last_change") or {}
+        items.append({
+            "id": w.get("id") or "",
+            "name": w.get("name") or "",
+            "target": w.get("target") or "",
+            "kind": "path",
+            "kind_text": "本地路径",
+            "condition_text": w.get("condition_text") or "",
+            "period": w.get("period") or "",
+            "status": w.get("status") or "",
+            "created": w.get("created") or "",
+            "last_check": w.get("last_check") or "",
+            # 最近一次触发（前端「最近触发」那一列就显示它）
+            "last_change_at": str(last.get("t") or ""),
+            "last_change_text": str(last.get("summary") or ""),
+            "changes": int(w.get("changes") or 0),
+            "pending": bool(w.get("pending")),
+            "enabled": bool(w.get("enabled")),
+        })
+    for j in list_watches():
+        tl = j.get("timeline") or []
+        last = tl[-1] if tl else {}
+        if str(j.get("kind") or "") == "path":
+            continue                    # path 类已经在上面（handoff 那份更详细）
+        items.append({
+            "id": j.get("id") or "",
+            "name": j.get("name") or "",
+            "target": j.get("query") or "",
+            "kind": str(j.get("kind") or "web"),
+            "kind_text": "联网盯事",
+            "condition_text": "",
+            "period": j.get("period") or "",
+            "status": j.get("last_status") or "",
+            "created": j.get("created") or "",
+            "last_check": j.get("last_run") or "",
+            "last_change_at": str((last or {}).get("t") or ""),
+            "last_change_text": ("+%s / -%s 处变化" % (last.get("added") or 0,
+                                                       last.get("removed") or 0))
+                                if last else "",
+            "changes": int(j.get("timeline_count") or 0),
+            "pending": False,
+            "enabled": bool(j.get("enabled")),
+        })
+    items.sort(key=lambda x: str(x.get("created") or ""), reverse=True)
+    cards = []
+    try:
+        cards = pop_livecards(session=session, drain=drain)
+    except Exception:                                     # noqa: BLE001
+        logger.warning("取待弹卡失败（面板照常显示列表）", exc_info=True)
+    return {"ok": True, "group": group, "items": items,
+            "count": len(items), "cards": cards}
 
 
 def watch_timeline(job_id: str) -> dict:

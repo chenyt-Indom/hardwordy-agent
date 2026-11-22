@@ -2058,6 +2058,24 @@ def list_watches(session: str = "") -> list:
     return out
 
 
+def get_watch(watch_id: str) -> dict:
+    """取一条监视的精简视图（没有就 {}）。
+
+    给「变化了 → 主动弹卡」用：卡片上的名字 / 目标 / 上次变化 / 已执行动作
+    都在这份视图里，调度线程不用自己去翻 watch.json。
+    """
+    wid = str(watch_id or "").strip()
+    if not wid:
+        return {}
+    try:
+        for rec in (_watch_read().get("watches") or []):
+            if isinstance(rec, dict) and str(rec.get("id") or "") == wid:
+                return _watch_view(rec)
+    except Exception:                                     # noqa: BLE001
+        logger.debug("读单条监视失败（按没有处理）", exc_info=True)
+    return {}
+
+
 def watch_group(title: str = "盯梢") -> dict:
     """jobplan 面板的「盯梢」分组数据源（前端直接渲染，不用自己拼口径）。"""
     items = list_watches()
@@ -2219,20 +2237,194 @@ def parse_watch_text(text: str) -> dict:
     return out
 
 
+# ------------------------------------------------------ 一句话意图解析
+# 2026-11-22（盯梢小助手一句话入口 + 主动弹卡）
+#
+# 痛点：用户连续 4 轮追问「盯到了吗」，因为他真正想说的是**一句话**：
+#       「帮我盯着某商品降价」。而 parse_watch_text 只回答「盯什么」，
+#       调用方还需要知道三件更关键的事：
+#         · 这句到底是不是盯梢需求（不是就别乱建监视，别把要求当目标）；
+#         · 目标是本机路径，还是网页 / 关键词 —— 这是**两条完全不同的执行路径**：
+#             路径   → 本模块的快照比对（check_watch）
+#             关键词 → scheduler 的联网抓取比对（run_watch / kind="web"）
+#           建错边的话，「盯着某商品降价」会变成盯一个不存在的文件，
+#           永远只会报「目标还不存在」——功能看着在跑，实际一句有用的话都没有。
+#         · 用户有没有顺口说间隔（「每 30 分钟看一眼」）。
+# 所以这里再包一层，产出一份**结构化意图**，tools / 前端 / HTTP 接口
+# 都按同一口径分流，不用各自再写一遍正则（也不容易写歪）。
+_WATCH_INTENT_TRIGGER_RE = re.compile(
+    r"(盯着|盯住|盯一下|盯紧|盯着点|帮我盯|给我盯|看着点|看着|看住|"
+    r"监视|监控|跟进|留意|watch)", re.I)
+_WATCH_MIN_RE = re.compile(r"(?:每|每隔)?\s*(\d+)\s*(?:分钟|分|min)", re.I)
+_WATCH_HOUR_RE = re.compile(r"(?:每|每隔)?\s*(\d+)\s*(?:个)?\s*(?:小时|钟头|h)", re.I)
+_WATCH_INTERVAL_WORDS = (
+    ("每半小时", 30), ("半个小时", 30), ("每小时", 60), ("每一小时", 60),
+    ("每半天", 720), ("每天", 1440), ("每日", 1440), ("每周", 10080),
+)
+_WATCH_PATH_EXT_RE = re.compile(
+    r"\.(?:txt|log|md|json|csv|xlsx?|docx?|pptx?|pdf|py|js|ts|html?|zip|"
+    r"png|jpe?g|webp|mp4|srt)$", re.I)
+_WATCH_URL_RE = re.compile(r"^(?:https?://|www\.)", re.I)
+
+
+def _watch_interval_of(text: str) -> int:
+    """从原话里捞间隔（分钟）；没说返回 0，交给调用方用默认值。
+
+    认「每 30 分钟 / 每2小时 / 半小时 / 每天」这些最常见的说法。
+    上限和 create_watch 保持一致（7 天），防止一句「每 999999 分钟」把调度压死。
+    """
+    s = str(text or "")
+    m = _WATCH_MIN_RE.search(s)
+    if m:
+        try:
+            return max(1, min(int(m.group(1)), 7 * 24 * 60))
+        except Exception:                                 # noqa: BLE001
+            pass
+    m = _WATCH_HOUR_RE.search(s)
+    if m:
+        try:
+            return max(1, min(int(m.group(1)) * 60, 7 * 24 * 60))
+        except Exception:                                 # noqa: BLE001
+            pass
+    for word, mins in _WATCH_INTERVAL_WORDS:
+        if word in s:
+            return mins
+    return 0
+
+
+def _watch_kind_of(target: str) -> str:
+    """判断目标是本机路径（"path"）还是联网关键词 / 网址（"web"）。
+
+    ★ 网址先判：`https://a.com/b` 里也有 `/`，不先拦会被当成 Windows 路径，
+      于是「盯着某个商品页」变成盯一个永远不存在的本地文件。
+    """
+    t = str(target or "").strip()
+    if not t:
+        return "web"
+    if _WATCH_URL_RE.match(t):
+        return "web"
+    if re.match(r"^[A-Za-z]:[\\/]", t) or t.startswith(("\\\\", "./", "../", "~/")):
+        return "path"
+    if _WATCH_PATH_EXT_RE.search(t):
+        return "path"
+    if re.search(r"[\\/]", t):
+        return "path"
+    try:
+        if os.path.exists(t):
+            return "path"
+    except Exception:                                     # noqa: BLE001
+        logger.debug("盯梢目标存在性判断失败（按关键词处理）", exc_info=True)
+    return "web"
+
+
+def parse_watch_intent(text: str) -> dict:
+    """把「帮我盯着某商品降价」这类原话解析成**结构化盯梢意图**。
+
+    返回（字段固定，缺省也有值，调用方不用再判 None）::
+
+        {"intent": "watch" | "",     # 认出来了就是 "watch"，否则空串
+         "is_watch": bool,           # 是否应当按盯梢处理（有触发词 + 有目标）
+         "matched": bool,            # 句子里出现了「盯着 / 监视 / 留意…」这类词
+         "raw": str,                 # 规整后的原话
+         "target": str,              # 盯什么（路径 / 网址 / 关键词）
+         "kind": "path" | "web",     # 走哪条执行路径（见 _watch_kind_of）
+         "condition": str,           # content_change / size_change / exists / any
+         "condition_text": str,      # 上面那个的一句人话（前端直接显示）
+         "interval_minutes": int,    # 用户顺口说的间隔（没说 = 0）
+         "action": str,              # 有变化时顺手做的预设动作
+         "name": str}                # 列表里显示的名字
+
+    ★ 纯规则、不调模型：要秒回，也要能在回归里离线断言。
+    ★ 认不出目标就返回 is_watch=False，让调用方去问一句 —— 猜错了比不问更糟
+      （会建出一条永远不报变化的监视，用户以为它在盯）。
+    """
+    raw = " ".join(str(text or "").split())
+    base = parse_watch_text(raw)
+    target = str(base.get("target") or "").strip()
+    matched = bool(_WATCH_INTENT_TRIGGER_RE.search(raw))
+    is_watch = bool(matched and target)
+    cond = _cond_of(base.get("condition"))
+    out = {
+        "intent": "watch" if is_watch else "",
+        "is_watch": is_watch,
+        "matched": matched,
+        "raw": raw,
+        "target": target,
+        "kind": _watch_kind_of(target),
+        "condition": cond,
+        "condition_text": WATCH_CONDITIONS.get(cond, ""),
+        "interval_minutes": _watch_interval_of(raw),
+        "action": str(base.get("action") or ""),
+        # 不是盯梢就别给名字 —— 调用方（比如前端）看到 name 会以为真解析出了监视
+        "name": str(base.get("name") or "") if is_watch else "",
+    }
+    if is_watch and not out["name"]:
+        _base = re.split(r"[\\/]", target.rstrip("\\/ "))[-1] or target
+        out["name"] = "盯着：" + _clean(_base, 24)
+    return out
+
+
 def create_watch_from_text(text: str, *, session: str = "",
                            interval_minutes: int = 0) -> dict:
     """一句话建监视：「盯着 XX，有变化就告诉我」→ 真的登记一条长期监视。
 
+    ★ 2026-11-22 分流：一句话里的目标可能是**本地路径**，也可能是
+      **网页 / 关键词**（「盯着某商品降价」）。前者归本模块（快照比对），
+      后者归 scheduler 的联网抓取比对 —— 两边都叫「盯梢」，用户不需要知道区别。
+      以前不分，关键词也被当成路径建了一条监视，于是永远「目标还不存在」，
+      用户反复问「盯到了吗」，就是这个断口。
+
     返回 {ok, id, watch, parsed} 或 {ok: False, error, parsed}。
     """
-    parsed = parse_watch_text(text)
+    parsed = parse_watch_intent(text)
     if not parsed.get("target"):
         return {"ok": False, "error": "没听出要盯什么 —— 说「盯着 <目录 / 网址 / 关键词>」就行",
                 "parsed": parsed}
+    try:
+        mins = int(interval_minutes or 0)
+    except (TypeError, ValueError):
+        mins = 0
+    if mins <= 0:
+        mins = int(parsed.get("interval_minutes") or 0)
+    if parsed.get("kind") == "web":
+        # 关键词 / 网址：交给 scheduler 联网比对（每轮抓一次、和上次做 diff）
+        try:
+            from . import scheduler as _sch
+            kind = "page" if _WATCH_URL_RE.match(str(parsed["target"])) else "web"
+            r = _sch.register_watch(str(parsed["target"]), interval_minutes=mins,
+                                    kind=kind, name=str(parsed.get("name") or ""),
+                                    session=session, source="watch_intent")
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("盯梢（联网类）登记失败：%s", e)
+            return {"ok": False, "error": "联网监视没建起来：%s" % e,
+                    "parsed": parsed}
+        if not r.get("ok"):
+            return {"ok": False, "error": r.get("error") or "联网监视没建起来",
+                    "parsed": parsed}
+        job = r.get("job") or {}
+        every = int(((job.get("schedule") or {}).get("every_minutes")) or 0)
+        return {
+            "ok": True,
+            "id": str(job.get("id") or ""),
+            "reused": bool(r.get("reused")),
+            "parsed": parsed,
+            "watch": {
+                "id": str(job.get("id") or ""),
+                "name": str(job.get("name") or parsed.get("name") or ""),
+                "target": str(job.get("watch_query") or parsed["target"]),
+                "kind": str(job.get("watch_kind") or ""),
+                "condition": parsed.get("condition"),
+                "condition_text": parsed.get("condition_text"),
+                "interval_minutes": every,
+                "period": ("每 %d 分钟" % every) if every else "",
+                "status": str(job.get("last_status") or "已登记，等第一次抓取"),
+                "last_change": None,
+            },
+        }
     wid = create_watch(parsed["target"],
                        condition=parsed.get("condition") or "content_change",
                        name=parsed.get("name") or "",
-                       interval_minutes=interval_minutes,
+                       interval_minutes=mins,
                        action=parsed.get("action") or "",
                        session=session)
     if not wid:

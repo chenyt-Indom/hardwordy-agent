@@ -26,6 +26,9 @@
   var API_PLAN = "/api/job/plan";
   var API_STATUS = "/api/plan/status/";      // 后面拼 job_id
   var API_ZIP = "/api/job/zip";              // ?job=<job_id>
+  var API_WATCH = "/api/watch";              // 盯梢：列表 + 待弹卡（GET）/ 一句话新建（POST）
+  var API_WATCH_ACK = "/api/watch/ack";      // 看过的卡标记已读
+  var API_WATCH_DEL = "/api/watch/remove";   // 停掉一条监视
 
   var root = null;          // 面板根节点
   var timer = null;         // 轮询句柄
@@ -99,7 +102,24 @@
     "max-height:52px;overflow:hidden;}" +
     ".jp-zip{display:block;text-align:center;margin-top:10px;padding:9px;border-radius:9px;" +
     "background:#3fa66a;color:#fff;font-weight:600;text-decoration:none;font-size:12.5px;}" +
-    ".jp-warn{margin-top:8px;font-size:11.5px;color:#e8883a;white-space:pre-wrap;}";
+    ".jp-warn{margin-top:8px;font-size:11.5px;color:#e8883a;white-space:pre-wrap;}" +
+    // ---- 盯梢面板（与上面同一套外观，只是改成左侧、窄一点）----
+    "#jpwPanel{position:fixed;top:64px;left:14px;width:340px;max-height:76vh;z-index:1200;" +
+    "background:#1b1e24;color:#e8eaed;border:1px solid rgba(255,255,255,.12);" +
+    "border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,.42);display:flex;" +
+    "flex-direction:column;overflow:hidden;}" +
+    "#jpwPanel[hidden]{display:none;}" +
+    ".jpw-item{border:1px solid rgba(255,255,255,.10);border-radius:9px;padding:7px 9px;" +
+    "margin-top:7px;font-size:12px;}" +
+    ".jpw-item .t{display:flex;gap:6px;align-items:center;}" +
+    ".jpw-item .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
+    ".jpw-item .s{opacity:.7;font-size:11px;white-space:nowrap;}" +
+    ".jpw-item .m{opacity:.62;font-size:11px;margin-top:3px;word-break:break-all;}" +
+    ".jpw-item .w{color:#e8883a;font-size:11px;margin-top:3px;}" +
+    ".jpw-x{border:0;background:transparent;color:#e5534b;cursor:pointer;font-size:11px;" +
+    "padding:0 2px;}" +
+    ".jpw-cards{margin-top:8px;}" +
+    ".jpw-cards .jp-hint{opacity:.72;}";
 
   function injectCss() {
     if ($("jpStyle")) return;
@@ -302,6 +322,244 @@
     }, 1000);
   }
 
+  // ==================================================================
+  //  「盯梢」面板（2026-11-22）
+  // ==================================================================
+  // 为什么要有它
+  // ------------
+  // 用户连续 4 轮追问「盯到了吗」——这是他真正想要的能力，而原来的状态是：
+  // 后台确实在按点比对，但**变化了没人告诉他**，只能靠他自己回来问。
+  //
+  // 这一层做三件事：
+  //   ① 一句话入口：输入「帮我盯着某商品降价」→ POST /api/watch，
+  //      意图解析在后端（handoff.parse_watch_intent），本地路径走快照比对、
+  //      关键词 / 网址走联网抓取，用户不需要知道区别；
+  //   ② 列表：当前所有监视 + 各自的**最近一次触发时间**（有变化才算触发）；
+  //   ③ 主动弹卡：后端 push_livecard 把卡排进队列，这里轮询取走并交给
+  //      livecard.js 渲染 —— 用户不用问，卡自己会冒出来。
+  // 后端接口（别自己另造）：
+  //   GET  /api/watch?session=&drain=1 → {ok, items, cards, group}
+  //   POST /api/watch {text}           → 建一条
+  //   POST /api/watch/ack {id}         → 卡看过了
+  //   POST /api/watch/remove {id}      → 停掉
+  // ==================================================================
+  var wroot = null;          // 盯梢面板根节点
+  var wtimer = null;         // 轮询句柄
+  var witems = [];           // 最近一次拿到的监视列表
+  var wcardsSeen = {};       // 已弹过的卡（按 ts+标题去重，避免同一张反复 toast）
+
+  function wmkItem(it) {
+    it = it || {};
+    var row = mk("div", "jpw-item");
+    var top = mk("div", "t");
+    top.appendChild(mk("span", "", it.kind === "path" ? "📁" : "🌐"));
+    top.appendChild(mk("span", "n", it.name || it.target || "监视"));
+    top.appendChild(mk("span", "s", it.period || ""));
+    var del = mk("button", "jpw-x", "✕");
+    del.title = "停掉这条监视";
+    del.onclick = function () { removeWatch(it.id); };
+    top.appendChild(del);
+    row.appendChild(top);
+
+    row.appendChild(mk("div", "m", "目标：" + (it.target || "—")));
+
+    var trig = it.last_change_at
+      ? ("最近触发：" + it.last_change_at + (it.last_change_text ? "（" + it.last_change_text + "）" : ""))
+      : "最近触发：还没触发过";
+    row.appendChild(mk("div", "m", trig));
+
+    var st = [];
+    if (it.status) st.push(it.status);
+    if (it.condition_text) st.push(it.condition_text);
+    if (it.changes) st.push("共变了 " + it.changes + " 次");
+    if (st.length) row.appendChild(mk("div", "m", st.join(" · ")));
+    if (it.pending) row.appendChild(mk("div", "w", "● 有新变化，刚推到上面了"));
+    return row;
+  }
+
+  function wrender() {
+    var box = $("jpwList");
+    if (!box) return;
+    box.textContent = "";
+    if (!witems.length) {
+      box.appendChild(mk("div", "jp-hint",
+        "现在没有在盯任何东西。说一句「帮我盯着某商品降价」就会开一条。"));
+      return;
+    }
+    box.appendChild(mk("div", "jp-hint", "当前在盯 " + witems.length + " 项："));
+    witems.forEach(function (it) { box.appendChild(wmkItem(it)); });
+  }
+
+  /** 后台推来的卡：交给 livecard.js 画（和回复气泡里是同一条渲染路径）。 */
+  function wshowCards(cards) {
+    var box = $("jpwCards");
+    if (!box || !cards || !cards.length) return;
+    var fresh = [];
+    cards.forEach(function (c) {
+      if (!c || typeof c !== "object") return;
+      var k = String(c.ts || "") + "|" + String(c.title || "");
+      if (wcardsSeen[k]) return;
+      wcardsSeen[k] = 1;
+      fresh.push(c);
+    });
+    if (!fresh.length) return;
+    box.textContent = "";
+    if (window.LiveCard && typeof window.LiveCard.renderLiveCard === "function") {
+      try {
+        var node = window.LiveCard.renderLiveCard(fresh, {
+          onOpen: function (card, el) {
+            if (el && el.classList) el.classList.toggle("open");
+          }
+        });
+        if (node) box.appendChild(node);
+      } catch (e) { /* 卡片渲染失败退化成文字，不影响列表 */ }
+    }
+    if (!box.childNodes.length) {
+      fresh.forEach(function (c) {
+        box.appendChild(mk("div", "jp-hint", "👁 " + (c.title || "盯梢提醒")));
+      });
+    }
+    // 弹出来的卡上带监视 id → 顺手标记已读，免得下次再弹一遍
+    fresh.forEach(function (c) {
+      var p = (c && c.payload) || {};
+      var wid = p["监视"] || p.watch_id || "";
+      if (wid) ackWatch(wid);
+    });
+    toast(fresh[0].title ? ("盯梢有变化：" + fresh[0].title) : "盯梢有变化", "ok");
+  }
+
+  function ackWatch(id) {
+    if (!id) return Promise.resolve(null);
+    return jpost(API_WATCH_ACK, { id: id }).catch(function () { return null; });
+  }
+
+  function removeWatch(id) {
+    if (!id) return Promise.resolve(null);
+    return jpost(API_WATCH_DEL, { id: id }).then(function (d) {
+      if (d && d.ok) { toast("已停掉这条监视"); refreshWatch(); }
+      else { toast((d && d.error) || "停不掉，稍后再试", "warn"); }
+      return d;
+    }).catch(function (e) {
+      toast("停监视失败：" + (e && e.message ? e.message : e), "warn");
+      return null;
+    });
+  }
+
+  /** 拉一次面板数据（列表 + 待弹卡）。 */
+  function refreshWatch() {
+    return jget(API_WATCH + "?drain=1").then(function (d) {
+      if (!d || !d.ok) {
+        if (d && d.error) toast("盯梢面板取不到：" + d.error, "warn");
+        return null;
+      }
+      witems = Array.isArray(d.items) ? d.items : [];
+      wrender();
+      wshowCards(d.cards || []);
+      return d;
+    }).catch(function (e) {
+      // 轮询失败不弹 toast（网络抖一下就弹会很吵），只在控制台留痕
+      if (window.console) console.log("[jobplan] 盯梢轮询失败", e);
+      return null;
+    });
+  }
+
+  function wbuild() {
+    if (wroot) return wroot;
+    injectCss();
+    wroot = mk("section");
+    wroot.id = "jpwPanel";
+    wroot.hidden = true;
+
+    var head = mk("div", "jp-head");
+    head.appendChild(mk("span", "jp-title", "👁 盯梢"));
+    var x = mk("button", "jp-x", "✕");
+    x.title = "收起";
+    x.onclick = closeWatch;
+    head.appendChild(x);
+    wroot.appendChild(head);
+
+    var body = mk("div", "jp-body");
+
+    var ta = mk("input", "jp-in");
+    ta.id = "jpwIn";
+    ta.style.minHeight = "0";
+    ta.placeholder = "一句话：帮我盯着某商品降价（有变化就告诉我）";
+    body.appendChild(ta);
+
+    var row = mk("div", "jp-row");
+    var go = mk("button", "jp-go", "👁 开始盯");
+    go.id = "jpwGo";
+    go.onclick = function () { addWatch(ta.value || ""); };
+    row.appendChild(go);
+    body.appendChild(row);
+    body.appendChild(mk("div", "jp-hint",
+      "本地文件 / 目录：有变化就提示；关键词 / 网址：定时联网比对。有变化会自己弹卡。"));
+
+    var cards = mk("div", "jpw-cards");
+    cards.id = "jpwCards";
+    body.appendChild(cards);
+
+    var list = mk("div");
+    list.id = "jpwList";
+    list.appendChild(mk("div", "jp-hint", "正在读取监视列表…"));
+    body.appendChild(list);
+
+    wroot.appendChild(body);
+    document.body.appendChild(wroot);
+
+    ta.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); addWatch(ta.value || ""); }
+    });
+    return wroot;
+  }
+
+  function addWatch(text) {
+    text = String(text || "").trim();
+    if (!text) { toast("说一句要盯什么，例如：帮我盯着某商品降价"); return Promise.resolve(null); }
+    var go = $("jpwGo");
+    if (go) { go.disabled = true; go.textContent = "…登记中"; }
+    return jpost(API_WATCH, { text: text }).then(function (d) {
+      if (go) { go.disabled = false; go.textContent = "👁 开始盯"; }
+      if (!d || !d.ok) {
+        toast((d && d.error) || "没能建起来", "warn");
+        return null;
+      }
+      var w = d.watch || {};
+      toast((d.reused ? "已经在盯了：" : "开始盯：") +
+        (w.name || w.target || text) + (w.period ? "（" + w.period + "）" : ""), "ok");
+      var ta = $("jpwIn");
+      if (ta) ta.value = "";
+      refreshWatch();
+      return d;
+    }).catch(function (e) {
+      if (go) { go.disabled = false; go.textContent = "👁 开始盯"; }
+      toast("建监视失败：" + (e && e.message ? e.message : e), "warn");
+      return null;
+    });
+  }
+
+  function openWatch() {
+    wbuild();
+    wroot.hidden = false;
+    refreshWatch();
+    if (wtimer) clearInterval(wtimer);
+    // 4 秒一轮：后台变化通常以分钟计，太快只是白耗电；但也不能太慢，
+    // 用户在等「它自己回来告诉我」的那一下。
+    wtimer = setInterval(refreshWatch, 4000);
+    var ta = $("jpwIn");
+    if (ta) { try { ta.focus(); } catch (e) { /* 焦点拿不到不影响用 */ } }
+  }
+
+  function closeWatch() {
+    if (wroot) wroot.hidden = true;
+    if (wtimer) { clearInterval(wtimer); wtimer = null; }
+  }
+
+  function toggleWatch() {
+    if (wroot && !wroot.hidden) closeWatch();
+    else openWatch();
+  }
+
   // ---------- 开始 ----------
   function start(goal) {
     goal = String(goal || "").trim();
@@ -355,6 +613,26 @@
     b.appendChild(txt);
     b.onclick = toggle;
     host.appendChild(b);
+
+    // 「盯梢」入口和上面那个并排：用户原话是「说一句盯着 XX」，
+    // 所以按钮名就叫盯梢，不叫「监视任务」这种系统术语。
+    if (!$("btnWatch")) {
+      var wb = document.createElement("button");
+      wb.type = "button";
+      wb.className = "tq-btn";
+      wb.id = "btnWatch";
+      wb.title = "说一句「盯着 XX」就后台长期监视，有变化自己弹卡告诉你";
+      var wico = document.createElement("span");
+      wico.className = "tq-ico";
+      wico.textContent = "👁";
+      var wtxt = document.createElement("span");
+      wtxt.className = "tq-txt";
+      wtxt.textContent = "盯梢";
+      wb.appendChild(wico);
+      wb.appendChild(wtxt);
+      wb.onclick = toggleWatch;
+      host.appendChild(wb);
+    }
   }
 
   function bind() {
@@ -374,6 +652,13 @@
     renderJobProgress: renderJobProgress,
     poll: pollJob,
     stopPoll: stopPoll,
+    // 盯梢：别的入口（聊天里的「盯着 XX」按钮等）也能直接把这句话递进来
+    watchPanel: toggleWatch,
+    openWatch: openWatch,
+    closeWatch: closeWatch,
+    addWatch: addWatch,
+    refreshWatch: refreshWatch,
+    get watches() { return witems; },
     get job() { return curJob; }
   };
 })();

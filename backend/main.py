@@ -10213,6 +10213,75 @@ def schedule_delete(body: dict):
     return scheduler.remove(str((body or {}).get("id") or ""))
 
 
+# ---------------- 盯梢小助手（一句话入口 + 主动弹卡） ----------------
+# 用户原话：「帮我盯着某商品降价」「盯到了吗」。前者是**一句话入口**，
+# 后者说明他只想知道结果 —— 所以变化时要**主动**把卡推过来，而不是等他来问。
+# 数据源统一在 scheduler.watch_panel（本地路径监视 + 联网盯事合成一份口径）。
+@app.get("/api/watch")
+def watch_panel(session: str = "", drain: int = 1):
+    """侧栏「盯梢」面板：当前所有监视 + 最近一次触发 + 待弹的卡（取完即清）。"""
+    try:
+        return scheduler.watch_panel(session=session, drain=bool(drain))
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("盯梢面板数据取不出来", exc_info=True)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                "items": [], "cards": [], "group": {"items": []}}
+
+
+@app.post("/api/watch")
+def watch_create(body: dict):
+    """一句话建盯梢：「盯着 XX，有变化就告诉我」。
+
+    解析交给 handoff.parse_watch_intent（纯规则，不调模型），
+    本地路径走快照比对、关键词 / 网址走联网抓取 —— 用户不用区分。
+    """
+    b = body or {}
+    text = str(b.get("text") or b.get("target") or "").strip()
+    if not text:
+        return {"ok": False, "error": "说一句要盯什么，例如：帮我盯着某商品降价"}
+    try:
+        interval = int(b.get("interval_minutes") or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    try:
+        from . import handoff as _ho
+        r = _ho.create_watch_from_text(text, session=str(b.get("session") or ""),
+                                      interval_minutes=interval)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("一句话建盯梢失败", exc_info=True)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    r["ok"] = bool(r.get("ok"))
+    return r
+
+
+@app.post("/api/watch/ack")
+def watch_ack(body: dict):
+    """用户看过那张卡了 → 清掉 pending（下次有变化才会再弹）。"""
+    from . import handoff as _ho
+    return _ho.ack_watch(str((body or {}).get("id") or ""))
+
+
+@app.post("/api/watch/remove")
+def watch_remove(body: dict):
+    """停掉一条盯梢（连带清掉它在定时任务表里的那条）。
+
+    ★ 面板里两种盯梢混排（本地路径 / 联网），id 可能属于任一边 ——
+      所以先按 handoff 的监视找，找不到再当定时任务删，避免「点了删除没反应」。
+    """
+    from . import handoff as _ho
+    wid = str((body or {}).get("id") or "").strip()
+    r = _ho.remove_watch(wid)
+    if r.get("ok"):
+        return r
+    try:
+        r2 = scheduler.remove(wid)
+        if r2.get("ok"):
+            return r2
+    except Exception:                                   # noqa: BLE001
+        logger.warning("删除联网盯事失败", exc_info=True)
+    return r
+
+
 @app.post("/api/image/discover")
 def image_discover(x_image_key: str = Header(default="")):
     """用这个 Key 问服务商**哪些模型能用**，并挑出可能能画图的候选。
