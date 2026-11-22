@@ -24,6 +24,7 @@ persistSession）。工具调用的**真实记录** —— 改了哪个文件、
 """
 import json
 import os
+import threading
 import time
 from collections import Counter
 
@@ -41,6 +42,70 @@ SHOW = 12               # 注入时最多列几条
 #   注意 MAX_KEEP 只有 120（单会话滚动覆盖），所以"近 300 条"必须跨会话拼，
 #   见 _recent_session_rows()；task.json 的事件也按"最近 300 条"截断。
 COUNT_WINDOW = 300
+
+# ★ 2026-11-23 修并发丢记录（实测丢 96.5%）：
+#   record() 是「读全量 → 追加一条 → 整份覆盖写回」，原来**没有任何锁**。
+#   两个线程同时进来：A 读到 50 条、B 也读到 50 条，各自 +1 后都写回 51 条，
+#   后写的把先写的覆盖掉 —— 实测 8 线程写 200 条只剩 7 条。
+#   后果不只是账本少几条：证据卡上的「针对 XX 失败 N 次」靠 count_fail_kind_recent
+#   统计账本，账本丢了，N 就是错的。
+#   两道锁：_LOCK 管同进程多线程；_file_lock 管跨进程（服务进程 + 回归/诊断子进程）。
+_LOCK = threading.RLock()
+
+
+class _file_lock:
+    """跨进程排他锁（Windows 用 msvcrt，POSIX 用 fcntl）。
+
+    只锁账本文件，拿不到锁就短暂重试；超时后**照常继续** ——
+    宁可偶尔丢一条，也绝不能让记账把对话卡住。
+    """
+
+    def __init__(self, path: str, timeout: float = 2.0):
+        self.path = path + ".lock"
+        self.timeout = timeout
+        self._fh = None
+
+    def __enter__(self):
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            self._fh = open(self.path, "a+b")
+            t0 = time.time()
+            while True:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(self._fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except Exception:
+                    if time.time() - t0 > self.timeout:
+                        return self
+                    time.sleep(0.01)
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+            return self
+
+    def __exit__(self, *exc):
+        try:
+            if self._fh is not None:
+                if os.name == "nt":
+                    import msvcrt
+                    try:
+                        self._fh.seek(0)
+                        msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    except Exception:                 # noqa: BLE001
+                        # 解锁失败只可能是句柄已失效，关掉文件也会自动释放锁
+                        logger.debug("unlock failed", exc_info=True)
+                else:
+                    import fcntl
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                self._fh.close()
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        return False
+
 
 # 从工具参数里挑"一眼能看出在干什么"的字段
 _BRIEF_KEYS = ("rel", "path", "file", "filename", "project", "query", "keyword",
@@ -182,17 +247,19 @@ def record(session: str, name: str, args=None, ok: bool = True,
         elif not ok:
             row["m"] = _first_line(result, 90)
         path = _path(session)
-        rows = _read(path)
-        # 连续重复（同一个工具 + 同一个参数）合并成一条，带次数 ——
-        # 否则"读了 30 次同一个文件"会把整段上下文吃光。
-        if (rows and rows[-1].get("n") == row["n"]
-                and rows[-1].get("a") == row["a"]):
-            rows[-1]["c"] = int(rows[-1].get("c") or 1) + 1
-            rows[-1]["t"] = row["t"]
-            rows[-1]["ok"] = row["ok"]
-        else:
-            rows.append(row)
-        _write(path, rows[-MAX_KEEP:])
+        # ★ 读-改-写必须串行：先线程锁，再跨进程文件锁
+        with _LOCK, _file_lock(path):
+            rows = _read(path)
+            # 连续重复（同一个工具 + 同一个参数）合并成一条，带次数 ——
+            # 否则"读了 30 次同一个文件"会把整段上下文吃光。
+            if (rows and rows[-1].get("n") == row["n"]
+                    and rows[-1].get("a") == row["a"]):
+                rows[-1]["c"] = int(rows[-1].get("c") or 1) + 1
+                rows[-1]["t"] = row["t"]
+                rows[-1]["ok"] = row["ok"]
+            else:
+                rows.append(row)
+            _write(path, rows[-MAX_KEEP:])
     except Exception:
         logger.debug("silent-except", exc_info=True)
 
