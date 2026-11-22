@@ -17094,7 +17094,7 @@
     if (!r || !r.ok) { say((r && r.error) || "放行失败", "bad"); return; }
     const n = (r.forced || []).length;
     say("已放行 " + n + " 条（熔断计数已重置），开始执行…", "good");
-    await submitToFeed(pid, "manual");
+    await submitToFeed(pid, "approved");
     await load();
   }
 
@@ -17125,7 +17125,8 @@
       return;
     }
     // 用户要求：手动批准时，没任务在跑就直接在聊天界面执行；有任务就排队等它结束。
-    await submitToFeed(data.latest.id, "manual");
+    // ★ 2026-11-23：待批准属于二级迭代 —— 改完代码自动重启验证（source=approved）。
+    await submitToFeed(data.latest.id, "approved");
     await load();
   }
 
@@ -17167,7 +17168,8 @@
     if (busy || !data || !data.latest) return;
     // 2026-11-15 用户要求：执行要在聊天界面里跑（有「正在迭代中」和代码卡片），
     // 所以不再走同步的 /execute，改成提交到迭代队列。
-    await submitToFeed(data.latest.id, "manual");
+    // ★ 2026-11-23：执行已批准的 = 二级迭代，改完自动重启验证（source=approved）。
+    await submitToFeed(data.latest.id, "approved");
     await load();
   }
 

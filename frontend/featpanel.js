@@ -207,8 +207,9 @@
     await api("/api/selfiter/force", { id: pid, action_ids: [aid], execute: false });
     const r = await api("/api/selfiter/approve", { id: pid, action_ids: [aid], note: note });
     if (!r || !r.ok) { toast((r && r.error) || "批准失败", "bad"); return; }
-    const e = await api("/api/selfiter/enqueue", { id: pid, source: "manual" });
-    toast((e && e.ok) ? "已批准并提交执行，去聊天区看进度"
+    // ★ 2026-11-23：待批准属于二级迭代，改完代码要自动重启验证（source=approved）
+    const e = await api("/api/selfiter/enqueue", { id: pid, source: "approved" });
+    toast((e && e.ok) ? "已批准并提交执行，改完会自动重启验证"
       : "已批准，但提交队列失败：" + ((e && e.error) || "未知"),
       (e && e.ok) ? "good" : "bad");
     await loadPending();
@@ -238,7 +239,7 @@
       const r = await api("/api/selfiter/approve", { id: g.plan_id, action_ids: ids });
       if (r && r.ok) {
         ok += (r.approved || 0);
-        await api("/api/selfiter/enqueue", { id: g.plan_id, source: "manual" });
+        await api("/api/selfiter/enqueue", { id: g.plan_id, source: "approved" });
       } else { bad++; }
     }
     toast("整批批准完成：成功 " + ok + " 条" + (bad ? "，" + bad + " 个计划失败" : ""),
@@ -316,8 +317,9 @@
     await api("/api/selfiter/force", { id: pid, action_ids: [aid], execute: false });
     const r = await api("/api/selfiter/approve", { id: pid, action_ids: [aid], note: note });
     if (!r || !r.ok) { toast((r && r.error) || "批准失败", "bad"); return; }
-    const e = await api("/api/selfiter/enqueue", { id: pid, source: "manual" });
-    toast((e && e.ok) ? "已批准并提交执行，去聊天区看进度"
+    // ★ 2026-11-23：推荐功能待批准执行，改完代码自动重启验证（source=approved）
+    const e = await api("/api/selfiter/enqueue", { id: pid, source: "approved" });
+    toast((e && e.ok) ? "已批准并提交执行，改完会自动重启验证"
       : "已批准，但提交队列失败：" + ((e && e.error) || "未知"),
       (e && e.ok) ? "good" : "bad");
     await loadFeat();

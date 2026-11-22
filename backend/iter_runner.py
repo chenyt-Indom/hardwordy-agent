@@ -731,10 +731,7 @@ def _worker(item):
             with _LOCK:
                 _cur_title = (str((_STATE.get("running") or {}).get("title") or "").strip()
                               or str(item.get("title") or "").strip())
-            try:
-                _auto = bool(_si.load_settings().get("auto_restart_after_iter", True))
-            except Exception:                            # noqa: BLE001
-                logger.debug("silent-except", exc_info=True)
+            _auto = _should_auto_restart(item.get("source"))
             if _auto:
                 with _LOCK:
                     prev = _STATE.get("verify") or {}
@@ -757,9 +754,23 @@ def _worker(item):
                       files=changed[:12])
                 auto_rst = True
             else:
+                # ★ 不自动重启 ≠ 不验证：把「待验证」记下来，用户点重启后
+                #   boot_resume 会自动接着验证 + 跑分 + 反思，链路不断。
+                with _LOCK:
+                    prev = _STATE.get("verify") or {}
+                    _STATE["verify"] = {
+                        "tid": tid, "plan_id": plan_id,
+                        "title": _cur_title,
+                        "files": changed[:20],
+                        "tries": int(prev.get("tries") or 0)
+                                 if prev.get("plan_id") == plan_id else 0,
+                        "at": time.time(),
+                    }
+                _save()
                 _emit(tid, "restart",
-                      text="这次改了 %d 个文件，需要重启才生效" % len(changed),
-                      files=changed[:12])
+                      text="这次改了 %d 个文件，需要重启才生效 —— 你点「立即重启」后，"
+                           "会自动接着验证、跑分、反思" % len(changed),
+                      files=changed[:12], manual=True)
 
         _finish(tid, "cancelled" if cancelled else ("done" if ok_n else "failed"),
                 ok_n, fail_n, skip_n, changed, err_all)
@@ -1122,6 +1133,30 @@ def _report_md(v, ok, problems):
     return "\n".join(out)
 
 
+# ★ 2026-11-23 用户要求：「非自动迭代的重启就由用户来就可以了，不需要自动重启，
+#   这样会打断任务，这些推荐以及待批准这些二级迭代才需要」。
+#   所以只有**自动跑起来的**迭代（auto = 自动迭代、featradar = 推荐迭代、
+#   approved = 待批准）改完代码才自动重启；manual（用户自己发起的主迭代）
+#   重启交给他自己点，避免在用户手头有事时突然断一次服务。
+_AUTO_RESTART_SOURCES = ("auto", "featradar", "approved")
+
+
+def _should_auto_restart(source):
+    """这个来源的迭代改完代码后，要不要自动重启。
+
+    · auto      —— 自动迭代（含验证不过后自动生成的修复任务），要
+    · featradar —— 推荐迭代，要
+    · approved  —— 待批准里批准后执行的二级迭代，要
+    · manual    —— 用户自己发起的主迭代，**不要**（自动重启会打断他手头的事）
+    """
+    try:
+        if not bool(_si.load_settings().get("auto_restart_after_iter", True)):
+            return False
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读 auto_restart_after_iter 失败（按默认允许）", exc_info=True)
+    return str(source or "").strip().lower() in _AUTO_RESTART_SOURCES
+
+
 def _auto_restart(reason="", tid=""):
     """后台延迟重启，让改动生效。
 
@@ -1477,3 +1512,4 @@ def continue_queue():
 
 
 _load()
+

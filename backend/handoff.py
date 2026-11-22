@@ -43,6 +43,7 @@ _finalize / _clip / _tail / _fmt_change / _mask_code / _bold_pos），
 只有「没截断且空间足够」时才补一个闭合围栏（那时变长是安全的）。
 """
 import functools
+import contextlib
 import hashlib
 import json
 import math
@@ -78,6 +79,10 @@ _LAST_TOUCH = {"session": "", "ts": 0.0}
 #   频率很低，这点开销换来「永远读不到半个文件」。RLock 是因为 _read 在损坏
 #   恢复时会调 _write。
 _IO_LOCK = threading.RLock()
+# ★ 2026-11-23：上一次**成功读出来**的完整内容。文件被别的进程短暂占用时
+#   （Windows 上 os.replace 的瞬间 open 会抛 PermissionError）用它兜底，
+#   绝不因为"暂时打不开"就把一份完好的交接卡当垃圾隔离掉。
+_LAST_GOOD = {}
 
 # ★ 2026-11-18 修（数据丢失）：record_change / touch / snapshot 三个入口都是
 #   「_read() → 改 d → _write(d)」这个非原子序列。_write 本身是原子替换，但
@@ -909,61 +914,144 @@ def _similar(a: str, b: str) -> bool:
 # =====================================================================
 #  读写
 # =====================================================================
+@contextlib.contextmanager
+def _file_lock(timeout=8.0):
+    """**跨进程**互斥。
+
+    ★ 2026-11-23 修（数据丢失级）：`_IO_LOCK` 只是 threading.RLock，同一个进程
+      里的线程能互斥，但服务进程、回归子进程、自检脚本是**三个进程**，同时写
+      同一份 last.json 时谁也挡不住谁。实测跑一次回归就会连报四五次
+      「交接卡 last.json 无法解析」，连 .bak 一起坏掉 —— 而 `_read` 一旦返回
+      空字典，下一次 record_change 就会把整份历史无声覆盖。
+      所以再加一把操作系统级的文件锁（Windows 用 msvcrt，其它平台用 fcntl）。
+    """
+    lock_path = LAST + ".lock"
+    try:
+        os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    fh = None
+    locked = False
+    try:
+        fh = open(lock_path, "a+b")
+        deadline = time.time() + timeout
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except Exception:                           # noqa: BLE001
+                if time.time() >= deadline:
+                    # 拿不到锁也不能把对话卡死 —— 继续往下走，靠原子替换兜底
+                    logger.warning("交接卡文件锁等待超时（%.0fs），继续执行", timeout)
+                    break
+                time.sleep(0.02)
+        yield
+    finally:
+        if fh is not None:
+            try:
+                if locked:
+                    if os.name == "nt":
+                        import msvcrt
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except Exception:                           # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+            try:
+                fh.close()
+            except Exception:                           # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+
+
 def _read() -> dict:
-    with _IO_LOCK:
+    with _IO_LOCK, _file_lock():
         return _read_locked()
 
 
 def _read_locked() -> dict:
-    try:
-        with open(LAST, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        if isinstance(d, dict):
-            return d
-        raise ValueError("last.json 顶层不是 dict")
-    except FileNotFoundError:
-        return {}
-    except Exception:
-        # 2026-11-18 修（数据丢失级）：原来这里直接 return {}，而调用方都是
-        # 「读 → 改 → 写」—— 文件一旦损坏（手工编辑出错、断电写一半、磁盘异常），
-        # 下一次 record_change/touch 就会拿空字典写回，把整份历史无声覆盖掉。
-        # 现在：先把坏文件改名隔离（留着人工抢救），再尝试上一次的 .bak。
+    # ★ 2026-11-23 修（根因）：以前这里一个 except Exception 把**所有**异常都
+    #   当成「文件坏了」—— 包括 Windows 上 os.replace 瞬间的 PermissionError。
+    #   实测后果：服务进程和回归子进程同时读写时，完好的 last.json 被反复
+    #   改名成 .corrupt、再拿 .bak 恢复旧内容，连 .bak 也被带坏，日志里连着
+    #   四五条「无法解析」。而 _read 返回空字典后，下一次 record_change 就会
+    #   拿空字典写回，把整份历史无声覆盖。
+    #   现在分开处理：OSError（被占用 / 共享冲突）= 暂时打不开 → 重试，仍不行
+    #   就沿用上次成功的内容，**绝不隔离**；只有 JSON 真的解析不了才隔离。
+    for _i in range(6):
         try:
-            bad = LAST + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S")
-            os.replace(LAST, bad)
-            logger.warning("交接卡 last.json 无法解析，已隔离为 %s", os.path.basename(bad))
-        except Exception:
-            logger.debug("silent-except", exc_info=True)
-        bak = LAST + ".bak"
-        if os.path.exists(bak):
-            try:
-                with open(bak, "r", encoding="utf-8") as f:
-                    d = json.load(f)
-                if not isinstance(d, dict):
-                    raise ValueError("last.json.bak 顶层不是 dict")
-                logger.warning("交接卡已从 last.json.bak 恢复")
-                # 2026-11-18 修（数据丢失级，上一版只修了一半）：原来这里
-                # 只把 d 返回给调用方，**没写回磁盘**。而 LAST 已被上面改名
-                # 隔离、此刻并不存在 —— 于是下一次 _read 走 FileNotFoundError
-                # 直接 return {}，恢复等于白做，接着 record_change 就拿空字典
-                # 覆盖。实测：24 条对话 / 30 条改动在第 2 次读取后全部消失。
-                _write(d)
+            with open(LAST, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                _LAST_GOOD.clear()
+                _LAST_GOOD.update(d)
                 return d
+            raise ValueError("last.json 顶层不是 dict")
+        except FileNotFoundError:
+            return {}
+        except OSError as e:
+            # PermissionError / WinError 32：另一个进程正在原子替换，稍等即可
+            if _i < 5:
+                time.sleep(0.03)
+                continue
+            logger.warning("交接卡暂时读不到（%s），不隔离文件，本次沿用上次成功的内容",
+                           type(e).__name__)
+            return dict(_LAST_GOOD)
+        except Exception:
+            break
+    # 走到这里 = 内容真的坏了（JSON 解析失败 / 顶层不是 dict）
+    # 2026-11-18 修（数据丢失级）：原来这里直接 return {}，而调用方都是
+    # 「读 → 改 → 写」—— 文件一旦损坏（手工编辑出错、断电写一半、磁盘异常），
+    # 下一次 record_change/touch 就会拿空字典写回，把整份历史无声覆盖掉。
+    # 现在：先把坏文件改名隔离（留着人工抢救），再尝试上一次的 .bak。
+    try:
+        bad = LAST + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S")
+        os.replace(LAST, bad)
+        logger.warning("交接卡 last.json 无法解析，已隔离为 %s", os.path.basename(bad))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    bak = LAST + ".bak"
+    if os.path.exists(bak):
+        try:
+            with open(bak, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError("last.json.bak 顶层不是 dict")
+            logger.warning("交接卡已从 last.json.bak 恢复")
+            # 2026-11-18 修（数据丢失级，上一版只修了一半）：原来这里
+            # 只把 d 返回给调用方，**没写回磁盘**。而 LAST 已被上面改名
+            # 隔离、此刻并不存在 —— 于是下一次 _read 走 FileNotFoundError
+            # 直接 return {}，恢复等于白做，接着 record_change 就拿空字典
+            # 覆盖。实测：24 条对话 / 30 条改动在第 2 次读取后全部消失。
+            # ★ 2026-11-23：改调 _write_locked —— 调用方（_read）已持有
+            #   跨进程文件锁，再进 _write 会自己锁自己（死等到超时）。
+            _write_locked(d)
+            _LAST_GOOD.clear()
+            _LAST_GOOD.update(d)
+            return d
+        except Exception:
+            # .bak 自己也坏了：隔离它，否则每次损坏都拿同一份坏备份去试，
+            # 永远恢复不出来，还会把 corrupt 文件堆在原地。
+            try:
+                bad2 = bak + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S")
+                os.replace(bak, bad2)
+                logger.warning("交接卡 last.json.bak 也无法解析，已隔离为 %s",
+                               os.path.basename(bad2))
             except Exception:
-                # .bak 自己也坏了：隔离它，否则每次损坏都拿同一份坏备份去试，
-                # 永远恢复不出来，还会把 corrupt 文件堆在原地。
-                try:
-                    bad2 = bak + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S")
-                    os.replace(bak, bad2)
-                    logger.warning("交接卡 last.json.bak 也无法解析，已隔离为 %s",
-                                   os.path.basename(bad2))
-                except Exception:
-                    logger.debug("silent-except", exc_info=True)
-        return {}
+                logger.debug("silent-except", exc_info=True)
+    return {}
 
 
 def _write(d: dict) -> None:
-    with _IO_LOCK:
+    with _IO_LOCK, _file_lock():
         _write_locked(d)
 
 
