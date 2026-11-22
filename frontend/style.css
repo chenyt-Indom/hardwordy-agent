@@ -2891,6 +2891,21 @@ select.pill-select option {
   flex: 1;
   min-width: 0;
 }
+/* ★ 2026-11-22 品牌盖章署名（hardwordy · 开发者 陈宇桐）
+   一行小字 + 左侧色条，**不参与主布局**、不新增按钮。 */
+.sd-seal {
+  margin: 2px 0 8px;
+  padding: 5px 9px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted, #8a93a6);
+  background: rgba(90, 169, 255, .07);
+  border-left: 2px solid rgba(90, 169, 255, .45);
+  border-radius: 0 6px 6px 0;
+  letter-spacing: .2px;
+}
+.sd-seal.ok { color: #57c98a; }
+.sd-seal.bad { color: #ff8a7a; }
 .sd-badge {
   flex: 0 0 auto;
   font-size: 11px;
@@ -7193,7 +7208,12 @@ html[data-theme="light"] .iter-site:hover {
 /* ===== 体系详情面板（设置抽屉内，默认收起）=====
    2026-11-22 用户要求「一个按钮看详细内容：日志、评分、迭代报告、反思」。
    容器固定最大高度 + 内部滚动，**不参与主布局**，展开也不会把页面撑高。 */
-.iter-panel { margin-top: 6px; max-height: 380px; overflow: auto; font-size: 12px; }
+/* ★ 2026-11-22 修：这里原来叫 .iter-panel，和 11-15「AI 自我迭代抽屉」的
+   .iter-panel（6192 行：display:flex / width:min(620px,94vw) / height:100%）
+   撞名。作者样式的 display 会盖掉 hidden 属性带来的 UA 样式 [hidden]{display:none}，
+   于是这个容器一旦展开就缩不回去。改成专属类名 ip-box，并显式兜住 [hidden]。 */
+.ip-box { margin-top: 6px; max-height: 380px; overflow: auto; font-size: 12px; }
+.ip-box[hidden] { display: none !important; }
 .ip-kpi { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
   padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, .04); }
 .ip-kpi b { font-size: 17px; color: var(--accent); font-variant-numeric: tabular-nums; }

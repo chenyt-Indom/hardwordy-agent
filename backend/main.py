@@ -4117,6 +4117,30 @@ def iter_panel(days: int = 30):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+@app.get("/api/brand")
+def brand_info():
+    """品牌与开发者信息 —— 已盖章，任何版本、任何机器都不许改。
+
+    ★ 2026-11-22 用户原话：
+        「hardwordy 这个名字以后任意版本都不允许修改」
+        「开发者：陈宇桐，这个以后也不允许有任何变动，无论什么版本什么机子」
+
+    这里返回三样东西：
+      · seal  —— 当前值 + 盖章值 + 指纹（改一个字指纹就对不上）
+      · files —— 真实文件扫描（窗口标题/页面 h1/标签页/服务名 还在不在）
+      · guard —— 给自迭代用的硬约束文本（自迭代会改代码，必须明确禁止它碰）
+    只读，不触发任何评分/反思。
+    """
+    from . import brand as _B
+    try:
+        c = _B.check()
+        v = _B.verify_files()
+        return {"ok": bool(c["ok"] and v["ok"]), "seal": c,
+                "files": v, "guard": _B.guard_text()}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 @app.get("/api/selfiter/loop")
 def selfiter_loop():
     """闭环进退看板：最近几轮是进步还是退步、进退多少、回滚原因。
@@ -11231,6 +11255,27 @@ def _resume_iter_queue():
         logger.info("已启动迭代队列恢复线程")
     except Exception as e:                              # noqa: BLE001
         logger.warning("启动迭代恢复线程失败：%s", e)
+
+
+@app.on_event("startup")
+def _brand_seal_on_boot():
+    """启动时校验品牌盖章 —— 应用名/开发者一旦被改，日志里立刻报警。
+
+    ★ 2026-11-22 用户要求「盖章，任何版本任何机器都不许改」。
+    光在注释里写「不许改」没用 —— 自迭代会自动改代码，所以必须每次启动
+    都拿真实文件验一遍（指纹 + 文件扫描双保险）。
+    """
+    try:
+        from . import brand as _B
+        c = _B.check()
+        v = _B.verify_files()
+        if c["ok"] and v["ok"]:
+            logger.info("品牌盖章完好：%s（指纹 %s）", c["seal_line"], c["fingerprint"])
+        else:
+            logger.error("⚠️ 品牌盖章被改动！指纹 %s / 应为 %s；文件异常 %s",
+                         c["fingerprint"], c["seal_fingerprint"], v.get("bad"))
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("品牌盖章校验失败：%s", e)
 
 
 @app.on_event("startup")

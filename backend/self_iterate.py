@@ -3620,6 +3620,20 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
     _prof = _user_profile_brief()
     if _prof and "## 🎨 创意发散" in _prompt:
         _prompt = _prompt.replace("## 🎨 创意发散", _prof + "\n## 🎨 创意发散", 1)
+    # ★ 2026-11-22 用户要求盖章：「hardwordy 这个名字以后任意版本都不允许修改」
+    #   「开发者：陈宇桐，以后也不允许有任何变动，无论什么版本什么机子」。
+    #   自迭代是会自动改代码的 —— 只在注释/文档里写「不许改」根本挡不住它，
+    #   必须把禁区写进**它每轮都会读的提示词**里。
+    try:
+        from . import brand as _B
+        _seal = _B.guard_text()
+        if _seal:
+            if "## 🎨 创意发散" in _prompt:
+                _prompt = _prompt.replace("## 🎨 创意发散", _seal + "\n\n## 🎨 创意发散", 1)
+            else:
+                _prompt = _prompt + "\n\n" + _seal
+    except Exception:                                   # noqa: BLE001
+        pass
     return _prompt
 
 

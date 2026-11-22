@@ -1261,6 +1261,10 @@
       '<div class="sd-head"><b>⚙ 设置</b>',
       '<button type="button" class="sd-x" id="settingsClose" title="关闭">✕</button></div>',
       '<div class="sd-body">',
+      // ★ 2026-11-22 用户要求「盖章」：hardwordy 这个名字与开发者 陈宇桐
+      //   任何版本、任何机器都不许改。这行是**看得见**的凭据；打开抽屉时
+      //   会拉 /api/brand 把「✅ 盖章完好 / ⚠️ 已被改动」补在后面。
+      '  <div class="sd-seal" id="sdSealLine">hardwordy · 开发者 陈宇桐</div>',
       // ★ 自循环状态卡（后端 /api/selfloop/status 与 app.js renderLoopStatus 早已写好，
       //   只差这个容器和 CSS —— 补上它这块功能才真正可见）。
       '  <section class="sd-sec" id="sdLoopSec"><div class="loop-st-card" id="loopStatusCard"></div></section>',
@@ -1270,7 +1274,7 @@
       '  <section class="sd-sec" id="sdIterPanelSec">',
       '    <button type="button" class="sd-fold" id="sdIterPanelToggle" aria-expanded="false">',
       '      <span>🔬 体系详情</span><i class="sd-badge" id="sdIterPanelBadge">—</i><i class="sd-caret">▸</i></button>',
-      '    <div class="iter-panel" id="iterPanelBox" hidden></div>',
+      '    <div class="ip-box" id="iterPanelBox" hidden></div>',
       '  </section>',
       '  <section class="sd-sec">',
       '    <button type="button" class="sd-fold" id="sdKeysToggle" aria-expanded="false">',
@@ -1389,6 +1393,9 @@
         dw.hidden = false;
         void dw.offsetWidth;   // 强制回流，让滑入动画每次都重播
         dw.classList.add('in');
+        // ★ 2026-11-22 品牌盖章：打开抽屉时拉一次 /api/brand，把校验状态
+        //   补在署名后面（✅ 盖章完好 / ⚠️ 已被改动）。只读，很轻。
+        try { loadBrandSeal(); } catch (e) { /* 可选功能，出错不挡抽屉 */ }
       } else {
         dw.classList.remove('in');
         mask.hidden = true;
@@ -1521,6 +1528,24 @@
                                 : '<div class="ip-empty">全部模块可加载</div>');
       ipb.innerHTML = h;
       if (ipBadge) ipBadge.textContent = '累计 ' + (cum > 0 ? '+' : '') + Number(cum).toFixed(1);
+    }
+    // ★ 2026-11-22 品牌盖章：hardwordy 与开发者 陈宇桐 已锁定。
+    //   这里只负责「把后端校验结果显出来」——真正的拦截在后端
+    //   （backend/brand.py 的指纹 + 文件扫描 + 启动告警 + 自迭代提示词护栏）。
+    function loadBrandSeal() {
+      var el = $('#sdSealLine');
+      if (!el) return;
+      fetch('/api/brand').then(function (r) { return r.json(); }).then(function (D) {
+        var s = (D && D.seal) || {};
+        var base = (s.app_name || 'hardwordy') + ' · 开发者 ' + (s.developer || '陈宇桐');
+        if (D && D.ok) {
+          el.className = 'sd-seal ok';
+          el.textContent = base + ' · ✅ 盖章完好 ' + (s.sealed_at || '');
+        } else {
+          el.className = 'sd-seal bad';
+          el.textContent = base + ' · ⚠️ 盖章被改动，请查日志';
+        }
+      }).catch(function () { /* 离线或接口未就绪：保留初始静态文案 */ });
     }
     function loadIterPanel() {
       if (!ipb) return;
