@@ -330,6 +330,45 @@ def _emit(tid, kind, **kw):
 
 
 # ------------------------------------------------------------------ 查询
+def mark_verify(plan_id, title="", files=None, tid="", source="direct"):
+    """登记「刚改完、还没验证」—— 供**非队列路径**使用。
+
+    ★ 2026-11-23 用户报：「前面的任务有没有进行跑分验证？」—— 没有。
+    根因：`/api/selfiter/execute` 直接调 `execute_approved`，**不经过 `_worker`**，
+    所以从不写 `_STATE["verify"]`；重启后 `boot_resume` 也就无从接着验证。
+    结果「连续两轮验证 → 跑分 → 退步反思 → 写日志」整条链只在队列路径生效。
+
+    这里让直接执行也登记，链路与队列路径完全一致（同一份 verify 记录、
+    同一个 `_verify_worker`），不另造一套。
+
+    返回 {ok, verify, why}。没有改动文件时不登记 —— 没改东西无需验证。
+    """
+    files = [str(f) for f in (files or []) if f]
+    if not files:
+        return {"ok": False, "why": "这次没有改动任何文件，无需验证"}
+    pid = str(plan_id or "")
+    with _LOCK:
+        prev = _STATE.get("verify") or {}
+        rec = {
+            "tid": tid or ("direct_%s" % (pid or int(time.time()))),
+            "plan_id": pid,
+            "title": str(title or "")[:120],
+            "files": files[:20],
+            # 同一功能反复修时轮次要累加，不能每轮清零
+            "tries": int(prev.get("tries") or 0) if prev.get("plan_id") == pid else 0,
+            "at": time.time(),
+            "source": str(source or "direct"),
+        }
+        _STATE["verify"] = rec
+    _save()
+    try:
+        _emit(rec["tid"], "status",
+              text="已登记待验证：%s（%d 个文件）—— 重启后自动验证、跑分"
+                   % (rec["title"] or pid or "未命名", len(rec["files"])),
+              state="running", verified=False)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return {"ok": True, "verify": rec}
 
 def snapshot(since=0):
     """前端轮询用：返回状态 + since 之后的新事件。

@@ -6230,6 +6230,26 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 a["status"] = "done"
                 a["error"] = ""
                 a["backup"] = _ar.get("backup_tag") or ""
+                # ★ 2026-11-23 用户问「前面的任务有没有进行跑分验证」—— 查 actlog
+                #   发现 evidence.regression 永远是 "skip"：LLM 直接操作成功后**从没
+                #   写回回归结论**（只有旧的补丁流程写 pass/fail）。而 iter_agent 的
+                #   独立复核本来就含「语法 / 导入 / 行为回归 / 断言 / diff 评审」，
+                #   ok=True 即这些全过，回归自然是 pass。这里把真实结论写回，
+                #   证据卡才会显示「回归 通过」而不是误导性的 skip。
+                try:
+                    _rgd = ((_ar.get("detail") or {}).get("regress") or {})
+                    if (_rgd.get("new_fails") or []):
+                        a["_regression"] = "fail"
+                    elif _rgd:
+                        a["_regression"] = "pass"
+                    else:
+                        # 复核里没带回归详情：按设置判断跑没跑
+                        a["_regression"] = (
+                            "pass"
+                            if load_settings().get("regress_after_change", True)
+                            else "skip")
+                except Exception:                       # noqa: BLE001
+                    logger.debug("写回归结论失败（不影响执行）", exc_info=True)
                 a["changelog"] = _change_summary(_apt)
                 results.append({"id": a["id"], "ok": True, "files": _afiles,
                                 "backup": a["backup"],

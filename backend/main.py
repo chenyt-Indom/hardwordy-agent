@@ -3797,13 +3797,55 @@ def selfiter_reject(body: dict):
 
 @app.post("/api/selfiter/execute")
 def selfiter_execute(body: dict):
-    """执行所有已批准的动作（备份 + 语法校验 + 失败自动回滚）。"""
+    """执行所有已批准的动作（备份 + 语法校验 + 失败自动回滚）。
+
+    ★ 2026-11-23：执行完把「待验证」登记给 iter_runner，否则这条**直接执行**
+    路径绕开了 `_worker`，重启后既不自动验证也不跑分（用户实测发现）。
+    """
     from . import self_iterate as _si
     b = body or {}
     try:
-        return _si.execute_approved(str(b.get("id") or ""))
+        r = _si.execute_approved(str(b.get("id") or ""))
+        _register_direct_verify(r, b, plan_id=str(b.get("id") or ""))
+        return r
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
+
+
+def _register_direct_verify(r, b, plan_id=""):
+    """把「直接执行」改过的文件登记成待验证，重启后自动验证 + 跑分。
+
+    只登记**真的成功改了文件**的动作：没改东西、被跳过、被回滚的都不算 ——
+    否则重启后会拿一份没变的代码去「验证」，白跑一轮还误报通过。
+    """
+    try:
+        if not isinstance(r, dict) or not r.get("done"):
+            return None
+        files = []
+        for _r in (r.get("results") or []):
+            if not isinstance(_r, dict):
+                continue
+            if not _r.get("ok") or _r.get("skipped") or _r.get("rolled_back"):
+                continue
+            for _f in (_r.get("files") or _r.get("changed") or []):
+                if _f:
+                    files.append(str(_f))
+        if not files:
+            return None
+        from . import iter_runner as _ir
+        title = ""
+        for _r in (r.get("results") or []):
+            if isinstance(_r, dict) and _r.get("ok"):
+                title = str(_r.get("title") or _r.get("id") or "")
+                break
+        return _ir.mark_verify(
+            plan_id=plan_id or str(b.get("id") or ""),
+            title=title or str(b.get("title") or ""),
+            files=list(dict.fromkeys(files)),
+            source=str(b.get("source") or "direct"))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("登记直接执行待验证失败（不影响执行）", exc_info=True)
+        return None
 
 
 @app.post("/api/selfiter/force")
@@ -3822,6 +3864,7 @@ def selfiter_force(body: dict):
         if r.get("ok") and b.get("execute", True):
             try:
                 r["exec"] = _si.execute_approved(pid, force=r.get("forced") or None)
+                _register_direct_verify(r["exec"], b, plan_id=pid)
             except Exception as e:                      # noqa: BLE001
                 r["exec_error"] = str(e)
         return r
