@@ -1500,6 +1500,50 @@
         log.length ? '<pre class="ip-pre">' + _ipEsc(log.join('\n')) + '</pre>'
                    : '<div class="ip-empty">暂无（还没跑过评分轮）</div>');
 
+      // ★ 2026-11-22 用户要求：低分历史，能点开看每次的扣分代码行
+      var SD = D.scoredrop || {};
+      var dls = SD.drops || [], sdh = '';
+      var RP = SD.repair || {};
+      if (RP.state && RP.state !== 'idle') {
+        sdh += '<div class="ip-sub">🔧 自动修复：' + _ipEsc(RP.state) +
+          (RP.msg ? ' · ' + _ipEsc(RP.msg) : '') + '</div>';
+      }
+      if (!dls.length) {
+        sdh += '<div class="ip-empty">暂无退步记录（每轮都在涨或持平）</div>';
+      } else {
+        sdh += '<div class="ip-sub">共 ' + dls.length + ' 次 · 累计掉了 ' +
+          Number(SD.total_lost || 0).toFixed(2) + ' 分（点每行展开扣分代码行）</div>';
+        dls.forEach(function (d) {
+          var hot = d.hot || [], rp = d.repair || {};
+          sdh += '<details class="ip-drop"><summary>' +
+            _ipEsc(String(d.iso || '').slice(5, 16)) + ' ' +
+            _ipEsc(d.prev) + ' → ' + _ipEsc(d.total) + '（' +
+            (Number(d.delta) > 0 ? '+' : '') + Number(d.delta || 0).toFixed(2) + '）' +
+            ' ｜ 扣分点 ' + hot.length + ' 个' +
+            (rp.state && rp.state !== 'pending' ? ' ｜ 修复 ' + _ipEsc(rp.state) : '') +
+            '</summary>';
+          if (hot.length) {
+            sdh += '<ul class="ip-drop-ul">';
+            hot.forEach(function (s) {
+              sdh += '<li><code>' + _ipEsc((s.file || '?') + ':' + (s.line || '?')) +
+                '</code> <b>' + _ipEsc(s.kind || '') + '</b> ' + _ipEsc(s.msg || '') +
+                (s.in_changed ? ' <i class="ip-star">★本轮改过</i>' : '') + '</li>';
+            });
+            sdh += '</ul>';
+          } else {
+            sdh += '<div class="ip-empty">这一轮没定位到具体扣分行</div>';
+          }
+          if (rp.msg) sdh += '<div class="ip-sub">' + _ipEsc(rp.msg) + '</div>';
+          sdh += '</details>';
+        });
+      }
+      var lss = (SD.lessons || []).map(function (L) {
+        return { k: '[' + (L.kinds_zh || []).join('、') + ' ×' + (L.count || 1) + ']',
+                 v: (L.root_cause || '') + ' → ' + (L.fix || '') };
+      });
+      h += _ipSec('📉 低分历史（' + dls.length + ' 次 · 教训 ' + lss.length + ' 条）',
+        sdh + (lss.length ? '<div class="ip-sub">沉淀的教训</div>' + _ipRows(lss) : ''));
+
       // 失败归因
       var kinds = F.by_kind_zh || {};
       var krows = Object.keys(kinds).map(function (k) { return { k: k, v: kinds[k] + ' 次' }; });

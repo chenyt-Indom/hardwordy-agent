@@ -244,6 +244,16 @@ def _blk_chain() -> dict:
 
 
 # ------------------------------------------------------------------ 出口
+def _blk_scoredrop(days: int = 30) -> dict:
+    """低分历史 + 教训 + 自动修复进度（2026-11-22 用户要求）。
+
+    用户要「点开能看到每次的扣分代码行」—— 这里把 hot（本轮改过的文件里
+    的扣分点）原样带出 file/line/kind/msg，前端做折叠展开。
+    """
+    from . import scoredrop as _SD
+    return _SD.status(n=20)
+
+
 def panel(days: int = 30) -> dict:
     """一次性返回面板需要的全部数据。任何一块失败都不影响其它块。"""
     days = max(1, int(days or 30))
@@ -251,6 +261,7 @@ def panel(days: int = 30) -> dict:
     blocks = [
         ("score", lambda: _blk_score()),
         ("failattr", lambda: _blk_failattr(days)),
+        ("scoredrop", lambda: _blk_scoredrop(days)),
         ("reflect", lambda: _blk_reflect()),
         ("memory", lambda: _blk_memory()),
         ("semantic", lambda: _blk_semantic()),

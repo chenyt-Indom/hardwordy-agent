@@ -176,6 +176,18 @@ def _msg(rec: Dict[str, Any]) -> str:
                                 "★本轮改过" if s.get("in_changed") else ""))
             else:
                 lines.append("  · %s" % s)
+    dp = rec.get("drop") or {}
+    if dp.get("recorded"):
+        lines.append("📝 已自动记录这次退步的原因（独立低分日志 + 失败归因表），"
+                     "并沉淀成教训%s。"
+                     % ("：" + dp["lesson"] if dp.get("lesson") else ""))
+    rp = dp.get("repair") or {}
+    if rp.get("started"):
+        lines.append("🔧 已自动启动修复（最多 %s 轮：反思→改代码→重评），"
+                     "后台在跑，不用你手动改；进度可看 /api/iter/scoredrop。"
+                     % rp.get("max_rounds"))
+    elif rp.get("why"):
+        lines.append("🔧 自动修复没启动（%s），请手动修。" % rp.get("why"))
     if rec.get("blocked"):
         lines.append("")
         lines.append("⛔ 这次比上次低，**先别重启**。要么把掉分的地方修好，"
@@ -185,6 +197,29 @@ def _msg(rec: Dict[str, Any]) -> str:
     else:
         lines.append("✅ 评分不低于上次，可以收尾。")
     return "\n".join(lines)
+
+
+def _record_drop(rec: Dict[str, Any], blocked: bool) -> Dict[str, Any]:
+    """退步时：记低分日志 + 沉淀教训 + 镜像归因表 + （拦住了就）起自动修复。
+
+    用户 2026-11-22 的六条口径全在这里落地：
+      · 只要比上次低就记（-0.01 也记）
+      · 两边都记（独立文件 + 归因表）
+      · 沉淀成长期教训，可用向量检索找类似的
+      · 自动直接改代码修好再重评，反复到涨回去
+    """
+    out: Dict[str, Any] = {}
+    try:
+        from . import scoredrop as _sd
+        r = _sd.record(rec) or {}
+        out["recorded"] = bool(r.get("saved"))
+        if r.get("lesson"):
+            out["lesson"] = str(r["lesson"].get("key") or "")
+        if blocked and r.get("row"):
+            out["repair"] = _sd.trigger_repair(r["row"])
+    except Exception:                                   # noqa: BLE001
+        logger.debug("scoregate 记低分失败", exc_info=True)
+    return out
 
 
 def gate(force: bool = False, note: str = "",
@@ -234,6 +269,10 @@ def gate(force: bool = False, note: str = "",
                "note": str(note or "")[:200],
                "per_part": (jd.get("per_part") or {}),
                "suspects": (ex.get("suspects") or [])[:8],
+               # ★ 2026-11-22 修：suspects 是**按文件归并**的（只有 lines 数组、
+               #   没有单条 kind/msg），低分日志据此只能记到「某文件」而定位不到行。
+               #   commit_round 的 explain.new_codes 才有逐条明细，一并带出。
+               "codes": (ex.get("new_codes") or [])[:20],
                "summary": str(ex.get("summary") or "")[:400]}
         # 分项进退：优先用账本算的，没有就自己算
         if not rec.get("per_part") and prev:
@@ -246,6 +285,10 @@ def gate(force: bool = False, note: str = "",
             rec["per_part"] = pp
         blocked = bool(block_on_drop and verdict == "regressed")
         rec["blocked"] = blocked
+        # ★ 2026-11-22 用户要求：退步要自动记录原因、沉淀教训、并自动修复。
+        #   ⚠️ 只有「真的拦住了」才起自动修复（纯记录场景别偷偷改代码）。
+        if verdict == "regressed":
+            rec["drop"] = _record_drop(rec, blocked)
         d["dirty"] = False
         d["files"] = []
         d["last_score"] = now
@@ -258,6 +301,7 @@ def gate(force: bool = False, note: str = "",
         return {"ran": True, "ok": not blocked, "blocked": blocked,
                 "prev": pv, "total": total, "delta": delta,
                 "verdict": verdict, "rec": rec, "msg": _msg(rec),
+                "drop": rec.get("drop"),
                 "cum": jd.get("cum")}
     except Exception as e:                              # noqa: BLE001
         logger.debug("scoregate 评分失败", exc_info=True)

@@ -633,6 +633,25 @@ def _failattr_brief(query=""):
         return "（归因表读取失败，本轮按无记录处理）"
 
 
+def _scoredrop_brief(query=""):
+    """低分日志摘要 —— 供反思提示词使用。
+
+    用户 2026-11-22：「反思时以及重新改进时有没有结合这个日志并引以为戒」
+                「最近 20 次」「用向量检索自动找出需要用到的类似的教训」
+
+    与 `_failattr_brief` 的分工：归因表记「动作失败」，这里记「评分退步」。
+    用户明确要求两边都记，所以提示词里两段都要有 —— 一段讲失败动作，
+    一段讲分数掉了多少、掉在哪一行、以前是不是犯过同样的错。
+    """
+    try:
+        from . import scoredrop as _SD
+        return (_SD.brief(n=20, query=str(query or ""))
+                or "（还没有评分退步记录 —— 说明每轮都在涨或持平）")
+    except Exception:                                   # noqa: BLE001
+        logger.debug("scoredrop.brief 失败", exc_info=True)
+        return "（低分日志读取失败，本轮按无记录处理）"
+
+
 def _change_gate(rel, count, last_failed=False, threshold=None, consec_fail=0,
                  root_cause=""):
     """同文件改动冷却闸门：改太多次还没成，就先停手换思路。
@@ -3620,6 +3639,17 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
     _prof = _user_profile_brief()
     if _prof and "## 🎨 创意发散" in _prompt:
         _prompt = _prompt.replace("## 🎨 创意发散", _prof + "\n## 🎨 创意发散", 1)
+    # ★ 2026-11-22 用户要求：「反思时结合这个日志并引以为戒」「最近 20 次」
+    #   「用向量检索自动找出需要用到的类似的教训」。
+    #   同样在 % 格式化之后注入（日志里可能有 % 号，提前拼会 TypeError）。
+    try:
+        _sd_brief = _scoredrop_brief((str(task_brief or "")[:600]
+                                      + "\n" + str(gap or "")[:300]))
+        if _sd_brief and "## 🎨 创意发散" in _prompt:
+            _prompt = _prompt.replace(
+                "## 🎨 创意发散", _sd_brief + "\n## 🎨 创意发散", 1)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("注入低分日志失败", exc_info=True)
     # ★ 2026-11-22 用户要求盖章：「hardwordy 这个名字以后任意版本都不允许修改」
     #   「开发者：陈宇桐，以后也不允许有任何变动，无论什么版本什么机子」。
     #   自迭代是会自动改代码的 —— 只在注释/文档里写「不许改」根本挡不住它，

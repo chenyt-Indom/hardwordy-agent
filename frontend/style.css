@@ -7257,6 +7257,12 @@ html[data-theme="light"] .iter-site:hover {
 .ip-act .pill-btn[disabled] { opacity: .55; cursor: progress; }
 .ip-act-st { color: var(--muted); font-size: 11px; line-height: 1.4; }
 .ip-act-st b { color: var(--accent); font-size: 13px; font-variant-numeric: tabular-nums; }
+/* 当前版本绝对值：一行显示，窄屏自动折行，不撑宽面板 */
+.ip-now { margin: 5px 0 0; padding: 4px 8px; border-radius: 7px; line-height: 1.5;
+  background: rgba(255, 255, 255, .03); border-left: 2px solid var(--accent); }
+.ip-now b { color: var(--accent); font-size: 15px; font-variant-numeric: tabular-nums; }
+.ip-now i { font-style: normal; color: var(--muted); font-size: 11px; margin-left: 6px; }
+.ip-now.dim { color: var(--muted); font-size: 11px; border-left-color: var(--muted); }
 .ip-sec > summary { cursor: pointer; padding: 3px 0; color: var(--text); user-select: none; }
 .ip-sec > summary:hover { color: var(--accent); }
 .ip-body { padding: 2px 0 4px 8px; display: flex; flex-direction: column; gap: 2px; }
@@ -7265,6 +7271,13 @@ html[data-theme="light"] .iter-site:hover {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ip-row span { flex: 1 1 auto; min-width: 0; color: var(--text); word-break: break-word; }
 .ip-sub { margin-top: 4px; color: var(--muted); font-size: 11px; }
+/* 低分历史：每条退步可展开看扣分代码行（2026-11-22 用户要求） */
+.ip-drop { border: 1px solid rgba(0, 0, 0, .08); border-radius: 6px; margin: 4px 0; }
+.ip-drop > summary { cursor: pointer; padding: 4px 6px; font-size: 12px; }
+.ip-drop-ul { margin: 2px 0 6px; padding-left: 18px; }
+.ip-drop-ul li { font-size: 11.5px; line-height: 1.5; word-break: break-all; }
+.ip-drop-ul code { font-size: 11px; opacity: .85; }
+.ip-star { color: #c05621; font-style: normal; font-size: 10.5px; }
 .ip-empty { color: var(--muted); padding: 3px 0; }
 .ip-empty.bad { color: var(--danger); }
 .ip-pre { margin: 2px 0 0; padding: 6px; max-height: 180px; overflow: auto;

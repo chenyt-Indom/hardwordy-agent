@@ -4132,6 +4132,21 @@ def iter_scoregate():
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+@app.get("/api/iter/scoredrop")
+def iter_scoredrop(n: int = 20):
+    """低分历史 / 教训 / 自动修复进度（2026-11-22 用户要求）。
+
+    只读：**不触发评分、不触发修复**。前端「体系详情 → 低分历史」用它。
+    """
+    from . import scoredrop as _sd
+    try:
+        st = _sd.status(n=max(1, min(100, int(n or 20))))
+        st["ok"] = True
+        return st
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 @app.get("/api/brand")
 def brand_info():
     """品牌与开发者信息 —— 已盖章，任何版本、任何机器都不许改。
