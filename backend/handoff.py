@@ -910,10 +910,8 @@ def _similar(a: str, b: str) -> bool:
 #  读写
 # =====================================================================
 def _read() -> dict:
-    # ★ 不加锁：实测加锁后回归会卡死（多线程持锁等待）。
-    #   读的安全由「写入用 os.replace 原子替换」保证 —— 读者要么读到旧文件、
-    #   要么读到新文件，绝不会读到半个。
-    return _read_locked()
+    with _IO_LOCK:
+        return _read_locked()
 
 
 def _read_locked() -> dict:
@@ -965,9 +963,8 @@ def _read_locked() -> dict:
 
 
 def _write(d: dict) -> None:
-    # ★ 不加锁（同上）：写之间的互斥靠「每次唯一临时名 + os.replace 原子替换」，
-    #   Windows 上偶发 WinError 5 由 _replace_retry 重试解决。
-    _write_locked(d)
+    with _IO_LOCK:
+        _write_locked(d)
 
 
 def _replace_retry(src, dst, tries=6):
