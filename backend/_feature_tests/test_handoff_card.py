@@ -67,6 +67,48 @@ def render_with(dialog, session="t", **extra):
     return handoff.render(session)
 
 
+def _isolate_last(fn):
+    """整个用例期间把 handoff.LAST 重定向到临时副本，跑完恢复。
+
+    ★ 2026-11-23 修（数据损坏级，根因）：
+      本文件多处直接 `open(handoff.LAST, "w")` **覆盖真实交接卡**，
+      末尾还 `os.remove(handoff.LAST)` 把它删掉；而服务进程同时在读写同一份文件。
+      实测跑一次 regress，日志连报 4 次「交接卡无法解析」，
+      连 last.json.bak 都被隔离走 —— 用户重启后「上次在干什么」的交接卡就没了。
+      现在：读到的仍是真实内容（先拷一份到临时目录），所有写入都进临时文件。
+    """
+    import functools
+    import shutil
+
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        real = handoff.LAST
+        tmpdir = tempfile.mkdtemp(prefix="handoff_test_")
+        tmp = os.path.join(tmpdir, "last.json")
+        try:
+            if os.path.exists(real):
+                shutil.copyfile(real, tmp)
+        except Exception:                               # noqa: BLE001
+            pass
+        handoff.LAST = tmp
+        # 本文件有 4 处**故意写坏 JSON**（验证「损坏后从 .bak 恢复」），
+        # 会让 handoff 刷出「无法解析」warning —— 那是预期输出，不是故障。
+        # 实测跑一次 regress 日志里 4 条红字，看起来像交接卡真坏了（我也被误导过）。
+        import logging
+        _lg = logging.getLogger("backend.handoff")
+        _old_level = _lg.level
+        _lg.setLevel(logging.CRITICAL)
+        try:
+            return fn(*a, **kw)
+        finally:
+            _lg.setLevel(_old_level)
+            handoff.LAST = real
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return wrapper
+
+
+@_isolate_last
 def main():
     # ---- 1. 换行必须保留（不能被压平导致两行粘成一个词）----
     txt = render_with([{"role": "user", "content": "问"},

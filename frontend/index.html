@@ -526,6 +526,19 @@
         <div class="mem-vec-hits" id="memVecHits" hidden></div>
       </div>
 
+      <!-- 记忆条目：把「一大段文本」拆成按分区的条目，能看见到底记住了几条 -->
+      <div class="mem-items" id="memItems">
+        <div class="mu-head" id="miToggle" role="button" tabindex="0"
+             title="点一下展开 / 收起条目列表">
+          <span class="mu-caret" id="miCaret">▸</span>
+          <span>📇 记忆条目</span>
+          <span class="mu-total" id="miTotal">—</span>
+        </div>
+        <div class="mu-body" id="miBody" hidden>
+          <div class="mi-list" id="miList"></div>
+        </div>
+      </div>
+
       <div class="mem-block">
         <div class="mem-block-head">
           <span class="mem-block-title">🧩 长期记忆</span>

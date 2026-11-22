@@ -4700,6 +4700,38 @@ html[data-theme="light"] .composer {
 }
 .mem-vec-empty { font-size: 12px; color: var(--muted); padding: 2px 0; }
 
+
+/* 记忆条目（分区列表）：每条一行，最多两行文本，按钮靠右不换行 */
+.mem-items { margin: 6px 0 10px; }
+.mi-list { max-height: 320px; overflow: auto; padding-right: 2px; }
+.mi-sec {
+  display: flex; align-items: center; gap: 6px; margin: 8px 0 4px;
+  font-size: 12px; font-weight: 600; color: var(--muted);
+}
+.mi-sec em {
+  font-style: normal; font-size: 11px; opacity: .8;
+  background: rgba(255, 255, 255, .07); border-radius: 8px; padding: 0 6px;
+}
+.mi-item {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 5px 6px; border-radius: 7px; border: 1px solid transparent;
+}
+.mi-item:hover { background: rgba(255, 255, 255, .04); border-color: var(--border); }
+.mi-item.pin { background: rgba(255, 200, 90, .08); }
+.mi-text {
+  flex: 1; min-width: 0; font-size: 12px; line-height: 1.45; color: var(--fg);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.mi-btn {
+  flex: none; background: none; border: 0; cursor: pointer;
+  font-size: 12px; line-height: 1; padding: 2px 4px; border-radius: 5px;
+  color: var(--muted); opacity: .55;
+}
+.mi-item:hover .mi-btn { opacity: 1; }
+.mi-btn:hover { background: rgba(255, 255, 255, .1); }
+.mi-btn.danger:hover { color: #ff8a8a; }
+
 /* ============================================================
    多人协作群（Hive）· 2026-11-13
    ------------------------------------------------------------

@@ -605,8 +605,31 @@ def _load_dynamic():
 
 
 def run(scope="quick", only=None):
-    """跑一遍回归。scope=quick 只跑快用例；full 追加全量自检与导入检查。"""
+    """跑一遍回归。scope=quick 只跑快用例；full 追加全量自检与导入检查。
+
+    ⚠️ 2026-11-23 修：`_feature_tests/*.py` 里大量用**相对路径**（"backend/tools.py"、
+    "frontend/livecard.js"）读源码，所以整套回归必须在**项目根**执行。
+    实测：在临时目录里跑 full，5 个 feature 用例全部
+    `FileNotFoundError: 'backend/tools.py'` —— 看起来像功能坏了，其实只是 cwd 不对，
+    这种假失败会让人（和自动迭代）误判成「改坏了」并触发回滚。
+    """
     t0 = time.time()
+    _cwd = os.getcwd()
+    try:
+        os.chdir(str(_BACKEND.parent))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("切到项目根失败，按当前目录跑", exc_info=True)
+    try:
+        return _run_inner(scope=scope, only=only, t0=t0)
+    finally:
+        try:
+            os.chdir(_cwd)
+        except Exception:                               # noqa: BLE001
+            logger.debug("恢复工作目录失败", exc_info=True)
+
+
+def _run_inner(scope="quick", only=None, t0=None):
+    t0 = time.time() if t0 is None else t0
     base = _CASES + _load_dynamic()
     if only:
         picked = [c for c in base if c["name"] in only]

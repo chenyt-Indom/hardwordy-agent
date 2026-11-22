@@ -148,6 +148,61 @@ def _add_uniq(arr: list, val: str) -> None:
         arr.append(val)
 
 
+_REL_KEEP = (memcore.SAME, memcore.COVERED, memcore.SUPERSET, memcore.FLIP)
+
+
+def _prune(items: list, current: list) -> int:
+    """把「主记忆里已经不存在的条目」从继承包里去掉，返回删除条数。
+
+    为什么必须做（2026-11-23 实测踩到）：
+      sync 原来只会**追加/合并**，从不删除。于是长期记忆从 107 条清洗到 34 条之后，
+      继承包里还留着 73 条垃圾（重复的捕蝇草推断、已纠正的"专业是建筑学"），
+      而 brief() 每轮都把这些注进上下文 —— 用户删掉的记忆等于没删，
+      新旧内容还互相矛盾（主记忆说电子信息工程，传承包说建筑学）。
+
+    ⚠️ 防误清（三条，缺一不可）：
+      1. `current` 为空 → 一律不动（读不到主记忆时绝不能把整包清空）；
+      2. 当前条目数不到包内长期条目的 30% → 判定为"主记忆可能读残了"，不动；
+      3. 只处理 level=="长期记忆" 的条目，短期记忆（别的对话的）不参与对齐。
+    """
+    if not current:
+        return 0
+    pairs = [(t, memcore.parse(t)) for t in current]
+    pairs = [(t, p) for t, p in pairs if p.body]
+    if not pairs:
+        return 0
+    longs = [it for it in items if str(it.get("level") or "") == "长期记忆"]
+    if len(longs) and len(pairs) < len(longs) * 0.3:
+        return 0
+    keep = []
+    removed = 0
+    for it in items:
+        if str(it.get("level") or "") != "长期记忆":
+            keep.append(it)
+            continue
+        a = memcore.parse(str(it.get("text") or ""))
+        if not a.body:
+            removed += 1
+            continue
+        hit = None
+        for text, b in pairs:
+            rel = memcore.relation(a, b)
+            if rel in _REL_KEEP:
+                hit = (rel, text)
+                break
+        if hit is None:
+            removed += 1
+            continue
+        # 正反说法（用户纠正过）：**以主记忆为准**改写包里的文本，
+        # 否则包里留着「喜欢无锡」而主记忆已经是「不喜欢无锡」，两处打架。
+        if hit[0] == memcore.FLIP and it.get("text") != hit[1]:
+            it["text"] = hit[1]
+        keep.append(it)
+    if removed:
+        items[:] = keep
+    return removed
+
+
 def sync(model: str = "", session: str = "", force: bool = False) -> dict:
     """把 memory 里的条目同步进继承包（模型无关）。
 
@@ -167,6 +222,7 @@ def sync(model: str = "", session: str = "", force: bool = False) -> dict:
             items = d.get("items") or []
             added = 0
             long_txt = memory.get_long()
+            pruned = _prune(items, _split(long_txt))
             for t in _split(long_txt):
                 added += _merge_item(items, t, "长期记忆", "", m)
             # 短期记忆：只同步**当前对话**的，别的对话的内容不该被带进这一轮
@@ -190,7 +246,8 @@ def sync(model: str = "", session: str = "", force: bool = False) -> dict:
             _write_pack(d)
             _CACHE.update({"mt_long": m, "mt_short": session, "at": now})
             return {"ok": True, "cached": False, "items": len(items),
-                    "added": added, "models": d.get("models") or []}
+                    "added": added, "pruned": pruned,
+                    "models": d.get("models") or []}
     except Exception as e:                                # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 

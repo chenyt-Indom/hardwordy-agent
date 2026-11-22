@@ -6806,6 +6806,7 @@
       lng.value = d.long || "";
       sht.value = d.short || "";
       _memLoadFails = 0;
+      loadMemItems();
       const lm = $("#memLongMeta");
       if (lm) lm.textContent = `${(d.long || "").length} / ${d.long_cap || 2000} 字`;
       const sm = $("#memShortMeta");
@@ -6830,6 +6831,76 @@
       if (_memLoadFails <= 4) setTimeout(loadMemory, 1500 * _memLoadFails);
     }
   }
+
+  // ---------- 记忆条目：分区 + 钉住 + 删除 ----------
+  // 正文唯一真相仍是上面那两块（长期 / 短期记忆），这里只是**视图**：
+  // 后端按「；」把正文拆成条目，再按关键词分到 4 个区。
+  // 用户要的是「能看见到底记住了几条、哪条过期了」，而不是一个黑盒 textarea。
+  async function loadMemItems() {
+    const box = $("#miList");
+    if (!box) return;
+    try {
+      const d = await api("/api/memory/items?session_id=" + encodeURIComponent(sessionId || ""));
+      if (!d || !d.ok) throw new Error((d && d.error) || "读取失败");
+      const st = d.stats || {};
+      const tot = $("#miTotal");
+      if (tot) tot.textContent = `${st.total || 0} 条${st.pinned ? ` · ${st.pinned} 钉住` : ""}`;
+      const items = d.items || [];
+      const secs = (st.sections || []).filter((s) => s.count > 0);
+      if (!items.length) {
+        box.innerHTML = '<div class="mem-vec-empty">还没有记忆条目</div>';
+        return;
+      }
+      box.innerHTML = secs.map((s) => `
+        <div class="mi-sec">${esc(s.name)}<em>${s.count}</em></div>
+        ${items.filter((it) => it.section === s.key).map((it) => `
+          <div class="mi-item${it.pin ? " pin" : ""}" data-id="${it.id}">
+            <span class="mi-text">${esc(it.text)}</span>
+            <button class="mi-btn" data-act="pin" title="${it.pin ? "取消钉住" : "钉住（注入时优先）"}">${it.pin ? "📌" : "📍"}</button>
+            <button class="mi-btn danger" data-act="del" title="删除这一条">✕</button>
+          </div>`).join("")}`).join("");
+    } catch (e) {
+      box.innerHTML = `<div class="mem-vec-empty">记忆条目读取失败：${esc(e.message || e)}</div>`;
+    }
+  }
+
+  (function bindMemItems() {
+    const head = $("#miToggle"), body = $("#miBody"), list = $("#miList");
+    if (!head || !body || !list) return;
+    head.onclick = () => {
+      body.hidden = !body.hidden;
+      const c = $("#miCaret");
+      if (c) c.textContent = body.hidden ? "▸" : "▾";
+      head.classList.toggle("open", !body.hidden);
+      if (!body.hidden) loadMemItems();
+    };
+    list.onclick = async (e) => {
+      const btn = e.target.closest("button[data-act]");
+      if (!btn) return;
+      const row = btn.closest(".mi-item");
+      const id = row && row.dataset.id;
+      if (!id) return;
+      btn.disabled = true;
+      try {
+        if (btn.dataset.act === "pin") {
+          await api("/api/memory/item/pin", { method: "POST", body: JSON.stringify({ id }) });
+        } else {
+          const txt = (row.querySelector(".mi-text") || {}).textContent || "";
+          if (!confirm(`删除这条记忆？\n\n${txt}\n\n（删前会自动备份，可以恢复）`)) return;
+          const r = await api("/api/memory/item/delete", {
+            method: "POST", body: JSON.stringify({ id, session_id: sessionId || "" }),
+          });
+          if (!r.ok) { showToast(r.error || "删除失败", "warn"); return; }
+          showToast("已删除这条记忆", "ok");
+        }
+        await loadMemory();
+      } catch (err) {
+        showToast("操作失败：" + (err.message || err), "warn");
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  })();
 
   // ⚠️ 别在对话一结束就立刻 loadMemory()。
   // 后端提炼记忆是**异步 + 防抖**的：停手 6 秒才启动，

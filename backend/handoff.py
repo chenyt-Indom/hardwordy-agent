@@ -972,6 +972,19 @@ def _file_lock(timeout=8.0):
                 logger.debug("silent-except", exc_info=True)
 
 
+def _uniq_suffix(base: str) -> str:
+    """给隔离文件名加唯一后缀，避免同一秒内多次损坏互相覆盖。
+
+    实测 2026-11-23：4 次「无法解析」全落在同一秒，只留下 1 个 .corrupt 文件，
+    另外 3 份原始内容（可能就是好的）被覆盖掉了，事后无法判断到底坏没坏。
+    """
+    p, n = base, 0
+    while os.path.exists(p):
+        n += 1
+        p = "%s-%d" % (base, n)
+    return p
+
+
 def _read() -> dict:
     with _IO_LOCK, _file_lock():
         return _read_locked()
@@ -1005,7 +1018,25 @@ def _read_locked() -> dict:
             logger.warning("交接卡暂时读不到（%s），不隔离文件，本次沿用上次成功的内容",
                            type(e).__name__)
             return dict(_LAST_GOOD)
-        except Exception:
+        except Exception as e:
+            # ★ 2026-11-23 再修：JSON 解析失败**也不等于文件坏了**。
+            #   实测（跑 regress 全量时连报 4 次「无法解析」）：
+            #   另一个进程刚 os.replace 完、或读到替换瞬间的旧句柄，
+            #   都可能拿到不完整内容 —— 直接把好文件改名隔离，
+            #   还把 .bak 一起隔离走（当时 data/handoff 里真的一份备份都没剩）。
+            #   所以先重试几次，仍失败才认定损坏。
+            if _i < 5:
+                time.sleep(0.05 * (_i + 1))
+                continue
+            try:
+                _sz = os.path.getsize(LAST)
+                with open(LAST, "rb") as _bf:
+                    _head = _bf.read(80)
+            except Exception:                           # noqa: BLE001
+                _sz, _head = -1, b""
+            logger.warning("交接卡内容解析失败（%s，pid=%s，%d 字节，开头=%r），"
+                           "重试 6 次仍不行，按损坏处理",
+                           type(e).__name__, os.getpid(), _sz, _head[:60])
             break
     # 走到这里 = 内容真的坏了（JSON 解析失败 / 顶层不是 dict）
     # 2026-11-18 修（数据丢失级）：原来这里直接 return {}，而调用方都是
@@ -1013,9 +1044,15 @@ def _read_locked() -> dict:
     # 下一次 record_change/touch 就会拿空字典写回，把整份历史无声覆盖掉。
     # 现在：先把坏文件改名隔离（留着人工抢救），再尝试上一次的 .bak。
     try:
-        bad = LAST + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S")
-        os.replace(LAST, bad)
-        logger.warning("交接卡 last.json 无法解析，已隔离为 %s", os.path.basename(bad))
+        bad = _uniq_suffix(LAST + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S"))
+        # ★ 2026-11-23：**复制**而不是 os.replace 搬走。
+        #   搬走会让 last.json 在这一瞬间**不存在**，此时别的进程（服务 / 回归）
+        #   正好来读，走 FileNotFoundError → 返回 {} → 下一次 record_change 拿空
+        #   字典写回，整份历史无声覆盖（这个坑 11-18 踩过一次）。
+        #   复制则原文件始终在，最坏情况只是多留一个坏副本。
+        shutil.copyfile(LAST, bad)
+        logger.warning("交接卡 last.json 无法解析，已另存一份到 %s（原文件保留）",
+                       os.path.basename(bad))
     except Exception:
         logger.debug("silent-except", exc_info=True)
     bak = LAST + ".bak"
@@ -1041,7 +1078,7 @@ def _read_locked() -> dict:
             # .bak 自己也坏了：隔离它，否则每次损坏都拿同一份坏备份去试，
             # 永远恢复不出来，还会把 corrupt 文件堆在原地。
             try:
-                bad2 = bak + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S")
+                bad2 = _uniq_suffix(bak + ".corrupt-" + time.strftime("%Y%m%d_%H%M%S"))
                 os.replace(bak, bad2)
                 logger.warning("交接卡 last.json.bak 也无法解析，已隔离为 %s",
                                os.path.basename(bad2))

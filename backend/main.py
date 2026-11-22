@@ -3608,6 +3608,37 @@ def selfiter_pending_features(days: int = 0):
         return {"ok": False, "error": str(e), "groups": [], "total": 0}
 
 
+# ---------------------------------------------------------------- 执行时间线
+# ⚠️ 这两个接口是「自迭代写了函数、忘了接路由」的遗留（2026-11-23 体检发现）：
+#   actlog.top_fail_kinds / actlog.get_stages 在 11-23 01:xx 就写好了，
+#   前端 featpanel.js 也早就按 `/api/actlog/top_fail_kinds`、
+#   `/api/selfiter/get_stages` 在调 —— 但路由从来没注册过，一点就 404，
+#   界面上表现为「失败分类看板 / 执行时间线」永远是空的。
+@app.get("/api/selfiter/get_stages")
+def selfiter_get_stages(id: str = "", n: int = 0):
+    """某个计划的阶段事件（旧→新），供前端时间线卡片渲染。
+
+    前端传的是 `?id=<plan_id>`（featpanel.js loadStages），这里照它的口径收。
+    """
+    from . import actlog as _al
+    try:
+        return {"ok": True, "plan_id": id, "stages": _al.get_stages(id, n)}
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("读取执行时间线失败", exc_info=True)
+        return {"ok": False, "error": str(e), "stages": []}
+
+
+@app.get("/api/actlog/top_fail_kinds")
+def actlog_top_fail_kinds(n: int = 10):
+    """失败分类看板：按 fail_kind 聚合次数（纯聚合，不调模型）。"""
+    from . import actlog as _al
+    try:
+        return {"ok": True, "items": _al.top_fail_kinds(n)}
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("读取失败分类失败", exc_info=True)
+        return {"ok": False, "error": str(e), "items": []}
+
+
 # ---------------------------------------------------------------- 推荐新功能
 # 用户 2026-11-16：「在最前端的设置按钮旁边增加一个新按钮就是【推荐新功能】…
 # 模型需要先想用户可能需要什么新功能…有计划时就在按钮中提示有推荐新功能，
@@ -12903,6 +12934,55 @@ def memory_reindex():
     """强制全量重建记忆索引（换模型或怀疑索引异常时用）。"""
     from . import memvec
     return {"ok": True, **memvec.rebuild()}
+
+
+@app.get("/api/memory/items")
+def memory_items(session_id: str = ""):
+    """记忆条目级视图：按分区分组返回每一条（长期 + 本对话短期）。
+
+    界面用它画「记忆条目」列表 —— 用户要的是能看见「到底记住了几条」，
+    而不是一个黑盒 textarea。正文仍是 memory 的长期/短期记忆，这里只是视图。
+    """
+    from . import memdesk
+    sid = (session_id or "").strip()
+    try:
+        return {"ok": True, "session_id": sid,
+                "items": memdesk.items(sid), "stats": memdesk.stats(sid)}
+    except Exception as e:
+        logger.warning("读取记忆条目失败", exc_info=True)
+        return {"ok": False, "error": str(e), "items": [], "stats": {}}
+
+
+@app.post("/api/memory/item/section")
+def memory_item_section(body: dict):
+    """改一条记忆的分区（profile/pref/work/recent）。"""
+    from . import memdesk
+    iid = str((body or {}).get("id") or "").strip()
+    sec = str((body or {}).get("section") or "").strip()
+    if not iid:
+        raise HTTPException(400, "缺少 id")
+    return memdesk.set_section(iid, sec)
+
+
+@app.post("/api/memory/item/pin")
+def memory_item_pin(body: dict):
+    """钉住 / 取消钉住一条记忆（钉住的排在最前面，注入时优先保留）。"""
+    from . import memdesk
+    iid = str((body or {}).get("id") or "").strip()
+    if not iid:
+        raise HTTPException(400, "缺少 id")
+    return memdesk.toggle_pin(iid)
+
+
+@app.post("/api/memory/item/delete")
+def memory_item_delete(body: dict):
+    """删除一条记忆（只删这一条，删前自动备份，条数不匹配就中止）。"""
+    from . import memdesk
+    iid = str((body or {}).get("id") or "").strip()
+    sid = str((body or {}).get("session_id") or "").strip()
+    if not iid:
+        raise HTTPException(400, "缺少 id")
+    return memdesk.delete_item(iid, sid)
 
 
 @app.get("/api/memory/usage")
