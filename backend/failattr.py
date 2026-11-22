@@ -364,9 +364,17 @@ def brief(limit: int = 8, days: int = 30, max_chars: int = 2400,
     """
     try:
         st = stats(days)
-        if not st.get("total"):
+        _empty = not st.get("total")
+        if _empty and not load_lessons():
             return ""
-        lines = ["共 %d 条失败/回滚记录（近 %d 天）" % (st["total"], days)]
+        if _empty:
+            # ★ 2026-11-22 修：原来这里直接 `return ""`，导致归因表为空期间
+            #   「已经构思过的改进方法」永远送不进反思提示词 —— 而 lessons
+            #   里恰恰积累着上一轮想好的办法。用户要求「不断积累改进经验」，
+            #   空表不等于没经验，不能把整段吞掉。
+            lines = ["归因表暂无记录（还没有真实失败被记下来）"]
+        else:
+            lines = ["共 %d 条失败/回滚记录（近 %d 天）" % (st["total"], days)]
         if st.get("by_kind_zh"):
             top = list(st["by_kind_zh"].items())[:6]
             lines.append("Top 失败类型：" + "、".join("%s×%d" % (k, v)
