@@ -2184,11 +2184,21 @@ def parse_watch_text(text: str) -> dict:
     if m:
         s = s[m.end():]
     s = _WATCH_TAIL_RE.sub("", s).strip()
+    # 从句兜底：路径里不会有中文标点，也不会「空格 + 一段中文」。
+    # 不做这层的话「盯着 a.log 每 30 分钟看一次」会把整段尾巴当成路径，
+    # 建出来的监视指向一个不存在的文件，永远只会报「文件不存在」。
+    s = re.split(r"[，,。；;！!？?]", s)[0].strip()
+    _m2 = re.match(r"^(\S+)\s+[\u4e00-\u9fff]", s)
+    if _m2:
+        s = _m2.group(1)
     s = s.strip(" \t，,。.！!；;：:、")
     s = s.strip("\"'「」“”《》")
     if s:
         out["target"] = s
-        out["name"] = "盯着：" + _clean(s, 24)
+        # 名称优先用文件名：长路径从头截断会变成「盯着：D:/local-multimodal-src/」，
+        # 列表里好几条长得一模一样，根本分不清盯的是哪个文件。
+        _base = re.split(r"[\\/]", s.rstrip("\\/ "))[-1] or s
+        out["name"] = "盯着：" + _clean(_base, 24)
     return out
 
 
