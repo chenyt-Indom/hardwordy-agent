@@ -1625,7 +1625,16 @@ def _trim_history_to_budget(messages: list, sys_prompt: str, tool_schemas: list,
         return tail, messages[:-2], _clamp_all(tail, max(256, room))
 
     # 输出愿留多少就留多少，但**不许把历史挤没**（见函数说明）
-    reserve_out = min(reserve_out_cfg, max(512, room - MIN_HISTORY_TOKENS))
+    # ★★ 2026-11-23 修（真 bug）：`cfg["max_tokens"]` 存的是**模型能力上限**
+    #   （云端探测到 DeepSeek max_output_tokens = 393216），不是本轮输出预算。
+    #   直接拿它当 reserve_out 会让它吃掉整个窗口 ——
+    #   `reserve_out = min(393216, room - 2500)` 恒等于 `room - 2500`，
+    #   于是 `budget` **永远等于 MIN_HISTORY_TOKENS(2500)**，历史只剩 1~2 条，
+    #   跟窗口开到 4 万还是 6 万**毫无关系**。这就是「老是失忆」的结构性原因。
+    #   现在给输出预留加一道天花板：最多占窗口 1/4，剩下的必须留给历史。
+    _out_cap = max(2048, ctx_limit // 4)
+    reserve_out = min(reserve_out_cfg, _out_cap,
+                      max(512, room - MIN_HISTORY_TOKENS))
     budget = room - reserve_out
     if budget <= 0:
         tail = messages[-2:]
@@ -10840,6 +10849,29 @@ async def chat_deepseek(req: ChatRequest,
     except Exception:
         logger.warning("云端通道图片台账失败（本轮按无图继续）", exc_info=True)
 
+    # ★★ 2026-11-23 修（API 费用暴涨的根因）：云端通道原来**完全没有历史预算控制**。
+    #   实测（data/llm_usage 真实账单）：chat 单次平均输入 **88,740 token**
+    #   （中位 88,740 / P90 124,501 / 最大 176,347），94% 的请求超过 6 万 token，
+    #   11-22 一天就烧掉 2.85 亿输入 token（输入占 99.3%）。
+    #   而本地通道一直走 _trim_history_to_budget（按 num_ctx 留最近若干轮），
+    #   云端这条独立入口漏掉了 —— 等于把整个会话历史原样重发一遍。
+    #   这里复用同一套裁剪：更早的压成「较早对话摘要」注入系统提示，
+    #   是**压缩不是丢弃**（问「开头聊了什么」仍答得出）。
+    _hist_digest_extra = ""
+    try:
+        _cfg_trim = config.load_config()
+        _ts_trim = _ds_tools(_cfg_trim)
+        _lu_trim = next((str(m.get("content") or "") for m in reversed(messages)
+                         if str(m.get("role") or "") == "user"), "")
+        _sys_trim = _SystemPrompt.build(_lu_trim, session) + _ask_rules(_cfg_trim)
+        messages, _dropped_trim, _ = _trim_history_to_budget(
+            messages, _sys_trim, _ts_trim, _cfg_trim,
+            images_b64=(list(_imgs or []) + list(_hist_imgs or [])))
+        if _dropped_trim:
+            _hist_digest_extra = _history_digest(_dropped_trim) or ""
+    except Exception:
+        logger.warning("云端通道历史裁剪失败（本轮按全量继续）", exc_info=True)
+
     # 只保留 role/content（Ollama 的额外字段 DeepSeek 不认）；
     # 但 **图片是认的** —— 历史消息带 images 时转成 OpenAI 多模态数组。
     clean: list[dict] = []
@@ -10890,6 +10922,10 @@ async def chat_deepseek(req: ChatRequest,
     # 症状：用户让 DeepSeek「做个 PPT / 画张图」，它不调 ask_user 直接瞎猜着做。
     # 工具在（41 个里有 ask_user），但模型不知道**什么时候该用**。
     sys_prompt += _ask_rules(cfg)
+    # ★ 2026-11-23：上面裁剪掉的较早历史，压成摘要并进系统提示 ——
+    #   否则用户回头问「开头聊了什么」，模型会一脸茫然（本地通道同款做法）。
+    if _hist_digest_extra:
+        sys_prompt += "\n\n" + _hist_digest_extra
 
     # ★ 2026-11-09：云端通道原来**完全没接**交接卡和工具账本 —— 用户用 DeepSeek 时
     #   问「刚刚改了什么」，模型手里一点证据都没有（只会答"没改任何东西"）。
