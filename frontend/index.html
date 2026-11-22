@@ -1455,7 +1455,7 @@
       // 评分：最近几轮进退 + 日志原文
       var hist = (S.history || []).map(function (x) {
         var d = Number(x.delta || 0);
-        return { k: String(x.ts || '').slice(5, 16) + ' ' + (x.verdict || ''),
+        return { k: String(x.iso || x.ts || '').slice(5, 16) + ' ' + (x.verdict || ''),
                  v: (d > 0 ? '+' : '') + d.toFixed(2) + (x.rollback ? ' ⏪' + (x.why || '') : '') };
       });
       h += _ipSec('📊 评分与进退（最近 ' + hist.length + ' 轮）', _ipRows(hist), true);

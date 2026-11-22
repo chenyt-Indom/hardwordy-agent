@@ -110,7 +110,7 @@ def _blk_failattr(days: int) -> dict:
     recent = []
     for r in rows:
         recent.append({
-            "ts": str(r.get("ts_zh") or r.get("ts") or "")[:19],
+            "ts": str(r.get("iso") or r.get("ts_zh") or r.get("ts") or "")[:19],
             "kind": str(r.get("kind_zh") or r.get("kind") or ""),
             "why": str(r.get("why_failed") or "")[:600],
             "rollback": str(r.get("why_rollback") or "")[:400],
