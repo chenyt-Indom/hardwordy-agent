@@ -416,6 +416,27 @@ def submit(plan_id, source="auto", title="", max_n=0):
     if not plan_id:
         return {"ok": False, "error": "缺少计划 id"}
 
+    # ★ 2026-11-22 用户报「推荐迭代完自动重启之后没有继续啊」：
+    #   真实原因不是「没继续」—— 队列恢复了、任务也开跑了，但它 0.3 秒就
+    #   报「没有已批准的动作」失败（22:37:48 那条事件），计划里 7 条全是 pending。
+    #   auto 来源没事（worker 会先 auto_approve_only 自动批准），
+    #   而 manual / featradar 等来源没人批准 → 必然白跑一趟，还让人以为卡住了。
+    #   所以这里先查一遍：没有已批准动作就**不许进队列**，并说清该怎么办。
+    if str(source or "auto") != "auto":
+        try:
+            _r = _si.get_plan(plan_id)
+            _acts = [a for a in (((_r or {}).get("plan") or {}).get("actions") or [])
+                     if isinstance(a, dict)]
+            if _acts and not any(a.get("status") == "approved" for a in _acts):
+                _pd = sum(1 for a in _acts if a.get("status") == "pending")
+                return {"ok": False, "state": "rejected",
+                        "error": ("这个计划没有已批准的动作（%d 条待批准）—— "
+                                  "先点「批准」再执行，否则排进去也是 0 秒失败"
+                                  % _pd) if _pd
+                                 else "这个计划没有可执行的动作（都已执行或已被拒绝）"}
+        except Exception:                               # noqa: BLE001
+            logger.debug("检查已批准动作失败（不拦，交给执行器判断）", exc_info=True)
+
     tid = "t_%s" % _si._pid()
     # ★ 2026-11-20：前端 enqueue 只传 id，不传 title —— 这里自己补，
     #   否则卡片永远只有一句「正在迭代中…」，看不出在做什么功能。
@@ -1177,6 +1198,33 @@ def boot_resume():
         _emit_sys("队列里有 %d 个任务找不到对应的计划文件（可能被删了），"
                   "任务内容已保留在卡片上，可以取消后重新提交" % _missing,
                   state="waiting")
+    # ★ 2026-11-22：重启前可能已经排进了「没有已批准动作」的死任务
+    #   （旧版 submit 不校验）。恢复时把它们剔出去并说明原因 —— 否则重启后
+    #   又要白跑一次 0.3 秒失败，用户看到的就是「重启后没继续」。
+    _dead, _keep = [], []
+    for _x in (_STATE.get("queue") or []):
+        if str(_x.get("source") or "") == "auto" or _x.get("plan_missing"):
+            _keep.append(_x)
+            continue
+        try:
+            _r2 = _si.get_plan(str(_x.get("plan_id") or ""))
+            _a2 = [a for a in (((_r2 or {}).get("plan") or {}).get("actions") or [])
+                   if isinstance(a, dict)]
+            if _a2 and not any(a.get("status") == "approved" for a in _a2):
+                _dead.append(_x)
+                continue
+        except Exception:                               # noqa: BLE001
+            logger.debug("恢复时检查已批准动作失败（不剔，交给执行器）", exc_info=True)
+        _keep.append(_x)
+    if _dead:
+        with _LOCK:
+            _STATE["queue"] = _keep
+        _save()
+        for _x in _dead:
+            _emit(_x.get("tid") or "_sys", "status",
+                  text="「%s」没有任何已批准的动作，已从队列移除（先批准再执行）"
+                       % (_x.get("title") or _x.get("plan_id") or "未命名"),
+                  state="cancelled")
     if orphan:
         _save()
         _name = orphan.get("title") or orphan.get("plan_id") or "未命名任务"
