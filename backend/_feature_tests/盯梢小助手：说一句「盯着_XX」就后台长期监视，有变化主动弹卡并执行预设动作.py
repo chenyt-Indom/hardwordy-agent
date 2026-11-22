@@ -18,14 +18,21 @@ def run():
     open(os.path.join(d, 'a.txt'), 'w').write('1')
     wid = handoff.create_watch(target=d, condition='content_change')
     assert wid is not None
-    before = len(actlog.list_events())
-    open(os.path.join(d, 'a.txt'), 'w').write('2')
-    changed = handoff.check_watch(wid)
-    assert changed is True
-    after = len(actlog.list_events())
-    assert after == before + 1
-    tasks = handoff.list_watches()
-    assert any(t.get('id') == wid for t in tasks)
+    try:
+        before = len(actlog.list_events())
+        open(os.path.join(d, 'a.txt'), 'w').write('2')
+        changed = handoff.check_watch(wid)
+        assert changed is True
+        after = len(actlog.list_events())
+        assert after == before + 1
+        tasks = handoff.list_watches()
+        assert any(t.get('id') == wid for t in tasks)
+    finally:
+        # 跑完自清理：回归每次都会跑本用例，不清会往真实 watch.json 留垃圾记录
+        try:
+            handoff.remove_watch(wid)
+        except Exception:  # noqa - 清理失败不影响断言结论
+            pass
     print('watch ok')
 
 

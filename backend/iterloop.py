@@ -193,10 +193,24 @@ def regress_part(timeout=180):
     try:
         from . import regress as RG
         runner = getattr(RG, "run_disk", None) or RG.run
+        # ★ 2026-11-22 修自激死循环：回归里有个断言会**真调 selfdev_write 写文件**
+        #   （test_selfdev_write_guard 的探针 backend/_guard_probe_target.py），
+        #   那会 mark_dirty → dirty_ts 刷新 → 20 秒后自动评分线程又跑回归 → 又打标记…
+        #   实测该文件被写 172 次、每分钟 1~3 次空转，持续烧 CPU。
+        #   评分期间用环境变量告诉 mark_dirty「别打标记」，finally 里**必须**恢复：
+        #   不恢复的话一次评分之后整个进程再也不打标记，闸门就永远检测不到退步了。
+        _old_nm = os.environ.get("MM_NO_SCORE_MARK")
+        os.environ["MM_NO_SCORE_MARK"] = "1"
         try:
-            r = runner(scope="quick", timeout=timeout)
-        except TypeError:
-            r = runner(scope="quick")
+            try:
+                r = runner(scope="quick", timeout=timeout)
+            except TypeError:
+                r = runner(scope="quick")
+        finally:
+            if _old_nm is None:
+                os.environ.pop("MM_NO_SCORE_MARK", None)
+            else:
+                os.environ["MM_NO_SCORE_MARK"] = _old_nm
         total = int(r.get("total") or 0)
         if total <= 0:
             return None

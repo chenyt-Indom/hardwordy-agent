@@ -1580,7 +1580,7 @@ def _watch_read() -> dict:
             d = json.load(f)
         if isinstance(d, dict) and isinstance(d.get("watches"), list):
             return d
-    except FileNotFoundError:
+    except FileNotFoundError:  # noqa - 首次运行还没有清单文件，属正常情况
         pass
     except Exception:
         logger.warning("盯梢 watch.json 读不出来，本次按空处理", exc_info=True)

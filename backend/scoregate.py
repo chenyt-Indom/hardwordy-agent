@@ -272,7 +272,15 @@ def auto_state() -> Dict[str, Any]:
 # ---------------------------------------------------------------- 打脏标记
 
 def mark_dirty(rel: str = "", note: str = "") -> None:
-    """任何代码写入成功后调它。只打标记，**不评分**（零开销）。"""
+    """任何代码写入成功后调它。只打标记，**不评分**（零开销）。
+
+    ⚠️ 2026-11-22 修自激死循环：评分要跑回归，而回归里有个断言会真调
+    selfdev_write 写探针文件 → 又 mark_dirty → dirty_ts 刷新 → 自动评分线程
+    又跑回归……实测 backend/_guard_probe_target.py 被写 172 次、每分钟 1~3 次。
+    所以评分期间由 iterloop.regress_part 设 MM_NO_SCORE_MARK=1，这里直接跳过。
+    """
+    if os.environ.get("MM_NO_SCORE_MARK"):
+        return
     try:
         with _LOCK:
             d = _load()
