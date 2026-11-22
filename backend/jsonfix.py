@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,223 @@ def parse(txt: str | None):
     if isinstance(fixed, dict):
         return fixed
     return None
+
+
+# =====================================================================
+#  safe_get：兜底取字段，避免 KeyError / AttributeError
+#  ---------------------------------------------------------------------
+#  2026-11-22 用户要求：「safe_get 兜底取字段，避免 KeyError」。
+#
+#  为什么要它：详情面板（iterpanel）与体检接口（main.py 的
+#  /api/iter/health、/api/selfiter/health、/api/iter/panel）都是**只读聚合层**，
+#  数据来自七八个模块的 stats() / check() / health_snapshot()。上游少给一个键、
+#  返回 None、或者列表里混进一条格式不对的行时：
+#        obj["k"]        → KeyError，
+#        obj.get("k")    → 在 None 上 AttributeError，
+#  整个接口 500，前端显示「体系挂了」—— 实际只是某个字段没给。用户看到的
+#  「体检报错」十次有九次是这个原因，不是体系真的坏了。
+#
+#  统一口径：
+#    · 取得到 → 返回**真实值本体**（0 / False / "" 也算取到，绝不当缺失）；
+#    · 取不到 → 返回 default，**绝不抛异常**（路径非法、类型对不上都一样）；
+#    · 取不到时把「实际可用的 key 列表」写进 actlog 的 field_miss 事件 ——
+#      否则下一个人只能靠猜「上游到底给了什么字段」。
+# =====================================================================
+
+_MISS_SESSION = "field_miss"     # 落盘到 data/actlog/field_miss.jsonl
+_MAX_KEYS = 24                   # 事件里最多列多少个可用 key（别把账本撑大）
+_MISS_KEEP = 200                 # 单进程最多记多少条，防止异常路径刷爆账本
+_MISS_GAP = 5.0                  # 同一 (调用点, 路径) 5 秒内只记一次
+_MISS_SEEN: dict = {}
+_MISS_N = 0
+
+
+def _split_path(path) -> list:
+    """'a.b.c' → ['a','b','c']；也接受已经拆好的序列。空段直接丢掉。"""
+    if isinstance(path, (list, tuple)):
+        return [str(p).strip() for p in path if str(p).strip()]
+    return [p.strip() for p in str(path or "").split(".") if p.strip()]
+
+
+def _avail_keys(obj) -> list:
+    """取 obj 上「实际可用的 key 列表」，给 field_miss 事件用。"""
+    try:
+        if isinstance(obj, dict):
+            ks = [str(k) for k in obj.keys()]
+        elif isinstance(obj, (list, tuple)):
+            ks = ["[%d]" % i for i in range(min(len(obj), _MAX_KEYS))]
+        else:
+            ks = []
+    except Exception:                       # noqa: BLE001
+        ks = []
+    return ks[:_MAX_KEYS]
+
+
+def _soft_key(obj, seg):
+    """大小写 / 首尾空白不敏感地找一个键（LLM 给的 JSON 常见 'Title' / ' Title'）。
+
+    找到返回**原始键**（拿来索引），找不到返回 None。
+    """
+    want = str(seg).strip().lower()
+    for k in obj.keys():
+        try:
+            if str(k).strip().lower() == want:
+                return k
+        except Exception:                   # noqa: BLE001
+            continue
+    return None
+
+
+def _as_index(seg):
+    """'0' / '[0]' → 0；不是下标写法返回 None。"""
+    s = str(seg).strip()
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1].strip()
+    try:
+        return int(s)
+    except Exception:                       # noqa: BLE001
+        return None
+
+
+def _actlog_module():
+    """拿到 actlog 模块；拿不到返回 None（本模块要保持「可独立导入」）。"""
+    try:
+        from . import actlog as _al
+        return _al
+    except Exception:                       # noqa: BLE001
+        logger.debug("jsonfix 取 actlog 失败（字段缺失事件不落账本）", exc_info=True)
+    for name in ("actlog", "backend.actlog"):
+        try:
+            return __import__(name, fromlist=["*"])
+        except Exception:                   # noqa: BLE001
+            continue
+    return None
+
+
+def _note_miss(path, where, avail, session="") -> None:
+    """把一次取字段失败写进 actlog 的 field_miss 事件。任何异常都吞掉。
+
+    事件里必须带「实际可用 key 列表」—— 只记「缺了 a.c」没用，真正要回答的是
+    「那上游到底给了什么」。落两行（工具动作行 + watch 事件行）是故意的：
+    前者进 fail_kind 统计（count_fail_kind_recent 能数出「这个字段缺了几次」），
+    后者进 list_events(kind="watch") / recent_watch_events，前端盯梢卡片能看到。
+    """
+    global _MISS_N
+    avail = list(avail or [])
+    try:
+        key = (str(where or ""), str(path or ""))
+        now = time.time()
+        last = _MISS_SEEN.get(key)
+        if last is not None and now - last < _MISS_GAP:
+            return                          # 同一调用点同一路径，短时间内只记一次
+        if _MISS_N >= _MISS_KEEP:
+            return                          # 账本轮不上限就别写，宁可少记也别刷爆
+        _MISS_SEEN[key] = now
+        _MISS_N += 1
+    except Exception:                       # noqa: BLE001
+        logger.debug("jsonfix field_miss 去重失败（照常记录）", exc_info=True)
+    al = _actlog_module()
+    if al is None:
+        return
+    try:
+        path_s = str(path or "")[:80]
+        where_s = str(where or "")[:60]
+        note = ("缺字段 %s（%s）；可用 key: %s"
+                % (path_s, where_s or "未标注调用点",
+                   ",".join(avail) if avail else "无（不是 dict/list 或为空）"))
+        al.record(session or _MISS_SESSION, "field_miss",
+                  {"path": path_s, "rel": where_s}, ok=False, result=note,
+                  evidence={"fail_kind": "field_miss"})
+        al.append_watch_event(session or _MISS_SESSION,
+                              {"kind": "field_miss", "key": path_s,
+                               "state": "miss", "note": note,
+                               "count": len(avail)})
+    except Exception:                       # noqa: BLE001
+        logger.debug("jsonfix 写 field_miss 事件失败（账本坏了不能影响取值）",
+                     exc_info=True)
+
+
+def safe_get(obj, path, default=None, *, session="", where=""):
+    """按点分路径从嵌套 dict / list 里取值，取不到返回 default，**绝不抛异常**。
+
+    用法与语义::
+
+        safe_get({'a': {'b': 1}}, 'a.b')            -> 1
+        safe_get({'a': {'b': 1}}, 'a.c')            -> None   （并记 field_miss）
+        safe_get({'a': {'b': 1}}, 'a.c', 0)         -> 0
+        safe_get({'a': [{'b': 1}]}, 'a.0.b')        -> 1      （支持下标）
+        safe_get(None, 'a.b', '默认')                -> '默认'
+
+    参数：
+      obj      任意对象（None / 非容器都安全）
+      path     点分路径字符串，或已拆好的序列；段的比较对大小写/空白不敏感
+      default  取不到时的返回值（只表示「缺失」，不表示「值是空」）
+      session  field_miss 事件落到哪个账本（默认 data/actlog/field_miss.jsonl）
+      where    调用点标注（如 "iterpanel.score"），排查时一眼知道是谁缺的字段
+
+    注意：键存在但值是 None 时**返回 None**（存在 ≠ 缺失）。要让 None 也走默认值，
+    调用方自己写 `safe_get(...) or default` —— 本函数不替调用方猜意图。
+    """
+    try:
+        cur = obj
+        parts = _split_path(path)
+        miss_at = -1
+        avail: list = []
+        for i, seg in enumerate(parts):
+            if isinstance(cur, dict):
+                if seg in cur:
+                    cur = cur[seg]
+                    continue
+                real = _soft_key(cur, seg)
+                if real is not None:
+                    cur = cur[real]
+                    continue
+                miss_at, avail = i, _avail_keys(cur)
+                break
+            if isinstance(cur, (list, tuple)):
+                idx = _as_index(seg)
+                if idx is not None and -len(cur) <= idx < len(cur):
+                    cur = cur[idx]
+                    continue
+                miss_at, avail = i, _avail_keys(cur)
+                break
+            # 走到非容器（None / int / str …）上还想再下钻 → 这一段就算缺
+            miss_at, avail = i, _avail_keys(cur)
+            break
+        if miss_at < 0:
+            return cur                      # 全程取到（哪怕是 0 / False / ""）
+        _note_miss(path, where, avail, session=session)
+        return default
+    except Exception:                       # noqa: BLE001
+        # 连路径解析都炸了（传了奇怪对象）也不能让调用方崩 —— 兜底就兜到底
+        logger.debug("safe_get 兜底失败 path=%r", path, exc_info=True)
+        try:
+            _note_miss(path, where, [], session=session)
+        except Exception:                   # noqa: BLE001
+            logger.debug("jsonfix field_miss 补记失败", exc_info=True)
+        return default
+
+
+def safe_list(obj, path, *, session="", where=""):
+    """safe_get 的列表专用版：取到的不是 list 就当缺失（返回 []）。
+
+    面板里全是 `for it in (d.get("items") or [])` 这种写法 —— 上游万一给了
+    dict 或字符串，`or []` 挡不住，for 会遍历键/字符甚至直接抛错。这里一次说清。
+    """
+    v = safe_get(obj, path, None, session=session, where=where)
+    if isinstance(v, list):
+        return v
+    if isinstance(v, tuple):
+        return list(v)
+    if v is None:
+        return []
+    return []
+
+
+def safe_dict(obj, path, *, session="", where=""):
+    """safe_get 的 dict 专用版：取到的不是 dict 就当缺失（返回 {}）。"""
+    v = safe_get(obj, path, None, session=session, where=where)
+    return v if isinstance(v, dict) else {}
 
 
 def dump_raw(txt: str | None, out_dir, where: str = "reflect") -> str:

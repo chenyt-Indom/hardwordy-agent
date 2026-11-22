@@ -3323,8 +3323,35 @@ def selfiter_health():
     这个接口把 health_snapshot() 直接吐给前端，面板顶部固定展示一张卡片。
     """
     from . import self_iterate as _si
+    from . import jsonfix as _jf
     try:
-        return _si.health_snapshot()
+        raw = _si.health_snapshot()
+        # ★ 2026-11-22「safe_get 兜底取字段」：快照数字来自三处（actlog /
+        #   plans.json / 进程内 _RUN），任何一处读不到都会让某个键消失。
+        #   逐字段 safe_get：缺了就降级成该字段的「无数据」值（0 / 0.0 / ""），
+        #   并把实际可用的 key 列表记进 actlog 的 field_miss 事件。
+        #   注意 has_data=False 的语义不变 —— 空 ≠ 坏，前端要能区分。
+        w = "main.selfiter_health"
+        return {
+            "ok": bool(_jf.safe_get(raw, "ok", True, where=w)),
+            "success_rate": _jf.safe_get(raw, "success_rate", 0.0, where=w),
+            "rollbacks": _jf.safe_get(raw, "rollbacks", 0, where=w),
+            "circuit_breaks": _jf.safe_get(raw, "circuit_breaks", 0, where=w),
+            "last_round_trigger": _jf.safe_get(raw, "last_round_trigger", "",
+                                               where=w),
+            "last_round_trigger_zh": _jf.safe_get(raw, "last_round_trigger_zh",
+                                                  "", where=w),
+            "phantom_fix_count": _jf.safe_get(raw, "phantom_fix_count", 0,
+                                              where=w),
+            "total": _jf.safe_get(raw, "total", 0, where=w),
+            "attempts": _jf.safe_get(raw, "attempts", 0, where=w),
+            "ok_count": _jf.safe_get(raw, "ok_count", 0, where=w),
+            "fail_count": _jf.safe_get(raw, "fail_count", 0, where=w),
+            "has_data": bool(_jf.safe_get(raw, "has_data", False, where=w)),
+            "last_round_ts": _jf.safe_get(raw, "last_round_ts", "", where=w),
+            "level": _jf.safe_get(raw, "level", "unknown", where=w),
+            "hint": _jf.safe_get(raw, "hint", "", where=w),
+        }
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
 
@@ -4092,8 +4119,26 @@ def iter_health(days: int = 30):
     而不是被误读成正常。只读、不触发评分/回归，毫秒级返回。
     """
     from . import iterhealth as _IH
+    from . import jsonfix as _jf
     try:
-        return _IH.check(days=int(days or 30))
+        raw = _IH.check(days=int(days or 30))
+        # ★ 2026-11-22 用户要求「safe_get 兜底取字段，避免 KeyError」：
+        #   体检结果由 8 个探测各拼一块，上游少给一个键（或返回 None）就让整个
+        #   接口 500 —— 用户看到的「体检报错」多半只是某个字段没给，不是体系坏了。
+        #   这里逐字段用 safe_get 取：缺了就降级成默认值，并把「实际可用的 key
+        #   列表」记进 actlog 的 field_miss 事件，排查时不用再猜上游给了什么。
+        w = "main.iter_health"
+        return {
+            "ok": bool(_jf.safe_get(raw, "ok", True, where=w)),
+            "overall": _jf.safe_get(raw, "overall", "", where=w),
+            "overall_zh": _jf.safe_get(raw, "overall_zh", "", where=w),
+            "verdict": _jf.safe_get(raw, "verdict", "", where=w),
+            "counts": _jf.safe_get(raw, "counts", {}, where=w) or {},
+            "items": _jf.safe_get(raw, "items", [], where=w) or [],
+            "days": _jf.safe_get(raw, "days", int(days or 30), where=w),
+            "iso": _jf.safe_get(raw, "iso", "", where=w),
+            "seconds": _jf.safe_get(raw, "seconds", None, where=w),
+        }
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
@@ -4111,8 +4156,30 @@ def iter_panel(days: int = 30):
     同样**只读**：不触发评分/回归/反思，点开即出。
     """
     from . import iterpanel as _IP
+    from . import jsonfix as _jf
     try:
-        return _IP.panel(days=int(days or 30))
+        raw = _IP.panel(days=int(days or 30))
+        # 同上：面板是 9 个块拼出来的，任何一块返回的不是 dict 都不该让接口炸。
+        # 顶层字段一律 safe_get 兜底（缺字段会记 actlog 的 field_miss 事件）。
+        w = "main.iter_panel"
+        if not isinstance(raw, dict):
+            return {"ok": False, "error": "面板返回的不是 dict：%s"
+                                          % type(raw).__name__}
+        return {
+            "ok": bool(_jf.safe_get(raw, "ok", True, where=w)),
+            "ts": _jf.safe_get(raw, "ts", "", where=w),
+            "days": _jf.safe_get(raw, "days", int(days or 30), where=w),
+            "errors": _jf.safe_get(raw, "errors", {}, where=w) or {},
+            "score": _jf.safe_get(raw, "score", None, where=w),
+            "press": _jf.safe_get(raw, "press", None, where=w),
+            "failattr": _jf.safe_get(raw, "failattr", None, where=w),
+            "scoredrop": _jf.safe_get(raw, "scoredrop", None, where=w),
+            "reflect": _jf.safe_get(raw, "reflect", None, where=w),
+            "memory": _jf.safe_get(raw, "memory", None, where=w),
+            "semantic": _jf.safe_get(raw, "semantic", None, where=w),
+            "health": _jf.safe_get(raw, "health", None, where=w),
+            "chain": _jf.safe_get(raw, "chain", None, where=w),
+        }
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 

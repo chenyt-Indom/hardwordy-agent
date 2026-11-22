@@ -18,7 +18,20 @@ import logging
 import os
 import time
 
+try:                                    # 包内导入（正常路径）
+    from .jsonfix import safe_get as _get
+except ImportError:                     # 允许作为顶层模块被直接导入（如验收断言）
+    from jsonfix import safe_get as _get
+
 logger = logging.getLogger(__name__)
+
+# ★ 2026-11-22 用户要求：「safe_get 兜底取字段，避免 KeyError」。
+#   本模块是**只读聚合层**，数据全来自七八个模块的 stats()/load()/brief()。
+#   上游少给一个键 → 原来的 st.get(...) 在 None 上直接 AttributeError，
+#   整块显示错误（用户以为体系挂了，其实只是某个字段没给）。
+#   现在统一走 jsonfix.safe_get：取不到返回默认值、并把「实际可用的 key 列表」
+#   记进 actlog 的 field_miss 事件，排查时不用再猜上游给了什么。
+#   下面的 where="块名.字段" 就是给 field_miss 事件用的调用点标注。
 
 # 日志/报告读多少行：够看清最近发生了什么，又不至于把响应撑到几百 KB
 _LOG_LINES = 40
@@ -92,18 +105,20 @@ def _blk_score() -> dict:
     except Exception:                                   # noqa: BLE001
         logger.debug("iterpanel 读 last_score.json 失败（面板照常显示其他块）",
                      exc_info=True)
+    if not isinstance(manual, dict):
+        manual = {}
     return {
         "last_manual": manual,
-        "cumulative": st.get("cumulative"),
-        "rounds": st.get("rounds"),
-        "improved": st.get("improved"),
-        "regressed": st.get("regressed"),
-        "flat": st.get("flat"),
-        "rollbacks": st.get("rollbacks"),
-        "avg_delta": st.get("avg_delta"),
-        "best": st.get("best"),
-        "worst": st.get("worst"),
-        "last": st.get("last"),
+        "cumulative": _get(st, "cumulative", where="score.cumulative"),
+        "rounds": _get(st, "rounds", where="score.rounds"),
+        "improved": _get(st, "improved", where="score.improved"),
+        "regressed": _get(st, "regressed", where="score.regressed"),
+        "flat": _get(st, "flat", where="score.flat"),
+        "rollbacks": _get(st, "rollbacks", where="score.rollbacks"),
+        "avg_delta": _get(st, "avg_delta", where="score.avg_delta"),
+        "best": _get(st, "best", where="score.best"),
+        "worst": _get(st, "worst", where="score.worst"),
+        "last": _get(st, "last", where="score.last"),
         "history": _IL.history(_HIST_SHOWN),
         "log_path": log_path,
         "log": _tail(log_path, _LOG_LINES),
@@ -116,39 +131,47 @@ def _blk_failattr(days: int) -> dict:
     st = _FA.stats(days)
     rows = []
     try:
-        rows = [r for r in (_FA.load() or [])][-6:]
+        loaded = _FA.load()
+        # 只留 dict 行：明细文件坏一半时，混进来的字符串/None 不该让整块塌掉
+        rows = [r for r in (loaded if isinstance(loaded, list) else [])
+                if isinstance(r, dict)][-6:]
     except Exception:                                   # noqa: BLE001
         logger.debug("iterpanel 读归因明细失败", exc_info=True)
     recent = []
     for r in rows:
+        w = "failattr.recent"
         recent.append({
-            "ts": str(r.get("iso") or r.get("ts_zh") or r.get("ts") or "")[:19],
-            "kind": str(r.get("kind_zh") or r.get("kind") or ""),
-            "why": str(r.get("why_failed") or "")[:600],
-            "rollback": str(r.get("why_rollback") or "")[:400],
-            "files": (r.get("files") or [])[:5],
-            "vague": bool(r.get("too_vague")),
+            "ts": str(_get(r, "iso", where=w) or _get(r, "ts_zh", where=w)
+                      or _get(r, "ts", where=w) or "")[:19],
+            "kind": str(_get(r, "kind_zh", where=w) or _get(r, "kind", where=w) or ""),
+            "why": str(_get(r, "why_failed", where=w) or "")[:600],
+            "rollback": str(_get(r, "why_rollback", where=w) or "")[:400],
+            "files": (_get(r, "files", where=w) or [])[:5]
+                     if isinstance(_get(r, "files", where=w), list) else [],
+            "vague": bool(_get(r, "too_vague", where=w)),
         })
     lessons = []
     try:
         d = _FA.load_lessons() or {}
+        if not isinstance(d, dict):
+            d = {}
         for k, v in list(d.items())[:8]:
             if isinstance(v, dict):
                 lessons.append({
-                    "kind": str(v.get("kind") or k),
-                    "root_cause": str(v.get("root_cause") or "")[:400],
-                    "fix": str(v.get("fix") or "")[:400],
-                    "verify": str(v.get("verify") or "")[:300],
+                    "kind": str(_get(v, "kind") or k),
+                    "root_cause": str(_get(v, "root_cause") or "")[:400],
+                    "fix": str(_get(v, "fix") or "")[:400],
+                    "verify": str(_get(v, "verify") or "")[:300],
                 })
     except Exception:                                   # noqa: BLE001
         logger.debug("iterpanel 读 lessons 失败", exc_info=True)
     return {
-        "total": st.get("total"),
-        "days": st.get("days"),
-        "by_kind_zh": st.get("by_kind_zh"),
-        "by_stage": st.get("by_stage"),
-        "repeat": st.get("repeat"),
-        "rollback": st.get("rollback"),
+        "total": _get(st, "total", where="failattr.total"),
+        "days": _get(st, "days", where="failattr.days"),
+        "by_kind_zh": _get(st, "by_kind_zh", where="failattr.by_kind_zh"),
+        "by_stage": _get(st, "by_stage", where="failattr.by_stage"),
+        "repeat": _get(st, "repeat", where="failattr.repeat"),
+        "rollback": _get(st, "rollback", where="failattr.rollback"),
         "recent": recent,
         "lessons": lessons,
     }
@@ -162,28 +185,32 @@ def _blk_reflect() -> dict:
         out["journal_path"] = jp
         for r in _tail_jsonl(jp, _JOURNAL_LINES):
             out["journal"].append({
-                "ts": str(r.get("ts") or "")[:19],
-                "rel": str(r.get("rel") or "")[:40],
-                "note": str(r.get("note") or "")[:220],
+                "ts": str(_get(r, "ts", where="reflect.journal") or "")[:19],
+                "rel": str(_get(r, "rel", where="reflect.journal") or "")[:40],
+                "note": str(_get(r, "note", where="reflect.journal") or "")[:220],
             })
     except Exception:                                   # noqa: BLE001
         logger.debug("iterpanel 读 journal 失败", exc_info=True)
     try:
         from . import self_iterate as _si
-        plans = (_si.load_plans() or {}).get("items") or []
+        plans = _get(_si.load_plans(), "items", where="reflect.plans") or []
+        if not isinstance(plans, list):
+            plans = []
         for p in plans[-_PLANS_SHOWN:][::-1]:
-            acts = p.get("actions") or []
-            done = [a for a in acts if str(a.get("status") or "") in
+            acts = _get(p, "actions", where="reflect.plan.actions") or []
+            if not isinstance(acts, list):
+                acts = []
+            done = [a for a in acts if str(_get(a, "status") or "") in
                     ("done", "approved", "executed")]
             out["plans"].append({
-                "id": str(p.get("id") or "")[:24],
-                "ts": str(p.get("ts") or "")[:19],
-                "trigger": str(p.get("trigger") or ""),
-                "summary": str(p.get("summary") or "")[:300],
+                "id": str(_get(p, "id") or "")[:24],
+                "ts": str(_get(p, "ts") or "")[:19],
+                "trigger": str(_get(p, "trigger") or ""),
+                "summary": str(_get(p, "summary") or "")[:300],
                 "actions": len(acts),
                 "done": len(done),
-                "features": len(p.get("features") or []),
-                "fail_lessons": len(p.get("fail_lessons") or []),
+                "features": len(_get(p, "features") or []),
+                "fail_lessons": len(_get(p, "fail_lessons") or []),
             })
     except Exception:                                   # noqa: BLE001
         logger.debug("iterpanel 读 plans 失败", exc_info=True)
@@ -204,7 +231,8 @@ def _blk_memory() -> dict:
         logger.debug("iterpanel 读长期记忆失败", exc_info=True)
     try:
         from . import memtransfer as _MT
-        out["transfer"] = _MT.stats()
+        _tr = _MT.stats()
+        out["transfer"] = _tr if isinstance(_tr, dict) else {}
         # brief() 内部会先 sync()，等于顺带确认「读写链路都通」
         out["transfer_brief"] = (_MT.brief(max_chars=600) or "")[:600]
     except Exception:                                   # noqa: BLE001
@@ -214,19 +242,24 @@ def _blk_memory() -> dict:
 
 def _blk_semantic() -> dict:
     from . import failvec as _FV
-    return _FV.status()
+    st = _FV.status()
+    # 语义检索状态整体缺失时给空 dict（前端显示「暂无」），而不是把 None 丢下去
+    return st if isinstance(st, dict) else {}
 
 
 def _blk_health(days: int) -> dict:
     from . import iterhealth as _IH
     d = _IH.check(days=days) or {}
     cnt = {"ok": 0, "degrade": 0, "idle": 0}
-    for it in (d.get("items") or []):
-        k = str(it.get("state") or "")
+    items = _get(d, "items", where="health.items") or []
+    if not isinstance(items, list):
+        items = []
+    for it in items:
+        k = str(_get(it, "state") or "")
         if k in cnt:
             cnt[k] += 1
-    return {"summary": cnt, "items": d.get("items") or [],
-            "verdict": d.get("verdict") or ""}
+    return {"summary": cnt, "items": items,
+            "verdict": _get(d, "verdict", "", where="health.verdict") or ""}
 
 
 def _blk_chain() -> dict:
@@ -251,7 +284,8 @@ def _blk_scoredrop(days: int = 30) -> dict:
     的扣分点）原样带出 file/line/kind/msg，前端做折叠展开。
     """
     from . import scoredrop as _SD
-    return _SD.status(n=20)
+    st = _SD.status(n=20)
+    return st if isinstance(st, dict) else {}
 
 
 def _blk_press() -> dict:
@@ -262,7 +296,8 @@ def _blk_press() -> dict:
     + 最近几次趋势。只读，不触发评分。
     """
     from . import scorepress as _SP
-    return _SP.stats()
+    st = _SP.stats()
+    return st if isinstance(st, dict) else {}
 
 
 def panel(days: int = 30) -> dict:
@@ -282,10 +317,21 @@ def panel(days: int = 30) -> dict:
     ]
     for name, fn in blocks:
         try:
-            out[name] = fn()
+            v = fn()
+            # 块返回的不是 dict（上游改了返回类型 / 给了 None）→ 按「暂无」处理，
+            # 绝不让前端拿到字符串或列表去当对象读（那是 TypeError 不是空面板）。
+            out[name] = v if isinstance(v, dict) else None
+            if out[name] is None:
+                out["errors"][name] = ("块 %s 返回的不是 dict（%s）"
+                                      % (name, type(v).__name__))
         except Exception as e:                          # noqa: BLE001
             logger.debug("iterpanel 块 %s 失败", name, exc_info=True)
             out[name] = None
             out["errors"][name] = "%s: %s" % (type(e).__name__, e)
     out["ok"] = not out["errors"]
+    # 面板出口处再兜一层：顶层字段用 safe_get 取，缺了也只降级成默认值
+    out["ok"] = bool(_get(out, "ok", True, where="panel.ok"))
+    out["ts"] = _get(out, "ts", "", where="panel.ts") or ""
+    out["days"] = _get(out, "days", days, where="panel.days") or days
+    out["errors"] = _get(out, "errors", {}, where="panel.errors") or {}
     return out
