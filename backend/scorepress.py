@@ -221,6 +221,21 @@ def build(sc: Dict[str, Any], note: str = "") -> Dict[str, Any]:
             "count": len(nit), "shown": len(nit), "items": nit,
         })
 
+    # ★ 2026-11-22 防呆：某个分项扣了分却一条明细都没有时，补一条「汇总项」。
+    #   实测踩过：用一份缺 findings 字段的评分对象生成报告，面板出现
+    #   「失 0.5 分 · 压分点 0 条」——自相矛盾，用户会以为明细丢了。
+    for _p in parts:
+        if float(_p.get("lost") or 0) > 0 and not _p.get("items"):
+            _it = {"part": _p.get("key"),
+                   "file": "<%s汇总>" % _p.get("label"),
+                   "line": 0, "kind": "no_detail", "level": "info",
+                   "msg": "该分项扣了 %s 分，但这次评分没给出逐条明细"
+                          % _p.get("lost"),
+                   "cost": round(float(_p.get("lost") or 0), 2),
+                   "fix": "重跑一次完整评分（full=true）通常能拿到明细"}
+            _p["items"] = [_it]
+            items.append(_it)
+
     # ---- 排序：按能挽回多少分从大到小（反思要的就是这个顺序）
     items.sort(key=lambda x: (-float(x.get("cost") or 0.0),
                               str(x.get("file") or ""),
@@ -399,3 +414,154 @@ def brief(n: int = 3, query: str = "") -> str:
         seq = " → ".join("%s" % h.get("total") for h in hist)
         lines.append("最近 %d 次评分趋势：%s" % (len(hist), seq))
     return "\n".join(lines)
+
+
+# ------------------------------------------- 压分点 → 改进计划 一键联动
+# ★ 2026-11-22 用户要求：「激活推荐功能那个压分点到一键联动那个推荐功能
+#   迭代任务，验证一下是否有进行评分」。
+#
+#   在此之前这里只有一个**草稿断言**（backend/_feature_tests/
+#   _pending_压分点→改进计划一键联动.py），它断言 scorepress.link_plan()
+#   存在 —— 而该函数根本不存在。草稿以 "_" 开头，回归会跳过，所以这个
+#   「功能」一直是空壳：压分清单和反思计划两套东西各说各的，用户得自己
+#   对照着看。
+#
+#   现在把链路接上：
+#     压分点（file:line:kind）
+#       → link_plan()  找到/构造对应改进动作（同文件已有待执行动作就复用）
+#       → create=True  真建成计划，进「待批准」队列 = 一个推荐功能迭代任务
+#       → 该任务执行时经 iter_agent._DISPATCH["write_file"] → _t_write
+#       → scoregate.mark_dirty() → 后台自动评分 → 闸门比对
+#   也就是「压分点修完到底有没有让分数涨」是自动闭环的。
+
+def _abs_path(rel: str) -> str:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, str(rel).replace("/", os.sep))
+
+
+def _press_norm(item: Dict[str, Any]) -> Dict[str, Any]:
+    """把压分点规范化（字段名有好几种写法，统一成一套）。"""
+    it = item if isinstance(item, dict) else {}
+    f = str(it.get("file") or it.get("path") or "").replace("\\", "/").strip()
+    while f.startswith("./"):
+        f = f[2:]
+    try:
+        line = int(it.get("line") or 0)
+    except Exception:                                       # noqa: BLE001
+        line = 0
+    try:
+        rec = float(it.get("cost") or it.get("recover")
+                    or it.get("recoverable") or 0.0)
+    except Exception:                                       # noqa: BLE001
+        rec = 0.0
+    return {"file": f, "line": line,
+            "kind": str(it.get("kind") or it.get("code") or "").strip(),
+            "level": str(it.get("level") or "").strip(),
+            "msg": str(it.get("msg") or it.get("message") or "")[:300],
+            "recover": round(rec, 2)}
+
+
+def _find_linked(rel: str):
+    """在计划里找**已经针对这个文件**的待执行动作（有就复用，不重复建）。"""
+    try:
+        from . import self_iterate as _si
+        d = _si.load_plans()
+    except Exception:                                       # noqa: BLE001
+        logger.debug("读计划失败，按「没有已联动动作」处理", exc_info=True)
+        return None
+    for p in (d.get("items") or []):
+        if not isinstance(p, dict):
+            continue
+        for a in (p.get("actions") or []):
+            if not isinstance(a, dict):
+                continue
+            st = str(a.get("status") or a.get("state") or "pending")
+            if st not in ("pending", ""):
+                continue
+            files = [str(x).replace("\\", "/") for x in (a.get("files") or [])]
+            if rel and rel in files:
+                return {"plan_id": p.get("id"), "action_id": a.get("id"),
+                        "title": str(a.get("title") or "")[:120],
+                        "files": files, "status": "pending",
+                        "source": "existing"}
+    return None
+
+
+def link_plan(item: Dict[str, Any], create: bool = False) -> Dict[str, Any]:
+    """把一个压分点联动成改进动作。
+
+    返回 {"press": 规范化压分点, "plan": 动作或 None, "evidence": 依据}。
+    plan 为 None 表示**不该联动**（没路径 / 文件已不存在），evidence 里写明原因。
+
+    create=False（默认）只给建议动作，不落盘 —— 供预览；
+    create=True 会真建成计划、进「待批准」队列，成为一条迭代任务。
+    """
+    p = _press_norm(item)
+    ev: Dict[str, Any] = {"file": p["file"], "line": p["line"],
+                          "kind": p["kind"], "exists": False,
+                          "matched": None, "why": ""}
+    if not p["file"]:
+        ev["why"] = "压分点没有文件路径，无法联动"
+        return {"press": p, "plan": None, "evidence": ev}
+    if not os.path.isfile(_abs_path(p["file"])):
+        ev["why"] = "文件不存在（历史记录或已删除），跳过"
+        return {"press": p, "plan": None, "evidence": ev}
+    ev["exists"] = True
+
+    old = _find_linked(p["file"])
+    if old:
+        ev["matched"] = old
+        ev["why"] = "已有待执行动作在改这个文件，直接复用，不重复建计划"
+        return {"press": p, "plan": old, "evidence": ev}
+
+    loc = p["file"] + (":%d" % p["line"] if p["line"] else "")
+    title = ("修压分点：%s %s" % (loc, p["kind"] or "问题"))[:120]
+    detail = ("【压分点】来自评分压分报告\n"
+              "位置：%s\n类型：%s（%s）\n说明：%s\n修法：%s\n"
+              "修好可挽回约 %s 分。\n"
+              "⚠️ 改完必须跑一次评分确认真的涨分，没涨就回滚。"
+              % (loc, p["kind"] or "-", p["level"] or "-",
+                 p["msg"] or "-", _hint(p["kind"]), p["recover"]))
+    prop: Dict[str, Any] = {"title": title, "files": [p["file"]],
+                            "detail": detail[:2000], "kind": p["kind"],
+                            "line": p["line"], "risk": "low",
+                            "state": "pending", "status": "pending",
+                            "source": "press_link"}
+    if not create:
+        ev["why"] = "这是待建的建议动作（预览）；create=True 才会真建成迭代任务"
+        return {"press": p, "plan": prop, "evidence": ev}
+
+    try:
+        from . import self_iterate as _si
+        r = _si.create_plan("修压分点：%s" % loc,
+                            actions=[prop], trigger="press_link")
+    except Exception as e:                                  # noqa: BLE001
+        ev["why"] = "建计划异常：%s: %s" % (type(e).__name__, e)
+        return {"press": p, "plan": None, "evidence": ev}
+    if not (isinstance(r, dict) and r.get("ok")):
+        ev["why"] = "建计划失败：%s" % (
+            (r or {}).get("error") if isinstance(r, dict) else r)
+        return {"press": p, "plan": None, "evidence": ev}
+    pl = r.get("plan") or {}
+    acts = pl.get("actions") or [{}]
+    prop["plan_id"] = pl.get("id")
+    prop["action_id"] = (acts[0] or {}).get("id")
+    prop["source"] = "created"
+    ev["why"] = "已建成迭代任务（待批准），执行时会自动评分并比对"
+    return {"press": p, "plan": prop, "evidence": ev}
+
+
+def link_top(n: int = 3, create: bool = False) -> Dict[str, Any]:
+    """把最新压分报告里最划算的 n 条压分点一次性联动成迭代任务。"""
+    rep = latest()
+    top = list(rep.get("top") or [])[:max(1, int(n or 3))]
+    if not top:
+        return {"ok": True, "linked": [], "msg": "当前没有压分点，无需联动"}
+    out = []
+    for it in top:
+        out.append(link_plan(it, create=create))
+    made = [x for x in out if (x.get("plan") or {}).get("source") == "created"]
+    return {"ok": True, "linked": out,
+            "created": len(made),
+            "msg": "联动 %d 条压分点，新建 %d 个迭代任务"
+                   % (len(out), len(made))}

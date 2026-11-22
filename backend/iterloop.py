@@ -375,6 +375,46 @@ def ability_part(rg=None, fn=None):
     }
 
 
+def write_last_score(s):
+    """把「当前代码的绝对分数」落盘，供面板显示「当前版本」。
+
+    ★ 2026-11-22 用户要求「以后每次结束之后都得在第一时间更新评分」。
+      之前这段逻辑写死在 main.py 的 /api/selfiter/loop/score 里，只有手动
+      点「量一下」才更新；后台自动评分（scoregate）没法复用，面板就一直
+      显示上一次手动量的旧分。抽成函数后两处共用同一份格式。
+
+    ⚠️ 这里**只写当前绝对值**，不碰累计分账本 —— 账本仍由重启闸门提交，
+       避免同一批改动被记两轮进退。
+    """
+    if not isinstance(s, dict):
+        return ""
+    try:
+        d = _data_dir()
+        os.makedirs(d, exist_ok=True)
+        _st = s.get("static") or {}
+        _rg = s.get("regress") or {}
+        _fn = s.get("func") or {}
+        _ab = s.get("ability") or {}
+        p = os.path.join(d, "last_score.json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"total": s.get("total"),
+                       "quality": s.get("quality"),
+                       "ability": _ab.get("score"),
+                       "ability_rows": _ab.get("rows"),
+                       "unbounded": True,
+                       "iso": s.get("iso"),
+                       "static": _st.get("score"), "static_max": _st.get("max"),
+                       "high": _st.get("high"), "mid": _st.get("mid"),
+                       "regress": _rg.get("score"), "regress_max": _rg.get("max"),
+                       "func": _fn.get("score"), "func_max": _fn.get("max"),
+                       "seconds": s.get("seconds")},
+                      fh, ensure_ascii=False, indent=1)
+        return p
+    except Exception:                                       # noqa: BLE001
+        logger.debug("写 last_score.json 失败", exc_info=True)
+        return ""
+
+
 def score(full=True):
     """综合评分 = quality 质量基线(0~100) + ability 能力跑分(无上限)。
 

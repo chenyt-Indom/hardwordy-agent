@@ -1520,6 +1520,13 @@
               (t.fix ? '<div class="ip-sub">修法：' + _ipEsc(t.fix) + '</div>' : '') + '</li>';
           });
           prh += '</ul>';
+          // ★ 2026-11-22 用户要求「激活推荐功能那个压分点到一键联动那个
+          //   推荐功能迭代任务」：一个按钮把最划算的前 N 条压分点直接建成
+          //   迭代任务（进待批准队列），执行时会自动评分并比对。
+          var _nl = Math.min(3, tps.length);
+          prh += '<button class="ip-link-btn" id="ipPressLink" data-n="' + _nl +
+            '">🔗 一键联动前 ' + _nl + ' 条 → 迭代任务</button>' +
+            '<div class="ip-sub" id="ipPressLinkMsg"></div>';
         } else {
           prh += '<div class="ip-empty">当前没有任何压分点（满分）</div>';
         }
@@ -1791,6 +1798,29 @@
           }
         }).catch(function (err) {
           if (st) st.textContent = '跑分失败：' + ((err && err.message) || err);
+        }).then(function () { b.disabled = false; });
+      });
+      // ★ 压分点 → 迭代任务 一键联动（2026-11-22 用户要求）。
+      //   只建计划、不直接改代码：任务进「待批准」，批准后执行时才真动手，
+      //   执行完由 scoregate 自动评分并与上次比对。
+      ipb.addEventListener('click', function (e) {
+        var b = (e.target && e.target.closest) ? e.target.closest('#ipPressLink') : null;
+        if (!b || b.disabled) return;
+        var n = Number(b.getAttribute('data-n') || 3) || 3;
+        var st = $('#ipPressLinkMsg');
+        b.disabled = true;
+        if (st) st.textContent = '正在把前 ' + n + ' 条压分点建成迭代任务…';
+        fetch('/api/iter/press/link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ top: n, create: true })
+        }).then(function (r) { return r.json(); }).then(function (D) {
+          if (!D || D.ok === false) throw new Error((D && D.error) || '联动失败');
+          if (st) st.textContent = (D.msg || '已联动') +
+            '（进「待批准」，批准后执行完会自动评分比对）';
+          loadIterPanel();
+        }).catch(function (err) {
+          if (st) st.textContent = '联动失败：' + ((err && err.message) || err);
         }).then(function () { b.disabled = false; });
       });
     }

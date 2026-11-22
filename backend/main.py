@@ -4164,6 +4164,44 @@ def iter_press(n: int = 20):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+@app.post("/api/iter/press/link")
+def iter_press_link(body: dict = None):
+    """压分点 → 改进计划 一键联动（2026-11-22 用户要求）。
+
+    用户原话：「激活推荐功能那个压分点到一键联动那个推荐功能迭代任务，
+              验证一下是否有进行评分」。
+
+    body:
+      {"file":"backend/x.py","line":12,"kind":"bare_except","create":true}
+      {"top":3,"create":true}      # 一次性联动最划算的 n 条
+      create=false 只预览，不落盘。
+    """
+    from . import scorepress as _sp
+    b = body or {}
+    try:
+        if b.get("top"):
+            r = _sp.link_top(int(b.get("top") or 3), create=bool(b.get("create")))
+        else:
+            r = _sp.link_plan(b, create=bool(b.get("create")))
+        r["ok"] = bool(r.get("ok", True))
+        return r
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+@app.get("/api/iter/press/link")
+def iter_press_link_preview(file: str = "", line: int = 0, kind: str = ""):
+    """同上，但走 GET，方便直接点开链接预览（不落盘）。"""
+    from . import scorepress as _sp
+    try:
+        r = _sp.link_plan({"file": file, "line": line, "kind": kind},
+                          create=False)
+        r["ok"] = True
+        return r
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 @app.get("/api/brand")
 def brand_info():
     """品牌与开发者信息 —— 已盖章，任何版本、任何机器都不许改。
@@ -4263,27 +4301,7 @@ def selfiter_loop_score(body: dict = None):
         #   手动量的这次结果要**落盘**，否则关掉面板就没了（账本只记进退净值，
         #   不记「当前代码绝对值」）。iterpanel 读这个文件显示「当前版本」。
         try:
-            import json as _json
-            import os as _os
-            _d = _IL._data_dir()
-            _os.makedirs(_d, exist_ok=True)
-            _st = s.get("static") or {}
-            _rg = s.get("regress") or {}
-            _fn = s.get("func") or {}
-            with open(_os.path.join(_d, "last_score.json"), "w", encoding="utf-8") as _f:
-                _ab = s.get("ability") or {}
-                _json.dump({"total": s.get("total"),
-                            "quality": s.get("quality"),
-                            "ability": _ab.get("score"),
-                            "ability_rows": _ab.get("rows"),
-                            "unbounded": True,
-                            "iso": s.get("iso"),
-                            "static": _st.get("score"), "static_max": _st.get("max"),
-                            "high": _st.get("high"), "mid": _st.get("mid"),
-                            "regress": _rg.get("score"), "regress_max": _rg.get("max"),
-                            "func": _fn.get("score"), "func_max": _fn.get("max"),
-                            "seconds": s.get("seconds")},
-                           _f, ensure_ascii=False, indent=1)
+            _IL.write_last_score(s)
         except Exception:                                 # noqa: BLE001
             logger.debug("写 last_score.json 失败（不影响本次跑分结果）", exc_info=True)
         return {"ok": True, "score": s, "stats": _IL.stats()}
@@ -11411,6 +11429,23 @@ def _loop_post_verify_on_boot():
         _th.Timer(8.0, _go).start()
     except Exception:                                   # noqa: BLE001
         logger.warning("启动复核线程失败", exc_info=True)
+
+
+@app.on_event("startup")
+def _scoregate_auto_on_boot():
+    """启动就把「后台自动更新评分」的线程拉起来。
+
+    ★ 2026-11-22 用户要求：「以后每次结束之后都得在第一时间更新评分」。
+      线程原本只在第一次 mark_dirty 时才启动 —— 如果服务重启后还没人改
+      代码，而磁盘上留着上次没评的改动，那就永远等不到自动评分。
+      启动时拉起一次，保证任何时刻都有个线程在看「有没有新改动要评」。
+    """
+    try:
+        from . import scoregate as _sg
+        _sg.ensure_auto_worker()
+        logger.info("后台自动评分线程已就绪")
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("启动后台自动评分线程失败：%s", e)
 
 
 @app.on_event("startup")

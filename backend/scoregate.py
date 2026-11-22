@@ -97,6 +97,128 @@ def _save(d: Dict[str, Any]) -> None:
         logger.debug("silent-except", exc_info=True)
 
 
+# ------------------------------------------------- 后台自动更新评分（防抖）
+# ★ 2026-11-22 用户要求：「以后每次结束之后都得在第一时间更新评分」。
+#   之前的评分**只在 selfdev_restart 闸门里跑**：如果这轮只改前端、或者任务
+#   结束时没重启，分数就一直停在上一版 —— 用户看到的永远是旧分。
+#   现在：写入打标记后起一个守护线程，等「安静下来」若干秒就在后台评一次，
+#   结果写进 last_score.json（面板「当前版本」立刻能看到）+ 压分报告。
+#
+#   ⚠️ 三条硬约束（都是踩过坑才加的）：
+#     ① **绝不写 scoregate.json 的 last_score 键** —— 闸门的比较基准就是它
+#        （_prev_score 读它）。自动评分若改了它，闸门每次都拿「刚算的分数」
+#        跟自己比 → delta 恒为 0 → 永远检测不到退步。
+#     ② **不提交累计分账本** —— 账本只由重启闸门提交，否则同一批改动会被
+#        记两轮进退。
+#     ③ 闸门若发现后台已经算过、且之后没再改动，就**复用**那次结果，
+#        不重复跑 37 秒。
+
+_AUTO_QUIET_S = 20.0      # 最后一次写入后安静这么久才评（防抖，别边写边评）
+_AUTO_MIN_GAP_S = 60.0    # 两次后台评分之间至少间隔这么久（别一直烧 CPU）
+_auto_state: Dict[str, Any] = {"worker": None, "last_ts": 0.0, "runs": 0,
+                               "full": None, "full_ts": 0.0}
+
+
+def _auto_score_once() -> Dict[str, Any]:
+    """后台跑一次评分并缓存（不写账本、不动闸门基准）。"""
+    global _RUNNING
+    with _LOCK:
+        d = _load()
+        if not d.get("dirty"):
+            return {"ran": False, "why": "没有待评分的改动"}
+        if _RUNNING:
+            return {"ran": False, "why": "评分正在跑"}
+        dts = float(d.get("dirty_ts") or 0)
+        if float(d.get("auto_ts") or 0) >= dts:
+            return {"ran": False, "why": "这一版已经自动评过"}
+        _RUNNING = True
+    try:
+        from . import iterloop as _il
+        t0 = time.time()
+        now = _il.score(full=True)
+        cost = round(time.time() - t0, 1)
+        try:
+            from . import scorepress as _SP
+            _SP.record(now, note="后台自动更新评分")
+        except Exception:                               # noqa: BLE001
+            logger.debug("后台压分报告失败", exc_info=True)
+        try:
+            _il.write_last_score(now)     # 面板「当前版本」立刻可见
+        except Exception:                               # noqa: BLE001
+            logger.debug("后台写 last_score 失败", exc_info=True)
+        with _LOCK:
+            d2 = _load()
+            d2["auto_score"] = {"iso": _now(), "ts": time.time(),
+                                "total": (now or {}).get("total"),
+                                "quality": (now or {}).get("quality"),
+                                "ability": (now or {}).get("ability"),
+                                "cost_s": cost,
+                                "files": list(d2.get("files") or [])}
+            d2["auto_ts"] = float(d2.get("dirty_ts") or time.time())
+            _save(d2)
+        _auto_state["runs"] = int(_auto_state.get("runs") or 0) + 1
+        _auto_state["last_ts"] = time.time()
+        # 完整分数对象留一份在内存里：闸门（同进程）可以直接拿来比对，
+        # 不用再跑一次 37 秒的全量评分。
+        _auto_state["full"] = now
+        _auto_state["full_ts"] = time.time()
+        logger.info("后台自动评分完成：%s（%.1fs）", (now or {}).get("total"), cost)
+        return {"ran": True, "total": (now or {}).get("total"), "cost_s": cost}
+    except Exception as e:                              # noqa: BLE001
+        logger.debug("后台自动评分失败", exc_info=True)
+        return {"ran": False, "why": "%s: %s" % (type(e).__name__, e)}
+    finally:
+        _RUNNING = False
+
+
+def _auto_worker() -> None:
+    """守护线程：发现「有改动 + 已经安静下来」就在后台评一次。"""
+    while True:
+        try:
+            time.sleep(5)
+            d = _load()
+            if not d.get("dirty"):
+                continue
+            dts = float(d.get("dirty_ts") or 0)
+            if time.time() - dts < _AUTO_QUIET_S:
+                continue                      # 还在写，等它写完
+            if float(d.get("auto_ts") or 0) >= dts:
+                continue                      # 这一版评过了
+            if time.time() - float(_auto_state.get("last_ts") or 0) < _AUTO_MIN_GAP_S:
+                continue
+            _auto_score_once()
+        except Exception:                               # noqa: BLE001
+            logger.debug("后台自动评分线程异常", exc_info=True)
+
+
+def ensure_auto_worker() -> None:
+    """确保后台自动评分线程在跑（幂等，重复调无副作用）。"""
+    with _LOCK:
+        w = _auto_state.get("worker")
+        if w is not None and getattr(w, "is_alive", lambda: False)():
+            return
+        try:
+            t = threading.Thread(target=_auto_worker, name="scoregate-auto",
+                                 daemon=True)
+            t.start()
+            _auto_state["worker"] = t
+        except Exception:                               # noqa: BLE001
+            logger.debug("起后台自动评分线程失败", exc_info=True)
+
+
+def auto_state() -> Dict[str, Any]:
+    """给面板/接口看的只读快照。"""
+    d = _load()
+    a = d.get("auto_score") or {}
+    w = _auto_state.get("worker")
+    return {"alive": bool(w is not None and getattr(w, "is_alive", lambda: False)()),
+            "runs": int(_auto_state.get("runs") or 0),
+            "total": a.get("total"), "iso": a.get("iso"),
+            "cost_s": a.get("cost_s"), "files": list(a.get("files") or []),
+            "fresh": (float(d.get("auto_ts") or 0) >= float(d.get("dirty_ts") or 0)
+                      and a.get("total") is not None)}
+
+
 # ---------------------------------------------------------------- 打脏标记
 
 def mark_dirty(rel: str = "", note: str = "") -> None:
@@ -131,6 +253,9 @@ def mark_dirty(rel: str = "", note: str = "") -> None:
             if note:
                 d["note"] = str(note)[:200]
             _save(d)
+        # 每打一次标记就确保后台线程在跑（幂等）——这样「任务结束」后
+        # 不用等重启，几十秒内面板上的当前版本分数就会自己更新。
+        ensure_auto_worker()
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
 
@@ -320,9 +445,20 @@ def gate(force: bool = False, note: str = "",
         prev = _prev_score(d)
         # 上次是旧口径（没有 schema 标记 / 版本不同）→ 这轮重建基准
         rebased = bool(prev) and prev.get("schema") != _SCHEMA
+        # ★ 后台自动评分刚算过、之后没再改动 → 直接复用，省一次 37 秒。
+        #   两个条件都要满足：① 文件里记的 auto_ts 覆盖了本批改动；
+        #   ② 同进程内存里还留着那份完整分数（重启过就没了，那就重算）。
+        _reuse = (float(d.get("auto_ts") or 0) >= float(d.get("dirty_ts") or 0)
+                  and isinstance(_auto_state.get("full"), dict)
+                  and _auto_state["full"].get("total") is not None)
         t0 = time.time()
-        now = _il.score(full=True)
-        cost = round(time.time() - t0, 1)
+        if _reuse:
+            now = _auto_state["full"]
+            cost = 0.0
+            logger.info("闸门复用后台自动评分结果（%.2f），不重复跑", now.get("total"))
+        else:
+            now = _il.score(full=True)
+            cost = round(time.time() - t0, 1)
         total = now.get("total")
         pv = (prev or {}).get("total")
         if rebased:
@@ -426,4 +562,6 @@ def status() -> Dict[str, Any]:
                      "total": lg.get("total"), "delta": lg.get("delta"),
                      "verdict": lg.get("verdict"),
                      "blocked": lg.get("blocked")},
-            "gates": len(d.get("gates") or [])}
+            "gates": len(d.get("gates") or []),
+            # ★ 2026-11-22：后台自动评分的状态（线程活着没 / 最近一次算到多少分）
+            "auto": auto_state()}

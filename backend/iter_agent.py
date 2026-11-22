@@ -40,7 +40,14 @@ from pathlib import Path
 
 logger = logging.getLogger("iter_agent")
 
-_ROOT = Path(__file__).resolve().parent.parent
+# ★ 2026-11-22 用户要求「加防护」。
+#   事故背景：验证「迭代写入会不会打评分标记」时直接调了 _t_write，
+#   而它的 _ROOT 永远指向真实项目根 —— 结果把 backend/map_tools.py
+#   （73KB）覆盖成 9 字节的「# probe」。备份才救回来。
+#   防护一：根目录可被环境变量接管。测试/沙箱设 MM_ITER_ROOT 指到临时
+#   目录，就不会碰到真实源码；不设时行为与以前完全一致（项目根）。
+_ROOT = Path(os.environ.get("MM_ITER_ROOT")
+             or Path(__file__).resolve().parent.parent).resolve()
 
 # 允许模型写的源码后缀（与 self_iterate 的白名单保持一致）
 _EXTS = (".py", ".js", ".css", ".html", ".json", ".md", ".txt")
@@ -415,6 +422,62 @@ def _t_read(ctx, args):
     return head + "\n".join("%5d| %s" % (i, s) for i, s in enumerate(seg, start))
 
 
+# 原文件小于这个字节数就不判缩水（小文件本来就短，缩水是正常的）
+_SHRINK_MIN = 2000
+# 新内容不到原文的 15% → 视为毁灭性覆盖（典型事故：73KB 被写成 9 字节）
+_SHRINK_RATIO = 0.15
+
+
+def _backup_before_write(rel):
+    """写前备份（防护二）：覆盖已有文件前先留一份，出事能捞回来。
+
+    事故当时是靠 selfdev 的旧备份救回 map_tools.py 的 —— 那是运气。
+    这里让迭代自己的每次覆盖都有独立备份，不依赖别的模块。
+    返回备份文件路径，没备份（新文件 / 失败）返回空串。
+    """
+    try:
+        src = _ROOT / rel
+        if not src.is_file():
+            return ""
+        # 走 config.data 与其他数据目录保持一致：设了 MM_DATA_DIR（Docker /
+        # 便携包换目录）时，备份也要落到新目录，不能写回源码树。
+        try:
+            from . import config as _cfg
+            data_dir = Path(_cfg.data("data"))
+        except Exception:                                   # noqa: BLE001
+            data_dir = Path(os.environ.get("MM_DATA_DIR") or (_ROOT / "data"))
+        bd = data_dir / "iter_backups"
+        bd.mkdir(parents=True, exist_ok=True)
+        safe = str(rel).replace("/", "%2F").replace("\\", "%2F")
+        dst = bd / ("%s_%s" % (time.strftime("%Y%m%d_%H%M%S"), safe))
+        shutil.copy2(str(src), str(dst))
+        return str(dst)
+    except Exception:                                       # noqa: BLE001
+        logger.debug("迭代写前备份失败", exc_info=True)
+        return ""
+
+
+def _is_destructive(rel, new_text):
+    """毁灭性覆盖判定（防护三）。返回 (是否危险, 原文字节, 新字节)。
+
+    为什么需要：模型（或我）把「改一处」误写成「整份重写」时，最容易
+    的表现就是用几十字节覆盖掉几万字节 —— 这种覆盖 99% 是事故不是本意。
+    拦下来让人显式加 allow_shrink=true，比事后从备份里捞便宜得多。
+    """
+    try:
+        p = _ROOT / rel
+        new_len = len((new_text or "").encode("utf-8"))
+        if not p.is_file():
+            return (False, 0, new_len)
+        old_len = p.stat().st_size
+        if old_len >= _SHRINK_MIN and new_len < old_len * _SHRINK_RATIO:
+            return (True, old_len, new_len)
+        return (False, old_len, new_len)
+    except Exception:                                       # noqa: BLE001
+        logger.debug("毁灭性覆盖判定失败", exc_info=True)
+        return (False, 0, len((new_text or "").encode("utf-8")))
+
+
 def _t_write(ctx, args):
     rel = _norm(args.get("path"))
     if not rel:
@@ -429,7 +492,13 @@ def _t_write(ctx, args):
             compile(content, rel, "exec")
         except SyntaxError as e:
             return ("语法错误，没有写入：第 %s 行 %s" % (e.lineno, e.msg))
+    bad, old_len, new_len = _is_destructive(rel, content)
+    if bad and not args.get("allow_shrink"):
+        return ("拒绝：这会用 %d 字节覆盖原文件的 %d 字节（不足 15%%），"
+                "像是把文件清空了。确认要整份重写，请加 allow_shrink=true"
+                % (new_len, old_len))
     p = _ROOT / rel
+    bk = _backup_before_write(rel)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -438,7 +507,8 @@ def _t_write(ctx, args):
     if rel not in ctx.touched:
         ctx.touched.append(rel)
     _mark_dirty(rel, "迭代写入")
-    return "已写入 %s（%d 字符）" % (rel, len(content))
+    return "已写入 %s（%d 字符）%s" % (
+        rel, len(content), ("；原文件已备份到 %s" % bk) if bk else "")
 
 
 def _t_edit(ctx, args):
@@ -468,6 +538,7 @@ def _t_edit(ctx, args):
             compile(new, rel, "exec")
         except SyntaxError as e:
             return ("改完会有语法错误，没有写入：第 %s 行 %s" % (e.lineno, e.msg))
+    bk = _backup_before_write(rel)
     try:
         p.write_text(new, encoding="utf-8")
     except Exception as e:                                  # noqa: BLE001
@@ -475,7 +546,9 @@ def _t_edit(ctx, args):
     if rel not in ctx.touched:
         ctx.touched.append(rel)
     _mark_dirty(rel, "迭代修改")
-    return "已修改 %s（替换 1 处，净变化 %+d 字符）" % (rel, len(new) - len(body))
+    return "已修改 %s（替换 1 处，净变化 %+d 字符）%s" % (
+        rel, len(new) - len(body),
+        ("；原文件已备份到 %s" % bk) if bk else "")
 
 
 def _t_list(ctx, args):

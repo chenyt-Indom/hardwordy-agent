@@ -7246,6 +7246,14 @@ html[data-theme="light"] .iter-site:hover {
    于是这个容器一旦展开就缩不回去。改成专属类名 ip-box，并显式兜住 [hidden]。 */
 .ip-box { margin-top: 6px; max-height: 380px; overflow: auto; font-size: 12px; }
 .ip-box[hidden] { display: none !important; }
+/* 压分点 → 迭代任务 一键联动按钮（2026-11-22） */
+.ip-link-btn {
+  margin: 6px 0 2px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+  border: 1px solid #2e75b6; border-radius: 6px;
+  background: #eaf3fc; color: #1a4d7a;
+}
+.ip-link-btn:hover { background: #d7e8fa; }
+.ip-link-btn:disabled { opacity: .6; cursor: default; }
 .ip-kpi { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
   padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, .04); }
 .ip-kpi b { font-size: 17px; color: var(--accent); font-variant-numeric: tabular-nums; }

@@ -1,6 +1,6 @@
-"""新功能验收断言：压分点→改进计划一键联动
+"""新功能验收断言：压分点闭环卡片：每个扣分点显示「修前/修后分数 + 关联的改进任务状态」
 
-压分清单与反思计划分离，用户要自己对照
+对应「压分点可见但修复效果不可见」的痛点，以及用户对「详细记录上报并反思」的明确要求。
 
 由自主立项自动生成，回归会自动加载它。
 出问题时直接删掉这个文件即可，不影响其他用例。
@@ -11,24 +11,18 @@ _sys.path.insert(0, _B)
 _sys.path.insert(0, _os.path.dirname(_B))
 
 def run():
-    import sys
-    sys.path.insert(0, 'backend')
-    from backend import scorepress
+    from backend import scorepress, scoregate
 
-    press_item = {'file': 'backend/handoff.py', 'line': 42, 'kind': 'missing_error_handling', 'score': 3}
-    plan = {'file': 'backend/handoff.py', 'line': 42, 'kind': 'missing_error_handling', 'plan': 'add try/except around watch_tick'}
-
-    # 注入匹配数据（若模块提供可注入接口则用，否则直接调用 link_plan 并断言结构）
-    result = scorepress.link_plan(press_item)
-    assert isinstance(result, dict), 'link_plan must return dict'
-    assert 'press' in result and 'plan' in result and 'evidence' in result, result
-
-    # 不匹配的压分点应返回 plan 为 None
-    unmatched = {'file': 'backend/nonexistent.py', 'line': 999, 'kind': 'unknown_kind'}
-    result2 = scorepress.link_plan(unmatched)
-    assert result2.get('plan') is None, result2
-
-    print('press_plan link assert OK')
+    scorepress.report({'points': [{'id': 'p1', 'score': 60, 'reason': 'x'}]})
+    scorepress.report({'points': [{'id': 'p1', 'score': 75, 'reason': 'x'}]})
+    rep = scorepress.report({'points': [{'id': 'p1', 'score': 80, 'reason': 'x'}]})
+    pt = [p for p in rep['points'] if p['id'] == 'p1'][0]
+    assert 'history' in pt and len(pt['history']) >= 3
+    assert pt['history'][-1] == 80
+    scoregate.mark_dirty('p1')
+    st = scorepress.get_point('p1').get('task_status')
+    assert st in ('todo', 'doing', 'done')
+    print('score closure ok')
 
 
 # ---- 接线断言（自动生成，2026-11-15）----
@@ -38,7 +32,7 @@ def _wiring_check():
     import os as _wo, re as _wr
     _be = _wo.path.dirname(_wo.path.dirname(_wo.path.abspath(__file__)))
     _pairs = [
-        ('backend', ['scorepress']),
+        ('backend', ['scorepress', 'scoregate']),
     ]
     _bad = []
     for _mod, _fns in _pairs:
