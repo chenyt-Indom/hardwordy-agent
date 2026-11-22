@@ -19,6 +19,7 @@
 """
 import os
 import json
+import re
 import time
 import threading
 
@@ -26,6 +27,9 @@ from . import config
 
 _LOCK = threading.RLock()
 _KEEP_LINES = 2000          # 超过这个行数就裁剪，只留最近 1200 条
+# 补丁工具「find 命中多处被拒绝」的报错是动态数字（命中 3 处 / 命中 12 处），
+# 子串规则表匹配不到，用正则单独认。
+_MULTI_HIT_RE = re.compile(r"命中\s*\d+\s*处")
 
 # ---------------------------------------------------------------------------
 #  失败类型表：kind -> (中文名, 默认教训, 关键词)
@@ -47,10 +51,16 @@ _RULES = [
      "一次只改一处；大改拆成能单独验证的几步，别一次甩整份重写",
      ("改动过大", "内容被截断", "truncat", "too large", "超出长度",
       "token 上限", "文件过大")),
+    ("key_error", "字段名/键读错",
+      "别凭印象取字段：先打印一次真实返回结构再写 key；不确定就用 .get(k, 默认值)，"
+      "不要直接下标 —— 键名猜错会直接抛 KeyError",
+      ("keyerror", "键不存在", "no such key", "字段不存在", "没有这个键",
+       "缺少键", "missing key", "unknown key")),
     ("patch_not_found", "改动锚点没命中",
      "不要凭印象写 find 原文：先 read 目标段落，再复制真实文本；"
      "或改用整份重写 / 按行号插入",
-     ("没找到要替换", "find 未命中", "锚点", "未找到匹配", "命中 0 处",
+     ("没找到要替换", "没找到这段原文", "这段原文", "未找到原文",
+       "find 未命中", "锚点", "未找到匹配", "命中 0 处", "0 条命中",
       "no match", "not found", "找不到要")),
     ("syntax_error", "语法错误",
      "改完先跑 py_compile / node --check 再谈行为，语法不过等于没改",
@@ -111,6 +121,12 @@ def classify(err: str, stage: str = "") -> tuple:
         for kw in keys:
             if kw.lower() in s:
                 return (kind, label, lesson)
+    # 补丁工具的另一类报错是「命中 3 处：…」（find 命中了多处被拒绝）。
+    # 它是动态数字，子串规则匹配不到；不加这条会归成「未归类」，
+    # 反思端按 kind 聚类时就聚不到「锚点没命中」这一类上。
+    if _MULTI_HIT_RE.search(s):
+        _lbl, _lsn = _KIND_MAP.get("patch_not_found", ("改动锚点没命中", ""))
+        return ("patch_not_found", _lbl, _lsn)
     return ("other", "未归类", "先把失败原因写清楚，没有原因就无法归因")
 
 
