@@ -11443,6 +11443,11 @@ def _scoregate_auto_on_boot():
     try:
         from . import scoregate as _sg
         _sg.ensure_auto_worker()
+        # ★ 2026-11-22：重启时闸门用的是**旧代码**，新进程不补评的话面板会一直
+        #   显示旧分。这里比 mtime，过期就后台补一次（不阻塞启动）。
+        _r = _sg.rescore_if_stale()
+        if _r.get("ran"):
+            logger.info("面板分数比代码旧，已在后台补评：%s", _r.get("why"))
         logger.info("后台自动评分线程已就绪")
     except Exception as e:                              # noqa: BLE001
         logger.warning("启动后台自动评分线程失败：%s", e)

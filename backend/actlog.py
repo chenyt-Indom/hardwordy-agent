@@ -654,6 +654,56 @@ def append_watch_event(session: str, event: dict) -> None:
         logger.debug("silent-except", exc_info=True)
 
 
+def list_events(session: str = "", kind: str = "", limit: int = 0) -> list:
+    """读出账本里的事件行（工具动作行 + 盯事 / 盯梢事件行）。
+
+    为什么需要它（2026-11-22 盯梢小助手）：以前只能按会话读（timeline /
+    recent_watch_events），要回答「刚刚到底有没有新汇报」「一共汇报了几次」
+    必须跨会话看总数。这里给一个**平铺**的读法：
+
+        session  给定 → 只读那本账；留空 → 读 data/actlog 下所有会话账本
+        kind     按事件类型过滤：'watch' 只留盯事行（带 w 字段），
+                 'tool' 只留工具动作行（带 n 字段），留空全要
+        limit    >0 时只返回最近这么多条（旧 → 新）
+
+    返回原始行（dict）列表，按写入顺序（旧 → 新）。任何异常返回 []。
+    """
+    try:
+        k = str(kind or "").strip().lower()
+        out = []
+        if session:
+            paths = [_path(session)]
+        else:
+            paths = []
+            try:
+                for name in sorted(os.listdir(_dir())):
+                    if name.endswith(".jsonl"):
+                        paths.append(os.path.join(_dir(), name))
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+        for p in paths:
+            for r in _read(p):
+                if not isinstance(r, dict):
+                    continue
+                is_watch = isinstance(r.get("w"), dict)
+                is_tool = bool(r.get("n"))
+                if k == "watch" and not is_watch:
+                    continue
+                if k == "tool" and not is_tool:
+                    continue
+                out.append(r)
+        try:
+            n = int(limit or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n > 0:
+            out = out[-n:]
+        return out
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return []
+
+
 def recent_watch_events(session: str, n: int = 20) -> list:
     """取最近 n 条「盯事助手」事件（按写入顺序，旧→新）。
 

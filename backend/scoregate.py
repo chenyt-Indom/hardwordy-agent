@@ -119,18 +119,23 @@ _auto_state: Dict[str, Any] = {"worker": None, "last_ts": 0.0, "runs": 0,
                                "full": None, "full_ts": 0.0}
 
 
-def _auto_score_once() -> Dict[str, Any]:
-    """后台跑一次评分并缓存（不写账本、不动闸门基准）。"""
+def _auto_score_once(force: bool = False) -> Dict[str, Any]:
+    """后台跑一次评分并缓存（不写账本、不动闸门基准）。
+
+    force=True 时**不看 dirty**：用于「启动体检」—— 重启时闸门是在旧代码上
+    评的分，新进程里没人改代码就永远等不到 dirty，面板会一直显示旧分。
+    """
     global _RUNNING
     with _LOCK:
         d = _load()
-        if not d.get("dirty"):
-            return {"ran": False, "why": "没有待评分的改动"}
+        if not force:
+            if not d.get("dirty"):
+                return {"ran": False, "why": "没有待评分的改动"}
+            dts = float(d.get("dirty_ts") or 0)
+            if float(d.get("auto_ts") or 0) >= dts:
+                return {"ran": False, "why": "这一版已经自动评过"}
         if _RUNNING:
             return {"ran": False, "why": "评分正在跑"}
-        dts = float(d.get("dirty_ts") or 0)
-        if float(d.get("auto_ts") or 0) >= dts:
-            return {"ran": False, "why": "这一版已经自动评过"}
         _RUNNING = True
     try:
         from . import iterloop as _il
@@ -204,6 +209,51 @@ def ensure_auto_worker() -> None:
             _auto_state["worker"] = t
         except Exception:                               # noqa: BLE001
             logger.debug("起后台自动评分线程失败", exc_info=True)
+
+
+def _score_stale() -> bool:
+    """面板上的分数是不是比代码旧（改过代码但没重评）。
+
+    ★ 为什么需要：改完代码点重启时，闸门是在**旧代码**上评的分；新进程起来后
+      如果没人再动代码，就永远等不到 dirty，面板会一直显示旧分 —— 用户看到的
+      是「明明修好了，分数却没变」。这里用 mtime 对比来判断，简单且不依赖额外状态。
+    """
+    try:
+        from . import iterloop as _il
+        p = os.path.join(_il._data_dir(), "last_score.json")
+        if not os.path.isfile(p):
+            return True
+        st = os.path.getmtime(p)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for sub in ("backend", "frontend"):
+            dd = os.path.join(root, sub)
+            if not os.path.isdir(dd):
+                continue
+            for name in os.listdir(dd):
+                fp = os.path.join(dd, name)
+                if os.path.isfile(fp) and os.path.getmtime(fp) > st + 2:
+                    return True
+    except Exception:                                   # noqa: BLE001
+        logger.debug("检查评分是否过期失败", exc_info=True)
+    return False
+
+
+def rescore_if_stale() -> Dict[str, Any]:
+    """启动体检：分数比代码旧 → 后台补评一次（不阻塞启动）。"""
+    if not _score_stale():
+        return {"ran": False, "why": "面板分数已是最新"}
+
+    def _go():
+        try:
+            _auto_score_once(force=True)
+        except Exception:                               # noqa: BLE001
+            logger.debug("启动补评失败", exc_info=True)
+
+    try:
+        threading.Thread(target=_go, name="scoregate-boot", daemon=True).start()
+        return {"ran": True, "why": "分数比代码旧，已在后台补评"}
+    except Exception as e:                              # noqa: BLE001
+        return {"ran": False, "why": "起线程失败：%s" % e}
 
 
 def auto_state() -> Dict[str, Any]:

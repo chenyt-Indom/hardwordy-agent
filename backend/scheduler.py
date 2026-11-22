@@ -696,6 +696,11 @@ def _run_once(job: dict) -> dict:
     # ★ 内置任务（抽空自检）—— 同上
     if str(job.get("kind") or "") == "selfidle":
         return _run_selfidle(job)
+    # ★ 盯事 / 盯梢任务（kind="watch"）—— 抓取比对，**不调模型**
+    #   2026-11-22：以前 kind="watch" 会掉进下面的模型工具循环（既浪费电，
+    #   又容易把 diff 说走样）。现在统一走 _run_watch_once。
+    if str(job.get("kind") or "") == "watch":
+        return _run_watch_once(job)
 
     cfg = config.load_config() or {}
     prompt = str(job.get("prompt") or "").strip()
@@ -1352,6 +1357,72 @@ def register_watch(query: str, interval_minutes: int = 0, kind: str = "web",
     return {"ok": True, "job": job, "reused": False}
 
 
+def register_file_watch(target: str, watch_id: str, interval_minutes: int = 0,
+                        name: str = "", session: str = "") -> dict:
+    """把 handoff 的**本地路径监视**登记进同一份定时任务表。
+
+    2026-11-22（盯梢小助手）：用户说「盯着某个目录 / 文件」，比对逻辑住在
+    backend/handoff.py（要记基线、条件、变化历史），但「到点要跑」这件事
+    复用这里的调度循环 —— 所以这里只造一条
+         kind="watch", watch_kind="path", watch_ref=<handoff 里的监视 id>
+    的任务。_run_once 认这个组合，直接调 handoff.check_watch，不调模型。
+
+    ★ 幂等：同一 watch_ref 只留一条（重复交代不该在列表里堆十条，
+      这正是用户抱怨的「同一需求被重复发送」）。
+    """
+    wid = str(watch_id or "").strip()
+    if not wid:
+        return {"ok": False, "error": "缺少监视 id"}
+    t = str(target or "").strip()
+    try:
+        mins = int(interval_minutes or 0)
+    except Exception:                                     # noqa: BLE001
+        mins = 0
+    if mins <= 0:
+        mins = WATCH_DEFAULT_MINUTES
+    mins = max(1, min(mins, 7 * 24 * 60))
+    with _LOCK:
+        jobs = load_jobs()
+        for old in jobs:
+            if str(old.get("kind") or "") != "watch":
+                continue
+            if str(old.get("watch_ref") or "") != wid:
+                continue
+            old["enabled"] = True
+            old["schedule"] = {"every_minutes": mins}
+            if t:
+                old["watch_query"] = t
+            if name:
+                old["name"] = str(name)[:40]
+            if session and not old.get("session"):
+                old["session"] = str(session)
+            old["next_run"] = _next_run({"schedule": {"every_minutes": mins}})
+            save_jobs(jobs)
+            return {"ok": True, "job": old, "reused": True}
+        job = {
+            "id": uuid.uuid4().hex[:12],
+            "name": str(name or "").strip()[:40] or ("盯着：" + t[:24]),
+            "kind": "watch",
+            "watch_kind": "path",
+            "watch_ref": wid,
+            "watch_query": t,
+            "prompt": "（盯梢任务）定时比对「%s」，有变化就汇报并执行预设动作。" % t[:40],
+            "schedule": {"every_minutes": mins},
+            "enabled": True,
+            "session": str(session or ""),
+            "created": _now(),
+            "last_run": "",
+            "last_status": "",
+            "last_preview": "",
+            "last_hash": "",
+            "timeline": [],
+            "next_run": _next_run({"schedule": {"every_minutes": mins}}),
+        }
+        jobs.append(job)
+        save_jobs(jobs)
+    return {"ok": True, "job": job, "reused": False}
+
+
 def list_watches() -> list:
     """列出所有「盯事」任务（kind == "watch"），按创建时间倒序。
 
@@ -1392,6 +1463,41 @@ def list_watches() -> list:
     return out
 
 
+def _run_watch_once(job: dict) -> dict:
+    """跑一次盯事任务（不调模型），给 _loop 一个统一的 {answer, ...} 口径。
+
+    两条路径：
+      · watch_kind="path" —— 本地目录 / 文件监视：交给 handoff.check_watch
+        （基线、触发条件、变化历史、预设动作、actlog 事件都在那边）；
+      · 其余（web / weather / page）—— 走本模块的 run_watch（联网抓取 + diff）。
+    """
+    k = str(job.get("watch_kind") or "web").strip().lower()
+    label = str(job.get("watch_query") or job.get("name") or "")[:40]
+    if k in ("path", "file", "dir"):
+        wid = str(job.get("watch_ref") or "")
+        try:
+            from . import handoff as _ho
+            changed = bool(_ho.check_watch(wid))
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("盯梢检查失败：%s", e)
+            return {"answer": "盯梢检查失败：%s" % e, "changed": False,
+                    "watch_id": wid}
+        return {"answer": "（盯梢「%s」）%s" % (
+                    label, "发现了变化，已汇报并执行预设动作" if changed else "这次没变化"),
+                "changed": changed, "watch_id": wid}
+    try:
+        r = run_watch(job)
+    except Exception as e:                                # noqa: BLE001
+        return {"answer": "盯事抓取失败：%s" % e, "changed": False}
+    if not r.get("ok"):
+        return {"answer": "盯事抓取失败：%s" % (r.get("error") or "未知错误"),
+                "changed": False}
+    return {"answer": "（盯事「%s」）%s" % (
+                label, ("有变化：+%s / -%s" % (r.get("added") or 0, r.get("removed") or 0))
+                if r.get("changed") else ("已记录基线" if r.get("baseline") else "无变化")),
+            "changed": bool(r.get("changed"))}
+
+
 def run_watch(job: dict) -> dict:
     """执行一次盯事任务：抓取 → 和上次比对 → 有变化就写时间线 + actlog。
 
@@ -1400,6 +1506,16 @@ def run_watch(job: dict) -> dict:
     """
     q = str(job.get("watch_query") or "").strip()
     k = str(job.get("watch_kind") or "web")
+    # ★ 本地路径监视（盯梢小助手）不联网：交给 handoff 那边做快照比对
+    if str(k).strip().lower() in ("path", "file", "dir"):
+        try:
+            from . import handoff as _ho
+            changed = bool(_ho.check_watch(str(job.get("watch_ref") or "")))
+        except Exception as e:                            # noqa: BLE001
+            return {"ok": False, "changed": False, "added": 0, "removed": 0,
+                    "error": "%s: %s" % (type(e).__name__, e)}
+        return {"ok": True, "changed": changed, "added": 1 if changed else 0,
+                "removed": 0, "error": ""}
     snap = _watch_snapshot(q, k)
     if not snap.get("ok"):
         return {"ok": False, "changed": False, "added": 0, "removed": 0,

@@ -131,9 +131,18 @@ def _read(p: Path) -> str:
         return ""
 
 
-def _finding(level, kind, rel, line, msg, hint=""):
-    return {"level": level, "kind": kind, "file": rel,
-            "line": int(line or 0), "msg": msg, "hint": hint}
+def _finding(level, kind, rel, line, msg, hint="", noscore=False):
+    """noscore=True 表示「只提示、不扣分」。
+
+    ★ 2026-11-22：这类项是**已确认无害**的（例：subprocess 告警但全局补丁实测
+      已兜住）。保留提示有排查价值，但让它扣分就是虚压 —— 用户会看到「明明写着
+      可忽略，分数却被扣了 0.5」。所以计数时排除它，展示时保留它。
+    """
+    d = {"level": level, "kind": kind, "file": rel,
+         "line": int(line or 0), "msg": msg, "hint": hint}
+    if noscore:
+        d["noscore"] = True
+    return d
 
 
 # ---------------------------------------------------------------- 1. 语法
@@ -640,6 +649,18 @@ def _has_global_nowin_patch(trees):
     所以有这个全局兜底时，subprocess 告警只作提示、不逐处报 high/mid，
     否则一个项目就是几十条误报，信任模式还会照着去改 —— 那是真危险。
     """
+    # ① 首选**实测**：补丁真的装上了才算数。
+    #    静态检查跑在服务进程里，而 main.py 启动时已调 install_nowin_patch()，
+    #    所以这里能直接问到「Popen 到底被打了没」。
+    try:
+        from . import procwin as _pw
+        if _pw.is_patched():
+            return True
+    except Exception:                                   # noqa: BLE001
+        logger.debug("查询 procwin.is_patched 失败，退回 AST 判断", exc_info=True)
+
+    # ② 兜底：AST 看有没有写调用（静态检查在**另一个进程**里跑时，实测会是 False，
+    #    这时仍要按「代码里有全局兜底」处理，否则又会炸出几十条误报）。
     for rel, (p, tree) in trees.items():
         src = _read(p)
         if "install_nowin_patch" not in src:
@@ -1513,7 +1534,9 @@ def audit(deep_files=None):
                 "检测到 %d 处 subprocess 直接调用，但 procwin.install_nowin_patch() 已全局兜住"
                 "（实测窗口数 0），故不逐处报 high/mid" % len(_locs),
                 "显式传 creationflags=procwin.NOWIN 更稳妥；位置：" + ", ".join(_locs[:10])
-                + ("…" if len(_locs) > 10 else "")))
+                + ("…" if len(_locs) > 10 else ""),
+                # ★ 已知无害项：保留提示（有排查价值），但不参与扣分。
+                noscore=True))
     else:
         findings += _sub
     findings += _check_js_syntax()
@@ -1535,6 +1558,21 @@ def audit(deep_files=None):
     for f in uniq:
         by_kind[f["kind"]] = by_kind.get(f["kind"], 0) + 1
 
+    # ★ 计分口径（2026-11-22）：noscore 项（已知无害）**照样展示、但不扣分**。
+    #   counts 是全量（给自检报告看「一共发现几条」），counts_scored 才给评分用。
+    scored = {"high": 0, "mid": 0, "low": 0, "info": 0}
+    for f in uniq:
+        if f.get("noscore"):
+            # ★ 护栏（2026-11-22）：noscore 只能用于「已确认无害」的 info 级提示。
+            #   如果哪天有人（或 LLM 自己）把 high/mid 标成 noscore 想刷满分，
+            #   这里直接把它当计分项 —— 宁可比真实情况更严，也不能让评分虚高。
+            if f["level"] in ("high", "mid", "low"):
+                logger.warning("noscore 只能用于 info 级，已忽略：%s:%s %s",
+                               f.get("file"), f.get("line"), f.get("kind"))
+            else:
+                continue
+        scored[f["level"]] = scored.get(f["level"], 0) + 1
+
     return {
         "ok": True,
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1542,6 +1580,7 @@ def audit(deep_files=None):
         "js_files": len(_js_files()),
         "seconds": round(time.time() - t0, 2),
         "counts": by_level,
+        "counts_scored": scored,
         "kinds": by_kind,
         "total": len(uniq),
         "findings": uniq,

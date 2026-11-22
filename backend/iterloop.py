@@ -139,7 +139,9 @@ def static_part():
             # 首次调用结果不可靠（见 _AUDIT_WARMED 注释），空跑一遍预热
             _AUDIT_WARMED = True
             a = CA.audit() or {}
-        c = a.get("counts") or {}
+        # ★ 2026-11-22：优先用「计分口径」（排除 noscore 已知无害项）。
+        #   否则会出现「压分明细自己写着『可忽略』，分数却被扣了 0.5」的矛盾。
+        c = a.get("counts_scored") or a.get("counts") or {}
         if not c:
             return None
         high = int(c.get("high") or 0)
@@ -154,13 +156,16 @@ def static_part():
         for f in fl:
             if not isinstance(f, dict):
                 continue
-            detail.append({
+            d = {
                 "file": str(f.get("file") or ""),
                 "line": int(f.get("line") or 0),
                 "kind": str(f.get("kind") or ""),
                 "level": str(f.get("level") or ""),
                 "msg": str(f.get("msg") or "")[:200],
-            })
+            }
+            if f.get("noscore"):
+                d["noscore"] = True
+            detail.append(d)
         return {
             "score": round(max(0.0, min(float(W_STATIC), raw)), 2),
             "max": W_STATIC,

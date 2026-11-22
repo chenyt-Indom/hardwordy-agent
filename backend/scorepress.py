@@ -133,6 +133,10 @@ def build(sc: Dict[str, Any], note: str = "") -> Dict[str, Any]:
         for f in (st.get("findings") or []):
             if not isinstance(f, dict):
                 continue
+            # ★ 2026-11-22：已知无害项（noscore）不参与扣分，也不该出现在压分点里。
+            #   否则报告会自相矛盾：静态失分 0，却列着一条 cost=0.5 的「压分点」。
+            if f.get("noscore"):
+                continue
             lv = str(f.get("level") or "").lower()
             kind = str(f.get("kind") or "")
             fit.append({
@@ -149,7 +153,7 @@ def build(sc: Dict[str, Any], note: str = "") -> Dict[str, Any]:
         parts.append({
             "key": "static", "label": "静态", "score": round(ssc, 2),
             "max": round(smax, 2), "lost": round(max(0.0, smax - ssc), 2),
-            "count": int(st.get("finding_total") or len(fit)),
+            "count": len(fit),
             "shown": len(fit), "items": fit,
         })
 
@@ -501,7 +505,12 @@ def link_plan(item: Dict[str, Any], create: bool = False) -> Dict[str, Any]:
                           "kind": p["kind"], "exists": False,
                           "matched": None, "why": ""}
     if not p["file"]:
-        ev["why"] = "压分点没有文件路径，无法联动"
+        # ★ 2026-11-22：质量段满分时压分点就是空的。原来的提示「没有文件路径」
+        #   会让人以为「有个压分点但缺路径」，其实是一条都没有 —— 说清区别。
+        if not (p.get("kind") or p.get("msg")):
+            ev["why"] = "当前没有压分点（质量段已满分），无需联动"
+        else:
+            ev["why"] = "压分点没有文件路径，无法联动"
         return {"press": p, "plan": None, "evidence": ev}
     if not os.path.isfile(_abs_path(p["file"])):
         ev["why"] = "文件不存在（历史记录或已删除），跳过"

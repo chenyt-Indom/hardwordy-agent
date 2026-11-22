@@ -43,6 +43,7 @@ _finalize / _clip / _tail / _fmt_change / _mask_code / _bold_pos），
 只有「没截断且空间足够」时才补一个闭合围栏（那时变长是安全的）。
 """
 import functools
+import hashlib
 import json
 import math
 import os
@@ -50,6 +51,7 @@ import re
 import shutil
 import threading
 import time
+import uuid
 
 from . import config
 import logging
@@ -1501,3 +1503,716 @@ def render(session: str = "") -> str:
         "和用户当前这句话冲突时**以当前为准**。不要主动复述这张卡，"
         "除非用户问「刚才聊到哪 / 改了些什么」。")
     return "\n".join(lines)
+
+
+# =====================================================================
+#  盯梢小助手（watch）—— 说一句「盯着 XX」就长期监视，变化时主动汇报
+#  （2026-11-22）
+# =====================================================================
+# 为什么需要
+# ----------
+# 用户 89 次重复发同一句需求（「有没有免费的」「帮我看着这个文件夹」…）。
+# 他真正要的不是「再问一次」，而是「事情变了你自己回来告诉我，而且顺手办好」。
+# 所以这里把「盯梢」做成一条**长期任务**：
+#     说一次 → 记下目标和触发条件 → 后台定时比对快照 →
+#     有变化就落一条 actlog 事件 + 生成一张卡（带「已执行的动作」+「查看详情」）。
+#
+# 和 scheduler 的关系
+# -------------------
+# 存储、去重、快照比对在本模块（要记路径 / 条件 / 基线 / 历史，比定时任务复杂）；
+# **触发**复用现有的定时任务表：create_watch 会在 schedules.json 里登记一条
+# kind="watch" / watch_kind="path" 的任务（watch_ref 指回本模块的监视 id），
+# 调度循环到点就调 check_watch —— 用户不需要学第二套概念，也不会多一个线程。
+# ⚠️ 事件落盘走 actlog.append_watch_event，不是模块级的 actlog(...) 直接调用；
+#    这里只借它那套「按会话隔离 + 滚动覆盖 + 重启后还在」的账本。
+#
+# 设计取舍
+# --------
+#   1. **建的时候立刻记基线**。否则用户刚说完「盯着」，下一次检查必然报「有变化」，
+#      那是噪音（也是同类功能以前踩过的坑）。
+#   2. **同一目标重复交代 → 复用同一条**（按路径 + 条件归一化查重）。这正是
+#      「同一需求被重复发送 89 次」的直接解法：说十遍也只盯一条。
+#   3. **快照用内容哈希，不只看 mtime**。同一秒内改两次 mtime 可能不变，
+#      只看 mtime 会漏掉真变化。
+#   4. 任何异常都吞掉并写日志 —— 盯梢坏了绝不能影响对话和调度本身。
+
+WATCH_FILE = os.path.join(DIR, "watch.json")
+WATCH_MAX = 40                 # 最多同时盯多少条（超了就滚动丢最老的）
+WATCH_HISTORY = 24             # 每条监视最多留多少条变化历史
+WATCH_DEFAULT_MINUTES = 30     # 用户没说间隔时的默认值
+WATCH_MAX_FILES = 1500         # 一个目录最多扫多少个文件（防巨目录）
+WATCH_HASH_BYTES = 512 * 1024  # 单文件超过这个大小只比大小 + mtime
+
+# 触发条件：key → 一句人话（前端直接显示这句）
+WATCH_CONDITIONS = {
+    "content_change": "内容一变就汇报",
+    "size_change": "大小变了就汇报",
+    "exists": "出现 / 消失就汇报",
+    "any": "有任何变化就汇报",
+}
+
+_WATCH_LOCK = threading.RLock()
+
+
+def _cond_of(condition) -> str:
+    """把用户/调用方给的触发条件归一化成白名单里的一个（认不出的按内容变化）。"""
+    c = str(condition or "").strip().lower()
+    alias = {
+        "change": "content_change", "content": "content_change",
+        "diff": "content_change", "内容": "content_change",
+        "size": "size_change", "大小": "size_change",
+        "exist": "exists", "appear": "exists", "出现": "exists",
+    }
+    c = alias.get(c, c)
+    return c if c in WATCH_CONDITIONS else "content_change"
+
+
+def _md5(b) -> str:
+    if isinstance(b, str):
+        b = b.encode("utf-8", "ignore")
+    return hashlib.md5(b or b"").hexdigest()
+
+
+def _watch_read() -> dict:
+    """读监视清单（坏文件不覆盖，只当空处理并留日志）。"""
+    try:
+        with open(WATCH_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and isinstance(d.get("watches"), list):
+            return d
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logger.warning("盯梢 watch.json 读不出来，本次按空处理", exc_info=True)
+    return {"watches": []}
+
+
+def _watch_write(d: dict) -> None:
+    """原子写监视清单（写一半断电也不会把整份清单写坏）。"""
+    try:
+        os.makedirs(DIR, exist_ok=True)
+        tmp = WATCH_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, WATCH_FILE)
+    except Exception:
+        logger.warning("盯梢 watch.json 写入失败", exc_info=True)
+
+
+def _snapshot(target: str) -> dict:
+    """抓一次目标的当前快照（不联网、不改目标）。
+
+    返回 {ok, sig, kind, exists, files, bytes, preview, error}：
+      · sig     —— 内容指纹（目录 = 每个文件「相对路径|大小|mtime|内容哈希」再取 md5）
+      · kind    —— dir / file / missing
+      · preview —— 一句人话摘要（卡片上直接显示）
+
+    目标不存在算**合法状态**（ok=True, kind="missing"）—— 「等文件出现」是正经
+    用法，不该报错。
+    """
+    out = {"ok": False, "sig": "", "kind": "missing", "exists": False,
+           "files": 0, "bytes": 0, "preview": "", "error": "", "detail": {}}
+    p = str(target or "").strip()
+    if not p:
+        out["error"] = "没有要盯的目标"
+        return out
+    out["ok"] = True
+    try:
+        if os.path.isdir(p):
+            rows = []
+            notes = []
+            n = 0
+            total = 0
+            for root, dirs, files in os.walk(p):
+                dirs.sort()
+                files.sort()
+                for fn in files:
+                    if n >= WATCH_MAX_FILES:
+                        break
+                    fp = os.path.join(root, fn)
+                    rel = os.path.relpath(fp, p).replace("\\", "/")
+                    try:
+                        st = os.stat(fp)
+                    except OSError:
+                        continue      # 正在被写 / 刚好被删，这一轮跳过
+                    n += 1
+                    total += int(st.st_size)
+                    sig = "%s|%d|%d" % (rel, int(st.st_size), int(st.st_mtime))
+                    if st.st_size <= WATCH_HASH_BYTES:
+                        try:
+                            with open(fp, "rb") as f:
+                                sig += "|" + _md5(f.read())
+                        except OSError:
+                            logger.debug("盯梢读文件失败（跳过内容哈希）", exc_info=True)
+                    rows.append(sig)
+                    if len(notes) < 3:
+                        notes.append(rel)
+                if n >= WATCH_MAX_FILES:
+                    break
+            out["kind"] = "dir"
+            out["exists"] = True
+            out["files"] = n
+            out["bytes"] = total
+            out["sig"] = _md5("\n".join(rows))
+            out["preview"] = "共 %d 个文件 / %d 字节%s" % (
+                n, total, ("；" + "、".join(notes)) if notes else "（空目录）")
+            if n >= WATCH_MAX_FILES:
+                out["preview"] += "（已扫到 %d 个文件上限）" % WATCH_MAX_FILES
+            return out
+        if os.path.isfile(p):
+            try:
+                st = os.stat(p)
+            except OSError:
+                st = None
+            size = int(getattr(st, "st_size", 0) or 0)
+            body = b""
+            try:
+                with open(p, "rb") as f:
+                    body = f.read(WATCH_HASH_BYTES + 1)
+            except OSError:
+                logger.debug("盯梢读文件失败", exc_info=True)
+            keep = body[:WATCH_HASH_BYTES]
+            out["kind"] = "file"
+            out["exists"] = True
+            out["files"] = 1
+            out["bytes"] = size
+            out["sig"] = "%d|%d|%s" % (int(getattr(st, "st_mtime", 0) or 0),
+                                       size, _md5(keep))
+            txt = keep[:200].decode("utf-8", "replace")
+            out["preview"] = "文件 %d 字节%s" % (
+                size, ("；开头：" + _clean(txt, 60)) if txt.strip() else "")
+            return out
+        # 目标还不存在：这是「等它出现」的正常状态
+        out["kind"] = "missing"
+        out["exists"] = False
+        out["sig"] = "missing"
+        out["preview"] = "目标还不存在（出现时会汇报）"
+        return out
+    except Exception as e:                                # noqa: BLE001
+        out["ok"] = False
+        out["error"] = "%s: %s" % (type(e).__name__, e)
+        return out
+
+
+def _watch_changed(rec: dict, snap: dict) -> bool:
+    """比一次快照，判断「算不算用户想看的变化」。
+
+    · 抓取失败 —— 不算变化（不能在读失败时就喊「变了」）；
+    · 第一次（没有旧指纹）—— 不算变化，只记基线；
+    · exists      —— 只看「在 / 不在」有没有翻转；
+    · size_change —— 只看字节数有没有变；
+    · 其余（content_change / any）—— 看整体指纹。
+    """
+    if not snap.get("ok"):
+        return False
+    old = str(rec.get("sig") or "")
+    if not old:
+        return False
+    cond = _cond_of(rec.get("condition"))
+    if cond == "exists":
+        return bool(rec.get("exists")) != bool(snap.get("exists"))
+    if cond == "size_change":
+        if rec.get("bytes") is None:
+            return False
+        return int(rec.get("bytes") or 0) != int(snap.get("bytes") or 0)
+    return old != str(snap.get("sig") or "")
+
+
+def _run_watch_action(rec: dict, snap: dict) -> list:
+    """执行监视任务上预设的动作，返回「已经办了什么」的人话列表。
+
+    目前支持（都不联网、都不改目标，用户说了才做）：
+      · "snapshot"      —— 把这次看到的摘要另存一份，方便事后对比
+      · "job:<任务id>"  —— 立刻跑一条已有的定时任务（顺手把下一步也办了）
+      · 其它 / 空       —— 只汇报，不动手
+    """
+    done = []
+    act = str(rec.get("action") or "").strip()
+    if not act:
+        return done
+    try:
+        if act == "snapshot":
+            d = os.path.join(DIR, "watch_snap", str(rec.get("id") or "w"))
+            os.makedirs(d, exist_ok=True)
+            fp = os.path.join(d, time.strftime("%Y%m%d_%H%M%S") + ".txt")
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write("%s\n%s\n\n%s\n" % (rec.get("target") or "",
+                                            _now_str(), snap.get("preview") or ""))
+            done.append("已另存快照 %s" % os.path.basename(fp))
+        elif act.startswith("job:"):
+            jid = act.split(":", 1)[1].strip()
+            from . import scheduler as _sch
+            r = _sch.run_now(jid, background=True)
+            done.append("已触发定时任务 %s（%s）" % (
+                jid, "已开始" if r.get("ok") else (r.get("error") or "没跑起来")))
+        else:
+            done.append("按预设动作「%s」记了一笔待办" % _clean(act, 40))
+    except Exception as e:                                # noqa: BLE001
+        logger.debug("盯梢预设动作执行失败", exc_info=True)
+        done.append("预设动作「%s」没执行成功：%s" % (_clean(act, 40), e))
+    return done
+
+
+def _emit_watch_change(rec: dict, ev: dict) -> None:
+    """把「有变化」这件事落一条 actlog 事件（前端据此弹卡）。
+
+    ★ 只落**一条**：验收断言按「事件数 +1」判断有没有真汇报，
+      多写一条就会把「汇报了几次」算错。
+    """
+    try:
+        from . import actlog
+        actlog.append_watch_event(str(rec.get("event_session") or ""), {
+            "kind": "watch_change",
+            "key": str(rec.get("target") or "")[:120],
+            "state": "changed",
+            "prev": str(ev.get("before") or "")[:120],
+            "note": "；".join([str(ev.get("summary") or "")] +
+                             list(ev.get("actions") or []))[:120],
+            "ts": time.time(),
+            "count": int(rec.get("changes") or 0),
+        })
+    except Exception:
+        logger.warning("盯梢事件落盘失败（不影响监视本身）", exc_info=True)
+
+
+def _watch_path_of(target: str) -> str:
+    """把目标规整成绝对路径（认不出就当普通字符串原样留着）。"""
+    t = str(target or "").strip().strip("\"'「」“”")
+    if not t:
+        return ""
+    try:
+        return os.path.abspath(os.path.expanduser(t))
+    except Exception:                                     # noqa: BLE001
+        return t
+
+
+def _sync_watch_job(rec: dict) -> str:
+    """把监视任务登记进**现有的**定时任务表（kind="watch" / watch_kind="path"）。
+
+    失败不影响创建 —— 用户至少能在「盯梢」分组里手动点「立即检查」。
+    """
+    try:
+        from . import scheduler as _sch
+        r = _sch.register_file_watch(
+            rec.get("path") or rec.get("target") or "",
+            str(rec.get("id") or ""),
+            interval_minutes=int(rec.get("interval_minutes") or 0),
+            name=str(rec.get("name") or ""),
+            session=str(rec.get("session") or ""))
+        if r.get("ok"):
+            return str((r.get("job") or {}).get("id") or "")
+        logger.warning("盯梢登记定时任务失败：%s", r.get("error"))
+    except Exception:                                     # noqa: BLE001
+        logger.warning("盯梢登记定时任务异常（监视本身仍在）", exc_info=True)
+    return ""
+
+
+def _prune_watch_jobs(alive_ids) -> int:
+    """清掉 schedules.json 里「监视记录已经不存在」的残留任务（抖动防护）。"""
+    try:
+        from . import scheduler as _sch
+        alive = set(str(x) for x in (alive_ids or []))
+        jobs = _sch.load_jobs()
+        keep = []
+        dropped = 0
+        for j in jobs:
+            if (str(j.get("kind") or "") == "watch"
+                    and str(j.get("watch_kind") or "") == "path"
+                    and str(j.get("watch_ref") or "") not in alive):
+                dropped += 1
+                continue
+            keep.append(j)
+        if dropped:
+            _sch.save_jobs(keep)
+        return dropped
+    except Exception:                                     # noqa: BLE001
+        logger.debug("清理残留盯梢任务失败（跳过）", exc_info=True)
+        return 0
+
+
+def create_watch(target: str, condition: str = "content_change", *,
+                 name: str = "", interval_minutes: int = 0, action: str = "",
+                 session: str = "") -> str:
+    """登记一条「盯着 XX」的长期监视任务，返回它的 id（失败返回空串）。
+
+    参数：
+      target            —— 要盯的东西：目录、文件、网址 / 关键词（原样保存）
+      condition         —— 触发条件，见 WATCH_CONDITIONS（默认「内容一变就汇报」）
+      interval_minutes  —— 多久查一次（0 = 默认 30 分钟）
+      action            —— 有变化时**顺手办好**的预设动作（见 _run_watch_action）
+      session           —— 哪段会话说的（事件落进那段账本，前端好归位）
+
+    ★ 建的时候立刻记一次基线：用户刚说完「盯着」，下一次检查不该马上收到
+      「有变化」—— 那是噪音。所以这里先抓一次快照当基线。
+    ★ 同一目标 + 同一条件再交代一次 → **复用**原来那条（只更新间隔 / 开关），
+      返回同一个 id。这是「同一需求被重复发送 89 次」的直接解法。
+    """
+    t = str(target or "").strip()
+    if not t:
+        return ""
+    path = _watch_path_of(t)
+    cond = _cond_of(condition)
+    try:
+        mins = int(interval_minutes or 0)
+    except Exception:                                     # noqa: BLE001
+        mins = 0
+    if mins <= 0:
+        mins = WATCH_DEFAULT_MINUTES
+    mins = max(1, min(mins, 7 * 24 * 60))
+    act = str(action or "").strip()
+    job_id = ""
+    with _WATCH_LOCK:
+        d = _watch_read()
+        watches = [w for w in (d.get("watches") or []) if isinstance(w, dict)]
+        for old in watches:
+            if _cond_of(old.get("condition")) != cond:
+                continue
+            if str(old.get("path") or "") not in (path, ""):
+                continue
+            old["enabled"] = True
+            old["interval_minutes"] = mins
+            if name:
+                old["name"] = _clean(name, 40)
+            if act:
+                old["action"] = act
+            if session and not old.get("session"):
+                old["session"] = _clean(session, 60)
+            d["watches"] = watches
+            _watch_write(d)
+            _sync_watch_job(old)
+            return str(old.get("id") or "")
+
+        snap = _snapshot(path or t)
+        wid = "w" + uuid.uuid4().hex[:10]
+        rec = {
+            "id": wid,
+            "target": t,
+            "path": path,
+            "condition": cond,
+            "name": _clean(name, 40) or ("盯着：" + _clean(t, 24)),
+            "action": act,
+            "session": _clean(session, 60),
+            # 事件落进这条监视**自己的**账本：每条 watch 一个文件，避免和其它
+            # 会话的滚动覆盖互相挤掉（一次变化就该留下一条）。
+            "event_session": "watch_" + wid[-8:],
+            "enabled": True,
+            "interval_minutes": mins,
+            "created": _now_str(),
+            "last_check": _now_str(),
+            "checks": 0,
+            "changes": 0,
+            "sig": snap.get("sig") or "",
+            "kind": snap.get("kind") or "",
+            "exists": bool(snap.get("exists")),
+            "files": int(snap.get("files") or 0),
+            "bytes": int(snap.get("bytes") or 0),
+            "preview": snap.get("preview") or "",
+            "status": "已记基线" if snap.get("ok") else ("基线没抓成：%s"
+                                                       % (snap.get("error") or "")),
+            "pending": False,
+            "job_id": "",
+            "history": [],
+        }
+        watches.append(rec)
+        d["watches"] = watches[-WATCH_MAX:]
+        _watch_write(d)
+        _prune_watch_jobs([w.get("id") for w in d["watches"]])
+        job_id = _sync_watch_job(rec)
+        if job_id:
+            rec["job_id"] = job_id
+            _watch_write(d)                # rec 就在 d["watches"] 里，一起落盘
+    return wid
+
+
+def check_watch(watch_id: str) -> bool:
+    """检查一条监视任务：抓快照 → 和上次比 → 有变化就落事件 + 执行预设动作。
+
+    返回 **True 表示这次真的发现变化**（调用方 / 验收断言就按这个判断）。
+    任何异常都不抛：一条监视炸掉不该把调度循环带走。
+    """
+    wid = str(watch_id or "").strip()
+    if not wid:
+        return False
+    changed = False
+    ev = None
+    rec = None
+    with _WATCH_LOCK:
+        d = _watch_read()
+        for w in (d.get("watches") or []):
+            if isinstance(w, dict) and str(w.get("id") or "") == wid:
+                rec = w
+                break
+        if rec is None:
+            return False
+        snap = _snapshot(rec.get("path") or rec.get("target") or "")
+        changed = _watch_changed(rec, snap)
+        rec["last_check"] = _now_str()
+        rec["checks"] = int(rec.get("checks") or 0) + 1
+        if changed:
+            before = str(rec.get("preview") or "")
+            preview = str(snap.get("preview") or "")
+            rec["changes"] = int(rec.get("changes") or 0) + 1
+            actions = _run_watch_action(rec, snap)
+            if not actions:
+                actions = ["仅汇报（这条监视没有预设动作）"]
+            summary = "「%s」有变化" % _clean(rec.get("target"), 40)
+            if before and preview and before != preview:
+                summary += "：%s → %s" % (_clean(before, 50), _clean(preview, 50))
+            ev = {"t": rec["last_check"], "before": before, "after": preview,
+                  "summary": summary, "actions": actions}
+            hist = [h for h in (rec.get("history") or []) if isinstance(h, dict)]
+            rec["history"] = (hist + [ev])[-WATCH_HISTORY:]
+            rec["status"] = "有变化（第 %d 次）" % rec["changes"]
+            # pending=True：前端据此「主动弹一次卡」，用户看过就清掉
+            rec["pending"] = True
+            rec["pending_at"] = rec["last_check"]
+        elif not snap.get("ok"):
+            rec["status"] = "检查失败：%s" % (snap.get("error") or "未知错误")
+        else:
+            rec["status"] = "无变化"
+            if not rec.get("sig"):
+                rec["status"] = "已记基线"
+        # 快照无论变没变都更新 —— 下一次比对永远对着「刚刚看到的」这一版
+        if snap.get("ok"):
+            rec["sig"] = snap.get("sig") or ""
+            rec["kind"] = snap.get("kind") or ""
+            rec["exists"] = bool(snap.get("exists"))
+            rec["files"] = int(snap.get("files") or 0)
+            rec["bytes"] = int(snap.get("bytes") or 0)
+            rec["preview"] = snap.get("preview") or ""
+        _watch_write(d)
+    if changed and ev is not None:
+        _emit_watch_change(rec, ev)        # 落账本放在锁外：IO 不占监视锁
+    return bool(changed)
+
+
+def _watch_view(rec: dict) -> dict:
+    """把一条监视记录整理成给前端 / 接口用的**精简视图**（字段固定、可序列化）。"""
+    hist = [h for h in (rec.get("history") or []) if isinstance(h, dict)]
+    last = hist[-1] if hist else None
+    return {
+        "id": str(rec.get("id") or ""),
+        "name": str(rec.get("name") or ""),
+        "target": str(rec.get("target") or ""),
+        "path": str(rec.get("path") or ""),
+        "kind": str(rec.get("kind") or ""),
+        "condition": _cond_of(rec.get("condition")),
+        "condition_text": WATCH_CONDITIONS.get(_cond_of(rec.get("condition")), ""),
+        "action": str(rec.get("action") or ""),
+        "enabled": bool(rec.get("enabled")),
+        "interval_minutes": int(rec.get("interval_minutes") or 0),
+        "period": "每 %d 分钟" % int(rec.get("interval_minutes") or 0),
+        "created": str(rec.get("created") or ""),
+        "last_check": str(rec.get("last_check") or ""),
+        "status": str(rec.get("status") or ""),
+        "checks": int(rec.get("checks") or 0),
+        "changes": int(rec.get("changes") or 0),
+        "files": int(rec.get("files") or 0),
+        "bytes": int(rec.get("bytes") or 0),
+        "preview": str(rec.get("preview") or ""),
+        "pending": bool(rec.get("pending")),
+        "job_id": str(rec.get("job_id") or ""),
+        # 最近一次变化：卡片上的「已执行的动作」+「查看详情」都吃这两个
+        "last_change": last,
+        "history": hist[-8:],
+    }
+
+
+def list_watches(session: str = "") -> list:
+    """列出所有监视任务（按创建时间倒序），每条都是 _watch_view 的精简视图。
+
+    给「盯梢」分组用：用户关掉页面再回来，能一眼看到「我在盯哪些东西、
+    最近一次检查是什么时候、上次变化时它顺手做了什么」。
+    """
+    out = []
+    try:
+        d = _watch_read()
+    except Exception:                                     # noqa: BLE001
+        logger.debug("读监视清单失败（当空处理）", exc_info=True)
+        return out
+    sid = str(session or "").strip()
+    for rec in (d.get("watches") or []):
+        if not isinstance(rec, dict):
+            continue
+        if sid and str(rec.get("session") or "") not in (sid, ""):
+            continue
+        out.append(_watch_view(rec))
+    out.sort(key=lambda x: str(x.get("created") or ""), reverse=True)
+    return out
+
+
+def watch_group(title: str = "盯梢") -> dict:
+    """jobplan 面板的「盯梢」分组数据源（前端直接渲染，不用自己拼口径）。"""
+    items = list_watches()
+    return {
+        "group": "watch",
+        "title": title,
+        "count": len(items),
+        "pending": len([x for x in items if x.get("pending")]),
+        "changed": len([x for x in items if int(x.get("changes") or 0) > 0]),
+        "items": items,
+    }
+
+
+def ack_watch(watch_id: str) -> dict:
+    """用户已经看过这张卡 → 清掉 pending（下次有变化才会再弹）。"""
+    wid = str(watch_id or "").strip()
+    if not wid:
+        return {"ok": False, "error": "缺少监视 id"}
+    with _WATCH_LOCK:
+        d = _watch_read()
+        hit = None
+        for rec in (d.get("watches") or []):
+            if isinstance(rec, dict) and str(rec.get("id") or "") == wid:
+                rec["pending"] = False
+                hit = rec
+                break
+        if hit is None:
+            return {"ok": False, "error": "没有这条监视"}
+        _watch_write(d)
+        return {"ok": True, "watch": _watch_view(hit)}
+
+
+def remove_watch(watch_id: str) -> dict:
+    """删掉一条监视任务，同时把它在定时任务表里的那条也删掉。"""
+    wid = str(watch_id or "").strip()
+    if not wid:
+        return {"ok": False, "error": "缺少监视 id"}
+    job_id = ""
+    with _WATCH_LOCK:
+        d = _watch_read()
+        watches = [w for w in (d.get("watches") or []) if isinstance(w, dict)]
+        keep = []
+        for rec in watches:
+            if str(rec.get("id") or "") == wid:
+                job_id = str(rec.get("job_id") or "")
+                continue
+            keep.append(rec)
+        if len(keep) == len(watches):
+            return {"ok": False, "error": "没有这条监视"}
+        d["watches"] = keep
+        _watch_write(d)
+    try:
+        from . import scheduler as _sch
+        jobs = _sch.load_jobs()
+        keepj = [j for j in jobs
+                 if not (str(j.get("kind") or "") == "watch"
+                         and (str(j.get("watch_ref") or "") == wid
+                              or (job_id and str(j.get("id") or "") == job_id)))]
+        if len(keepj) != len(jobs):
+            _sch.save_jobs(keepj)
+    except Exception:                                     # noqa: BLE001
+        logger.debug("删除监视对应的定时任务失败（不影响监视本身）", exc_info=True)
+    return {"ok": True, "id": wid}
+
+
+def check_due(limit: int = 0) -> dict:
+    """把所有**该检查的**监视任务跑一遍（供调度/接口兜底调用）。
+
+    判断「该不该查」：上次检查时间 + 间隔 <= now。返回
+    {ok, ran, changed, errors} —— 和 scheduler.tick_watch 的口径一致。
+    """
+    now = time.time()
+    ran = 0
+    changed = 0
+    errors = []
+    try:
+        d = _watch_read()
+        items = [w for w in (d.get("watches") or []) if isinstance(w, dict)]
+    except Exception:                                     # noqa: BLE001
+        return {"ok": False, "ran": 0, "changed": 0, "errors": ["清单读不出来"]}
+    for rec in items:
+        if not rec.get("enabled"):
+            continue
+        try:
+            mins = int(rec.get("interval_minutes") or WATCH_DEFAULT_MINUTES)
+        except Exception:                                 # noqa: BLE001
+            mins = WATCH_DEFAULT_MINUTES
+        try:
+            last = time.mktime(time.strptime(str(rec.get("last_check") or ""),
+                                             "%Y-%m-%d %H:%M:%S"))
+        except Exception:                                 # noqa: BLE001
+            last = 0.0
+        if last and (now - last) < mins * 60:
+            continue
+        ran += 1
+        try:
+            if check_watch(str(rec.get("id") or "")):
+                changed += 1
+        except Exception as e:                            # noqa: BLE001
+            errors.append({"id": rec.get("id"), "error": "%s: %s" % (type(e).__name__, e)})
+        if limit and ran >= int(limit):
+            break
+    return {"ok": True, "ran": ran, "changed": changed, "errors": errors}
+
+
+# ---------------------------------------------------------------- 一句话解析
+# 用户不会念参数，他只会说：「盯着 D:\work\报价单，有变化就告诉我」。
+# 这里把这句话拆成 target / condition / action —— 纯规则、不调模型（要秒回、
+# 要离线可测）。拆不出来就返回空 target，让调用方去问一句，别瞎猜。
+_WATCH_TRIGGER_RE = re.compile(r"^(.*?)(盯着|盯住|盯一下|看着|看住|监视|监控|跟进|"
+                               r"watch)\s*[:：]?\s*", re.I)
+_WATCH_TAIL_RE = re.compile(r"[，,]?\s*(一有变化|有变化|变了|变化时|变动时|更新时|"
+                            r"一旦变化|如果变了|只要有变化).*$")
+_WATCH_ACT_RE = re.compile(r"(另存|存一份|留一份|备份)", )
+
+
+def parse_watch_text(text: str) -> dict:
+    """从用户原话里拆出「盯什么 / 什么算变化 / 要不要顺手办什么」。
+
+    返回 {target, condition, action, name}，认不出的字段给默认值；
+    实在没提到目标就返回 target=""。
+    """
+    raw = " ".join(str(text or "").split())
+    out = {"target": "", "condition": "content_change", "action": "", "name": ""}
+    if not raw:
+        return out
+
+    # 1) 触发条件：先按整句判断（「出现 / 消失」「大小」这些词可能在从句里）
+    if re.search(r"(出现|消失|不见了|多出来|新建)", raw):
+        out["condition"] = "exists"
+    elif re.search(r"(大小|体积|多大|占多少)", raw):
+        out["condition"] = "size_change"
+
+    # 2) 预设动作
+    if _WATCH_ACT_RE.search(raw):
+        out["action"] = "snapshot"
+
+    # 3) 目标：去掉开头的客套和「盯着」，再去掉「有变化就告诉我」这类尾巴
+    s = re.sub(r"^(帮我|帮忙|请你?|麻烦你?|我要你|给我|替我)\s*", "", raw).strip()
+    m = _WATCH_TRIGGER_RE.match(s)
+    if m:
+        s = s[m.end():]
+    s = _WATCH_TAIL_RE.sub("", s).strip()
+    s = s.strip(" \t，,。.！!；;：:、")
+    s = s.strip("\"'「」“”《》")
+    if s:
+        out["target"] = s
+        out["name"] = "盯着：" + _clean(s, 24)
+    return out
+
+
+def create_watch_from_text(text: str, *, session: str = "",
+                           interval_minutes: int = 0) -> dict:
+    """一句话建监视：「盯着 XX，有变化就告诉我」→ 真的登记一条长期监视。
+
+    返回 {ok, id, watch, parsed} 或 {ok: False, error, parsed}。
+    """
+    parsed = parse_watch_text(text)
+    if not parsed.get("target"):
+        return {"ok": False, "error": "没听出要盯什么 —— 说「盯着 <目录 / 网址 / 关键词>」就行",
+                "parsed": parsed}
+    wid = create_watch(parsed["target"],
+                       condition=parsed.get("condition") or "content_change",
+                       name=parsed.get("name") or "",
+                       interval_minutes=interval_minutes,
+                       action=parsed.get("action") or "",
+                       session=session)
+    if not wid:
+        return {"ok": False, "error": "监视没建起来（目标为空或写盘失败）", "parsed": parsed}
+    one = None
+    for w in list_watches():
+        if w.get("id") == wid:
+            one = w
+            break
+    return {"ok": True, "id": wid, "watch": one, "parsed": parsed}

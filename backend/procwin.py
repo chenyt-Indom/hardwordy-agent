@@ -139,6 +139,20 @@ def ensure_child_python_env():
         return False
 
 
+def is_patched():
+    """全局 nowin 补丁是否**真的**已生效（不是「代码里写过调用」）。
+
+    ★ 2026-11-22：静态检查原本只靠 AST 看「main.py 里有没有 install_nowin_patch
+      这个调用」，那是「写了」而不是「生效了」—— 调用被 try/except 包住失败、
+      或者 os.name != "nt" 提前返回，AST 都会判成「已兜住」，于是几十处
+      subprocess 告警被错误降级。这里给一个实测入口，供静态检查交叉验证。
+    """
+    if os.name != "nt":
+        return False
+    import subprocess as _sp
+    return bool(getattr(_sp.Popen, "_nowin_patched", False))
+
+
 def install_nowin_patch():
     """给 subprocess.Popen 打全局补丁：Windows 上默认不分配控制台窗口。
 
