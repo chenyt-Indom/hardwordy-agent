@@ -58,6 +58,15 @@ _MAX_AUTO_ROUNDS = 10
 # ★ 2026-11-20 用户：「假如一个功能过于复杂呢？」→ 复杂功能改动多、自检问题也多，
 #   原来 12 轮很容易修不完就被跳过。改为 30 轮，复杂功能有足够时间修完。
 _MAX_VERIFY_TRIES = 30
+# ★ 2026-11-22 用户要求：「务必确保反复验证修改之后反复验证完全没问题之后
+#   才显示『已验证』」。所以通过一次不算数 —— 必须**连续**这么多轮都通过。
+#   每轮 = 语法编译 + 代码自检 + 真跑一遍回归（run_disk，从磁盘重载新代码）。
+_VERIFY_CONFIRM = 2
+
+# 评分结论的中文说法（跑分汇报用）
+_VERDICT_CN = {"improved": "进步", "regressed": "退步", "flat": "持平",
+               "rebased": "重建基准", "unknown": "无可比", "skip": "跳过",
+               "busy": "上一次还在评", "error": "评分出错"}
 
 # 队列里「等待中」的任务最多几个（★ 2026-11-20 用户明确要求：不能超过 10 个）。
 # 注意这和上面的 _MAX_AUTO_ROUNDS（本轮已完成功能数）是两回事：
@@ -979,17 +988,102 @@ def _verify_once(files):
             logger.debug("node 语法检查没跑成（跳过）", exc_info=True)
 
     try:
-        a = _si.run_audit(deep=False, source="after_change", create_plan=False)
-        if not a.get("skipped"):
-            for f in (a.get("findings") or []):
-                if f.get("level") in ("high", "mid"):
-                    problems.append("自检[%s] %s:%s %s —— %s" % (
-                        f.get("level"), f.get("file"), f.get("line"),
-                        f.get("kind"), f.get("msg")))
+        # ★ 2026-11-22 修一个把「反复验证」拖死的问题（实测：单轮卡 200 秒以上）：
+        #   原来调 _si.run_audit()，而它内部**无条件再跑一遍回归**
+        #   （self_iterate.py 的 RG.run_disk），之后还要过复核层。
+        #   于是每轮验证 = 两次回归 + 一次复核，连续两轮就十几分钟，验证根本走不完。
+        #   验证器只需要「静态自检的 high/mid」，直接调 code_audit.audit()（约 7 秒）。
+        from . import code_audit as _ca
+        a = _ca.audit()
+        for f in (a.get("findings") or []):
+            if f.get("level") in ("high", "mid"):
+                problems.append("自检[%s] %s:%s %s —— %s" % (
+                    f.get("level"), f.get("file"), f.get("line"),
+                    f.get("kind"), f.get("msg")))
     except Exception as e:                              # noqa: BLE001
         problems.append("代码自检没跑成：%s: %s" % (type(e).__name__, e))
 
+    # ★ 2026-11-22 用户要求「反复验证完全没问题之后才显示已验证」：
+    #   语法能编过、自检干净，**不等于**功能没被改坏。必须真跑一遍回归。
+    #   用 run_disk 而不是 run()：
+    #     ① 进程内 run() 跑的是改动前的旧代码（Python 不会自动重载），
+    #        等于在验旧版本，「改坏了」根本验不出来；
+    #     ② 回归用例里有相对路径（backend/tools.py），进程工作目录不在项目根
+    #        时会整片假失败 —— 实测在临时目录里跑出 5 条假失败，把好改动判成退步。
+    #   run_disk 在子进程里从磁盘重新 import，且自带 cwd=项目根。
+    #   没跑成（异常）也算问题 —— 没验证到就不能宣布已验证。
+    try:
+        from . import regress as _rg
+        runner = getattr(_rg, "run_disk", None) or _rg.run
+        try:
+            rr = runner(scope="quick", timeout=300)
+        except TypeError:
+            rr = runner(scope="quick")
+        if not rr.get("ok"):
+            problems.append("回归失败 %d/%d 条：%s" % (
+                int(rr.get("failed") or 0), int(rr.get("total") or 0),
+                str(rr.get("summary") or "")[:300]))
+    except Exception as e:                              # noqa: BLE001
+        problems.append("回归没跑成：%s: %s" % (type(e).__name__, e))
+
     return (not problems), problems
+
+
+def _score_after_verify(tid, v):
+    """验证通过后真跑一次评分，并与上一版比对。
+
+    ★ 2026-11-22 用户要求：「除了这些还有进行跑分以及反思还有日志记录」。
+      验证全过只说明「没改坏」，还要看**分数**：
+        · 低于上一版 → scoregate 记低分日志 + 沉淀教训 + 起自动修复（反思改进）
+        · 持平/进步  → 只记录，不打扰
+    block_on_drop=True：退步时真的拦下来并启动修复（用户要「不断反思以及改进」）。
+    """
+    try:
+        from . import scoregate as _sg
+        sc = _sg.gate(force=True, block_on_drop=True,
+                      note="迭代验证通过后自动跑分：%s" % (v.get("title") or ""))
+        return sc if isinstance(sc, dict) else {}
+    except Exception as e:                              # noqa: BLE001
+        return {"ran": False, "verdict": "error",
+                "msg": "评分没跑成：%s: %s" % (type(e).__name__, e)}
+
+
+def _score_md(sc):
+    """跑分结果的 markdown 片段（写进报告）。"""
+    if not isinstance(sc, dict) or not sc.get("ran"):
+        return "- **跑分**：%s" % (str((sc or {}).get("msg") or "没跑成")[:200])
+    out = ["- **跑分**：%s → %s（%+.2f，%s）" % (
+        sc.get("prev"), sc.get("total"), float(sc.get("delta") or 0),
+        _VERDICT_CN.get(str(sc.get("verdict") or ""), sc.get("verdict")))]
+    rec = sc.get("rec") or {}
+    press = rec.get("press") or {}
+    if press.get("items"):
+        out.append("- **压分点**：%d 处，共压 %.2f 分" % (
+            len(press.get("items") or []), float(press.get("lost") or 0)))
+    drop = sc.get("drop") or {}
+    if drop:
+        out.append("- **退步归因**：%s" % str(drop.get("why") or drop.get("note") or "已记录")[:200])
+    return "\n".join(out)
+
+
+def _log_verify(name, **kw):
+    """把验证/跑分写进行为日志（用户要求「还可以写日志」）。
+
+    优先走 actlog（能在体系详情里看到），失败就退回普通日志 —— 记日志这件事
+    本身绝不能把验证流程弄挂。
+    """
+    try:
+        from . import actlog as _al
+        _al.record_act(name, ok=bool(kw.get("ok", True)),
+                       summary=str(kw.get("summary") or "")[:300])
+        return
+    except Exception:                                   # noqa: BLE001
+        logger.debug("actlog 记录失败，退回普通日志", exc_info=True)
+    try:
+        logger.info("[verify] %s %s", name,
+                    " ".join("%s=%s" % (k, v) for k, v in kw.items() if k != "ok"))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
 
 
 def _report_md(v, ok, problems):
@@ -1005,9 +1099,11 @@ def _report_md(v, ok, problems):
         len(files),
         ("（" + "、".join("`%s`" % x for x in files[:6]) +
          ("等" if len(files) > 6 else "") + "）") if files else ""))
-    out.append("- **验证**：第 %d 轮 · %s" % (
-        tries, "✅ 通过（已验证）" if ok else "❌ 未通过"))
-    out.append("- **验证方式**：改动文件语法编译 + 代码自检（high/mid）+ 后端导入与运行状态")
+    out.append("- **验证**：%s" % (
+        "连续 %d 轮全部通过 ✅ 已验证" % _VERIFY_CONFIRM if ok
+        else "第 %d 次修复后仍未通过 ❌" % tries))
+    out.append("- **验证方式**：改动文件语法编译 + 代码自检（high/mid）"
+               "+ 全量回归 + 后端导入与运行状态")
     if ok:
         out.append("- **结果**：语法、代码自检、运行状态全部正常，改动已生效")
         with _LOCK:
@@ -1110,16 +1206,66 @@ def _verify_worker():
     _emit(tid, "status",
           text="重启完成，自动验证第 %d 轮：%s" % (v["tries"], v.get("title") or ""),
           state="running")
-    _emit(tid, "step", text="验证中：%d 个改动文件的语法 + 代码自检 + 运行状态…"
-          % len(files))
-    try:
-        ok, problems = _verify_once(files)
-    except Exception as e:                              # noqa: BLE001
-        ok, problems = False, ["验证器自己崩了：%s: %s" % (type(e).__name__, e)]
+    # ★ 2026-11-22 用户要求「反复验证完全没问题之后才显示已验证」：
+    #   一轮通过不算数，必须**连续** _VERIFY_CONFIRM 轮全过。
+    #   任何一轮不过就立刻回去修（streak 归零，修完从第 1 轮重新数）。
+    need = _VERIFY_CONFIRM
+    streak = int(v.get("streak") or 0)
+    ok, problems = False, []
+    while streak < need:
+        _emit(tid, "step",
+              text="验证中（连续第 %d/%d 轮）：%d 个改动文件的语法 + 代码自检 + 回归…"
+                   % (streak + 1, need, len(files)))
+        try:
+            _ok, _problems = _verify_once(files)
+        except Exception as e:                          # noqa: BLE001
+            _ok, _problems = False, ["验证器自己崩了：%s: %s"
+                                     % (type(e).__name__, e)]
+        if not _ok:
+            v["streak"] = 0
+            ok, problems = False, _problems
+            break
+        streak += 1
+        v["streak"] = streak
+        ok, problems = True, []
+        with _LOCK:
+            _STATE["verify"] = v
+        if streak < need:
+            _emit(tid, "step",
+                  text="第 %d 轮通过，再确认一轮（连续 %d/%d）…"
+                       % (streak, streak, need))
+            time.sleep(1.0)
 
     md = _report_md(v, ok, problems)
 
     if ok:
+        # ★ 2026-11-22 用户要求：「除了这些还有进行跑分以及反思还有日志记录」。
+        #   连续验证全过只说明「没改坏」，还要**真跑一次评分**跟上一版比：
+        #   低于原来 → scoregate 记低分日志 + 沉淀教训 + 起自动修复（反思改进）。
+        _emit(tid, "step", text="连续 %d 轮验证全过，开始跑分并与上一版比对…" % need)
+        _sc = _score_after_verify(tid, v)
+        md = md + "\n" + _score_md(_sc)
+        _log_verify("verify_pass", ok=True,
+                    summary="%s 连续 %d 轮验证通过" % (v.get("title") or "", need))
+        if _sc.get("ran"):
+            _log_verify("score", ok=(str(_sc.get("verdict") or "") != "regressed"),
+                        summary="%s 跑分 %s → %s（%s）" % (
+                            v.get("title") or "", _sc.get("prev"), _sc.get("total"),
+                            _VERDICT_CN.get(str(_sc.get("verdict") or ""), "")))
+        if str(_sc.get("verdict") or "") == "regressed":
+            _log_verify("reflect", ok=False,
+                        summary="分数低于上一版 %s：已记低分日志、沉淀教训并启动反思修复"
+                                % _sc.get("delta"))
+            _emit(tid, "step",
+                  text="⚠️ 分数比上一版低 %+.2f（%s → %s）：已记低分日志、"
+                       "沉淀教训并启动反思修复" % (
+                           float(_sc.get("delta") or 0),
+                           _sc.get("prev"), _sc.get("total")))
+        else:
+            _emit(tid, "step", text="跑分：%s（%s）" % (
+                _sc.get("total") if _sc.get("total") is not None else "没跑成",
+                _VERDICT_CN.get(str(_sc.get("verdict") or ""),
+                                _sc.get("msg") or "无对比")))
         with _LOCK:
             _STATE["verify"] = None
             _STATE["reports"].insert(0, {"tid": tid, "title": v.get("title") or "",

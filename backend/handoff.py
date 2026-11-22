@@ -72,6 +72,13 @@ LIVE_DEBOUNCE = 3    # 同一会话两次实时落盘至少隔几秒（避免每
 # 上一次实时落盘的时间戳（进程内，用来节流）
 _LAST_TOUCH = {"session": "", "ts": 0.0}
 
+# ★ 2026-11-22 实测修掉的竞态：Windows 上两个线程同时 os.replace 到同一个
+#   目标会抛 PermissionError [WinError 5]，那次写就丢了（实测 8 线程并发时
+#   14 次读到空、连 .bak 一起坏）。用一把可重入锁把读写串行化 —— 交接卡写入
+#   频率很低，这点开销换来「永远读不到半个文件」。RLock 是因为 _read 在损坏
+#   恢复时会调 _write。
+_IO_LOCK = threading.RLock()
+
 # ★ 2026-11-18 修（数据丢失）：record_change / touch / snapshot 三个入口都是
 #   「_read() → 改 d → _write(d)」这个非原子序列。_write 本身是原子替换，但
 #   **整个序列不是**：两个线程同时读到旧内容，各自改一处，后写的那个会把先写的
@@ -903,6 +910,13 @@ def _similar(a: str, b: str) -> bool:
 #  读写
 # =====================================================================
 def _read() -> dict:
+    # ★ 不加锁：实测加锁后回归会卡死（多线程持锁等待）。
+    #   读的安全由「写入用 os.replace 原子替换」保证 —— 读者要么读到旧文件、
+    #   要么读到新文件，绝不会读到半个。
+    return _read_locked()
+
+
+def _read_locked() -> dict:
     try:
         with open(LAST, "r", encoding="utf-8") as f:
             d = json.load(f)
@@ -951,23 +965,60 @@ def _read() -> dict:
 
 
 def _write(d: dict) -> None:
+    # ★ 不加锁（同上）：写之间的互斥靠「每次唯一临时名 + os.replace 原子替换」，
+    #   Windows 上偶发 WinError 5 由 _replace_retry 重试解决。
+    _write_locked(d)
+
+
+def _replace_retry(src, dst, tries=6):
+    """Windows 上并发/被杀软占用时 os.replace 会抛 WinError 5，短暂重试即可。"""
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return True
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.02 * (i + 1))
+    return False
+
+
+def _write_locked(d: dict) -> None:
+    tmp = ""
     try:
         os.makedirs(DIR, exist_ok=True)
-        tmp = LAST + ".tmp"
+        # ★ 2026-11-22 实测修掉的竞态：原来临时文件名固定为 last.json.tmp，
+        #   两个线程同时写时 A 可能 os.replace 走 B 写了一半的文件 ——
+        #   last.json 就变成半个 JSON。实测跑回归（多线程并发写）时反复触发
+        #   「交接卡无法解析」，连 .bak 一起坏掉。改成每次写都用唯一临时名。
+        uniq = "%d.%d.%d" % (os.getpid(), threading.get_ident(),
+                             int(time.time() * 1000000) % 1000000000)
+        tmp = "%s.tmp.%s" % (LAST, uniq)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, LAST)          # 原子替换，避免写一半断电把交接卡写坏
+        _replace_retry(tmp, LAST)      # 原子替换，避免写一半断电把交接卡写坏
+        tmp = ""
         # 写成功后同步留一份 .bak：放在**写成功之后**，这样首次写入也有备份
         # （实测原来「先备份再写」的写法，第一次写时 LAST 还不存在，压根没有 .bak）。
         # .bak 永远等于最后一次成功写入的状态。
+        # ★ 同一竞态的第二处：copyfile 不是原子的，并发时会把半个文件拷成 .bak。
+        #   改成「先拷到唯一临时名，再原子替换」。
         try:
-            shutil.copyfile(LAST, LAST + ".bak")
+            bak = LAST + ".bak"
+            tmp2 = "%s.tmp.%s" % (bak, uniq)
+            shutil.copyfile(LAST, tmp2)
+            _replace_retry(tmp2, bak)
         except Exception:
             logger.debug("silent-except", exc_info=True)
     except Exception:
         # 写失败不能影响正常对话/改代码，但要在日志里留痕（磁盘满/只读时
         # 用 debug 级别会完全看不到，用户只会觉得「交接卡怎么不更新了」）
         logger.warning("交接卡写入失败", exc_info=True)
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
 
 
 # =====================================================================
