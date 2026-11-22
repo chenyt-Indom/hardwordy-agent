@@ -254,12 +254,24 @@ def _blk_scoredrop(days: int = 30) -> dict:
     return _SD.status(n=20)
 
 
+def _blk_press() -> dict:
+    """当前压分报告（2026-11-22 用户要求）。
+
+    「评分机制能够汇报压低评分的部分是哪些部分然后详细记录然后上报」——
+    这一块就是「上报」：分项失分 + 逐条压分点（file:line:kind:msg + 可挽回分）
+    + 最近几次趋势。只读，不触发评分。
+    """
+    from . import scorepress as _SP
+    return _SP.stats()
+
+
 def panel(days: int = 30) -> dict:
     """一次性返回面板需要的全部数据。任何一块失败都不影响其它块。"""
     days = max(1, int(days or 30))
     out = {"ok": True, "ts": _now(), "days": days, "errors": {}}
     blocks = [
         ("score", lambda: _blk_score()),
+        ("press", lambda: _blk_press()),
         ("failattr", lambda: _blk_failattr(days)),
         ("scoredrop", lambda: _blk_scoredrop(days)),
         ("reflect", lambda: _blk_reflect()),

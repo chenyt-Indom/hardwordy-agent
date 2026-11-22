@@ -4147,6 +4147,23 @@ def iter_scoredrop(n: int = 20):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+@app.get("/api/iter/press")
+def iter_press(n: int = 20):
+    """当前压分报告（2026-11-22 用户要求）。
+
+    用户原话：「评分机制能够汇报压低评分的部分是哪些部分然后详细记录然后
+    上报」。只读：**不触发评分**，只读最近一次评分落盘的压分报告。
+    """
+    from . import scorepress as _sp
+    try:
+        st = _sp.stats()
+        st["history"] = _sp.history(n=max(1, min(100, int(n or 20))))
+        st["ok"] = True
+        return st
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 @app.get("/api/brand")
 def brand_info():
     """品牌与开发者信息 —— 已盖章，任何版本、任何机器都不许改。

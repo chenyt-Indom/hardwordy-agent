@@ -1488,6 +1488,45 @@
         '<button type="button" class="pill pill-btn" id="ipScoreBtn">▶ 量一下当前版本分数</button>' +
         '<span class="ip-act-st" id="ipScoreSt">约 35 秒（含回归）</span></div>';
 
+      // ★ 2026-11-22 用户要求「评分机制能够汇报压低评分的部分是哪些部分
+      //   然后详细记录然后上报，反思机制需要重点参考然后构建改进计划然后
+      //   正常推送」—— 这一段就是「上报」：分项失分 + 逐条压分点
+      //   （file:line + 能挽回多少分 + 修法）+ 最近趋势。只读，不触发评分。
+      var PR = D.press || {}, prh = '';
+      if (PR.has) {
+        prh += '<div class="ip-sub">当前综合分 ' + _ipEsc(PR.total) + '，共被压掉 <b>' +
+          _ipEsc(PR.lost) + '</b> 分；修前几条最多可挽回 ' +
+          _ipEsc(PR.recoverable) + ' 分</div>';
+        (PR.parts || []).forEach(function (p) {
+          prh += '<div class="ip-row"><b>' + _ipEsc(p.label) + '</b><span>' +
+            _ipEsc(p.score) + ' / ' + _ipEsc(p.max) + '（失 ' + _ipEsc(p.lost) +
+            ' · ' + _ipEsc(p.count) + ' 处）</span></div>';
+        });
+        var tps = PR.top || [];
+        if (tps.length) {
+          prh += '<div class="ip-sub">按「修了能挽回多少分」排序</div><ul class="ip-drop-ul">';
+          tps.forEach(function (t) {
+            prh += '<li><code>' + _ipEsc((t.file || '?') + (t.line ? ':' + t.line : '')) +
+              '</code> <b>' + _ipEsc(t.kind || '') + '</b> 可挽回 ' + _ipEsc(t.cost) +
+              ' 分 · ' + _ipEsc(t.msg || '') +
+              (t.fix ? '<div class="ip-sub">修法：' + _ipEsc(t.fix) + '</div>' : '') + '</li>';
+          });
+          prh += '</ul>';
+        } else {
+          prh += '<div class="ip-empty">当前没有任何压分点（满分）</div>';
+        }
+        var tr = PR.trend || [];
+        if (tr.length) {
+          prh += '<div class="ip-sub">最近 ' + tr.length + ' 次：' + tr.map(function (x) {
+            return _ipEsc(x.total) + '（失 ' + _ipEsc(x.lost) + '）';
+          }).join(' → ') + '</div>';
+        }
+      } else {
+        prh = '<div class="ip-empty">还没有压分报告 —— 下一次评分（量分数或迭代收尾）会自动生成</div>';
+      }
+      h += _ipSec('📊 当前压分（' + ((PR.top || []).length) + ' 条 · 失 ' +
+        _ipEsc(PR.lost || 0) + ' 分）', prh, true);
+
       // 评分：最近几轮进退 + 日志原文
       var hist = (S.history || []).map(function (x) {
         var d = Number(x.delta || 0);

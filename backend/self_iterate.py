@@ -3650,6 +3650,18 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
                 "## 🎨 创意发散", _sd_brief + "\n## 🎨 创意发散", 1)
     except Exception:                                   # noqa: BLE001
         logger.debug("注入低分日志失败", exc_info=True)
+    # ★ 2026-11-22 用户要求：「评分机制汇报压低评分的部分是哪些 → 详细记录 →
+    #   上报，反思机制需要重点参考然后构建改进计划然后正常推送」。
+    #   低分日志讲的是「变化」，这里补「存量」：当前这一版还有哪些压分点、
+    #   修哪条最划算。放在「创意发散」之前，让改进动作优先于新功能提案。
+    try:
+        from . import scorepress as _SP
+        _pr_brief = _SP.brief(n=3, query=(str(task_brief or "")[:400]))
+        if _pr_brief and "## 🎨 创意发散" in _prompt:
+            _prompt = _prompt.replace(
+                "## 🎨 创意发散", _pr_brief + "\n\n## 🎨 创意发散", 1)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("注入压分清单失败", exc_info=True)
     # ★ 2026-11-22 用户要求盖章：「hardwordy 这个名字以后任意版本都不允许修改」
     #   「开发者：陈宇桐，以后也不允许有任何变动，无论什么版本什么机子」。
     #   自迭代是会自动改代码的 —— 只在注释/文档里写「不许改」根本挡不住它，

@@ -107,7 +107,12 @@ def mark_dirty(rel: str = "", note: str = "") -> None:
             d["dirty"] = True
             d["dirty_iso"] = _now()
             d["dirty_ts"] = time.time()
-            fs = list(d.get("files") or [])
+            # ★ 2026-11-22 修：历史测试调 mark_dirty 写进来的文件可能早被删了，
+            #   留着会让「本轮改过哪些文件」和扣分归因指向不存在的文件
+            #   （实测脏列表里出现过 backend/_guard_probe_target.py 这种幽灵项）。
+            _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            fs = [x for x in (d.get("files") or [])
+                  if x and os.path.exists(os.path.join(_base, str(x).replace("/", os.sep)))]
             r = str(rel or "").replace("\\", "/").lstrip("./")
             if r and r not in fs:
                 fs.append(r)
@@ -165,14 +170,53 @@ def _msg(rec: Dict[str, Any]) -> str:
             bits.append("%s %s" % (zh, s))
     if bits:
         lines.append("分项：" + "；".join(bits))
+    # ★ 2026-11-22 用户要求「评分机制要能汇报压低评分的部分是哪些部分」：
+    #   上面「分项」只说哪一块掉了多少，这里给出**存量压分明细**——
+    #   哪怕这次是持平，也明确说清「当前这版还有多少分被谁压着、先修哪条」。
+    pr = rec.get("press") or {}
+    if pr:
+        lines.append("当前压分：共失 %s 分（%s 处），按可挽回分排序前几条："
+                     % (pr.get("lost"), pr.get("items_total")))
+        for it in (pr.get("top") or [])[:3]:
+            if isinstance(it, dict):
+                ln = it.get("line")
+                loc = str(it.get("file") or "?")
+                if ln:
+                    loc += ":%s" % ln
+                lines.append("  · %s [%s] 可挽回 %s 分"
+                             % (loc, it.get("kind") or "?", it.get("cost")))
+    # ★ 2026-11-22 修：suspects 是**按文件归并**的（只有 lines[]/kinds[] 数组，
+    #   没有单条 line/kind），直接读 s.get("line") 会全变成「?」，模型看到
+    #   「backend/foo.py ?（?）」根本定位不到行。这里做兼容读法，
+    #   并优先用 codes（逐条明细，含 file/line/kind/msg）展示精确位置。
+    codes = rec.get("codes") or []
+    if codes:
+        lines.append("新增扣分点（精确到行）：")
+        for c in codes[:6]:
+            if isinstance(c, dict):
+                lines.append("  · %s:%s [%s] %s%s"
+                             % (c.get("file") or "?", c.get("line") or "?",
+                                c.get("kind") or c.get("code") or "?",
+                                str(c.get("msg") or "")[:120],
+                                "  ★本轮改过" if c.get("in_changed") else ""))
     sus = rec.get("suspects") or []
     if sus:
         lines.append("可疑代码：")
         for s in sus[:5]:
             if isinstance(s, dict):
+                ln = s.get("line")
+                if ln in (None, "", 0):
+                    ls = s.get("lines")
+                    if isinstance(ls, list) and ls:
+                        ln = ls[0]
+                kd = s.get("code") or s.get("kind")
+                if not kd:
+                    ks = s.get("kinds")
+                    if isinstance(ks, list) and ks:
+                        kd = "、".join(str(k) for k in ks[:3])
                 lines.append("  · %s %s（%s）%s"
-                             % (s.get("file") or "?", s.get("line") or "?",
-                                s.get("code") or s.get("kind") or "?",
+                             % (s.get("file") or "?", ln or "?",
+                                kd or "?",
                                 "★本轮改过" if s.get("in_changed") else ""))
             else:
                 lines.append("  · %s" % s)
@@ -283,6 +327,16 @@ def gate(force: bool = False, note: str = "",
                 if a is not None and b.get("score") is not None:
                     pp[k] = round(float(b["score"]) - float(a), 2)
             rec["per_part"] = pp
+        # ★ 2026-11-22 用户要求：「评分机制能够汇报压低评分的部分是哪些部分
+        #   然后详细记录然后上报，反思机制需要重点参考然后构建改进计划然后
+        #   正常推送」。scoredrop 记的是**变化**（这轮改坏了什么），这里补的是
+        #   **存量**（当前这一版还有哪些地方在压分、各能挽回多少分）——
+        #   每次评分都出报告，不管进步、持平还是退步。
+        try:
+            from . import scorepress as _SP
+            rec["press"] = _SP.record(now, note=(note or "自动评分闸门"))
+        except Exception:                               # noqa: BLE001
+            logger.debug("压分报告生成失败", exc_info=True)
         blocked = bool(block_on_drop and verdict == "regressed")
         rec["blocked"] = blocked
         # ★ 2026-11-22 用户要求：退步要自动记录原因、沉淀教训、并自动修复。
