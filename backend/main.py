@@ -4082,6 +4082,22 @@ def selfloop_cfg_set(body: dict):
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/iter/health")
+def iter_health(days: int = 30):
+    """自迭代体系健康度体检 —— 8 项三态探测 + 源码级接线检查。
+
+    ★ 2026-11-22 用户要求「验证整套机制是否完全正常运行且体系化协同运作」。
+    与 /api/selfiter/loop 的区别：那个看的是「进退数据」，这个看的是
+    「**体系有没有真的在转**」—— 已接线但没跑过的项会明确标成 idle（待运行），
+    而不是被误读成正常。只读、不触发评分/回归，毫秒级返回。
+    """
+    from . import iterhealth as _IH
+    try:
+        return _IH.check(days=int(days or 30))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 @app.get("/api/selfiter/loop")
 def selfiter_loop():
     """闭环进退看板：最近几轮是进步还是退步、进退多少、回滚原因。

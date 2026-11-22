@@ -622,6 +622,29 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
     if note:
         lines.append("    说明：" + str(note)[:300])
     _append_log(lines)
+    # ⚠️ 2026-11-22 体系体检抓到：commit_round 只写了账本 / 明细 / 文本日志，
+    #    **从来没写 history.jsonl** —— 而 stats()、history()、前端进退看板读的
+    #    正是它。后果：单独调用 commit_round 时账本 rounds 在涨、看板永远 0 轮。
+    #    这里补一条，并打 kind 标记：execute_approved 里 record_round 记的是
+    #    「动作轮」，这里记的是「综合分轮」，两者都留着但可区分，不会重复计数。
+    try:
+        with _LOCK:
+            with open(_hist_path(), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "ts": rec["ts"], "iso": rec["iso"], "kind": "score_round",
+                    "plan_id": rec["plan_id"],
+                    "before": rec["before"], "after": rec["after"],
+                    "delta": delta, "pct": rec["pct"], "verdict": verdict,
+                    "per_part": rec["per_part"],
+                    "cum": cum, "cum_before": cum_before,
+                    "rollback": rec["rollback"], "note": rec["note"],
+                    "actions": [{"id": str(a.get("id") or ""),
+                                 "title": str(a.get("title") or "")[:80],
+                                 "ok": bool(a.get("ok"))}
+                                for a in (actions or [])][:20],
+                }, ensure_ascii=False) + "\n")
+    except Exception:                                   # noqa: BLE001
+        logger.debug("写进退历史失败", exc_info=True)
     return {"cum": cum, "delta": delta, "verdict": verdict,
             "cum_before": cum_before, "explain": ex}
 
