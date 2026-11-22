@@ -68,6 +68,45 @@
     d.addEventListener("toggle", () => { if (d.open) loadActLog(); });
   })();
 
+  // ---------- 本轮交付清单（/api/delivery/checklist）----------
+  // 2026-11-23：回复末尾会自动追加「已交付 / 未交付 / 下一步」，但用户回头翻
+  // 历史消息时找不到「上一轮到底交付了什么」。这里在侧栏给一个随时可查的入口，
+  // 数据与回复里那份同源（后端只读本轮 actlog，没动过东西就返回空串）。
+  async function loadDeliveryChecklist() {
+    const box = $("#deliveryList");
+    if (!box) return;
+    box.textContent = "加载中…";
+    try {
+      const r = await fetch("/api/delivery/checklist");
+      const data = await r.json();
+      if (!data || data.ok === false) {
+        box.textContent = "读取失败：" + ((data && data.error) || "接口没有返回数据");
+        return;
+      }
+      const text = String(data.text || "").trim();
+      // 空串 = 本轮没有改动（纯闲聊 / 纯查询）。如实给空态，别编内容。
+      if (!text) {
+        box.textContent = "本轮没有改动（纯对话 / 查询不需要交付清单）";
+        return;
+      }
+      box.innerHTML = text.split("\n").map((line) => {
+        // 去掉 markdown 的分隔线「---」和加粗「**」，这里只做纯文本展示
+        const s = line.replace(/\*\*/g, "").replace(/^\s*-{3,}\s*$/, "").trim();
+        if (!s) return "";
+        const cls = /^-?\s*已交付/.test(s) ? "ok" : (/^-?\s*未交付/.test(s) ? "fail" : "");
+        return '<div class="actlog-item"><span class="actlog-res ' + cls + '">' +
+          esc(String(s)) + "</span></div>";
+      }).join("");
+    } catch (e) {
+      box.textContent = "读取失败：" + (e && e.message ? e.message : e);
+    }
+  }
+  (function bindDeliveryChecklist() {
+    const d = $("#deliveryBox");
+    if (!d) return;
+    d.addEventListener("toggle", () => { if (d.open) loadDeliveryChecklist(); });
+  })();
+
   // ---------- 会话时间轴（timeline）----------
   // 右侧可折叠面板：拉 /api/timeline，每条一个圆点 + 一行摘要，点击展开详情。
   // 成功绿 / 回滚红；无记录时显示「本会话暂无自动改动」。

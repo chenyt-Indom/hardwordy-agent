@@ -1,0 +1,217 @@
+diff --git a/backend/self_iterate.py b/backend/self_iterate.py
+index 9392d6e..7ea5d48 100644
+--- a/backend/self_iterate.py
++++ b/backend/self_iterate.py
+@@ -1230,26 +1230,41 @@ _LOOP_MAX_HITS = 10         # 窗口内同一文件被自动改成功的上限
+ 
+ 
+ def _count_fail_kind(kind, days=7):
+-    """统计最近 days 天内某个 fail_kind 的**真实**失败次数（读 actlog.jsonl）。
++    """统计最近 days 天内某个 fail_kind 的**真实**失败次数，返回 {kind: n}。
+ 
+     ★ 2026-11-16 静态自检报的 high：`_count_fail_kind` 在 `_change_summary` 里
+       被调用，但**本文件从来没定义过它**，外面套着 except 于是静默失效 ——
+       「幽灵修复检测」（针对 fail_kind=X 共 N 次，N 为 0 就说明这次改动没有
+       真实失败依据）实际上永远拿不到计数，等于不存在。这里补上实现。
++
++    ★ 2026-11-23 修口径（失败真实性前置校验）：
++      原来这里按 `classify_fail(detail) == kind` 统计，而 classify_fail 只会返回
++      guard / model / env / unsolved / other / unknown —— **永远不等于**传进来的
++      fail_kind。也就是说这个函数对任何真实 kind 恒返回 0，下游 selfdev.patch 的
++      幽灵闸门据此把**所有**改动都判成幽灵（甚至连 "(unspecified)" 都被拒）。
++      现在统一走 actlog.count_fail_kind_window：task.json 的失败事件 +
++      会话账本里带 fail_kind 的行，两处取较大值，和时间窗一致，不猜常量。
+     """
+-    kind = str(kind or "")
++    kind = str(kind or "").strip()
+     if not kind:
+         return {}
++    try:
++        from . import actlog as _ALOG
++        n, ok = _ALOG.count_fail_kind_window(kind, days=days)
++        if ok:
++            return {kind: int(n or 0)}
++    except Exception:                                   # noqa: BLE001
++        logger.debug("silent-except", exc_info=True)
++    # 兜底（账本读不出来时）：按旧的 classify_fail 口径数一遍，仍不猜常量
+     try:
+         rows = list_actlog(500)
+     except Exception:                                   # noqa: BLE001
+-        return {}
++        return {kind: 0}
+     now = time.time()
+     n = 0
+     for r in rows:
+         if r.get("result") != "fail":
+             continue
+-        # actlog 里没有 fail_kind 字段，按 detail 归类（与前端显示同一套判据）
+         try:
+             if classify_fail(r.get("detail")) != kind:
+                 continue
+@@ -1262,8 +1277,8 @@ def _count_fail_kind(kind, days=7):
+             t = time.mktime(time.strptime(str(r.get("ts") or "")[:19],
+                                           "%Y-%m-%d %H:%M:%S"))
+         except Exception:                               # noqa: BLE001
+-            continue
+-        if now - t <= float(days) * 86400:
++            t = 0.0
++        if not t or now - t <= float(days) * 86400:
+             n += 1
+     return {kind: n}
+ 
+@@ -5840,8 +5855,14 @@ def _check_phantom(action):
+       这个失败近 7 天根本没发生过。这种修复不仅浪费执行轮次，还可能把本来
+       正常的代码改坏。所以动手前先查账本：近 7 天真实出现次数为 0 → 拒绝。
+ 
+-    数据源：actlog.count_fail_kind_ex（按时间窗过滤，不是按条数截断）。
+-    账本读不出来（ok=False）时放行 —— 账本坏了不能挡住正常改动。
++    数据源：actlog.count_fail_kind_window（按时间窗过滤，不是按条数截断；
++    task.json 的失败事件 + 会话账本里带 fail_kind 的行，两处取较大值）。
++    账本读不出来时放行 —— 账本坏了不能挡住正常改动。
++
++    ★ 2026-11-23（失败真实性前置校验）：判定为幽灵时顺手落一条 actlog
++      phantom 事件（含 fail_kind + 计数，见 actlog.record_phantom），
++      这样「拦了几次、拦的是哪个 fail_kind」在账本里查得到，不再只活在
++      这次执行的事件流里。
+     """
+     a = action or {}
+     fk = str(a.get("fail_kind") or "").strip()
+@@ -5849,18 +5870,21 @@ def _check_phantom(action):
+         return {"ok": True, "phantom": False}
+     try:
+         from . import actlog as _AL
+-        n, ok = _AL.count_fail_kind_ex(fk, days=7)
++        _files = a.get("files") or []
++        _rel = str(_files[0]) if _files else ""
++        g = _AL.require_real_failure(fk, days=7, rel=_rel)
+     except Exception:                                   # noqa: BLE001
+         logger.debug("silent-except", exc_info=True)
+         return {"ok": True, "phantom": False}
+-    if not ok:
+-        # 账本读不出来 → 放行，不判幽灵
+-        return {"ok": True, "phantom": False}
+-    if n <= 0:
++    if not g.get("ok"):
+         return {"ok": True, "phantom": True, "fail_kind": fk,
+-                "reason": "幽灵修复：fail_kind=%s 近 7 天真实出现 0 次，拒绝执行" % fk}
++                "count": int(g.get("count") or 0),
++                "evidence": {"fail_kind": fk, "count": 0, "phantom": True},
++                "reason": (g.get("reason_text")
++                           or "幽灵修复：fail_kind=%s 近 7 天真实出现 0 次，拒绝执行"
++                              % fk).replace("\n", " ")}
+     return {"ok": True, "phantom": False,
+-            "evidence": {"fail_kind": fk, "count": n}}
++            "evidence": {"fail_kind": fk, "count": int(g.get("count") or 0)}}
+ 
+ 
+ def _rescue_mod():
+diff --git a/backend/tools.py b/backend/tools.py
+index 12ab02b..749f4cf 100644
+--- a/backend/tools.py
++++ b/backend/tools.py
+@@ -1929,12 +1929,18 @@ def _selfdev_schemas() -> list:
+             "name": "selfdev_patch",
+             "description": ("**精确替换**源码里的某一段（最安全的改法）。"
+                             "find 必须和文件里的原文**一字不差**（含缩进换行），"
+-                            "且只能命中一处；命中 0 处或多处都会被拒绝。"),
++                            "且只能命中一处；命中 0 处或多处都会被拒绝。"
++                            "⚠️ 改之前系统会到 actlog 查 fail_kind 的**真实**失败计数："
++                            "计数为 0（这个失败没发生过）会被直接拒绝并记 phantom。"),
+             "parameters": {"type": "object", "properties": {
+                 "rel": {"type": "string", "description": "相对路径"},
+                 "find": {"type": "string", "description": "要被替换的原文"},
+                 "replace": {"type": "string", "description": "替换成什么"},
+-                "note": {"type": "string", "description": "改动说明"}},
++                "note": {"type": "string", "description": "改动说明"},
++                "fail_kind": {"type": "string",
++                              "description": ("这次改的是**哪个真实失败**（如 timeout / "
++                                              "syntax_error）。必须是 actlog 里真实发生过的，"
++                                              "否则会被判成幽灵修复而拒绝")}},
+                 "required": ["rel", "find", "replace"]}}},
+         {"type": "function", "function": {
+             "name": "selfdev_apply",
+@@ -1996,6 +2002,13 @@ def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
+     if not isinstance(ui_events, list):
+         return
+     d = (r or {}).get("diff") or {}
++    # 🧾 改动证据卡（失败真实性前置校验，2026-11-23）：把「这次改动针对哪个真实
++    #   失败、近 7 天真实发生 N 次」一起推给前端，卡片上直接显示。
++    #   evidence 缺失就整段不带 —— 前端绝不补默认值，否则又变成「看起来像证据的
++    #   假数字」。
++    _evi = (r or {}).get("evidence")
++    if not isinstance(_evi, dict) or not str(_evi.get("fail_kind") or "").strip():
++        _evi = None
+     ui_events.append({
+         "type": "selfdev",
+         "act": act,
+@@ -2006,6 +2019,7 @@ def _selfdev_ui(ui_events, act: str, r: dict, who: str = "") -> None:
+         "backup": os.path.basename(r.get("backup") or ""),
+         "who": who,
+         "is_new": bool(r.get("is_new")),
++        "evidence": _evi,
+     })
+ 
+ 
+@@ -2346,17 +2360,61 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
+                                      str(a.get("replace") or ""))
+             if _bg:
+                 return _bg
++            # 🧪 失败真实性前置校验（Phantom Guardrails，2026-11-23 用户要求）：
++            #   动手前先到 actlog 查「这个 fail_kind 近 7 天**真实**发生过几次」。
++            #   计数为 0 → 说明这个失败根本没发生过，是模型凭空捏的幽灵修复：
++            #   直接拒绝改动，并在 actlog 落一条 phantom 事件（含 fail_kind + 计数）。
++            #   为什么拦在这里：这是模型真正会走的 patch 入口。只在提示词里写
++            #   「请先确认失败真的出现过」没用 —— 必须用账本硬拦。
++            _fk = str(a.get("fail_kind") or "").strip()
++            _gate = {"ok": True, "count": 0, "evidence": "", "phantom": False}
++            if _fk:
++                try:
++                    from . import actlog as _ALOG
++                    _gate = _ALOG.require_real_failure(
++                        _fk, days=7,
++                        session=str((context or {}).get("session") or ""),
++                        rel=str(a.get("rel") or ""))
++                except Exception:               # noqa: BLE001
++                    logger.debug("silent-except", exc_info=True)
++                    _gate = {"ok": True, "count": 0, "evidence": "",
++                             "phantom": False}
++            if not _gate.get("ok"):
++                return ("改动被拒绝（失败真实性前置校验）：%s\n"
++                        "本次改动没有真实失败证据（fail_kind=%s 计数 0），"
++                        "已记入 actlog（phantom 事件）。请先在账本里确认这个失败"
++                        "真的发生过，或换一个**真实存在**的 fail_kind 再改。"
++                        % (_gate.get("reason_text") or "", _fk))
+             r = _sd.patch(str(a.get("rel") or ""), str(a.get("find") or ""),
+-                          str(a.get("replace") or ""), str(a.get("note") or ""))
++                          str(a.get("replace") or ""), str(a.get("note") or ""),
++                          fail_kind=_fk)
+             if not r.get("ok"):
++                if str(r.get("reason") or "") == "phantom":
++                    return ("替换失败（幽灵修复闸门）：%s" % r.get("error"))
+                 return "替换失败：%s" % r.get("error")
++            # 🧾 改动证据卡：把「本次改动针对的真实失败证据（fail_kind + 计数）」
++            #   挂到结果上 —— 前端改动卡片与改动日志都从这里取，绝不在前端补默认值。
++            _ev = {}
++            if _fk and int(_gate.get("count") or 0) > 0:
++                _ev = {"fail_kind": _fk, "count": int(_gate.get("count") or 0),
++                       "source": "actlog"}
++                r["evidence"] = _ev
+             _selfdev_ui(ui_events, "patch", r)
+             _score_mark(str(r.get("rel") or ""), str(a.get("note") or ""))
+             from . import handoff as _hd; _hd.record_from_tool(r, "patch", str(a.get("note") or ""))
+             d = r.get("diff") or {}
++            # 🧾 改动日志里的「真实失败证据」：让用户一眼看到这次改动不是拍脑袋，
++            #   而是针对 actlog 里真实发生过 N 次的某个失败。没有证据就不写这段
++            #   （宁可留白，也不编一个看起来像证据的数字）。
++            _ev_txt = ""
++            if _ev:
++                _ev_txt = ("\n【改动证据】针对 fail_kind=%s 的真实失败 %d 次"
++                           "（近 7 天，来自 actlog）"
++                           % (_ev.get("fail_kind"), int(_ev.get("count") or 0)))
+             return (("已修改 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
+                      "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
+                      % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
++                    + _ev_txt
+                     + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
+         if name == "selfdev_run":
+             r = _sd.run_py(str(a.get("rel") or ""), str(a.get("args") or ""))

@@ -296,6 +296,11 @@ def _load():
                                      # ★ 2026-11-20：内容快照要跟着恢复，
                                      #   否则重启后卡片只剩一个 plan_id。
                                      "brief": run.get("brief") or {},
+                                     # ★ 2026-11-23 用户要求「记得当前工作干到哪」：
+                                     #   cur_action 必须一起带进队列 —— 否则重启
+                                     #   瞬间就丢，恢复提示只能说「在跑某任务」，
+                                     #   说不出「停在第 4/9 条」。
+                                     "cur_action": run.get("cur_action") or {},
                                      "resumed": True})
                 # 去重：同 tid 在队列里只留一条（旧数据可能重复写盘）
                 _seen = set()
@@ -342,8 +347,23 @@ def _save():
         logger.debug("silent-except", exc_info=True)
 
 
+# ★ 2026-11-23 用户要求「非正常关闭重启之后要记得当前工作干到哪里了」：
+#   原来 _emit **只写内存**，只有 submit / cancel / _finish 才 _save()。
+#   实测踩到：任务 01:12:10 开始跑，跑到 01:37 干了 25 分钟活，磁盘上
+#   task.json 的 mtime 还是 01:12:10 —— 这中间被硬杀 / 关窗口 / 断电，
+#   进度全丢，重启后连「做到第几条」都不知道。
+#   现在每 _SAVE_MIN_GAP 秒最多落盘一次（事件 2000 条上限，写一次几百 KB，
+#   2 秒一次的代价可以接受），关键事件用 _force_save=True 立刻落盘。
+_LAST_SAVE = [0.0]
+_SAVE_MIN_GAP = 2.0
+
+
 def _emit(tid, kind, **kw):
-    """追加一条事件，返回它的 seq。"""
+    """追加一条事件，返回它的 seq。
+
+    _force_save=True 时立刻落盘（终止、恢复、任务完成这类关键节点用）。
+    """
+    force = bool(kw.pop("_force_save", False))
     with _LOCK:
         _STATE["seq"] += 1
         ev = {"seq": _STATE["seq"], "tid": tid, "kind": kind,
@@ -352,7 +372,13 @@ def _emit(tid, kind, **kw):
         _STATE["events"].append(ev)
         if len(_STATE["events"]) > _MAX_EVENTS:
             _STATE["events"] = _STATE["events"][-_MAX_EVENTS:]
-        return ev["seq"]
+        seq = ev["seq"]
+        due = force or (time.time() - _LAST_SAVE[0] >= _SAVE_MIN_GAP)
+        if due:
+            _LAST_SAVE[0] = time.time()
+    if due:
+        _save()                                     # 锁外写盘，别占着 _LOCK 做 IO
+    return seq
 
 
 # ------------------------------------------------------------------ 查询
@@ -715,6 +741,16 @@ def _worker(item):
                     with _LOCK:
                         if _STATE.get("running"):
                             _STATE["running"]["title"] = _t[:60]
+                            # ★ 2026-11-23 用户要求「重启后记得干到哪」：
+                            #   光有 title 只能说「在做哪条」，说不出「第几条 / 共几条」。
+                            #   这里把序号也记进 running 并落盘，重启后就能报
+                            #   「上次停在 第 3/9 条：xxx，从这里继续」。
+                            _STATE["running"]["cur_action"] = {
+                                "index": kw.get("index"),
+                                "total": kw.get("total"),
+                                "title": _t[:60],
+                                "action_id": str(kw.get("action_id") or "")}
+                            _STATE["running"]["beat_at"] = time.time()
                     try:
                         _stage("action_start",
                                "第 %s/%s 条：%s" % (kw.get("index") or "?",
@@ -754,10 +790,22 @@ def _worker(item):
             return
 
         cancelled = bool(r.get("cancelled"))
+        # ★ 2026-11-23 用户要求「手动点终止可以不拉起，但需要记录情况」：
+        #   原来终止只写 state=cancelled，history 里 error 是空的 ——
+        #   过几天回看根本不知道当时做到哪、为什么停。
+        _cancel_reason = ""
         if cancelled:
+            with _LOCK:
+                _ca = dict((_STATE.get("running") or {}).get("cur_action") or {})
+            _where = ""
+            if _ca.get("title"):
+                _where = "，停在「第 %s/%s 条：%s」" % (
+                    _ca.get("index") or "?", _ca.get("total") or "?", _ca.get("title"))
+            _cancel_reason = ("用户手动终止（非异常）：已完成 %d 条，失败 %d 条，"
+                              "剩余动作保持待批准%s" % (ok_n, fail_n, _where))
             _stage("blocked", "已终止（已完成 %d 条，剩余动作保持待批准）" % ok_n)
-            _emit(tid, "status", text="已终止（已完成 %d 条，剩余动作保持待批准）" % ok_n,
-                  state="cancelled")
+            _emit(tid, "status", text=_cancel_reason,
+                  state="cancelled", _force_save=True)
         elif ok_n or fail_n:
             if fail_n:
                 _stage("failed",
@@ -838,7 +886,8 @@ def _worker(item):
                       files=changed[:12], manual=True)
 
         _finish(tid, "cancelled" if cancelled else ("done" if ok_n else "failed"),
-                ok_n, fail_n, skip_n, changed, err_all)
+                ok_n, fail_n, skip_n, changed,
+                _cancel_reason or err_all)
     except Exception as e:                              # noqa: BLE001
         tb = traceback.format_exc()[-800:]
         try:
@@ -1512,6 +1561,92 @@ def _verify_worker():
         _next()
 
 
+_WATCHDOG = [None]
+
+
+def _reclaim_dead_run(reason="看门狗"):
+    """把「线程已死但 running 还挂着」的任务回收掉，真没跑完的放回队首。
+
+    返回 orphan 字典（None 表示没有僵尸）。调用方负责 _save() 和后续 _next()。
+    """
+    with _LOCK:
+        run = _STATE.get("running")
+        if not run or _run_alive(run):
+            return None
+        _STATE["running"] = None
+        done = any((h.get("tid") or "") == (run.get("tid") or "")
+                   for h in (_STATE.get("history") or []))
+        if done:
+            return dict(run, finished=True)
+        _STATE["queue"].insert(0, {
+            "tid": run.get("tid"), "plan_id": run.get("plan_id"),
+            "source": run.get("source") or "manual",
+            "title": run.get("title") or "",
+            "max_n": run.get("max_n") or 0,
+            "at": run.get("started_at") or time.time(),
+            "brief": run.get("brief") or {},
+            "cur_action": run.get("cur_action") or {},
+            "resumed": True})
+        logger.warning("%s：任务线程已不在，放回队列接着做：%s", reason,
+                       run.get("plan_id"))
+        return dict(run)
+
+
+def _where_text(run):
+    """「上次停在 第 3/9 条：xxx」这类人话，没有就返回空串。"""
+    ca = (run or {}).get("cur_action") or {}
+    if not ca.get("title"):
+        return ""
+    return "，上次停在「第 %s/%s 条：%s」" % (
+        ca.get("index") or "?", ca.get("total") or "?", ca.get("title"))
+
+
+def _start_watchdog():
+    """看门狗：每 30 秒查一次 worker 线程是否还活着。
+
+    ★ 2026-11-23 用户要求「除了手动终止，其他非正常关闭重启都要重新拉起，
+      并且记得进度」：
+      · 跨进程的重启 —— boot_resume / _load 用 started_at < _BOOT_AT 能识别；
+      · **本进程内** worker 被硬杀 / 抛未捕获异常（finally 没跑到）——
+        running 会永远挂着，界面显示「一直在跑」，实际早停了，而且 submit
+        的 dup 判断会让这个计划再也提交不进去。
+      这里补上第三种情况的自动回收：死了就按 history 判断是「已跑完只是
+      占位没清」还是「真没跑完」，后者放回队首接着做并说明停在哪。
+    """
+    th0 = _WATCHDOG[0]
+    if th0 is not None and th0.is_alive():
+        return False
+
+    def _loop():
+        while True:
+            time.sleep(30)
+            try:
+                orphan = _reclaim_dead_run("看门狗")
+                if not orphan:
+                    continue
+                _save()
+                tid = orphan.get("tid") or "_sys"
+                if orphan.get("finished"):
+                    _emit(tid, "status",
+                          text="「%s」已经结束，只是占位没清，已回收"
+                               % (orphan.get("title") or orphan.get("plan_id")),
+                          state="done", _force_save=True)
+                else:
+                    _emit(tid, "status",
+                          text="⚠️ 执行线程意外停止（不是正常结束），已放回队列接着做%s"
+                               % _where_text(orphan),
+                          state="waiting", _force_save=True)
+                    _next()
+            except Exception:                            # noqa: BLE001
+                logger.debug("看门狗循环出错", exc_info=True)
+
+    th = threading.Thread(target=_loop, name="iter-watchdog", daemon=True)
+    _WATCHDOG[0] = th
+    th.start()
+    logger.info("已启动迭代看门狗（每 30 秒查一次线程存活）")
+    return True
+
+
 def boot_resume():
     """进程启动后调用：有待验证的先验证，有排队的接着跑。
 
@@ -1519,6 +1654,10 @@ def boot_resume():
     工具进程都会意外开始执行任务）。
     """
     time.sleep(2.5)                                     # 等 FastAPI 起来
+    try:
+        _start_watchdog()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("启动看门狗失败（不影响恢复队列）", exc_info=True)
     orphan = None
     with _LOCK:
         v = _STATE.get("verify")
@@ -1544,6 +1683,9 @@ def boot_resume():
                                            "max_n": run.get("max_n") or 0,
                                            "at": run.get("started_at") or time.time(),
                                            "brief": run.get("brief") or {},
+                                           # ★ 2026-11-23：把「停在哪一条」一起带进队列，
+                                           #   重启后能明确告诉用户从哪儿继续。
+                                           "cur_action": run.get("cur_action") or {},
                                            "resumed": True})
         qn = len(_STATE["queue"])
         first = (_STATE["queue"][0] if _STATE["queue"] else None)
@@ -1606,8 +1748,9 @@ def boot_resume():
                   state="done")
         else:
             _emit(orphan.get("tid") or "_sys", "status",
-                  text="上次重启时「%s」还没跑完，已放回队列接着做" % _name,
-                  state="running")
+                  text="上次重启时「%s」还没跑完%s，已放回队列接着做"
+                       % (_name, _where_text(orphan)),
+                  state="running", _force_save=True)
     if v:
         # ★ 2026-11-23 用户要求「重启后卡片自动弹出来」：这条提示原来走 _emit_sys，
         #   会挂到**上一个任务**的 tid 上（history[0]），用户看到的是一张旧卡片上多一行字，
@@ -1629,11 +1772,268 @@ def boot_resume():
     if first:
         with _LOCK:
             done_n = int(_STATE.get("budget") or 0)
-        _emit_sys("重启后恢复：正在恢复第 %d 个任务「%s」（队列里共 %d 个等待）"
+        # ★ 2026-11-23 用户要求「记得当前工作干到哪」：_load 已经把孤儿任务
+        #   放回队列了（boot_resume 的 orphan 分支其实走不到），所以「停在哪一条」
+        #   要在这里说出来 —— 否则用户只看到「恢复第 N 个任务」，
+        #   不知道上次是卡在哪一步。
+        _emit_sys("重启后恢复：正在恢复第 %d 个任务「%s」（队列里共 %d 个等待）%s"
                   % (done_n + 1,
-                     first.get("title") or first.get("plan_id") or "（未命名）", qn),
+                     first.get("title") or first.get("plan_id") or "（未命名）", qn,
+                     _where_text(first)),
                   state="running")
         _next()
+
+
+def _plan_actions(plan_id):
+    """把计划里的动作清单抽成前端能直接渲染的列表（带状态 / 文件 / 风险）。"""
+    out = []
+    if not plan_id:
+        return out
+    try:
+        r = _si.get_plan(plan_id)
+        p = (r or {}).get("plan") or {}
+        for a in (p.get("actions") or []):
+            if not isinstance(a, dict):
+                continue
+            out.append({
+                "id": str(a.get("id") or ""),
+                "title": str(a.get("title") or "")[:80],
+                "status": str(a.get("status") or "pending"),
+                "files": [f for f in (a.get("files") or []) if isinstance(f, str)][:6],
+                "risk": str(a.get("risk") or ""),
+                "error": str(a.get("error") or "")[:200],
+            })
+    except Exception:                                    # noqa: BLE001
+        logger.debug("抽动作清单失败（详情里就不显示动作表）", exc_info=True)
+    return out
+
+
+def _task_progress(acts):
+    """进度：第几步 / 共几步 / 当前在干什么。"""
+    total = len(acts)
+    okn = len([a for a in acts if a["status"] in ("done", "ok", "skipped")])
+    cur = next((a for a in acts if a["status"] in ("running", "doing")), None)
+    if total and okn < total:
+        step = okn + 1
+    else:
+        step = okn
+    return {"total": total, "done": okn, "step": step,
+            "current": (cur or {}).get("title") or ""}
+
+
+def journal(limit=40):
+    """★ 2026-11-23 用户要求：「左侧工具栏增加一个可以查看自迭代日志」。
+
+    一次给出弹窗要的全部东西（前端不用连调好几个接口）：
+      · running / queue / history（最近 limit 条）
+      · 每条任务的**进度**（第几步 / 共几步 / 当前在干什么）
+      · **动作清单**（成功 / 失败 / 跳过 / 待做）
+      · **分数变化**（改动前后 + 进退，从事件里摘）
+      · **事件日志**（验证 / 跑分 / 反思的原始记录，最多 60 条）
+      · 「一键拉起」候选列表（中断 / 失败 / 改完没验证 / 队列卡住）
+    """
+    limit = max(1, min(int(limit or 40), 200))
+    with _LOCK:
+        run = dict(_STATE["running"]) if _STATE.get("running") else None
+        q = [dict(x) for x in (_STATE["queue"] or [])]
+        hist = [dict(x) for x in (_STATE["history"] or [])[:limit]]
+        events = list(_STATE.get("events") or [])
+        verify = dict(_STATE.get("verify") or {}) or None
+        budget = int(_STATE.get("budget") or 0)
+        reps = list(_STATE.get("reports") or [])[:5]
+        seq = int(_STATE.get("seq") or 0)
+
+    by_tid = {}
+    for e in events:
+        by_tid.setdefault(str(e.get("tid") or ""), []).append(e)
+
+    def _score_of(tid):
+        """从事件里摘最近一次跑分（「跑分：a → b（进退）」）。"""
+        for e in reversed(by_tid.get(tid, [])):
+            if str(e.get("kind") or "") == "score":
+                return str(e.get("text") or "")
+        return ""
+
+    def _pack(t, state_hint=""):
+        if not t:
+            return None
+        tid = str(t.get("tid") or "")
+        acts = _plan_actions(t.get("plan_id"))
+        evs = by_tid.get(tid, [])
+        return {
+            "tid": tid,
+            "plan_id": str(t.get("plan_id") or ""),
+            "source": str(t.get("source") or ""),
+            "title": str(t.get("title") or "")[:120],
+            "state": state_hint or str(t.get("state") or ""),
+            "started_at": t.get("started_at") or 0,
+            "ended_at": t.get("ended_at") or 0,
+            "elapsed": (round(time.time() - float(t.get("started_at") or time.time()), 1)
+                        if not t.get("ended_at") else t.get("seconds") or 0),
+            "at": str(t.get("at") or ""),
+            "progress": _task_progress(acts),
+            "actions": acts,
+            "score": _score_of(tid),
+            "done": t.get("done"), "failed": t.get("failed"),
+            "skipped": t.get("skipped"),
+            "files": t.get("files") or [],
+            "error": str(t.get("error") or "")[:300],
+            "events": evs[-60:],
+        }
+
+    tasks = []
+    if run:
+        tasks.append(_pack(run, "running"))
+    for x in q:
+        tasks.append(_pack(x, "waiting"))
+    for h in hist:
+        tasks.append(_pack(h))
+
+    return {
+        "ok": True,
+        "seq": seq,
+        "state": _state_name(run, q),
+        "running": _pack(run, "running"),
+        "queue": [_pack(x, "waiting") for x in q],
+        "history": [_pack(h) for h in hist],
+        "tasks": tasks,
+        "verify": verify,
+        "budget": budget,
+        "max_rounds": _MAX_AUTO_ROUNDS,
+        "reports": reps,
+        "candidates": revive_candidates(limit=limit),
+        "counts": {
+            "running": 1 if run else 0,
+            "queue": len(q),
+            "history": len(hist),
+        },
+    }
+
+
+def revive_candidates(limit=40):
+    """★ 用户要的「一键拉起未成功执行的完整任务」—— 范围：全部。
+
+    列出四类可拉起的：
+      · failed  / error     执行失败或异常中断
+      · cancelled           被终止（动作没做完）
+      · unverified          改完登记了待验证，但验证没跑完（服务没重启就一直挂着）
+      · stuck               队列里有、却没有任务在跑（卡住了）
+    """
+    limit = max(1, min(int(limit or 40), 200))
+    with _LOCK:
+        hist = [dict(x) for x in (_STATE["history"] or [])[:limit]]
+        q = [dict(x) for x in (_STATE["queue"] or [])]
+        run = _STATE.get("running")
+        verify = dict(_STATE.get("verify") or {}) or None
+        budget = int(_STATE.get("budget") or 0)
+
+    out = []
+    seen_plan = set()
+    for h in hist:
+        st = str(h.get("state") or "")
+        if st not in ("failed", "error", "cancelled"):
+            continue
+        pid = str(h.get("plan_id") or "")
+        if pid and pid in seen_plan:
+            continue
+        if pid:
+            seen_plan.add(pid)
+        out.append({
+            "kind": "failed" if st in ("failed", "error") else "cancelled",
+            "kind_text": {"failed": "执行失败", "error": "异常中断",
+                          "cancelled": "被终止"}.get(st, st),
+            "tid": str(h.get("tid") or ""),
+            "plan_id": pid,
+            "title": str(h.get("title") or "")[:120],
+            "at": str(h.get("at") or ""),
+            "done": h.get("done"), "failed": h.get("failed"),
+            "error": str(h.get("error") or "")[:200],
+            "can_revive": bool(pid),
+            "why": "" if pid else "这条记录没有计划 id，无法重新拉起",
+        })
+    if verify:
+        out.append({
+            "kind": "unverified",
+            "kind_text": "改完还没验证",
+            "tid": str(verify.get("tid") or ""),
+            "plan_id": str(verify.get("plan_id") or ""),
+            "title": str(verify.get("title") or "")[:120],
+            "at": (time.strftime("%m-%d %H:%M:%S",
+                                 time.localtime(float(verify.get("at") or 0)))
+                   if verify.get("at") else ""),
+            "tries": int(verify.get("tries") or 0),
+            "files": verify.get("files") or [],
+            "can_revive": True,
+            "why": "",
+        })
+    if q and not run and budget < _MAX_AUTO_ROUNDS:
+        for x in q:
+            out.append({
+                "kind": "stuck",
+                "kind_text": "排队中但没在跑",
+                "tid": str(x.get("tid") or ""),
+                "plan_id": str(x.get("plan_id") or ""),
+                "title": str(x.get("title") or "")[:120],
+                "at": "",
+                "can_revive": True,
+                "why": "",
+            })
+    return out
+
+
+def revive(kind="", tid="", plan_id="", limit=0):
+    """★ 一键拉起：按候选类型把任务重新拉起来。
+
+    kind:
+      · "unverified" → 直接启动验证线程（连续两轮 → 跑分 → 反思），
+                       不用等重启，立刻就能看到它在验；
+      · "failed" / "cancelled" → 把同一个计划重新提交进队列
+                       （source="approved" → 跑完自动重启并验证）；
+      · "stuck"      → 踢一下 _next()，让队列动起来；
+      · ""           → 自动判断：有 verify 就先验，否则按 plan_id 重新提交。
+    """
+    k = str(kind or "").strip().lower()
+    pid = str(plan_id or "").strip()
+
+    with _LOCK:
+        verify = dict(_STATE.get("verify") or {}) or None
+        busy = bool(_STATE.get("running"))
+
+    # 待验证 / 自动判断：优先把它验完（这正是用户最想看到的那条链）
+    want_verify = (k == "unverified") or (not k and verify and
+                                          (not pid or str(verify.get("plan_id") or "") == pid))
+    if want_verify:
+        if not verify:
+            return {"ok": False, "error": "现在没有待验证的记录（可能已经验完了）"}
+        if busy:
+            return {"ok": False, "error": "有任务正在跑，等它结束再验证，避免两边同时改代码"}
+        try:
+            _start_verify(wait_busy=True)
+        except Exception as e:                           # noqa: BLE001
+            logger.warning("一键拉起验证失败", exc_info=True)
+            return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        return {"ok": True, "mode": "verify",
+                "message": "已启动验证：连续 2 轮全过才算通过，然后跑分比对上一版"}
+
+    if k == "stuck" or (not k and not pid):
+        with _LOCK:
+            qn = len(_STATE["queue"] or [])
+        if not qn:
+            return {"ok": False, "error": "队列是空的，没有可拉起的任务"}
+        _next()
+        return {"ok": True, "mode": "queue", "message": "已让队列继续跑"}
+
+    if not pid:
+        return {"ok": False, "error": "缺少计划 id，没法重新拉起"}
+
+    # 重新提交：会检查计划里还有没有可执行的动作，没有就明确报错
+    r = submit(pid, source="approved", title="", max_n=0)
+    if not isinstance(r, dict):
+        r = {"ok": bool(r)}
+    if r.get("ok"):
+        r.setdefault("mode", "submit")
+        r.setdefault("message", "已重新提交进队列（source=approved，跑完自动重启并验证）")
+    return r
 
 
 def reports(limit=10):

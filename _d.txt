@@ -1,0 +1,14 @@
+warning: in the working copy of 'backend/main.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/scheduler.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/jobplan.js', LF will be replaced by CRLF the next time Git touches it
+ backend/actlog.py       | 333 ++++++++++++++++++++++++++++
+ backend/main.py         | 155 +++++++++++++-
+ backend/reply_gate.py   | 560 ++++++++++++++++++++++++++++++++++++++++++++++++
+ backend/scheduler.py    | 215 ++++++++++++++++++-
+ backend/self_iterate.py |  54 +++--
+ backend/tools.py        |  64 +++++-
+ chat_images/index.json  |   2 +-
+ frontend/app.js         |  54 +++++
+ frontend/index.html     |  10 +
+ frontend/jobplan.js     | 261 +++++++++++++++++++++-
+ 10 files changed, 1680 insertions(+), 28 deletions(-)

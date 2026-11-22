@@ -886,7 +886,13 @@ def remove(job_id: str) -> dict:
     hit = next((j for j in jobs if j.get("id") == job_id), None)
     if hit is not None:
         _k = str(hit.get("kind") or "").strip()
-        if _k:
+        # ★ 2026-11-23 修：原来判的是「kind 非空 = 内置任务」，而盯梢任务的
+        #   kind 正好是 "watch" —— 于是用户点盯梢卡片的 × 时被拒，
+        #   还被告知「这个自我维护是内置任务，不能删除」（实测：
+        #   remove('0ec600e09531') → ok=False builtin=True）。
+        #   内置只认 _BUILTIN_LABEL 里那四种，其余 kind（watch/path…）都是
+        #   用户自己的东西，必须能删。
+        if _k in _BUILTIN_LABEL:
             _nm = str(hit.get("name") or job_id)
             _lbl = _BUILTIN_LABEL.get(_k, "自我维护")
             _what = _nm if _nm == _lbl else "「%s」这个%s" % (_nm, _lbl)
@@ -897,11 +903,91 @@ def remove(job_id: str) -> dict:
                          "想让它不再自动跑，点卡片上的「暂停」即可。" % _what,
             }
     n = len(jobs)
+    gone = [j for j in jobs if j.get("id") == job_id]
     jobs = [j for j in jobs if j.get("id") != job_id]
     if len(jobs) == n:
         return {"ok": False, "error": "没有这个任务"}
     save_jobs(jobs)
-    return {"ok": True}
+    # ★ 2026-11-23 用户要求：「删掉但保留时间线历史，可恢复」。
+    #   所以删除不是真删，而是把整条记录（含 timeline）挪进归档表，
+    #   面板上「已删除」折叠区能看、能一键恢复。
+    try:
+        if gone:
+            _archive_add(gone[0])
+    except Exception:                                     # noqa: BLE001
+        logger.warning("任务归档失败（删除已生效，历史可能丢）", exc_info=True)
+    return {"ok": True, "archived": bool(gone)}
+
+
+def _archive_path() -> str:
+    return config.data("data", "schedule_archive.json")
+
+
+def _archive_read() -> list:
+    try:
+        with open(_archive_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def _archive_add(job: dict) -> None:
+    """把删掉的任务（含 timeline）存进归档表，最多留 200 条。"""
+    rec = dict(job or {})
+    rec["_deleted_at"] = _now()
+    rows = _archive_read()
+    rows = [r for r in rows if str(r.get("id") or "") != str(rec.get("id") or "")]
+    rows.append(rec)
+    rows = rows[-200:]
+    p = _archive_path()
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+
+
+def list_archived() -> list:
+    """已删除但可恢复的任务（面板「已删除」区用）。"""
+    out = []
+    for r in _archive_read():
+        out.append({
+            "id": r.get("id") or "",
+            "name": r.get("name") or "",
+            "kind": r.get("kind") or "",
+            "period": describe(r),
+            "deleted_at": r.get("_deleted_at") or "",
+            "timeline_count": len(r.get("timeline") or []),
+            "last_run": r.get("last_run") or "",
+        })
+    out.sort(key=lambda x: str(x.get("deleted_at") or ""), reverse=True)
+    return out
+
+
+def restore(job_id: str) -> dict:
+    """把归档表里的一条任务放回定时任务表（时间线原样带回来）。"""
+    jid = str(job_id or "").strip()
+    if not jid:
+        return {"ok": False, "error": "缺少任务 id"}
+    rows = _archive_read()
+    hit = next((r for r in rows if str(r.get("id") or "") == jid), None)
+    if hit is None:
+        return {"ok": False, "error": "归档里没有这个任务"}
+    rec = dict(hit)
+    rec.pop("_deleted_at", None)
+    jobs = load_jobs()
+    if any(str(j.get("id") or "") == jid for j in jobs):
+        return {"ok": False, "error": "这条任务还在列表里，不用恢复"}
+    jobs.append(rec)
+    save_jobs(jobs)
+    rows = [r for r in rows if str(r.get("id") or "") != jid]
+    p = _archive_path()
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+    return {"ok": True, "id": jid}
 
 
 # 2026-11-15 用户要求：「自检和反思那些不要归类在自动化任务里，另外分一个类」。
@@ -1790,6 +1876,123 @@ def run_watch(job: dict) -> dict:
 
     return {"ok": True, "changed": True, "added": added,
             "removed": removed, "error": ""}
+
+
+def watch_run_now(job_id: str) -> dict:
+    """★ 2026-11-23 用户要求：盯梢卡片加「立即运行」按钮。
+
+    「两者都要：既比对又显示当前值」—— 所以这里**同步跑一次**
+    （联网抓取通常 2~8 秒，路径快照更快），然后把：
+      · 有没有变化（changed / added / removed）
+      · 这次抓到的内容（preview，截前 2000 字）
+      · 下次自动运行时间
+    一起返回。跑完立刻落盘，面板刷新就能看到「最近触发」更新了。
+    """
+    jid = str(job_id or "").strip()
+    if not jid:
+        return {"ok": False, "error": "缺少盯梢 id"}
+    jobs = load_jobs()
+    hit = next((j for j in jobs if str(j.get("id") or "") == jid), None)
+    if hit is None:
+        return {"ok": False, "error": "没找到这条盯梢（可能已经被删掉了）"}
+    r = run_watch(hit)                       # 就地改 hit（last_hash/last_preview/timeline）
+    hit["last_run"] = _now()
+    hit["last_status"] = "ok" if r.get("ok") else "error"
+    try:
+        hit["next_run"] = _next_run(hit)
+    except Exception:                                     # noqa: BLE001
+        logger.debug("重算 next_run 失败（保留旧值）", exc_info=True)
+    save_jobs(jobs)
+    if not r.get("ok"):
+        return {"ok": False, "error": r.get("error") or "抓取失败",
+                "id": jid, "name": hit.get("name") or ""}
+    # 路径类没有抓取正文，用时间线里的变化摘要补一句
+    preview = str(hit.get("last_preview") or "")
+    tl = hit.get("timeline") or []
+    last = tl[-1] if tl else {}
+    if not preview and last.get("preview"):
+        preview = str(last.get("preview") or "")
+    nr = float(hit.get("next_run") or 0)
+    return {
+        "ok": True,
+        "id": jid,
+        "name": hit.get("name") or "",
+        "changed": bool(r.get("changed")),
+        "baseline": bool(r.get("baseline")),
+        "added": int(r.get("added") or 0),
+        "removed": int(r.get("removed") or 0),
+        "preview": preview[:2000],
+        "diff": str(last.get("diff") or "")[:2000],
+        "ran_at": hit.get("last_run") or "",
+        "next_run_human": (time.strftime("%m-%d %H:%M", time.localtime(nr)) if nr else "-"),
+        "answer": ("有变化：+%s / -%s" % (r.get("added") or 0, r.get("removed") or 0))
+                  if r.get("changed") else
+                  ("已记录基线（第一次抓取）" if r.get("baseline") else "无变化"),
+    }
+
+
+def watch_detail(job_id: str) -> dict:
+    """★ 2026-11-23 用户要求：「查看」要一屏看全 ——
+    时间线 + 最近内容 + 下次运行时间。
+
+    一次把这三样都给出去，前端不用连调三个接口：
+      · timeline：每次变化的时刻 / 增删行数 / diff 片段（最多 20 条）
+      · preview ：最近一次抓到的正文（4000 字）
+      · next_run / last_run / period / enabled
+    """
+    jid = str(job_id or "").strip()
+    if not jid:
+        return {"ok": False, "error": "缺少盯梢 id"}
+    # 1) 联网盯事（kind=watch，住 schedules.json）
+    for j in load_jobs():
+        if str(j.get("id") or "") != jid:
+            continue
+        tl = j.get("timeline") or []
+        nr = float(j.get("next_run") or 0)
+        return {
+            "ok": True,
+            "id": jid,
+            "source": "schedule",
+            "name": j.get("name") or "",
+            "query": j.get("watch_query") or j.get("prompt") or "",
+            "kind_text": "联网盯事" if str(j.get("watch_kind") or "web") != "path"
+                         else "本地路径",
+            "period": describe(j),
+            "enabled": bool(j.get("enabled")),
+            "last_run": j.get("last_run") or "",
+            "last_status": j.get("last_status") or "",
+            "next_run_human": (time.strftime("%m-%d %H:%M", time.localtime(nr))
+                               if nr else "-"),
+            "preview": str(j.get("last_preview") or "")[:4000],
+            "timeline": list(tl)[-20:],
+            "timeline_count": len(tl),
+        }
+    # 2) 本地路径监视（住 handoff 的 watch.json）
+    try:
+        from . import handoff as _ho
+        w = _ho.get_watch(jid)
+    except Exception:                                     # noqa: BLE001
+        logger.warning("读本地监视详情失败", exc_info=True)
+        w = {}
+    if w:
+        hist = w.get("history") or []
+        return {
+            "ok": True,
+            "id": jid,
+            "source": "handoff",
+            "name": w.get("name") or "",
+            "query": w.get("target") or "",
+            "kind_text": "本地路径",
+            "period": w.get("period") or "",
+            "enabled": bool(w.get("enabled")),
+            "last_run": w.get("last_check") or "",
+            "last_status": w.get("status") or "",
+            "next_run_human": "-",
+            "preview": str(w.get("last_text") or "")[:4000],
+            "timeline": list(hist)[-20:],
+            "timeline_count": len(hist),
+        }
+    return {"ok": False, "error": "没找到这条盯梢（可能已经被删掉了）"}
 
 
 def watch_panel(session: str = "", drain: bool = True) -> dict:

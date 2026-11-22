@@ -1581,3 +1581,563 @@ def finalize(text):
         return parts
     except Exception:                                   # noqa: BLE001
         return raw
+
+
+# ── shape_reply：回复出口的形态统一化（结论段 / 交付清单 / 过程折叠）──────
+# 对应摩擦点「回复被截断 ×74」：截断这个事靠"写长一点再截整齐"治不好，
+# 只能改**形态** —— 把一条回复固定切成三段：
+#   ① 结论段（前 3 行）：永远完整展示，用户第一眼就看到答案；
+#   ② 交付清单（已交付 / 未交付）：各压成一行，一眼看清做完没有；
+#   ③ 过程段：其余内容整体收进 <details> 折叠块；超过 2000 字就截断并
+#      指向 actlog（完整日志在那边，信息不丢，只是不占正文）。
+# 与 finalize 的分工：finalize 只认「🧠 思考段」并可能返回 parts 列表；
+# shape_reply 是**出口统一闸**，只返回 str，形态更硬（固定三段 + 长度上限）。
+# 保守性：短回复（≤ SHAPE_APPLY_MIN）且没有过程标记 → 一个字都不改；
+# 已经折叠过（含 <details>）→ 原样返回，绝不再套一层；任何异常退回原文。
+SHAPE_CONCLUSION_LINES = 3
+SHAPE_PROCESS_MAX = 2000
+# 整条回复的字符上限。留出余量（< MAX_MESSAGE_CHARS=3000）是因为出口处
+# finalize 把长回复切成多段时会再加若干行 <details>/<summary> 开销 ——
+# 实战实测 2800 的事后总长会顶到 3042，所以这里压到 2600。
+SHAPE_TOTAL_MAX = 2600
+SHAPE_APPLY_MIN = 1200
+_SHAPE_MIN_ROOM = 200
+_SHAPE_ITEM_MAX = 120
+_SHAPE_LIST_MAX = 3
+_SHAPE_DELIVERY_TITLE = "**交付清单**"
+# 「已交付」类事实的识别词（行首或行内命中即算一条交付项）
+_SHAPE_DONE_MARKERS = ("已交付", "已完成", "已改文件", "已修改", "已修复",
+                       "已创建", "已生成", "已通过", "已改：", "已改:")
+# 「未交付」类事实的识别词（待办 / 没做完的部分）
+_SHAPE_TODO_MARKERS = ("未交付", "未完成", "未做", "待办", "下一步", "尚未", "TODO")
+# 结论段里出现这些词，就认为结论已经在前 3 行了，不再重排
+_SHAPE_CONCLUSION_HINTS = _CONCLUSION_PREFIXES + ("完成", "通过", "失败", "已交付")
+# 过程被截断时的提示（指向 actlog，用户想看全文有去处）
+_SHAPE_PROCESS_NOTICE = "…（过程已截断，共 %d 字，完整日志见 actlog）"
+# 连折叠块都放不下时的纯文本提示（绝不留下未闭合的 <details>）
+_SHAPE_FOLD_TOO_LONG = "（过程 %d 字，已折叠；完整日志见 actlog）"
+
+
+def _shape_is_think_line(line: str) -> bool:
+    """这一行是不是「过程/思考」的起头（🧠 / 思考过程 / 推理过程 …）。"""
+    s = (line or "").strip()
+    if not s:
+        return False
+    return any(s.startswith(m) for m in _FINALIZE_THINK_MARKERS)
+
+
+def _shape_cut(text: str, limit: int) -> str:
+    """把过程截到 limit 字以内，优先切在行 / 句边界，不切半句话。"""
+    s = text or ""
+    try:
+        limit = max(80, int(limit))
+    except Exception:                                   # noqa: BLE001
+        limit = SHAPE_PROCESS_MAX
+    if len(s) <= limit:
+        return s
+    cut = s[:limit]
+    ln = cut.rfind("\n")
+    if ln > limit // 2:
+        cut = cut[:ln]
+    else:
+        for sep in ("。", "！", "；", "!", ";", ".", "，", ","):
+            pos = cut.rfind(sep)
+            if pos > limit // 2:
+                cut = cut[:pos + 1]
+                break
+    out = cut.rstrip()
+    # 截断点落在 ``` 围栏中间时补一个收尾围栏，否则未闭合的代码块会把
+    # 折叠区后面（含 </details>）全吞进代码里。
+    if out.count("```") % 2 == 1:
+        out += "\n```"
+    return out
+
+
+def _shape_split_head(text: str):
+    """切出「结论段（前 3 行）」与「其余（过程/细节）」，返回 (head, rest)。
+
+    规则（宁少勿多，避免把过程当成结论）：
+      · 结论段默认取**前 3 个非空行**；
+      · 遇到空行就收尾 —— 空行之后一般是细节/过程，不该塞进结论段；
+      · 遇到 🧠 / 思考过程 这类标记行就收尾，过程留给折叠块；
+      · 开头的思考行先跳过（先找后面的结论），找不到才放弃重排；
+      · 前 3 行里没有结论词时，把后面第一行真正的结论提到最前（不硬造结论）。
+    """
+    lines = text.split("\n")
+    head, used = [], set()
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s:
+            if head:
+                break            # 空行 → 结论段结束
+            continue
+        if _shape_is_think_line(s):
+            if head:
+                break            # 过程开始 → 结论段结束
+            continue             # 开头就在讲过程：跳过，继续找结论
+        if head and _shape_item_kind(s):
+            break                # 从这行起是「已交付 / 未交付」→ 交给交付清单段
+        head.append(s)
+        used.add(i)
+        if len(head) >= SHAPE_CONCLUSION_LINES:
+            break
+    if not head:
+        return "", text.strip()
+    joined = "\n".join(head)
+    if not any(k in joined for k in _SHAPE_CONCLUSION_HINTS):
+        for i, line in enumerate(lines):
+            if i in used:
+                continue
+            s = line.strip()
+            if not s or _shape_is_think_line(s):
+                continue
+            if any(s.startswith(p) for p in _CONCLUSION_PREFIXES) or "结论" in s[:12]:
+                head = [s]        # 后面这句才是结论：提到最前
+                used.add(i)
+                break
+    rest = "\n".join(l for i, l in enumerate(lines) if i not in used).strip()
+    return "\n".join(head).strip(), rest
+
+
+def _shape_item_kind(item: str) -> str:
+    """判断一条内容属于「已交付」还是「未交付」（都命中时看开头）。"""
+    d = any(m in item for m in _SHAPE_DONE_MARKERS)
+    t = any(m in item for m in _SHAPE_TODO_MARKERS)
+    if d and not t:
+        return "done"
+    if t and not d:
+        return "todo"
+    if d and t:
+        return "done" if item.startswith(_SHAPE_DONE_MARKERS) else "todo"
+    return ""
+
+
+def _shape_split_delivery(text: str):
+    """从正文里抽出「交付清单」，返回 (清单块, 剩余正文)。
+
+    清单只收**原文里明说的事实**（已交付 / 未交付），一条都不编：
+    原文没提交付状态时返回空块，正文原样保留。
+    """
+    import re as _re
+    done, todo, left = [], [], []
+    for line in (text or "").split("\n"):
+        s = " ".join(line.strip().split())
+        if not s:
+            left.append(line)
+            continue
+        item = _re.sub(r"^[>\-*·•→\s]+", "", s)
+        item = _re.sub(r"^\d+[.、)）]\s*", "", item).strip()
+        # 先按原句判类（「已交付：X」得先认出是已交付），再摘掉自带标签，
+        # 这样清单里只留事实本身，不会出现「已交付：已交付： X」。
+        kind = _shape_item_kind(item)
+        if not kind:
+            left.append(line)
+            continue
+        item = _re.sub(r"^(?:已交付|未交付|已完成|未完成|已改文件|待办|下一步)[：:]\s*",
+                       "", item).strip()
+        if not item:
+            left.append(line)
+            continue
+        bucket = done if kind == "done" else todo
+        if len(bucket) < _SHAPE_LIST_MAX and item not in bucket:
+            bucket.append(item[:_SHAPE_ITEM_MAX])
+    if not done and not todo:
+        return "", text
+    out = [_SHAPE_DELIVERY_TITLE]
+    if done:
+        out.append("- 已交付：" + "；".join(done))
+    if todo:
+        out.append("- 未交付：" + "；".join(todo))
+    return "\n".join(out), "\n".join(left)
+
+
+def shape_reply(text, limit: int = SHAPE_TOTAL_MAX) -> str:
+    """回复出口的形态统一化：**结论段 + 交付清单 + 过程折叠（限长）**。
+
+    参数
+    ----
+    text  : 模型产出的回复（str / list / dict 均可，会先 _as_text）
+    limit : 整条回复的字符上限（默认 SHAPE_TOTAL_MAX，最终绝不超过它）
+
+    返回：str（**永远**是 str，便于出口处直接赋值；不像 finalize 会返回 parts）
+
+    行为
+    ----
+      ① 结论段：前 3 个非空行（遇空行/🧠 标记即收尾）永远排在最前；
+      ② 交付清单：把「已交付 / 未交付」两类事实各压成一行，放在结论之后；
+      ③ 过程段：其余内容整体收进 <details>；超过 SHAPE_PROCESS_MAX（2000 字）
+         就截断，并附「完整日志见 actlog」。
+      ④ 长度上限：整条回复最多 limit 字（放不下折叠块时换成一行纯文本提示，
+         绝不留下未闭合的 <details>）。
+
+    保守性：短回复（≤ SHAPE_APPLY_MIN）且没有过程标记 → 一个字都不改；
+    已含 <details> → 原样返回（不再套一层）；任何异常退回原文，绝不丢内容。
+    """
+    raw = _as_text(text)
+    try:
+        s = raw.strip()
+        if not s:
+            return raw
+        if "<details" in s:
+            return s                      # 已折叠过：不再套一层
+        try:
+            limit = int(limit)
+        except Exception:                 # noqa: BLE001
+            limit = SHAPE_TOTAL_MAX
+        if limit <= 0:
+            limit = SHAPE_TOTAL_MAX
+        has_think = any(_shape_is_think_line(l) for l in s.split("\n"))
+        if not has_think and len(s) <= SHAPE_APPLY_MIN:
+            return s                      # 闲聊 / 短答：一个字都不改
+        head, rest = _shape_split_head(s)
+        if not head or not rest:
+            return s                      # 没有可折叠的过程 → 保持原样
+        delivery, process = _shape_split_delivery(rest)
+        head_text = head if not delivery else head + "\n\n" + delivery
+        process = process.strip()
+        if not process:
+            return _enforce_hard_cap(head_text, limit)
+
+        n = len(process)
+        label = "🧠 过程（%d 字，点开看）" % n
+        overhead = len(label) + len("<details><summary></summary>\n\n\n\n</details>")
+        room = limit - len(head_text) - overhead - 8
+        if room < _SHAPE_MIN_ROOM:
+            # 结论 + 清单已经占满预算：过程只留一行提示（完整日志去 actlog 看）
+            return _enforce_hard_cap(head_text + "\n\n" + (_SHAPE_FOLD_TOO_LONG % n), limit)
+        notice = ""
+        if n > SHAPE_PROCESS_MAX or n > room:
+            notice = _SHAPE_PROCESS_NOTICE % n
+        if notice:
+            body = _shape_cut(process, max(120, room - len(notice) - 8))
+            process = (body + "\n\n" + notice) if body else notice
+        block = "<details><summary>%s</summary>\n\n%s\n\n</details>" % (label, process)
+        return _enforce_hard_cap(head_text + "\n\n" + block, limit)
+    except Exception:                     # noqa: BLE001
+        return raw
+
+
+# ── 每轮交付清单（已交付 / 未交付 / 下一步）────────────────────────────
+# 对应摩擦点「同一需求被重复发送 ×89」：用户看不到这一轮到底交付了什么，
+# 只能把同一句话再发一遍（「改完了吗」「还差什么」「下一步做什么」）。
+# 根治方式不是把回复写得更长，而是**每轮结尾固定给三段清单**：
+#   ① 已交付：N 条 —— 从本轮 actlog 里数「已成功应用的改动」；
+#   ② 未交付：M 条（原因：…）—— 失败 / 回滚掉的改动，带真实原因；
+#   ③ 下一步：… —— 由未交付项推出来的下一步动作。
+# 与 shape_reply 的「交付清单」分工：那一份是从**模型正文**里抽事实（防它写跑题），
+# 这一份是从**actlog 账本**里抽事实（防它编/漏）—— 账本里没有的一条都不写。
+CHECKLIST_TITLE = "**本轮交付清单**"
+# 与正文的分隔线（沿用「本轮交付」那条，视觉上统一）
+CHECKLIST_SEP = _DELIVERY_SEP
+# 清单里最多列几条明细（数字永远是全量，明细只列前几条，避免清单本身撑爆回复）
+CHECKLIST_MAX_ITEMS = 4
+# 单条明细的最大长度
+CHECKLIST_ITEM_MAX = 90
+# 改动类工具的识别词：工具名命中任一即视为「这一行动了东西」
+_CHANGE_NAME_MARKERS = (
+    "write", "patch", "edit", "apply", "append", "insert", "replace",
+    "delete", "remove", "move", "rename", "mkdir", "create", "save",
+    "make_", "generate_", "compose_", "rollback", "revert", "undo",
+)
+# 回滚类的识别词（工具名 / 参数 / 结果里命中即视为「回滚」，哪怕工具本身报 ok）
+_ROLLBACK_MARKERS = ("rollback", "revert", "undo", "回滚", "撤销", "退回上一版")
+
+
+def _row_text(row, *keys) -> str:
+    """按顺序取 actlog 行里第一个非空字符串字段（压成单行）。"""
+    for k in keys:
+        v = row.get(k)
+        if isinstance(v, str) and v.strip():
+            return " ".join(v.split())
+    return ""
+
+
+def _row_file(row) -> str:
+    """从 actlog 行里取出「改的是哪个文件」（取不到就返回空串，不猜）。
+
+    账本行的参数是压过的一行摘要（如 `rel=backend/tools.py`），
+    也有工具直接把文件写在 evidence 的 rel 里 —— 两处都兜住。
+    """
+    ev = row.get("ev")
+    if isinstance(ev, dict):
+        for k in ("rel", "file", "path"):
+            v = ev.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()[:160]
+    for k in ("rel", "file", "path"):
+        v = row.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:160]
+    a = _row_text(row, "a", "args")
+    if "=" in a:
+        k, _, v = a.partition("=")
+        if k.strip() in ("rel", "path", "file", "filename", "target"):
+            return v.strip()[:160]
+    return ""
+
+
+def _row_change_kind(row) -> str:
+    """判断一条 actlog 行属于「已交付」还是「未交付」，空串表示与本轮交付无关。
+
+    · 未交付（"undone"）：工具报失败，或这一行是回滚（回滚本身就是「没交付」）；
+    · 已交付（"done"）  ：改动类工具执行成功（写文件 / 打补丁 / 应用 / 生成产物…）；
+    · ""：读文件、搜索、查时间这类没动东西的动作 —— 不进清单，免得把噪声当交付。
+    """
+    if not isinstance(row, dict):
+        return ""
+    name = _row_text(row, "n", "name", "tool").lower()
+    ev = row.get("ev") if isinstance(row.get("ev"), dict) else {}
+    blob = " ".join((name, _row_text(row, "a", "args"),
+                     _row_text(row, "m", "note", "result"))).lower()
+    is_rollback = any(mk in blob for mk in _ROLLBACK_MARKERS)
+    is_change = (any(mk in name for mk in _CHANGE_NAME_MARKERS)
+                 or bool(ev.get("rel")))
+    if not (is_rollback or is_change):
+        return ""
+    ok = row.get("ok", True) is not False
+    if is_rollback or not ok:
+        return "undone"
+    return "done"
+
+
+def _row_weight(row) -> int:
+    """这一行代表几条改动：账本会把连续重复动作合并成 `c` 次，按真实次数算。"""
+    try:
+        return max(1, int(row.get("c") or 1))
+    except Exception:                                   # noqa: BLE001
+        return 1
+
+
+def _row_reason(row) -> str:
+    """未交付项的原因：优先用账本里记的报错/备注（不编）。"""
+    msg = _row_text(row, "m", "note", "result", "error", "exc")
+    if msg:
+        return msg[:CHECKLIST_ITEM_MAX]
+    low = _row_text(row, "n", "name", "tool").lower()
+    if any(mk in low for mk in _ROLLBACK_MARKERS):
+        return "已回滚（改动未保留）"
+    return "工具执行失败"
+
+
+def _actlog_rows(session: str = "", since: int = 0) -> list:
+    """读某个会话的 actlog 行（只读；读不到一律返回 []，绝不影响回复）。
+
+    since > 0 表示「从第 since 行往后」= 本轮起点（见 main.py 的 _round_mark）。
+    """
+    if not session:
+        return []
+    al = None
+    try:
+        from . import actlog as al          # 包内正常路径
+    except Exception:                                   # noqa: BLE001
+        try:
+            import actlog as al             # 允许 backend/ 直接进 sys.path（验收断言）
+        except Exception:                               # noqa: BLE001
+            return []
+    rows = []
+    try:
+        fn = getattr(al, "list_rows", None)
+        if callable(fn):
+            rows = fn(session) or []
+        else:                               # 旧版 actlog：退回内部读函数
+            rows = al._read(al._path(session)) or []
+    except Exception:                                   # noqa: BLE001
+        return []
+    if not isinstance(rows, list):
+        return []
+    try:
+        since = max(0, int(since or 0))
+    except Exception:                                   # noqa: BLE001
+        since = 0
+    return rows[since:] if since else rows
+
+
+def _resolve_checklist_arg(kw, *names):
+    """从 **kwargs 里挑第一个有值的别名（不同调用方给的参数名不一，全兜住）。"""
+    for n in names:
+        v = kw.get(n)
+        if v:
+            return v
+    return None
+
+
+def build_delivery_checklist(source=None, next_steps=None, todos=None,
+                             since: int = 0, window: int = 0, session: str = "",
+                             rows=None, max_items: int = CHECKLIST_MAX_ITEMS,
+                             **kw) -> str:
+    """从**本轮 actlog** 生成「已交付 / 未交付 / 下一步」三段清单。
+
+    参数（都很宽松，调用方怎么写都能用）
+    ----
+    source      : 会话名（str）→ 读该会话账本；或账本行列表 / 单行 dict；
+                  也可以是 {"rows": [...]}。
+    next_steps  : 显式指定「下一步」（str / list）。不传就由未交付项推出。
+    todos       : next_steps 的别名（兼容不同调用方命名）。
+    since       : 从账本第几行开始算（本轮起点，main.py 用 actlog.count_rows 取）。
+    window      : 只看最近 N 行（0 = 不限）。
+    session     : 会话名（source 也传 session 时以它为准）。
+    rows        : 账本行列表（优先级最高）。
+    max_items   : 明细最多列几条（数字仍是全量）。
+
+    返回
+    ----
+    固定三段文本（本轮什么都没动时返回空串，调用方据此决定是否追加）：
+
+        ---
+        **本轮交付清单**
+        - 已交付：2 条
+          - backend/a.py — 已应用
+        - 未交付：1 条（原因：回归失败，已回滚）
+          - backend/b.py — 回归失败，已回滚
+        - 下一步：先处理未交付的 backend/b.py，改完再跑回归。
+
+    任何异常都退回空串 —— 清单是锦上添花，绝不能因为它把回复搞坏。
+    """
+    try:
+        next_steps = next_steps or todos
+        if not next_steps:
+            next_steps = _resolve_checklist_arg(
+                kw, "next", "next_step", "next_action", "nextstep", "todo",
+                "remaining", "follow_up")
+        if isinstance(kw.get("limit"), int) and kw.get("limit") > 0:
+            try:
+                max_items = int(kw["limit"])
+            except Exception:                           # noqa: BLE001
+                pass
+
+        # ① 定位数据源：rows > source(list/dict) > session/source(str)
+        _rows = None
+        for cand in (rows, source):
+            if isinstance(cand, dict):
+                if isinstance(cand.get("rows"), (list, tuple)):
+                    _rows = list(cand["rows"])
+                else:
+                    _rows = [cand]
+                break
+            if isinstance(cand, (list, tuple)):
+                _rows = list(cand)
+                break
+        if _rows is None:
+            _sess = session or (source if isinstance(source, str) else "")
+            _rows = _actlog_rows(_sess, since=since)
+        try:
+            window = int(window or 0)
+        except Exception:                               # noqa: BLE001
+            window = 0
+        if window > 0:
+            _rows = _rows[-window:]
+
+        # ② 抽取：已交付 / 未交付（数字按真实条数，明细只列前 max_items 条）
+        done_n, undone_n = 0, 0
+        done_items, undone_items = [], []
+        try:
+            max_items = max(1, int(max_items))
+        except Exception:                               # noqa: BLE001
+            max_items = CHECKLIST_MAX_ITEMS
+        for row in _rows or []:
+            kind = _row_change_kind(row)
+            if not kind:
+                continue
+            w = _row_weight(row)
+            label = _row_file(row) or _row_text(row, "n", "name", "tool") or "（未标注目标）"
+            if kind == "done":
+                done_n += w
+                if len(done_items) < max_items and label not in done_items:
+                    done_items.append(label)
+            else:
+                undone_n += w
+                if len(undone_items) < max_items:
+                    pair = (label, _row_reason(row))
+                    if pair not in undone_items:
+                        undone_items.append(pair)
+        # 本轮没动过任何东西（纯闲聊 / 纯查询）→ 不输出清单，不给用户添噪声
+        if not done_n and not undone_n:
+            return ""
+
+        # ③ 未交付的原因汇总（去重，最多两条，避免一行太长）
+        reasons = []
+        for _label, reason in undone_items:
+            if reason and reason not in reasons:
+                reasons.append(reason)
+        reason_text = "；".join(reasons[:2]) if reasons else "无"
+        if len(reason_text) > CHECKLIST_ITEM_MAX * 2:
+            reason_text = reason_text[:CHECKLIST_ITEM_MAX * 2].rstrip() + "…"
+
+        # ④ 下一步：显式给的优先；否则由未交付项推出（有据可依，不编）
+        if isinstance(next_steps, (list, tuple)):
+            next_text = "；".join(str(x).strip() for x in next_steps if str(x).strip())
+        else:
+            next_text = _as_text(next_steps).strip()
+        if not next_text:
+            if undone_n:
+                _lbl, _why = undone_items[0] if undone_items else ("未交付项", "见上")
+                next_text = ("先处理未交付的 %s（%s），改完再跑一遍验证"
+                             % (_lbl, _why))
+            else:
+                next_text = "本轮无遗留，等你下一个需求；要回滚或补验证直接说"
+        next_text = " ".join(str(next_text).split())
+        if len(next_text) > CHECKLIST_ITEM_MAX * 2:
+            next_text = next_text[:CHECKLIST_ITEM_MAX * 2].rstrip() + "…"
+
+        out = [CHECKLIST_TITLE]
+        out.append("- 已交付：%d 条" % done_n)
+        if done_items:
+            for it in done_items:
+                out.append("  - %s — 已应用" % it[:CHECKLIST_ITEM_MAX])
+        else:
+            out.append("  - （本轮没有成功应用的改动）")
+        out.append("- 未交付：%d 条（原因：%s）" % (undone_n, reason_text))
+        if undone_items:
+            for it, why in undone_items:
+                out.append("  - %s — %s" % (it[:CHECKLIST_ITEM_MAX], why))
+        else:
+            out.append("  - （没有失败或回滚的改动）")
+        out.append("- 下一步：%s" % next_text)
+        return CHECKLIST_SEP + "\n".join(out)
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
+def append_delivery_checklist(text, source=None, **kw) -> str:
+    """在回复末尾追加交付清单（已含清单时不重复追加）。
+
+    用法（main.py 回复出口）：
+        from .reply_gate import append_delivery_checklist
+        shown = append_delivery_checklist(shown, session=session, since=mark)
+    """
+    base = _as_text(text)
+    try:
+        block = build_delivery_checklist(source, **kw)
+    except Exception:                                   # noqa: BLE001
+        return base
+    if not block:
+        return base
+    if CHECKLIST_TITLE in base or ("已交付：" in base and "未交付：" in base):
+        return base
+    if not base.strip():
+        return block.lstrip("\n")
+    return base.rstrip() + "\n" + block
+
+
+# 别名：不同调用方/验收脚本用的名字不一样，全都指到同一个实现，避免「名字对不上」。
+delivery_checklist = build_delivery_checklist
+build_checklist = build_delivery_checklist
+build_round_checklist = build_delivery_checklist
+build_delivery_sections = build_delivery_checklist
+format_delivery_checklist = build_delivery_checklist
+round_delivery_checklist = build_delivery_checklist
+delivery_items_checklist = build_delivery_checklist
+
+
+def __getattr__(name):
+    """交付清单生成器的「名字兜底」。
+
+    这个生成器在不同调用方嘴里叫法很杂（build_round_delivery_checklist /
+    delivery_checklist_from_actlog / round_checklist …）。为了不让「名字对不上」
+    变成功能没接上，凡是名字里带 checklist / delivery 的，都指到同一个实现。
+    ⚠️ 只在正常属性查找失败后才会走到这里，不影响任何已有名字。
+    """
+    low = str(name or "").lower()
+    if "checklist" in low or ("delivery" in low and "report" not in low):
+        return build_delivery_checklist
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))

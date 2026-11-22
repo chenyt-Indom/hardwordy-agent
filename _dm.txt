@@ -1,0 +1,277 @@
+warning: in the working copy of 'backend/main.py', LF will be replaced by CRLF the next time Git touches it
+diff --git a/backend/main.py b/backend/main.py
+index 95604fd..74bcc94 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -731,6 +731,39 @@ def _apply_reply_gate(text: str, limit: int = _REPLY_MAX_CHARS) -> str:
+         return s
+ 
+ 
++def _round_actlog_mark(session: str = "") -> int:
++    """本轮起点：当前账本行数（给交付清单划「这一轮」的界限）。
++
++    账本读不出来就返回 0（当作从第一行起），任何异常都不往外抛 ——
++    交付清单是收口信息，绝不能因为它把对话卡住。
++    """
++    try:
++        fn = getattr(actlog, "count_rows", None)
++        if callable(fn):
++            return int(fn(session) or 0)
++    except Exception:
++        logger.debug("silent-except", exc_info=True)
++    return 0
++
++
++def _append_delivery_checklist(text: str, session: str = "",
++                               since: int = 0, **kw) -> str:
++    """回复出口：把「已交付 / 未交付 / 下一步」三段清单追加到回复末尾。
++
++    2026-11-23 接线（对应摩擦点「同一需求被重复发送 ×89」）：用户看不到这一轮
++    交付了什么，只能把同一句话再发一遍。清单**只取本轮 actlog 的真实记录**
++    （见 reply_gate.build_delivery_checklist），账本里没有的事一条都不写；
++    本轮没动过任何东西（纯聊天/查询）就原样返回，闲聊完全不受影响。
++    """
++    s = str(text or "")
++    try:
++        from .reply_gate import append_delivery_checklist
++        return append_delivery_checklist(s, session=session, since=since, **kw)
++    except Exception:
++        logger.debug("silent-except", exc_info=True)
++        return s
++
++
+ # 空回复硬失败兜底（2026-11-16 用户要求）：
+ # 低分轮次里模型只回一个「…」「。」或纯空白 —— 用户看到的就是「发出去没反应」。
+ # 这里在最终回复返回前做一道检查：strip 后为空、或去掉标点/省略号后没有实质内容，
+@@ -3409,6 +3442,23 @@ def api_actlog_append(payload: dict = Body(...)):
+         return {"ok": False, "error": str(e)}
+ 
+ 
++@app.get("/api/delivery/checklist")
++def api_delivery_checklist(session_id: str = "", since: int = 0):
++    """本轮交付清单（已交付 / 未交付 / 下一步），只读 actlog。
++
++    2026-11-23 接线：聊天回复出口已经自动把这份清单追加在回复末尾
++    （见 reply_gate.build_delivery_checklist）。这个路由给前端/排查用：
++    想单独看「这一轮到底交付了什么」时不必再翻回复正文。
++    since = 本轮起点的账本行号（前端一般不传，0 表示整份账本）。
++    """
++    try:
++        from .reply_gate import build_delivery_checklist as _build_checklist
++        text = _build_checklist(session=session_id or "", since=int(since or 0))
++        return {"ok": True, "text": text or ""}
++    except Exception as e:                              # noqa: BLE001
++        return {"ok": False, "text": "", "error": str(e)}
++
++
+ @app.get("/api/timeline")
+ def api_timeline(session_id: str = ""):
+     """会话时间轴：本会话的自动改动记录（供前端画时间轴）。
+@@ -3965,6 +4015,51 @@ def selfiter_continue():
+         return {"ok": False, "error": str(e)}
+ 
+ 
++@app.get("/api/selfiter/journal")
++def selfiter_journal(limit: int = 40):
++    """★ 2026-11-23 用户要求：左侧工具栏「自迭代日志」独立弹窗的数据源。
++
++    一次给出：在跑/排队/历史 + 每条任务的进度、动作清单、分数变化、
++    事件日志（验证/跑分/反思）+ 可一键拉起的候选。
++    """
++    from . import iter_runner as _ir
++    try:
++        return _ir.journal(limit=limit)
++    except Exception as e:                              # noqa: BLE001
++        logger.warning("取自迭代日志失败", exc_info=True)
++        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
++
++
++@app.get("/api/selfiter/candidates")
++def selfiter_candidates(limit: int = 40):
++    """可一键拉起的任务：失败 / 被终止 / 改完没验证 / 队列卡住。"""
++    from . import iter_runner as _ir
++    try:
++        return {"ok": True, "items": _ir.revive_candidates(limit=limit)}
++    except Exception as e:                              # noqa: BLE001
++        logger.warning("取可拉起任务失败", exc_info=True)
++        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e), "items": []}
++
++
++@app.post("/api/selfiter/revive")
++def selfiter_revive(body: dict):
++    """★ 一键拉起：按类型把任务重新拉起来。
++
++    kind=unverified → 立刻启动验证（连续两轮 → 跑分 → 反思）；
++    kind=failed/cancelled → 同一个计划重新入队（跑完自动重启并验证）；
++    kind=stuck → 让队列动起来。
++    """
++    from . import iter_runner as _ir
++    b = body or {}
++    try:
++        return _ir.revive(kind=str(b.get("kind") or ""),
++                          tid=str(b.get("tid") or ""),
++                          plan_id=str(b.get("plan_id") or ""))
++    except Exception as e:                              # noqa: BLE001
++        logger.warning("一键拉起失败", exc_info=True)
++        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
++
++
+ @app.get("/api/selfiter/reports")
+ def selfiter_reports(limit: int = 10):
+     """每个功能完成后的 markdown 报告。"""
+@@ -8210,6 +8305,10 @@ async def chat(req: ChatRequest,
+         #    于是前面第一次 `client.chat(..., tools=tool_schemas)` 直接
+         #    UnboundLocalError: cannot access local variable（实测踩过）。
+         nonlocal tool_schemas, _native_tool_names
++        # 🧾 交付清单（2026-11-23 接线）：记下**本轮起点**的账本行号。
++        #   出口处据此只统计这一轮真正落账的改动（见 reply_gate.build_delivery_checklist），
++        #   绝不会把上一轮、上上个任务的改动算成「本轮已交付」。
++        _round_mark = _round_actlog_mark(session)
+         # ★ 用户要求（2026-11-15）：一个任务一个版本。
+         #   如果上一次任务没正常结束（用户按了「终止」/ 关掉页面 / 进程崩），
+         #   它的改动还留在池子里。这里先把它作为一个**「未完成」版本**收掉，
+@@ -9423,7 +9522,21 @@ async def chat(req: ChatRequest,
+         # 对应「回复被截断」「过程淹没结论」两个最高频摩擦 —— 用户第一眼先看到结论，
+         # 想看过程点开 <details>，超长则分段而不是让前端在任意位置硬截断。
+         # 任何异常都退回原文（只 debug 记一笔），绝不影响主回复。
++        # 回复形态统一闸（2026-11-23 接线 reply_gate.shape_reply）：
++        # 「结论段（前 3 行）+ 交付清单（已交付/未交付）+ 过程段（<details> 折叠，
++        # 超 2000 字截断并指向 actlog）」。放在 finalize 之前：先把形态摆正
++        # （结论一定在最前、过程一定在折叠块里），再由 finalize 决定要不要分段。
++        # 短回复 / 已折叠过的回复 shape_reply 会原样返回，闲聊不受影响。
+         _parts = None
++        try:
++            from .reply_gate import shape_reply as _shape_reply
++            _shaped0 = _shape_reply(_shown)
++            if isinstance(_shaped0, str) and _shaped0.strip() and _shaped0 != _shown:
++                logger.info("[reply-shape] 回复 %d 字 → %d 字，已重排为「结论段 + 交付清单 + 过程折叠」",
++                            len(_shown), len(_shaped0))
++                _shown = _shaped0
++        except Exception:
++            logger.debug("silent-except", exc_info=True)
+         try:
+             from .reply_gate import finalize as _shape_finalize
+             _shaped = _shape_finalize(_shown)
+@@ -9441,6 +9554,25 @@ async def chat(req: ChatRequest,
+         except Exception:
+             logger.debug("silent-except", exc_info=True)
+             _parts = None
++        # 🧾 每轮结尾固定输出「已交付 / 未交付 / 下一步」三段清单（2026-11-23 接线）：
++        #   对应摩擦点「同一需求被重复发送 ×89」—— 用户看不到这轮到底交付了什么，
++        #   只能把同一句话再发一遍（「改完了吗」「还差什么」）。
++        #   清单**只取本轮 actlog 的真实记录**（成功应用的改动 / 失败·回滚掉的改动），
++        #   账本里没有的事一条都不写；本轮没动过任何东西（纯聊天/查询）就不加，
++        #   闲聊和短答完全不受影响。
++        #   ⚠️ 只加在**展示文本**上：落盘的历史（上面 sessions.save_messages）在
++        #      这之前已经写完，清单不会变成下一轮自己说过的话再读回去。
++        _checked = _append_delivery_checklist(_shown, session=session,
++                                             since=_round_mark)
++        if _checked != _shown:
++            logger.info("[delivery] 回复末尾已追加本轮交付清单（%d 字）",
++                        len(_checked) - len(_shown))
++            _shown = _checked
++            if _parts:
++                _parts = list(_parts)
++                _parts[-1] = _append_delivery_checklist(_parts[-1],
++                                                        session=session,
++                                                        since=_round_mark)
+         _done_payload = {"done": True, "text": _shown, "thinking": final_thinking}
+         if _parts:
+             _done_payload["parts"] = _parts
+@@ -10381,16 +10513,73 @@ def watch_remove(body: dict):
+     """
+     from . import handoff as _ho
+     wid = str((body or {}).get("id") or "").strip()
++    if not wid:
++        return {"ok": False, "error": "缺少要删除的 id"}
+     r = _ho.remove_watch(wid)
+     if r.get("ok"):
+         return r
++    # ★ 2026-11-23 修：原来不管 scheduler 说什么，最后都 `return r`，
++    #   于是用户永远只看到 handoff 的「没有这条监视」—— 而真实原因
++    #   （比如被误判成内置任务）被丢掉了。现在两边都试，**把有信息量的
++    #   那个错误返回**：scheduler 明确拒绝（builtin）就报它，否则才报通用话。
++    r2 = {}
+     try:
+         r2 = scheduler.remove(wid)
+         if r2.get("ok"):
+             return r2
+-    except Exception:                                   # noqa: BLE001
++    except Exception as e:                              # noqa: BLE001
+         logger.warning("删除联网盯事失败", exc_info=True)
+-    return r
++        r2 = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
++    if r2.get("builtin"):
++        return r2                                       # 内置任务不能删，原因说清楚
++    if r2.get("error") and "没有这个任务" not in str(r2.get("error")):
++        return r2
++    return {"ok": False,
++            "error": "没找到这条盯梢（id=%s）。可能已经被删掉了，刷新面板看看。" % wid}
++
++
++@app.post("/api/watch/run")
++def watch_run_now(body: dict):
++    """★ 2026-11-23 用户要求：盯梢卡片加「立即运行」。
++
++    同步跑一次（联网抓 2~8 秒），既比对又返回这次抓到的内容 ——
++    用户不用等到下一个整点才知道盯的是什么、有没有变。
++    """
++    try:
++        return scheduler.watch_run_now(str((body or {}).get("id") or ""))
++    except Exception as e:                              # noqa: BLE001
++        logger.warning("立即运行盯梢失败", exc_info=True)
++        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
++
++
++@app.get("/api/watch/detail")
++def watch_detail(id: str = ""):
++    """★ 2026-11-23 用户要求：「查看」一屏看全 —— 时间线 + 最近内容 + 下次运行。"""
++    try:
++        return scheduler.watch_detail(id)
++    except Exception as e:                              # noqa: BLE001
++        logger.warning("取盯梢详情失败", exc_info=True)
++        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
++
++
++@app.get("/api/schedule/archived")
++def schedule_archived():
++    """已删除但可恢复的任务（删掉保留时间线历史）。"""
++    try:
++        return {"ok": True, "items": scheduler.list_archived()}
++    except Exception as e:                              # noqa: BLE001
++        logger.warning("读已删除任务失败", exc_info=True)
++        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e), "items": []}
++
++
++@app.post("/api/schedule/restore")
++def schedule_restore(body: dict):
++    """把已删除的任务恢复回来（时间线原样带回）。"""
++    try:
++        return scheduler.restore(str((body or {}).get("id") or ""))
++    except Exception as e:                              # noqa: BLE001
++        logger.warning("恢复任务失败", exc_info=True)
++        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+ 
+ 
+ @app.post("/api/image/discover")
+@@ -10882,6 +11071,8 @@ async def chat_deepseek(req: ChatRequest,
+             finally:
+                 q.put(("__done__", None))
+ 
++        # 🧾 交付清单（2026-11-23 接线）：记下本轮起点，出口处只统计**本轮**的改动
++        _ds_round_mark = _round_actlog_mark(session)
+         threading.Thread(target=worker, daemon=True).start()
+ 
+         yield json.dumps({"note": f"正在调用 {model}…"}) + "\n"
+@@ -11008,6 +11199,11 @@ async def chat_deepseek(req: ChatRequest,
+         # ⚠️ 卡片只加在回填用的 answer 上：磁盘里的会话历史必须是干净正文，
+         #    否则下一轮会把「结论：通过」当成自己说过的话再读回去。
+         _answer = (_vcard + _full) if _vcard else _full
++        # 🧾 每轮结尾固定输出「已交付 / 未交付 / 下一步」三段清单（2026-11-23 接线）：
++        #   和本地通道同一口径 —— 只取**本轮 actlog** 的真实改动，本轮没动过东西就不加。
++        #   ⚠️ 同样只加在回填给前端的 answer 上，磁盘会话历史保持干净正文。
++        _answer = _append_delivery_checklist(_answer, session=session,
++                                             since=_ds_round_mark)
+         yield json.dumps({"__end": True, "answer": _answer}, ensure_ascii=False) + "\n"
+ 
+     return StreamingResponse(gen(), media_type="application/x-ndjson")

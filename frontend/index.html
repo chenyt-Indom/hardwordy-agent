@@ -185,6 +185,16 @@
       <div class="actlog-list" id="actlogList">展开后加载</div>
     </details>
 
+    <!-- 📋 本轮交付清单（2026-11-23）
+         后端 GET /api/delivery/checklist 返回「已交付 / 未交付 / 下一步」三段
+         （数据只来自本轮 actlog，回复末尾也会自动附一份）。这下面是它的前端入口：
+         app.js 的 loadDeliveryChecklist()/bindDeliveryChecklist()。
+         默认收起，展开时才请求，跟上面「最近自动执行」同一个懒加载口径。 -->
+    <details class="actlog-box" id="deliveryBox">
+      <summary>📋 本轮交付清单</summary>
+      <div class="actlog-list" id="deliveryList">展开后加载</div>
+    </details>
+
     <!-- 知识库：把 .txt/.md 丢进文件夹即可被检索，无需导入 -->
     <!-- ⏰ 定时任务已从侧栏移出（2026-11-11）：它不该占对话/侧栏的位置。
          现在是一个**独立浮层卡片**（见文件末尾 #schedFloat），点顶栏 ⏰ 开合；

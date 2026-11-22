@@ -29,6 +29,12 @@
   var API_WATCH = "/api/watch";              // 盯梢：列表 + 待弹卡（GET）/ 一句话新建（POST）
   var API_WATCH_ACK = "/api/watch/ack";      // 看过的卡标记已读
   var API_WATCH_DEL = "/api/watch/remove";   // 停掉一条监视
+  var API_WATCH_RUN = "/api/watch/run";      // ★ 立即跑一次（同步抓 2~8 秒）
+  var API_WATCH_DETAIL = "/api/watch/detail"; // ★ 一屏看全：时间线 + 最近内容
+  var API_WATCH_RUN = "/api/watch/run";      // ★ 立即运行一次（比对 + 返回当前值）
+  var API_WATCH_DETAIL = "/api/watch/detail"; // ★ 详情：时间线 + 最近内容 + 下次运行
+  var API_SCHED_ARCHIVED = "/api/schedule/archived";  // ★ 已删除但可恢复
+  var API_SCHED_RESTORE = "/api/schedule/restore";    // ★ 恢复
 
   var root = null;          // 面板根节点
   var timer = null;         // 轮询句柄
@@ -119,7 +125,33 @@
     ".jpw-x{border:0;background:transparent;color:#e5534b;cursor:pointer;font-size:11px;" +
     "padding:0 2px;}" +
     ".jpw-cards{margin-top:8px;}" +
-    ".jpw-cards .jp-hint{opacity:.72;}";
+    ".jpw-cards .jp-hint{opacity:.72;}" +
+    // ★ 2026-11-23 用户要求：盯梢卡片加「立即运行」「查看」两个按钮。
+    ".jpw-acts{display:flex;gap:6px;margin-top:6px;}" +
+    ".jpw-btn{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);" +
+    "color:#cfd3d8;border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer;}" +
+    ".jpw-btn:hover{background:rgba(255,255,255,.14);}" +
+    ".jpw-btn:disabled{opacity:.45;cursor:default;}" +
+    // 详情弹窗（一屏看全：时间线 + 最近内容 + 下次运行）
+    ".jpwd-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1299;}" +
+    ".jpwd-mask[hidden]{display:none;}" +
+    "#jpwDetail{position:fixed;top:7vh;left:50%;transform:translateX(-50%);" +
+    "width:min(760px,92vw);max-height:82vh;z-index:1300;background:#1b1e24;color:#e8eaed;" +
+    "border:1px solid rgba(255,255,255,.12);border-radius:14px;" +
+    "box-shadow:0 16px 48px rgba(0,0,0,.5);display:flex;flex-direction:column;overflow:hidden;}" +
+    "#jpwDetail[hidden]{display:none;}" +
+    ".jpwd-head{display:flex;align-items:center;gap:8px;padding:10px 12px;" +
+    "border-bottom:1px solid rgba(255,255,255,.10);}" +
+    ".jpwd-head .tt{flex:1;font-size:13px;font-weight:600;overflow:hidden;" +
+    "text-overflow:ellipsis;white-space:nowrap;}" +
+    ".jpwd-body{overflow:auto;padding:10px 12px;font-size:12px;line-height:1.6;}" +
+    ".jpwd-sec{margin-bottom:12px;}" +
+    ".jpwd-sec h4{margin:0 0 5px;font-size:12px;opacity:.75;font-weight:600;}" +
+    ".jpwd-pre{white-space:pre-wrap;word-break:break-word;background:rgba(255,255,255,.05);" +
+    "border-radius:8px;padding:8px;max-height:240px;overflow:auto;font-size:11px;opacity:.9;}" +
+    ".jpwd-tl{list-style:none;margin:0;padding:0;}" +
+    ".jpwd-tl li{padding:5px 0;border-bottom:1px dashed rgba(255,255,255,.10);font-size:11px;}" +
+    ".jpwd-kv{display:flex;flex-wrap:wrap;gap:10px;opacity:.8;font-size:11px;}";
 
   function injectCss() {
     if ($("jpStyle")) return;
@@ -368,12 +400,39 @@
       : "最近触发：还没触发过";
     row.appendChild(mk("div", "m", trig));
 
+    // ★ 2026-11-23 用户要求：每条盯梢加「立即运行」「查看」——
+    //   原来只能等下一个整点，用户想立刻知道「现在有没有变化」时毫无入口。
+    var acts = mk("div", "jpw-acts");
+    var runb = mk("button", "jpw-btn", "▶ 立即运行");
+    runb.title = "现在就抓一次（联网 2~8 秒），立刻告诉你有没有变化";
+    runb.onclick = function () { runWatchNow(it.id, runb); };
+    var vw = mk("button", "jpw-btn", "查看");
+    vw.title = "看它盯的是什么、最近抓到的内容、变化时间线";
+    vw.onclick = function () { openWatchDetail(it.id); };
+    acts.appendChild(runb);
+    acts.appendChild(vw);
+    row.appendChild(acts);
+
     var st = [];
     if (it.status) st.push(it.status);
     if (it.condition_text) st.push(it.condition_text);
     if (it.changes) st.push("共变了 " + it.changes + " 次");
     if (st.length) row.appendChild(mk("div", "m", st.join(" · ")));
     if (it.pending) row.appendChild(mk("div", "w", "● 有新变化，刚推到上面了"));
+
+    // ★ 2026-11-23 用户要求：「增加一个立即运行以及查看的按钮」。
+    //   立即运行 = 现在就跑一次（既比对又显示当前值，结果直接铺在卡片上）；
+    //   查看     = 弹窗一屏看全（时间线 + 最近内容 + 下次运行）。
+    var acts = mk("div", "jpw-acts");
+    var run = mk("button", "jpw-btn", "▶ 立即运行");
+    run.title = "现在就抓一次，和上次比一比";
+    run.onclick = function () { runWatchNow(it, run, row); };
+    var view = mk("button", "jpw-btn", "查看");
+    view.title = "时间线 + 最近内容 + 下次运行";
+    view.onclick = function () { openWatchDetail(it.id, it.name || it.target || "盯梢"); };
+    acts.appendChild(run);
+    acts.appendChild(view);
+    row.appendChild(acts);
     return row;
   }
 
@@ -436,13 +495,232 @@
   function removeWatch(id) {
     if (!id) return Promise.resolve(null);
     return jpost(API_WATCH_DEL, { id: id }).then(function (d) {
-      if (d && d.ok) { toast("已停掉这条监视"); refreshWatch(); }
+      if (d && d.ok) { toast("已停掉这条监视"); refreshWatch(); loadArchived(); }
       else { toast((d && d.error) || "停不掉，稍后再试", "warn"); }
       return d;
     }).catch(function (e) {
       toast("停监视失败：" + (e && e.message ? e.message : e), "warn");
       return null;
     });
+  }
+
+  /** ★ 立即运行一次：既比对又显示当前值，结果直接铺在这张卡下面。 */
+  function runWatchNow(it, btn, row) {
+    if (!it || !it.id) return;
+    var old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "抓取中…";
+    jpost(API_WATCH_RUN, { id: it.id }).then(function (d) {
+      btn.disabled = false;
+      btn.textContent = old;
+      if (!d || !d.ok) { toast((d && d.error) || "运行失败", "warn"); return; }
+      row.appendChild(mk("div", "m", "▶ 刚跑完：" + (d.answer || "") +
+        (d.next_run_human && d.next_run_human !== "-" ? " · 下次 " + d.next_run_human : "")));
+      if (d.preview) {
+        var pre = mk("div", "jpwd-pre", d.preview);
+        pre.style.maxHeight = "160px";
+        row.appendChild(pre);
+      }
+      toast(d.changed ? "发现变化了" : (d.baseline ? "已记录基线" : "这次没变化"), "ok");
+    }).catch(function (e) {
+      btn.disabled = false;
+      btn.textContent = old;
+      toast("运行失败：" + (e && e.message ? e.message : e), "warn");
+    });
+  }
+
+  var wdroot = null, wdmask = null;
+
+  function wdetailBuild() {
+    if (wdroot) return wdroot;
+    injectCss();
+    wdmask = mk("div", "jpwd-mask");
+    wdmask.onclick = closeWatchDetail;
+    document.body.appendChild(wdmask);
+    wdroot = mk("section");
+    wdroot.id = "jpwDetail";
+    wdroot.hidden = true;
+    var head = mk("div", "jpwd-head");
+    head.appendChild(mk("span", "tt", "盯梢详情"));
+    var x = mk("button", "jpw-x", "✕");
+    x.onclick = closeWatchDetail;
+    head.appendChild(x);
+    wdroot.appendChild(head);
+    var body = mk("div", "jpwd-body");
+    body.id = "jpwdBody";
+    wdroot.appendChild(body);
+    document.body.appendChild(wdroot);
+    return wdroot;
+  }
+
+  function closeWatchDetail() {
+    if (wdroot) wdroot.hidden = true;
+    if (wdmask) wdmask.hidden = true;
+  }
+
+  /** ★ 查看：时间线 + 最近内容 + 下次运行，一屏看全。 */
+  function openWatchDetail(id, title) {
+    if (!id) return;
+    wdetailBuild();
+    var body = $("jpwdBody");
+    body.textContent = "";
+    body.appendChild(mk("div", "jp-hint", "读取中…"));
+    wdroot.hidden = false;
+    wdmask.hidden = false;
+    jget(API_WATCH_DETAIL + "?id=" + encodeURIComponent(id)).then(function (d) {
+      body.textContent = "";
+      if (!d || !d.ok) {
+        body.appendChild(mk("div", "jp-hint", (d && d.error) || "取不到详情"));
+        return;
+      }
+      var tt = wdroot.querySelector(".jpwd-head .tt");
+      if (tt) tt.textContent = d.name || title || "盯梢详情";
+      var kv = mk("div", "jpwd-kv");
+      [["类型", d.kind_text || ""], ["周期", d.period || ""],
+       ["下次运行", d.next_run_human || "-"],
+       ["最近一次", d.last_run || "还没跑过"],
+       ["状态", d.last_status || "—"],
+       ["共变化", (d.timeline_count || 0) + " 次"]].forEach(function (p) {
+        if (p[1]) kv.appendChild(mk("span", "", p[0] + "：" + p[1]));
+      });
+      body.appendChild(kv);
+      if (d.query) {
+        var s1 = mk("div", "jpwd-sec");
+        s1.appendChild(mk("h4", "", "盯的目标"));
+        s1.appendChild(mk("div", "jpwd-pre", d.query));
+        body.appendChild(s1);
+      }
+      var s2 = mk("div", "jpwd-sec");
+      s2.appendChild(mk("h4", "", "最近一次抓到的内容"));
+      s2.appendChild(d.preview ? mk("div", "jpwd-pre", d.preview)
+                               : mk("div", "jp-hint", "还没抓到内容（第一次运行后就有了）"));
+      body.appendChild(s2);
+      var s3 = mk("div", "jpwd-sec");
+      s3.appendChild(mk("h4", "", "变化时间线（" + (d.timeline_count || 0) + " 条）"));
+      var tl = d.timeline || [];
+      if (!tl.length) {
+        s3.appendChild(mk("div", "jp-hint", "还没有记录到变化。"));
+      } else {
+        var ul = mk("ul", "jpwd-tl");
+        tl.slice().reverse().forEach(function (p) {
+          var li = mk("li", "");
+          var t = p.t || p.time || "";
+          var add = (p.added != null ? p.added : "");
+          var rem = (p.removed != null ? p.removed : "");
+          li.appendChild(mk("div", "", t + (add !== "" ? "　+" + add + " / -" + rem : "")));
+          var df = String(p.diff || p.preview || "").slice(0, 400);
+          if (df) li.appendChild(mk("div", "jpwd-pre", df));
+          ul.appendChild(li);
+        });
+        s3.appendChild(ul);
+      }
+      body.appendChild(s3);
+    }).catch(function (e) {
+      body.textContent = "";
+      body.appendChild(mk("div", "jp-hint", "取详情失败：" + (e && e.message ? e.message : e)));
+    });
+  }
+
+  /**
+   * ★ 已删除但可恢复的任务（GET /api/schedule/archived）。
+   *
+   * 删除现在是**归档**而不是真删（时间线还留着），这里把它露出来，
+   * 用户点错了当场能恢复，否则归档等于白做。
+   */
+  function loadArchived() {
+    var box = $("jpwArch");
+    if (!box) return Promise.resolve(null);
+    return jget(API_SCHED_ARCHIVED).then(function (d) {
+      var items = (d && Array.isArray(d.items)) ? d.items : [];
+      box.textContent = "";
+      if (!items.length) return d;
+      box.appendChild(mk("div", "jp-hint",
+        "已删除（" + items.length + " 条，点「恢复」就能找回来，时间线还在）："));
+      items.slice(0, 20).forEach(function (a) {
+        a = a || {};
+        var row = mk("div", "jpw-item");
+        var top = mk("div", "t");
+        top.appendChild(mk("span", "", "🗑"));
+        top.appendChild(mk("span", "n", a.name || a.id || "任务"));
+        top.appendChild(mk("span", "s", a.period || ""));
+        var b = mk("button", "jpw-btn", "恢复");
+        b.onclick = function () { restoreArchived(a.id); };
+        top.appendChild(b);
+        row.appendChild(top);
+        var meta = [];
+        if (a.deleted_at) meta.push("删除于 " + a.deleted_at);
+        if (a.timeline_count) meta.push("保留 " + a.timeline_count + " 条时间线");
+        if (meta.length) row.appendChild(mk("div", "m", meta.join(" · ")));
+        box.appendChild(row);
+      });
+      return d;
+    }).catch(function () { return null; });
+  }
+
+  function restoreArchived(id) {
+    if (!id) return Promise.resolve(null);
+    return jpost(API_SCHED_RESTORE, { id: id }).then(function (d) {
+      if (d && d.ok) { toast("已恢复"); refreshWatch(); loadArchived(); }
+      else { toast((d && d.error) || "恢复失败", "warn"); }
+      return d;
+    }).catch(function (e) {
+      toast("恢复失败：" + (e && e.message ? e.message : e), "warn");
+      return null;
+    });
+  }
+
+  // ★ 2026-11-23 用户要求：不用等到整点，点一下就抓一次。
+  //   后端 watch_run_now 是同步的（2~8 秒），返回里直接给「有没有变」。
+  function runWatchNow(id, btn) {
+    if (!id) return Promise.resolve(null);
+    var old = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "…抓取中"; }
+    return jpost(API_WATCH_RUN, { id: id }).then(function (d) {
+      if (btn) { btn.disabled = false; btn.textContent = old || "▶ 立即运行"; }
+      if (!d || !d.ok) { toast((d && d.error) || "跑不动，稍后再试", "warn"); return null; }
+      var msg = d.baseline ? "已记录基线（第一次抓取）" : String(d.answer || "跑完了");
+      toast("「" + (d.name || "盯梢") + "」" + msg, d.changed ? "ok" : "");
+      refreshWatch();
+      return d;
+    }).catch(function (e) {
+      if (btn) { btn.disabled = false; btn.textContent = old || "▶ 立即运行"; }
+      toast("立即运行失败：" + (e && e.message ? e.message : e), "warn");
+      return null;
+    });
+  }
+
+  // 详情弹窗：骨架只建一次，反复打开只换内容（省得每点一次塞一个 DOM）
+  var droot = null, dmask = null;
+
+  function closeWatchDetail() {
+    if (droot) droot.hidden = true;
+    if (dmask) dmask.hidden = true;
+  }
+
+  function buildDetail() {
+    if (droot) return droot;
+    injectCss();
+    dmask = mk("div", "jpwd-mask");
+    dmask.hidden = true;
+    dmask.onclick = closeWatchDetail;
+    document.body.appendChild(dmask);
+    droot = mk("section");
+    droot.id = "jpwDetail";
+    droot.hidden = true;
+    var head = mk("div", "jpwd-head");
+    var tt = mk("span", "tt", "盯梢详情");
+    tt.id = "jpwdTitle";
+    head.appendChild(tt);
+    var x = mk("button", "jp-x", "✕");
+    x.title = "关闭";
+    x.onclick = closeWatchDetail;
+    head.appendChild(x);
+    droot.appendChild(head);
+    var body = mk("div", "jpwd-body");
+    body.id = "jpwdBody";
+    droot.appendChild(body);
+    document.body.appendChild(droot);
+    return droot;
   }
 
   /** 拉一次面板数据（列表 + 待弹卡）。 */

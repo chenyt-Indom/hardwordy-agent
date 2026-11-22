@@ -289,6 +289,50 @@ def render(session: str, n: int = SHOW) -> str:
               "就如实说「这一轮没动过」，不要编。")
 
 
+def count_rows(session: str = "") -> int:
+    """当前账本行数 —— 给「本轮起点」打标记用。
+
+    用法（见 main.py 回复出口 + reply_gate.build_delivery_checklist）：
+        mark = actlog.count_rows(session)   # 本轮开始
+        ... 这一轮的工具动作陆续落账 ...
+        build_delivery_checklist(session=session, since=mark)   # 只统计本轮
+
+    读不到账本时返回 0（当作「从第一行起」），任何异常都不往外抛。
+    """
+    try:
+        return len(_read(_path(session)))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return 0
+
+
+def list_rows(session: str = "", limit: int = 0, since: int = 0) -> list:
+    """按落盘顺序返回账本行（只读；给「本轮交付清单」这类统计用）。
+
+    since > 0 表示跳过前 since 行（本轮起点）；limit > 0 表示只取末尾 limit 行。
+    账本读不出来/格式不对一律返回 []，绝不抛异常。
+    """
+    try:
+        rows = _read(_path(session))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        return []
+    if not isinstance(rows, list):
+        return []
+    try:
+        since = max(0, int(since or 0))
+    except Exception:
+        since = 0
+    rows = rows[since:]
+    try:
+        limit = int(limit or 0)
+    except Exception:
+        limit = 0
+    if limit > 0:
+        rows = rows[-limit:]
+    return rows
+
+
 def _load_events(path: str = "") -> list:
     """读 task.json 里的 events 列表；读不到/格式不对一律返回 []。"""
     try:
