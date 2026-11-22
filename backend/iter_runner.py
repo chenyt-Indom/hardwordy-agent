@@ -19,6 +19,7 @@
 """
 
 import json
+import os
 import threading
 import time
 import traceback
@@ -297,7 +298,15 @@ def _load():
 
 
 def _save():
-    """写盘。失败不影响执行（历史丢了也比任务跑不完强）。"""
+    """写盘。失败不影响执行（历史丢了也比任务跑不完强）。
+
+    ★ 2026-11-23：只读进程（诊断脚本、静态检查、回归子进程）绝不能写这个文件。
+      它们 import 本模块时 `_load()` 会把 running 当孤儿清掉，只要顺手 `_save()`
+      一次，正在跑的真实任务记录就从磁盘上消失了 —— 实测踩过：一条正在跑的
+      任务被诊断进程的 import 清成了 null。设 MM_ITER_READONLY=1 时直接返回。
+    """
+    if os.environ.get("MM_ITER_READONLY") == "1":
+        return
     try:
         with _LOCK:
             d = {"seq": _STATE["seq"],
@@ -1555,5 +1564,11 @@ def continue_queue():
     return {"ok": True, "queue_len": qn, "running": busy}
 
 
-_load()
+# ★ 2026-11-23：只读进程（诊断脚本、静态检查、回归子进程）import 本模块时
+#   不要加载状态 —— `_load()` 会把 running 当孤儿清掉，之后任何一次 `_save()`
+#   就会把这个「清掉」写回磁盘，正在跑的任务记录就没了。
+#   实测：一条正在跑的任务被诊断进程 import 后从 task.json 里消失了。
+#   诊断请设 MM_ITER_READONLY=1（配合 _save 的守卫，全程不碰磁盘）。
+if os.environ.get("MM_ITER_READONLY") != "1":
+    _load()
 
