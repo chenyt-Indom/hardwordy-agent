@@ -1198,33 +1198,31 @@ def boot_resume():
         _emit_sys("队列里有 %d 个任务找不到对应的计划文件（可能被删了），"
                   "任务内容已保留在卡片上，可以取消后重新提交" % _missing,
                   state="waiting")
-    # ★ 2026-11-22：重启前可能已经排进了「没有已批准动作」的死任务
-    #   （旧版 submit 不校验）。恢复时把它们剔出去并说明原因 —— 否则重启后
-    #   又要白跑一次 0.3 秒失败，用户看到的就是「重启后没继续」。
-    _dead, _keep = [], []
+    # ★ 2026-11-22 用户报：「没有自动拉起任务啊」——
+    #   上一版这里把「没有已批准动作」的任务**直接剔出队列**，结果重启后
+    #   队列被清空、任务静默消失，用户看到的就是「没拉起」。
+    #   改为：**保留任务**，只打 need_approve 标记并说明卡在哪；
+    #   任务照常被 _next() 拉起，卡片上显示「等待批准」，点批准就能接着跑。
+    _need = 0
     for _x in (_STATE.get("queue") or []):
         if str(_x.get("source") or "") == "auto" or _x.get("plan_missing"):
-            _keep.append(_x)
             continue
         try:
             _r2 = _si.get_plan(str(_x.get("plan_id") or ""))
             _a2 = [a for a in (((_r2 or {}).get("plan") or {}).get("actions") or [])
                    if isinstance(a, dict)]
             if _a2 and not any(a.get("status") == "approved" for a in _a2):
-                _dead.append(_x)
-                continue
+                _x["need_approve"] = sum(1 for a in _a2
+                                         if a.get("status") not in ("done", "skipped"))
+                _need += 1
+            else:
+                _x.pop("need_approve", None)
         except Exception:                               # noqa: BLE001
-            logger.debug("恢复时检查已批准动作失败（不剔，交给执行器）", exc_info=True)
-        _keep.append(_x)
-    if _dead:
-        with _LOCK:
-            _STATE["queue"] = _keep
+            logger.debug("恢复时检查已批准动作失败（不标记，交给执行器）", exc_info=True)
+    if _need:
         _save()
-        for _x in _dead:
-            _emit(_x.get("tid") or "_sys", "status",
-                  text="「%s」没有任何已批准的动作，已从队列移除（先批准再执行）"
-                       % (_x.get("title") or _x.get("plan_id") or "未命名"),
-                  state="cancelled")
+        _emit_sys("队列里有 %d 个任务还没有已批准的动作 —— 任务已保留，"
+                  "在卡片上点「批准」即可让它接着跑" % _need, state="waiting")
     if orphan:
         _save()
         _name = orphan.get("title") or orphan.get("plan_id") or "未命名任务"
