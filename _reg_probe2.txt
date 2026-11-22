@@ -1,0 +1,3 @@
+run done ok=False total=38 passed=30 failed=8
+failed_items=[{"name": "feature.test_canvas_command", "ok": false, "why": "断言文件加载失败 test_canvas_command.py：ImportError: 缺少 run() 函数"}, {"name": "feature.test_handoff_card", "ok": false, "why": "断言文件加载失败 test_handoff_card.py：ImportError: 缺少 run() 函数"}, {"name": "feature.test_llm_retry", "ok": false, "why": "断言文件加载失败 test_llm_retry.py：SystemExit: 0"}, {"name": "feature.test_map_city_level", "ok": false, "why": "
+脚本继续执行到了这里 —— 进程没被杀 ✅

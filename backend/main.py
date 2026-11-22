@@ -358,6 +358,22 @@ def _memory_ctx(session: str, last_user_text: str, cfg: dict) -> str:
     except Exception:
         logger.warning("读取记忆失败（本轮不注入）", exc_info=True)
         return ""
+    # ★ 跨模型记忆传承（2026-11-22 用户要求「记忆能够跨模型」）：
+    #   记忆本身是纯文本、与模型无关；这里再补一段「传承索引」，让**换模型后**
+    #   新模型知道这份档案是多个模型共同积累的、可以直接用，不必从零理解。
+    #   ⚠️ 必须限长（memtransfer._BRIEF_CAP = 760 字）：这段挂在最后一条用户消息上，
+    #   太长会把真实对话挤掉（同 _memory_ctx 开头那段关于预填充的说明）。
+    #   任何异常都只跳过这一段，不能连原有记忆一起丢掉。
+    try:
+        from . import memtransfer as _MT
+        _mt = _MT.brief(
+            model=str((cfg or {}).get("model") or (cfg or {}).get("llm_model") or ""),
+            session=_memory_sid(session))
+    except Exception:
+        logger.debug("记忆传承层读取失败（跳过这一段）", exc_info=True)
+        _mt = ""
+    if _mt:
+        ctx = (ctx + "\n\n" + _mt) if ctx else _mt
     if not ctx:
         return ""
     # 目标/计划类记忆的用法：当背景用，别当催命符；有进展就更新。
@@ -4061,6 +4077,46 @@ def selfloop_cfg_set(body: dict):
         return _sl.set_cfg(**kw)
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfiter/loop")
+def selfiter_loop():
+    """闭环进退看板：最近几轮是进步还是退步、进退多少、回滚原因。
+
+    用户 2026-11-22：「进退多少都得呈现，以及每次回滚的原因是什么」。
+    这里**只读**，不触发评分（评分要 20 秒，前端轮询会把机器拖死）。
+    """
+    from . import iterloop as _IL
+    from . import self_iterate as _si
+    try:
+        s = _si.load_settings()
+        return {
+            "ok": True,
+            "stats": _IL.stats(),
+            "history": _IL.history(12),
+            "cfg": {
+                "loop_guard": bool(s.get("loop_guard", True)),
+                "loop_auto_restart": bool(s.get("loop_auto_restart", True)),
+                "rec_card": bool(s.get("rec_card", True)),
+            },
+        }
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+@app.post("/api/selfiter/loop/score")
+def selfiter_loop_score(body: dict = None):
+    """手动量一次综合分（前端「量一下」按钮）。
+
+    默认 full=true（含回归），body 里 full=false 可跳过回归图快。
+    """
+    from . import iterloop as _IL
+    b = body or {}
+    try:
+        s = _IL.score(full=bool(b.get("full", True)))
+        return {"ok": True, "score": s, "stats": _IL.stats()}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
 @app.get("/api/selfiter/settings")
@@ -11140,6 +11196,31 @@ def _resume_iter_queue():
 
 
 @app.on_event("startup")
+def _loop_post_verify_on_boot():
+    """闭环：上次自动重启前留了「重启后复核」标记 → 这次启动后自动再量一次分。
+
+    用户 2026-11-22：「改进过程可以进行自动重启然后自动验证」——
+    重启会清掉内存，只能靠磁盘标记把「还要复核」这件事带过重启。
+
+    ⚠️ 两个约束：延迟 8 秒（等 FastAPI 完全起来再跑，否则冒烟会打到自己还没
+    注册完的路由）；**没有标记时什么都不做**，不拖慢正常启动。
+    """
+    def _go():
+        try:
+            from . import iterloop as _IL
+            r = _IL.run_post_verify()
+            if r:
+                logger.info("[loop] 重启后复核完成：%s", str(r)[:400])
+        except Exception:                               # noqa: BLE001
+            logger.warning("重启后复核失败", exc_info=True)
+    try:
+        import threading as _th
+        _th.Timer(8.0, _go).start()
+    except Exception:                                   # noqa: BLE001
+        logger.warning("启动复核线程失败", exc_info=True)
+
+
+@app.on_event("startup")
 def _reap_ide_orphans():
     """启动时先回收上次残留的 code-server（见 workspace.reap_orphan_code_server）。"""
     try:
@@ -11157,6 +11238,37 @@ def _reap_ide_orphans():
             logger.info("已清理 %d 个残留的模型进程（llama-server）", n)
     except Exception as e:
         logger.warning("清理 llama-server 残留进程失败：%s", e)
+
+
+@app.on_event("startup")
+def _loop_post_verify():
+    """闭环最后一环：改完自动重启之后，再量一次分确认「重启后仍然正常」。
+
+    ★ 2026-11-22 用户要求「改进过程可以进行自动重启然后自动验证」。
+    ⚠️ 必须放后台线程：量一次分要跑一遍回归（约 25 秒），
+       放在 startup 里同步跑会把启动卡住半分钟。
+    """
+    try:
+        from . import iterloop as _IL
+        if not _IL.post_verify_pending():
+            return
+    except Exception:                                   # noqa: BLE001
+        return
+
+    def _go():
+        time.sleep(2.0)                                 # 等启动流程走完再测
+        try:
+            from . import iterloop as _IL2
+            r = _IL2.run_post_verify()
+            logger.info("重启后复核结果：%s", r)
+        except Exception:                               # noqa: BLE001
+            logger.warning("重启后复核失败", exc_info=True)
+
+    try:
+        import threading as _th
+        _th.Thread(target=_go, name="loop-post-verify", daemon=True).start()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
 
 
 @app.post("/api/ide/start")

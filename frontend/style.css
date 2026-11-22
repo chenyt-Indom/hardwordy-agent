@@ -6313,6 +6313,9 @@ html[data-theme="light"] .composer {
 .iter-sw-t { font-size: 13px; font-weight: 600; color: var(--text, #2d3748); }
 .iter-trust-hint { font-size: 12px; color: var(--muted, #7a8494); }
 .iter-trust-hint.on { color: #b7791f; }
+/* 2026-11-22 推荐卡片开关：与信任模式同一套视觉，不新增布局 */
+.iter-rec-hint { font-size: 12px; color: var(--muted, #7a8494); }
+.iter-rec-hint.on { color: #2f855a; }
 /* 需要重启时的提示条 */
 .iter-restart {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;

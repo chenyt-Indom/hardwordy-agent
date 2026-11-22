@@ -15618,6 +15618,15 @@
           '</label>' +
           '<span class="iter-trust-hint">开启后：我发现的问题、能升级的地方直接改，不用你批准（推荐的新功能仍要你点头）</span>' +
         '</div>' +
+        // ★ 2026-11-22 用户要求：「增加一个叫【推荐卡片】的开关，开启时则可以在
+        //   对话中直接推送等待批准，关闭时则只在【待批准】里进行推送」。
+        '<div class="iter-trust">' +
+          '<label class="iter-sw">' +
+            '<input type="checkbox" class="iter-rec-cb">' +
+            '<span class="iter-sw-t">推荐卡片</span>' +
+          '</label>' +
+          '<span class="iter-rec-hint">开启后：改进计划会直接在对话里推一张卡片（写清改进原因和好处，思路可展开）等你批；关闭后只进「待批准」面板</span>' +
+        '</div>' +
         '<div class="iter-bar">' +
           '<button type="button" class="btn sm iter-run">🔄 现在反思一次</button>' +
           '<button type="button" class="btn sm ghost iter-audit-btn">🔍 代码自检</button>' +
@@ -15651,6 +15660,7 @@
     el.querySelector(".iter-regress-btn").onclick = runRegress;
     el.querySelector(".iter-restart-btn").onclick = doRestart;
     el.querySelector(".iter-trust-cb").onchange = onTrustToggle;
+    el.querySelector(".iter-rec-cb").onchange = onRecToggle;
     el.querySelector(".iter-pause").onclick = togglePause;
     el.querySelector(".iter-diag-btn").onclick = toggleDiag;
     el.querySelector(".iter-diag-go").onclick = runDiagnose;
@@ -16575,12 +16585,19 @@
   // ★ 2026-11-16 用户要求：「要，放在『🌱 迭代想法』顶部」。
   // 显示今天思考几次、生成几个计划（含上限）、自动执行几个。
   let loopStats = null;
+  // ★ 2026-11-22 闭环进退（最近几轮是进步还是退步、进退多少、回滚原因）
+  let loopGuard = null;
 
   function loadLoop() {
     fetch("/api/selfloop/stats")
       .then(function (r) { return r.json(); })
       .then(function (d) { loopStats = d; if (el) render(); })
       .catch(function () { /* 拿不到就不显示，不影响抽屉其它内容 */ });
+    // 闭环数据单独拉：拿不到也只是少一个 chip，不能让上面那排 chip 跟着空掉
+    fetch("/api/selfiter/loop")
+      .then(function (r) { return r.json(); })
+      .then(function (d) { loopGuard = d; if (el) render(); })
+      .catch(function () { /* 同上 */ });
   }
 
   // ---------- 自循环状态卡（设置抽屉顶部，30 秒刷新）----------
@@ -16737,6 +16754,26 @@
       h += '<span class="iter-chip on iter-creative" title="点一下让它重新想一批新点子（花一次调用）">' +
            '💡 换一批点子 ↻</span>';
     }
+    // ★ 2026-11-22 用户要求「进退多少都得呈现，以及每次回滚的原因是什么」：
+    //   把最近一轮的进退放进 chip（不新增控件，避免窄面板横向挤压）。
+    const g = (loopGuard && loopGuard.ok) ? (loopGuard.stats || {}) : null;
+    if (g && g.rounds) {
+      const last = g.last || {};
+      const dl = last.delta;
+      const arrow = (dl === null || dl === undefined) ? "—" : (dl > 0 ? "↑" : (dl < 0 ? "↓" : "→"));
+      const cls2 = (dl > 0) ? "on" : (dl < 0 ? "bad" : "");
+      const rbTxt = (last.rollback && last.rollback.reason) ? last.rollback.reason : "";
+      h += '<span class="iter-chip ' + cls2 + '" title="' + esc(
+        "闭环评分 0-100（静态40 + 回归30 + 功能30）。最近一轮 " +
+        (last.before === null || last.before === undefined ? "—" : last.before) + " → " +
+        (last.after === null || last.after === undefined ? "—" : last.after) +
+        "；共 " + g.rounds + " 轮，进步 " + (g.improved || 0) +
+        "、退步 " + (g.regressed || 0) + "、回滚 " + (g.rollbacks || 0) +
+        (rbTxt ? "；上次回滚原因：" + rbTxt : "")
+      ) + '">闭环 ' + arrow +
+      ((dl === null || dl === undefined) ? "—" : (dl > 0 ? "+" : "") + dl) +
+      ' · 回滚 <b>' + (g.rollbacks || 0) + '</b></span>';
+    }
     if (L.busy) h += '<span class="iter-chip busy">正在思考…</span>';
     return h;
   }
@@ -16782,6 +16819,12 @@
     const s = d.settings || {};
     const cb = el.querySelector(".iter-trust-cb");
     if (cb) cb.checked = !!s.trust_mode;
+    const rcb = el.querySelector(".iter-rec-cb");
+    if (rcb) rcb.checked = (s.rec_card === undefined ? true : !!s.rec_card);
+    const rh = el.querySelector(".iter-rec-hint");
+    if (rh) {
+      rh.className = "iter-rec-hint" + (s.rec_card === false ? "" : " on");
+    }
     const th = el.querySelector(".iter-trust-hint");
     if (th) {
       th.textContent = s.trust_mode
@@ -16922,6 +16965,25 @@
     if (data && data.settings) data.settings.trust_mode = on;
     say(on ? "信任模式已开启：我发现的问题、能升级的地方直接改，改完提示你重启；推荐的新功能仍会等你批准。"
            : "信任模式已关闭：改代码前仍会等你批准。", on ? "warn" : "good");
+  }
+
+  // ★ 2026-11-22 用户要求加的【推荐卡片】开关。
+  //   开：改进计划在对话里直接推卡片等批准（卡片写清改进原因 + 好处，思路可展开）
+  //   关：只在「待批准」面板里推，不打扰对话
+  async function onRecToggle(e) {
+    const on = !!(e && e.target && e.target.checked);
+    const r = await api("/api/selfiter/settings", { rec_card: on });
+    if (!r || !r.ok) {
+      say((r && r.error) || "设置失败", "bad");
+      e.target.checked = !on;
+      return;
+    }
+    if (data && data.settings) data.settings.rec_card = on;
+    const hint = el && el.querySelector(".iter-rec-hint");
+    if (hint) hint.className = "iter-rec-hint" + (on ? " on" : "");
+    say(on ? "推荐卡片已开启：以后改进计划会直接在对话里推卡片等你批。"
+           : "推荐卡片已关闭：改进计划只进「待批准」面板，不再打扰对话。",
+        on ? "good" : "warn");
   }
 
   async function runAudit() {

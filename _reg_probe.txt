@@ -1,0 +1,19 @@
+start import
+imported, cases=29
+EXC Traceback (most recent call last):
+  File "<string>", line 11, in <module>
+    r = regress.run(scope="quick")
+  File "D:\local-multimodal-src\backend\regress.py", line 526, in run
+    base = _CASES + _load_dynamic()
+                    ~~~~~~~~~~~~~^^
+  File "D:\local-multimodal-src\backend\regress.py", line 509, in _load_dynamic
+    spec.loader.exec_module(mod)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^
+  File "<frozen importlib._bootstrap_external>", line 759, in exec_module
+  File "<frozen importlib._bootstrap>", line 491, in _call_with_frames_removed
+  File "D:\local-multimodal-src\backend\_feature_tests\test_llm_retry.py", line 126, in <module>
+    sys.exit(1 if _fail else 0)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^
+SystemExit: 0
+
+end of script

@@ -41,6 +41,7 @@ code_audit 只能看「名字 / 结构」：调了不存在的函数、未定义
 import ast
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -510,7 +511,17 @@ def _load_dynamic():
             fn = getattr(mod, "run", None)
             if not callable(fn):
                 raise ImportError("缺少 run() 函数")
-        except Exception as e:                          # noqa: BLE001
+        except BaseException as e:                      # noqa: BLE001
+            # ⚠️ 2026-11-22 实测致命缺陷：_feature_tests/test_llm_retry.py 在
+            #    **模块级**调用了 sys.exit(0)，而 exec_module 会把 SystemExit
+            #    抛给调用方。原来这里只捕 Exception，SystemExit 继承自
+            #    BaseException 捕不到 —— 于是整个进程（连同 Web 服务）被静默
+            #    杀掉，连外层 except 都接不到（实测：进程内跑 regress.run()
+            #    后 rc=0 但后续代码一行都不执行）。
+            #    这里必须捕 BaseException；KeyboardInterrupt 要放回去，
+            #    否则用户 Ctrl+C 会被当成「断言文件加载失败」吞掉。
+            if isinstance(e, KeyboardInterrupt):
+                raise
             def _bad(_e=e, _p=p.name):
                 raise AssertionError("断言文件加载失败 %s：%s: %s" % (
                     _p, type(_e).__name__, _e))
@@ -569,14 +580,21 @@ def run(scope="quick", only=None):
 
 
 _MARK = "@@REGRESS@@"
+# ⚠️ 2026-11-22 实测修掉的致命 bug：
+#   regress.run() 内部有测试会 **关掉 sys.stdout**，所以子进程末尾的
+#   print('@@REGRESS@@' + json) 必然抛
+#   `ValueError: I/O operation on closed file` ——
+#   run_disk() 因此**一直是坏的**（永远返回「回归子进程没跑起来」，total=0）。
+#   改成把结果**写进临时文件**，完全不依赖 stdout。
 _DISK_RUNNER = (
     "import io,sys\n"
     "sys.stdout=io.TextIOWrapper(sys.stdout.buffer,encoding='utf-8',errors='replace')\n"
     "sys.path.insert(0,'.')\n"
     "import json\n"
     "from backend import regress\n"
+    "out=sys.argv[2]\n"
     "r=regress.run(scope=sys.argv[1])\n"
-    "print('%s'+json.dumps(r,ensure_ascii=False))\n" % _MARK
+    "open(out,'w',encoding='utf-8').write(json.dumps(r,ensure_ascii=False))\n"
 )
 
 
@@ -596,8 +614,16 @@ def run_disk(scope="quick", timeout=300):
     t0 = time.time()
     err_box = {"ok": False, "scope": scope, "total": 0, "passed": 0, "failed": 1,
                "skipped": 0, "seconds": 0.0, "items": [], "failed_items": []}
+    # 结果走临时文件：regress.run() 会关掉 stdout，print 传不出来（见 _DISK_RUNNER 注释）
+    import tempfile
+    _fd, _out_path = tempfile.mkstemp(prefix="regress_", suffix=".json")
+    os.close(_fd)
     try:
-        r = subprocess.run([sys.executable, "-c", _DISK_RUNNER, scope],
+        os.unlink(_out_path)                 # 先删，跑完再看有没有重新写出来
+    except OSError:
+        pass
+    try:
+        r = subprocess.run([sys.executable, "-c", _DISK_RUNNER, scope, _out_path],
                            cwd=str(_ROOT), capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         err_box["seconds"] = round(time.time() - t0, 2)
@@ -605,11 +631,16 @@ def run_disk(scope="quick", timeout=300):
         err_box["summary"] = "回归子进程超时（%d 秒）" % timeout
         return err_box
 
-    txt = (r.stdout or b"").decode("utf-8", "replace")
     line = ""
-    for ln in txt.splitlines():
-        if ln.startswith(_MARK):
-            line = ln[len(_MARK):]
+    try:
+        with open(_out_path, encoding="utf-8") as _fh:
+            line = _fh.read().strip()
+    except Exception:                                       # noqa: BLE001
+        line = ""
+    try:
+        os.unlink(_out_path)
+    except OSError:
+        pass
     if not line:
         err = (r.stderr or b"").decode("utf-8", "replace")[-500:]
         err_box["seconds"] = round(time.time() - t0, 2)

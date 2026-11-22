@@ -258,6 +258,14 @@ _DEFAULT_SETTINGS = {
     "polish_rounds": 3,
     # 改完代码后：用户选的是「弹提示 + 给一个一键重启按钮」，不自动重启。
     "auto_restart": False,
+    # ---- 闭环评分（2026-11-22 用户要求）----
+    # 「评判每次迭代是进步了还是退步了，进退多少都得呈现……评分或功能不正常
+    #   就自动回滚并记录原因，然后重新改进」
+    "loop_guard": True,          # 迭代前后各量一次综合分（静态40+回归30+功能30）
+    "loop_auto_restart": True,   # 评分正常时后台自动重启（用户选的「接受」）
+    # 推荐卡片：开启时改进计划会**在对话里**直接推一张带批准按钮的卡片；
+    # 关闭时只在「待批准」面板里推。用户 2026-11-22 要求加这个开关。
+    "rec_card": True,
     # 每次改完代码自动跑一次静态自检（用户要求「每次代码被改完就自动跑」）。
     "audit_after_change": True,
     # 每天定时自检一次（用户要求「+ 每天一次」）。
@@ -570,6 +578,41 @@ _CHECKPOINT = _DATA / "checkpoint.json"
 
 
 _ROUNDS = _DATA / "rounds.jsonl"
+
+def _loop_brief():
+    """把最近几轮的**进退分数**和反复失败的坑压成提示词片段。
+
+    用户 2026-11-22：「这些反思都得参考并以之为依据进行构建改进计划」——
+    反思不能只看「失败了几次」，还要看「上一轮到底进步了还是退步了、
+    退了多少、是哪一块（静态/回归/功能）掉的」，否则改进计划会一直在
+    同一个方向上加码，而分数其实在往下走。
+    """
+    try:
+        from . import iterloop as _IL
+        b = _IL.brief(6)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("闭环摘要读取失败", exc_info=True)
+        return "## 最近几轮迭代的进退\n（读不到进退记录）"
+    if not b:
+        return "## 最近几轮迭代的进退\n（还没有进退记录）"
+    return ("## 最近几轮迭代的进退（综合评分 0-100，口径=静态40+回归30+功能30）\n"
+            "★ 制定改进计划时必须参考：**上一轮是进步还是退步、退了多少、哪一块掉的**。\n"
+            "如果连续退步，说明方向错了，要换思路而不是加倍。\n" + b)
+
+
+def _failattr_brief():
+    """失败归因摘要 —— 供反思提示词使用。
+
+    用户 2026-11-22 明确要求：「自动自迭代功能需要重点参考这份归因表，
+    以不断构建思路改进自身」。所以这里**每次反思都读**，读不到也要给占位文本，
+    不能因为归因表为空就让提示词少一段（那会让模型以为没有历史失败）。
+    """
+    try:
+        from . import failattr as _FA
+        return _FA.brief(limit=8) or "（还没有失败/回滚记录，这是干净的一轮）"
+    except Exception:                                   # noqa: BLE001
+        logger.debug("failattr.brief 失败", exc_info=True)
+        return "（归因表读取失败，本轮按无记录处理）"
 
 
 def _change_gate(rel, count, last_failed=False, threshold=None, consec_fail=0,
@@ -1081,6 +1124,35 @@ def _log_act(plan, act, ok, detail=""):
              "evidence": _evidence,
              "phantom": _phantom,
              "auto": bool((act or {}).get("auto"))})
+
+    # ★ 2026-11-22 失败归因：**所有**失败路径统一在这里落一条记录。
+    #   原来只有「LLM 直接操作失败」和「人工回滚」两处手工记，补丁流程的
+    #   13 处失败（锚点没命中 / 语法不过 / 回归失败 / 断言失败…）全都没进
+    #   归因表 —— 而那恰恰是最常发生的一类。
+    #   调用方若已手工记过（信息更全、带 traceback），会置 _failattr_logged 跳过。
+    if not ok and not (act or {}).get("_failattr_logged"):
+        try:
+            from . import failattr as _FA
+            _FA.record(
+                stage="apply",
+                title=str((act or {}).get("title") or (act or {}).get("id") or ""),
+                why_failed=str(detail or ""),
+                why_rollback=("失败后已自动回滚到改动前"
+                              if (act or {}).get("backup") else ""),
+                files=(act or {}).get("files") or [],
+                plan_id=str((plan or {}).get("id") or ""),
+                action_id=str((act or {}).get("id") or ""),
+                context="动作=%s；目标文件=%s；计划触发=%s" % (
+                    (act or {}).get("title") or "-",
+                    "、".join((act or {}).get("files") or []) or "-",
+                    (plan or {}).get("trigger") or "-"),
+                extra={"regression": _rg or "",
+                       "detail": str((act or {}).get("detail") or "")[:400]})
+            if isinstance(act, dict):
+                act["_failattr_logged"] = True
+        except Exception:                               # noqa: BLE001
+            logger.debug("failattr 统一记录失败", exc_info=True)
+
 
 
 def list_actlog(limit=40):
@@ -3310,6 +3382,30 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
    要么先想清楚真正的根因再动手，要么换一条完全不同的思路 ——
    绝对不要在同一条路上继续叠加改动（那是"越改越乱"的来源）。
 
+## 🧾 失败归因表（**真实记录，动手前必须先读这一段**）
+%s
+⚠️ 这是**你自己过去失败/回滚的归因**，不是别人的意见，也不是建议：
+   · 「为什么失败」是当时真实的错误文本；「失败时在做什么」是当时的步骤与输入；
+     「堆栈末行」是异常类型与消息；「为什么回滚」是触发回滚的具体判据；
+   · 「重复 ≥3 次的坑」= 这条路已经走过至少三次都没成，**不要原样重试**：
+     要么换实现方式（比如锚点老是命中不了就改成整份重写），要么先补验证手段再动手；
+   · 本轮若又要在同一个文件 / 同一类动作上改，必须在 detail 里写清
+     「上次为什么没做对 + 这次的根因是什么」——写不出来就别提这条动作。
+
+🚨 **这一段不是读过就算，必须产出东西**（用户 2026-11-22 明确要求
+   「后期的反思一定要仔细参考并构思改进方法」）：
+   1. 对上面**每一个「重复 ≥3 次的坑」**，都必须在输出的 `fail_lessons` 里给一条，
+      一条都不许漏 —— 漏了这条反思就是不合格的；
+   2. 每条的 `root_cause` 要回答「为什么会反复发生」，不能复述错误文本。
+      例：不能写「因为 PermissionError」，要写「因为默认覆盖写已有文件，
+      而用户常在 PowerPoint 里开着它」；
+   3. `fix` 必须具体到**动作**：改哪个文件、改哪一行逻辑、换成什么做法。
+      写「以后注意 / 加强校验」这种等于没写，会被当成空话；
+   4. `verify` 要写「怎么证明这次真的修好了」（可执行的判据，不是「应该没问题」）；
+   5. 如果某个坑你判断**这次仍然修不了**，就明说原因和卡在哪，
+      **不许用一句「已关注」糊过去** —— 糊过去等于下一轮还要再踩一次。
+   ⚠️ 归因表为空时 `fail_lessons` 给空数组即可，不要硬编。
+
 ## 🎨 创意发散（**先做这一步，再往下看**）
 上面那些输入**全是问题**（摩擦、失败、缺口）。只看问题，想出来的必然只有修补。
 所以先做一次纯发散：**完全不考虑修 bug / 补护栏 / 优化现有流程**，只问一件事：
@@ -3424,6 +3520,7 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
   "features": [{"title":"功能名","why":"为什么值得做（必须说清）","pain":"对应哪个痛点或预判","how":"大概怎么做","effort":"S|M|L","files":["backend/xxx.py","frontend/xxx.js"],"anchor":"改哪个函数","risk":"low|mid|high","verify":"怎么验证有效","theory":"理论/论文依据，没有就留空","assert_code":"必填，见下方说明","value":1-10 的整数,"novelty":1-10 的整数,"feasibility":1-10 的整数}],
   "questions": [{"q":"想问用户的一句话","why":"为什么这个信息会改变做法","options":["选项1","选项2"]}],
   "tech_takeaways": [{"title":"技术名","source":"来源","url":"链接","takeaway":"一句话要点","applicable":"对本项目有没有用，怎么用"}],
+  "fail_lessons": [{"kind":"对应归因表里的失败类型（中文名，如「改动锚点没命中」）","count":3,"root_cause":"为什么这一类会反复发生（讲机制，不复述错误文本）","fix":"具体改哪个文件哪一行、换成什么做法","verify":"怎么验证这次真修好了（可执行判据）","will_fix":true}],
   "actions": [{"title":"短标题","why":"为什么要动这个（原因 + 证据，1~2 句）","detail":"解决方案：具体改哪个文件、怎么改、改完怎么验证","risk":"low|mid|high","files":["backend/xxx.py"]}]
 }
 
@@ -3443,6 +3540,8 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
 · feasibility（做出来的把握）—— 用现有模块拼一下就行的给 8~10；要动核心链路
   （会话/执行器/前端渲染）但路径清楚的给 5~7；需要引入新依赖或重写架构的给 1~4。
 
+%s
+
 %s""" % (_PROJECT_BRIEF,
         "\n".join(sig_lines) or "（暂无）",
         "\n".join(jr) or "（暂无）",
@@ -3451,6 +3550,8 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
         paper_brief or "（本轮没有可用的论文评估）",
         task_brief or "（本轮没有召回到相似的历史任务）",
         gap or "（暂无执行记录统计）",
+        _failattr_brief(),
+        _loop_brief(),
         ("## 用户这次的额外关注点\n" + focus) if focus else "")
 
 
@@ -3957,6 +4058,12 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
         "questions": [x for x in (data.get("questions") or []) if isinstance(x, dict)],
         "feature_actions": len(feat_actions),
         "tech_takeaways": data.get("tech_takeaways") or [],
+        # ★ 2026-11-22：反思必须对失败归因表逐条给出改进方法（用户要求
+        #   「仔细参考并构思改进方法」）。这里单独存一份，既给前端看，
+        #   也写回 failattr —— 下一轮反思就能看到「上次已经想到什么办法」，
+        #   不必每轮从零重新构思（这才是「不断构建思路」而不是每轮重来）。
+        "fail_lessons": [x for x in (data.get("fail_lessons") or [])
+                         if isinstance(x, dict)],
         "actions": actions,
         "tech_raw": {k: (v or [])[:6] for k, v in (tech or {}).items()},
         "tech_total": tech_total,
@@ -3979,6 +4086,19 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
         record_round(plan)
     except Exception:                                     # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
+
+    # ★ 2026-11-22 闭环：把本轮反思对归因表逐条构思出的改进方法**写回去**，
+    #   下一轮 brief() 会带上「已经构思过的改进方法」。没有这一步，
+    #   模型每轮都在重新构思同一个坑，等于归因表只进不出。
+    try:
+        from . import failattr as _FA
+        _fl = plan.get("fail_lessons") or []
+        _rl = _FA.record_lessons(_fl, plan_id=str(plan.get("id") or ""))
+        if _fl:
+            logger.info("改进方法库已更新：本轮 %d 条，库内共 %s 条",
+                        len(_fl), _rl.get("total"))
+    except Exception:                                     # noqa: BLE001
+        logger.debug("fail_lessons 写回失败", exc_info=True)
 
     # ★ 2026-11-16 用户要求「不断完善计划，直到计划可以了再执行」，
     #   判定标准是他定的：自评 8 分以上，或打磨满 3 轮。
@@ -5761,6 +5881,21 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                     "error": "全部动作都是幽灵修复（近 7 天无真实失败记录），已拒绝执行",
                     "phantom_rejected": _phantom_rejected}
 
+    # ★ 2026-11-22 用户要求「评判每次迭代是进步了还是退步了，进退多少都得呈现」：
+    #   动手前先量一次综合分（静态自检 40 + 回归通过率 30 + 功能冒烟 30），
+    #   改完再量一次做对比。拿不到分时 _loop_before 为 None，后面整段跳过，
+    #   **不会**因为量不出分就把这次迭代判死。
+    _loop_before = None
+    _loop_on = True
+    try:
+        _loop_on = bool(load_settings().get("loop_guard", True))
+        if _loop_on:
+            from . import iterloop as _IL0
+            _loop_before = _IL0.score(full=True)
+            _ev("loop_score", phase="before", total=_loop_before.get("total"))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("改动前评分失败", exc_info=True)
+
     # ★ 2026-11-17 用户要求：动手前先自动打一个全栈版本，改坏了能整体滚回来。
     #   放在这里（幽灵检查之后、真正 patch 之前）：被拒的动作不该占快照。
     _iter_snap_name = _iter_snapshot(plan, pid, _ev)
@@ -5797,6 +5932,20 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 "files": by_file,
                 "changed": list(files or []),
                 "backup": backup or a.get("backup") or ""}
+
+    # ★ 2026-11-22 用户要求「评判每次迭代是进步还是退步，进退多少都得呈现」：
+    #   动手前先量一次分当基线，收尾时把 delta 累加到累计分上。
+    #   score_round 可在设置里关掉（它会跑一遍回归，有几秒开销）。
+    _sc_before = None
+    try:
+        from . import iterloop as _IL
+        if load_settings().get("score_round", True):
+            _sc_before = _IL.score(full=True)
+            _cum0 = float(_IL.cumulative().get("cum") or 0.0)
+            _ev("step", text="改动前评分 %s（累计跑分 %+.2f）"
+                % (_sc_before.get("total"), _cum0))
+    except Exception as _e:                             # noqa: BLE001
+        logger.debug("改动前评分失败: %s", _e)
 
     results = []
     cancelled = False
@@ -5955,6 +6104,39 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 a["error"] = _aerr
                 results.append({"id": a["id"], "ok": False, "error": _aerr,
                                 "files": _afiles, "agent": a["agent"]})
+                # ★ 失败归因表（2026-11-22）：光记「失败了」不够，必须记下
+                #   **为什么失败**和**为什么回滚**，并带上完整堆栈与上下文，
+                #   下一轮反思才能据此避免在同一条路上重试。
+                #   记完置 _failattr_logged，避免 _log_act 里再记一条重复的。
+                try:
+                    from . import failattr as _FA
+                    _FA.record(
+                        stage="agent",
+                        title=str(a.get("title") or ""),
+                        why_failed=_aerr,
+                        why_rollback=("独立复核没过 → 整条改动自动回滚到改动前"
+                                      if _ar.get("rolled_back") else ""),
+                        files=_afiles,
+                        plan_id=str((plan or {}).get("id") or ""),
+                        action_id=str(a.get("id") or ""),
+                        model=str(_ar.get("model") or ""),
+                        # 详细归因：完整堆栈 + 失败前在做什么。
+                        # 只看 _aerr 那行摘要，下一轮判断不出根因。
+                        traceback_text=str(_ar.get("traceback")
+                                           or _ar.get("tb") or _aerr),
+                        context=("动作=%s；目标文件=%s；步骤数=%s；尝试=%s；修复=%s"
+                                 % (a.get("title") or a.get("id"),
+                                    "、".join(_afiles) or "-",
+                                    _ar.get("steps"), _ar.get("attempts"),
+                                    _ar.get("repairs"))),
+                        extra={"steps": _ar.get("steps"),
+                               "tries": _ar.get("attempts"),
+                               "repairs": _ar.get("repairs"),
+                               "detail": str(a.get("detail") or "")[:600]})
+                    if isinstance(a, dict):
+                        a["_failattr_logged"] = True
+                except Exception:                   # noqa: BLE001
+                    logger.debug("failattr 写入失败", exc_info=True)
                 _log_act(plan, a, False, _aerr)
                 _ev("step", text="%s 没做成：%s" % (a.get("id"), _aerr[:160]))
                 _cf = _card(a, _apt, False, _aerr,
@@ -6352,6 +6534,102 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
             logger.debug("silent-except", exc_info=True)
             out["post_audit"] = {"error": "%s: %s" % (type(e).__name__, e)}
 
+    # ---------------- 闭环判定：进步还是退步，进退多少 ----------------
+    # 用户 2026-11-22 原话：「如果评分或者功能出现不正常，则可以自动完成回滚
+    # 并记录回滚原因然后重新进行改进或迭代，增加新功能时也是如此」。
+    # 口径（用户选定）：**只要比改动前低就回滚**，不留容差。
+    if _loop_on and _loop_before and _loop_before.get("total") is not None and ok_n > 0:
+        try:
+            from . import iterloop as _IL
+            _after = _IL.score(full=True)
+            _vd = _IL.judge(_loop_before, _after)
+            out["loop"] = {
+                "before": _loop_before.get("total"),
+                "after": _after.get("total"),
+                "delta": _vd.get("delta"), "pct": _vd.get("pct"),
+                "verdict": _vd.get("verdict"),
+                "per_part": _vd.get("per_part"),
+            }
+            _ev("loop_score", phase="after", total=_after.get("total"),
+                delta=_vd.get("delta"), verdict=_vd.get("verdict"))
+            _rb = None
+            if _vd.get("should_rollback"):
+                def _restore_ok(tag):
+                    try:
+                        _restore(tag)
+                        return True
+                    except Exception:                   # noqa: BLE001
+                        return False
+                # 先单条回滚，不行再整轮（用户选定）
+                _rb = _IL.rollback_until_good(
+                    results, _loop_before.get("total"), _restore_ok,
+                    rescore=lambda: _IL.score(full=True),
+                    log=lambda t: _ev("step", text=str(t)[:200]))
+                if _rb.get("round_rollback"):
+                    _snap = str(plan.get("_iter_snap") or _iter_snap_name or "")
+                    if _snap:
+                        try:
+                            _rescue_mod().rollback(snap_path=_snap)
+                            _rb["snapshot_restored"] = _snap
+                        except Exception as _e3:        # noqa: BLE001
+                            _rb["snapshot_error"] = "%s: %s" % (
+                                type(_e3).__name__, _e3)
+                    for _r1 in results:
+                        if _r1.get("ok") and not _r1.get("skipped"):
+                            _r1["rolled_back"] = True
+                    out["need_restart"] = False
+                out["loop"]["rollback"] = _rb
+                _ev("loop_rollback", reason=str(_rb.get("reason") or "")[:300])
+                # 归因表：为什么退步、为什么回滚 —— 下一轮反思必须看到
+                try:
+                    from . import failattr as _FA2
+                    _files = []
+                    for _r0 in results:
+                        _files.extend([str(f) for f in (_r0.get("changed") or [])])
+                    _FA2.record(
+                        kind="loop_regress", stage="iterloop",
+                        title="迭代后综合评分下降",
+                        why_failed=("改动前 %.2f 分 → 改动后 %.2f 分，退步 %.2f 分"
+                                    "（%s%%）。分项变化：%s。口径=静态40+回归30+功能30"
+                                    % (_loop_before.get("total"), _after.get("total"),
+                                       abs(float(_vd.get("delta") or 0)),
+                                       _vd.get("pct"), _vd.get("per_part"))),
+                        why_rollback=str(_rb.get("reason") or "")[:1200],
+                        files=list(dict.fromkeys(_files))[:8],
+                        plan_id=str(pid or ""),
+                        context="本轮 %d 条动作，%d 条成功"
+                                % (len(results), ok_n))
+                except Exception:                       # noqa: BLE001
+                    logger.debug("归因写入失败", exc_info=True)
+                # 同一批反复退步 → 降优先级（用户：不限次数，但降优先级）
+                try:
+                    _IL.bump_attempt(
+                        "plan:%s 评分退步" % str(pid)[:40],
+                        "综合分 %.2f→%.2f" % (_loop_before.get("total"),
+                                              _after.get("total")),
+                        str(_rb.get("reason") or "")[:300])
+                except Exception:                       # noqa: BLE001
+                    logger.debug("silent-except", exc_info=True)
+            else:
+                try:
+                    _IL.clear_attempt("plan:%s 评分退步" % str(pid)[:40])
+                except Exception:                       # noqa: BLE001
+                    logger.debug("silent-except", exc_info=True)
+            _IL.record_round(pid=pid, before=_loop_before, after=_after,
+                             verdict=_vd, actions=results, rollback=_rb,
+                             note="闭环自动判定（静态40+回归30+功能30）")
+            # 自动重启（用户选「接受，后台自动重启并继续验证」）
+            if ((not _vd.get("should_rollback")) and ok_n > 0
+                    and load_settings().get("loop_auto_restart", True)):
+                try:
+                    out["loop"]["auto_restart"] = _schedule_auto_restart(pid)
+                except Exception as _e4:                # noqa: BLE001
+                    out["loop"]["auto_restart"] = {
+                        "ok": False, "error": "%s: %s" % (type(_e4).__name__, _e4)}
+        except Exception as e:                          # noqa: BLE001
+            logger.debug("闭环判定失败", exc_info=True)
+            out["loop"] = {"error": "%s: %s" % (type(e).__name__, e)}
+
     # ---------------- 单轮内自动收敛（问题二：修不全要人再点一次）
     # 实测：探针 9 处问题，第一轮只修掉 6 处。这里自动接续下一轮，直到
     # 没有同类残留或到上限（默认 2 轮），用户不用手动再触发一次。
@@ -6405,6 +6683,47 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
         save_plans(d)
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
+
+    # ★ 2026-11-22 用户要求：每轮都要能看出进退多少，并自动查清是哪段代码
+    #   导致加减分，详细记进日志，供反思重点参考。这里统一提交一次累计分。
+    try:
+        from . import iterloop as _IL2
+        if _sc_before is not None and ok_n > 0:
+            _sc_after = _IL2.score(full=True)
+            _dg = out.get("degrade") or {}
+            _rb_txt = None
+            if _dg.get("rolled_back"):
+                _rb_txt = ("改动让自检问题从 %s 增到 %s，已回滚 %s"
+                           % (_dg.get("base"), _dg.get("after"),
+                              _dg.get("rolled_back")))
+            _cm = _IL2.commit_round(before=_sc_before, after=_sc_after,
+                                    actions=results, rollback=_rb_txt,
+                                    note="本轮 %d 条动作成功" % ok_n, pid=pid)
+            _ex = _cm.get("explain") or {}
+            out["score"] = {
+                "before": _sc_before.get("total"),
+                "after": _sc_after.get("total"),
+                "delta": _cm.get("delta"),
+                "cum": _cm.get("cum"),
+                "cum_before": _cm.get("cum_before"),
+                "verdict": _cm.get("verdict"),
+                "why": _ex.get("summary"),
+                "suspects": _ex.get("suspects"),
+                "new_codes": _ex.get("new_codes"),
+                "fixed_codes": _ex.get("fixed_codes"),
+            }
+            try:
+                _ev("score", **out["score"])
+            except Exception:                           # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+            _ev("step", text="累计跑分 %+.2f（本轮 %+.2f，%s）"
+                % (float(_cm.get("cum") or 0.0),
+                   float(_cm.get("delta") or 0.0),
+                   {"improved": "进步", "regressed": "退步",
+                    "flat": "持平"}.get(_cm.get("verdict"), "未知")))
+    except Exception as _e:                             # noqa: BLE001
+        logger.warning("提交累计分失败", exc_info=True)
+        out["score_error"] = "%s: %s" % (type(_e).__name__, _e)
     return out
 
 
@@ -6428,6 +6747,40 @@ def _restore(tag):
             logger.debug("silent-except", exc_info=True)
 
 
+def _schedule_auto_restart(pid="", delay=3.0):
+    """闭环判定「评分正常」之后，后台自动重启让新代码生效。
+
+    用户 2026-11-22 选的是「接受，后台自动重启并继续验证」。
+
+    ⚠️ 两个必须：**延迟** + **独立线程**。在请求处理中间直接 restart()
+    会把这一轮的返回掐断 —— 前端只看到连接断开，看不到刚算出来的进退分数，
+    用户会以为又崩了。延迟 3 秒足够让 HTTP 响应先发出去。
+
+    重启前会先把「重启后要复核」的标记写到磁盘，main 启动时读到就自动
+    再量一次分，把「重启后是否仍然正常」也记进闭环历史。
+    """
+    import threading as _th
+
+    def _go():
+        time.sleep(float(delay))
+        try:
+            from . import iterloop as _IL
+            _IL.mark_post_verify(str(pid or ""))
+        except Exception:                               # noqa: BLE001
+            logger.debug("写重启后复核标记失败", exc_info=True)
+        try:
+            from . import main as _M
+            _M.selfdev_apply_restart({"src": "loop_auto"})
+        except Exception:                               # noqa: BLE001
+            logger.warning("闭环自动重启失败", exc_info=True)
+
+    try:
+        _th.Thread(target=_go, name="loop-auto-restart", daemon=True).start()
+        return {"ok": True, "scheduled": True, "in_seconds": delay}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 def rollback(pid):
     """把某次反思里所有 done 的动作回滚到改动前。"""
     d, plan = _find_plan(pid)
@@ -6442,6 +6795,25 @@ def rollback(pid):
         a["error"] = ""
         a["note"] = (a.get("note") or "") + " [已回滚 %s]" % _now()
         hit += 1
+        # ★ 失败归因表：用户主动回滚也要留证据 —— 这类「自检通过但效果不行」
+        #   恰恰是最该被下一轮反思参考的（否则下次还会交同样的东西）。
+        try:
+            from . import failattr as _FA
+            _FA.record(
+                kind="manual_rollback", stage="rollback",
+                title=str(a.get("title") or ""),
+                why_failed=str(a.get("error") or "用户主动回滚"),
+                why_rollback="用户判定这次改动不达标，手动回滚到改动前",
+                files=[str(f) for f in (a.get("files") or [])],
+                plan_id=str(plan.get("id") or ""),
+                action_id=str(a.get("id") or ""),
+                context="动作=%s；改动摘要=%s" % (
+                    a.get("title") or a.get("id") or "-",
+                    str(a.get("changelog") or "")[:300]))
+            if isinstance(a, dict):
+                a["_failattr_logged"] = True
+        except Exception:                           # noqa: BLE001
+            logger.debug("failattr 写入失败", exc_info=True)
     save_plans(d)
     return {"ok": hit > 0, "rolled_back": hit, "plan": plan}
 
@@ -6579,6 +6951,70 @@ def _remember_plan(plan):
         _mem.update_long(_MEM_HINT, _clip(line, 320))
     except Exception:                                   # noqa: BLE001
         logger.debug("写迭代记忆失败", exc_info=True)
+
+
+def _push_rec_card(plan):
+    """把新计划作为一条**推荐卡片**推进当前对话。
+
+    用户 2026-11-22 原话：「两个地方都推；然后增加一个叫【推荐卡片】的开关，
+    开启时则可以在对话中直接推送等待批准，关闭时则只在【待批准】里进行推送。
+    然后卡片中需要明确记录改进原因以及好处是什么，思路的详细内容可以一键展开」。
+
+    实现方式：往当前会话追加一条 assistant 消息，正文里放 ```rec 围栏（JSON）。
+    前端 mdToHtml 那条链路认得这个围栏，会渲染成带「批准/忽略」按钮的卡片，
+    思路用 <details> 一键展开。**不改动现有消息渲染主路径**，只是多一种围栏。
+
+    rec_card 关掉时直接返回，计划照常进「待批准」面板。
+    """
+    try:
+        if not load_settings().get("rec_card", True):
+            return {"ok": True, "skipped": "rec_card 已关闭，只进待批准"}
+        acts = plan.get("actions") or []
+        if not acts:
+            return {"ok": True, "skipped": "这次没有动作"}
+        cards = []
+        for a in acts[:6]:
+            cards.append({
+                "id": str(a.get("id") or ""),
+                "title": str(a.get("title") or "")[:90],
+                "why": str(a.get("why") or a.get("reason") or a.get("note")
+                           or plan.get("summary") or "")[:500],
+                "good": str(a.get("benefit") or a.get("value")
+                            or a.get("expect") or "")[:500],
+                "detail": str(a.get("detail") or a.get("how")
+                              or a.get("replace") or "")[:1500],
+                "risk": str(a.get("risk") or "mid"),
+                "files": [str(f) for f in (a.get("files") or [])][:6],
+            })
+        payload = {"plan_id": str(plan.get("id") or ""),
+                   "summary": str(plan.get("summary") or "")[:300],
+                   "trigger": str(plan.get("trigger") or ""),
+                   "actions": cards}
+        body = ("**我想到 %d 处可以改进** —— 每条都写清了「为什么改」和「改完有什么好处」，"
+                "想看具体思路点「展开思路」。\n\n```rec\n%s\n```\n"
+                % (len(cards), json.dumps(payload, ensure_ascii=False)))
+        from . import sessions as _S
+        sid = ""
+        try:
+            from . import main as _M
+            sid = str(getattr(_M, "_LAST_SESSION", "") or "")
+        except Exception:                               # noqa: BLE001
+            logger.debug("取当前会话失败", exc_info=True)
+        if not sid:
+            ss = _S.list_sessions() or []
+            sid = str((ss[0] or {}).get("id") or "") if ss else ""
+        if not sid:
+            sid = str(_S.ensure_default() or "")
+        if not sid:
+            return {"ok": False, "error": "找不到可写入的会话"}
+        msgs = _S.get_messages(sid) or []
+        msgs.append({"role": "assistant", "content": body})
+        _S.save_messages(sid, msgs)
+        return {"ok": True, "session": sid, "actions": len(cards),
+                "plan_id": payload["plan_id"]}
+    except Exception as e:                              # noqa: BLE001
+        logger.debug("推荐卡片推送失败", exc_info=True)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
 def _make_plan(trigger, summary, actions, extra=None):
