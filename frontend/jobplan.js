@@ -733,6 +733,7 @@
       witems = Array.isArray(d.items) ? d.items : [];
       wrender();
       wshowCards(d.cards || []);
+      loadArchived();
       return d;
     }).catch(function (e) {
       // 轮询失败不弹 toast（网络抖一下就弹会很吵），只在控制台留痕
@@ -781,6 +782,12 @@
     list.id = "jpwList";
     list.appendChild(mk("div", "jp-hint", "正在读取监视列表…"));
     body.appendChild(list);
+
+    // ★ 2026-11-23：删除是归档而不是真删（时间线留着），所以这里留一格
+    //   「已删除」，点「恢复」就把它放回来 —— 否则用户点错就再也找不回。
+    var arch = mk("div");
+    arch.id = "jpwArch";
+    body.appendChild(arch);
 
     wroot.appendChild(body);
     document.body.appendChild(wroot);

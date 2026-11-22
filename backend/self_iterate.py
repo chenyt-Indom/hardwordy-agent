@@ -6741,13 +6741,45 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                     log=lambda t: _ev("step", text=str(t)[:200]))
                 if _rb.get("round_rollback"):
                     _snap = str(plan.get("_iter_snap") or _iter_snap_name or "")
-                    if _snap:
+                    # ★ 2026-11-23 用户原话「这个回滚害人不浅，也给他改成最安全的方式」：
+                    #   原来走 rescue.rollback() —— 整包覆盖 + clean，会把**本轮没动过**的
+                    #   文件也还原到快照时点。实测把并行开发中的 backend/iter_runner.py、
+                    #   frontend/iterjournal.js 一起抹掉，还返回 ok=True，界面看不出异常。
+                    #   现在只还原本轮动作 changed 里点名的文件，其余一个字节都不动。
+                    _files_rb = []
+                    for _r0 in results:
+                        if _r0.get("ok") and not _r0.get("skipped"):
+                            _files_rb.extend([str(f) for f in (_r0.get("changed") or [])])
+                    _files_rb = list(dict.fromkeys(_files_rb))
+                    if _snap and _files_rb:
                         try:
-                            _rescue_mod().rollback(snap_path=_snap)
+                            _rr = _rescue_mod().restore_files(
+                                snap_path=_snap, rels=_files_rb)
                             _rb["snapshot_restored"] = _snap
+                            _rb["files_only"] = True
+                            _rb["restore_detail"] = {
+                                "restored": len(_rr.get("restored") or []),
+                                "removed": len(_rr.get("removed") or []),
+                                "failed": len(_rr.get("failed") or []),
+                                "files": _files_rb[:12],
+                            }
+                            if not _rr.get("ok"):
+                                _rb["snapshot_error"] = str(
+                                    _rr.get("error") or "部分文件未还原")
+                            _ev("step", text="精准回滚：只还原本轮改过的 %d 个文件"
+                                             "（还原 %d、删除 %d、失败 %d）"
+                                % (len(_files_rb),
+                                   len(_rr.get("restored") or []),
+                                   len(_rr.get("removed") or []),
+                                   len(_rr.get("failed") or [])))
                         except Exception as _e3:        # noqa: BLE001
                             _rb["snapshot_error"] = "%s: %s" % (
                                 type(_e3).__name__, _e3)
+                    elif _snap:
+                        # 拿不到改动清单 → 宁可不做整包还原（那正是误伤的来源）
+                        _rb["snapshot_skipped"] = "拿不到本轮改动的文件清单，已跳过整包还原"
+                        _ev("step", text="⚠️ 拿不到本轮改动清单，已跳过整包还原"
+                                         "（避免误伤本轮没动过的文件）")
                     for _r1 in results:
                         if _r1.get("ok") and not _r1.get("skipped"):
                             _r1["rolled_back"] = True

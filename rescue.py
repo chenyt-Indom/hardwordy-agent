@@ -1425,6 +1425,77 @@ def _resolve_snap(name):
 
 
 # ---------------------------------------------------------------- 回滚
+def restore_files(snap_path=None, rels=None):
+    """★ 2026-11-23 用户要求「回滚改成最安全的方式」：**只还原点名的文件**。
+
+    为什么不再用 rollback()：它是整包覆盖 + clean（删掉快照里没有的条目），
+    一次回滚会把**本轮没动过的文件**也一起还原到快照时点 —— 实测把并行开发中
+    刚写好的 backend/iter_runner.py、frontend/iterjournal.js 一起抹掉，
+    而且返回 ok=True，界面上完全看不出异常。
+
+    本函数只碰 rels 里的文件：
+      · 快照里有的   → 覆盖回去
+      · 快照里没有的 → 本轮新建的，删掉才等于回到改动前
+      · 其余文件     → 一个字节都不动
+    rels 为空直接拒绝 —— 宁可不回滚，也不误伤。
+    """
+    path = _resolve_snap(snap_path) if snap_path else ""
+    if not path:
+        return {"ok": False, "error": "找不到快照「%s」（本次未改动任何文件）" % snap_path}
+    rels = [str(r).replace("\\", "/").strip() for r in (rels or [])]
+    rels = [r for r in rels if r and r != _ENGINE_NAME]
+    if not rels:
+        return {"ok": False, "skipped": True,
+                "error": "没有给出要还原的文件清单，已拒绝（避免误伤未改动的文件）"}
+    restored, removed, missing, failed = [], [], [], []
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = set(z.namelist())
+            for rel in rels:
+                try:
+                    dst = _dst_path(rel)
+                except ValueError as exc:
+                    failed.append({"file": rel, "error": str(exc)})
+                    continue
+                if rel in names:
+                    try:
+                        if z.getinfo(rel).file_size > MAX_ENTRY_MB * 1024 * 1024:
+                            failed.append({"file": rel, "error": "条目过大，已拒绝"})
+                            continue
+                        okp, why = _prepare_dst(dst)
+                        if not okp:
+                            failed.append({"file": rel, "error": why})
+                            continue
+                        _dir = os.path.dirname(dst)
+                        if _dir:
+                            os.makedirs(_dir, exist_ok=True)
+                        with z.open(rel) as _src, open(dst, "wb") as _out:
+                            shutil.copyfileobj(_src, _out)
+                        restored.append(rel)
+                    except Exception as exc:            # noqa: BLE001
+                        failed.append({"file": rel,
+                                       "error": "%s: %s" % (type(exc).__name__, exc)})
+                else:
+                    if os.path.isfile(dst):
+                        try:
+                            os.remove(dst)
+                            removed.append(rel)
+                        except Exception as exc:        # noqa: BLE001
+                            failed.append({"file": rel,
+                                           "error": "%s: %s" % (type(exc).__name__, exc)})
+                    else:
+                        missing.append(rel)
+    except Exception as exc:                            # noqa: BLE001
+        return {"ok": False, "error": "快照读不了：%s: %s" % (type(exc).__name__, exc)}
+    _log("精准回滚 %s：还原 %d、删除 %d、失败 %d"
+         % (os.path.basename(path), len(restored), len(removed), len(failed)))
+    return {"ok": not failed, "mode": "files_only",
+            "snapshot": os.path.basename(path),
+            "restored": restored, "removed": removed,
+            "missing": missing, "failed": failed,
+            "count": len(restored) + len(removed)}
+
+
 def rollback(snap_path=None, clean=True, deep=False, force=False, allow_mass_delete=False,
              allow_foreign=False):
     """回滚到某个快照（对外入口）。

@@ -1848,10 +1848,41 @@ def journal(limit=40):
         by_tid.setdefault(str(e.get("tid") or ""), []).append(e)
 
     def _score_of(tid):
-        """从事件里摘最近一次跑分（「跑分：a → b（进退）」）。"""
+        """从事件里摘最近一次跑分。
+
+        ⚠️ 2026-11-23 实测踩到（用户问「跑分呢，为什么没看到」）：
+          原来只读 `e["text"]`，但跑分事件是用 `_ev("score", before=..., after=...,
+          delta=..., cum=..., verdict=...)` 发出来的 —— **根本没有 text 字段**。
+          于是每条任务摘出来的分数都是空串，界面上永远显示「（无）」，
+          用户会以为跑分没跑。这里改成从结构化字段拼出人话，
+          并兼容 loop_score（单轮绝对分）与老版本带 text 的记录。
+        """
+        _vz = {"improved": "进步", "regressed": "退步", "flat": "持平"}
         for e in reversed(by_tid.get(tid, [])):
-            if str(e.get("kind") or "") == "score":
-                return str(e.get("text") or "")
+            _k = str(e.get("kind") or "")
+            if _k == "score":
+                _txt = str(e.get("text") or "").strip()
+                if _txt:
+                    return _txt
+                _b, _a, _d = e.get("before"), e.get("after"), e.get("delta")
+                if _b is None and _a is None:
+                    continue
+                _s = "跑分 %s → %s" % (
+                    "?" if _b is None else ("%g" % float(_b)),
+                    "?" if _a is None else ("%g" % float(_a)))
+                if _d is not None:
+                    _s += "（%+.2f，%s）" % (float(_d),
+                                             _vz.get(str(e.get("verdict") or ""), "未知"))
+                if e.get("cum") is not None:
+                    _s += " 累计 %+.2f" % float(e.get("cum"))
+                return _s
+            if _k == "loop_score":
+                _tot = e.get("total")
+                if _tot is None:
+                    continue
+                return "本轮评分 %g（%+.2f，%s）" % (
+                    float(_tot), float(e.get("delta") or 0.0),
+                    _vz.get(str(e.get("verdict") or ""), "未知"))
         return ""
 
     def _pack(t, state_hint=""):
