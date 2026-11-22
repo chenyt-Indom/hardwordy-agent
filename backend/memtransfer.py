@@ -89,8 +89,11 @@ def _split(text: str) -> list:
 
 
 def _norm_model(model: str) -> str:
+    # 空模型名返回空串，**不伪造 "unknown"**：
+    # 伪造会让「多模型确认」统计失真（一个真模型 + 一个假的 unknown 被算成 2 个模型）。
+    # _add_uniq 对空值自动跳过，所以空模型不会污染 models 列表。
     m = str(model or "").strip()
-    return m[:60] or "unknown"
+    return m[:60]
 
 
 def _merge_item(items: list, text: str, level: str, session: str,
@@ -132,7 +135,7 @@ def _merge_item(items: list, text: str, level: str, session: str,
     items.append({
         "text": text,
         "level": level,
-        "models": [model],
+        "models": [model] if model else [],
         "sessions": [session] if session else [],
         "first_ts": time.time(),
         "last_ts": time.time(),
@@ -199,11 +202,16 @@ def stats() -> dict:
     for it in items:
         lv = str(it.get("level") or "未标注")
         by_level[lv] = by_level.get(lv, 0) + 1
-    multi = [it for it in items if len(it.get("models") or []) > 1]
+    # 排除历史遗留的 "unknown"（旧版把空模型名兜底成它，不是真实模型）
+    def _real(ms):
+        return [m for m in (ms or [])
+                if str(m).strip() and str(m).strip().lower() != "unknown"]
+
+    multi = [it for it in items if len(_real(it.get("models"))) > 1]
     return {
         "items": len(items),
         "by_level": by_level,
-        "models": d.get("models") or [],
+        "models": _real(d.get("models")),
         "sessions": len(d.get("sessions") or []),
         "multi_model_items": len(multi),
         "updated_at": d.get("updated_at") or "",
@@ -235,7 +243,7 @@ def brief(model: str = "", session: str = "", max_chars: int = _BRIEF_CAP) -> st
         lines = [head, "最近更新的 3 条（完整档案见【记忆】段）："]
         for it in items:
             lines.append("- %s（%s）" % (str(it.get("text") or "")[:90],
-                                        "、".join((it.get("models") or [])[:3])))
+                                        "、".join((it.get("models") or [])[:3]) or "未标注"))
         lines.append("直接用这些信息，别重新问一遍；新事实用 remember 追加，"
                      "写进去后会自动并进传承包。")
         out = "\n".join(lines)
