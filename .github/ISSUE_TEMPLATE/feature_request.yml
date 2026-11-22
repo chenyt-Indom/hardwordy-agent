@@ -1,0 +1,51 @@
+name: 功能建议
+description: 想让它在什么场景下更好用（先说摩擦，不必先说方案）
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这个项目最缺的不是功能数量，是**判断哪些功能该加**。
+
+        所以请先描述「你现在被什么卡住了」，再谈方案 —— 往往真正该改的地方和你最初想的不一样。
+  - type: textarea
+    id: friction
+    attributes:
+      label: 你在什么场景下被卡住了
+      description: 越具体越好：什么任务、做到哪一步、为什么过不去
+      placeholder: 我让它把 30 篇 PDF 归纳成一张对照表，它每次只读前 3 篇就开始总结，后面全凭猜
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: 现在怎么凑合的
+      description: 手动补、换工具、拆成多轮……这决定了痛点有多真实
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你希望的形态（可选）
+      description: 界面怎么变、多一个按钮还是一条命令，随便画
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: 属于哪一块
+      multiple: true
+      options:
+        - 对话 / 工具调用
+        - 记忆与上下文
+        - 自迭代 / 代码修改
+        - 知识库 / 文档处理
+        - Office（Word/PPT/Excel）生成
+        - 图片 / 抠图 / 数字人
+        - 地图 / 联网
+        - 定时任务 / 常驻
+        - 部署 / 打包
+        - 文档与说明
+    validations:
+      required: true

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 装不上 / 跑不起来 / 怎么用
+    url: https://github.com/chenyt-Indom/hardwordy-agent/discussions
+    about: 这类问题先去 Discussions，比开 issue 回得快，也方便别人搜到答案
+  - name: 杀软报毒了
+    url: https://github.com/chenyt-Indom/hardwordy-agent#security
+    about: 包里有未签名的 python.exe 和 ffmpeg.exe，多数是启发式误报；先按 README「杀软误报」自查
+  - name: 安全漏洞
+    url: https://github.com/chenyt-Indom/hardwordy-agent/security/advisories/new
+    about: 涉及自迭代写入、路径穿越、命令注入的，走私密报告，不要开公开 issue

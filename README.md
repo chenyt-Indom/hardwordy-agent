@@ -43,6 +43,8 @@ copy /b HardwordyAgent-Source-2026.11.21b.zip.part1 + HardwordyAgent-Source-2026
 > 包内**不含** AI 对话模型权重（由 Ollama 单独下载），也**不含**本地文生图
 > （torch + SD 权重约 10 GB）。图片生成默认走云端 API，详见「已知限制」。
 
+> 装不上、跑不起来、想问怎么用 → 先去 **[Discussions](https://github.com/chenyt-Indom/hardwordy-agent/discussions)**，比开 issue 回得快。
+
 **装法（3 步）**
 
 ```powershell
@@ -921,11 +923,12 @@ ExecStart=/opt/multimodal/.venv/bin/python -m uvicorn backend.main:app --host 0.
 
 ## 快速开始
 
-### 方式一：Windows 一键包（推荐）
+### 方式一：源码版整合包（推荐，不用配环境）
 
-下载最新源码版三卷 → 合并 → 解压 → 双击 `一键启动.bat`。启动器会预检代码、起服务、等健康检查，成功后自动打快照。
+就是上面下载表里那个 4.10 GB 的包：**源码树 + 便携 Python 3.14.4 + 随包模型**，`app\` 直接就是项目根，和开发机结构一致。
+下载三卷 → 合并 → 解压 → 双击 `一键启动.bat`。启动器会预检代码、起服务、等健康检查，成功后自动打快照。
 
-### 方式二：源码运行
+### 方式二：源码运行（自己配环境）
 
 ```bash
 # 1. 安装 Ollama（也可跳过，直接用云端）

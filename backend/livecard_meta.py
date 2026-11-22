@@ -217,19 +217,25 @@ def _artifact_card(name, args, result):
         kind = "ppt"
     elif name in _VIDEO_TOOLS:
         kind = "video"
-    elif kind in ("", "image"):
+    elif name in _IMAGE_TOOLS:
+        # 图片工具必须出 image 卡：原来这里把 image 和"推断不出"一起压成 doc，
+        # 导致 generate_image / web_image_search 的产出被当前端当文档渲染（没有缩略图）。
+        kind = "image"
+    elif kind not in ("image", "ppt", "video", "doc"):
         kind = "doc"
     title_bits = []
     if kind == "ppt":
         title_bits.append("📊")
     elif kind == "video":
         title_bits.append("🎬")
+    elif kind == "image":
+        title_bits.append("🖼")
     else:
         title_bits.append("📄")
     title = os.path.basename(path) if path else _s(
         str((args or {}).get("title") or (args or {}).get("name") or name), 40)
     if not os.path.splitext(title)[1]:
-        title += {"ppt": ".pptx", "video": ".mp4"}.get(kind, ".docx")
+        title += {"ppt": ".pptx", "video": ".mp4", "image": ".png"}.get(kind, ".docx")
     return [_mk(kind, " ".join(title_bits) + " " + title, "",
                 path=path, tool=name,
                 title_arg=_s((args or {}).get("title") or "", 60))]
