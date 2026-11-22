@@ -574,8 +574,15 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
     else:
         cum = round(cum_before + float(delta), 2)
         verdict = v.get("verdict")
-    if d.get("base") is None and before is not None:
-        d["base"] = {"total": (before or {}).get("total"), "iso": _now()}
+    # ★ 2026-11-22 修：原来只在 before 非空时记 base —— 于是**第一次**评分
+    #   （还没有上一次可比）base 永远是空的，账本里就查不到基准分，
+    #   体检/面板「基准分」一栏永远显示不出来。现在 before 为空就退回取 after。
+    if d.get("base") is None:
+        _base_v = (before or {}).get("total")
+        if _base_v is None:
+            _base_v = (after or {}).get("total")
+        if _base_v is not None:
+            d["base"] = {"total": _base_v, "iso": _now()}
     rec = {
         "iso": _now(), "ts": time.time(), "plan_id": str(pid or ""),
         "cum_before": cum_before, "cum": cum,
@@ -700,7 +707,7 @@ def take_post_verify():
         return None
     try:
         os.remove(p)
-    except OSError:
+    except OSError:                                     # noqa: BLE001
         pass
     return d if isinstance(d, dict) else None
 

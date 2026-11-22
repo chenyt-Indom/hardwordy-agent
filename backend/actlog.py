@@ -409,6 +409,21 @@ def _recent_session_rows(window: int = COUNT_WINDOW) -> list:
     return rows[-k:]
 
 
+def record_act(name: str, ok: bool = True, summary: str = "",
+               session: str = "brand") -> None:
+    """兼容封装：把 record_act(name, ok=, summary=) 转成 record(session, name, ...)。
+
+    2026-11-22：brand.py 的品牌解锁 / 写入留痕调用的是 `record_act`，而 actlog
+    只暴露 `record(session, name, ...)` —— 静态检查因此报 high（调用了不存在的
+    函数）。brand.py 受品牌密码保护、不适合为这点小事去解锁，所以在账本这边补
+    一层薄封装。任何异常都吞掉：账本坏了绝不能拦住写入本身。
+    """
+    try:
+        record(session, name, {}, ok=bool(ok), result=str(summary or ""))
+    except Exception:                                     # noqa: BLE001
+        logger.debug("record_act 兼容封装写账本失败", exc_info=True)
+
+
 def count_fail_kind_recent(fail_kind: str, window: int = COUNT_WINDOW,
                            session: str = "", path: str = "") -> int:
     """从**最近 window 条日志**统计某个 fail_kind 的真实发生次数（证据卡计数口径）。

@@ -160,9 +160,9 @@ def unlock(pwd: str, ttl: int = UNLOCK_TTL) -> Dict[str, Any]:
     if not verify_password(pwd):
         try:
             from . import actlog as _al
-            _al.record_act("brand_unseal_failed", ok=False,
-                           summary="品牌解锁失败：密码不正确")
-        except Exception:
+            _al.record("brand", "brand_unseal_failed", {},
+                       ok=False, result="品牌解锁失败：密码不正确")
+        except Exception:                   # noqa: BLE001
             pass
         return {"ok": False, "error": "密码不正确"}
     _unlock_until = time.time() + max(30, int(ttl))
@@ -237,9 +237,10 @@ def guard_write(rel: str, old: str, new: str) -> Dict[str, Any]:
     _unlock_count += 1
     try:
         from . import actlog as _al
-        _al.record_act("brand_write_unlocked", ok=True,
-                       summary="密码解锁后改品牌：%s（%s）" % (rel, info.get("why")))
-    except Exception:
+        _al.record("brand", "brand_write_unlocked", {"rel": rel},
+                   ok=True,
+                   result="密码解锁后改品牌：%s（%s）" % (rel, info.get("why")))
+    except Exception:                       # noqa: BLE001
         pass
     return {"ok": True, "reason": "", "need_password": False}
 

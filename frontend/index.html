@@ -1468,6 +1468,25 @@
       var h = '<div class="ip-kpi"><b>' + (cum > 0 ? '+' : '') + Number(cum).toFixed(2) +
         '</b><i>累计跑分</i><span>' + (S.rounds || 0) + ' 轮 · 进步 ' + (S.improved || 0) +
         ' · 退步 ' + (S.regressed || 0) + ' · 回滚 ' + (S.rollbacks || 0) + '</span></div>';
+      // ★ 2026-11-22 用户问「评分系统启动了吗？为什么我到现在还没看到当前版本的
+      //   跑分？」—— 真相是评分**不会自己跑**：没有任何定时任务，只在自迭代执行
+      //   完一轮改动时才自动算一次；面板本身只读账本。所以这里补一个手动入口，
+      //   打 POST /api/selfiter/loop/score（只算分、不提交账本，不改累计分）。
+      // 当前版本绝对值（账本只记进退净值，这一行才是「现在这份代码值多少分」）
+      var LM = S.last_manual || {};
+      if (LM.total != null && LM.total !== '') {
+        h += '<div class="ip-now">当前版本 <b>' + _ipEsc(LM.total) + '</b> 分' +
+          '<i>静态 ' + _ipEsc(LM.static) + '/' + _ipEsc(LM.static_max) +
+          '（high ' + _ipEsc(LM.high) + ' mid ' + _ipEsc(LM.mid) + '）· 回归 ' +
+          _ipEsc(LM.regress) + '/' + _ipEsc(LM.regress_max) + ' · 功能 ' +
+          _ipEsc(LM.func) + '/' + _ipEsc(LM.func_max) + ' · 量于 ' +
+          _ipEsc(String(LM.iso || '').slice(5, 16)) + '</i></div>';
+      } else {
+        h += '<div class="ip-now dim">当前版本分数：还没量过，点下面的按钮量一次</div>';
+      }
+      h += '<div class="ip-act">' +
+        '<button type="button" class="pill pill-btn" id="ipScoreBtn">▶ 量一下当前版本分数</button>' +
+        '<span class="ip-act-st" id="ipScoreSt">约 35 秒（含回归）</span></div>';
 
       // 评分：最近几轮进退 + 日志原文
       var hist = (S.history || []).map(function (x) {
@@ -1653,6 +1672,32 @@
         ipt.classList.toggle('open', !ipb.hidden);
         if (!ipb.hidden) loadIterPanel();
       };
+      // ★ 手动跑分（2026-11-22）：POST /api/selfiter/loop/score 只算分、不提交
+      //   账本，所以累计分和进退记录都不会被这个按钮改动 —— 它只回答
+      //   「当前这份代码现在值多少分」。用事件委托，因为面板内容每次重渲染。
+      ipb.addEventListener('click', function (e) {
+        var b = (e.target && e.target.closest) ? e.target.closest('#ipScoreBtn') : null;
+        if (!b || b.disabled) return;
+        var st = $('#ipScoreSt');
+        b.disabled = true;
+        if (st) st.textContent = '跑分中…约 35 秒（静态+回归+功能），别关面板';
+        fetch('/api/selfiter/loop/score', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ full: true })
+        }).then(function (r) { return r.json(); }).then(function (D) {
+          if (!D || D.ok === false) throw new Error((D && D.error) || '跑分失败');
+          var s = D.score || {}, P = s.static || {}, G = s.regress || {}, Fn = s.func || {};
+          if (st) {
+            st.innerHTML = '当前版本 <b>' + _ipEsc(s.total) + '</b> 分 · 静态 ' +
+              _ipEsc(P.score) + '/' + _ipEsc(P.max) + '（high ' + _ipEsc(P.high) + '）· 回归 ' +
+              _ipEsc(G.score) + '/' + _ipEsc(G.max) + ' · 功能 ' +
+              _ipEsc(Fn.score) + '/' + _ipEsc(Fn.max) + ' · ' + _ipEsc(s.seconds) + ' 秒';
+          }
+        }).catch(function (err) {
+          if (st) st.textContent = '跑分失败：' + ((err && err.message) || err);
+        }).then(function () { b.disabled = false; });
+      });
     }
 
     // ⑧ app.js 异步加载，它动态插进 .tools-bar 的「性能档位 / 上下文 / 定时 /

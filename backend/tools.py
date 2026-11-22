@@ -1984,6 +1984,21 @@ def _brand_write_guard(rel: str, old: str, new: str) -> str:
     return "写入被拒绝：%s" % (g.get("reason") or "品牌信息需要密码解锁")
 
 
+def _score_mark(rel: str, note: str = "") -> None:
+    """代码写入成功后打「待评分」标记（2026-11-22 用户要求）。
+
+    用户原话：「以后每次有修改代码的任务完成之前都得自动进行评分然后比对，
+              确保每次迭代评分都比上次高」。
+    这里只打标记（写一个小 json），**不评分** —— 评分要几十秒，每次写入都跑
+    会把对话卡死。真正的评分在 selfdev_restart 前的闸门里做。
+    """
+    try:
+        from . import scoregate as _sg
+        _sg.mark_dirty(rel, note)
+    except Exception:                       # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+
+
 def _read_raw(rel: str) -> str:
     """读磁盘原文（不带行号），供品牌闸门比对。读不到返回空串。"""
     try:
@@ -2191,6 +2206,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             _kind, _pick = code_model_pick(cfg, context)
             who = ("DeepSeek " + _pick) if _kind == "cloud" else ("本地 " + (_pick or "默认"))
             _selfdev_ui(ui_events, "apply", r, who)
+            _score_mark(str(r.get("rel") or ""), str(a.get("note") or ""))
             from . import handoff as _hd; _hd.record_from_tool(r, "apply", str(a.get("note") or ""))
             d = r.get("diff") or {}
             return (("已用 %s 重写 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
@@ -2243,6 +2259,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             if not r.get("ok"):
                 return "写入被拒绝：%s" % r.get("error")
             _selfdev_ui(ui_events, "write", r)
+            _score_mark(str(r.get("rel") or ""), str(a.get("note") or ""))
             from . import handoff as _hd; _hd.record_from_tool(r, "write", str(a.get("note") or ""))
             d = r.get("diff") or {}
             return (("已写入 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
@@ -2263,6 +2280,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             if not r.get("ok"):
                 return "插入失败：%s" % r.get("error")
             _selfdev_ui(ui_events, "insert", r)
+            _score_mark(str(r.get("rel") or ""), str(a.get("note") or ""))
             from . import handoff as _hd; _hd.record_from_tool(r, "insert", str(a.get("note") or ""))
             d = r.get("diff") or {}
             return (("已在 %s 插入一段（+%d −%d 行）。详情已作为卡片展示给用户。\n"
@@ -2280,6 +2298,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             if not r.get("ok"):
                 return "替换失败：%s" % r.get("error")
             _selfdev_ui(ui_events, "patch", r)
+            _score_mark(str(r.get("rel") or ""), str(a.get("note") or ""))
             from . import handoff as _hd; _hd.record_from_tool(r, "patch", str(a.get("note") or ""))
             d = r.get("diff") or {}
             return (("已修改 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
@@ -2298,6 +2317,20 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             # ★ 用户明确要求：模型**不许自己重启**（会打断对话、用户毫不知情）。
             #   这里只做「导入自检 + 打标记 + 通知前端」，
             #   真正的重启由用户在前端点「立即重启」(/api/selfdev/apply_restart)。
+            # ★ 2026-11-22 用户要求：「每次有修改代码的任务完成之前都得自动
+            #   进行评分然后比对，确保每次迭代评分都比上次高」。
+            #   这里是「完成」的集中入口（新代码要生效必须走重启），所以把
+            #   评分闸门挂在这儿 —— 不靠模型自觉，是硬闸门。
+            _gate_msg = ""
+            try:
+                from . import scoregate as _sg
+                _g = _sg.gate(note="完成任务前自动评分")
+                if _g.get("blocked"):
+                    return _g.get("msg") or "评分比上次低，先别重启。"
+                if _g.get("ran"):
+                    _gate_msg = "\n【自动评分】" + str(_g.get("msg") or "").split("\n")[0]
+            except Exception:                   # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
             v = _sd.verify_import()
             if not v.get("ok"):
                 return ("导入自检没通过，先别重启：%s"
@@ -2314,7 +2347,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             return ("已自检通过，前端已弹出「新版本已就绪」提示。\n"
                     "现在**不要自己重启**：等用户点「立即重启」才生效，"
                     "在此之前应用仍跑旧代码。你可以继续把剩下的活干完，"
-                    "最后告诉用户「点一下重启按钮就生效」即可。")
+                    "最后告诉用户「点一下重启按钮就生效」即可。" + _gate_msg)
 
     except Exception as e:                        # noqa: BLE001
         return "自开发工具出错：%s: %s" % (type(e).__name__, e)

@@ -4117,6 +4117,21 @@ def iter_panel(days: int = 30):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+@app.get("/api/iter/scoregate")
+def iter_scoregate():
+    """自动评分闸门的只读状态（2026-11-22 用户要求）。
+
+    只读：**不触发评分**。要看「本轮有没有还没评的改动、上次闸门结论是什么」。
+    """
+    from . import scoregate as _sg
+    try:
+        st = _sg.status()
+        st["ok"] = True
+        return st
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 @app.get("/api/brand")
 def brand_info():
     """品牌与开发者信息 —— 已盖章，任何版本、任何机器都不许改。
@@ -4212,6 +4227,27 @@ def selfiter_loop_score(body: dict = None):
     b = body or {}
     try:
         s = _IL.score(full=bool(b.get("full", True)))
+        # ★ 2026-11-22 用户问「为什么我到现在还没看到当前版本的跑分」：
+        #   手动量的这次结果要**落盘**，否则关掉面板就没了（账本只记进退净值，
+        #   不记「当前代码绝对值」）。iterpanel 读这个文件显示「当前版本」。
+        try:
+            import json as _json
+            import os as _os
+            _d = _IL._data_dir()
+            _os.makedirs(_d, exist_ok=True)
+            _st = s.get("static") or {}
+            _rg = s.get("regress") or {}
+            _fn = s.get("func") or {}
+            with open(_os.path.join(_d, "last_score.json"), "w", encoding="utf-8") as _f:
+                _json.dump({"total": s.get("total"), "iso": s.get("iso"),
+                            "static": _st.get("score"), "static_max": _st.get("max"),
+                            "high": _st.get("high"), "mid": _st.get("mid"),
+                            "regress": _rg.get("score"), "regress_max": _rg.get("max"),
+                            "func": _fn.get("score"), "func_max": _fn.get("max"),
+                            "seconds": s.get("seconds")},
+                           _f, ensure_ascii=False, indent=1)
+        except Exception:                                 # noqa: BLE001
+            logger.debug("写 last_score.json 失败（不影响本次跑分结果）", exc_info=True)
         return {"ok": True, "score": s, "stats": _IL.stats()}
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}

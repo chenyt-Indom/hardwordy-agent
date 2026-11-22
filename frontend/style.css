@@ -7251,6 +7251,12 @@ html[data-theme="light"] .iter-site:hover {
 .ip-kpi b { font-size: 17px; color: var(--accent); font-variant-numeric: tabular-nums; }
 .ip-kpi i { font-style: normal; color: var(--muted); font-size: 11px; }
 .ip-kpi span { color: var(--muted); font-size: 11px; }
+/* 手动跑分：按钮 + 结果一行，窄屏自动换行，不撑宽面板 */
+.ip-act { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0 2px; }
+.ip-act .pill-btn { font-size: 11px; padding: 2px 9px; }
+.ip-act .pill-btn[disabled] { opacity: .55; cursor: progress; }
+.ip-act-st { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.ip-act-st b { color: var(--accent); font-size: 13px; font-variant-numeric: tabular-nums; }
 .ip-sec > summary { cursor: pointer; padding: 3px 0; color: var(--text); user-select: none; }
 .ip-sec > summary:hover { color: var(--accent); }
 .ip-body { padding: 2px 0 4px 8px; display: flex; flex-direction: column; gap: 2px; }

@@ -81,7 +81,19 @@ def _blk_score() -> dict:
         log_path = _IL._score_log_path()
     except Exception:                                   # noqa: BLE001
         log_path = os.path.join(_data_dir(), "iterloop", "score.log")
+    # ★ 2026-11-22：账本只记「进退净值」，不记「当前代码绝对值」，所以用户看到
+    #   「累计 +0.00」会以为没跑过分。这里补上「上次手动量的当前版本分数」。
+    manual = {}
+    try:
+        mp = os.path.join(_data_dir(), "iterloop", "last_score.json")
+        if os.path.exists(mp):
+            with open(mp, encoding="utf-8") as f:
+                manual = json.load(f) or {}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("iterpanel 读 last_score.json 失败（面板照常显示其他块）",
+                     exc_info=True)
     return {
+        "last_manual": manual,
         "cumulative": st.get("cumulative"),
         "rounds": st.get("rounds"),
         "improved": st.get("improved"),
