@@ -681,6 +681,30 @@ def _t_cmd(ctx, args):
         p.returncode, time.time() - t0, out[-6000:] or "（无输出）")
 
 
+def _rg_fails(rr):
+    """把 run_disk 的结果拆成 (真失败用例名集合, 基础设施失败原因)。
+
+    ★ 2026-11-22 修一个会冤枉好改动的坑（实测踩到）：
+      run_disk 在「子进程超时 / 没输出 / 结果解析失败」时会塞一条
+      {"name": "regress", "why": ...} 的**占位**失败项。它不是某个用例真的红了，
+      但会被当成「本次新增失败」，于是好改动被判成「你改坏了」→ 整批自动回滚。
+      实测：a4 因为机器被别的任务占满、回归子进程超时，被判「新增失败 1 条：regress」，
+      连同不相关的 handoff.py / iter_loop.py 一起被还原。
+    """
+    fails, infra = set(), ""
+    for x in ((rr or {}).get("failed_items") or []):
+        if not isinstance(x, dict):
+            continue
+        name = str(x.get("name") or "")
+        why = str(x.get("why") or "")
+        if name == "regress" and why:
+            infra = why[:200]
+            continue
+        if name:
+            fails.add(name)
+    return fails, infra
+
+
 def _t_check(ctx, args):
     """跑真实验证：syntax / import / regress / all。"""
     kind = str(args.get("kind") or "all").lower()
@@ -715,9 +739,16 @@ def _t_check(ctx, args):
         try:
             from . import regress as _RG
             r = _RG.run_disk(scope="quick")
-            fails = {str(x.get("name")) for x in (r.get("failed_items") or [])}
+            fails, infra = _rg_fails(r)
+            if infra:                       # 基础设施失败 → 重跑一次，别冤枉改动
+                r2 = _RG.run_disk(scope="quick")
+                f2, i2 = _rg_fails(r2)
+                if not i2:
+                    r, fails, infra = r2, f2, ""
             new = fails - (ctx.base_fails or set())
-            if new and ctx.base_ok:
+            if infra:
+                out.append("【回归】跑不起来（基础设施问题：%s）—— 与你的改动无关" % infra)
+            elif new and ctx.base_ok:
                 out.append("【回归】新增失败 %d 条：%s" % (len(new), "；".join(sorted(new)[:6])))
             elif new:
                 out.append("【回归】%d 条失败（基线不可用，无法归因）：%s"
@@ -1381,11 +1412,21 @@ def _final_verify(ctx, snap):
             #   quick 只有 38 条快用例；full 会追加「全量自检无 high」+
             #   「全模块可导入」两项（约 10 秒）。这里用 full。
             rr = _RG.run_disk(scope="full")
-            fails = {str(x.get("name")) for x in (rr.get("failed_items") or [])}
+            fails, infra = _rg_fails(rr)
+            if infra:
+                # ★ 基础设施失败（超时/没输出/解析失败）→ 重跑一次，别冤枉改动
+                logger.warning("回归基础设施失败，重跑一次：%s", infra)
+                rr2 = _RG.run_disk(scope="full")
+                f2, i2 = _rg_fails(rr2)
+                if not i2:
+                    rr, fails, infra = rr2, f2, ""
             new_fails = fails - (ctx.base_fails or set())
             detail["regress"] = {"passed": rr.get("passed"), "seconds": rr.get("seconds"),
-                                 "new_fails": sorted(new_fails)}
-            if new_fails and ctx.base_ok:
+                                 "new_fails": sorted(new_fails), "infra": infra}
+            if infra:
+                probs.append("【回归】跑不起来（基础设施问题：%s）—— 不是你的改动导致的，"
+                             "本次不按「改坏」处理，但也没能确认安全" % infra)
+            elif new_fails and ctx.base_ok:
                 probs.append("【回归】新增失败 %d 条（改动前这些是过的，说明你改坏了）：\n%s"
                              % (len(new_fails),
                                 "\n".join("  · " + x for x in sorted(new_fails)[:12])))

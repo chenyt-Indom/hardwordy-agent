@@ -63,9 +63,13 @@ try:
 except Exception:
     has_key = False
 
-print("[3] 整城检索（联网+有 key 才测）")
-if not (net and has_key):
-    print("  skip  没网或没配高德 key")
+# ★ 2026-11-22 修：这一段会**真打实时地图接口**（Overpass 单次 45 秒、重试 3 次），
+#   实测把子进程回归拖到 200 秒以上还不结束 —— 而回归是「改完代码反复验证」的必经一步，
+#   于是验证被它卡死。回归套件必须快且确定，所以实时网络改成**显式开关**：
+#   平时跳过；想真验联网效果时用 MM_LIVE_NET=1 单独跑这个文件。
+print("[3] 整城检索（联网 + 有 key + 显式开启 MM_LIVE_NET=1 才测）")
+if not (net and has_key and os.environ.get("MM_LIVE_NET") == "1"):
+    print("  skip  没网 / 没配高德 key / 没设 MM_LIVE_NET=1（实时接口太慢，不放进回归）")
 else:
     c = mt.geocode_one("广州市", allow_net=True)
     ck("广州市能定位", bool(c))
@@ -90,8 +94,8 @@ else:
 #       命中"江西省南昌市进贤县天河城"（那边真有个同名村子）。
 # 改走 /assistant/inputtips（高德全国相关度）：实测「天河城」第 3 条就是广州天河区那个。
 print("[4] 裸地名（不给城市）不能跑外省")
-if not (net and has_key):
-    print("  skip  没网或没配高德 key")
+if not (net and has_key and os.environ.get("MM_LIVE_NET") == "1"):
+    print("  skip  没网 / 没配高德 key / 没设 MM_LIVE_NET=1（实时接口太慢，不放进回归）")
 else:
     g = mt.geocode_one("天河城", allow_net=True)
     ck("「天河城」能定位", bool(g))
@@ -138,8 +142,8 @@ ck("_name_relevant：白云机场 vs 白云国际机场 判相关（别名不能
 ck("_name_relevant：含「路/号」的地址类查询不校验",
    mt._name_relevant("天河路208号", {"name": "随便什么", "addr": ""}))
 
-if not (net and has_key):
-    print("  skip  没网或没配高德 key（下面几项要联网）")
+if not (net and has_key and os.environ.get("MM_LIVE_NET") == "1"):
+    print("  skip  没网 / 没配高德 key / 没设 MM_LIVE_NET=1（下面几项要联网）")
 else:
     ck("假地名返回空（不给「不存驿站」）", not mt.search_place("不存在的假地方xyz", allow_net=True))
     ck("城市不匹配返回空（正佳广场不在上海）",
@@ -176,8 +180,8 @@ ck("_city_from_admin_name：甘肃省酒泉市敦煌市 → 敦煌（县级市�
 ck("_city_from_admin_name：带县的地点名不算城市",
    mt._city_from_admin_name("江西省南昌市进贤县天河城") == "")
 
-if not (net and has_key):
-    print("  skip  没网或没配高德 key（下面几项要联网）")
+if not (net and has_key and os.environ.get("MM_LIVE_NET") == "1"):
+    print("  skip  没网 / 没配高德 key / 没设 MM_LIVE_NET=1（下面几项要联网）")
 else:
     # ③ 县级市 / 自治州首府：靠 geocode 的「省+市」结构动态判定
     ck("city_of 联网认出县级市：敦煌", mt.city_of("敦煌", allow_net=True) == "敦煌")
