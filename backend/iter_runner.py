@@ -47,6 +47,9 @@ _STATE = {
     #   queue 现在会写盘并在新进程里恢复；verify 记录「刚改完、还没验证」的那个任务，
     #   新进程启动后自动接着验证 —— 这样「改代码 → 重启 → 验证 → 再改」能全自动闭环。
     "verify": None,      # {tid, plan_id, title, files, tries, at, report}
+    # ★ 2026-11-23：**跨计划**累加的连续验证失败次数。每轮修复都是新 plan_id，
+    #   所以 verify.tries 会归零；这个字段不归零，用来兜住无限重启。
+    "fail_chain": 0,
     "reports": [],       # 每个功能完成后的 markdown 报告（新的在前）
     "budget": 0,         # 本轮连续自动迭代已完成的功能数（上限见 _MAX_AUTO_ROUNDS）
 }
@@ -56,9 +59,19 @@ _FILE = _si._DATA / "task.json"
 _MAX_AUTO_ROUNDS = 10
 # 同一个功能验证不过时的重试上限。用户选的是「继续重试直到通过」，
 # 但必须有兜底 —— 否则一个死循环功能会把队列永远卡住。
-# ★ 2026-11-20 用户：「假如一个功能过于复杂呢？」→ 复杂功能改动多、自检问题也多，
-#   原来 12 轮很容易修不完就被跳过。改为 30 轮，复杂功能有足够时间修完。
-_MAX_VERIFY_TRIES = 30
+# ★ 2026-11-20 用户：「假如一个功能过于复杂呢？」→ 曾改为 30 轮。
+# ★ 2026-11-23 用户问「验证没问题之后会自动停止不陷入无限重启吗」→ 查出真缺口：
+#   `tries` 只在 **同一 plan_id** 内累加（见 mark_verify），而每轮修复都
+#   `run_audit(create_plan=True)` 生成**全新 plan_id**（self_iterate 用时间戳当 id，
+#   绝不复用）→ tries 每轮归零，30 这个上限在实际链路里**永远触发不了**。
+#   所以真正管用的护栏是下面的 _MAX_FAIL_CHAIN（跨计划累加）。
+#   这里降到 5：同计划内 5 次仍不通过，也没必要再试。
+_MAX_VERIFY_TRIES = 5
+# ★ 2026-11-23 用户：「然后验证没问题之后会自动停止不陷入无限重启吗」
+#   → 连续失败链上限：**跨计划**累加的连续验证失败次数。
+#   达到就**不再自动生成修复任务**，停下来等用户决定 —— 这是防「改→重启→验证→
+#   不过→再改」无限烧 token 的最终护栏。任何一次验证通过即清零。
+_MAX_FAIL_CHAIN = 3
 # ★ 2026-11-22 用户要求：「务必确保反复验证修改之后反复验证完全没问题之后
 #   才显示『已验证』」。所以通过一次不算数 —— 必须**连续**这么多轮都通过。
 #   每轮 = 语法编译 + 代码自检 + 真跑一遍回归（run_disk，从磁盘重载新代码）。
@@ -251,6 +264,9 @@ def _load():
                 _STATE["budget"] = int(d.get("budget") or 0)
                 # 待验证的任务：新进程起来后自动接着验证
                 _STATE["verify"] = d.get("verify") or None
+                # ★ 连续失败链必须跨重启保留：否则「改→重启→验证不过」每重启一次
+                #   计数就归零，护栏又失效了 —— 这正是无限重启的入口。
+                _STATE["fail_chain"] = int(d.get("fail_chain") or 0)
                 # 队列恢复：把上次「正在跑」的那个放回队首（它没跑完）
                 q = list(d.get("queue") or [])
                 run = d.get("running")
@@ -316,6 +332,7 @@ def _save():
                  "queue": _STATE["queue"],
                  "running": _STATE["running"],
                  "verify": _STATE.get("verify"),
+                 "fail_chain": int(_STATE.get("fail_chain") or 0),
                  "reports": _STATE.get("reports") or [],
                  "budget": _STATE.get("budget") or 0,
                  "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -1095,11 +1112,15 @@ def _score_after_verify(tid, v):
       验证全过只说明「没改坏」，还要看**分数**：
         · 低于上一版 → scoregate 记低分日志 + 沉淀教训 + 起自动修复（反思改进）
         · 持平/进步  → 只记录，不打扰
-    block_on_drop=True：退步时真的拦下来并启动修复（用户要「不断反思以及改进」）。
+    ★ 2026-11-23 用户要求：「跑分不能低于上个版本，不然还得重新改进」。
+      所以这里传 block_on_drop=False —— **故意不让 scoregate 自己起修复线程**，
+      它只负责记退步日志 + 沉淀教训；真正的修复由本模块统一走
+      「生成修复计划 → submit(source=auto) → 自动重启 → 重新验证 → 重新跑分」
+      那条链。否则两条修复线并行改代码会互相打架。
     """
     try:
         from . import scoregate as _sg
-        sc = _sg.gate(force=True, block_on_drop=True,
+        sc = _sg.gate(force=True, block_on_drop=False,
                       note="迭代验证通过后自动跑分：%s" % (v.get("title") or ""))
         return sc if isinstance(sc, dict) else {}
     except Exception as e:                              # noqa: BLE001
@@ -1349,8 +1370,56 @@ def _verify_worker():
                 _sc.get("total") if _sc.get("total") is not None else "没跑成",
                 _VERDICT_CN.get(str(_sc.get("verdict") or ""),
                                 _sc.get("msg") or "无对比")))
+        # ★ 2026-11-23 用户要求：「跑分不能低于上个版本，不然还得重新改进」。
+        #   退步 = **验收不通过**：绝不显示「✅ 已验证」，也不 _next() 接下一个
+        #   （否则修复和下一个任务并行改代码，互相打架）。
+        #   走的是和「验证没过」同一条修复链：生成修复计划 → submit(auto)
+        #   → 自动重启 → 重新验证 → 重新跑分，直到涨回去才算完成。
+        if str(_sc.get("verdict") or "") == "regressed":
+            with _LOCK:
+                _STATE["verify"] = None
+                _STATE["fail_chain"] = int(_STATE.get("fail_chain") or 0) + 1
+                _fc = _STATE["fail_chain"]
+                _STATE["reports"].insert(0, {"tid": tid, "title": v.get("title") or "",
+                                             "md": md, "ok": False, "at": _now()})
+                _STATE["reports"] = _STATE["reports"][:30]
+            _emit(tid, "status",
+                  text="⚠️ 分数比上一版低 %+.2f（%s → %s）：验收不通过，"
+                       "不显示「已验证」，自动生成修复任务重新改进（连续 %d/%d）"
+                       % (float(_sc.get("delta") or 0), _sc.get("prev"),
+                          _sc.get("total"), _fc, _MAX_FAIL_CHAIN),
+                  state="error")
+            _emit(tid, "report", text=md, title=v.get("title") or "")
+            _save()
+            if _fc >= _MAX_FAIL_CHAIN:
+                with _LOCK:
+                    _STATE["fail_chain"] = 0
+                _emit_sys("「%s」连续 %d 次修复后分数仍未涨回去，"
+                          "已停止自动修复，等你决定" % (v.get("title") or "", _fc),
+                          state="error")
+                return
+            _emit(tid, "step", text="自动生成修复任务，把掉的分补回来…")
+            _pid2 = ""
+            try:
+                _a2 = _si.run_audit(deep=False, source="manual", create_plan=True)
+                _pid2 = str((_a2.get("plan") or {}).get("id") or "")
+            except Exception as _e2:                     # noqa: BLE001
+                _emit(tid, "step", text="生成修复计划失败：%s: %s"
+                      % (type(_e2).__name__, _e2))
+            if _pid2:
+                submit(_pid2, source="auto",
+                       title="把分数补回来「%s」（第 %d 次，%s → %s）"
+                             % (v.get("title") or "", _fc,
+                                _sc.get("prev"), _sc.get("total")))
+            else:
+                _emit_sys("分数退步但没能自动生成修复计划，请手动处理",
+                          state="error")
+            return
+
         with _LOCK:
             _STATE["verify"] = None
+            # ★ 验证通过 ⇒ 连续失败链清零，护栏重新计数
+            _STATE["fail_chain"] = 0
             _STATE["reports"].insert(0, {"tid": tid, "title": v.get("title") or "",
                                          "md": md, "ok": True, "at": _now()})
             _STATE["reports"] = _STATE["reports"][:30]
@@ -1384,6 +1453,32 @@ def _verify_worker():
         except Exception as e:                          # noqa: BLE001
             _emit_sys("推荐下一个功能失败：%s: %s" % (type(e).__name__, e),
                       state="error")
+        return
+
+    # 没过 —— 先累加「跨计划连续失败链」（每轮修复都是新 plan_id，
+    # v["tries"] 会归零，只有这个计数能兜住无限重启）
+    with _LOCK:
+        _STATE["fail_chain"] = int(_STATE.get("fail_chain") or 0) + 1
+        _fc = _STATE["fail_chain"]
+        _STATE["verify"] = None
+    _save()
+    _log_verify("verify_fail", ok=False,
+                summary="%s 第 %d 轮验证没过（连续失败 %d/%d）：%s" % (
+                    v.get("title") or "", int(v.get("tries") or 0), _fc,
+                    _MAX_FAIL_CHAIN,
+                    "；".join(str(x) for x in (problems or [])[:3]) or "见报告"))
+    if _fc >= _MAX_FAIL_CHAIN:
+        # 已经停手了，计数归零：否则之后任何无关任务失败一次就会被误拦
+        with _LOCK:
+            _STATE["fail_chain"] = 0
+        _emit(tid, "status",
+              text="⚠️ 「%s」连续 %d 次修复后验证仍未通过，已停止自动修复，等你决定"
+                   "（不再自动重启，避免无限循环）"
+                   % (v.get("title") or "", _fc),
+              state="error")
+        _emit(tid, "report", text=md, title=v.get("title") or "")
+        _save()
+        _next()
         return
 
     # 没过 —— 继续修
