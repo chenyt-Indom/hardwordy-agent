@@ -353,8 +353,15 @@ def guard(kind: str = "", files=None, n: int = 3, days: int = 30) -> dict:
         return {"blocked": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
-def brief(limit: int = 8, days: int = 30, max_chars: int = 2400) -> str:
-    """压成一段给反思提示词用的紧凑归因摘要（没有记录时返回空串）。"""
+def brief(limit: int = 8, days: int = 30, max_chars: int = 2400,
+          query: str = "") -> str:
+    """压成一段给反思提示词用的紧凑归因摘要（没有记录时返回空串）。
+
+    query：本轮打算做的事（或召回的历史任务 + 执行统计）。给了就走
+    `failvec` 的**语义相似检索**，把「换了说法但其实是同一个坑」的历史
+    失败也带进提示词 —— 纯按 kind/files 聚类做不到这一点（用户 2026-11-22
+    要求「加进去，而且要实现体系化完美运行」）。
+    """
     try:
         st = stats(days)
         if not st.get("total"):
@@ -375,6 +382,23 @@ def brief(limit: int = 8, days: int = 30, max_chars: int = 2400) -> str:
             lines.append("⚠️ 重复 ≥3 次的坑（这些路已经走不通，别再原样重试）："
                          + "、".join("%s(%d)" % (r["kind_zh"], r["count"])
                                     for r in rep[:5]))
+        # ★ 语义相似检索（用户 2026-11-22：「加进去，而且要实现体系化完美运行」）。
+        #   上面几段都是「按 kind/files 聚类统计」，能说「patch_not_found 失败了
+        #   7 次」，但答不了更关键的一问：**我这次要做的事，和历史上哪一次踩的
+        #   是同一个坑**。纯分类会把「锚点写太死」和「行号已变」算成同一类。
+        #   这里按语义找近邻，把真正可复用的那条教训捞出来。
+        _extra = 0
+        _q = str(query or "").strip()
+        if _q:
+            try:
+                from . import failvec as _FV
+                _sim = _FV.brief_similar(_q, top_k=4,
+                                         days=max(int(days), 90), max_chars=900)
+                if _sim:
+                    lines.append(_sim)
+                    _extra = 900        # 给这段单独留额度，别把「最近几条」挤掉
+            except Exception:                             # noqa: BLE001
+                pass
         # ★ 已构思的改进方法（上一轮反思产出的）——直接给出来，别让模型
         #   每轮从零重新想同一个问题；但要提示「先判断还适用不适用」。
         _ls = load_lessons()
@@ -394,7 +418,13 @@ def brief(limit: int = 8, days: int = 30, max_chars: int = 2400) -> str:
                 lines.append("🧠 已经构思过的改进方法（先判断是否仍然适用；"
                              "适用的直接沿用并落地，不适用的说明为什么变）：")
                 lines.extend(_segs)
-        rows = load(limit)
+        # ★ 2026-11-22 修：原来这里直接 `load(limit)` —— 它取的是**文件里
+        #   最后写入的 N 条**，完全不看 ts。一条 100 天前的记录只要写在后面，
+        #   就会被当成「最近」喂给反思，和用户要求的「按时效性」正好相反。
+        #   这里按 days 过滤，多取 3 倍再截断，避免过滤后条数不够。
+        _since = time.time() - max(1, int(days)) * 86400
+        rows = [r for r in load(max(int(limit) * 3, int(limit)))
+                if float(r.get("ts") or 0) >= _since][:int(limit)]
         if rows:
             lines.append("最近 %d 条：" % len(rows))
             for i, r in enumerate(rows, 1):
@@ -428,8 +458,10 @@ def brief(limit: int = 8, days: int = 30, max_chars: int = 2400) -> str:
                                "下次遇到同类问题必须先补全具体错误再动手")
                 lines.append("\n".join(seg))
         out = "\n".join(lines)
-        if len(out) > max_chars:
-            out = out[:max_chars] + "\n…（归因表较长，已截断；完整内容在 data/self_iterate/fail_attribution.jsonl）"
+        if len(out) > max_chars + _extra:
+            out = out[:max_chars + _extra] + (
+                "\n…（归因表较长，已截断；完整内容在 "
+                "data/self_iterate/fail_attribution.jsonl）")
         return out
     except Exception:                                     # noqa: BLE001
         return ""

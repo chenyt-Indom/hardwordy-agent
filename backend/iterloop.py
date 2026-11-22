@@ -68,7 +68,22 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _data_dir():
-    d = os.path.join(_ROOT, "data", "iterloop")
+    """累计分账本目录。
+
+    ⚠️ 2026-11-22 修：原来硬编码 `项目根/data/iterloop`，**绕过了
+    config.data_root()** —— 后果是设了 MM_DATA_DIR（Docker 部署、便携包
+    换目录）之后账本仍写回源码目录，那里可能只读，累计分就永远存不下来；
+    而 failattr / memory 都走 config.data()，两边不一致。
+    现在统一走 config.data()，拿不到时再退回 _ROOT。
+    """
+    d = ""
+    try:
+        from . import config as _cfg
+        d = os.path.join(_cfg.data("data"), "iterloop")
+    except Exception:                                   # noqa: BLE001
+        logger.debug("iterloop 取 config.data 失败，退回项目根", exc_info=True)
+    if not d:
+        d = os.path.join(_ROOT, "data", "iterloop")
     try:
         os.makedirs(d, exist_ok=True)
     except Exception:                                   # noqa: BLE001

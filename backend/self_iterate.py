@@ -34,13 +34,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 from . import jsonfix as _jsonfix
+from . import config as _config
 
 _ROOT = Path(__file__).resolve().parent.parent
-_DATA = _ROOT / "data" / "self_iterate"
+# ★ 2026-11-22 修（与 iterloop 同一类 bug）：原来硬编码 `_ROOT/data/self_iterate`，
+#   绕过了 config.data_root()。默认情况下 config.data_root() 就是项目根，所以
+#   **既有数据位置完全不变**；但设了 MM_DATA_DIR（Docker 部署 / 便携包换目录）时，
+#   计划、信号、备份、重规划预算全都会写回源码目录 —— 那里常常是只读的，
+#   结果是「预算写不进去 → 静默拒绝重规划」这类查不出来的失效。
+_DATA = Path(_config.data("data")) / "self_iterate"
 _BACKUPS = _DATA / "backups"
 _PLANS = _DATA / "plans.json"
 _SIGNALS = _DATA / "signals.json"
-_JOURNAL = _ROOT / "data" / "selfdev_journal.jsonl"
+_JOURNAL = Path(_config.data("data")) / "selfdev_journal.jsonl"
 
 # 允许 AI 自主修改的范围（白名单），其余一律拒绝
 _ALLOWED_PREFIX = ("backend/", "frontend/")
@@ -263,6 +269,13 @@ _DEFAULT_SETTINGS = {
     #   就自动回滚并记录原因，然后重新改进」
     "loop_guard": True,          # 迭代前后各量一次综合分（静态40+回归30+功能30）
     "loop_auto_restart": True,   # 评分正常时后台自动重启（用户选的「接受」）
+    # 回滚后**自动重新改进**（2026-11-22 用户要求：「回滚并记录回滚原因，
+    # 然后重新进行改进或迭代」）。开 = 后台排程一次重规划；
+    # 信任模式开就自动执行，没开就只生成计划推到待批准。
+    "replan_after_rollback": True,
+    # 同一个计划最多重规划几次（防「回滚→重规划→又改坏」死循环；
+    # 另有 90 秒全局冷却兜住链式递归，见 _replan_take）。
+    "replan_after_rollback_max": 1,
     # 推荐卡片：开启时改进计划会**在对话里**直接推一张带批准按钮的卡片；
     # 关闭时只在「待批准」面板里推。用户 2026-11-22 要求加这个开关。
     "rec_card": True,
@@ -595,12 +608,14 @@ def _loop_brief():
         return "## 最近几轮迭代的进退\n（读不到进退记录）"
     if not b:
         return "## 最近几轮迭代的进退\n（还没有进退记录）"
-    return ("## 最近几轮迭代的进退（综合评分 0-100，口径=静态40+回归30+功能30）\n"
-            "★ 制定改进计划时必须参考：**上一轮是进步还是退步、退了多少、哪一块掉的**。\n"
+    return ("## 最近几轮迭代的进退（**以累计跑分为准**：从 0 起累加、无上限、负数=净退步；"
+            "0-100 那套只当单轮测量尺）\n"
+            "★ 制定改进计划时必须参考：**累计分这一轮涨了还是掉了、涨跌多少、"
+            "哪一段代码造成的**。\n"
             "如果连续退步，说明方向错了，要换思路而不是加倍。\n" + b)
 
 
-def _failattr_brief():
+def _failattr_brief(query=""):
     """失败归因摘要 —— 供反思提示词使用。
 
     用户 2026-11-22 明确要求：「自动自迭代功能需要重点参考这份归因表，
@@ -609,7 +624,10 @@ def _failattr_brief():
     """
     try:
         from . import failattr as _FA
-        return _FA.brief(limit=8) or "（还没有失败/回滚记录，这是干净的一轮）"
+        # ★ 2026-11-22：把「本轮要做什么」当 query 传进去，让归因摘要不只做
+        #   分类统计，还能按语义捞出「换了说法但其实是同一个坑」的历史失败。
+        return (_FA.brief(limit=8, query=str(query or ""))
+                or "（还没有失败/回滚记录，这是干净的一轮）")
     except Exception:                                   # noqa: BLE001
         logger.debug("failattr.brief 失败", exc_info=True)
         return "（归因表读取失败，本轮按无记录处理）"
@@ -3550,7 +3568,8 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
         paper_brief or "（本轮没有可用的论文评估）",
         task_brief or "（本轮没有召回到相似的历史任务）",
         gap or "（暂无执行记录统计）",
-        _failattr_brief(),
+        _failattr_brief((str(task_brief or "")[:800] + "\n"
+                         + str(gap or "")[:400])),
         _loop_brief(),
         ("## 用户这次的额外关注点\n" + focus) if focus else "")
 
@@ -5947,6 +5966,35 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     except Exception as _e:                             # noqa: BLE001
         logger.debug("改动前评分失败: %s", _e)
 
+    # ★ 2026-11-22 用户要求「体系化完美运行」：`failattr.guard()` 早就写好了，
+    #   但全项目**一次都没被调用过**（死代码 = 等于没有）。这里以**不阻断**的
+    #   方式激活它的语义能力：动手前查一遍「历史上有没有相似的做法失败过」，
+    #   只提示 + 记进 out，不改变既有执行行为（不阻断，避免把正常改动拦死）。
+    _precheck = None
+    try:
+        from . import failvec as _FV
+        _q = " ".join([str(plan.get("title") or "")] +
+                      [str(a.get("title") or "") for a in
+                       (plan.get("actions") or [])][:6]).strip()
+        if _q:
+            _sim = _FV.similar(_q, top_k=3)
+            _hit = _sim.get("items") or []
+            _precheck = {
+                "query": _q[:200], "hits": len(_hit),
+                "backend": _sim.get("backend"),
+                "top": [{"kind": h.get("kind"), "title": h.get("title"),
+                         "score": h.get("score"), "lesson": h.get("lesson"),
+                         "files": h.get("files")} for h in _hit[:3]],
+            }
+            if _hit:
+                _ev("step", text="⚠️ 历史上有 %d 条相似的做法失败过（最高相似度 %.2f），"
+                    "最高分那条的教训：%s"
+                    % (len(_hit), float(_hit[0].get("score") or 0),
+                       str(_hit[0].get("lesson") or _hit[0].get("title")
+                           or "")[:80]))
+    except Exception as _e:                             # noqa: BLE001
+        logger.debug("历史失败预检失败: %s", _e)
+
     results = []
     cancelled = False
     skipped = 0
@@ -6484,6 +6532,7 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     out = {"ok": ok_n > 0, "done": ok_n, "total": len(results), "results": results,
            "plan": plan,
            "cancelled": cancelled, "skipped": skipped,
+           "precheck": _precheck,
            "need_restart": ok_n > 0}
 
     # 用户要求：每次代码被改完就自动跑一次自检。
@@ -6601,6 +6650,32 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                                 % (len(results), ok_n))
                 except Exception:                       # noqa: BLE001
                     logger.debug("归因写入失败", exc_info=True)
+                # ★ 用户 2026-11-22：「自动完成回滚并记录回滚原因，然后**重新进行
+                #   改进或迭代**」。这里是**排程**不是直接跑：延迟 6 秒 + 独立线程，
+                #   否则会在 execute_approved 栈内递归调 reflect，而且会把本轮
+                #   「退步多少、回滚了哪条」的 HTTP 响应掐断。
+                #   信任模式开 → reflect 自动执行；没开 → 只生成计划推到待批准。
+                try:
+                    # 检索词 = 被回滚动作的标题 + 本轮改过的文件（「做了什么」），
+                    # 不是「评分掉了多少」（那是结果，语义上对不上历史失败）。
+                    _rb_ctx = " ".join(
+                        [str(x.get("title") or "")
+                         for x in (_rb.get("rolled") or [])] +
+                        [str(f) for _r0 in results
+                         for f in (_r0.get("changed") or [])]).strip()
+                    out["loop"]["replan"] = _schedule_replan(
+                        pid=pid, reason=str(_rb.get("reason") or ""),
+                        before=_loop_before.get("total"),
+                        after=_after.get("total"),
+                        context=_rb_ctx)
+                    if (out["loop"]["replan"] or {}).get("scheduled"):
+                        _ev("step", text="已排程自动重规划：%s 秒后换思路重新改进"
+                            % out["loop"]["replan"].get("in_seconds"))
+                    elif (out["loop"]["replan"] or {}).get("skipped"):
+                        _ev("step", text="未重规划：%s"
+                            % str(out["loop"]["replan"].get("why") or "")[:120])
+                except Exception:                       # noqa: BLE001
+                    logger.debug("排程重规划失败", exc_info=True)
                 # 同一批反复退步 → 降优先级（用户：不限次数，但降优先级）
                 try:
                     _IL.bump_attempt(
@@ -6777,6 +6852,125 @@ def _schedule_auto_restart(pid="", delay=3.0):
     try:
         _th.Thread(target=_go, name="loop-auto-restart", daemon=True).start()
         return {"ok": True, "scheduled": True, "in_seconds": delay}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def _replan_budget_path():
+    return os.path.join(_DATA, "replan_budget.json")
+
+
+def _replan_take(pid, limit=1, cooldown=90.0):
+    """回滚后重规划的预算闸门 —— 没有它就会死循环。
+
+    用户 2026-11-22 要求：「自动完成回滚并记录回滚原因然后**重新进行改进或迭代**」。
+    但「回滚 → 重新规划 → 又改坏 → 再回滚 → 再规划」是真实存在的死循环路径
+    （而且新计划会有新 pid，只按 pid 限次也拦不住链式递归）。所以加两道闸：
+      1. 同一个 plan_id 最多重规划 `limit` 次（默认 1）；
+      2. **全局冷却** `cooldown` 秒 —— 链式递归在这一层被掐断。
+    """
+    p = _replan_budget_path()
+    now = time.time()
+    try:
+        d = {}
+        if os.path.isfile(p):
+            with open(p, encoding="utf-8") as fh:
+                d = json.load(fh) or {}
+        if not isinstance(d, dict):
+            d = {}
+        last = float(d.get("_last") or 0)
+        if now - last < float(cooldown):
+            return {"allow": False, "why": "冷却中（距上次重规划 %.0f 秒，需 %.0f 秒）"
+                    % (now - last, float(cooldown))}
+        rec = d.get(str(pid)) or {}
+        n = int(rec.get("n") or 0)
+        if n >= int(limit):
+            return {"allow": False, "n": n, "limit": int(limit),
+                    "why": "该计划已重规划 %d 次，达上限 %d" % (n, int(limit))}
+        d[str(pid)] = {"n": n + 1, "ts": now}
+        d["_last"] = now
+        # 只留最近 200 个计划的预算，文件不无限长
+        ks = [k for k in d.keys() if not str(k).startswith("_")]
+        if len(ks) > 200:
+            ks.sort(key=lambda k: float((d.get(k) or {}).get("ts") or 0))
+            for k in ks[:-200]:
+                d.pop(k, None)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(d, fh, ensure_ascii=False)
+        os.replace(tmp, p)
+        return {"allow": True, "n": n + 1, "limit": int(limit)}
+    except Exception as e:                              # noqa: BLE001
+        # 预算写不进去时**拒绝**重规划（宁可不动，也不冒死循环的风险）
+        return {"allow": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def _schedule_replan(pid="", reason="", before=None, after=None, delay=6.0,
+                     context=""):
+    """回滚之后自动**重新改进**：后台跑一次反思，把回滚原因+归因+相似失败
+    一起当焦点，逼它换思路而不是原样重试。
+
+    为什么必须后台 + 延迟
+    --------------------
+    1. 在 `execute_approved` 的栈里同步调 `reflect()` → reflect 又会
+       `execute_approved`，同一条线程直接递归，StackOverflow 或状态互踩；
+    2. `_run_begin()` 不防重入，会覆盖正在进行的反思状态；
+    3. 当前 HTTP 响应还没发出去，阻塞会把「退步多少、回滚了哪条」全吞掉。
+
+    信任模式开着 → reflect 内部会按设置自动执行；没开 → 只生成计划推到
+    待批准，用户点一下才动。这条不用在这里判断，交给 reflect 的 auto_execute。
+    """
+    import threading as _th
+
+    _st = load_settings()
+    if not _st.get("replan_after_rollback", True):
+        return {"ok": False, "skipped": True, "why": "设置里关了 replan_after_rollback"}
+    _b = _replan_take(pid, limit=int(_st.get("replan_after_rollback_max", 1) or 1))
+    if not _b.get("allow"):
+        return {"ok": False, "skipped": True, "why": _b.get("why") or _b.get("error"),
+                "budget": _b}
+
+    def _go():
+        time.sleep(float(delay))
+        # 已经有反思在跑 → 这轮让位，别把状态覆盖掉
+        with _RUN_LOCK:
+            _busy = bool(_RUN.get("running"))
+        if _busy:
+            logger.info("回滚后重规划跳过：已有反思在运行")
+            return
+        try:
+            _sim = ""
+            try:
+                from . import failvec as _FV
+                # ★ 2026-11-22 实测修：原来拿 `reason`（「评分 85.2→80.8 退步
+                #   4.4 分」）当检索词 —— 它是**结果描述**，语义上跟「当时为什么
+                #   失败」毫无重叠，实测 0 命中，相似失败段整段失效。
+                #   正确的检索词是**本轮做了什么**（被回滚动作的标题 + 涉及文件）。
+                _q = (str(context or "") + " " + str(reason or "")).strip()
+                _sim = _FV.brief_similar(_q[:400], top_k=3, max_chars=700)
+            except Exception:                           # noqa: BLE001
+                _sim = ""
+            _focus = (
+                "【自动重规划｜上一轮改动已被回滚，必须换思路，禁止原样重试】\n"
+                "回滚原因：%s\n"
+                "评分：%s → %s（退步）\n"
+                "%s\n"
+                "硬性要求：\n"
+                "1) 先用一句话说清上一轮**为什么失败**（对照上面的归因与相似失败记录）；\n"
+                "2) 这次必须换一个不同的做法，或把改动粒度拆得更小（一次只改一处）；\n"
+                "3) 若判断这条路已经走不通，就明确说停手并给替代方案 —— 不要硬凑计划。"
+                % (str(reason or "")[:600],
+                   before if before is not None else "?",
+                   after if after is not None else "?",
+                   _sim))
+            reflect(trigger="auto_replan", use_web=False, focus=_focus)
+        except Exception:                               # noqa: BLE001
+            logger.warning("回滚后自动重规划失败", exc_info=True)
+
+    try:
+        _th.Thread(target=_go, name="loop-auto-replan", daemon=True).start()
+        return {"ok": True, "scheduled": True, "in_seconds": delay, "budget": _b}
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
@@ -7046,6 +7240,12 @@ def _make_plan(trigger, summary, actions, extra=None):
     d["items"] = d["items"][:60]
     save_plans(d)
     _remember_plan(plan)
+    # ★ 2026-11-22 用户要求「两个地方都推」：待批准面板 + 对话里的推荐卡片。
+    #   rec_card 关掉时这里什么都不做（计划仍进待批准）。
+    try:
+        _push_rec_card(plan)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("推送推荐卡片失败（不影响计划本身）", exc_info=True)
     return plan
 
 

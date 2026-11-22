@@ -366,6 +366,9 @@ def _memory_ctx(session: str, last_user_text: str, cfg: dict) -> str:
     #   任何异常都只跳过这一段，不能连原有记忆一起丢掉。
     try:
         from . import memtransfer as _MT
+        # ⚠️ 2026-11-22 核实：brief() 内部第 217 行**已经先调 sync()**，
+        #   所以这里只调 brief 就够了 —— 每轮对话都会把当前模型写进继承包，
+        #   换模型后新写入的记忆会自动并进来，不需要额外再 sync 一次。
         _mt = _MT.brief(
             model=str((cfg or {}).get("model") or (cfg or {}).get("llm_model") or ""),
             session=_memory_sid(session))
