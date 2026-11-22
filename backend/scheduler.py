@@ -1406,7 +1406,8 @@ def register_file_watch(target: str, watch_id: str, interval_minutes: int = 0,
             "watch_kind": "path",
             "watch_ref": wid,
             "watch_query": t,
-            "prompt": "（盯梢任务）定时比对「%s」，有变化就汇报并执行预设动作。" % t[:40],
+            "prompt": "（盯梢任务）定时比对「%s」，有变化就汇报并执行预设动作。"
+                      % (os.path.basename(t.rstrip("\\/")) or t),
             "schedule": {"every_minutes": mins},
             "enabled": True,
             "session": str(session or ""),
@@ -1472,7 +1473,16 @@ def _run_watch_once(job: dict) -> dict:
       · 其余（web / weather / page）—— 走本模块的 run_watch（联网抓取 + diff）。
     """
     k = str(job.get("watch_kind") or "web").strip().lower()
-    label = str(job.get("watch_query") or job.get("name") or "")[:40]
+    _raw = str(job.get("watch_query") or job.get("name") or "")
+    # ★ 不要对路径做字符截断：`D:\a\b\c\report.txt` 截 40 字正好停在父目录，
+    #   汇报里就成了「盯梢 D:\a\b\c」——用户会以为盯错了地方（2026-11-22 实测踩到）。
+    #   路径类统一显示文件名，完整路径本来就在 watch_query 里。
+    if "\\" in _raw or "/" in _raw:
+        label = os.path.basename(_raw.rstrip("\\/")) or _raw
+    else:
+        label = _raw
+    if len(label) > 40:
+        label = label[:40]
     if k in ("path", "file", "dir"):
         wid = str(job.get("watch_ref") or "")
         try:

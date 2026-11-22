@@ -62,6 +62,56 @@ _WS_PACK_SCHEMA = {
     },
 }
 
+# ---------- 盯梢（后台长期监视文件/网页，有变化主动汇报）----------
+# 为什么必须有它：handoff.py 建/查/删监视、scheduler.py 定时跑与比对、livecard 弹卡
+# 这些能力**全都齐了**，但对话里一个入口都没有 —— 用户说「盯着这个文件」，
+# 模型手上没有对应工具，前端也没按钮，等于这功能只能靠写代码调用。
+# 2026-11-22 用户报「盯梢功能必须正常执行」，查出来就是这个断口。
+_WATCH_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "watch_create",
+            "description": (
+                "【盯梢】用户说「盯着 XX / 帮我盯一下 / 有变化就告诉我 / 定期看看 XX」时用它。"
+                "建一条**后台长期**监视：按间隔自动比对文件或网页，有变化主动弹卡汇报。\n"
+                "text 直接传用户那句原话（内部会解析出路径、间隔、预设动作），也可以只传路径。\n"
+                "建完把「在盯什么、多久看一次」告诉用户即可，不要描述界面步骤。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "用户原话，如「盯着 D:/a/report.txt，每 30 分钟看一次，有变化就告诉我」"},
+                    "interval_minutes": {"type": "integer", "description": "多久看一次（分钟）。用户没说就留空（默认 30）"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "watch_list",
+            "description": "【盯梢】列出当前所有监视任务。用户问「我在盯哪些 / 盯梢列表 / 那个盯梢还在吗」时用。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "watch_remove",
+            "description": "【盯梢】停掉一条监视。用户说「别盯了 / 取消监视 XX」时用，会连带清掉它的定时任务。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "watch_id": {"type": "string", "description": "监视 id（watch_list 能看到）"},
+                },
+                "required": ["watch_id"],
+            },
+        },
+    },
+]
+
 # ---------- PPT 生成 ----------
 # 用户 2026-09-17 提的需求：「模型能生成 PPT 吗？面向各领域的都要能排。」
 # 设计要点：**模型只填内容，不写代码** —— 8B 模型即兴写 python-pptx 代码
@@ -1568,6 +1618,9 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
     # 生成 PPT：纯本机操作（不联网、不执行用户代码），所以**不挂任何开关**，
     # 始终可用 —— 和「记忆」「文库」一样的待遇。
     schemas.append(_MAKE_PPTX_SCHEMA)
+    # 盯梢：纯本机比对 + 复用已登记的定时任务，不联网、不跑用户代码，始终可用。
+    for _wsc in _WATCH_SCHEMAS:
+        schemas.append(_wsc)
     # 写 Word 文档 + 改已有的 Word/PPT（同样不联网、不跑用户代码，始终可用）。
     schemas.append(_MAKE_DOCX_SCHEMA)
     schemas.append(_MAKE_XLSX_SCHEMA)
@@ -2965,6 +3018,12 @@ def dispatch(name: str, arguments: dict, ui_events: list, context: dict) -> str:
         return _do_map_plan(arguments, ui_events, context)
     if name == "nearby_places":
         return _do_nearby_places(arguments, ui_events, context)
+    if name == "watch_create":
+        return _do_watch_create(arguments, context)
+    if name == "watch_list":
+        return _do_watch_list(arguments, context)
+    if name == "watch_remove":
+        return _do_watch_remove(arguments, context)
     if name == "edit_office":
         return _do_edit_office(arguments, ui_events)
     if name == "web_read":
@@ -6543,6 +6602,65 @@ def _clean_stray_inline_html(obj):
     if isinstance(obj, dict):
         return {k: _clean_stray_inline_html(v) for k, v in obj.items()}
     return obj
+
+
+def _do_watch_create(arguments=None, context=None) -> str:
+    """建一条盯梢监视。文本解析、落盘、登记定时任务都交给 handoff。"""
+    a = arguments or {}
+    text = str(a.get("text") or "").strip()
+    if not text:
+        return "没有拿到要盯的内容。请告诉我盯什么（文件路径或网址），比如「盯着 D:/a/report.txt」。"
+    try:
+        interval = int(a.get("interval_minutes") or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    try:
+        from . import handoff
+        r = handoff.create_watch_from_text(
+            text, session=str((context or {}).get("session") or ""),
+            interval_minutes=interval)
+    except Exception as e:
+        return "建监视失败：%s" % e
+    if not r.get("ok"):
+        return "没能建起来：%s" % (r.get("error") or "解析不出要盯的目标")
+    w = r.get("watch") or {}
+    return ("已开始盯梢：%s\n· 目标：%s\n· 检查频率：%s\n· 监视 id：%s\n"
+            "有变化我会主动弹卡告诉你；想停就说「别盯了」。"
+            % (w.get("name") or "监视", w.get("target") or "", w.get("period") or "每 30 分钟",
+               w.get("id") or r.get("id") or ""))
+
+
+def _do_watch_list(arguments=None, context=None) -> str:
+    """列出当前所有监视。"""
+    try:
+        from . import handoff
+        ws = handoff.list_watches()
+    except Exception as e:
+        return "读取监视列表失败：%s" % e
+    if not ws:
+        return "现在没有在盯任何东西。想盯的话说一句「盯着 <文件或网址>，有变化就告诉我」。"
+    out = ["当前在盯 %d 项：" % len(ws)]
+    for w in ws:
+        out.append("· %s（%s）%s —— id %s" % (
+            w.get("name") or "监视", w.get("period") or "",
+            "｜" + str(w.get("status") or ""), w.get("id") or ""))
+    return "\n".join(out)
+
+
+def _do_watch_remove(arguments=None, context=None) -> str:
+    """停掉一条监视，连带清掉它的定时任务。"""
+    a = arguments or {}
+    wid = str(a.get("watch_id") or "").strip()
+    if not wid:
+        return "要停哪一条？先用 watch_list 看看有哪些，再把 id 给我。"
+    try:
+        from . import handoff
+        r = handoff.remove_watch(wid)
+    except Exception as e:
+        return "停止监视失败：%s" % e
+    if not r.get("ok"):
+        return "没找到这条监视：%s" % (r.get("error") or wid)
+    return "已停掉监视 %s，它的定时任务也一起清掉了。" % wid
 
 
 def _do_make_pptx(arguments=None, ui_events=None) -> str:
