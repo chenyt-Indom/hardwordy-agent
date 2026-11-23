@@ -36,6 +36,23 @@ ESCALATE_AT = 3
 # 太短 = 刚改完就自封修好（实测：任何无关改动刷新 mtime 就会把旧教训判成 fixed）。
 OBSERVE_HOURS = 6.0
 
+# 静默异常账本（2026-11-23 修）。
+#   `except ...: pass` 会把「功能静默失效」彻底掩盖掉 —— 这次踩过的坑就是它盖住了
+#   AttributeError，所以自检里 silent-except 一直挂着一条扣分点。
+#   但这两处兜底**本身是对的**（时间戳解析不出来 / 文件读不到 mtime，就该退回默认值，
+#   不能把整条教训闭环打断），所以不能删 catch —— 改成「兜住但记一笔」：
+#   控制流不变，出问题时能在 `_silent_log` 里查到 (时间戳, 异常) 现场。
+#   上限只留最近 200 条，避免常驻服务里无限长大。
+_silent_log = []
+_SILENT_LOG_MAX = 200
+
+
+def _note_silent(e) -> None:
+    """把被兜住的异常记进 `_silent_log`（不抛、不改控制流）。"""
+    _silent_log.append((time.time(), repr(e)))
+    if len(_silent_log) > _SILENT_LOG_MAX:
+        del _silent_log[:-_SILENT_LOG_MAX]
+
 
 def _data_dir() -> str:
     """沿用 self_iterate 的数据目录（MM_DATA_DIR 可隔离，测试用）。"""
@@ -187,8 +204,8 @@ def _num_ts(v) -> float:
         return 0.0
     try:
         return float(s)
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as e:
+        _note_silent(e)
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
             return time.mktime(time.strptime(s[:19] if len(s) >= 19 else s, fmt))
@@ -216,8 +233,8 @@ def _last_ok_edit(rel: str) -> float:
     p = os.path.join(_PROJECT_ROOT, rel.replace("/", os.sep))
     try:
         best = max(best, os.path.getmtime(p))
-    except OSError:
-        pass
+    except OSError as e:
+        _note_silent(e)
     return best
 
 
@@ -273,15 +290,18 @@ def judge(it: dict) -> dict:
         if edited > t0:
             return {"kind": kind, "status": "pending", "recur": recur,
                     "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+                    "progress": 0.0,
                     "evidence": "改过 %s，但**修复逻辑不在代码里**（改歪了）" % rel,
                     "detail": ev}
         return {"kind": kind, "status": "pending", "recur": recur,
                 "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+                "progress": 0.0,
                 "evidence": "修复逻辑不在代码里，该文件也没改过（只说不做）", "detail": ev}
     # ② 修复逻辑在，但教训之后又复发 —— 改得不够，继续 pending
     if recur > 0:
         return {"kind": kind, "status": "pending", "recur": recur,
                 "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+                "progress": 0.0,
                 "evidence": "修复逻辑已在代码里，但之后又复发 %d 次" % recur, "detail": ev}
     # ③ 修复逻辑在、没复发。观察窗从「改动时间 / 教训时间」的**晚者**算起。
     #    ⚠️ 原来写 `if edited > t0`：教训若比改动更新（同一 kind 被反复重记），
@@ -291,12 +311,23 @@ def judge(it: dict) -> dict:
     base = max(edited, t0)
     left = OBSERVE_HOURS * 3600.0 - (time.time() - base)
     if left > 0:
+        # progress = 观察窗已走过的比例（0 = 刚改完，1 = 熬满窗口）
+        # ⚠️ 为什么必须给部分信用（2026-11-23 实测修正）：
+        #    原来 verifying 在落地率里算 0 分 → 6 条全在观察中时落地率恒为 0，
+        #    RSI 被钉在 57 分一动不动；6 小时一到 6 条同时转 fixed，
+        #    落地率 0→100%，RSI 一次突跳 25 分。那是**阶跃**，
+        #    与 RSI「斜率逐渐变陡」正好相反。按窗口进度线性给分后，
+        #    落地率随时间连续爬升，RSI 曲线才可能是平滑的。
+        prog = 1.0 - max(0.0, left) / (OBSERVE_HOURS * 3600.0)
         return {"kind": kind, "status": "verifying", "recur": 0,
                 "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
-                "evidence": "修复逻辑已在、暂未复发，观察中（还差 %.1f 小时）" % (left / 3600.0),
+                "progress": round(prog, 4),
+                "evidence": "修复逻辑已在、暂未复发，观察中（已过 %.0f%%，还差 %.1f 小时）"
+                            % (prog * 100, left / 3600.0),
                 "detail": ev}
     return {"kind": kind, "status": "fixed", "recur": 0,
             "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+            "progress": 1.0,
             "evidence": "代码探针命中（%s 含 %r）且教训之后未复发"
                         % (rel, needle),
             "detail": ev}
@@ -329,8 +360,13 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
     marked = [r for r in rows if r.get("phantom") is not None]
     ph = sum(1 for r in marked if r.get("phantom") is True)
     a = audit()
-    fx = len(a.get("fixed") or a.get("done") or [])
-    pd_ = len(a.get("pending") or []) + len(a.get("verifying") or [])
+    # 落地率按 progress 加权：fixed=1.0 / verifying=窗口进度 / pending=0.0。
+    # ⚠️ 原来只数 fixed、把 verifying 当 0 分（2026-11-23 实测修正）：
+    #    观察窗 6 小时内落地率恒 0，RSI 被钉死；窗口一满一次性转 fixed，
+    #    落地率 0→100%，RSI 突跳 25 分 —— 是阶跃，不是 RSI 要的平滑上升。
+    rows_a = a.get("rows") or []
+    fx = sum(float(r.get("progress") or 0.0) for r in rows_a)
+    pd_ = len(rows_a)
     hi = mid = 0
     try:
         au = json.load(open(os.path.join(_data_dir(), "audits.json"), encoding="utf-8"))
@@ -346,8 +382,9 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
     if marked:
         parts.append(("无幽灵率", 1 - ph / len(marked), 0.15,
                       "幽灵 %d/%d" % (ph, len(marked))))
-    if fx + pd_:
-        parts.append(("教训落地率", fx / (fx + pd_), 0.25, "%d/%d" % (fx, fx + pd_)))
+    if pd_:
+        parts.append(("教训落地率", min(1.0, fx / pd_), 0.25,
+                      "%.1f/%d 条（观察中按进度计）" % (fx, pd_)))
     parts.append(("静态质量", max(0.0, 1 - min(1.0, (hi * 3 + mid) / 10.0)), 0.20,
                   "high %d / mid %d" % (hi, mid)))
     tw = sum(p[2] for p in parts) or 1.0
@@ -441,6 +478,13 @@ def hint(max_n: int = 4, max_chars: int = 700) -> str:
       · 只在有 pending 时才返回非空；
       · 文案按 kind 排序、截断到固定条数，同一状态下是**稳定字符串**。
     """
+    # 顺带做一次 RSI 采样（内部节流：1 小时最多一条）。
+    # ⚠️ 放在 `if not pend: return ""` 之前 —— 没有待办时 RSI 照样需要序列点，
+    #    否则「没 pending」的那段时间曲线是空的，趋势判不出来。
+    try:
+        rsi_sample_throttled()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("RSI 节流采样失败", exc_info=True)
     try:
         a = audit()
     except Exception:                                   # noqa: BLE001
@@ -772,6 +816,27 @@ def rsi_sample(force: bool = False, min_gap: float = 60.0) -> dict:
             "iso": rec["iso"]}
 
 
+# 节流采样：hint() 每轮对话都会调，但只有距上次超过 gap 秒才真写盘。
+# 为什么需要它：rsi_sample() 原本只在「评估收尾」调用，而评估约 2 小时一次 ——
+# 判趋势至少要 4 个采样点，那得等 8 小时才画得出曲线，期间用户问「有没有上升」
+# 只能答「样本不足」。加上每轮对话的低频采样后，只要用户在用就有足够密度。
+_RSI_LAST_SAMPLE: dict = {"ts": 0.0}
+
+
+def rsi_sample_throttled(gap: float = 3600.0) -> dict:
+    """距上次采样超过 gap 秒才真写一条（防每轮对话都写盘）。"""
+    now = time.time()
+    if now - float(_RSI_LAST_SAMPLE.get("ts") or 0.0) < gap:
+        return {"ok": True, "skipped": True,
+                "why": "距上次采样不足 %.0f 秒" % gap}
+    _RSI_LAST_SAMPLE["ts"] = now
+    try:
+        return rsi_sample(min_gap=gap)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("rsi 节流采样失败", exc_info=True)
+        return {"ok": False}
+
+
 def rsi_trend(limit: int = 120, window: int = 5) -> dict:
     """RSI 历史序列的趋势形态（判断有没有 RSI 那种斜率递增）。
 
@@ -827,8 +892,21 @@ def rsi_weakest() -> dict:
     parts = cur.get("parts") or []
     if not parts:
         return {"ok": False, "error": "无可用指标"}
+    # ⚠️ 「教训落地率」在没有 pending 时**不可行动**（2026-11-23 实测）：
+    #    6 条全在观察窗里，落地率被拖到 1%，drag 0.247 排第一，
+    #    RSI 会一直催「去把 pending 教训落到代码」—— 可当时根本没有 pending，
+    #    唯一能做的是等 6 小时。那会把改进方向指错。
+    #    所以没有 pending 时把这一项排除出候选，只从能动手的项里选。
+    try:
+        _pend_n = len(audit().get("pending") or [])
+    except Exception:                                   # noqa: BLE001
+        _pend_n = 0
+    cands = [p for p in parts
+             if not (p["name"] == "教训落地率" and _pend_n == 0)]
+    if not cands:
+        cands = parts
     # 拖后腿程度 = 权重 × (1 - 得分)
-    worst = max(parts, key=lambda p: p["weight"] * (1 - p["value"]))
+    worst = max(cands, key=lambda p: p["weight"] * (1 - p["value"]))
     advice = {
         "动作成功率": "挑最近失败最多的动作类型，看它的失败原因，先修掉重复出现的那个",
         "无幽灵率": "检查「声称改了但 diff 为空」的动作，把校验卡在提交前",
