@@ -35,6 +35,37 @@ logger = logging.getLogger(__name__)
 #   改了什么。2000 条 × 平均 160 字 ≈ 300KB，可以接受。
 _MAX_EVENTS = 2000
 _MAX_HISTORY = 20
+# ★ 2026-11-23 修：think 事件单独限流。
+#   实测 events 里 think 占 66%（2000 条里 1330 条），只覆盖 3.3 小时 ——
+#   status / phantom_reject / code 这些**关键事件**被思考碎片挤出了窗口，
+#   等于「记录细节」这件事根本没做到。现在 think 最多留 _MAX_THINK 条，
+#   其余事件仍按 _MAX_EVENTS 保留，总上限 _MAX_EVENTS + _MAX_THINK。
+_MAX_THINK = 600
+_EV_HARD_CAP = _MAX_EVENTS + _MAX_THINK
+
+
+def _trim_events():
+    """按 kind 分别限流：think 只留最近 _MAX_THINK 条，总量不超过硬上限。
+
+    必须在 _LOCK 内调用（直接改 _STATE["events"]）。
+    """
+    evs = _STATE.get("events") or []
+    n_think = 0
+    for e in evs:
+        if isinstance(e, dict) and e.get("kind") == "think":
+            n_think += 1
+    if n_think > _MAX_THINK:
+        drop = n_think - _MAX_THINK
+        kept = []
+        for e in evs:
+            if drop > 0 and isinstance(e, dict) and e.get("kind") == "think":
+                drop -= 1
+                continue
+            kept.append(e)
+        evs = kept
+    if len(evs) > _EV_HARD_CAP:
+        evs = evs[-_EV_HARD_CAP:]
+    _STATE["events"] = evs
 
 _LOCK = threading.RLock()
 _STATE = {
@@ -327,7 +358,7 @@ def _load():
             d = json.loads(_FILE.read_text(encoding="utf-8"))
             with _LOCK:
                 _STATE["seq"] = int(d.get("seq") or 0)
-                _STATE["events"] = list(d.get("events") or [])[-_MAX_EVENTS:]
+                _STATE["events"] = list(d.get("events") or [])[-_EV_HARD_CAP:]
                 _STATE["history"] = list(d.get("history") or [])[:_MAX_HISTORY]
                 _STATE["reports"] = list(d.get("reports") or [])[:30]
                 _STATE["budget"] = int(d.get("budget") or 0)
@@ -400,7 +431,7 @@ def _save():
     try:
         with _LOCK:
             d = {"seq": _STATE["seq"],
-                 "events": _STATE["events"][-_MAX_EVENTS:],
+                 "events": _STATE["events"][-_EV_HARD_CAP:],
                  "history": _STATE["history"][:_MAX_HISTORY],
                  # ★ 队列必须落盘：否则重启后等待中的任务全丢
                  "queue": _STATE["queue"],
@@ -439,8 +470,7 @@ def _emit(tid, kind, **kw):
               "ts": time.time(), "t": time.strftime("%H:%M:%S")}
         ev.update(kw)
         _STATE["events"].append(ev)
-        if len(_STATE["events"]) > _MAX_EVENTS:
-            _STATE["events"] = _STATE["events"][-_MAX_EVENTS:]
+        _trim_events()
         seq = ev["seq"]
         due = force or (time.time() - _LAST_SAVE[0] >= _SAVE_MIN_GAP)
         if due:
@@ -845,7 +875,11 @@ def _worker(item):
                                 "index": kw.get("index"),
                                 "total": kw.get("total"),
                                 "title": _t[:60],
-                                "action_id": str(kw.get("action_id") or "")}
+                                "action_id": str(kw.get("action_id") or ""),
+                                # ★ 2026-11-23：声明要动的文件 + 执行前不存在的
+                                #   （＝声称要新建的），收工时用来核对是否真的落地
+                                "files": list(kw.get("files") or [])[:20],
+                                "new_files": list(kw.get("new_files") or [])[:20]}
                             _STATE["running"]["beat_at"] = time.time()
                     try:
                         _stage("action_start",
@@ -1017,6 +1051,42 @@ def _worker(item):
             ok_n = 0
             fail_n = fail_n or 1
             err_all = ((err_all or "") + " no_change：声称改完但 diff 为空").strip()
+
+        # ★ 2026-11-23 修（记录造假）：动作声称「新建 X」，可 X 根本没生成，
+        #   却按 ok 收工 —— 实测 a5「新增 backend/_feature_tests/test_pause_resume.py」
+        #   记了 result=ok、changelog 还写 new_file=true，那个文件压根不存在。
+        #   这里补一道硬检查：执行前不存在、又被声明为目标的新建文件，
+        #   收工时必须真的在磁盘上；缺一个就判失败并记 no_change。
+        if ok_n and not cancelled:
+            _miss = []
+            try:
+                from . import self_iterate as _si4
+                with _LOCK:
+                    _ca3 = dict((_STATE.get("running") or {}).get("cur_action") or {})
+                for _x in (_ca3.get("new_files") or []):
+                    _rel = str(_x or "").strip()
+                    if not _rel:
+                        continue
+                    if not (_si4._ROOT / _rel.replace("/", os.sep)).is_file():
+                        _miss.append(_rel)
+            except Exception:                           # noqa: BLE001
+                logger.debug("校验新建文件失败（不影响迭代）", exc_info=True)
+                _miss = []
+            if _miss:
+                try:
+                    from . import actlog as _al4
+                    _al4.record_stage(plan_id, "no_change",
+                                      detail="声称新建但文件不存在：%s"
+                                             % ", ".join(_miss[:5]))
+                except Exception:                       # noqa: BLE001
+                    logger.debug("记 no_change 失败", exc_info=True)
+                _emit(tid, "error",
+                      text="声称新建的文件没有生成（%s）：判失败，不算这一轮的成果"
+                           % "、".join(_miss[:3]))
+                ok_n = 0
+                fail_n = fail_n or 1
+                err_all = ((err_all or "") + " no_change：声称新建的文件不存在：%s"
+                           % "、".join(_miss[:3])).strip()
         _finish(tid, "cancelled" if cancelled else ("done" if ok_n else "failed"),
                 ok_n, fail_n, skip_n, changed,
                 _cancel_reason or err_all)

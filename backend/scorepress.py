@@ -44,6 +44,13 @@ _LOCK = threading.RLock()
 # press.jsonl 最多保留多少条（每条约 2~6 KB，60 条足够看趋势）
 _KEEP = 60
 
+# ★ 2026-11-23 新增：同分去重时间窗（秒）。
+#   实测 60 条评分里 25 条是同一个 155.09 ——「后台自动更新评分」每几分钟跑
+#   一次，分数一点没变也照样写一行，把趋势线压平、也让评分样本看起来像污染。
+#   规则：与最后一条**完全同分**且间隔小于这个窗 → 不新增行，只更新时间。
+#   不同分数一律保留，一条不丢。
+_DEDUP_SEC = 600
+
 # 报告里最多列多少条压分点（再多模型也读不完，反而稀释重点）
 _TOP_N = 15
 
@@ -289,14 +296,55 @@ def _load_all() -> List[Dict[str, Any]]:
     return out
 
 
+def _same_score(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    """两份报告的「分数」是否完全一样（total + quality + ability）。"""
+    try:
+        if round(float(a.get("total") or 0), 2) != round(float(b.get("total") or 0), 2):
+            return False
+        if round(float(a.get("quality") or 0), 2) != round(float(b.get("quality") or 0), 2):
+            return False
+        aa = (a.get("ability") or {}).get("score")
+        bb = (b.get("ability") or {}).get("score")
+        return round(float(aa or 0), 2) == round(float(bb or 0), 2)
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
+def _gap_sec(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+    """两份报告的时间差（秒）；取不到时间就返回一个很大的数（当作不相邻）。"""
+    try:
+        ta = float(a.get("ts") or 0)
+        tb = float(b.get("ts") or 0)
+        if ta and tb:
+            return abs(tb - ta)
+    except Exception:                                   # noqa: BLE001
+        pass
+    return 1e9
+
+
 def record(sc: Dict[str, Any], note: str = "") -> Dict[str, Any]:
-    """算一份压分报告并落盘。**每次评分都该调**（不管进步/持平/退步）。"""
+    """算一份压分报告并落盘。**每次评分都该调**（不管进步/持平/退步）。
+
+    ★ 2026-11-23 修「评分样本污染」：同分近时不再追加新行。
+      实测 press.jsonl 60 条里 25 条是同一个 155.09 ——「后台自动更新评分」
+      每几分钟跑一次、分数一点没变也写一行，把趋势压平，样本看着像污染。
+      现在的规则：
+        · 与最后一条**完全同分**且间隔 < _DEDUP_SEC → 不新增，只把最后一条
+          的时间/note 更新成这次（表示「此刻仍是这个分」，信息不丢）；
+        · 分数有任何变化 → 照常新增一行，一条不丢。
+    """
     rep = build(sc, note=note)
     try:
         with _LOCK:
             rows = _load_all()
-            rows.append(rep)
-            rows = rows[-_KEEP:]
+            if rows and _same_score(rows[-1], rep) and _gap_sec(rows[-1], rep) < _DEDUP_SEC:
+                rows[-1]["iso"] = rep.get("iso") or rows[-1].get("iso")
+                rows[-1]["ts"] = rep.get("ts") or rows[-1].get("ts")
+                rows[-1]["note"] = rep.get("note") or rows[-1].get("note")
+                rep = rows[-1]
+            else:
+                rows.append(rep)
+                rows = rows[-_KEEP:]
             with open(_path(), "w", encoding="utf-8") as fh:
                 for r in rows:
                     fh.write(json.dumps(r, ensure_ascii=False) + "\n")

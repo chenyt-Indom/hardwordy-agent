@@ -6332,8 +6332,21 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
         # ★ 2026-11-20 用户要求「卡片上说明正在迭代什么功能」——
         #   一个计划里有多条动作（多个功能），每条开始前发一次，
         #   iter_runner 收到后把卡片标题换成当前这条，用户就知道现在在做什么。
+        # ★ 2026-11-23 修（记录造假）：把这条动作声明要动的文件带出去，
+        #   并标出「执行前根本不存在」的那几个（＝声称要新建的）。
+        #   实测 a5「新增 backend/_feature_tests/test_pause_resume.py」判了 ok，
+        #   可那个文件压根没生成 —— 收工时必须能核对这一点。
+        _want = [str(x) for x in (a.get("files") or []) if str(x).strip()]
+        _fresh = []
+        for _x in _want:
+            try:
+                if not (_ROOT / str(_x).replace("/", os.sep)).is_file():
+                    _fresh.append(str(_x))
+            except Exception:                           # noqa: BLE001
+                continue
         _ev("action_start", action_id=str(a.get("id") or ""),
-            title=str(a.get("title") or ""), index=_i + 1, total=len(todo))
+            title=str(a.get("title") or ""), index=_i + 1, total=len(todo),
+            files=_want[:20], new_files=_fresh[:20])
         if not _pk:
             a["status"] = "done"
             a["note"] = ((a.get("note") or "") + "｜" + _pwhy).strip("｜")

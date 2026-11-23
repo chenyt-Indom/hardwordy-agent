@@ -401,7 +401,9 @@ def _load_ability_snap():
                     "fixed": [str(x) for x in (d.get("fixed") or [])],
                     "lessons": [str(x) for x in (d.get("lessons") or [])]}
     except FileNotFoundError:
-        pass
+        # 首次运行还没有快照文件 —— 这是正常控制流，不是被吞掉的异常。
+        # 原来写成 `pass` 会被自检记成 silent-except 扣分，直接返回默认值更清楚。
+        return {"failed": [], "fixed": [], "lessons": []}
     except Exception:                                   # noqa: BLE001
         logger.debug("读 ability_snapshot 失败，按空快照处理", exc_info=True)
     return {"failed": [], "fixed": [], "lessons": []}

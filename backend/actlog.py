@@ -699,6 +699,49 @@ def count_fail_kind(fail_kind: str, days: int = 7, path: str = "") -> int:
     return n
 
 
+def _count_fail_attr(fail_kind: str, cutoff: float = 0.0) -> int:
+    """数「失败归因账本」fail_attribution.jsonl 里某个 kind 的条数。
+
+    为什么必须合并这个来源（2026-11-23 实测出来的真实缺陷）：
+      task.json 的 events 里**几乎不存在** fail_kind 字段 —— 实测 2000 条事件
+      里只有 1 条带 fail_kind，而且还是 phantom_reject 事件自己写进去的。
+      真实的失败分类记在 fail_attribution.jsonl 的 kind 字段（近 7 天 18 条：
+      score_regress 7 / no_edit 3 / patch_not_found 2 / model_error 2 …）。
+      只读 events 会让计数恒为 0，于是「幽灵修复」闸门把**所有带 fail_kind 的
+      真实修复**全判成幽灵拒掉（实测 16:40:53 fail_kind=model 被拒），
+      反而那些不带 fail_kind 的凭空动作能放行 —— 闸门方向完全反了。
+    """
+    try:
+        p = os.path.join(config.data_root(), "data", "self_iterate",
+                         "fail_attribution.jsonl")
+        if not os.path.isfile(p):
+            return 0
+        n = 0
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except Exception:                       # noqa: BLE001
+                    continue
+                if not isinstance(r, dict):
+                    continue
+                k = r.get("kind") or r.get("fail_kind")
+                if not isinstance(k, str) or k.strip() != fail_kind:
+                    continue
+                if cutoff > 0:
+                    ts = _event_ts(r)
+                    if ts and ts < cutoff:
+                        continue
+                n += 1
+        return n
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return 0
+
+
 def count_fail_kind_ex(fail_kind: str, days: int = 7, path: str = "") -> tuple:
     """同 count_fail_kind，但返回 (count, ok)。
 
@@ -738,6 +781,12 @@ def count_fail_kind_ex(fail_kind: str, days: int = 7, path: str = "") -> tuple:
             if ts and ts < cutoff:
                 continue
         hit += 1
+    # ★ 2026-11-23 修：events 里的 fail_kind 在生产里几乎不存在（见
+    #   _count_fail_attr 的说明），必须把失败归因账本一并数进来，
+    #   否则闸门恒判 0 → 真实修复全被拒、凭空动作反而放行。
+    #   path 显式指定时（测试用）不读生产账本，保证用例可重复。
+    if not path:
+        hit += _count_fail_attr(fk, cutoff)
     return hit, True
 
 
