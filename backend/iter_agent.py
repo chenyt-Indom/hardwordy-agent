@@ -149,7 +149,20 @@ def _is_guard(rel):
     r = str(rel or "").replace("\\", "/").lstrip("./")
     if r in _GUARD_FILES:
         return True
-    return any(r.startswith(d) for d in _GUARD_DIRS)
+    # ⚠️⚠️ 2026-11-24 实测缺陷：`_GUARD_DIRS` 把**整个** _feature_tests/ 都算护栏，
+    #   连 `_pending_*.py`（待办/临时断言）也算 —— 而这类文件本来就会被正常
+    #   创建、消费、清理掉。文件一没，`_sha()` 返回 ""≠快照 sha，于是
+    #   `_final_verify` 判「护栏文件被修改（不允许）」，**整轮直接回滚**。
+    #   实测 11-23 18:46 那次动作失败正是它：
+    #     「护栏文件被修改（不允许）：backend/_feature_tests/_pending_盯梢任务哨兵…py」
+    #   产品代码一行没坏，只是临时文件被清了。
+    #   护栏的语义是「不许模型改写**验收断言**」，而下划线开头的文件
+    #   regress 自己也按 `_` 前缀跳过（不参与回归），本就不是断言。
+    #   所以：_feature_tests/ 下只把**非下划线开头**的 test_*.py 当护栏。
+    if any(r.startswith(d) for d in _GUARD_DIRS):
+        name = r.rsplit("/", 1)[-1]
+        return not name.startswith("_")
+    return False
 
 
 def _mark_dirty(rel, note=""):

@@ -181,8 +181,14 @@ PROBES: dict[str, tuple[str, str]] = {
     "没产生实际改动": ("backend/iter_runner.py", "no_change"),
     # 容错解析链：strip_notice → balanced → _close_truncated → parse
     "模型输出不可用": ("backend/jsonfix.py", "def _close_truncated"),
-    # 跑分前先取自检计数（static_first）
-    "跑分退步（低于上一版）": ("backend/iter_runner.py", "static_first"),
+    # ⚠️⚠️ 2026-11-24 实测缺陷：这里原来指向 iter_runner.py 的 "static_first"
+    #   （跑分前先取自检计数）—— 那和「跑分退步」**根本不是同一个问题**：
+    #   实测 5 次 regressed 里 4 次只有 0.44~0.5 分跌幅，是评分噪声，
+    #   真正的修法是 scoregate 的噪声带判定（_verdict_of）。
+    #   探针指错文件 → 恒命中 → 这条教训永远显示「已修」，
+    #   而实际上它反复复发（教训库里 ×7，是最高频的一条）。
+    #   探针必须指向**修复逻辑本身**（同本表开头的告警）。
+    "跑分退步（低于上一版）": ("backend/scoregate.py", "def _verdict_of"),
     # 容错取值：键名写错/层级读错时不抛错
     "字段名/键读错": ("backend/jsonfix.py", "def safe_get"),
 }
@@ -551,8 +557,16 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
     #    观察窗 6 小时内落地率恒 0，RSI 被钉死；窗口一满一次性转 fixed，
     #    落地率 0→100%，RSI 突跳 25 分 —— 是阶跃，不是 RSI 要的平滑上升。
     rows_a = a.get("rows") or []
-    fx = sum(float(r.get("progress") or 0.0) for r in rows_a)
-    pd_ = len(rows_a)
+    # ⚠️⚠️ 2026-11-24 实测缺陷：原来 `pd_ = len(rows_a)`、`fx = sum(progress or 0)`，
+    #   而 unprobed 的 progress 是 None → **计 0 分却进分母**。
+    #   实测：1 条 fixed + 3 条 unprobed 得 0.25（应得 1.0）—— 与 judge() 里
+    #   「unprobed 既不算落地也不算没落地，绝不污染落地率」直接矛盾，
+    #   只要有一条教训没有探针（新 kind 未登记），RSI 就被无声压低。
+    #   分母只算**可判定**（progress 不是 None）的条目。
+    scored = [r for r in rows_a if r.get("progress") is not None]
+    n_unprobed = len(rows_a) - len(scored)
+    fx = sum(float(r.get("progress") or 0.0) for r in scored)
+    pd_ = len(scored)
     hi = mid = 0
     try:
         au = json.load(open(os.path.join(_data_dir(), "audits.json"), encoding="utf-8"))
@@ -571,7 +585,10 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
                       "幽灵 %d/%d" % (ph, len(marked))))
     if pd_:
         parts.append(("教训落地率", min(1.0, fx / pd_), 0.25,
-                      "%.1f/%d 条（观察中按进度计）" % (fx, pd_)))
+                      "%.1f/%d 条（观察中按进度计%s）"
+                      % (fx, pd_,
+                         "；%d 条无可判定探针，不计入分母" % n_unprobed
+                         if n_unprobed else "")))
     parts.append(("静态质量", max(0.0, 1 - min(1.0, (hi * 3 + mid) / 10.0)), 0.20,
                   "high %d / mid %d" % (hi, mid)))
     tw = sum(p[2] for p in parts) or 1.0
@@ -664,8 +681,10 @@ def hint(max_n: int = 4, max_chars: int = 700) -> str:
     """给对话主循环的教训摘要（塞进系统提示）。
 
     ⚠️ 内容随教训状态变化会破坏 Ollama 前缀缓存，所以：
-      · 只在有 pending 时才返回非空；
-      · 文案按 kind 排序、截断到固定条数，同一状态下是**稳定字符串**。
+      · 有 pending → 只列未修项；没有 pending → 列**已落地**项（观察窗内也得能看见，
+        否则刚修好的那 24 小时里教训完全不进上下文，2026-11-24 实测缺陷）；
+      · 文案按 kind 排序、截断到固定条数，同一批教训下是**稳定字符串**
+        （不含时间/百分比/累计次数，避免每轮都变、废掉前缀缓存）。
     """
     # 顺带做一次 RSI 采样（内部节流：1 小时最多一条）。
     # ⚠️ 放在 `if not pend: return ""` 之前 —— 没有待办时 RSI 照样需要序列点，
@@ -681,7 +700,33 @@ def hint(max_n: int = 4, max_chars: int = 700) -> str:
         return ""
     pend = a.get("pending") or []
     if not pend:
-        return ""
+        # ⚠️⚠️ 2026-11-24 实测缺陷（用户要求「教训要能被看见」）：
+        #   6 条教训全部处在观察窗内（verifying 2 / confirming 4）时 pending 为空，
+        #   于是 hint() 返回 ""，**教训一个字都不进上下文** —— 而观察窗最长
+        #   OBSERVE_CONFIRM_HOURS（24 小时）。也就是说：教训刚落地、最该被遵守的
+        #   那段时间，反而完全看不见。这里补一段「已落地」摘要。
+        #   ⚠️ 必须是**稳定字符串**：只列 kind + 改法摘要，不含时间/百分比/累计次数
+        #   （那些会变，且已验证会破坏前缀缓存）。verifying→confirming→fixed
+        #   的状态迁移不改变这段文本，只有教训集合本身变了才变。
+        landed = (a.get("confirming") or []) + (a.get("verifying") or []) \
+            + (a.get("fixed") or [])
+        seen, items = set(), []
+        for r in sorted(landed, key=lambda x: str(x.get("kind") or "")):
+            k = str(r.get("kind") or "").strip()
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            items.append(r)
+        if not items:
+            return ""
+        lines = ["\n【历史教训（已落地，别再犯）】",
+                 "下面这些是前几轮反思发现、**代码里已经修好**的问题。"
+                 "本轮如果碰到同类情况，直接按「改法」做，别重新想一遍："]
+        for r in items[:max_n]:
+            fix = " ".join(str(r.get("fix") or "").split())[:100]
+            lines.append("- 「%s」%s" % (r.get("kind"), ("：" + fix) if fix else ""))
+        s = "\n".join(lines) + "\n"
+        return s[:max_chars]
     lines = ["\n【历史教训（未修完，别重复踩）】"]
     # RSI 当前最弱项：让主循环知道「整体最该修哪一项」。
     # 没有这行，模型只看到零散教训，不知道该先动哪个。

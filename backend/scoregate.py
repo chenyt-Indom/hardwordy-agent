@@ -162,7 +162,9 @@ def _auto_score_once(force: bool = False) -> Dict[str, Any]:
             _tot = (now or {}).get("total")
             if _pv is not None and _tot is not None:
                 _delta = round(float(_tot) - float(_pv), 2)
-                if _delta < 0:
+                # ⚠️ 2026-11-24：两处判定必须同一口径。原来这里也是 `_delta < 0`，
+                #   于是「后台自动评分」这条路上 0.5 分的噪声照样会记账 + 起修复。
+                if _delta < -_NOISE_BAND:
                     _rec = {"iso": _now(), "ts": time.time(), "prev": _pv,
                             "total": _tot, "delta": _delta,
                             "verdict": "regressed", "cost_s": cost,
@@ -392,6 +394,36 @@ def pending() -> Dict[str, Any]:
 _SCHEMA = 3      # 3: 能力分文件数排除 _tmp*/_probe*（口径修正，需重建基准）
 
 
+# ---------------------------------------------------------------- 进退判定
+# ⚠️⚠️ 2026-11-24 实测缺陷（「跑分退步」×7 的真正来源）：
+#   原来判定是 `delta < 0 → regressed` —— 一分不差地拿两次评分硬比。
+#   但评分本身有噪声。实测 scoregate.json 的 5 次 regressed 里，
+#   **4 次跌幅只有 0.44~0.5 分**，而且是同一版本在 24 秒内来回跳：
+#     00:43:19  154.59  −0.5  判「退步」
+#     00:44:13  155.09  +0.5  判「进步」
+#   每一次误判都会：沉淀一条「跑分退步」教训 + 起自动修复（最多 3 轮），
+#   既烧 token，又可能把本来没坏的代码改坏 —— 教训库里最高频的那条
+#   「跑分退步（低于上一版）」×7 就是这么攒出来的。
+#   现在给判定加一条**噪声带**：跌幅在 1 分以内算「持平」。
+#   1 分 ≈ 总分（~170）的 0.6%，是实测噪声幅度（±0.5）的 2 倍；
+#   真实退步（实测有一次 −7.0）远在带外。
+#   权衡：会漏掉 −0.8 这种微小退步 —— 但漏一次的代价远小于误触发一轮
+#   自动修复；而且 delta 原值仍照实记进 gates / 账本，信息没丢。
+_NOISE_BAND = 1.0
+
+
+def _verdict_of(delta):
+    """跌幅在噪声带内一律判持平；带外才分进步/退步。"""
+    if delta is None:
+        return "unknown"
+    d = float(delta)
+    if d > _NOISE_BAND:
+        return "improved"
+    if d < -_NOISE_BAND:
+        return "regressed"
+    return "flat"
+
+
 def _prev_score(d: Dict[str, Any]):
     """上一次的**完整**评分（分项都在，才能算清是哪一块掉的）。"""
     s = d.get("last_score")
@@ -420,7 +452,12 @@ def _msg(rec: Dict[str, Any]) -> str:
                 % (pv, tv, d, {"improved": "进步", "regressed": "退步",
                                "flat": "持平",
                                "rebased": "评分口径升级，本轮重建基准、不计进退"}
-                   .get(rec.get("verdict"), "未知")))
+                    .get(rec.get("verdict"), "未知")))
+        if rec.get("verdict") == "flat" and d:
+            # 2026-11-24：判定加了噪声带，这里必须说清「-0.5 为什么算持平」，
+            # 否则用户看到负 delta 却说持平会以为算错了。
+            head += ("（变动在噪声带 ±%.1f 分内，判持平，不触发自动修复）"
+                     % _NOISE_BAND)
     lines = [head]
     # ★ 2026-11-22 总分改无上限后，必须把两段拆开说，否则模型看到「143.8 分」
     #   会误以为质量段超过 100（其实质量段永远 ≤100，超出部分来自能力跑分）。
@@ -585,8 +622,10 @@ def gate(force: bool = False, note: str = "",
             verdict = "unknown"
         else:
             delta = round(float(total) - float(pv), 2)
-            verdict = ("improved" if delta > 0
-                       else ("regressed" if delta < 0 else "flat"))
+            # ⚠️ 2026-11-24：改用噪声带判定（见 _verdict_of 的注释）。
+            #   原来 `delta < 0` 就把 0.5 分的评分波动判成「退步」，
+            #   进而触发自动修复 —— 那是误判，不是改进。
+            verdict = _verdict_of(delta)
         # 写进累计分账本（累加 + 归因 + history 一条）
         res = {}
         try:
