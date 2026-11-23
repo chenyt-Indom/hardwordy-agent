@@ -128,3 +128,9 @@ _pack_chunk.py
 # ---- 诊断脚本与临时日志（2026-11-11 加：CDP 探针/打包日志，不进版本库也不进交付包）----
 _bench/
 _bench_*.log
+
+# 自迭代的临时探针/转储（2026-11-23 起，别入库）
+backend/_tmp_*
+backend/_probe_*
+backend/*.pyc_check
+backend/*.bak-*
