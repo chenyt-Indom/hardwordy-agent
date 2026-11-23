@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 # 同一 kind 未修多少次就升级（用户 2026-11-23 选：≥3 次强制升级到待批准）
 ESCALATE_AT = 3
 
+# 改完之后要观察多久才敢判「真修好了」（小时）。
+# 太短 = 刚改完就自封修好（实测：任何无关改动刷新 mtime 就会把旧教训判成 fixed）。
+OBSERVE_HOURS = 6.0
+
 
 def _data_dir() -> str:
     """沿用 self_iterate 的数据目录（MM_DATA_DIR 可隔离，测试用）。"""
@@ -123,6 +127,198 @@ def _probe_hit(rel: str, needle: str) -> bool:
         return False
 
 
+# --------------------------------------------------------------------------
+# 行为探针（2026-11-23 修正）
+#
+# ⚠️ 原来 PROBES 的 needle 是 `anchor_miss` / `no_change` / `parse_fail` 这类
+#    **失败事件名**，而它们本来就写在「记录这次失败」的代码里
+#    （例：jsonfix 里 actlog.record("jsonfix", "parse_fail")），
+#    所以 audit() 恒判 done —— 实测 6 条教训全「已修」、pending 恒空、
+#    auto_fix 永远返回「没有未落地的教训」、lesson_auto.json 从未生成，
+#    一条教训都没被真正修过。**假阳性比没检查更危险**。
+#
+# 现在用两条独立证据，任一足以支撑才判 fixed：
+#   A. 行为证据：这条教训对应 fail kind 在「修复之后」**没再复发**；
+#   B. 改动证据：该文件在教训记录之后**真的被改过**（actlog 成功改动 / mtime）。
+#   两个都没有 → pending（只说不做）。
+# --------------------------------------------------------------------------
+
+def _fail_attr_path() -> str:
+    return os.path.join(_data_dir(), "fail_attribution.jsonl")
+
+
+def _read_jsonl(p: str) -> list:
+    out = []
+    if not os.path.isfile(p):
+        return out
+    try:
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:                       # noqa: BLE001
+                    continue
+                if isinstance(o, dict):
+                    out.append(o)
+    except OSError:
+        logger.debug("读 %s 失败", p, exc_info=True)
+    return out
+
+
+def _num_ts(v) -> float:
+    """时间戳归一化：float / 'YYYY-MM-DD HH:MM:SS' 都认，认不出返回 0。"""
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v or "").strip()
+    if not s:
+        return 0.0
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return time.mktime(time.strptime(s[:19] if len(s) >= 19 else s, fmt))
+        except (ValueError, OverflowError):
+            continue
+    return 0.0
+
+
+def _last_ok_edit(rel: str) -> float:
+    """该文件「最近一次被改动」的时间戳 = max(actlog 成功改动, 文件 mtime)。
+
+    actlog 里 result=ok 且 files 命中 → 说明这一版真的落盘了；
+    mtime 是兜底（有的改动走 selfdev_patch，不进 iter_runner 的账本）。
+    """
+    best = 0.0
+    rows = _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))
+    for r in rows:
+        if str(r.get("result") or "").lower() != "ok":
+            continue
+        files = r.get("files") or []
+        if not isinstance(files, list):
+            continue
+        if any(str(f).replace("\\", "/").endswith(rel) for f in files):
+            best = max(best, _num_ts(r.get("ts")))
+    p = os.path.join(_PROJECT_ROOT, rel.replace("/", os.sep))
+    try:
+        best = max(best, os.path.getmtime(p))
+    except OSError:
+        pass
+    return best
+
+
+def _recur_after(kind_zh: str, since: float) -> int:
+    """该 kind 在 since 之后复发了几次（0 = 修完之后没再犯）。"""
+    k = str(kind_zh or "").strip()
+    if not k:
+        return 0
+    n = 0
+    for r in _read_jsonl(_fail_attr_path()):
+        kz = str(r.get("kind_zh") or "").strip()
+        kk = str(r.get("kind") or "").strip()
+        if k not in (kz, kk):
+            continue
+        if _num_ts(r.get("ts") or r.get("iso")) > since:
+            n += 1
+    return n
+
+
+def judge(it: dict) -> dict:
+    """单条教训的真实判定（不靠模型自称，只看账本 + 文件）。
+
+    返回 {kind, status, evidence, recur, edited_at, probe}
+      fixed    —— 教训之后该文件真被改过，且同一 kind 之后没再复发
+      pending  —— 教训之后没改过这个文件（只说不做），或改完又复发
+      unprobed —— 没有可判定的文件，不瞎判
+    """
+    kind = str(it.get("kind") or "").strip()
+    t0 = _num_ts(it.get("ts") or it.get("iso"))
+    pr = PROBES.get(kind)
+    if not pr:
+        return {"kind": kind, "status": "unprobed", "recur": 0,
+                "edited_at": 0.0, "probe": "", "evidence": "没有可判定的文件"}
+    rel, needle = pr
+    edited = _last_ok_edit(rel)
+    recur = _recur_after(kind, max(t0, edited) if edited > t0 else t0)
+    hit = _probe_hit(rel, needle)
+    ev = {
+        "file": rel, "needle": needle, "code_hit": hit,
+        "edited_at": time.strftime("%m-%d %H:%M", time.localtime(edited)) if edited else "",
+        "lesson_at": time.strftime("%m-%d %H:%M", time.localtime(t0)) if t0 else "",
+        "recur": recur,
+    }
+    if edited <= t0:
+        return {"kind": kind, "status": "pending", "recur": recur,
+                "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+                "evidence": "教训之后该文件没有任何改动（只说不做）", "detail": ev}
+    if recur > 0:
+        return {"kind": kind, "status": "pending", "recur": recur,
+                "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+                "evidence": "改过，但之后又复发 %d 次" % recur, "detail": ev}
+    # 观察窗：刚改完还没被「下一次真实使用」检验过，不许自封修好
+    # （实测漏洞：任何无关改动刷新 mtime 就会把旧教训判成 fixed）
+    left = OBSERVE_HOURS * 3600.0 - (time.time() - edited)
+    if left > 0:
+        return {"kind": kind, "status": "verifying", "recur": 0,
+                "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+                "evidence": "改过、暂未复发，观察中（还差 %.1f 小时）" % (left / 3600.0),
+                "detail": ev}
+    return {"kind": kind, "status": "fixed", "recur": 0,
+            "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+            "evidence": "改过且未复发（代码探针%s）" % ("命中" if hit else "未命中"),
+            "detail": ev}
+
+
+def rsi_index(limit: int = 400) -> dict:
+    """客观 RSI 指数（0~100）—— 只用可复现账本，**不含 LLM 自评**。
+
+    为什么必须换掉自评：94 次评估的跨评估斜率 0.001、标准差 1.74（10 分制），
+    噪声比任何真实改进都大 —— 拿它当目标函数，斜率天然是 0，看不出有没有进步。
+
+    四项（各自 0~1，加权平均后 ×100）：
+      1) 动作成功率   actlog: ok / (ok+fail)          —— 改得动不动
+      2) 幽灵率       1 - phantom / 有标记的动作      —— 声称改了其实没改
+      3) 教训落地率   fixed / (fixed+pending)         —— 学到的东西有没有落地
+      4) 静态质量     1 - min(1,(high*3+mid)/10)      —— 代码本身有没有变差
+    """
+    rows = _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))[-max(20, limit):]
+    ok = sum(1 for r in rows if str(r.get("result") or "").lower() == "ok")
+    bad = sum(1 for r in rows if str(r.get("result") or "").lower() in ("fail", "failed", "error"))
+    marked = [r for r in rows if r.get("phantom") is not None]
+    ph = sum(1 for r in marked if r.get("phantom") is True)
+    a = audit()
+    fx = len(a.get("fixed") or a.get("done") or [])
+    pd_ = len(a.get("pending") or []) + len(a.get("verifying") or [])
+    hi = mid = 0
+    try:
+        au = json.load(open(os.path.join(_data_dir(), "audits.json"), encoding="utf-8"))
+        it0 = (au.get("items") or [{}])[0]
+        c = it0.get("counts") or {}
+        hi, mid = int(c.get("high") or 0), int(c.get("mid") or 0)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读 audits 失败", exc_info=True)
+    parts = []
+    if ok + bad:
+        parts.append(("动作成功率", ok / (ok + bad), 0.40,
+                      "%d/%d" % (ok, ok + bad)))
+    if marked:
+        parts.append(("无幽灵率", 1 - ph / len(marked), 0.15,
+                      "幽灵 %d/%d" % (ph, len(marked))))
+    if fx + pd_:
+        parts.append(("教训落地率", fx / (fx + pd_), 0.25, "%d/%d" % (fx, fx + pd_)))
+    parts.append(("静态质量", max(0.0, 1 - min(1.0, (hi * 3 + mid) / 10.0)), 0.20,
+                  "high %d / mid %d" % (hi, mid)))
+    tw = sum(p[2] for p in parts) or 1.0
+    score = round(100 * sum(p[1] * p[2] for p in parts) / tw, 1)
+    return {"ok": True, "score": score,
+            "parts": [{"name": n, "value": round(v, 3), "weight": w, "detail": d}
+                      for n, v, w, d in parts]}
+
+
 def audit() -> dict:
     """逐条核验教训「到底修没修」，返回分状态清单。
 
@@ -134,20 +330,11 @@ def audit() -> dict:
     items = load()
     rows = []
     for it in items:
-        kind = str(it.get("kind") or "").strip()
-        pr = PROBES.get(kind)
-        if not pr:
-            rows.append({"kind": kind, "status": "unprobed",
-                         "count": int(it.get("count") or 1),
-                         "fix": str(it.get("fix") or "")[:200]})
-            continue
-        rel, needle = pr
-        rows.append({"kind": kind,
-                     "status": "done" if _probe_hit(rel, needle) else "pending",
-                     "count": int(it.get("count") or 1),
-                     "probe": "%s 含 %r" % (rel, needle),
-                     "fix": str(it.get("fix") or "")[:200],
-                     "will_fix": bool(it.get("will_fix"))})
+        j = judge(it)
+        j["count"] = int(it.get("count") or 1)
+        j["fix"] = str(it.get("fix") or "")[:200]
+        j["will_fix"] = bool(it.get("will_fix"))
+        rows.append(j)
     # 同 kind 合并（只保留最严重的一条）
     merged: dict[str, dict] = {}
     for r in rows:
@@ -156,20 +343,24 @@ def audit() -> dict:
         if old is None:
             merged[k] = r
             continue
-        # done 优先于 pending 优先于 unprobed
-        rank = {"done": 0, "pending": 1, "unprobed": 2}
+        # fixed 优先于 verifying 优先于 pending 优先于 unprobed
+        rank = {"fixed": 0, "verifying": 1, "pending": 2, "unprobed": 3}
         if rank[r["status"]] < rank[old["status"]]:
             merged[k] = r
         merged[k]["count"] = max(int(old.get("count") or 1),
                                  int(r.get("count") or 1))
     out = list(merged.values())
-    out.sort(key=lambda x: ({"pending": 0, "unprobed": 1, "done": 2}[x["status"]],
+    out.sort(key=lambda x: ({"pending": 0, "verifying": 1, "unprobed": 2,
+                             "fixed": 3}[x["status"]],
                             -int(x.get("count") or 1)))
     return {
         "ok": True,
         "total": len(out),
-        "done": [r for r in out if r["status"] == "done"],
+        # fixed 是标准名；done 保留给旧调用方（scheduler/main 用 a["done"]）
+        "fixed": [r for r in out if r["status"] == "fixed"],
+        "done": [r for r in out if r["status"] == "fixed"],
         "pending": [r for r in out if r["status"] == "pending"],
+        "verifying": [r for r in out if r["status"] == "verifying"],
         "unprobed": [r for r in out if r["status"] == "unprobed"],
         "rows": out,
     }
@@ -432,7 +623,8 @@ def auto_fix(max_n: int = 1, submit: bool = True, cooldown_hours: float = 24.0) 
       · 走 iter_runner 的正规链路（备份 / 验证 / 回归 / 跑分 / 可回滚）。
     """
     a = audit()
-    pend = [r for r in (a.get("pending") or []) if r.get("probe")]
+    pend = [r for r in (a.get("pending") or [])
+            if r.get("probe") and r.get("status") == "pending"]
     if not pend:
         return {"ok": True, "submitted": [], "msg": "没有未落地的教训"}
     st = _auto_state()

@@ -1,0 +1,26 @@
+{
+ "counts": {
+  "high": 0,
+  "mid": 0,
+  "low": 0,
+  "info": 1
+ },
+ "counts_scored": {
+  "high": 0,
+  "mid": 0,
+  "low": 0,
+  "info": 0
+ },
+ "findings": [
+  {
+   "level": "info",
+   "kind": "subprocess-global-patched",
+   "file": "backend/main.py",
+   "line": 76,
+   "msg": "检测到 28 处 subprocess 直接调用，但 procwin.install_nowin_patch() 已全局兜住（实测窗口数 0），故不逐处报 high/mid",
+   "hint": "显式传 creationflags=procwin.NOWIN 更稳妥；位置：avatar2.py:474, avatar2.py:515, avatar2.py:481, avatar_cloud.py:577, avatar_cloud.py:684, avatar_cloud.py:707, avatar_cloud.py:565, avatar_cloud.py:588, avatar_cloud.py:641, deploy_keys.py:386…",
+   "noscore": true
+  }
+ ],
+ "static": {}
+}

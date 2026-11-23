@@ -587,8 +587,10 @@ def _run_selfexp(job: dict) -> dict:
     try:
         from . import lessonloop as _ll
         _la = _ll.audit()
-        lines.append("- 教训闭环：已修 %d 条 / 未落地 %d 条"
-                     % (len(_la.get("done") or []), len(_la.get("pending") or [])))
+        lines.append("- 教训闭环：已修 %d 条 / 观察中 %d 条 / 未落地 %d 条"
+                     % (len(_la.get("done") or []),
+                        len(_la.get("verifying") or []),
+                        len(_la.get("pending") or [])))
         _af = _ll.auto_fix(max_n=1)
         _subs = _af.get("submitted") or []
         for _x in _subs:

@@ -1,0 +1,41 @@
+backend/kb.py:37  slide_suppressed=True
+        # 纯中文段：2-gram
+        if re.fullmatch(r"[\u4e00-\u9fa5]+", ch):
+            for i in range(len(ch) - 1):
+                tokens.append(ch[i:i + 2])
+            # 保留单字符边界，避免 2 字词内部信息丢失
+
+backend/main.py:1143  slide_suppressed=True
+    #    后面的一律被静默丢弃 —— 这个坑踩过），所以并进本轮用户消息的开头。
+    _dangling = any(out[k].get("role") == "user" and out[k + 1].get("role") == "user"
+                    for k in range(len(out) - 1))
+    for i in range(len(out) - 1, -1, -1):
+        if out[i].get("role") != "user":
+
+backend/memory.py:357  slide_suppressed=True
+    for ch in re.findall(r"[\u4e00-\u9fa5_a-zA-Z0-9]+", (text or "").lower()):
+        if re.fullmatch(r"[\u4e00-\u9fa5]+", ch):
+            for i in range(len(ch) - 1):
+                tokens.append(ch[i:i + 2])
+            if len(ch) == 1:
+
+backend/self_iterate.py:2996  slide_suppressed=True
+    zh = re.sub(r"[^\u4e00-\u9fff]", "", q)
+    if zh:
+        grams = [zh[i:i + 2] for i in range(len(zh) - 1)] or [zh]
+        if sum(1 for g in grams if g in blob) >= max(1, len(grams) // 2):
+            return True
+
+backend/tools.py:8407  slide_suppressed=True
+    if x in y or y in x:
+        return True
+    gx = {x[i:i + 2] for i in range(len(x) - 1)} or {x}
+    gy = {y[i:i + 2] for i in range(len(y) - 1)} or {y}
+    inter = len(gx & gy)
+
+backend/tools.py:8408  slide_suppressed=True
+        return True
+    gx = {x[i:i + 2] for i in range(len(x) - 1)} or {x}
+    gy = {y[i:i + 2] for i in range(len(y) - 1)} or {y}
+    inter = len(gx & gy)
+    return inter / float(len(gx | gy) or 1) >= 0.7
