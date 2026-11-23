@@ -83,6 +83,13 @@ _STATE = {
     "fail_chain": 0,
     "reports": [],       # 每个功能完成后的 markdown 报告（新的在前）
     "budget": 0,         # 本轮连续自动迭代已完成的功能数（上限见 _MAX_AUTO_ROUNDS）
+    # ★ 2026-11-23 回合收尾强制证据检查（见文件下方「回合收尾证据」一节）：
+    #   regress          = 本轮**真跑过**的回归结果（唯一的通过率证据来源）
+    #   regress_round_at = 本轮起点；早于它的回归记录不算「本轮的」
+    #   last_closeout    = 最近一次收尾检查的完整结果（前端/诊断可直接读）
+    "regress": None,
+    "regress_round_at": 0.0,
+    "last_closeout": None,
 }
 _FILE = _si._DATA / "task.json"
 
@@ -129,6 +136,17 @@ _LOCK_RETRY_DELAY = 20
 # ★ 2026-11-23：撞执行锁最多重试几次。原来没有上限，只要那条执行卡着，
 #   就会每 20 秒重试一次、永远不停（实测无限循环）。
 _MAX_LOCK_RETRY = 3
+
+# ★ 2026-11-23 本轮需求：**单次改动的文件数上限，从「无限制」降到 3 个**。
+#   它和「跑分退步」是同一个根因的两面：
+#     · 一次改十几个文件时，分数掉了也归因不到具体是哪个文件弄的；
+#     · 出问题要整轮回滚，代价随文件数线性放大；
+#     · 本轮新增的静态扣分点散落在多个文件里，评分前的自动修更容易漏。
+#   收紧到 3 个之后，「一次改动」小到能被验证、被归因、被回滚。
+#   ⚠️ 这只是**本轮改动集**的上限，不是「验证只看 3 个文件」：超出的文件照样
+#   做语法/自检（见 _verify_once），但会被明确记成「超上限，留给下一轮」，
+#   写进事件与遗留清单 —— 绝不静默丢掉（静默丢文件正是本项目反复踩的坑）。
+_MAX_CHANGE_FILES = 3
 
 # ★ 2026-11-20 修（用户报「卡住不动了」）：
 #   重启后 _STATE["running"] 会从 task.json 恢复出来，但那条的 worker 线程
@@ -481,6 +499,52 @@ def _emit(tid, kind, **kw):
 
 
 # ------------------------------------------------------------------ 查询
+
+def _clip_change_files(files, limit=None):
+    """按上限裁「单次改动的文件集」。返回 (kept, dropped)。
+
+    去重 + 保序（先出现的优先保留）；limit 不传就用 _MAX_CHANGE_FILES。
+    纯函数，不落盘、不发事件 —— 便于测试与复用。
+    """
+    lim = int(limit if limit is not None else _MAX_CHANGE_FILES)
+    if lim <= 0:
+        lim = _MAX_CHANGE_FILES
+    kept, dropped, seen = [], [], set()
+    for f in (files or []):
+        s = str(f or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        (kept if len(kept) < lim else dropped).append(s)
+    return kept, dropped
+
+
+def change_scope(files, tid="", where="verify", notify=True):
+    """把本轮改动集按上限裁一遍，并把「超上限」**说出来**。
+
+    返回 {"files": kept, "dropped": [...], "all_n": N, "limit": 3}。
+    超出的文件不进「本轮改动集」（不参与评分/验证的归因），但会：
+      ① 发一条 step 事件点名，界面上看得见；
+      ② 由调用方写进遗留清单，下一轮接着改。
+    静默丢弃是绝对不允许的 —— 用户会以为「都改完了」。
+    """
+    kept, dropped = _clip_change_files(files)
+    all_n = len(kept) + len(dropped)
+    if dropped and notify:
+        try:
+            _emit(str(tid or "_sys"), "step",
+                  text="单次改动文件数超上限（%d > %d）：本轮只认 %s；"
+                       "超出的 %s 不静默丢弃，记进遗留清单下一轮再改"
+                       % (all_n, _MAX_CHANGE_FILES,
+                          "、".join(kept) or "无",
+                          "、".join(dropped[:6])
+                          + ("…" if len(dropped) > 6 else "")))
+        except Exception:                                # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+    return {"files": kept, "dropped": dropped, "all_n": all_n,
+            "limit": _MAX_CHANGE_FILES}
+
+
 def mark_verify(plan_id, title="", files=None, tid="", source="direct"):
     """登记「刚改完、还没验证」—— 供**非队列路径**使用。
 
@@ -498,13 +562,21 @@ def mark_verify(plan_id, title="", files=None, tid="", source="direct"):
     if not files:
         return {"ok": False, "why": "这次没有改动任何文件，无需验证"}
     pid = str(plan_id or "")
+    # ★ 2026-11-23 本轮需求：单次改动文件数上限从「无限制」（原来是 [:20]，
+    #   实际等于不限）降到 3 个。超出的进 files_over_cap，由收尾写进遗留清单，
+    #   绝不静默丢掉。直接执行路径和队列路径用同一套裁剪。
+    _scope = change_scope(files, tid=tid, where="mark_verify")
+    files = _scope["files"]
     with _LOCK:
         prev = _STATE.get("verify") or {}
         rec = {
             "tid": tid or ("direct_%s" % (pid or int(time.time()))),
             "plan_id": pid,
             "title": str(title or "")[:120],
-            "files": files[:20],
+            "files": files,
+            "files_all": _scope["all_n"],
+            "files_over_cap": _scope["dropped"],
+            "files_limit": _MAX_CHANGE_FILES,
             # 同一功能反复修时轮次要累加，不能每轮清零
             "tries": int(prev.get("tries") or 0) if prev.get("plan_id") == pid else 0,
             "at": time.time(),
@@ -514,8 +586,11 @@ def mark_verify(plan_id, title="", files=None, tid="", source="direct"):
     _save()
     try:
         _emit(rec["tid"], "status",
-              text="已登记待验证：%s（%d 个文件）—— 重启后自动验证、跑分"
-                   % (rec["title"] or pid or "未命名", len(rec["files"])),
+              text="已登记待验证：%s（%d 个文件%s）—— 重启后自动验证、跑分"
+                   % (rec["title"] or pid or "未命名", len(rec["files"]),
+                      "，单次改动上限 %d、超出的 %d 个顺延到下一轮"
+                      % (_MAX_CHANGE_FILES, len(_scope["dropped"]))
+                      if _scope["dropped"] else ""),
               state="running", verified=False)
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
@@ -804,6 +879,9 @@ def _worker(item):
     # ★ 2026-11-20：撞到「另一个执行占着锁」时置 True —— 把任务放回队首稍后重试，
     #   而不是报一张「没有可执行的动作」的假失败卡。
     requeued = False
+    # ★ 2026-11-23 本轮需求：单次改动上限 3 个文件，超出的那几个记在这里，
+    #   收尾时写进遗留清单（本轮判未闭环 → 下一轮接着改）。
+    _over_cap = []
 
     # ★ 2026-11-20：只有 running 槽位确实是自己时才干活。
     #   防止被别的路径顶掉之后出现两个 worker 同时改代码。
@@ -838,6 +916,9 @@ def _worker(item):
             logger.debug("写阶段流水失败（不影响迭代）", exc_info=True)
 
     try:
+        # ★ 2026-11-23 回合收尾强制证据检查：新的一轮开始，上一轮跑过的回归
+        #   结果不再算本轮的证据（否则收尾会拿旧数字充数）。
+        _round_begin("task:%s" % str(item.get("title") or plan_id or "")[:60])
         _stage("queued", "已提交执行，等待开始")
         _emit(tid, "step", text="读取计划并确定要执行的动作…")
         # 信任模式：先把 pending 全批准（高风险也批，但会在结果里点出来）
@@ -912,6 +993,12 @@ def _worker(item):
                 _emit(tid, "status",
                       text="已终止（等待重试期间被手动终止，不会再跑）",
                       state="cancelled", _force_save=True)
+                _emit_closeout(
+                    tid, title=_cur_title or str(item.get("title") or ""),
+                    plan_id=plan_id,
+                    header="**本轮迭代收尾**：用户在等待重试期间终止",
+                    problems=["用户手动终止：动作没跑完"],
+                    allow_run=False)
                 _finish(tid, "cancelled", ok_n, fail_n, skip_n, changed,
                         "用户手动终止（撞执行锁后、重试前被终止）")
                 return
@@ -923,6 +1010,14 @@ def _worker(item):
                 _emit(tid, "error",
                       text="连续 %d 次撞到「另一个执行正在进行」，已停止重试："
                            "那条执行可能卡住了，确认后请手动重新提交" % (_try - 1))
+                _emit_closeout(
+                    tid, title=_cur_title or str(item.get("title") or ""),
+                    plan_id=plan_id,
+                    header="**本轮迭代收尾**：撞执行锁 %d 次，已停止重试"
+                           % (_try - 1),
+                    problems=["撞到「另一个执行正在进行」%d 次：本轮根本没跑起来"
+                              % (_try - 1)],
+                    allow_run=False)
                 _finish(tid, "failed", ok_n, fail_n, skip_n, changed,
                         "撞执行锁重试 %d 次仍失败（另一条执行一直没释放）" % (_try - 1))
                 return
@@ -988,6 +1083,11 @@ def _worker(item):
                 _bg.mark_auto_change(changed, note="自动迭代：%s" % str(item.get("title") or "")[:60])
             except Exception:                            # noqa: BLE001
                 logger.debug("标记自动迭代改动失败（不影响迭代）", exc_info=True)
+            # ★ 2026-11-23 本轮需求：单次改动文件数上限 3 个。
+            #   超出部分不进「本轮改动集」（评分/归因只看 ≤3 个），但会：
+            #   ① 发事件点名；② 进下面的遗留清单 → 本轮判未闭环 → 下一轮接着改。
+            _scope = change_scope(changed, tid=tid, where="worker")
+            _over_cap = list(_scope["dropped"])
             _auto = True
             # 真正在做的那条动作名（action_start 已把 running.title 更新过）
             with _LOCK:
@@ -1000,7 +1100,10 @@ def _worker(item):
                     _STATE["verify"] = {
                         "tid": tid, "plan_id": plan_id,
                         "title": _cur_title,
-                        "files": changed[:20],
+                        "files": _scope["files"],
+                        "files_all": _scope["all_n"],
+                        "files_over_cap": _over_cap,
+                        "files_limit": _MAX_CHANGE_FILES,
                         # 同一功能反复修时轮次要累加，不能每轮清零
                         "tries": int(prev.get("tries") or 0)
                                  if prev.get("plan_id") == plan_id else 0,
@@ -1023,7 +1126,10 @@ def _worker(item):
                     _STATE["verify"] = {
                         "tid": tid, "plan_id": plan_id,
                         "title": _cur_title,
-                        "files": changed[:20],
+                        "files": _scope["files"],
+                        "files_all": _scope["all_n"],
+                        "files_over_cap": _over_cap,
+                        "files_limit": _MAX_CHANGE_FILES,
                         "tries": int(prev.get("tries") or 0)
                                  if prev.get("plan_id") == plan_id else 0,
                         "at": time.time(),
@@ -1087,6 +1193,36 @@ def _worker(item):
                 fail_n = fail_n or 1
                 err_all = ((err_all or "") + " no_change：声称新建的文件不存在：%s"
                            % "、".join(_miss[:3])).strip()
+        # ★ 2026-11-23 回合收尾强制证据检查（用户要求「不允许静默结束」）：
+        #   在发这一轮的最终回复**之前**，强制查两项并写清楚：
+        #     ① 本轮回归跑了没、通过率是不是 100%（没跑过就当场拉起一次）；
+        #     ② 遗留清单（验证问题 / 失败动作 / 没做完的动作）为空 ——
+        #        空也要明说「遗留：无」。
+        #   任何一项没满足，回复最后一行就是「⚠️ 本轮未闭环：<原因>」。
+        _extra = []
+        if cancelled:
+            _extra.append("用户手动终止：动作没跑完，本轮不算闭环")
+        if ok_n and not changed:
+            _extra.append("动作声称成功但一个文件都没改（no_change）")
+        if requeued:
+            _extra.append("撞到「另一个执行正在进行」，任务已放回队列等重试")
+        if _over_cap:
+            # ★ 单次改动文件数上限 3：超出的这几个**明写进遗留**，
+            #   本轮因此判未闭环（下一轮接着改），而不是悄悄当成改完了。
+            _extra.append("单次改动超上限（%d > %d）：%s 未纳入本轮，下一轮再改"
+                          % (len(_over_cap) + _MAX_CHANGE_FILES, _MAX_CHANGE_FILES,
+                             "、".join(_over_cap[:4])
+                             + ("…" if len(_over_cap) > 4 else "")))
+        _ttl = _cur_title or str(item.get("title") or "") or "未命名功能"
+        _emit_closeout(
+            tid, title=_ttl, plan_id=plan_id,
+            header="**本轮迭代收尾**：%s（成功 %d 条，失败 %d 条%s）" % (
+                _ttl, ok_n, fail_n, "，跳过 %d 条" % skip_n if skip_n else ""),
+            problems=[err_all] if err_all else [],
+            extra=_extra,
+            # 只有真改了文件才值得当场跑一遍回归（约 10 秒）；没改动的一轮
+            # 就如实记「本轮没跑过回归」→ 收尾照样判未闭环，不拿旧数字充数。
+            allow_run=bool(changed))
         _finish(tid, "cancelled" if cancelled else ("done" if ok_n else "failed"),
                 ok_n, fail_n, skip_n, changed,
                 _cancel_reason or err_all)
@@ -1101,6 +1237,15 @@ def _worker(item):
         _emit(tid, "status", text="迭代出错：%s: %s" % (type(e).__name__, e),
               state="error")
         _emit(tid, "error", text="%s: %s" % (type(e).__name__, e), tb=tb)
+        # ★ 2026-11-23 收尾强制证据检查：出错同样是「一轮结束」，照样要给出
+        #   回归通过数 + 遗留清单，并以「⚠️ 本轮未闭环：…」结尾（不允许静默结束）。
+        _emit_closeout(
+            tid, title=_cur_title or str(item.get("title") or ""),
+            plan_id=plan_id,
+            header="**本轮迭代出错**：%s: %s" % (type(e).__name__, e),
+            problems=["迭代出错：%s: %s" % (type(e).__name__, e)],
+            extra=["代码可能在改到一半时中断，请人工确认后再重跑"],
+            allow_run=False)
         _finish(tid, "error", ok_n, fail_n, skip_n, changed,
                 "%s: %s" % (type(e).__name__, e))
     finally:
@@ -1355,6 +1500,10 @@ def _verify_once(files):
             rr = runner(scope="quick", timeout=300)
         except TypeError:
             rr = runner(scope="quick")
+        # ★ 2026-11-23 回合收尾强制证据检查：真跑过的回归结果必须留痕。
+        #   原来这里只把失败塞进 problems，**通过的数字直接丢了** —— 收尾时
+        #   就答不出「本轮回归过了几条、通过率多少」，只能含糊地说「没问题」。
+        _record_regress(rr, where="verify_once")
         if not rr.get("ok"):
             problems.append("回归失败 %d/%d 条：%s" % (
                 int(rr.get("failed") or 0), int(rr.get("total") or 0),
@@ -1363,6 +1512,265 @@ def _verify_once(files):
         problems.append("回归没跑成：%s: %s" % (type(e).__name__, e))
 
     return (not problems), problems
+
+
+# ------------------------------------------------------------------ 回合收尾证据
+# ★ 2026-11-23 用户要求「回合收尾强制证据检查：回归通过数 + 遗留清单」。
+#
+# 要解决的不是「验证没跑」，而是**跑完了却静默结束**：一轮结束时的回复里
+# 既没有「回归到底过了几条」，也没有「还剩什么事没做完」，用户没法判断
+# 这一轮闭环没有，只能自己猜 —— 而猜错的代价是「以为改好了，其实还烂着」。
+#
+# 所以回合收尾**不允许静默结束**，在发这一轮最终回复之前强制检查两项：
+#   ① 本轮是否**真跑过**回归，且通过率 100%（failed=0，且 passed>0）；
+#   ② 遗留清单是否为空 —— **空也要明说「遗留：无」**，不能拿沉默表示清白；
+# 任何一项没满足，就在最终回复的**最后一行**追加
+# 「⚠️ 本轮未闭环：<原因>」（前端 mdToHtml 把它渲染成高亮块，见 app.js）。
+#
+# 用户备注还要求收尾时把**测试和 RSI 一起拉起来**：
+#   · 测试：本轮没有回归证据时**当场拉起一次** quick 回归（run_disk，
+#     在子进程里读磁盘上的新代码，约 10 秒），而不是拿上一轮的数字充数；
+#   · RSI：当场采样一次并取「最该修的一项」，让「有没有改坏」（回归）和
+#     「有没有变好」（RSI）出现在同一条收尾回复里，各说各话才算证据。
+_CLOSEOUT_TAG = "⚠️ 本轮未闭环："
+# 回归证据算不算「本轮的」：必须晚于本轮起点；再给半小时的宽容期
+_CLOSEOUT_TTL = 1800.0
+# 收尾回复里最多列几条遗留（完整清单还在任务详情里）
+_CLOSEOUT_MAX_LEFT = 5
+
+
+def _record_regress(rr, tid="", where="verify"):
+    """把一次**真跑过**的回归结果记下来（回合收尾通过率的唯一来源）。
+
+    只留结构化数字与失败用例名，不留 items 详情 —— task.json 已经很大，
+    收尾要回答的只有「过了几条 / 共几条 / 谁没过」。
+    """
+    if not isinstance(rr, dict):
+        return {}
+    try:
+        total = int(rr.get("total") or 0)
+        passed = int(rr.get("passed") or 0)
+        failed = int(rr.get("failed") or 0)
+        skipped = int(rr.get("skipped") or 0)
+    except (TypeError, ValueError):
+        return {}
+    rec = {"ok": bool(rr.get("ok")) and failed == 0,
+           "total": total, "passed": passed, "failed": failed,
+           "skipped": skipped,
+           "scope": str(rr.get("scope") or "quick"),
+           "seconds": rr.get("seconds"),
+           "summary": str(rr.get("summary") or "")[:300],
+           "failed_items": [str((x or {}).get("name") or "")
+                            for x in (rr.get("failed_items") or [])
+                            if isinstance(x, dict)][:5],
+           "error": str(rr.get("error") or "")[:200],
+           "tid": str(tid or ""), "where": str(where or ""),
+           "at": time.time()}
+    with _LOCK:
+        _STATE["regress"] = rec
+    return rec
+
+
+def _round_begin(where=""):
+    """标记「新一轮开始」：之前记的回归结果不再算本轮的证据。
+
+    必须在新一轮动手之前调用，否则上一轮跑过的回归会被当成这一轮的通过率。
+    """
+    with _LOCK:
+        _STATE["regress_round_at"] = time.time()
+        _STATE["regress"] = None
+    logger.debug("回合开始：%s", where or "-")
+
+
+def _regress_evidence(tid="", allow_run=True):
+    """取本轮回归证据；本轮没跑过就**当场拉起一次**（用户备注要求）。
+
+    allow_run=False 时只读已有记录（例如这一轮压根没改文件，没必要白跑 10 秒，
+    但会如实记成「本轮没跑过回归」→ 收尾判未闭环）。
+    """
+    now = time.time()
+    with _LOCK:
+        rec = dict(_STATE.get("regress") or {})
+        t0 = float(_STATE.get("regress_round_at") or 0)
+    if rec:
+        _at = float(rec.get("at") or 0)
+        if _at >= t0 - 1.0 and (now - _at) <= _CLOSEOUT_TTL:
+            rec["fresh"] = True
+            return rec
+    if not allow_run:
+        rec["fresh"] = False
+        return rec
+    try:
+        from . import regress as _rgc
+        runner = getattr(_rgc, "run_disk", None) or _rgc.run
+        try:
+            rr = runner(scope="quick", timeout=300)
+        except TypeError:                               # 老签名兜底
+            rr = runner(scope="quick")
+    except Exception as e:                              # noqa: BLE001
+        rr = {"ok": False, "total": 0, "passed": 0, "failed": 0,
+              "summary": "回归没跑成：%s: %s" % (type(e).__name__, e)}
+    rec = _record_regress(rr, tid=tid, where="closeout")
+    rec["fresh"] = True
+    return rec
+
+
+def _regress_verdict(rec):
+    """回归证据 → (是否 100% 通过, 一行展示文字, 未通过原因)。"""
+    rec = rec or {}
+    total = int(rec.get("total") or 0)
+    passed = int(rec.get("passed") or 0)
+    failed = int(rec.get("failed") or 0)
+    skipped = int(rec.get("skipped") or 0)
+    if total <= 0:
+        why = str(rec.get("error") or rec.get("summary") or "").strip()
+        return False, "回归：本轮没跑成（没有用例数，也就没有通过率证据）", \
+            "本轮没跑过回归/没跑成%s" % ("：" + why[:120] if why else "")
+    base = max(1, total - skipped)          # 跳过的用例不算进通过率分母
+    rate = 100.0 * passed / base
+    line = "回归 %d/%d 通过（%.0f%%%s）" % (
+        passed, base, rate, "，跳过 %d 条" % skipped if skipped else "")
+    if failed or passed < base or not rec.get("ok"):
+        names = [n for n in (rec.get("failed_items") or []) if n]
+        why = "回归通过率 %.0f%%（%d/%d），不是 100%%" % (rate, passed, base)
+        if names:
+            why += "；没过：%s" % "、".join(names[:3])
+        return False, line + " —— 未全过", why
+    return True, line, ""
+
+
+def _leftover_items(plan_id="", problems=None, extra=None):
+    """遗留清单：这一轮**本该做完却没做完**的事。空 = 真的没有遗留。"""
+    out = []
+    for p in (problems or []):
+        s = str(p or "").strip()
+        if s:
+            out.append("验证没过：" + s[:160])
+    acts = _plan_actions(plan_id) if plan_id else []
+    for a in [x for x in acts if x.get("status") in ("failed", "error")][:3]:
+        out.append("动作失败：%s%s" % (
+            (a.get("title") or a.get("id") or "?")[:40],
+            "（%s）" % a["error"] if a.get("error") else ""))
+    undone = [x for x in acts
+              if x.get("status") not in ("done", "ok", "skipped", "failed",
+                                         "error")]
+    if undone:
+        out.append("计划里还有 %d 条动作没做完：%s" % (
+            len(undone),
+            "、".join((x.get("title") or x.get("id") or "?")[:24]
+                     for x in undone[:3])))
+    for x in (extra or []):
+        s = str(x or "").strip()
+        if s:
+            out.append(s)
+    seen, res = set(), []
+    for s in out:
+        if s in seen:
+            continue
+        seen.add(s)
+        res.append(s)
+    return res
+
+
+def _closeout_check(tid="", plan_id="", problems=None, title="",
+                    allow_run=True, extra=None):
+    """回合收尾的**强制**证据检查。
+
+    返回 {closed, tag, lines, reason, leftover, regress, rsi, at, ...}：
+      · closed  —— 两项都满足（回归 100% 通过 + 遗留为空）
+      · lines   —— 要拼进最终回复的证据行（含「遗留：无」的明说）
+      · tag     —— 没闭环时的那一行「⚠️ 本轮未闭环：<原因>」，闭环时是空串
+    调用方**必须**把 lines 拼进回复、把 tag 放在最后一行 —— 这是「不允许
+    静默结束」的落地方式。
+    """
+    rec = _regress_evidence(tid=tid, allow_run=allow_run)
+    r_ok, r_line, r_why = _regress_verdict(rec)
+    left = _leftover_items(plan_id=plan_id, problems=problems, extra=extra)
+    # 用户备注：收尾时把 RSI 一起拉起来（当场采样 + 最该修的一项）。
+    # 同一分钟内重复采样会被 lessonloop 去重，不会刷爆账本。
+    rsi = ""
+    try:
+        from . import lessonloop as _ll
+        try:
+            _ll.rsi_sample(force=True)
+        except Exception:                               # noqa: BLE001
+            logger.debug("RSI 采样失败（不影响收尾证据）", exc_info=True)
+        rsi = str(_ll.rsi_line() or "").strip()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("拉起 RSI 失败（不影响收尾证据）", exc_info=True)
+
+    reasons = []
+    if not r_ok:
+        reasons.append(r_why)
+    if left:
+        reasons.append("遗留 %d 项未清（第一条：%s）" % (len(left), left[0][:80]))
+    closed = not reasons
+    lines = ["**本轮收尾证据**", "- " + r_line]
+    lines.append("- 遗留：" + ("无" if not left else "%d 项" % len(left)))
+    for i, s in enumerate(left[:_CLOSEOUT_MAX_LEFT], 1):
+        lines.append("  %d. %s" % (i, s))
+    if len(left) > _CLOSEOUT_MAX_LEFT:
+        lines.append("  …还有 %d 项（完整清单见任务详情）"
+                     % (len(left) - _CLOSEOUT_MAX_LEFT))
+    if rsi:
+        lines.append("- " + rsi)
+    ev = {"closed": closed,
+           "reason": "；".join(reasons),
+           "tag": "" if closed else (_CLOSEOUT_TAG + "；".join(reasons)),
+           "lines": lines, "leftover": left,
+           "regress": rec, "regress_ok": r_ok, "rsi": rsi,
+           "tid": str(tid or ""), "title": str(title or "")[:80],
+           "at": time.time(),
+           "at_text": time.strftime("%m-%d %H:%M:%S")}
+    with _LOCK:
+        _STATE["last_closeout"] = ev
+    return ev
+
+
+def _with_closeout(md, ev):
+    """把收尾证据拼到这一轮最终回复的末尾；未闭环时最后一行是那条警示。"""
+    body = str(md or "").rstrip()
+    lines = list((ev or {}).get("lines") or [])
+    tag = str((ev or {}).get("tag") or "")
+    parts = []
+    if body:
+        parts.append(body)
+    if lines:
+        parts.append("\n".join(lines))
+    if tag:
+        parts.append(tag)
+    return "\n\n".join(parts)
+
+
+def _closeout_md(tid, md, v, problems=None, extra=None, allow_run=True):
+    """收尾便捷入口：检查 + 拼接到报告 md 上（验证轮最终回复用）。"""
+    ev = _closeout_check(tid=tid,
+                         plan_id=str((v or {}).get("plan_id") or ""),
+                         problems=list(problems or []),
+                         title=str((v or {}).get("title") or ""),
+                         allow_run=allow_run, extra=extra)
+    return _with_closeout(md, ev), ev
+
+
+def _emit_closeout(tid, title="", plan_id="", header="", problems=None,
+                   extra=None, allow_run=True):
+    """把「回合收尾证据 + 未闭环标记」当一条 report 事件发出去。
+
+    所有「这一轮到此为止」的出口都走这里 —— 用户要求「不允许静默结束」，
+    所以哪怕是出错 / 被终止，也要有一条带证据的最终回复。任何异常都吞掉：
+    收尾提示坏了绝不能反过来影响迭代本身。
+    """
+    try:
+        md, ev = _closeout_md(tid,
+                              str(header or "**本轮收尾**").rstrip(),
+                              {"plan_id": plan_id, "title": title},
+                              problems=problems, extra=extra,
+                              allow_run=allow_run)
+        _emit(tid, "report", text=md, title=str(title or "")[:80])
+        return ev
+    except Exception:                                   # noqa: BLE001
+        logger.debug("回合收尾证据检查没跑成（不影响迭代）", exc_info=True)
+        return {}
 
 
 # ---------------------------------------------------------------- 静态面优先修
@@ -1795,6 +2203,35 @@ def _score_after_verify(tid, v):
                                      % (int(_pf.get("left_n") or 0),
                                         "、".join(str(p.get("file") or "")
                                                   for p in (_pf.get("left") or [])[:3])))
+            # ★ 2026-11-23 本轮需求（用户备注「拉起测试 RSI」）：
+            #   跑分这一步要**同时**把「测试」和「RSI」拉起来 ——
+            #     ① 测试（回归）：回答「有没有改坏」，本轮没跑过就当场拉起一次；
+            #     ② RSI：回答「有没有变好」，当场采样（内有 60 秒节流）+ 取
+            #        「最该修的一项」，和分数写在同一条结果里。
+            #   两件事都失败也不影响评分本身（证据缺了要如实空着，不能造假）。
+            try:
+                _rgv = _regress_evidence(tid=tid, allow_run=True)
+                sc["regress"] = {"ok": bool(_rgv.get("ok")),
+                                 "total": int(_rgv.get("total") or 0),
+                                 "passed": int(_rgv.get("passed") or 0),
+                                 "failed": int(_rgv.get("failed") or 0),
+                                 "line": _regress_verdict(_rgv)[1]}
+            except Exception:                           # noqa: BLE001
+                logger.debug("跑分时拉起回归证据失败（不影响评分）", exc_info=True)
+            try:
+                from . import lessonloop as _ll
+                try:
+                    _ll.rsi_sample(force=False)
+                except Exception:                       # noqa: BLE001
+                    logger.debug("RSI 采样失败（不影响评分）", exc_info=True)
+                sc["rsi"] = str(_ll.rsi_line() or "").strip()
+            except Exception:                           # noqa: BLE001
+                logger.debug("拉起 RSI 失败（不影响评分）", exc_info=True)
+            # 单次改动文件数上限（3 个）：写进结果，报告里能看出「这一轮凭什么是
+            # 这几个文件的分」，也便于事后解释超上限被顺延的那几个。
+            sc["change_cap"] = {"limit": _MAX_CHANGE_FILES,
+                                "files": list(v.get("files") or []),
+                                "over": list(v.get("files_over_cap") or [])}
         return sc if isinstance(sc, dict) else {}
     except Exception as e:                              # noqa: BLE001
         return {"ran": False, "verdict": "error",
@@ -1827,6 +2264,24 @@ def _score_md(sc):
     drop = sc.get("drop") or {}
     if drop:
         out.append("- **退步归因**：%s" % str(drop.get("why") or drop.get("note") or "已记录")[:200])
+    # ★ 2026-11-23 用户备注「拉起测试 RSI」：报告里「测试」和「RSI」都要出现 ——
+    #   前者说没改坏，后者说在变好，两者分开写才不会被分数一句话糊过去。
+    rg = sc.get("regress") or {}
+    if rg:
+        out.append("- **测试（本轮回归）**：%s" % str(
+            rg.get("line") or ("%s/%s 通过" % (rg.get("passed"), rg.get("total"))))[:200])
+    rsi = str(sc.get("rsi") or "").strip()
+    if rsi:
+        out.append("- **RSI**：%s" % rsi[:240])
+    cap = sc.get("change_cap") or {}
+    if cap:
+        out.append("- **单次改动上限**：≤%d 个文件；本轮 %d 个%s" % (
+            int(cap.get("limit") or _MAX_CHANGE_FILES),
+            len(cap.get("files") or []),
+            ("，超上限顺延到下一轮 %d 个（%s）" % (
+                len(cap.get("over") or []),
+                "、".join("`%s`" % x for x in (cap.get("over") or [])[:3])))
+            if (cap.get("over") or []) else ""))
     return "\n".join(out)
 
 
@@ -1868,6 +2323,11 @@ def _report_md(v, ok, problems):
         else "第 %d 次修复后仍未通过 ❌" % tries))
     out.append("- **验证方式**：改动文件语法编译 + 代码自检（high/mid）"
                "+ 全量回归 + 后端导入与运行状态")
+    # ★ 单次改动文件数上限（3 个）：报告里明写口径，用户才知道「这轮为什么
+    #   只动了这几个文件」，以及超出的那几个去哪了（顺延到下一轮）。
+    out.append("- **单次改动上限**：≤%d 个文件%s" % (
+        _MAX_CHANGE_FILES,
+        ("（本轮改了 %d 个，超出的顺延）" % len(files)) if len(files) > _MAX_CHANGE_FILES else ""))
     if ok:
         out.append("- **结果**：语法、代码自检、运行状态全部正常，改动已生效")
         with _LOCK:
@@ -1993,6 +2453,9 @@ def _verify_worker():
     tid = v.get("tid") or "_sys"
     v["tries"] = int(v.get("tries") or 0) + 1
     files = v.get("files") or []
+    # ★ 2026-11-23 回合收尾强制证据检查：新的一轮验证开始，之前记的回归结果
+    #   一律作废 —— 收尾要的是**这一轮真跑出来的**通过率，不是上一轮的。
+    _round_begin("verify:%s" % (v.get("title") or ""))
 
     _emit(tid, "status",
           text="重启完成，自动验证第 %d 轮：%s" % (v["tries"], v.get("title") or ""),
@@ -2063,6 +2526,13 @@ def _verify_worker():
         #   走的是和「验证没过」同一条修复链：生成修复计划 → submit(auto)
         #   → 自动重启 → 重新验证 → 重新跑分，直到涨回去才算完成。
         if str(_sc.get("verdict") or "") == "regressed":
+            # ★ 2026-11-23 收尾强制证据检查：分数退步本身就是「这一轮没闭环」，
+            #   必须显式写进最终回复（回归可能全过，但整体验收没过）。
+            md, _ev = _closeout_md(
+                tid, md, v, problems,
+                extra=["跑分退步 %+.2f（%s → %s）：分数没涨回去就不算闭环" % (
+                    float(_sc.get("delta") or 0), _sc.get("prev"),
+                    _sc.get("total"))])
             with _LOCK:
                 _STATE["verify"] = None
                 _STATE["fail_chain"] = int(_STATE.get("fail_chain") or 0) + 1
@@ -2111,6 +2581,9 @@ def _verify_worker():
                           state="error")
             return
 
+        # ★ 2026-11-23 收尾强制证据检查：这一轮算「通过」之前，先把
+        #   回归通过数 + 遗留清单写进最终回复；不满足就带上「未闭环」标记。
+        md, _ev = _closeout_md(tid, md, v, problems)
         with _LOCK:
             _STATE["verify"] = None
             # ★ 验证通过 ⇒ 连续失败链清零，护栏重新计数
@@ -2155,6 +2628,10 @@ def _verify_worker():
                     v.get("title") or "", int(v.get("tries") or 0), _fc,
                     _MAX_FAIL_CHAIN,
                     "；".join(str(x) for x in (problems or [])[:3]) or "见报告"))
+    # ★ 2026-11-23 收尾强制证据检查（下面三个分支都要发最终报告，统一在这里拼一次）：
+    #   验证没过时「回归通过数」和「遗留清单（=没过的问题）」都必须写在回复里，
+    #   末尾带上「⚠️ 本轮未闭环：…」—— 不允许只发一句「验证没过」就结束。
+    md, _ev = _closeout_md(tid, md, v, problems)
     if _fc >= _MAX_FAIL_CHAIN:
         # 已经停手了，计数归零：否则之后任何无关任务失败一次就会被误拦
         with _LOCK:
@@ -2485,6 +2962,8 @@ def journal(limit=40):
         budget = int(_STATE.get("budget") or 0)
         reps = list(_STATE.get("reports") or [])[:5]
         seq = int(_STATE.get("seq") or 0)
+        # ★ 2026-11-23 回合收尾证据检查的结果（回归通过数 / 遗留清单 / 未闭环原因）
+        closeout = dict(_STATE.get("last_closeout") or {})
 
     by_tid = {}
     for e in events:
@@ -2575,6 +3054,10 @@ def journal(limit=40):
         "budget": budget,
         "max_rounds": _MAX_AUTO_ROUNDS,
         "reports": reps,
+        # ★ 2026-11-23 回合收尾强制证据检查的结果（回归通过数 / 遗留清单 /
+        #   未闭环原因 / RSI）。前端浮层与诊断脚本都直接读这一个字段，
+        #   不用再自己拼「到底闭环没有」。
+        "closeout": closeout,
         "candidates": revive_candidates(limit=limit),
         "counts": {
             "running": 1 if run else 0,

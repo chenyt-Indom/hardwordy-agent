@@ -385,6 +385,63 @@ def _ability_snap_path():
     return os.path.join(_data_dir(), "ability_snapshot.json")
 
 
+_SNAP_WARN_SESSION = "rsi_snapshot"     # 落盘到 data/actlog/rsi_snapshot.jsonl
+_SNAP_WARN_GAP = 3600.0                 # 同一类问题 1 小时最多进账本 1 条
+_SNAP_WARN_SEEN = {"ts": 0.0}
+
+
+def _actlog_module():
+    """拿到 actlog 模块；拿不到返回 None（iterloop 要能独立导入）。"""
+    try:
+        from . import actlog as _al
+        return _al
+    except Exception:                                   # noqa: BLE001
+        logger.debug("iterloop 取 actlog 失败（快照告警不落账本）", exc_info=True)
+    for _name in ("actlog", "backend.actlog"):
+        try:
+            return __import__(_name, fromlist=["*"])
+        except Exception:                               # noqa: BLE001
+            continue
+    return None
+
+
+def _note_snap_problem(msg, key="ability_snapshot"):
+    """ability_snapshot 读/写真出问题时**留痕**：warning + actlog 事件。
+
+    为什么需要它（2026-11-23 修的 silent-except 扣分点）：这两处原来是
+    `except ...: pass`，异常被完全吞掉。后果不只是自检扣一分 ——
+    「快照读不到 → 增量分每轮都从零算」这种故障原本在日志和账本里
+    **一点现场都没有**，只能看到分数莫名不动。
+
+    口径：
+      * FileNotFoundError（首次运行没有快照）= 正常控制流，只留 debug，不当故障；
+      * 其它异常（JSON 截断 / 权限 / 磁盘满）= 真故障，warning + 账本事件，
+        且同一类问题 1 小时内只进账本 1 条，避免评分每轮刷爆账本。
+    任何异常都吞掉（记日志这件事绝不能把评分弄挂），但吞之前先写 debug。
+    """
+    text = str(msg or "")[:200]
+    try:
+        logger.warning("ability_snapshot[%s]: %s", key, text)
+    except Exception:                                   # noqa: BLE001
+        return
+    now = time.time()
+    try:
+        if now - float(_SNAP_WARN_SEEN.get("ts") or 0.0) < _SNAP_WARN_GAP:
+            return                       # 节流：账本轮不上限，宁可少记也别刷爆
+        _SNAP_WARN_SEEN["ts"] = now
+    except Exception:                                   # noqa: BLE001
+        logger.debug("ability_snapshot 告警节流失效（照常记录）", exc_info=True)
+    al = _actlog_module()
+    if al is None:
+        return
+    try:
+        al.append_watch_event(_SNAP_WARN_SESSION,
+                              {"kind": "rsi_snapshot", "key": str(key)[:80],
+                               "state": "warn", "note": text})
+    except Exception:                                   # noqa: BLE001
+        logger.debug("ability_snapshot 告警写账本失败（不影响评分）", exc_info=True)
+
+
 def _load_ability_snap():
     """读增量项的去重快照。
 
@@ -400,12 +457,18 @@ def _load_ability_snap():
             return {"failed": [str(x) for x in (d.get("failed") or [])],
                     "fixed": [str(x) for x in (d.get("fixed") or [])],
                     "lessons": [str(x) for x in (d.get("lessons") or [])]}
-    except FileNotFoundError:
+    except FileNotFoundError:                           # noqa: BLE001
         # 首次运行还没有快照文件 —— 这是正常控制流，不是被吞掉的异常。
-        # 原来写成 `pass` 会被自检记成 silent-except 扣分，直接返回默认值更清楚。
+        # 显式标 noqa 说明「有意忽略」，绝不写成 `pass`（自检会记成 silent-except）；
+        # 也只留 debug 不打 warning：每装一次就 warn 一次纯属噪音。
+        logger.debug("读 ability_snapshot：还没有快照文件，按空快照起步（%s）",
+                     _ability_snap_path())
         return {"failed": [], "fixed": [], "lessons": []}
-    except Exception:                                   # noqa: BLE001
-        logger.debug("读 ability_snapshot 失败，按空快照处理", exc_info=True)
+    except Exception as e:                              # noqa: BLE001
+        # ★ 真读坏了（JSON 截断 / 权限 / 磁盘）不能只留一行 debug：
+        #   进 warning + actlog 事件，才有现场可查（silent-except 的另一半修法）。
+        _note_snap_problem("读 ability_snapshot 失败，按空快照处理: %s: %s"
+                           % (type(e).__name__, e))
     return {"failed": [], "fixed": [], "lessons": []}
 
 
@@ -414,7 +477,10 @@ def _save_ability_snap(snap):
         with open(_ability_snap_path(), "w", encoding="utf-8") as fh:
             json.dump(snap, fh, ensure_ascii=False, indent=1)
         return True
-    except Exception:                                   # noqa: BLE001
+    except Exception as e:                              # noqa: BLE001
+        # 写不进去的后果比读失败更隐蔽：去重快照丢了 → 同一批修复会被反复计分。
+        # 所以这里也留痕（warning + 账本），而不只是写一行 debug。
+        _note_snap_problem("写 ability_snapshot 失败: %s: %s" % (type(e).__name__, e))
         logger.debug("写 ability_snapshot 失败", exc_info=True)
         return False
 
@@ -979,7 +1045,11 @@ def post_verify_pending():
     try:
         with open(_post_verify_path(), encoding="utf-8") as fh:
             return isinstance(json.load(fh), dict)
-    except Exception:                                   # noqa: BLE001
+    except Exception as e:                              # noqa: BLE001
+        # 没有标记（FileNotFoundError）是常态；标记坏了同样返回 False，
+        # 但那意味着「重启后复核」这条闭环悄悄不跑了 —— 至少留一条 debug。
+        logger.debug("读重启后复核标记失败（视为无待复核）: %s: %s",
+                     type(e).__name__, e)
         return False
 
 
@@ -989,12 +1059,18 @@ def take_post_verify():
     try:
         with open(p, encoding="utf-8") as fh:
             d = json.load(fh)
-    except Exception:                                   # noqa: BLE001
+    except Exception as e:                              # noqa: BLE001
+        logger.debug("取重启后复核标记失败（本次不复核）: %s: %s",
+                     type(e).__name__, e)
         return None
     try:
         os.remove(p)
-    except OSError:                                     # noqa: BLE001
-        pass
+    except OSError as e:                                # noqa: BLE001
+        # ★ 这是本文件最后一处 `except ...: pass`。删不掉标记本身不致错
+        #   （下次还会复核一次），但「一直删不掉」意味着目录权限出了问题，
+        #   以前完全查不到 —— 现在留 debug，且照样把标记内容返回给调用方。
+        logger.debug("删重启后复核标记失败（不影响本次复核）: %s: %s",
+                     type(e).__name__, e)
     return d if isinstance(d, dict) else None
 
 
@@ -1084,9 +1160,14 @@ def history(n=10):
                     continue
                 try:
                     out.append(json.loads(line))
-                except Exception:                       # noqa: BLE001
+                except Exception as e:                  # noqa: BLE001
+                    # 坏行跳过是刻意的（一行坏了不该把整段历史弄没），
+                    # 但要留 debug —— 以前整段 continue 掉，账本被写坏毫无痕迹。
+                    logger.debug("history 跳过坏行: %s: %s", type(e).__name__, e)
                     continue
-    except Exception:                                   # noqa: BLE001
+    except Exception as e:                              # noqa: BLE001
+        logger.debug("history 读不到进退记录（按空历史）: %s: %s",
+                     type(e).__name__, e)
         return []
     return out[-int(n):][::-1]
 
@@ -1097,7 +1178,9 @@ def _load_att():
         with open(_att_path(), encoding="utf-8") as fh:
             d = json.load(fh)
         return d if isinstance(d, dict) else {}
-    except Exception:                                   # noqa: BLE001
+    except Exception as e:                              # noqa: BLE001
+        # 读不到失败计数 = 所有问题都从 0 次起步，优先级会算偏 —— 留一条 debug。
+        logger.debug("读 attempts 失败（按空表）: %s: %s", type(e).__name__, e)
         return {}
 
 

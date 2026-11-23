@@ -16,10 +16,14 @@
 
   var API_J = "/api/selfiter/journal?limit=40";
   var API_R = "/api/selfiter/revive";
+  // 体检接口（iterpanel 的 health 块里带「历史记录不一致」计数）
+  var API_P = "/api/iter/panel?days=7";
   var timer = null;
   var openFlag = false;
   var lastData = null;
   var expanded = {};          // tid -> true 展开详情
+  var audit = null;           // {count, claims, scanned, items:[{path,t}]}
+  var auditAt = 0;            // 上次取回检计数的时间（ms），30 秒内不重复请求
 
   function $(id) { return document.getElementById(id); }
   function mk(t, c, x) {
@@ -199,6 +203,38 @@
     return b;
   }
 
+  // 取「历史记录不一致」计数（2026-11-24）：体检接口 health.history_claims。
+  // 只读接口，30 秒缓存一次，不跟着 2 秒轮询去反复打后端。
+  function refreshAudit() {
+    var now = Date.now();
+    if (audit && (now - auditAt) < 30000) { return Promise.resolve(audit); }
+    return jget(API_P).then(function (d) {
+      var h = (d && d.health) || {};
+      var a = h.history_claims || (d && d.history_claims) || null;
+      if (a && typeof a === "object") { audit = a; auditAt = now; }
+      return audit;
+    }).catch(function () { return audit; });
+  }
+
+  function auditNode() {
+    if (!audit) { return null; }
+    var n = audit.count;
+    if (n === undefined || n === null) { n = audit.mismatch; }
+    n = Number(n) || 0;
+    var row = mk("div", "ij-stat");
+    row.textContent = "历史记录不一致：" + n + " 条";
+    if (n > 0) { row.style.color = "#e8823a"; }
+    var items = audit.items || [];
+    if (items.length) {
+      row.title = "声称新建但文件不存在：\n" + items.slice(0, 8).map(function (x) {
+        return "· " + String(x.path || "") + (x.t ? "（" + x.t + "）" : "");
+      }).join("\n");
+    } else {
+      row.title = "扫了最近 " + (audit.scanned || 0) + " 条历史记录，声称新建的文件都存在";
+    }
+    return row;
+  }
+
   function render(d) {
     var body = $("ijBody");
     if (!body) { return; }
@@ -216,6 +252,8 @@
       " · 历史 " + (c.history || 0) + "　本轮 " + (d.budget || 0) +
       "/" + (d.max_rounds || "?");
     body.appendChild(stat);
+    var an = auditNode();
+    if (an) { body.appendChild(an); }
     if (d.verify) {
       var v = mk("div", "ij-stat");
       v.style.color = "#e8b23a";
@@ -255,7 +293,9 @@
   }
 
   function load() {
-    return jget(API_J).then(function (d) { render(d); return d; })
+    // 体检计数和日志并行取：计数失败不影响日志主体（各自 catch）
+    return Promise.all([jget(API_J), refreshAudit()])
+      .then(function (x) { render(x[0]); return x[0]; })
       .catch(function (e) {
         var body = $("ijBody");
         if (body) {

@@ -1215,6 +1215,62 @@ def _is_simple_question(text: str) -> bool:
     return not any(k in t for k in _COMPLEX_HINTS)
 
 
+# ---------------------------------------------------------------- 短确认类问题（2026-11-24）
+# 用户报的现象：「我就回一个『是』或『好了吗』，它给我写七八段。」
+# 这类轮次要的不是长文，而是**一眼看到结论 + 一条能自己复核的命令**。
+# 所以这里只做 prompt 注入（不改 LLM、不动 max_tokens）：
+#   · 收紧 max_tokens 会连带砍掉**同一轮里可能需要的工具调用**（见 _is_simple_question
+#     上面那段实测注释），而短确认轮次仍可能要点一下只读工具，所以只在提示词层引导。
+_SHORT_CONFIRM_MAX_CHARS = 10
+# 短确认特征：判断句（是/否/对/行/好）、疑问尾巴（吗/呢/？）、完成态（了）。
+# 「了」单字最容易误伤，所以下面配了排除词表（写/画/生成…一律不算确认）。
+_SHORT_CONFIRM_HINTS = (
+    "是", "否", "对", "行不行", "对不对",
+    "吗", "呢", "？", "?", "了", "继续", "然后呢", "还有呢", "确认",
+)
+# ⚠️ 故意**不收录**「好 / 嗯 / 可以 / 行」：这些多半是"同意动手"（「好的」＝去做吧），
+#    套上 3 行限制反而会把该做的活儿挡下来；不然「你好」这种问候也会被判成短确认。
+# 命中这些词就是"真任务"，哪怕字数很短也不能按短确认处理
+# （「要不要写代码了」「帮我画个图吗」都是 ≤10 字但明显是新活）。
+_SHORT_CONFIRM_EXCLUDE = _COMPLEX_HINTS + (
+    "什么", "为什么", "怎么", "如何", "区别", "对比", "介绍", "解释", "分析",
+    "讲讲", "说说", "帮我",
+)
+
+
+def _is_short_confirm(text) -> bool:
+    """是不是「短确认类」消息（≤10 字 + 确认/疑问特征）。
+
+    只做**文本**层面判断；调用方还要确认本轮没有图片上下文
+    （有图时可能是「改成这样了」这类微改指令，不能被压成 3 行）。
+    """
+    t = text if isinstance(text, str) else str(text or "")
+    t = t.strip()
+    if not t or len(t) > _SHORT_CONFIRM_MAX_CHARS:
+        return False
+    if any(k in t for k in _SHORT_CONFIRM_EXCLUDE):
+        return False
+    return any(k in t for k in _SHORT_CONFIRM_HINTS)
+
+
+def _short_confirm_ctx() -> str:
+    """短确认轮次追加到 system prompt 的**唯一**一段规则（只引导篇幅，不限制能力）。"""
+    return (
+        "\n\n【这是短确认类问题：思考 ≤200 字，正文 ≤3 行 + 一条只读核实命令】\n"
+        "- 用户这句话只是**确认 / 追问 / 收尾**（是、否、对、好了吗、继续…），"
+        "**不是新任务**：不要把上文的任务再做一遍，也不要重新规划。\n"
+        "- **思考不超过 200 字**：别反复推演、别复述上下文；想清「是 / 否 / 现状」就停。\n"
+        "- **回复不超过 3 行（正文不超过 3 行）**：第 1 行直接给结论"
+        "（是 / 不是 / 已完成 / 还没做 / 现状如何），后面最多两行补充必要细节。\n"
+        "  ⚠️ 这一轮**不套**「结论：/改动：/验证：」三段模板，也不要小标题和长清单。\n"
+        "- 正文最后附**恰好一条**能自己复核的**只读**命令（单独一行代码块），"
+        "例如 `git status --short`、`git log -1 --stat`、`py -3 -m pytest -q backend/_feature_tests`、"
+        "`dir`；**禁止**给会改变状态或产生副作用的命令（写文件、git commit、pip install、删目录…）。\n"
+        "- 若这件事**确实没法用一句话答完**（要改文件、要跑长任务），"
+        "就只用一行回「这需要动手改，要我改吗？」，**不要**展开长文。"
+    )
+
+
 # 简单问题的**起手配额**（思考+回答总量）——⚠️ 2026-09-26 起它不再是"篇幅上限"：
 # 用户明确要求「取消所有篇幅限制」，各档位一律提到与天花板同级，
 # 真正能用多少只由「num_ctx − 提示词占用」决定（重试逻辑会按实测剩余窗口夹住）。
@@ -8401,6 +8457,14 @@ async def chat(req: ChatRequest,
             "—— 这时直接写；信息不够就**用 ask_user 问用户要**。\n"
             "- 搜了确实没有可用资料：如实说明「没搜到权威资料」，可以写通用部分，"
             "但**不得编造具体细节**。")
+    # ★ 2026-11-24：短确认类问题（「是」「好了吗？」「继续」）→ 思考 ≤200 字、
+    #   正文 ≤3 行 + 一条只读核实命令。**只注入提示词**，不收紧 max_tokens
+    #   （理由见 _is_short_confirm 上面的注释）。
+    #   ⚠️ 带图 / 带前图的轮次不套这条：「改成这样了」这类短句其实是微改指令，
+    #      压成 3 行会把改法丢掉（同 simple_q 的判据）。
+    if _is_short_confirm(last_user) and not images and not prev_img:
+        sys_prompt += _short_confirm_ctx()
+        logger.info("[chat] 短确认轮次 → 注入短回答规则（%r）", str(last_user)[:20])
     if writing_mode or office_mode:
         # 长产物的**工具调用 JSON 本身就很长**（一份 15 页 PPT 的内容都在
         # tool_calls 的参数里），额度给小了会被截断 → 生成失败或只剩半份。
@@ -11141,6 +11205,14 @@ async def chat_deepseek(req: ChatRequest,
     #   否则用户回头问「开头聊了什么」，模型会一脸茫然（本地通道同款做法）。
     if _hist_digest_extra:
         sys_prompt += "\n\n" + _hist_digest_extra
+    # ★ 2026-11-24：短确认轮次（主通道 /api/chat 同款规则，见 _is_short_confirm）。
+    #   ⚠️ 必须在这里也接一遍：日志实测真实流量全走这条云端通道
+    #   （/api/chat/deepseek 17 次 / 本地 /api/chat 0 次），只改本地等于没生效。
+    #   带图轮次不套（同主通道判据）。
+    if _is_short_confirm(last_user) and not _imgs:
+        sys_prompt += _short_confirm_ctx()
+        logger.info("[chat.deepseek] 短确认轮次 → 注入短回答规则（%r）",
+                    str(last_user)[:20])
 
     # ★ 2026-11-09：云端通道原来**完全没接**交接卡和工具账本 —— 用户用 DeepSeek 时
     #   问「刚刚改了什么」，模型手里一点证据都没有（只会答"没改任何东西"）。
@@ -14663,6 +14735,53 @@ def avatar2_video_delete(body: dict):
     body = body or {}
     return avatar2.delete_video(str(body.get("name") or ""),
                                 scope=str(body.get("scope") or "avatar"))
+
+
+# ---------------- 数字人解说员：文档 / PPT 一键「讲给我听」 ----------------
+# 前端入口：文档面板打开一个文档后的「🎬 讲给我听」按钮（#dlNarrate），
+# 由 frontend/app.js 的 startNarration() 调这里，出来的视频在 #narrVideo 里播。
+@app.post("/api/avatar2/narrate")
+def avatar2_narrate(body: dict):
+    """文档 → 数字人讲解视频。body: {doc_id|rel, style, voice, max_chars, max_segments}
+
+    同步返回（分段合成，默认 local 渲染，十几秒）。长文档只讲前 max_chars 字，
+    返回里的 truncated 会告诉前端「还有多少没讲」。
+    """
+    body = body or {}
+    doc_id = str(body.get("doc_id") or body.get("rel") or body.get("name") or "")
+    return avatar2.narrate_doc(
+        doc_id,
+        style=str(body.get("style") or ""),
+        voice=str(body.get("voice") or ""),
+        rate=body.get("rate") or 0,
+        max_chars=body.get("max_chars") or 1000,
+        max_segments=body.get("max_segments") or 6,
+        engine=str(body.get("engine") or "local"),
+    )
+
+
+@app.get("/api/avatar2/narrations")
+def avatar2_narrations(limit: int = 50):
+    """讲过的视频列表（新的在前），前端讲解面板底部展示、可删。"""
+    return {"ok": True, "items": avatar2.list_narrations(limit=limit)}
+
+
+@app.get("/api/avatar2/narration/{name}")
+def avatar2_narration(name: str):
+    """播放讲解视频（<video src> 直接用它）。"""
+    p = avatar2.narration_path(name)
+    if not p:
+        raise HTTPException(status_code=404, detail="讲解视频不存在")
+    return FileResponse(p, media_type="video/mp4",
+                        headers={"Content-Disposition": "inline",
+                                 "Accept-Ranges": "bytes"})
+
+
+@app.post("/api/avatar2/narration/delete")
+def avatar2_narration_delete(body: dict):
+    """删掉一条讲解视频。body: {name}"""
+    body = body or {}
+    return avatar2.delete_narration(str(body.get("name") or ""))
 
 
 # ---------- 前端 ----------

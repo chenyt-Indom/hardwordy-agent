@@ -1846,6 +1846,12 @@
     return '<div class="viz">' + title + body + "</div>";
   }
 
+  // ★ 2026-11-23 回合收尾强制证据检查（后端 iter_runner 的 _closeout_check）：
+  //   一轮没闭环时，最终回复的**最后一行**一定是「⚠️ 本轮未闭环：<原因>」。
+  //   这一行必须一眼看见 —— 否则用户会以为这轮一切正常（静默结束正是要治的病）。
+  //   匹配时容忍 emoji 后没有变体选择符、以及前面多余的空白。
+  const _UNCLOSED_RE = /^(?:⚠\ufe0f?\s*)?本轮未闭环/;
+
   function mdToHtml(text) {
     const raw = String(text == null ? "" : text);
     // ★ 2026-11-15 支持 <details> 折叠块（reply_gate 用它折叠长过程，替代「超长就丢弃」）。
@@ -1903,7 +1909,11 @@
       || /\*\*[^*\n]+\*\*/.test(raw) || /`[^`\n]+`/.test(raw) || /https?:\/\//.test(raw) || /\[[^\]\n]{1,60}\]\([^)\s]+\)/.test(raw)
       || raw.indexOf("```") >= 0;
     if (!_hasMd && raw.length < 400) {
-      return _restoreBlocks(_restore(esc)).replace(/\r?\n/g, "<br>");
+      // ★ 2026-11-23 回合收尾的「未闭环」标记即使在纯文本路径也必须高亮
+      return _restoreBlocks(_restore(esc)).split(/\r?\n/).map((ln) => (
+        _UNCLOSED_RE.test(ln.trim())
+          ? '<div class="md-unclosed">' + ln.trim() + "</div>"
+          : ln)).join("<br>");
     }
     // 行内：`code` / **粗** / *斜* / [文字](链接) / 裸网址 / 裸本地路径
     // ★ 2026-11-10 用户要求：回答里写的本地路径、网址要能点开
@@ -1985,6 +1995,14 @@
       }
       m = /^(\d+)[.、)]\s+(.*)$/.exec(t);
       if (m) { if (list !== "ol") { closeList(); out.push('<ol class="md-ol">'); list = "ol"; } out.push("<li>" + inline(m[2]) + "</li>"); continue; }
+      // ★ 2026-11-23 回合收尾的「未闭环」标记：单独拎成一块高亮，别混在正文段落里。
+      //   放在引用/列表之后、普通段落之前 —— 它自己就是一行，不该被 `<ul>` 吞进去
+      //   （后端把它作为回复的最后一行独立发出，这里按整行元素渲染）。
+      if (_UNCLOSED_RE.test(t)) {
+        closeList();
+        out.push('<div class="md-unclosed">' + inline(t) + "</div>");
+        continue;
+      }
       // ⚠️ 这里是**转义之后**的文本，行首的 > 已经变成 &gt;，要按转义后的形式匹配
       m = /^(?:>|&gt;)\s?(.*)$/.exec(t);
       if (m) { closeList(); out.push('<blockquote class="md-quote">' + inline(m[1]) + "</blockquote>"); continue; }
@@ -6386,6 +6404,220 @@
       el.classList.toggle("active", el.dataset.rel === rel));
   }
 
+  // ================= 数字人解说员：文档 / PPT 一键「讲给我听」 =================
+  // 用户痛点：文档 / PPT 生成完还得自己读，长文档很费时间；数字人只在独立入口用。
+  // 这里把两者接起来：文档面板点「🎬 讲给我听」→ 后端分段合成 → 本面板里播。
+  //
+  // 进度为什么是「估」的：/api/avatar2/narrate 是一次同步请求（后端分段合成要十几秒），
+  // 中途拿不到真实百分比。所以按已用时间往 90% 爬，剩下的 10% 留给最后拼接 ——
+  // 宁可标成「≈」，也不要假装精确（假进度条比没有进度条更让人恼火）。
+  let narrTimer = null;
+  let narrT0 = 0;
+  let narrBusy = false;
+
+  function narrHint(msg) {
+    const h = $("#narrHint");
+    if (h) h.textContent = msg || "";
+  }
+
+  function narrProg(pct) {
+    const f = $("#narrProgFill");
+    if (f) f.style.width = Math.max(0, Math.min(100, pct)).toFixed(1) + "%";
+  }
+
+  function narrStopTick() {
+    if (narrTimer) { clearInterval(narrTimer); narrTimer = null; }
+  }
+
+  // 估算成片时长：音频约 4.5 字/秒，每段多算 1.5 秒渲染开销（和后端口径一致）
+  function narrEstSec(chars, segments) {
+    return Math.max(6, Math.round(Number(chars || 0) / 4.5 + Number(segments || 1) * 1.5));
+  }
+
+  function narrShow(on) {
+    const p = $("#narrPanel");
+    if (!p) return;
+    p.hidden = !on;
+    if (on) loadNarrations();
+  }
+
+  // 讲解视频的播放地址：GET /api/avatar2/narration/{name}（FileResponse，支持 Range
+  // 所以 <video> 能拖动进度条）。后端返回里也带 url，但这里统一自己拼一份 ——
+  // 后端换了存放目录 / 前缀只要改这一处，播放列表和「刚讲完立刻播」走的是同一条路径。
+  function narrUrl(name, fallback) {
+    const n = String(name || "");
+    if (!n) return String(fallback || "");
+    return "/api/avatar2/narration/" + encodeURIComponent(n);
+  }
+
+  function narrPlayItem(it) {
+    const v = $("#narrVideo");
+    if (!v || !it || !(it.name || it.url)) return;
+    narrShow(true);
+    v.hidden = false;
+    v.src = narrUrl(it.name, it.url);
+    v.play().catch(() => {});
+    narrHint("讲解视频：" + (it.doc_name || it.doc || it.name || ""));
+    const d = $("#narrDownload");
+    if (d) { d.href = narrUrl(it.name, it.url); d.hidden = false; }
+    const meta = $("#narrMeta");
+    if (meta) {
+      const bits = [];
+      if (it.duration) bits.push("时长 " + Math.round(it.duration) + " 秒");
+      if (it.sentences) bits.push(it.sentences + " 句");
+      if (it.chars) bits.push(it.chars + " 字");
+      if (it.mtime) bits.push(it.mtime);
+      meta.textContent = bits.join(" · ");
+    }
+    narrProg(100);
+  }
+
+  async function loadNarrations() {
+    const box = $("#narrHist");
+    if (!box) return;
+    let items = [];
+    try {
+      const d = await api("/api/avatar2/narrations");
+      items = d.items || [];
+    } catch (e) { items = []; }
+    box.textContent = "";
+    if (!items.length) {
+      const e = document.createElement("div");
+      e.className = "hint";
+      e.textContent = "还没讲过文档。打开文库里的一个文档 / PPT，点「🎬 讲给我听」。";
+      box.appendChild(e);
+      return;
+    }
+    items.forEach((it) => {
+      const row = document.createElement("div");
+      row.className = "narr-item";
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "narr-item-play";
+      b.textContent = "▶ " + (it.doc_name || it.doc || it.name);
+      b.title = "播放这条讲解";
+      b.onclick = () => narrPlayItem(it);
+      row.appendChild(b);
+      const m = document.createElement("span");
+      m.className = "narr-item-meta";
+      m.textContent = (it.duration ? Math.round(it.duration) + " 秒" : "")
+        + (it.mtime ? " · " + it.mtime : "");
+      row.appendChild(m);
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "narr-item-del";
+      del.textContent = "🗑";
+      del.title = "删掉这条讲解视频";
+      del.onclick = async (ev) => {
+        ev.stopPropagation();
+        del.disabled = true;
+        try {
+          await api("/api/avatar2/narration/delete", {
+            method: "POST", body: JSON.stringify({ name: it.name }),
+          });
+          showToast("已删除：" + (it.doc_name || it.name), "ok");
+          const v = $("#narrVideo");
+          if (v && (v.src || "").indexOf(encodeURIComponent(it.name)) >= 0) {
+            v.pause(); v.hidden = true; v.removeAttribute("src");
+          }
+          loadNarrations();
+        } catch (e) {
+          del.disabled = false;
+          showToast("删除失败：" + String(e.message || e), "warn");
+        }
+      };
+      row.appendChild(del);
+      box.appendChild(row);
+    });
+  }
+
+  // 给文档面板「🎬 讲给我听」用的主入口
+  async function playNarration(docRel, style) {
+    const rel = String(docRel || dlCurrent || "");
+    if (!rel) { showToast("先打开一个文档，再点「讲给我听」", "warn"); return; }
+    if (narrBusy) { showToast("上一份还在讲，等它讲完", "warn"); return; }
+    narrBusy = true;
+    const sel = $("#narrStyle");
+    const sty = style !== undefined ? style : (sel ? sel.value : "");
+    const v = $("#narrVideo");
+    if (v) { v.pause(); v.hidden = true; v.removeAttribute("src"); }
+    const d = $("#narrDownload");
+    if (d) d.hidden = true;
+    const meta = $("#narrMeta");
+    if (meta) meta.textContent = "";
+    narrShow(true);
+    narrProg(0);
+    narrHint("正在把《" + rel + "》讲成视频…（分段合成，通常十几秒）");
+    narrT0 = Date.now();
+    narrStopTick();
+    narrTimer = setInterval(() => {
+      const used = (Date.now() - narrT0) / 1000;
+      // 渐近曲线：越接近 90% 爬得越慢，不会「卡在 99% 骗人」
+      narrProg(90 * (1 - Math.exp(-used / 12)));
+      narrHint("正在把《" + rel + "》讲成视频… 已用 " + Math.round(used) + " 秒");
+    }, 400);
+    try {
+      const r = await api("/api/avatar2/narrate", {
+        method: "POST",
+        body: JSON.stringify({
+          doc_id: rel,
+          style: sty || "",
+          max_chars: 900,
+          max_segments: 5,
+        }),
+      });
+      narrStopTick();
+      if (!r.ok) throw new Error(r.error || "合成失败");
+      narrProg(100);
+      const bits = [];
+      if (r.duration) bits.push("时长 " + Math.round(r.duration) + " 秒");
+      if (r.sentences) bits.push(r.sentences + " 句");
+      if (r.parts) bits.push(r.parts + " 段");
+      if (r.truncated) {
+        bits.push("长文档只讲了前 " + r.chars + " 字（共 " + r.total_chars + " 字）");
+      }
+      narrHint("讲完了：" + (r.doc_name || rel));
+      if (meta) meta.textContent = bits.join(" · ");
+      if (v) {
+        v.hidden = false;
+        v.src = r.url;
+        v.play().catch(() => {});
+      }
+      if (d) { d.href = r.url; d.hidden = false; }
+      showToast("讲解视频好了（" + Math.round(r.duration || 0) + " 秒）", "ok");
+      loadNarrations();
+      return r;
+    } catch (e) {
+      narrStopTick();
+      narrProg(0);
+      narrHint("讲解失败：" + String(e.message || e));
+      showToast("讲解失败：" + String(e.message || e), "warn");
+      return null;
+    } finally {
+      narrBusy = false;
+    }
+  }
+  window.playNarration = playNarration;      // 别的面板（对话卡片等）也能调
+
+  (function bindNarrationPanel() {
+    const p = $("#narrPanel");
+    if (!p) return;
+    const c = $("#narrClose");
+    if (c) c.onclick = () => {
+      const v = $("#narrVideo");
+      if (v) v.pause();
+      narrShow(false);
+    };
+    const d = $("#narrDownload");
+    if (d) d.onclick = async (ev) => {
+      const url = d.getAttribute("href") || "";
+      if (!url) return;
+      ev.preventDefault();
+      if (window.__saveViaDesktop && await window.__saveViaDesktop(url)) return;
+      window.open(url, "_blank");
+    };
+  })();
+
   (function bindDoclibPanel() {
     const wrap = $("#doclibPanel");
     if (!wrap) return;
@@ -6414,6 +6646,21 @@
         loadDoclib();
       } catch (e) { showToast("保存失败：" + String(e.message || e), "warn"); }
     };
+    // 「🎬 讲给我听」：把当前文档交给数字人讲（后端读的是磁盘上的文件，
+    // 所以先把编辑框的内容存一下，否则讲的是上一版）
+    const narrBtn = $("#dlNarrate");
+    if (narrBtn) narrBtn.onclick = async () => {
+      if (!dlCurrent) { showToast("先打开一个文档再点「讲给我听」", "warn"); return; }
+      narrBtn.disabled = true;
+      try {
+        try {
+          await api("/api/doclib/file", { method: "POST",
+            body: JSON.stringify({ rel: dlCurrent, text: $("#dlText").value }) });
+        } catch (e) { /* Word/PPT 这类写不进去很正常，直接按原文件讲 */ }
+        await playNarration(dlCurrent);
+      } finally { narrBtn.disabled = false; }
+    };
+
     const docx = $("#dlDocxBtn");
     if (docx) docx.onclick = async () => {
       if (!dlCurrent) return;

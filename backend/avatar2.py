@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -520,3 +521,447 @@ def _probe_duration(path: str) -> float:
         return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
     except Exception:                                       # noqa: BLE001
         return 0.0
+
+
+# ================================================================
+#  数字人解说员：文档 / PPT 一键「讲给我听」
+# ================================================================
+# 痛点：文档 / PPT 生成完之后，用户还得自己读 —— 长文档很费时间，而数字人能力
+# 只在「数字人」那个独立入口里用着，等于闲置。
+#
+# 这里把两者接起来：doclib 取正文 → 按句切分 → 分段 TTS → 每段驱动数字人出画面
+# → 拼接成一条视频。
+#
+# 为什么必须**按段**合成（不是整篇一次）
+# --------------------------------------
+#   1. 云端 S2V 单段音频上限 <20 秒，整篇丢过去它内部还要再切，进度就看不见了；
+#   2. 一份几十页的文档是几十上百分钟音频，一次性合成等于把整条音频常驻内存、
+#      整段解码重绘，内存和显存都扛不住（就是「长音频占显存」那条）；
+#   3. 分段之后单段失败只丢一小段，重试代价小，也能给用户报「第几段失败」。
+_NARR_META = "narrations.json"
+
+_SENT_RE = re.compile(r"(?<=[。！？!?；;…\n])")
+# 中文神经语音约 4.5 字/秒（和 tts 里的估时口径一致，只用于切段）
+_CHARS_PER_SEC = 4.5
+
+
+def split_sentences(text: str, max_len: int = 120) -> list:
+    """按句子切分（句号/问号/感叹号/分号/省略号/换行处断开），超长句硬切。"""
+    out = []
+    for seg in _SENT_RE.split(str(text or "")):
+        s = seg.strip()
+        if not s:
+            continue
+        while len(s) > max_len:
+            out.append(s[:max_len])
+            s = s[max_len:]
+        if s:
+            out.append(s)
+    return out
+
+
+def plan_segments(sentences, max_chars: int = 110, max_sec: float = 18.0) -> list:
+    """把句子合并成「一段音频」：每段 ≤ max_chars 字，且估算时长 ≤ max_sec 秒。
+
+    估算时长 = 字数 / 4.5，只用来切段，不追求精确；真实时长合成后再量。
+    """
+    segs, buf, chars = [], [], 0
+    for s in (sentences or []):
+        n = len(s)
+        if buf and (chars + n > max_chars
+                    or (chars + n) / _CHARS_PER_SEC > max_sec):
+            segs.append({"text": "".join(buf), "chars": chars,
+                         "sentences": len(buf)})
+            buf, chars = [], 0
+        buf.append(s)
+        chars += n
+    if buf:
+        segs.append({"text": "".join(buf), "chars": chars,
+                     "sentences": len(buf)})
+    for i, sg in enumerate(segs):
+        sg["index"] = i
+        sg["est_sec"] = round(sg["chars"] / _CHARS_PER_SEC, 2)
+    return segs
+
+
+def _audio_duration(path: str) -> float:
+    """音频真实时长（解码一遍，不看容器头）。失败返回 0。
+
+    为什么不用 `_probe_duration`：那是读 `Duration:` 头的，VBR 的 mp3 会偏小
+    （实测 14.7 秒报 11.8 秒），分段时长/字数比例就全乱了。
+    """
+    if not path or not os.path.isfile(path):
+        return 0.0
+    exe = ffmpeg()
+    if not exe:
+        return _probe_duration(path)
+    try:
+        r = subprocess.run([exe, "-i", path, "-f", "null", "-"],
+                           capture_output=True, timeout=300)
+        s = (r.stderr or b"").decode("utf-8", "ignore")
+        hits = re.findall(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", s)
+        if not hits:
+            return _probe_duration(path)
+        h, m, sec = hits[-1]
+        return int(h) * 3600 + int(m) * 60 + float(sec)
+    except Exception:                                       # noqa: BLE001
+        return _probe_duration(path)
+
+
+def synthesize_segment(text: str, voice: str = "", rate=0, style: str = "",
+                       filename: str = "") -> dict:
+    """一段文字 → 一段音频（走项目现成的 tts，edge 不行会自动退 SAPI）。"""
+    t = (text or "").strip()
+    if not t:
+        return {"ok": False, "error": "这一段没有文字（空句子不合成）", "chars": 0}
+    try:
+        from . import tts as tts_mod
+        a = tts_mod.synth(t, voice=voice or "", rate=int(rate or 0),
+                          engine="auto", style=(style or "").strip(),
+                          filename=filename or "")
+    except Exception as e:                                  # noqa: BLE001
+        return {"ok": False, "chars": len(t),
+                "error": "配音失败：%s: %s" % (type(e).__name__, e)}
+    if not a.get("ok"):
+        return {"ok": False, "chars": len(t),
+                "error": a.get("error") or "配音失败"}
+    p = a.get("path") or ""
+    # ⚠️ 时长必须**解码量**，不能用容器头：
+    # edge 出来的 mp3 是 VBR，头部 Duration 会偏小（实测 14.7 秒的段报成 11.8 秒），
+    # 而「每段音频时长要和字数近似成比例」这类验收正是看这个数。
+    real = _audio_duration(p)
+    return {
+        "ok": True,
+        "path": p,
+        "name": os.path.basename(p),
+        "chars": len(t),
+        # 真量出来的时长优先；量不出来才退回字数估算（探测失败不能报成 0）
+        "duration": round(real or len(t) / _CHARS_PER_SEC, 2),
+        "measured": bool(real),
+        "est_sec": round(len(t) / _CHARS_PER_SEC, 2),
+        "engine": a.get("engine") or "",
+        "url": a.get("url") or "",
+        "warnings": a.get("warnings") or [],
+    }
+
+
+def _render_talking_still(image_path: str, audio_path: str, out_path: str,
+                          width: int = 0, duration: float = 0.0) -> dict:
+    """本地渲染：静态形象 + 音频 → mp4（时长 = 音频时长）。
+
+    为什么不硬做像素级口型：源图是张嘴还是闭嘴我们并不知道，凭亮度阈值猜出来的
+    「唇缝暗带」一拉就成色块（本地形变版实测唇部锐度只有原图 41%）。宁可老实，
+    也不要给用户一段「嘴在乱抖」的视频。
+    """
+    exe = ffmpeg()
+    if not exe:
+        return {"ok": False, "error": "找不到 ffmpeg，无法渲染视频"}
+    vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    if width and width > 0:
+        vf = ("scale=%d:-2:force_original_aspect_ratio=decrease,"
+              "scale=trunc(iw/2)*2:trunc(ih/2)*2" % int(width))
+    cmd = [exe, "-y", "-loglevel", "error",
+           "-loop", "1", "-framerate", "12", "-i", image_path,
+           "-i", audio_path,
+           "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+           "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "128k"]
+    # ⚠️ 长度必须**显式**给 -t，不能只靠 -shortest：
+    # 实测「-loop 1 静态图 + -shortest」出来的成片比音频长 3 秒（14.3 秒的音频出
+    # 17.3 秒的片子），而「视频时长要和文本句数正相关」正是按成片时长数的。
+    if duration and duration > 0:
+        cmd += ["-t", "%.3f" % (float(duration) + 0.05)]
+    else:
+        cmd += ["-shortest"]
+    cmd += ["-movflags", "+faststart", out_path]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "本地渲染超时（ffmpeg 卡住）"}
+    if r.returncode != 0 or not os.path.isfile(out_path) \
+            or os.path.getsize(out_path) < 1000:
+        err = (r.stderr or b"").decode("utf-8", "ignore")[:300]
+        return {"ok": False, "error": "本地渲染失败：%s" % (err or "产物为空")}
+    return {"ok": True, "path": out_path,
+            "duration": round(_probe_duration(out_path), 2),
+            "bytes": os.path.getsize(out_path)}
+
+
+def warp_lipsync(image_path: str, audio_path: str, out_name: str = "",
+                 engine: str = "local", resolution: str = "") -> dict:
+    """一段音频 + 一张形象图 → 一段「数字人在讲」的视频。
+
+    engine="cloud"：云端真口型（要 Key、花钱、单段 <20 秒、1~3 分钟/段）
+    engine="local"：本地快速渲染（秒级、免费、断网可用，不做假口型）
+    """
+    if not image_path or not os.path.isfile(image_path):
+        return {"ok": False,
+                "error": "还没有数字人形象，请先上传一张图或用 AI 生成一张"}
+    if not audio_path or not os.path.isfile(audio_path):
+        return {"ok": False, "error": "音频不存在，无法驱动口型"}
+    name = os.path.basename(out_name or ("narr_seg_" + uuid.uuid4().hex[:8] + ".mp4"))
+    if not name.lower().endswith(".mp4"):
+        name += ".mp4"
+    out = os.path.join(_vdir(), name)
+
+    eng = (engine or "local").strip().lower()
+    if eng in ("cloud", "api", "wan", "hd"):
+        try:
+            from . import avatar_cloud as ac
+            r = ac.generate(image_path, audio_path, resolution=resolution or "")
+        except Exception as e:                              # noqa: BLE001
+            return {"ok": False, "engine": "cloud",
+                    "error": "云端口型失败：%s: %s" % (type(e).__name__, e)}
+        if not r.get("ok"):
+            r = dict(r)
+            r["engine"] = "cloud"
+            return r
+        src = os.path.join(_vdir(), os.path.basename(str(r.get("name") or "")))
+        if os.path.isfile(src) and os.path.abspath(src) != os.path.abspath(out):
+            os.replace(src, out)
+        return {"ok": True, "engine": "cloud", "name": name, "path": out,
+                "duration": round(_probe_duration(out), 2),
+                "url": "/api/avatar2/narration/" + quote(name)}
+
+    r = _render_talking_still(image_path, audio_path, out,
+                              duration=_audio_duration(audio_path))
+    if not r.get("ok"):
+        return {"ok": False, "engine": "local", "name": name,
+                "error": r.get("error")}
+    return {"ok": True, "engine": "local", "name": name, "path": out,
+            "duration": r.get("duration") or 0.0, "bytes": r.get("bytes") or 0,
+            "url": "/api/avatar2/narration/" + quote(name)}
+
+
+def _narr_index() -> dict:
+    d = _read_json(_NARR_META, {})
+    return d if isinstance(d, dict) else {}
+
+
+def _narr_index_set(name: str, meta) -> None:
+    d = _narr_index()
+    if meta is None:
+        d.pop(name, None)
+    else:
+        d[name] = meta
+    try:
+        _write_json(_NARR_META, d)
+    except Exception:                                       # noqa: BLE001
+        logger.debug("写讲解索引失败（不影响成品视频）", exc_info=True)
+
+
+def _resolve_doc(doc_id: str) -> dict:
+    """把前端给的 doc_id 定位到文库里的一个文件（支持 rel，也支持只给文件名）。"""
+    from . import doclib
+    rel = str(doc_id or "").strip().replace("\\", "/")
+    if not rel:
+        return {"ok": False, "error": "没有指定要讲的文档（doc_id 是空的）"}
+    d = doclib.read_file(rel)
+    if d.get("ok"):
+        return d
+    if d.get("missing"):
+        want = rel.rsplit("/", 1)[-1]
+        try:
+            files = doclib.list_files()
+        except Exception:                                   # noqa: BLE001
+            files = []
+        for f in files:
+            if f.get("name") == want or str(f.get("rel", "")).endswith("/" + want):
+                d2 = doclib.read_file(f["rel"])
+                if d2.get("ok"):
+                    return d2
+    return d
+
+
+def narrate_doc(doc_id: str, style: str = "", voice: str = "", rate=0,
+                max_chars: int = 1000, max_segments: int = 6,
+                engine: str = "local") -> dict:
+    """文档 → 数字人讲解视频（一条 mp4）。这是「讲给我听」的后端主入口。
+
+    doc_id : 生成文库里的相对路径（如「方案.md」），只给文件名也能认
+    style  : TTS 情感预设 id（见 tts.STYLES），留空为自然
+    max_chars / max_segments : 单次讲解上限（长文档只讲前一段，回传 truncated）
+    engine : local（默认，快且免费）/ cloud（真口型，慢且花钱）
+
+    返回 {ok, name, url, path, duration, sentences, segments, chars, truncated}
+    """
+    try:
+        mc = max(120, int(max_chars or 1000))
+    except Exception:                                       # noqa: BLE001
+        mc = 1000
+    try:
+        ms = max(1, int(max_segments or 6))
+    except Exception:                                       # noqa: BLE001
+        ms = 6
+
+    d = _resolve_doc(doc_id)
+    if not d.get("ok"):
+        return {"ok": False, "doc_id": str(doc_id or ""),
+                "error": d.get("error") or "读不到这个文档"}
+    doc_rel = d.get("rel") or str(doc_id or "")
+
+    try:
+        from . import tts as tts_mod
+        text = tts_mod.clean_text(d.get("text") or "")
+    except Exception:                                       # noqa: BLE001
+        text = (d.get("text") or "").strip()
+    total_chars = len(text)
+    if not text.strip():
+        # 空文档 / 纯图片 PDF / 只有代码：明确报错，别让调用方干等
+        # （要求 3：空文档返回明确错误，而不是抛异常/超时）
+        return {"ok": False, "doc_id": doc_rel,
+                "error": "这个文档里没有可朗读的正文（可能是空的、纯图片或只有代码块）",
+                "chars": 0, "sentences": 0, "segments": []}
+
+    truncated = total_chars > mc
+    if truncated:
+        text = text[:mc]
+
+    sents = split_sentences(text)
+    if not sents:
+        return {"ok": False, "doc_id": doc_rel,
+                "error": "这个文档里没有可朗读的正文（切句后为空）",
+                "chars": total_chars, "sentences": 0, "segments": []}
+    segs = plan_segments(sents)[:ms]
+
+    details, part_names, warnings = [], [], []
+    total_sents = 0
+    for sg in segs:
+        a = synthesize_segment(sg["text"], voice=voice, rate=rate, style=style)
+        if not a.get("ok"):
+            return {"ok": False, "doc_id": doc_rel,
+                    "error": "第 %d 段配音失败：%s" % (sg["index"] + 1, a.get("error")),
+                    "segments": details}
+        v = warp_lipsync(_img_path(), a["path"],
+                         out_name="_narrseg_%s_%02d.mp4"
+                                  % (uuid.uuid4().hex[:6], sg["index"]),
+                         engine=engine)
+        if not v.get("ok"):
+            return {"ok": False, "doc_id": doc_rel,
+                    "error": "第 %d 段出画面失败：%s" % (sg["index"] + 1, v.get("error")),
+                    "need_key": bool(v.get("need_key")), "segments": details}
+        part_names.append(v["name"])
+        total_sents += sg["sentences"]
+        warnings.extend(a.get("warnings") or [])
+        vdur = float(v.get("duration") or 0) or float(a.get("duration") or 0)
+        details.append({
+            "index": sg["index"], "chars": sg["chars"],
+            "sentences": sg["sentences"], "text": sg["text"][:60],
+            "audio": a.get("name"), "audio_duration": a.get("duration"),
+            "audio_measured": a.get("measured"),
+            "video": v["name"], "video_duration": round(vdur, 2),
+            "engine": v.get("engine"),
+            # 时长/字数 比：验收用「近似成比例」看的就是这个数
+            "sec_per_char": round(vdur / max(1, sg["chars"]), 5),
+        })
+
+    final = ("narr_" + time.strftime("%Y%m%d_%H%M%S") + "_"
+             + uuid.uuid4().hex[:4] + ".mp4")
+    if len(part_names) == 1:
+        src = os.path.join(_vdir(), part_names[0])
+        dst = os.path.join(_vdir(), final)
+        try:
+            os.replace(src, dst)
+        except OSError as e:
+            return {"ok": False, "doc_id": doc_rel,
+                    "error": "收尾改名失败：%s" % e, "segments": details}
+        duration = round(_probe_duration(dst), 2) or details[0]["video_duration"]
+        out_name, parts = final, 1
+    else:
+        r = concat_videos(part_names, out_name=final)
+        # 分段中间产物用完就清，别在 videos/ 里堆一堆 _narrseg_
+        for n in part_names:
+            try:
+                os.remove(os.path.join(_vdir(), n))
+            except OSError:
+                logger.debug("清理分段视频失败：%s", n, exc_info=True)
+        if not r.get("ok"):
+            return {"ok": False, "doc_id": doc_rel,
+                    "error": "拼接讲解视频失败：%s" % r.get("error"),
+                    "segments": details}
+        out_name = r.get("name") or final
+        parts = int(r.get("parts") or len(part_names))
+        duration = round(float(r.get("duration") or 0), 2)
+
+    meta = {
+        "doc": doc_rel, "doc_name": os.path.basename(doc_rel),
+        "style": (style or "").strip(), "voice": voice or "",
+        "chars": len(text), "total_chars": total_chars,
+        "sentences": total_sents, "segments": parts,
+        "duration": duration, "truncated": truncated,
+        "engine": engine or "local",
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ts": time.time(),
+    }
+    _narr_index_set(out_name, meta)
+    return {
+        "ok": True, "name": out_name,
+        "url": "/api/avatar2/narration/" + quote(out_name),
+        "path": os.path.join(_vdir(), out_name),
+        "duration": duration, "parts": parts,
+        "sentences": total_sents, "chars": meta["chars"],
+        "total_chars": total_chars, "truncated": truncated,
+        "doc": doc_rel, "doc_name": meta["doc_name"],
+        "style": meta["style"], "engine": meta["engine"],
+        "segments": details, "warnings": sorted(set(warnings)),
+    }
+
+
+def list_narrations(limit: int = 50) -> list:
+    """讲解视频列表（新的在前）。索引丢了也能按文件名把现存 mp4 捞回来。"""
+    idx = _narr_index()
+    try:
+        names = os.listdir(_vdir())
+    except OSError:
+        names = []
+    items = []
+    for fn in names:
+        if not fn.lower().startswith("narr_") or not fn.lower().endswith(".mp4"):
+            continue
+        p = os.path.join(_vdir(), fn)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        m = idx.get(fn) or {}
+        items.append({
+            "name": fn, "url": "/api/avatar2/narration/" + quote(fn),
+            "bytes": st.st_size,
+            "mtime": time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime)),
+            "_ts": st.st_mtime,
+            "doc": m.get("doc") or "", "doc_name": m.get("doc_name") or "",
+            "duration": m.get("duration") or round(_probe_duration(p), 2),
+            "sentences": m.get("sentences") or 0,
+            "chars": m.get("chars") or 0,
+            "truncated": bool(m.get("truncated")),
+            "style": m.get("style") or "",
+            "engine": m.get("engine") or "",
+            "created": m.get("created") or "",
+        })
+    items.sort(key=lambda x: x["_ts"], reverse=True)
+    for it in items:
+        it.pop("_ts", None)
+    return items[:max(1, int(limit or 50))]
+
+
+def narration_path(name: str) -> str:
+    """安全取讲解视频路径（挡目录穿越，只认 videos/ 里的 mp4）。"""
+    base = os.path.basename(str(name or ""))
+    if not base.lower().endswith(".mp4"):
+        return ""
+    p = os.path.join(_vdir(), base)
+    return p if os.path.isfile(p) else ""
+
+
+def delete_narration(name: str) -> dict:
+    """删掉一条讲解视频（连同索引里的记录）。"""
+    base = os.path.basename(str(name or ""))
+    p = narration_path(base)
+    if not p:
+        return {"ok": False, "error": "没有这个讲解视频"}
+    try:
+        os.remove(p)
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    _narr_index_set(base, None)
+    return {"ok": True, "name": base}

@@ -438,6 +438,7 @@
           <span class="head-acts">
             <button class="btn sm ghost" id="dlSaveBtn">保存</button>
             <button class="btn sm ghost" id="dlDocxBtn" title="导出为 Word 文档（WPS 与 Word 都能直接打开）">导出 Word</button>
+            <button class="btn sm ghost" id="dlNarrate" title="让数字人把这份文档讲给你听（分段合成，长文档只讲开头一段）">🎬 讲给我听</button>
             <button class="btn sm ghost" id="dlDownload">下载</button>
             <button class="btn sm ghost" id="dlCopyBtn" title="复制一份（可改名字，原文件不动）">📋 复制</button>
             <button class="btn sm ghost danger" id="dlDelBtn">删除</button>
@@ -448,6 +449,33 @@
       </div>
           </div>
       </div>
+    </section>
+
+    <!-- 数字人解说员：文档 / PPT 一键「讲给我听」
+         入口在生成文库的文档面板（#dlNarrate）；这里只负责播放与进度。
+         后端按段合成（/api/avatar2/narrate），一段失败只会报「第几段」。 -->
+    <section class="panel narr" id="narrPanel" hidden>
+      <div class="sec-head">
+        <h2>🎬 数字人讲解</h2>
+        <span class="head-acts">
+          <select class="narr-style" id="narrStyle" title="讲解语气（TTS 情感预设）">
+            <option value="">自然</option>
+            <option value="news">播报</option>
+            <option value="gentle">温柔</option>
+            <option value="serious">严肃</option>
+            <option value="cheerful">愉悦</option>
+          </select>
+          <button class="btn sm ghost" id="narrClose" title="收起讲解面板（视频还在，随时能再打开）">✕</button>
+        </span>
+      </div>
+      <p class="hint" id="narrHint">正在准备…</p>
+      <video class="narr-video" id="narrVideo" controls playsinline hidden></video>
+      <div class="narr-prog"><div class="narr-prog-fill" id="narrProgFill"></div></div>
+      <div class="narr-acts">
+        <a class="btn sm ghost" id="narrDownload" hidden>⬇ 下载视频</a>
+        <span class="narr-meta" id="narrMeta"></span>
+      </div>
+      <div class="list narr-hist" id="narrHist"></div>
     </section>
 
     <!-- 音频库：TTS 合成出来的音频统一留存，可试听 / 下载 / 重命名 / 删除 -->

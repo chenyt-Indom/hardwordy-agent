@@ -24,6 +24,7 @@ persistSession）。工具调用的**真实记录** —— 改了哪个文件、
 """
 import json
 import os
+import re
 import threading
 import time
 from collections import Counter
@@ -1118,6 +1119,226 @@ def timeline(limit: int = 20, session: str = "") -> list:
         if item.get("regress_pass") is None:
             missing.append("regress_pass")
         item["missing"] = missing
+    return out
+
+
+# ------------------------------------------------------------------ 历史声称回扫
+# ★ 2026-11-24 用户要求「历史「已完成」记录回扫：声称新建的文件必须真实存在」：
+#   账本里的 detail 经常写着「新建 backend/xxx.py」，可下一次回忆「我建过什么」
+#   时只能看到这行字 —— 文件其实从没落盘。于是模型拿自己的旧记录当证据，
+#   越回忆越离谱。这里把这类「声称」当作**待验证断言**，逐条核对磁盘：
+#   对不上的记一条 claim_mismatch 事件（落 data/actlog/claim_mismatch.jsonl）。
+_CLAIM_RE = re.compile(r"(?:新建|新增)\s*[：:=\-—]?\s*"
+                       r"([^\s，,。；;、:：!！?？（）()\[\]{}<>\"'“”‘’|]+)")
+_CLAIM_SESSION = "claim_mismatch"     # 事件落到单独一本账，不污染会话账本
+_CLAIM_GAP = 300.0                    # 同一路径 5 分钟内只记一次（面板会反复轮询）
+_CLAIM_KEEP = 200                     # 单进程最多记多少条，防止异常路径刷爆账本
+_CLAIM_SEEN = {}
+
+
+def _claim_roots() -> list:
+    """「新建 <path>」里的相对路径按哪几个根去解析（项目根 / backend / cwd）。"""
+    roots = []
+    try:
+        roots.append(os.path.dirname(os.path.dirname(
+            os.path.abspath(config.__file__))))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    try:
+        roots.append(os.getcwd())
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    try:
+        roots.append(os.path.dirname(os.path.abspath(__file__)))
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    out = []
+    for r in roots:
+        if r and r not in out:
+            out.append(r)
+    return out
+
+
+def _clean_claim_path(s) -> str:
+    """把正则抓到的片段清理成路径：去引号/括号/句末标点，压掉空白。"""
+    t = " ".join(str(s or "").split())
+    t = t.strip("「」【】()[]{}<>\"'“”‘’《》")
+    return t.rstrip("。，,;；:：!！?？")
+
+
+def _looks_like_path(s: str) -> bool:
+    """是不是一个「文件路径」的写法 —— 必须有目录分隔符或扩展名。
+
+    只写「新增功能 / 新增记录」这类中文词不算声称新建文件，不参与核对。
+    """
+    if not s or len(s) > 200:
+        return False
+    if "/" in s or "\\" in s:
+        return True
+    # 有扩展名才算文件名（排除 "3.14" 这种纯数字）
+    return bool(re.search(r"\.[A-Za-z0-9]{1,10}$", s))
+
+
+def _claim_file_exists(p: str, roots=None) -> bool:
+    """声称的文件是否真实存在：绝对路径直接用，相对路径逐个根试（不抛异常）。"""
+    s = _clean_claim_path(p)
+    if not s:
+        return False
+    cands = []
+    if os.path.isabs(s):
+        cands.append(s)
+    else:
+        rel = s.replace("\\", os.sep).replace("/", os.sep)
+        for r in (roots if roots is not None else _claim_roots()):
+            cands.append(os.path.join(r, rel))
+        cands.append(rel)
+    for c in cands:
+        try:
+            if os.path.exists(c):
+                return True
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+    return False
+
+
+def _claim_texts(row) -> list:
+    """一行记录里可能带「新建/新增 <path>」声称的文本字段。"""
+    out = []
+    if isinstance(row, dict):
+        for k in ("detail", "m", "a"):
+            v = row.get(k)
+            if isinstance(v, str) and v.strip():
+                out.append(v)
+    return out
+
+
+def _claim_rows(window: int, session: str = "") -> list:
+    """取要回扫的记录：会话账本（或跨会话最近 window 条）+ 计划阶段流水。"""
+    rows = []
+    try:
+        if session:
+            rows = _read(_path(session))[-window:]
+        else:
+            rows = _recent_session_rows(window)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    # 阶段流水单独落盘（data/actlog/stages/*.jsonl），detail 字段就在那里
+    try:
+        sdir = os.path.join(_dir(), "stages")
+        for name in sorted(os.listdir(sdir)):
+            if name.endswith(".jsonl"):
+                rows.extend(_read(os.path.join(sdir, name))[-window:])
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    return rows
+
+
+def _note_claim_mismatch(item: dict) -> None:
+    """把一次「声称新建但文件不存在」记成 claim_mismatch 事件（异常全吞）。"""
+    p = str((item or {}).get("path") or "")
+    if not p:
+        return
+    try:
+        now = time.time()
+        if now - float(_CLAIM_SEEN.get(p) or 0.0) < _CLAIM_GAP:
+            return
+        if len(_CLAIM_SEEN) >= _CLAIM_KEEP:
+            return
+        _CLAIM_SEEN[p] = now
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+    try:
+        note = ("声称新建但文件不存在：%s（记录时间 %s）"
+                % (p, str((item or {}).get("t") or "?")))
+        record(_CLAIM_SESSION, "claim_mismatch", {"path": p, "rel": p}, ok=False,
+               result=note, evidence={"fail_kind": "claim_mismatch"})
+        append_watch_event(_CLAIM_SESSION,
+                           {"kind": "claim_mismatch", "key": p, "state": "miss",
+                            "note": note, "count": 1})
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+
+
+def audit_history_claims(window: int = COUNT_WINDOW, session: str = "",
+                         path: str = "", record_events: bool = True,
+                         roots=None) -> dict:
+    """回扫历史记录：凡是写着「新建/新增 <path>」的，核对该文件是否真实存在。
+
+    为什么需要（2026-11-24 用户要求）：
+      账本里「已完成」的记录会被下一轮当成事实引用 —— detail 里一句
+      「新建 backend/foo.py」看着像证据，其实文件从没落盘。这里把这类声称
+      当断言逐条验证，对不上的记 claim_mismatch 事件，前端体检卡显示
+      「历史记录不一致：N 条」，用户一眼知道旧记录不能全信。
+
+    参数：
+      window         扫最近多少条日志（<=0 按 COUNT_WINDOW=300 处理）
+      session        非空 → 只扫该会话账本；空 → 跨会话扫最近的
+      path           显式指定单个账本文件（测试用；给了就只扫这个文件）
+      record_events  是否把不一致写进 claim_mismatch 事件（默认写）
+      roots          相对路径的解析根（测试用；默认项目根 / cwd / backend）
+
+    返回 dict（任何异常都返回 ok=False 的空结果，绝不抛）：
+      {"ok": True, "ts": str, "window": int, "scanned": int,
+       "claims": int,          # 命中「新建/新增 <path>」的次数
+       "mismatch": int,        # 文件不存在的不一致条数（同路径只算 1 条）
+       "count": int,           # mismatch 的别名，前端/体检卡直接用
+       "items": [{"path","claim","t","text","session"}, ...],
+       "missing": [路径, ...]}
+    """
+    out = {"ok": True, "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+           "window": COUNT_WINDOW, "scanned": 0, "claims": 0,
+           "mismatch": 0, "count": 0, "items": [], "missing": []}
+    try:
+        try:
+            k = int(window)
+        except (TypeError, ValueError):
+            k = COUNT_WINDOW
+        if k <= 0:
+            k = COUNT_WINDOW
+        out["window"] = k
+        try:
+            rows = _read(path)[-k:] if path else _claim_rows(k, session)
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+            rows = []
+        if not isinstance(rows, list):
+            rows = []
+        out["scanned"] = len(rows)
+        items = []
+        seen = set()
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            # 自己不核对自己的事件行（note 里也含「新建」二字）
+            if str(r.get("n") or "") == "claim_mismatch":
+                continue
+            for text in _claim_texts(r):
+                for m in _CLAIM_RE.finditer(text):
+                    p = _clean_claim_path(m.group(1))
+                    if not _looks_like_path(p):
+                        continue
+                    out["claims"] += 1
+                    if _claim_file_exists(p, roots):
+                        continue
+                    if p in seen:
+                        continue
+                    seen.add(p)
+                    items.append({"path": p,
+                                  "claim": " ".join(m.group(0).split())[:80],
+                                  "t": str(r.get("t") or r.get("ts") or "")[:19],
+                                  "text": " ".join(text.split())[:160],
+                                  "session": session or ""})
+        items = items[:50]
+        out["items"] = items
+        out["mismatch"] = len(items)
+        out["count"] = len(items)
+        out["missing"] = [it["path"] for it in items]
+        if record_events and items:
+            for it in items:
+                _note_claim_mismatch(it)
+    except Exception:
+        logger.debug("silent-except", exc_info=True)
+        out["ok"] = False
     return out
 
 

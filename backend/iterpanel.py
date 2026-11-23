@@ -38,6 +38,9 @@ _LOG_LINES = 40
 _JOURNAL_LINES = 14
 _PLANS_SHOWN = 6
 _HIST_SHOWN = 10
+# 历史声称回扫看多少条（2026-11-24）：和 actlog 的 COUNT_WINDOW 同口径，
+# 单会话账本只有 120 条，300 条必须跨会话拼（actlog._recent_session_rows 负责）。
+_CLAIM_WINDOW = 300
 
 
 def _now() -> str:
@@ -243,6 +246,49 @@ def _blk_semantic() -> dict:
     return st if isinstance(st, dict) else {}
 
 
+def _blk_history_claims() -> dict:
+    """历史「新建/新增 <path>」声称回扫（2026-11-24 用户要求）。
+
+    账本 detail 里写着「新建 xxx.py」不代表文件真的存在 —— 下一轮拿旧记录
+    当证据就会自己骗自己。这里调 actlog.audit_history_claims() 只读核对磁盘，
+    把「不一致条数 + 前几条明细」暴露给体检卡，前端显示「历史记录不一致：N 条」。
+
+    只读磁盘、不触发评分/回归；任何异常都退化成空结果（计数 0），
+    绝不让这一块把整张面板拖成空白。
+    """
+    empty = {"count": 0, "mismatch": 0, "claims": 0, "scanned": 0,
+             "window": _CLAIM_WINDOW, "items": []}
+    try:
+        from . import actlog as _AL
+        d = _AL.audit_history_claims(window=_CLAIM_WINDOW)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("iterpanel 历史声称回扫失败", exc_info=True)
+        return empty
+    if not isinstance(d, dict):
+        return empty
+    w = "history_claims"
+    try:
+        cnt = int(_get(d, "count", 0, where=w + ".count") or 0)
+    except (TypeError, ValueError):
+        cnt = 0
+    try:
+        claims = int(_get(d, "claims", 0, where=w + ".claims") or 0)
+    except (TypeError, ValueError):
+        claims = 0
+    try:
+        scanned = int(_get(d, "scanned", 0, where=w + ".scanned") or 0)
+    except (TypeError, ValueError):
+        scanned = 0
+    items = []
+    for it in _get_list(d, "items", where=w + ".items")[:10]:
+        items.append({
+            "path": str(_get(it, "path", where=w + ".item.path") or "")[:200],
+            "t": str(_get(it, "t", where=w + ".item.t") or "")[:19],
+        })
+    return {"count": cnt, "mismatch": cnt, "claims": claims,
+            "scanned": scanned, "window": _CLAIM_WINDOW, "items": items}
+
+
 def _blk_health(days: int) -> dict:
     from . import iterhealth as _IH
     d = _IH.check(days=days) or {}
@@ -252,8 +298,17 @@ def _blk_health(days: int) -> dict:
         k = str(_get(it, "state") or "")
         if k in cnt:
             cnt[k] += 1
+    # ★ 2026-11-24：体检块顺带带上「历史记录不一致」计数 —— main.py 的
+    #   /api/iter/panel 会把整个 health 块原样透出，前端据此显示告警行。
+    try:
+        claims = _blk_history_claims()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("iterpanel 体检取历史声称失败", exc_info=True)
+        claims = {"count": 0, "mismatch": 0, "claims": 0, "scanned": 0,
+                  "window": _CLAIM_WINDOW, "items": []}
     return {"summary": cnt, "items": items,
-            "verdict": _get(d, "verdict", "", where="health.verdict") or ""}
+            "verdict": _get(d, "verdict", "", where="health.verdict") or "",
+            "history_claims": claims}
 
 
 def _blk_chain() -> dict:
@@ -323,6 +378,21 @@ def panel(days: int = 30) -> dict:
             out[name] = None
             out["errors"][name] = "%s: %s" % (type(e).__name__, e)
     out["ok"] = not out["errors"]
+    # ★ 2026-11-24：把「历史记录不一致」提到顶层，调用方（体检卡/看板）
+    #   不必知道它藏在 health 块里；health 块里那份原样保留，两处同源不重扫。
+    try:
+        hc = out.get("health")
+        if isinstance(hc, dict) and isinstance(hc.get("history_claims"), dict):
+            out["history_claims"] = hc["history_claims"]
+        else:
+            out["history_claims"] = {"count": 0, "mismatch": 0, "claims": 0,
+                                     "scanned": 0, "window": _CLAIM_WINDOW,
+                                     "items": []}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("iterpanel 汇总历史声称失败", exc_info=True)
+        out["history_claims"] = {"count": 0, "mismatch": 0, "claims": 0,
+                                 "scanned": 0, "window": _CLAIM_WINDOW,
+                                 "items": []}
     # 面板出口处再兜一层：顶层字段用 safe_get 取，缺了也只降级成默认值
     out["ok"] = bool(_get(out, "ok", True, where="panel.ok"))
     out["ts"] = _get(out, "ts", "", where="panel.ts") or ""

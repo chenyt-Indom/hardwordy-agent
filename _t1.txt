@@ -1,0 +1,1 @@
+{"avatar": false, "lib": true, "libfiles": ["AI迭代想法抽屉前端修复说明.docx", "AMS1117-3.3稳压板_BOM.xlsx", "AMS1117-3.3稳压板设计方案.pptx", "avprobe.txt", "Hive 多人协作群 · 实现与使用说明.docx", "Hive群聊跨版本兼容与状态显示说明.docx", "LLM接管核查报告.docx", "Markdown渲染失效诊断与修复报告.docx", "PPT制作能力样例.pptx", "PPT通用模板.pptx"]}
