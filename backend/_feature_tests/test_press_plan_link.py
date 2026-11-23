@@ -58,3 +58,9 @@ def run():
     assert hit, "link_plan / link_top 没有任何调用方（功能等于没接上）"
 
     print("press_plan_link OK")
+
+
+if __name__ == "__main__":
+    # ⚠️ 2026-11-23 补：原来只有 def run()，没有调用入口 ——
+    #   直接跑这个文件 rc=0 但一条断言都没执行（静默通过）。补上入口。
+    run()
