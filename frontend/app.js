@@ -9406,22 +9406,29 @@
   }
 
   // ---------- 终止当前任务 ----------
-  // ★ 2026-11-23 用户要求：「时刻都有那个终止按键，随时都能手动立刻终止」。
-  //   所以按钮**永远显示、永远可点**；on=true 只表示"现在有任务在跑"，用来高亮。
+  // ★ 2026-11-23 用户要求（最新）：「没有进行任务时就不要显示终止了，不然不知道当前状态」。
+  //   所以这两个按钮**跟着任务状态走**：on=true（真的在跑）→ 出现；on=false（空闲）→ 收起。
+  //   ⚠️ 之前为了修"一会有一会没有"改成过常驻显示，现在改回来 —— 但这次状态是可靠的：
+  //     · 开始生成：doSend 里 `setStopVisible(true)`
+  //     · 正常结束 / 出错 / 被终止 / 被暂停：finally、stopStreaming、pauseStream 都会调 false
+  //     · 页面加载：初始化时调一次 false
+  //   ⚠️ 同时设 style.display：`.btn` 自己有 display（inline-flex），会盖掉 [hidden] 的
+  //     UA 默认样式，只写 hidden 的话按钮会"该消失却不消失"。
   function setStopVisible(on) {
+    const show = !!on;
     const b = $("#stopBtn");
-    if (!b) return;
-    b.hidden = false;
-    b.disabled = false;
-    b.classList.toggle("running", !!on);
-    // ★ 2026-11-23：「⏸ 暂停」只在真的有任务在跑时才出现 ——
-    //   没东西可暂停时摆一个按钮，点了什么都不发生，反而让人以为坏了。
-    // ⚠️ 2026-11-23：暂停按钮原来 `hidden = !on` —— 只要某一处调 setStopVisible(false)，
-    //   它就整个消失，跟「终止」之前"一会有一会没有"是同一个病。
-    //   改成**常驻显示**：没任务可暂停时置灰（disabled），有任务时亮起来。
-    //   这样按钮位置永远固定，用户不用满屏找它。
+    if (b) {
+      b.hidden = !show;
+      b.style.display = show ? "" : "none";
+      b.disabled = false;
+      b.classList.toggle("running", show);
+    }
     const p = $("#pauseBtn");
-    if (p) { p.hidden = false; p.disabled = !on; }
+    if (p) {
+      p.hidden = !show;
+      p.style.display = show ? "" : "none";
+      p.disabled = !show;
+    }
   }
 
   // 「▶ 继续」按钮：暂停之后才出现，点一下接着写

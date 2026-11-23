@@ -896,8 +896,9 @@
         <input type="file" id="docInput" multiple hidden />
         <input type="file" id="videoInput" accept="video/*" hidden />
         <textarea id="input" rows="1" placeholder="描述需求，可拖图/文档进来"></textarea>
-        <!-- 2026-11-23：「■ 终止」常驻可点（停下并丢掉后续）；「⏸ 暂停」停下但保住进度，可点「▶ 继续」接着写 -->
-        <button class="btn ghost danger stop" id="stopBtn" title="终止当前任务（随时可点，点了立刻停，后续不再继续）">■ 终止</button>
+        <!-- 2026-11-23：空闲时不显示「终止 / 暂停」，只有真的在跑任务时才由 JS 亮出来（否则看不出当前状态）。
+             「■ 终止」= 停下并丢掉后续；「⏸ 暂停」= 停下但保住进度，可点「▶ 继续」接着写。 -->
+        <button class="btn ghost danger stop" id="stopBtn" hidden title="终止当前任务（点了立刻停，后续不再继续）">■ 终止</button>
         <button class="btn ghost pause" id="pauseBtn" hidden title="暂停（保住已生成的内容，之后可以继续）">⏸ 暂停</button>
         <button class="btn primary resume" id="resumeBtn" hidden title="接着刚才中断的地方继续">▶ 继续</button>
         <button class="btn primary send" id="sendBtn">发送</button>
