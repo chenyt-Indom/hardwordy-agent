@@ -579,6 +579,29 @@ def _is_gate_block(row: dict) -> bool:
     return any(m in s for m in _GATE_MARKS)
 
 
+# 哪些动作记录属于「验证机制本身」而不是真实改动能力。
+# 实测依据（2026-11-24，actlog 495 条）：probe=True 9 条，files 指向
+# _probe_ / _tmp_ / _debug_archive 临时脚本 23 条 —— 这类动作跑一次几乎必然 ok，
+# 混进动作成功率会让分数随「我跑了多少次测试」上下浮动，等于自己给自己刷分。
+# ⚠️ backend/_feature_tests/ 下的 test_*.py **不算**（写测试用例是真实工作），
+#    只有明确是诊断 / 临时脚本的才排除。
+_PROBE_FILE_MARKS = ("_probe_", "/_tmp_", "/_debug_archive/")
+
+
+def _is_probe_row(row: dict) -> bool:
+    """这条 actlog 是不是探针 / 临时诊断产生的（不该进能力统计）。"""
+    try:
+        if row.get("probe") is True:
+            return True
+        files = row.get("files") or []
+        if not isinstance(files, list) or not files:
+            return False
+        names = [str(f).replace("\\", "/") for f in files]
+        return all(any(m in n for m in _PROBE_FILE_MARKS) for n in names)
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
 # RSI 缓存：hint() 每轮构建系统提示都会走到这里，
 # 不能每次都把 actlog.jsonl 全解析一遍（几千行）。
 _RSI_CACHE: dict = {"ts": 0.0, "val": None}
@@ -601,12 +624,25 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
             and _now - _RSI_CACHE["ts"] < cache_sec):
         return _RSI_CACHE["val"]
     rows = _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))[-max(20, limit):]
-    ok = sum(1 for r in rows if str(r.get("result") or "").lower() == "ok")
-    _fail = [r for r in rows
+    # ★ 2026-11-24 修（用户要求：统计不许被测试 / 探针污染）
+    #   探针与临时诊断脚本的记录整条排除，并显式报出条数 —— 不静默丢弃。
+    # ⚠️ 2026-11-24 修：review_approve 是「用户批准动作」的**审批事件**，
+    #   不是动作执行结果（实测 58 条 approved + 14 条 noop 全是这一类）。
+    #   混进样本会让覆盖率虚低（0.647），让人误以为统计不透明。
+    _events = [r for r in rows if r.get("kind") == "review_approve"]
+    judged = [r for r in rows
+              if not _is_probe_row(r) and r.get("kind") != "review_approve"]
+    n_probe = len(rows) - len(judged) - len(_events)
+    ok = sum(1 for r in judged if str(r.get("result") or "").lower() == "ok")
+    _fail = [r for r in judged
              if str(r.get("result") or "").lower() in ("fail", "failed", "error")]
     gate = sum(1 for r in _fail if _is_gate_block(r))
     bad = len(_fail) - gate
-    marked = [r for r in rows if r.get("phantom") is not None]
+    # 既不算成功也不算失败的（approved 待执行 / noop 无事可做 / 空结果）：
+    # 不进分母是合理的，但必须**报出覆盖率** —— 否则用户看到的百分比
+    # 可能只覆盖了一半记录，属于统计不透明。
+    n_undecided = len(judged) - ok - len(_fail)
+    marked = [r for r in judged if r.get("phantom") is not None]
     ph = sum(1 for r in marked if r.get("phantom") is True)
     a = audit()
     # 落地率按 progress 加权：fixed=1.0 / verifying=窗口进度 / pending=0.0。
@@ -632,27 +668,52 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
         hi, mid = int(c.get("high") or 0), int(c.get("mid") or 0)
     except Exception:                                   # noqa: BLE001
         logger.debug("读 audits 失败", exc_info=True)
+    # ⚠️⚠️ 2026-11-24 修（用户要求「避免刻意刷分」）：
+    #   原来缺数据的项直接 `if pd_:` 不进 parts，随后 tw 只加剩余权重并重新归一化
+    #   —— 等于「让某一项没数据」就能把它的 0 分从总分里抹掉，分数自动上涨。
+    #   这正是可被刻意利用的刷分路径：把教训全变成 unprobed（无可判定探针），
+    #   落地率的 0 分就消失，总分凭空变高，而实际什么都没改好。
+    #   现在改成：缺失项**保留固定权重、按 0 计**（保守，宁可低估不虚高），
+    #   并在 insufficient 里点名是哪项没数据 —— 分数只能靠真实改进上升。
     parts = []
+    insufficient = []
     if ok + bad:
         parts.append(("动作成功率", ok / (ok + bad), 0.40,
                       "%d/%d%s" % (ok, ok + bad,
                                    ("（另 %d 次护栏拦截，不计入分母）" % gate) if gate else "")))
+    else:
+        insufficient.append("动作成功率")
     if marked:
         parts.append(("无幽灵率", 1 - ph / len(marked), 0.15,
                       "幽灵 %d/%d" % (ph, len(marked))))
+    else:
+        insufficient.append("无幽灵率")
     if pd_:
         parts.append(("教训落地率", min(1.0, fx / pd_), 0.25,
                       "%.1f/%d 条（观察中按进度计%s）"
                       % (fx, pd_,
                          "；%d 条无可判定探针，不计入分母" % n_unprobed
                          if n_unprobed else "")))
+    else:
+        insufficient.append("教训落地率")
     parts.append(("静态质量", max(0.0, 1 - min(1.0, (hi * 3 + mid) / 10.0)), 0.20,
                   "high %d / mid %d" % (hi, mid)))
-    tw = sum(p[2] for p in parts) or 1.0
-    score = round(100 * sum(p[1] * p[2] for p in parts) / tw, 1)
+    # ★ 分母**固定为 1.0**（四项权重之和），而不是「只加有数据的项再归一化」：
+    #   · 缺数据的项不进 parts —— UI 不会把它误显示成「0% 落地率」；
+    #   · 但它的权重仍算在分母里（等价于按 0 计）—— 删掉数据也不能抬分。
+    #   这两个要求缺一不可，是「不误报」和「不刷分」的平衡点。
+    score = round(100 * sum(p[1] * p[2] for p in parts), 1)
+    # 覆盖率：可判定动作 / 全部动作 —— 让「这个分数覆盖了多少记录」可见。
+    coverage = round((ok + bad) / float(len(judged) or 1), 3) if judged else 0.0
     res = {"ok": True, "score": score,
-           "parts": [{"name": n, "value": round(v, 3), "weight": w, "detail": d}
+           "parts": [{"name": n, "value": round(v, 3), "weight": w, "detail": d,
+                      "insufficient": n in insufficient}
                      for n, v, w, d in parts],
+           "insufficient": insufficient,
+           "coverage": coverage,
+           "samples": {"judged": len(judged), "probe_excluded": n_probe,
+                       "event_excluded": len(_events),
+                       "undecided": n_undecided, "gate_blocked": gate},
            "at": time.strftime("%H:%M:%S", time.localtime(_now))}
     _RSI_CACHE["ts"], _RSI_CACHE["val"] = _now, res
     return res
@@ -818,6 +879,33 @@ def _slope(ys: list) -> float | None:
     if den == 0:
         return None
     return sum((i - mx) * (ys[i] - my) for i in range(n)) / den
+
+
+def _slope_ts(pts: list) -> float | None:
+    """按**真实时间**算斜率，单位「分 / 小时」。
+
+    为什么不能按索引算（原来的 _slope）：采样间隔并不等距 —— 正常 1 小时一次，
+    调试 / 手动 force 时可能 12 分钟内 8 次。按索引算等于假设等距，
+    密集点会把斜率压成接近 0（实测 05:42~05:54 那 8 个点就是这么把趋势压平的）。
+    按时间算，密集点的权重自然降低，曲线才反映真实改进速度。
+
+    pts 每项需要 {"t": 秒级时间戳, "score": 分数}；时间戳缺失时退化为索引斜率。
+    """
+    try:
+        xs = [float(p.get("t") or 0.0) for p in pts]
+        ys = [float(p.get("score") or 0.0) for p in pts]
+    except (TypeError, ValueError):
+        return None
+    n = len(xs)
+    if n < 2 or len(set(xs)) < 2:
+        return _slope(ys)
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    den = sum((x - mx) ** 2 for x in xs)
+    if den == 0:
+        return None
+    per_sec = sum((xs[i] - mx) * (ys[i] - my) for i in range(n)) / den
+    return per_sec * 3600.0
 
 
 def _stdev(ys: list) -> float | None:
@@ -1258,11 +1346,20 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0) -> dict:
     p = _rsi_hist_path()
     rows = _read_jsonl(p)
     now = time.time()
-    if not force and rows:
+    replace_last = False
+    if rows:
         last = _num_ts(rows[-1].get("ts"))
-        if now - last < min_gap:
+        gap = now - last
+        if not force and gap < min_gap:
             return {"ok": True, "skipped": True, "score": cur.get("score"),
                     "n": len(rows), "why": "距上次采样不足 %.0f 秒" % min_gap}
+        # ★ 2026-11-24 修（统计污染）：force=True（调试 / 手动）原来无条件追加 ——
+        #   实测 rsi_history 30 个点里有 8 个挤在 12 分钟内（05:42:30~05:54:30），
+        #   而 _slope 是按索引等距算的 → 趋势斜率被这堆几乎相同的点主导、曲线失真。
+        #   改成：距上一条不足 min_gap 时**替换**最后一条，历史点保持等距，
+        #   调试不再往趋势里堆点。
+        if gap < min_gap:
+            replace_last = True
     try:
         sp = rsi_speed().get("score")
     except Exception:                                   # noqa: BLE001
@@ -1274,12 +1371,21 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0) -> dict:
            "speed": sp,
            "parts": {x["name"]: x["value"] for x in (cur.get("parts") or [])}}
     try:
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if replace_last:
+            rows[-1] = rec
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            os.replace(tmp, p)
+        else:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError as e:
         return {"ok": False, "error": "写 rsi_history 失败：%s" % e}
-    return {"ok": True, "score": rec["score"], "n": len(rows) + 1,
-            "iso": rec["iso"]}
+    return {"ok": True, "score": rec["score"],
+            "n": len(rows) if replace_last else len(rows) + 1,
+            "replaced": replace_last, "iso": rec["iso"]}
 
 
 # 节流采样：hint() 每轮对话都会调，但只有距上次超过 gap 秒才真写盘。
@@ -1314,7 +1420,20 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
       整体 < -0.05 → 下滑。
     """
     rows = _read_jsonl(_rsi_hist_path())[-max(10, limit):]
+    # ★ 2026-11-24 修（统计污染）：斜率改成**按真实时间**算（见 _slope_ts）。
+    #   原来按索引算 = 假设采样等距，而实测正常 1 小时一次、调试时 12 分钟 8 次，
+    #   密集点会把斜率压成接近 0，曲线失真。
+    #   这里只保留「同一秒内的重复写入」去重（并发双写的老问题），不动正常采样点。
+    _ded = []
+    for _r in rows:
+        _ts = _num_ts(_r.get("ts"))
+        if _ded and _ts and _ded[-1][0] and abs(_ts - _ded[-1][0]) < 1.0:
+            _ded[-1] = (_ts, _r)
+        else:
+            _ded.append((_ts, _r))
+    rows = [r for _, r in _ded]
     pts = [{"ts": r.get("iso") or "",
+            "t": _num_ts(r.get("ts")) or 0.0,
             "score": float(r.get("score") or 0),
             "speed": (float(r["speed"])
                       if isinstance(r.get("speed"), (int, float)) else None)}
@@ -1324,17 +1443,18 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
         return {"ok": True, "n": len(ys), "points": pts, "shape": "样本不足",
                 "slope": None, "segs": [],
                 "advice": "继续采样（每次评估收尾会自动记一条）"}
-    sl = _slope(ys) or 0.0
+    sl = _slope_ts(pts) or 0.0
     sd = _stdev(ys) or 0.0
     k = max(1, len(ys) // 3)
     segs = []
     for i, name in enumerate(("前段", "中段", "后段")):
         a0 = i * k if i < 2 else 2 * k
         a1 = (i + 1) * k if i < 2 else len(ys)
-        seg = ys[a0:a1]
-        segs.append({"name": name, "n": len(seg),
-                     "slope": round(_slope(seg) or 0.0, 3),
-                     "mean": round(sum(seg) / max(1, len(seg)), 1)})
+        seg_pts = pts[a0:a1]
+        seg_y = ys[a0:a1]
+        segs.append({"name": name, "n": len(seg_y),
+                     "slope": round(_slope_ts(seg_pts) or 0.0, 3),
+                     "mean": round(sum(seg_y) / max(1, len(seg_y)), 1)})
     s1, s2, s3 = [x["slope"] for x in segs]
     if s1 < s2 < s3 and s1 > 0:
         shape = "③ 斜率递增（RSI）"
@@ -1344,7 +1464,8 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
         shape = "④ 锯齿下滑"
     else:
         shape = "① 平台（原地跑）"
-    return {"ok": True, "n": len(ys), "points": pts[-40:],
+    return {"ok": True, "n": len(ys),
+            "points": [{k: v for k, v in p.items() if k != "t"} for p in pts[-40:]],
             "slope": round(sl, 3), "stdev": round(sd, 2),
             "segs": segs, "shape": shape,
             "first": ys[0], "last": ys[-1],
@@ -1370,10 +1491,22 @@ def rsi_weakest() -> dict:
         _pend_n = len(audit().get("pending") or [])
     except Exception:                                   # noqa: BLE001
         _pend_n = 0
+    # ⚠️ 2026-11-24 修：缺数据的项（insufficient，按 0 计）**不能**当「最该修」——
+    #    它 0 分只是因为没样本，不是能力差；拿它当改进方向会把模型指去
+    #    「制造数据」而不是「修问题」，等于变相刷分。
     cands = [p for p in parts
-             if not (p["name"] == "教训落地率" and _pend_n == 0)]
+             if not (p["name"] == "教训落地率" and _pend_n == 0)
+             and not p.get("insufficient")]
+    # 全满分同样没有「最该修」：硬选一个 drag=0 的项 = 假装有事要做，
+    # 会把模型指去瞎改 —— 那也是刷分（为了让指标好看而制造动作）。
+    if cands and max(p["weight"] * (1 - p["value"]) for p in cands) <= 0:
+        cands = []
     if not cands:
-        cands = parts
+        # 全是缺数据项 → 不给「最该修」：硬选只会把改进方向指错，
+        # 等于逼模型去「制造数据」而不是「修问题」。
+        return {"ok": False, "error": "没有可判定的短板（数据不足或各项已满分）",
+                "insufficient": [p["name"] for p in parts if p.get("insufficient")],
+                "score": cur.get("score")}
     # 拖后腿程度 = 权重 × (1 - 得分)
     worst = max(cands, key=lambda p: p["weight"] * (1 - p["value"]))
     advice = {
@@ -1395,7 +1528,7 @@ def rsi_line() -> str:
     t = rsi_trend()
     s = "RSI %.1f 分" % (cur.get("score") or 0)
     if t.get("n", 0) >= 4:
-        s += "（%d 次采样，斜率 %+.2f/次，形态：%s）" % (
+        s += "（%d 次采样，斜率 %+.2f 分/小时，形态：%s）" % (
             t["n"], t.get("slope") or 0.0, t.get("shape"))
     else:
         s += "（历史采样 %d 条，还不够判趋势）" % t.get("n", 0)

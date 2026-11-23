@@ -366,6 +366,34 @@ def _read_json(path, default):
     return default
 
 
+def _scrub_surrogates(obj):
+    """把字符串里的**孤立代理字符**（被截断的 emoji 半截）换成 `?`。
+
+    2026-11-24 实测真故障（app.log.1 里可查）：
+      `写 plans 失败 … UnicodeEncodeError: '\\udbc2' … surrogates not allowed`
+      `[papervec] 重写库失败：'utf-8' codec can't encode character '\\udbc2'`
+    根因：模型输出被截断时会产生半个 surrogate pair，存进 plans / 对话记录后，
+    **写盘**（json.dump + utf-8 编码）必然抛错 —— 一个坏字符就能让
+    「保存计划 / 重写向量库 / 写动作日志」整条链路反复失败。
+    deepseek_client._sanitize 只清洗了**请求体**，写盘这条路没管，所以没修住。
+
+    这里用 utf-8 的 replace 编解码清洗：只把非法代理换掉，其余字符一个不动。
+    """
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+            return obj
+        except UnicodeEncodeError:
+            return obj.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(obj, list):
+        return [_scrub_surrogates(x) for x in obj]
+    if isinstance(obj, tuple):
+        return tuple(_scrub_surrogates(x) for x in obj)
+    if isinstance(obj, dict):
+        return {_scrub_surrogates(k): _scrub_surrogates(v) for k, v in obj.items()}
+    return obj
+
+
 def _write_json(path, obj, retries=6):
     """原子写 JSON。⚠️ 必须带重试 —— Windows 上 `os.replace` 会撞「文件被占用」。
 
@@ -378,7 +406,9 @@ def _write_json(path, obj, retries=6):
     _ensure()
     tmp = str(path) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+        # ★ 2026-11-24 修：写盘前清洗孤立代理字符，否则一个坏 emoji 半截
+        #   会让 plans.json 永远写不进去（实测崩溃见 _scrub_surrogates 注释）。
+        json.dump(_scrub_surrogates(obj), f, ensure_ascii=False, indent=2)
     last = None
     for i in range(retries):
         try:
@@ -908,7 +938,7 @@ def record_round(plan):
         }
         _ROUNDS.parent.mkdir(parents=True, exist_ok=True)
         with open(_ROUNDS, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(_scrub_surrogates(rec), ensure_ascii=False) + "\n")
         return rec
     except Exception as e:                                # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
@@ -1217,7 +1247,9 @@ _ACTLOG_LOCK = threading.Lock()
 
 def _actlog(entry):
     """信任模式自动执行时写一条 actlog，供用户查「有没有在改代码」。"""
-    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    # ★ 2026-11-24 修：actlog 也必须在写盘前清洗 —— 它承载 RSI 的全部样本，
+    #   一个坏字符会让这条记录整条写不进去，统计就「凭空少样本」。
+    line = json.dumps(_scrub_surrogates(entry), ensure_ascii=False) + "\n"
     try:
         p = _DATA / "actlog.jsonl"
         _ensure()
@@ -2331,6 +2363,22 @@ def evaluate_and_improve(limit=10, use_llm=True, trigger="periodic",
               if int(f.get("count") or 0) >= 2]
     if repeat:
         why.append("反复摩擦：" + "、".join(str(f.get("tag")) for f in repeat[:3]))
+    # ★ 2026-11-24 补（用户要求：避免刻意刷分）：
+    #   原来「要不要改进」**只看 LLM 自评分**（<6.5）。自评是可以被自己抬高的 ——
+    #   一旦习惯性给 7 分，反思机制就永远判「不需要改进」而静默停摆。
+    #   这里加一条**客观**判据：RSI 里有「可行动且拖累明显」的短板时，
+    #   不管自评多少分都要改进。自评分只能加戏，不能一票否决。
+    #   用 rsi_weakest() 而不是原始 parts：它已经排除了「没有 pending 的落地率」
+    #   和「无数据项」，避免拿不可行动 / 缺数据的项去空转触发。
+    try:
+        from . import lessonloop as _LL
+        _w = _LL.rsi_weakest()
+        if _w.get("ok") and float(_w.get("drag") or 0) >= 0.15:
+            why.append("客观短板：%s 仅 %.0f%%（拖 %.2f）"
+                       % (_w.get("name"), float(_w.get("value") or 0) * 100,
+                          float(_w.get("drag") or 0)))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("客观判据读取失败", exc_info=True)
     need = bool(why)
     out = {"ok": True, "record": rec, "summary": s,
            "need_improve": need, "reason": "；".join(why)}
@@ -7438,7 +7486,7 @@ def _replan_take(pid, limit=1, cooldown=90.0):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(d, fh, ensure_ascii=False)
+            json.dump(_scrub_surrogates(d), fh, ensure_ascii=False)
         os.replace(tmp, p)
         return {"allow": True, "n": n + 1, "limit": int(limit)}
     except Exception as e:                              # noqa: BLE001

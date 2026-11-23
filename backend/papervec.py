@@ -119,6 +119,26 @@ def load_all() -> list:
     return out
 
 
+def _scrub(obj):
+    """清洗孤立代理字符（坏 emoji 半截）。
+
+    2026-11-24 实测真故障：日志里 `[papervec] 重写库失败：'utf-8' codec can't
+    encode character '\\udbc2'`。不清洗的话，只要库里有一条带坏字符的记录，
+    **整次重写都会失败** —— 库就永远停在旧版本，去重 / 淘汰全部静默失效。
+    """
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+            return obj
+        except UnicodeEncodeError:
+            return obj.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(obj, list):
+        return [_scrub(x) for x in obj]
+    if isinstance(obj, dict):
+        return {_scrub(k): _scrub(v) for k, v in obj.items()}
+    return obj
+
+
 def _rewrite(items: list):
     """整体重写（去重/淘汰时用）。"""
     _ensure()
@@ -126,7 +146,7 @@ def _rewrite(items: list):
         tmp = str(_PAPERS) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             for it in items:
-                f.write(json.dumps(it, ensure_ascii=False) + "\n")
+                f.write(json.dumps(_scrub(it), ensure_ascii=False) + "\n")
         os.replace(tmp, str(_PAPERS))
     except Exception as e:
         _LOG.warning("[papervec] 重写库失败：%s", e)
