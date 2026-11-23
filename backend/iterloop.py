@@ -986,6 +986,66 @@ def read_bench_last():
         return None
 
 
+def read_bench_series(limit=120):
+    """尺子**序列**（只读，给双轴曲线用）。读不到就返回 []，绝不补点。
+
+    ⚠️ 施工单 8.5「拿不到尺子 → 显示 —，不画点」：断线比假点诚实。
+    """
+    out = []
+    try:
+        with open(BENCH_SCORES, encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except Exception:                        # noqa: BLE001
+                    continue
+                if not isinstance(r, dict):
+                    continue
+                out.append({"iso": str(r.get("iso") or ""),
+                            "pass": r.get("pass"), "total": r.get("total"),
+                            "pct": r.get("pct")})
+    except Exception:                                    # noqa: BLE001
+        return []
+    return out[-int(limit or 120):]
+
+
+def read_ledger_series(limit=120):
+    """账本**序列**（只读）：history.jsonl 里 kind=score_round 的综合分轮。
+
+    ⚠️ 施工单 8.2：只取账本自己的数，**不与尺子做任何合成**
+       （不相加、不加权、不平均、不归一化）。前端拿到的是两列原始点。
+    """
+    out = []
+    try:
+        with open(_hist_path(), encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except Exception:                        # noqa: BLE001
+                    continue
+                if not isinstance(r, dict) or r.get("kind") != "score_round":
+                    continue
+                v = r.get("ledger")
+                if v is None:
+                    v = r.get("cum")
+                if v is None:
+                    continue
+                try:
+                    out.append({"iso": str(r.get("iso") or ""),
+                                "v": round(float(v), 2)})
+                except Exception:                        # noqa: BLE001
+                    continue
+    except Exception:                                    # noqa: BLE001
+        return []
+    return out[-int(limit or 120):]
+
+
 def commit_round(before=None, after=None, actions=None, rollback=None,
                  note="", pid="", rebased=False):
     """把这一轮进退**累加**到累计分，并把原因与代码位置写进日志。
@@ -1070,6 +1130,13 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
     #   这里只是补充：迭代轮次结束顺手跑一次，被删也不致命。
     #   bench.py 自己带文件锁：两个通道撞上时后到的直接退出，不会并发写坏哈希链。
     # ══════════════════════════════════════════════════════════════════
+    # 🔒LOCK:rsi-bench-trigger
+    #   施工单 C4：这段**不许被自迭代删掉**。
+    #   主保障是 Windows 计划任务 hwa_bench（操作系统层，自迭代改不到）；
+    #   这里只是补充通道。若要再加一道「锁区清单」保护，需人工在
+    #   backend/selfdev.py 的 _LOCKED_BLOCKS 里加一行：
+    #       "backend/iterloop.py": [("<LOCK 标记>", "<END 标记>")]
+    #   （该文件按设计禁止模型改写，所以这一步只能由人来做。）
     _BENCH = os.environ.get("HWA_BENCH", r"D:\hwa_bench\bench.py")
     if os.path.exists(_BENCH):
         try:
@@ -1080,6 +1147,7 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             logger.debug("启动 bench 失败", exc_info=True)
+    # 🔒END:rsi-bench-trigger
     # ⚠️ 2026-11-22 体系体检抓到：commit_round 只写了账本 / 明细 / 文本日志，
     #    **从来没写 history.jsonl** —— 而 stats()、history()、前端进退看板读的
     #    正是它。后果：单独调用 commit_round 时账本 rounds 在涨、看板永远 0 轮。

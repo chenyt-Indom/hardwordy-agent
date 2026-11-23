@@ -4456,6 +4456,33 @@ def _bench_latest():
         return None
 
 
+@app.get("/api/iter/dual")
+def iter_dual(limit: int = 120):
+    """施工单 8.5：账本与尺子的**两条独立序列**，各给各的，永不相加。
+
+    红线（8.2）：不得相加 / 加权 / 平均 / 归一化。所以这里**故意不返回任何
+    「综合分」字段** —— 没有字段，就没法被合成。前端只能两条线并排画。
+
+    读不到就给空数组 + null，界面显示「—」不画点（8.5 最后一行）。
+    """
+    from . import iterloop as _il
+    try:
+        led = _il.read_ledger_series(limit=int(limit or 120))
+        ben = _il.read_bench_series(limit=int(limit or 120))
+        return {
+            "ok": True,
+            "ledger": led,
+            "bench": ben,
+            "ledger_now": (led[-1] if led else None),
+            "bench_now": _il.read_bench_last(),
+            "note": ("账本=施工日志（累计只增，会骗人）；尺子=体检报告（会抖，"
+                     "但不会系统性说谎）。两个数并排看，永不相加。"),
+        }
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                "ledger": [], "bench": [], "ledger_now": None, "bench_now": None}
+
+
 @app.get("/api/iter/panel")
 def iter_panel(days: int = 30):
     """自迭代体系「详情面板」—— 一个接口喂满前端那张卡。

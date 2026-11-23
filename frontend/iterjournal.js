@@ -15,6 +15,8 @@
   "use strict";
 
   var API_J = "/api/selfiter/journal?limit=40";
+  // 施工单 8.5：账本 / 尺子两条独立序列（后端只给原始点，没有「综合分」字段）
+  var API_D = "/api/iter/dual?limit=120";
   var API_R = "/api/selfiter/revive";
   // 体检接口（iterpanel 的 health 块里带「历史记录不一致」计数）
   var API_P = "/api/iter/panel?days=7";
@@ -25,6 +27,7 @@
   var audit = null;           // {count, claims, scanned, items:[{path,t}]}
   var auditAt = 0;            // 上次取回检计数的时间（ms），30 秒内不重复请求
 var bench = null;           // 施工单 8.5：尺子（项目外固定基准）最新读数
+  var dual = null;            // 施工单 8.5：{ledger:[…], bench:[…]} 两条独立序列
 
   function $(id) { return document.getElementById(id); }
   function mk(t, c, x) {
@@ -82,7 +85,13 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
     ".ij-go[disabled]{opacity:.5;cursor:default;}" +
     ".ij-exp{border:0;background:transparent;color:#8ab4f8;cursor:pointer;" +
     "font-size:11px;padding:0;margin-top:3px;}" +
-    ".ij-empty{opacity:.6;font-size:11.5px;margin-top:6px;}";
+    ".ij-empty{opacity:.6;font-size:11.5px;margin-top:6px;}" +
+    ".ij-led{font-size:11.5px;opacity:.74;margin-bottom:8px;}" +
+    ".ij-dual{margin:2px 0 6px;}" +
+    ".ij-dual svg{width:100%;height:96px;display:block;}" +
+    ".ij-dual .lg{display:flex;gap:12px;font-size:10.5px;opacity:.7;margin-top:2px;}" +
+    ".ij-dual .lg i{display:inline-block;width:10px;height:2px;margin-right:4px;" +
+    "vertical-align:middle;border-radius:1px;}";
 
   function injectCss() {
     if ($("ijCss")) { return; }
@@ -241,6 +250,93 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
     return row;
   }
 
+  // 施工单 8.5 第二行小字：账本（降级为辅助信息，但保留可解释性）
+  function ledgerNode() {
+    if (!dual) { return null; }
+    var now = dual.ledger_now || null;
+    var row = mk("div", "ij-led");
+    if (!now) {
+      row.textContent = "账本（累计只增）：—";
+      row.title = "还没有综合分轮。读不到就显示「—」，不补 0、不估算。";
+      return row;
+    }
+    var v = Number(now.v);
+    var arr = dual.ledger || [];
+    var prev = arr.length >= 2 ? Number(arr[arr.length - 2].v) : null;
+    var d = (prev !== null && isFinite(prev) && isFinite(v)) ? (v - prev) : null;
+    row.textContent = "账本（累计只增）：" + (isFinite(v) ? v.toFixed(2) : "—") +
+      (d === null ? "" : "（本轮 " + (d >= 0 ? "+" : "") + d.toFixed(2) + "）");
+    row.title = "施工单 8.5：账本 = 攒了多少家当，只增不减，" +
+                "不能用来看「是否越改越强」。";
+    return row;
+  }
+
+  // 施工单 8.5 曲线图：两条线 + **左右两个独立 Y 轴**。
+  // 归一化就是变相加权 —— 所以两条线各按各自的 min/max 画，谁也不许被拉平。
+  function dualChart() {
+    if (!dual) { return null; }
+    var L = dual.ledger || [], B = dual.bench || [];
+    if (!L.length && !B.length) {
+      var e = mk("div", "ij-dual");
+      e.innerHTML = '<div class="ij-empty">账本与尺子都还没有数据（不画点，不补 0）。</div>';
+      return e;
+    }
+    var W = 356, H = 96, x0 = 34, x1 = W - 36, y0 = 8, y1 = H - 14;
+    function mm(a, k) {
+      var f = [];
+      for (var i = 0; i < a.length; i++) {
+        var v = Number(a[i][k]);
+        if (isFinite(v)) { f.push(v); }
+      }
+      if (!f.length) { return [0, 1]; }
+      var lo = Math.min.apply(null, f), hi = Math.max.apply(null, f);
+      if (hi - lo < 1e-9) { hi = lo + 1; }
+      return [lo, hi];
+    }
+    function line(a, k, rng, color) {
+      var n = a.length, d = "", on = false;
+      for (var i = 0; i < n; i++) {
+        var v = Number(a[i][k]);
+        if (!isFinite(v)) { on = false; continue; }
+        var x = n < 2 ? (x0 + x1) / 2 : x0 + (x1 - x0) * i / (n - 1);
+        var t = (v - rng[0]) / (rng[1] - rng[0]);
+        var y = y1 - (y1 - y0) * Math.max(0, Math.min(1, t));
+        d += (on ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1) + " ";
+        on = true;
+      }
+      return d ? '<path d="' + d + '" fill="none" stroke="' + color +
+        '" stroke-width="2"/>' : "";
+    }
+    var lr = mm(L, "v");
+    var tot = (dual.bench_now && Number(dual.bench_now.total)) || 15;
+    var br = [0, tot > 0 ? tot : 15];
+    var svg = '<svg viewBox="0 0 ' + W + " " + H + '">' +
+      '<line x1="' + x0 + '" y1="' + y1 + '" x2="' + x1 + '" y2="' + y1 +
+      '" stroke="#2a3140"/><line x1="' + x0 + '" y1="' + y0 + '" x2="' + x0 +
+      '" y2="' + y1 + '" stroke="#2a3140"/><line x1="' + x1 + '" y1="' + y0 +
+      '" x2="' + x1 + '" y2="' + y1 + '" stroke="#2a3140"/>' +
+      '<text x="2" y="' + (y0 + 8) + '" fill="#7b8496" font-size="9">' + lr[1] + "</text>" +
+      '<text x="2" y="' + (y1 + 2) + '" fill="#7b8496" font-size="9">' + lr[0] + "</text>" +
+      '<text x="' + (x1 + 4) + '" y="' + (y0 + 8) + '" fill="#7b8496" font-size="9">' + br[1] + "</text>" +
+      '<text x="' + (x1 + 4) + '" y="' + (y1 + 2) + '" fill="#7b8496" font-size="9">0</text>' +
+      line(L, "v", lr, "#e8b23a") + line(B, "pass", br, "#6ea8fe") + "</svg>" +
+      '<div class="lg"><span><i style="background:#e8b23a"></i>账本 ' + L.length +
+      ' 点</span><span><i style="background:#6ea8fe"></i>尺子 ' + B.length + ' 点</span></div>';
+    var box = mk("div", "ij-dual");
+    box.innerHTML = svg;
+    box.title = "左轴 = 账本（累计），右轴 = 尺子（0~" + br[1] +
+      " 题）。两条线各自缩放，**不相加、不加权、不平均、不归一化**。";
+    return box;
+  }
+
+  // 施工单 8.5：取两条序列（只读；取不到就是 null → 显示「—」，不画点）
+  function refreshDual() {
+    return jget(API_D).then(function (d) {
+      dual = (d && d.ok !== false) ? d : null;
+      return dual;
+    }).catch(function () { return dual; });
+  }
+
   function auditNode() {
     if (!audit) { return null; }
     var n = audit.count;
@@ -270,15 +366,21 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
         "读不到自迭代日志：" + ((d && d.error) || "未知原因")));
       return;
     }
+    // 施工单 8.5：首屏第一眼是尺子（「我多能打」），账本降级为第二行
+    var _b0 = benchNode();
+    if (_b0) { body.appendChild(_b0); }
     var c = d.counts || {};
     var stat = mk("div", "ij-stat");
     stat.textContent = "状态：" + (d.state || "空闲") +
       "　在跑 " + (c.running || 0) + " · 排队 " + (c.queue || 0) +
       " · 历史 " + (c.history || 0) + "　本轮 " + (d.budget || 0) +
       "/" + (d.max_rounds || "?");
+    var ln = ledgerNode();
+    if (ln) { body.appendChild(ln); }
+    var ch = dualChart();
+    if (ch) { body.appendChild(ch); }
+    // 施工单 8.5 的优先级：尺子 > 账本 > 两条曲线 > 迭代状态
     body.appendChild(stat);
-    var bn = benchNode();
-    if (bn) { body.appendChild(bn); }
     var an = auditNode();
     if (an) { body.appendChild(an); }
     if (d.verify) {
@@ -321,7 +423,7 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
 
   function load() {
     // 体检计数和日志并行取：计数失败不影响日志主体（各自 catch）
-    return Promise.all([jget(API_J), refreshAudit()])
+    return Promise.all([jget(API_J), refreshAudit(), refreshDual()])
       .then(function (x) { render(x[0]); return x[0]; })
       .catch(function (e) {
         var body = $("ijBody");
