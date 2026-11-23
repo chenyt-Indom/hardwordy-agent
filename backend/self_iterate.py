@@ -6118,8 +6118,17 @@ def _iter_snapshot(plan, pid, ev=None):
 
 
 @_exec_guard
-def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=None):
+def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=None,
+                     origin="manual"):
     """执行这次反思里所有 status=approved 的动作。带备份 + 校验 + 失败回滚。
+
+    `origin`：这次执行是**谁发起的**，决定改完代码后要不要自动重启。
+      · "auto" / "featradar" / "approved" —— 后台无人值守的迭代，自动重启并验证；
+      · "manual"（默认）—— 用户主动要求的（界面上点执行、或在对话里让我跑），
+        **不自动重启**，把「待重启生效」写进状态，等他点了再重启。
+      ★ 2026-11-23 用户：「其他的迭代自动重启没错，但我跟你交流时是我要求你
+        迭代」—— 之前这里只判断 loop_auto_restart，完全不看来源，所以用户点
+        「执行」也会被 3 秒后重启，人还在等回复就被换进程了。
 
     `force`：人工复核放行的动作 id —— 这些跳过「反复修改熔断」这一道。
     用户要求（2026-11-16）：「如果要人工复核就在前端一个审核的按钮」。
@@ -7058,14 +7067,30 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
             _IL.record_round(pid=pid, before=_loop_before, after=_after,
                              verdict=_vd, actions=results, rollback=_rb,
                              note="闭环自动判定（静态40+回归30+功能30）")
-            # 自动重启（用户选「接受，后台自动重启并继续验证」）
-            if ((not _vd.get("should_rollback")) and ok_n > 0
-                    and load_settings().get("loop_auto_restart", True)):
+            # 自动重启 —— ★ 2026-11-23 必须**分来源**（用户原话：「其他的迭代
+            # 是自动重启没错，但是我跟你交流不是自我迭代，而是我要求你进行
+            # 自我迭代」）：
+            #   后台无人值守（auto/featradar/approved）→ 自动重启并继续验证；
+            #   用户发起（manual）→ **绝不自动重启**，只把「待重启生效」写进
+            #   状态，由他点「立即重启」。
+            _auto_why = _origin_auto_restart_ok(origin)
+            if ((not _vd.get("should_rollback")) and ok_n > 0 and _auto_why["ok"]):
                 try:
                     out["loop"]["auto_restart"] = _schedule_auto_restart(pid)
                 except Exception as _e4:                # noqa: BLE001
                     out["loop"]["auto_restart"] = {
                         "ok": False, "error": "%s: %s" % (type(_e4).__name__, _e4)}
+            else:
+                out["loop"]["auto_restart"] = {
+                    "ok": False, "scheduled": False,
+                    "skipped": True, "why": _auto_why["why"]}
+                if ok_n > 0 and not _vd.get("should_rollback"):
+                    try:
+                        _ev("step", text="代码已改好，但这次是**你发起的**迭代，"
+                                        "我不自动重启（免得打断你）—— "
+                                        "改动等你点「立即重启」后生效")
+                    except Exception:                   # noqa: BLE001
+                        logger.debug("silent-except", exc_info=True)
         except Exception as e:                          # noqa: BLE001
             logger.debug("闭环判定失败", exc_info=True)
             out["loop"] = {"error": "%s: %s" % (type(e).__name__, e)}
@@ -7094,9 +7119,11 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                     save_plans(d)
                     _ev("step", text="第 %d 轮：还有 %d 处同类残留，自动接续修复"
                         % (_depth + 2, len(resid)))
+                    # 收敛的下一轮继承本轮来源，否则用户发起的迭代会在
+                    # 第二轮悄悄变成「允许自动重启」
                     sub = execute_approved(pid, on_event=on_event,
                                            should_cancel=should_cancel,
-                                           _depth=_depth + 1)
+                                           _depth=_depth + 1, origin=origin)
                     out["converge"] = {"round": _depth + 2,
                                        "residual": len(resid),
                                        "done": sub.get("done") or 0}
@@ -7229,6 +7256,41 @@ def _restore(tag):
                 p.unlink()
         except Exception:                           # noqa: BLE001
             logger.debug("silent-except", exc_info=True)
+
+
+_AUTO_RESTART_ORIGINS = ("auto", "featradar", "approved")
+
+
+def _origin_auto_restart_ok(origin):
+    """这次执行的**来源**允不允许自动重启。
+
+    ★ 2026-11-23 用户要求分情况：
+      · 后台自动迭代（auto / featradar / approved）—— 无人值守，改完就该
+        自动重启 + 自动验证，并弹结束卡片；
+      · 用户主动要求（manual）—— 他人在跟前、还在等回复，**不许**突然换进程。
+        改动留在磁盘上，等他点「立即重启」再验证。
+
+    返回 {"ok": bool, "why": 原因}，原因会进 loop.auto_restart 和结束卡片。
+    """
+    o = str(origin or "manual").strip().lower()
+    if o not in _AUTO_RESTART_ORIGINS:
+        return {"ok": False,
+                "why": "来源=manual（你发起的迭代），不自动重启；改动已落盘，"
+                       "等你点「立即重启」后生效"}
+    try:
+        s = load_settings()
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读设置失败，按允许自动重启处理", exc_info=True)
+        s = {}
+    if not bool(s.get("loop_auto_restart", True)):
+        return {"ok": False, "why": "设置里关了「闭环自动重启」(loop_auto_restart)"}
+    try:
+        if not bool(s.get("auto_restart_after_iter", True)):
+            return {"ok": False,
+                    "why": "设置里关了「迭代后自动重启」(auto_restart_after_iter)"}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return {"ok": True, "why": "来源=%s（后台自动迭代），自动重启并继续验证" % o}
 
 
 def _schedule_auto_restart(pid="", delay=3.0):

@@ -3980,7 +3980,10 @@ def selfiter_execute(body: dict):
     from . import self_iterate as _si
     b = body or {}
     try:
-        r = _si.execute_approved(str(b.get("id") or ""))
+        # ★ 2026-11-23：这条是**用户点执行**（或对话里让我跑）→ origin=manual，
+        #   改完不自动重启，等他点「立即重启」
+        r = _si.execute_approved(str(b.get("id") or ""),
+                                 origin=str(b.get("source") or "manual"))
         _register_direct_verify(r, b, plan_id=str(b.get("id") or ""))
         return r
     except Exception as e:                              # noqa: BLE001
@@ -4038,7 +4041,9 @@ def selfiter_force(body: dict):
         r = _si.force_execute(pid, b.get("action_ids") or None)
         if r.get("ok") and b.get("execute", True):
             try:
-                r["exec"] = _si.execute_approved(pid, force=r.get("forced") or None)
+                # 人工复核放行 = 用户在场点的 → 不自动重启
+                r["exec"] = _si.execute_approved(
+                    pid, force=r.get("forced") or None, origin="manual")
                 _register_direct_verify(r["exec"], b, plan_id=pid)
             except Exception as e:                      # noqa: BLE001
                 r["exec_error"] = str(e)

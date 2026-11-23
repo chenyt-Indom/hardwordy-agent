@@ -876,6 +876,9 @@ def _worker(item):
     _cur_title = ""
     # 改了文件且开启自动重启时置 True —— finally 里据此决定「重启」还是「接下一个」
     auto_rst = False
+    # ★ 2026-11-23：execute_approved 内部已经按来源排程过重启时置 True。
+    #   两处都排程 = 连续断两次（用户看到「又莫名其妙重启了」）。
+    _exec_scheduled_restart = False
     # ★ 2026-11-20：撞到「另一个执行占着锁」时置 True —— 把任务放回队首稍后重试，
     #   而不是报一张「没有可执行的动作」的假失败卡。
     requeued = False
@@ -971,8 +974,11 @@ def _worker(item):
                     _emit(tid, "status", text="正在迭代：%s" % _t[:60],
                           state="running")
 
+        # 把队列来源透传下去：auto/featradar/approved 自动重启，
+        # manual（用户自己拉起的）不重启
         r = _si.execute_approved(plan_id, on_event=_on_event,
-                                 should_cancel=should_cancel)
+                                 should_cancel=should_cancel,
+                                 origin=str(item.get("source") or "auto"))
         ok_n = int(r.get("done") or 0)
         results = r.get("results") or []
         fail_n = sum(1 for x in results if not x.get("ok"))
@@ -1094,6 +1100,14 @@ def _worker(item):
                 _cur_title = (str((_STATE.get("running") or {}).get("title") or "").strip()
                               or str(item.get("title") or "").strip())
             _auto = _should_auto_restart(item.get("source"))
+            # execute_approved 里已经按来源排程过重启（auto 来源才会）→ 记下来，
+            # finally 里不再排第二次
+            try:
+                _exec_scheduled_restart = bool(
+                    ((r or {}).get("loop") or {}).get("auto_restart", {})
+                    .get("scheduled"))
+            except Exception:                            # noqa: BLE001
+                _exec_scheduled_restart = False
             if _auto:
                 with _LOCK:
                     prev = _STATE.get("verify") or {}
@@ -1267,7 +1281,11 @@ def _worker(item):
             # 走「重启 → 自动验证 → 再接下一个」这条链，
             # 这里**不能**调 _next()：否则下一个任务会在重启前抢跑，
             # 跑到一半进程被替换掉，进度就丢了。
-            _auto_restart(reason=_cur_title or item.get("title") or plan_id, tid=tid)
+            # ★ 2026-11-23：execute_approved 已经排程过就不再排第二次 ——
+            #   两次都排 = 连着断两次，用户会以为又莫名重启了。
+            if not _exec_scheduled_restart:
+                _auto_restart(reason=_cur_title or item.get("title") or plan_id,
+                              tid=tid)
         else:
             _next()
 
