@@ -9384,6 +9384,22 @@
           renderFinal(answerBubble, answer, promptText);
         }
       } catch (e) { /* 忽略 */ }
+      // ★ 2026-11-23：暂停的兜底 —— abort() 有时**不会抛错**（比如工具刚跑完、
+      //   上游流已经自然结束），那样上面 catch 里的 pausedNow 分支压根不执行，
+      //   pendingResume 一直是 null →「▶ 继续」按钮永远不出现，用户点了暂停就没法接着写。
+      //   这里统一补一次：只要这轮是暂停、又没记下断点，就用已生成的内容补上。
+      if (pausedNow && !pendingResume) {
+        const _keepP = String(answer || "").trim();
+        try { answerBubble.classList.remove("empty-answer"); } catch (e) { /* 忽略 */ }
+        if (!answerBubble.textContent.trim()) {
+          answerBubble.textContent = _keepP || "（已暂停：这一轮还没有输出内容）";
+        }
+        history.push({ role: "assistant",
+                       content: _keepP || "（用户暂停了这次生成，还没有输出内容）" });
+        pendingResume = { answer: _keepP, prompt: String(promptText || "") };
+        try { setResumeVisible(true); } catch (e) { /* 忽略 */ }
+        try { persistSession(); } catch (e) { /* 忽略 */ }
+      }
       $("#sendBtn").disabled = false;
       setStopVisible(false);
     }
@@ -9458,8 +9474,12 @@
     pausedNow = true;
     aborted = true;
     try { abortCtl && abortCtl.abort(); } catch (e) { /* 忽略 */ }
+    // ★ 2026-11-23：这里**必须**打 /api/chat/pause，不能打 /api/chat/stop。
+    //   两个接口底层动作一样（掐连接 + 置终止令牌），但后端会为 pause 记一个
+    //   `_pause_flags` 标记 —— 原来这里错调 stop，那个标记永远是空的，
+    //   日志里"用户暂停"和"用户终止"长得一模一样，事后根本分不清。
     try {
-      fetch("/api/chat/stop", {
+      fetch("/api/chat/pause", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: sessionId }),
       });
