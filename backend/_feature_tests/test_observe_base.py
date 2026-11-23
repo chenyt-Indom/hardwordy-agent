@@ -5,12 +5,21 @@ progress 清零（教训落地率 0.354→0.147，RSI 71.1→66.0）。这里断
   ① 首次命中时间一旦记下就不再被后续调用覆盖；
   ② 修复消失 / 复发会清掉它（不能拿旧进度冒充）；
   ③ 真的把探针文件 mtime 推到"现在"后，progress 不归零（这条最要紧）。
+
+⚠️ 2026-11-24 并发修复：原来全程读写**真实**的 lesson_hit.json，并且用
+   全局固定的测试键 `__test_hit_ts__`。两个后果：
+   · 两套测试同时跑时，A 的 `_clear_hit_ts` 会清掉 B 刚写下的时间 →
+     「落盘了」「后续调用不覆盖」随机失败（单跑永远绿）；
+   · 更严重：③ 里 `L._clear_hit_ts(cand)` 清的是**真实教训**的首次命中时间，
+     会把用户真实的观察窗进度抹掉 —— 测试污染生产数据。
+   现在把 `_hit_state_path` 整体指到本进程专属的临时文件：
+   各跑各的、并发不冲突，且一个字节都不碰真实账本。
 """
 from __future__ import annotations
 
-import io
 import os
 import sys
+import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,8 +44,7 @@ def check(name, cond, extra=""):
     print(("  OK   " if cond else "  FAIL ") + name + (("  | " + str(extra)) if extra else ""))
 
 
-def main():
-    _utf8()
+def _body():
     # 清掉可能残留的测试键
     L._clear_hit_ts(KEY)
 
@@ -54,27 +62,51 @@ def main():
     L._clear_hit_ts(KEY)
     check("清掉后键真的没了", KEY not in L._hit_state())
 
-    # ③ 真实场景：把探针文件 mtime 推到"现在"，progress 不应归零
-    a0 = L.audit()
-    before = {r["kind"]: r.get("progress") for r in a0["rows"] if r.get("progress") is not None}
-    check("改动前有可判定的教训", len(before) >= 1, list(before)[:3])
+    # ③ 核心场景：把探针文件 mtime 推到"现在"，progress 不应归零
+    #
+    # ⚠️ 2026-11-24 改：原来直接拿**真实账本**里「有 progress 的条目」来比 ——
+    #   账本为空（MM_DATA_DIR 指向临时目录 / 全新安装 / 教训被清过）时
+    #   「改动前有可判定的教训」必挂，这是**假失败**：测的是用户数据里恰好
+    #   有没有教训，而不是机制对不对。
+    #   改成用一条**合成教训**：挑一个当前真能命中的探针 kind，ts 取现在，
+    #   两次 judge 之间只推 mtime。这样无论账本有没有数据，都在测同一条机制。
+    cand = None
+    for _k, _pr in L.PROBES.items():
+        if L._probe_hit(_pr[0], _pr[1]) is True:
+            cand = _k
+            break
+    check("存在可命中的探针（合成教训用）", cand is not None)
+    if cand:
+        L._clear_hit_ts(cand)                 # 别拿上一次跑留下的首次命中时间
+        synth = {"kind": cand, "ts": time.time(), "count": 1, "fix": "合成教训"}
+        b = L.judge(synth)
+        check("合成教训有可判定的 progress", b.get("progress") is not None,
+              (b.get("status"), b.get("progress")))
+        rel_probe = L.PROBES[cand][0]
+        target = os.path.join(ROOT, rel_probe.replace("/", os.sep))
+        old = os.stat(target).st_mtime
+        try:
+            os.utime(target, (time.time() + 5, time.time() + 5))   # 只改 mtime，不动内容
+            a = L.judge(synth)
+        finally:
+            os.utime(target, (old, old))                           # 还原 mtime
+        check("mtime 变化后 progress 不下降（核心修复）",
+              (a.get("progress") or 0.0) >= (b.get("progress") or 0.0) - 1e-9,
+              {"before": b.get("progress"), "after": a.get("progress"),
+               "status": (b.get("status"), a.get("status"))})
+        L._clear_hit_ts(cand)                 # 收尾，别把测试键留在账本里
 
-    target = os.path.join(ROOT, "backend", "lessonloop.py")
-    old = os.stat(target).st_mtime
+
+def main():
+    _utf8()
+    # 隔离：本进程用独立的 lesson_hit.json，并发安全且不碰真实数据
+    _tmpdir = tempfile.mkdtemp(prefix="hitstate_")
+    _orig = L._hit_state_path
+    L._hit_state_path = lambda: os.path.join(_tmpdir, "lesson_hit.json")
     try:
-        os.utime(target, (time.time(), time.time()))     # 只改 mtime，不动内容
-        a1 = L.audit()
-        after = {r["kind"]: r.get("progress") for r in a1["rows"] if r.get("progress") is not None}
-        # 只比较两轮都有的条目
-        common = [k for k in before if k in after]
-        check("有可比条目", len(common) >= 1, common[:3])
-        dropped = [k for k in common if (after[k] or 0) < (before[k] or 0) - 1e-9]
-        check("mtime 变化后 progress 不下降（核心修复）", not dropped,
-              {"before": {k: before[k] for k in common},
-               "after": {k: after[k] for k in common},
-               "dropped": dropped})
+        _body()
     finally:
-        os.utime(target, (old, old))                     # 还原 mtime
+        L._hit_state_path = _orig
 
     bad = [x for x in _results if not x[1]]
     print("\n通过 %d / 失败 %d" % (len(_results) - len(bad), len(bad)))

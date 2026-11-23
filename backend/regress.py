@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -51,6 +52,13 @@ logger = logging.getLogger(__name__)
 
 _BACKEND = Path(__file__).resolve().parent
 _ROOT = _BACKEND.parent
+
+# Windows 控制台默认 GBK，中文结果会打成乱码（实测「全部通过」变 ???）——
+# 命令行入口要打印中文结论，这里统一改 UTF-8。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:                                       # noqa: BLE001
+    pass
 
 _CASES = []
 
@@ -496,18 +504,98 @@ class _KeepOpenBytesIO(io.BytesIO):
         pass
 
 
-def _bad_fn(fname, why):
-    """造一个「加载期就失败」的用例：跑起来直接抛 AssertionError。"""
-    def _bad():
-        raise AssertionError("断言文件加载失败 %s：%s" % (fname, why))
-    return _bad
+def _out_tail(text, n=10, width=180):
+    """取输出末尾 n 行，每行截到 width 字 —— 失败原因里只放有用的一小段。"""
+    lines = [l.rstrip() for l in (text or "").splitlines() if l.strip()]
+    return " / ".join(l[:width] for l in lines[-n:]) or "（无输出）"
 
 
-def _pass_fn():
-    """造一个「加载期已经跑完且全过」的用例（纯脚本式断言用）。"""
-    def _ok():
-        return None
-    return _ok
+# 断言文件用这个退出码表示「环境不满足，本条跳过」（不是功能坏了）。
+# 典型场景：数据目录是全新的 → 安全改写开关没开 → 改不了 backend/ 源码，
+# 于是「锚点诊断」这类要真改文件的断言没法跑。记 skip 而不是 fail，
+# 否则自动迭代会把**没问题的代码**当成「改坏了」回滚掉。
+_SKIP_CODE = 77
+
+
+# 子进程里跑一条断言文件：先按模块加载（模块级断言照样会执行），
+# 有 run()/main() 就调它；都没有就按脚本（__main__）跑一遍。
+# 三种形态都覆盖，且都在**新进程**里，互不污染。
+_FEATURE_RUNNER = (
+    "import importlib.util,sys,runpy\n"
+    "path,root=sys.argv[1],sys.argv[2]\n"
+    "sys.path.insert(0,root)\n"
+    "spec=importlib.util.spec_from_file_location('__mm_feature__',path)\n"
+    "mod=importlib.util.module_from_spec(spec)\n"
+    "try:\n"
+    "    spec.loader.exec_module(mod)\n"
+    "except SystemExit as e:\n"
+    "    c=getattr(e,'code',None)\n"
+    "    sys.exit(0 if c in (0,None) else (c if isinstance(c,int) else 1))\n"
+    "fn=getattr(mod,'run',None)\n"
+    "if not callable(fn):\n"
+    "    fn=getattr(mod,'main',None)\n"
+    "if callable(fn):\n"
+    "    r=fn()\n"
+    "    sys.exit(r if isinstance(r,int) and not isinstance(r,bool) else 0)\n"
+    "sys.argv=[path]\n"
+    "runpy.run_path(path,run_name='__main__')\n"
+    "sys.exit(0)\n"
+)
+
+
+def _feature_runner(p, timeout=180):
+    """把一条 feature 断言包成「**子进程**用例」。
+
+    为什么必须隔进程跑（2026-11-24 实测，两条长期假失败的根因）
+    --------------------------------------------------------
+    原来是把断言文件 exec_module 进**当前进程**再调 run()/main()。但
+    `_feature_tests/test_handoff_card.py` 里有这么一行
+
+        real_ss.get_messages = lambda s: fake      # real_ss 就是 backend.sessions
+
+    它改了**真模块**的全局属性、且从不还原。于是排在它后面的
+    test_surrogate_safety / test_selfiter_resilience 读会话时拿到的是
+    那个假 lambda 的返回值 → 两条断言必挂（**单独跑却全过**）。
+    更糟的是 _run_inner 只把「main() 返回 1」当线索，看不到用例自己打印的
+    失败断言，于是这两条长期挂着、每次都被误判成「功能坏了」。
+
+    断言文件本来就是**脚本**（约定用法 `py -3 xxx.py`，靠退出码表达结果）。
+    隔进程跑之后：全局变量、sys.stdout、MM_DATA_DIR、cwd、sys.path、已导入
+    模块全部天然隔离，以后谁再写脏补丁也传染不到别的用例；同时把输出尾巴
+    写进失败原因，下次一眼看到挂在哪条断言上。
+
+    返回 None = 通过；抛 AssertionError = 失败（原因带末尾输出）。
+    """
+    def _run():
+        import subprocess
+        t0 = time.time()
+        try:
+            # 编码必须两端都钉成 utf-8：断言文件里普遍有
+            # sys.stdout.reconfigure(encoding="utf-8")，而 Windows 控制台默认 GBK，
+            # 父进程按 GBK 解码就得到一片乱码 —— 失败原因等于白写（实测见过）。
+            _env = dict(os.environ)
+            _env["PYTHONIOENCODING"] = "utf-8"
+            r = subprocess.run([sys.executable, "-c", _FEATURE_RUNNER,
+                                str(p), str(_BACKEND.parent)],
+                               cwd=str(_BACKEND.parent),
+                               capture_output=True, text=True, errors="replace",
+                               encoding="utf-8", env=_env,
+                               timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("%s 超时（>%ds），疑似死循环/等输入" % (p.name, timeout))
+        if r.returncode == 0:
+            return None
+        # 77 = 「环境不满足，本条跳过」（约定见 _SKIP_CODE）。这类不是功能坏了：
+        # 例：数据目录是全新的、安全改写开关没开 → 断言文件没法改 backend/ 源码。
+        # 当成失败会让自动迭代把**好改动**回滚掉，所以单独记 skip。
+        if r.returncode == _SKIP_CODE:
+            return "skip"
+        out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
+        raise AssertionError("%s 退出码 %s（%.1fs）末尾：%s" % (
+            p.name, r.returncode, time.time() - t0, _out_tail(out)))
+
+    _run.__name__ = "run_feature_%s" % p.stem
+    return _run
 
 
 def _load_dynamic():
@@ -517,7 +605,7 @@ def _load_dynamic():
     ----------------
     智能体自主加的新功能，通用回归里**没有它的用例**，改坏了根本发现不了。
     用户明确要求「需要验证所有功能是否正常」，所以每条新功能必须把自己的
-    验收断言写成一个独立文件：模块里提供 run()，断言失败就抛 AssertionError。
+    验收断言写成一个独立文件。
 
     为什么放独立目录而不是往本文件里塞
     --------------------------------
@@ -525,7 +613,13 @@ def _load_dynamic():
     删也删不干净。放独立目录：坏了直接删那个文件，不用动 regress.py。
 
     约定：文件里**不联网、不调 LLM、不加载模型**，必须秒级可重复。
-    单个文件加载失败只记一条失败用例，绝不让整个回归崩掉。
+    单个文件失败只记一条失败用例，绝不让整个回归崩掉。
+
+    ⚠️ 2026-11-24 改：不再把断言文件 exec_module 进本进程，改**一条一个
+    子进程**（见 _feature_runner 的注释：进程内跑会被别的用例的脏补丁污染，
+    而且失败只剩「main() 返回 1」这种看不出问题的原因）。
+    代价是每条多一次解释器启动（合计约 10 秒），换来的是用例之间**绝对隔离**
+    —— 不管断言文件写得多么不守规矩，都不会再互相传染。
     """
     out = []
     try:
@@ -535,73 +629,97 @@ def _load_dynamic():
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
         return out
-    import importlib.util
-    import io
     for p in files:
         if p.name.startswith("_"):
             continue
-        name = "feature.%s" % p.stem
-        # ⚠️ 2026-11-22 修：断言文件是**独立脚本**写法，有三种形态
-        #   (a) 提供 run()
-        #   (b) 只有 main()（返回 0=通过、非 0=失败）
-        #   (c) 纯模块级脚本，靠 sys.exit(0/1) 表达结果
-        # 原来只认 (a)，(b)(c) 全被记成「缺少 run() 函数」—— 实测 11 条
-        # 回归全挂、白丢 8.68 分。那 11 条**不是功能坏了**，是断言文件
-        # 加载不进来，等于这些功能长期没人守着。
-        # 另外 test_tool_registry.py 会重新包装 sys.stdout，把真实 stdout
-        # 的 buffer 一起关掉，导致**后面所有文件**报
-        # `ValueError: I/O operation on closed file`。所以每次加载都换成
-        # 独立的、带 buffer 的假 stdout，跑完立刻恢复。
-        saved_out = sys.stdout
-        sys.stdout = io.TextIOWrapper(_KeepOpenBytesIO(), encoding="utf-8",
-                                      errors="replace")
-        mod = None
-        executed_ok = False
-        load_err = None
-        try:
-            spec = importlib.util.spec_from_file_location(
-                "backend._feature_tests.%s" % p.stem, str(p))
-            if spec is None or spec.loader is None:
-                raise ImportError("无法构建模块规格")
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            executed_ok = True          # 模块级执行完毕、没有抛异常
-        except SystemExit as e:
-            # 脚本式断言：exit(0)/exit(None) = 全部通过，其余算失败
-            code = getattr(e, "code", None)
-            if code in (0, None):
-                executed_ok = True
-            else:
-                load_err = "脚本式断言未通过（sys.exit(%r)）" % (code,)
-        except BaseException as e:                      # noqa: BLE001
-            # ⚠️ 2026-11-22 实测致命缺陷：_feature_tests/test_llm_retry.py 在
-            #    **模块级**调用了 sys.exit(0)，而 exec_module 会把 SystemExit
-            #    抛给调用方。原来这里只捕 Exception，SystemExit 继承自
-            #    BaseException 捕不到 —— 于是整个进程（连同 Web 服务）被静默
-            #    杀掉，连外层 except 都接不到（实测：进程内跑 regress.run()
-            #    后 rc=0 但后续代码一行都不执行）。
-            #    这里必须捕 BaseException；KeyboardInterrupt 要放回去，
-            #    否则用户 Ctrl+C 会被当成「断言文件加载失败」吞掉。
-            if isinstance(e, KeyboardInterrupt):
-                raise
-            load_err = "%s: %s" % (type(e).__name__, e)
-        finally:
-            sys.stdout = saved_out
-        if load_err:
-            out.append({"name": name, "scope": "quick",
-                        "fn": _bad_fn(p.name, load_err)})
+        # ⚠️ 2026-11-24：run_all.py / conftest.py 是**基础设施**不是断言。
+        #   原来把它们也当用例跑：run_all.py 会把整套 30 个文件再跑一遍
+        #   （白花十几秒，而且它自己一失败就把「失败」记成一条用例）。
+        if p.stem in ("run_all", "conftest"):
             continue
-        fn = getattr(mod, "run", None)
-        if not callable(fn):
-            fn = getattr(mod, "main", None)
-        if callable(fn):
-            out.append({"name": name, "scope": "quick", "fn": fn})
-        elif executed_ok:
-            out.append({"name": name, "scope": "quick", "fn": _pass_fn()})
-        else:
-            out.append({"name": name, "scope": "quick",
-                        "fn": _bad_fn(p.name, "既没有 run() 也没有 main()")})
+        out.append({"name": "feature.%s" % p.stem, "scope": "quick",
+                    "fn": _feature_runner(p)})
     return out
+
+
+_RUN_LOCK = os.path.join(tempfile.gettempdir(), "mm_regress_run.lock")
+_RUN_LOCK_STALE = 1800.0      # 锁文件超过 30 分钟一律视为残留（进程被强杀时会发生）
+
+
+def _pid_alive(pid: int) -> bool:
+    """粗判 pid 是否还活着（拿不到信息时按「活着」处理，绝不误抢别人的锁）。"""
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except Exception:                                   # noqa: BLE001 没有 psutil 就用 mtime 判
+        return True
+
+
+def _acquire_run_lock(wait: float = 240.0):
+    """跨进程互斥：同一时刻只允许**一套**回归在跑。拿到返回 token，拿不到返回 None。
+
+    为什么需要（2026-11-24 实测）
+    ---------------------------
+    两次回归撞在一起时，用例之间会互相踩：断言文件用的是**固定夹具名**、
+    有的还会读写真实数据目录。实测一次重叠运行里
+    `test_selfdev_write_guard` 报「文件仍然存在」失败、`test_task_card`
+    写 cards.json 直接抛异常 —— **单独跑全过**。这种假失败会让自动迭代
+    把没问题的改动回滚掉，属于必须从机制上堵掉的一类。
+
+    用系统临时目录里的锁文件（不是 data/，那是用户数据），
+    残留锁按「mtime 超过 30 分钟」或「记录的 pid 已不在」判定为可抢。
+    """
+    deadline = time.time() + max(0.0, wait)
+    me = {"pid": os.getpid(), "ts": time.time()}
+    while True:
+        try:
+            fd = os.open(_RUN_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, json.dumps(me).encode("utf-8"))
+            finally:
+                os.close(fd)
+            return me
+        except FileExistsError:
+            # 已有锁：残留就抢，活着就等
+            stale = False
+            try:
+                age = time.time() - os.path.getmtime(_RUN_LOCK)
+                if age > _RUN_LOCK_STALE:
+                    stale = True
+                else:
+                    with open(_RUN_LOCK, encoding="utf-8") as f:
+                        other = json.load(f)
+                    if not _pid_alive(int(other.get("pid") or 0)):
+                        stale = True
+            except Exception:                           # noqa: BLE001 读不出来/正在写 → 当作活着
+                stale = False
+            if stale:
+                try:
+                    os.remove(_RUN_LOCK)
+                except OSError:
+                    logger.debug("清理残留回归锁失败", exc_info=True)
+                continue
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.5)
+        except OSError:
+            # 连锁文件都建不了（权限/磁盘满）→ 不阻塞，照常跑，别把回归彻底堵死
+            logger.debug("创建回归锁失败，按无锁继续", exc_info=True)
+            return me
+
+
+def _release_run_lock(tok) -> None:
+    if not tok:
+        return
+    try:
+        with open(_RUN_LOCK, encoding="utf-8") as f:
+            cur = json.load(f)
+        if int(cur.get("pid") or 0) == int(tok.get("pid") or -1):
+            os.remove(_RUN_LOCK)
+    except Exception:                                   # noqa: BLE001 锁已被别人抢走/文件不在
+        logger.debug("释放回归锁失败（不影响结果）", exc_info=True)
 
 
 def run(scope="quick", only=None):
@@ -614,6 +732,16 @@ def run(scope="quick", only=None):
     这种假失败会让人（和自动迭代）误判成「改坏了」并触发回滚。
     """
     t0 = time.time()
+    # ★ 2026-11-24：整套回归**跨进程串行**。重叠跑过一次就见过假失败
+    #   （断言文件用固定夹具名 + 会碰真实数据目录），详见 _acquire_run_lock。
+    tok = _acquire_run_lock()
+    if tok is None:
+        return {"ok": False, "scope": scope, "total": 0, "passed": 0, "failed": 1,
+                "skipped": 0, "seconds": round(time.time() - t0, 2), "items": [],
+                "failed_items": [{"name": "regress",
+                                  "why": "另一个回归正在跑（等待超时）"}],
+                "summary": "已有回归在跑，等待 %ds 仍未结束 —— 没有跑，别把它当通过"
+                           % int(240)}
     _cwd = os.getcwd()
     try:
         os.chdir(str(_BACKEND.parent))
@@ -626,6 +754,7 @@ def run(scope="quick", only=None):
             os.chdir(_cwd)
         except Exception:                               # noqa: BLE001
             logger.debug("恢复工作目录失败", exc_info=True)
+        _release_run_lock(tok)
 
 
 def _run_inner(scope="quick", only=None, t0=None):
@@ -633,6 +762,15 @@ def _run_inner(scope="quick", only=None, t0=None):
     base = _CASES + _load_dynamic()
     if only:
         picked = [c for c in base if c["name"] in only]
+        if not picked:
+            # ⚠️ 2026-11-24 实测：`only=["拼错的名字"]` 原来返回 ok=True、
+            #   summary「全部通过（0 条）」—— 一条都没跑却报全绿，是最危险的假绿。
+            return {"ok": False, "scope": scope, "total": 0, "passed": 0,
+                    "failed": 1, "skipped": 0,
+                    "seconds": round(time.time() - t0, 2), "items": [],
+                    "failed_items": [{"name": "regress", "why": "指定的用例不存在"}],
+                    "summary": "指定的用例一条都没匹配上：%s（检查名字是否拼错）"
+                               % "、".join(map(str, only))[:200]}
     elif scope == "full":
         picked = list(base)
     else:
@@ -987,3 +1125,37 @@ def _c_stop_single_source():
     finally:
         with M._cancel_lock:
             M._cancel_flags.pop(key, None)
+
+
+# ---------------------------------------------------------------- 命令行入口
+def _main_cli(argv=None):
+    """直接跑本文件时真跑一遍回归，打印结果并用退出码表达成败。
+
+    ★ 2026-11-24 实测踩到：本模块只有 `run()` 没有 `__main__`，所以
+    `python backend/regress.py` 只是把模块 import 一遍就退出 ——
+    **0.1 秒、零输出、退出码 0**。这在自动化里是最危险的假绿：
+    看起来「跑过了」，其实一条用例都没执行。
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    scope = "full" if ("full" in argv or "--full" in argv) else "quick"
+    r = run(scope=scope)
+    print("回归 %s：%s" % (scope, r.get("summary", "")))
+    print("通过 %d / 失败 %d / 跳过 %d / 共 %d 条，用时 %.1fs"
+          % (r.get("passed", 0), r.get("failed", 0), r.get("skipped", 0),
+             r.get("total", 0), r.get("seconds", 0.0)))
+    for it in r.get("failed_items", []) or []:
+        print("  FAIL  %s：%s" % (it.get("name"), it.get("why")))
+    return 0 if r.get("ok") else 1
+
+
+if __name__ == "__main__":
+    if not __package__:
+        # 作为脚本直接跑（python backend/regress.py）时没有包上下文，
+        # 相对导入会失败 —— 补上项目根再以包方式导入自己。
+        sys.path.insert(0, str(_ROOT))
+        from backend import regress as _R
+        sys.exit(_R._main_cli())
+    sys.exit(_main_cli())
+
+
+

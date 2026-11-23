@@ -14,6 +14,7 @@ import time
 import uuid
 
 from . import config
+from . import safeio
 import logging
 logger = logging.getLogger(__name__)
 
@@ -94,51 +95,20 @@ def _read(path: str, default):
         return default
 
 
-def _scrub_surrogates(obj):
-    """把**孤立代理字符**（被截断的 emoji 半截）换成 `?`，返回清洗后的新对象。
-
-    2026-11-24 实测：`_write` 原来是裸 json.dump，一旦消息里混进半个
-    surrogate pair（模型输出被截断时很常见），写盘必然抛
-    `UnicodeEncodeError: '\\udbc2' ... surrogates not allowed`。
-    后果是**静默丢写**：selfiter 写会话那段包在 try/except 里，
-    崩了只留一行 debug 日志，用户看到的就是「这条记录没了」。
-    这里用 utf-8 的 replace 编解码清洗：只换非法代理，其余字符一个不动。
-    """
-    if isinstance(obj, str):
-        try:
-            obj.encode("utf-8")
-            return obj
-        except UnicodeEncodeError:
-            return obj.encode("utf-8", "replace").decode("utf-8")
-    if isinstance(obj, list):
-        return [_scrub_surrogates(x) for x in obj]
-    if isinstance(obj, tuple):
-        return tuple(_scrub_surrogates(x) for x in obj)
-    if isinstance(obj, dict):
-        return {_scrub_surrogates(k): _scrub_surrogates(v)
-                for k, v in obj.items()}
-    return obj
+# 清洗逻辑已抽到 safeio（iterloop 的账本/卡片写盘同样需要），这里保留原名转发，
+# 避免既有调用方与测试引用断掉。
+_scrub_surrogates = safeio.scrub_surrogates
 
 
 def _write(path: str, data) -> None:
     """原子写：先写临时文件再替换，避免中途崩溃损坏数据。
 
-    ⚠️ 写前必须清洗孤立代理字符（见 _scrub_surrogates），否则一个坏 emoji
-    就能让整条消息写不进去。临时文件用 try/finally 兜底删除，
-    避免半截 .tmp 残留干扰下次读取。
+    统一走 safeio.atomic_write_json，它负责两件原先各自实现的事：
+      ① 写前清洗孤立代理字符 —— 否则一个坏 emoji 就能让整条消息写不进去；
+      ② os.replace 在 Windows 文件锁下重试 —— 前端正读会话时替换会被拒
+         （WinError 5），POSIX 上不会，所以这个故障只在 Windows 并发时出现。
     """
-    os.makedirs(os.path.dirname(path) or DIR, exist_ok=True)
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_scrub_surrogates(data), f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                logger.debug("清理 .tmp 失败", exc_info=True)
+    safeio.atomic_write_json(path, data, indent=2)
 
 
 def _path(sid: str) -> str:

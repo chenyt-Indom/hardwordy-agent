@@ -15,6 +15,7 @@
 """
 import os
 import sys
+import tempfile
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
@@ -50,6 +51,14 @@ def main():
         return {"ok": True, "scheduled": True, "in_seconds": 6}
 
     SI._schedule_replan = _fake_replan
+    # ★ 2026-11-24 并发实测：原来全程读写**真实**的 pending_cards.jsonl，
+    #   两套测试同时跑时 A 的 ack_cards([]) 会把 B 刚推的卡清掉 →
+    #   「pending_cards 拿得到刚推的卡」随机失败（单跑永远绿）。
+    #   更严重的是它会清掉**用户此刻真实待播报的卡片**。
+    #   所以把队列指到本进程专属的临时文件：各跑各的，且绝不碰真实数据。
+    _tmpdir = tempfile.mkdtemp(prefix="taskcard_")
+    _orig_cards_path = IL._cards_path
+    IL._cards_path = lambda: os.path.join(_tmpdir, "pending_cards.jsonl")
     try:
         IL.ack_cards([])                     # 干净起点
 
@@ -134,7 +143,8 @@ def main():
               "/static/taskcard.js" in _rd("frontend/index.html"))
     finally:
         SI._schedule_replan = orig
-        IL.ack_cards([])                     # 收尾清空，别把测试卡留在真实队列里
+        IL.ack_cards([])                     # 清的是临时队列，不碰真实数据
+        IL._cards_path = _orig_cards_path    # 还原真实路径
 
     print()
     print("=" * 62)

@@ -37,6 +37,8 @@ import threading
 import time
 import traceback
 
+from . import safeio
+
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
@@ -807,10 +809,7 @@ def load_ledger():
 def _save_ledger(d):
     try:
         with _LOCK:
-            tmp = _ledger_path() + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(d, fh, ensure_ascii=False, indent=1)
-            os.replace(tmp, _ledger_path())
+            safeio.atomic_write_json(_ledger_path(), d, indent=1)
     except Exception:                                   # noqa: BLE001
         logger.debug("写累计账本失败", exc_info=True)
 
@@ -1330,14 +1329,12 @@ def _read_cards():
 
 
 def _write_cards(rows):
-    p = _cards_path()
-    tmp = p + ".tmp"
+    # 2026-11-24 实测：前端轮询读卡片时 os.replace 会抛 WinError 5，
+    # 导致 ack 清空失败、卡片永远播不完。改走 safeio（重试 + 降级）。
     with _LOCK:
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as fh:
-            for r in list(rows)[-_CARD_KEEP:]:
-                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-        os.replace(tmp, p)
+        body = "".join(json.dumps(r, ensure_ascii=False) + "\n"
+                       for r in list(rows)[-_CARD_KEEP:])
+        safeio.atomic_write_text(_cards_path(), body)
 
 
 def push_card(card):
@@ -1542,10 +1539,7 @@ def _load_att():
 def _save_att(d):
     try:
         with _LOCK:
-            tmp = _att_path() + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(d, fh, ensure_ascii=False, indent=1)
-            os.replace(tmp, _att_path())
+            safeio.atomic_write_json(_att_path(), d, indent=1)
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
 

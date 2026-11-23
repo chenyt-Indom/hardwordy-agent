@@ -132,8 +132,16 @@ def main():
             {"role": "assistant", "content": LONG},
             {"role": "assistant", "content": LONG},
             {"role": "user", "content": "再问"}]
+    # ⚠️ 2026-11-24：这里换掉的是**真模块** backend.sessions 的属性。
+    #   原来赋值后不还原，导致同进程里排在后面的 test_surrogate_safety /
+    #   test_selfiter_resilience 读会话时拿到这个假 lambda 的返回值 → 两条
+    #   断言必挂（单独跑全过）。现在用 try/finally 还原，谁也不传染。
+    _orig_get = real_ss.get_messages
     real_ss.get_messages = lambda s: fake
-    dlg = handoff._dialog_digest("t")
+    try:
+        dlg = handoff._dialog_digest("t")
+    finally:
+        real_ss.get_messages = _orig_get
     check("重复条目被合并（4→3）", len(dlg) == 3, [m["role"] for m in dlg])
 
     # ---- 6. 轮数按真实用户消息数标注 ----
@@ -395,7 +403,16 @@ def main():
     check("同一文件被合并", len(_rec) == 1 and _rec[0]["added"] == 5, str(_rec)[:160])
 
     # ---- 33. 保存 reason 时超长要留省略号（原来 _clean 硬截断，落盘后看不出被截过）----
-    handoff.touch("s", "x" * 200)
+    # ⚠️ 2026-11-24：touch() 里「拿不到对话摘要就直接 return，不落盘」。
+    #   这条原来能过，是因为第 5 项把 real_ss.get_messages 换成了假 lambda 且
+    #   没还原 —— 等于靠**全局污染**喂了内容。补丁一还原它就静默不写，
+    #   下一行就 KeyError: 'reason'。这里显式给一份对话，用完立刻还原。
+    _orig_t = real_ss.get_messages
+    real_ss.get_messages = lambda s: [{"role": "user", "content": "问"}]
+    try:
+        handoff.touch("s", "x" * 200)
+    finally:
+        real_ss.get_messages = _orig_t
     _r = json.load(open(handoff.LAST, encoding="utf-8"))["reason"]
     check("落盘 reason 超长带省略号", "…" in _r and len(_r) <= 120, repr(_r[:40]))
 

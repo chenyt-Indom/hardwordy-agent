@@ -4,8 +4,11 @@
 **备份 + 写盘 + 返回 ok** —— 一个 435KB 的源码被截成 0 字节，
 消息还说「已写入」。工具层现在硬拦这三种情况。
 """
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -22,31 +25,74 @@ from backend import tools as T  # noqa: E402
 #   断言不该依赖外部状态，这里自己打开、跑完恢复。
 #   同理还有第二道闸门 self_dev_full_access（「完全访问」）：关着时不许改
 #   backend/ 下的任何文件，[3] 的「正常写入」照样会被拒。两个开关一起备好。
+# ★ 2026-11-24 改：原来直接 `CFG.save_config()` 把两个开关写进**真实配置**、跑完再恢复。
+#   两个真问题：
+#     ① 并发跑时 A 的「恢复」会覆盖 B 的「恢复」，最终值可能不是用户原来的
+#        （实测：原本 False → A 存 True → B 读到 True 当原始值 → A 恢复 False
+#         → B 恢复 True，最后停在 True）；
+#     ② 跑测试的这段时间里，用户界面上的「🛠 自开发」是被强行打开的。
+#   改成**只在内存里** patch `load_config`：开关照常生效，
+#   但一个字节都不写用户配置，也就没有恢复顺序的问题。
 _CFG_ORIG = dict(CFG.load_config() or {})
 _NEED = {"self_dev_enabled": True, "self_dev_full_access": True}
 _ORIG_FLAGS = {k: bool(_CFG_ORIG.get(k)) for k in _NEED}
-if any(not _ORIG_FLAGS[k] for k in _NEED):
-    _c = dict(_CFG_ORIG)
-    _c.update(_NEED)
-    CFG.save_config(_c)
+_REAL_LOAD_CONFIG = CFG.load_config
 
 
-def _restore_dev_flag():
-    """把两个自开发开关恢复到跑之前的状态（不污染用户配置）。"""
+def _load_with_dev_on():
+    c = dict(_REAL_LOAD_CONFIG() or {})
+    c.update(_NEED)
+    return c
+
+
+CFG.load_config = _load_with_dev_on
+
+# ★ 2026-11-24 污染修复：本测试要真走 `_do_selfdev("selfdev_write", …)`，
+#   而它会连带写三处**生产数据** —— 实测每跑一次就多：
+#     data/selfdev_journal.jsonl（+1.9KB）
+#     data/version_task.json（+221B）
+#     data/iterloop/scoregate.json（内容每次都变）
+#   用户明确要求「统计无污染」，所以把数据根挪到临时目录；
+#   version 的任务池走 project_root()、不看 MM_DATA_DIR，单独指过去。
+_tmp_data = tempfile.mkdtemp(prefix="guard_")
+_old_env = os.environ.get("MM_DATA_DIR")
+os.environ["MM_DATA_DIR"] = _tmp_data
+
+from backend import version as _V            # noqa: E402
+_old_task_path = _V._task_path
+_V._task_path = lambda: os.path.join(_tmp_data, "version_task.json")
+_cleaned = {"done": False}
+
+
+def _cleanup_data():
+    """恢复环境与 patch（幂等：末尾显式调一次，atexit 再兜一次）。"""
+    if _cleaned["done"]:
+        return
+    _cleaned["done"] = True
     try:
-        cur = dict(CFG.load_config() or {})
-        changed = False
-        for k, was in _ORIG_FLAGS.items():
-            if bool(cur.get(k)) != was:
-                cur[k] = was
-                changed = True
-        if changed:
-            CFG.save_config(cur)
+        _V._task_path = _old_task_path
+        if _old_env is None:
+            os.environ.pop("MM_DATA_DIR", None)
+        else:
+            os.environ["MM_DATA_DIR"] = _old_env
+        shutil.rmtree(_tmp_data, ignore_errors=True)
     except Exception:                                   # noqa: BLE001
         pass
 
 
-REL = "backend/_guard_probe_target.py"
+atexit.register(_cleanup_data)
+
+
+def _restore_dev_flag():
+    """把 load_config 换回真的（本来就只在内存里改，用户配置没被动过）。"""
+    CFG.load_config = _REAL_LOAD_CONFIG
+
+
+# ★ 2026-11-24 并发实测：原来探针用**固定**文件名 backend/_guard_probe_target.py，
+#   两套测试同时跑时 A 的 fresh() 会删掉 B 刚写的文件 →
+#   「文件确实有内容」「文件大小没变」随机失败（单跑永远绿）。
+#   夹具必须按进程唯一：各写各的，互不干扰。
+REL = "backend/_guard_probe_target_%d.py" % os.getpid()
 ABS = os.path.join(ROOT, REL)
 REFUSED = "\u5199\u5165\u88ab\u62d2\u7edd"      # 写入被拒绝
 WROTE = "\u5df2\u5199\u5165"                    # 已写入
@@ -109,6 +155,7 @@ check("文件大小没变", size() == before)
 
 fresh()
 _restore_dev_flag()
+_cleanup_data()                          # 先恢复数据根，再断言清理结果
 print("cleaned:", not os.path.exists(ABS))
 print()
 if bad:

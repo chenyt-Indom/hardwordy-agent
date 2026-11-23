@@ -6,12 +6,25 @@
   · 不带 fail_kind 调 selfdev.patch 先被幽灵闸门拦成 reason=phantom，
     把「锚点命中多处」误诊成「幽灵修复」。
 本文件逐条断言这些行为，且断言**失败时文件绝不被改动**。
+
+⚠️ 2026-11-24 并发/污染修复：本测试要**真**走 selfdev.write 才能验锚点诊断，
+   而 selfdev.write 会连带写三处生产数据 —— 实测每跑一次就多：
+     data/self_backups/…_backend%2F_feature_tests%2F_tmp_anchor_demo_<pid>.py
+     data/selfdev_journal.jsonl（+1.9KB/次）
+     data/version_task.json（+221B/次）
+     data/iterloop/scoregate.json（内容每次都变）
+   于是 RSI 的账本被测试数据灌满、自备份目录越堆越多。用户明确要求
+   「统计无污染」，所以这里把数据根整体挪到临时目录（MM_DATA_DIR），
+   再把 version 的任务池单独指过去（它走 project_root，不看 MM_DATA_DIR）。
+   被测的**源码文件本身**仍在 backend/_feature_tests/ 下（selfdev 只允许改
+   backend/），按 pid 唯一命名，跑完删掉。
 """
 from __future__ import annotations
 
-import io
 import os
+import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
@@ -55,6 +68,27 @@ def check(name, cond, extra=""):
     print(("  OK   " if cond else "  FAIL ") + name + (("  | " + str(extra)) if extra else ""))
 
 
+def _skip_if_gated(r):
+    """写不进去是因为**安全改写开关没开**（典型：数据目录是全新的 / 临时目录）
+    → 本条**跳过**，不是功能坏了。
+
+    2026-11-24 实测：MM_DATA_DIR 指向临时目录时 `selfdev.write` 被安全闸门拦下
+    （「改 backend/ 需要先打开安全改写开关」），于是 reset() 的 assert 直接炸，
+    regress 记成「功能失败」—— 自动迭代会把**没问题的代码**当坏改动回滚掉。
+    连改文件都被拦着，锚点诊断本来就无从验证，所以这里按环境跳过处理。
+    退出码 77 = 跳过，约定见 regress._SKIP_CODE。
+
+    注：现在 main() 会先在**内存里**把开关打开，正常情况走不到这里；
+    留着是兜底 —— 万一将来闸门判定变了，也不该记成功能失败。
+    """
+    err = str(r.get("error") or "")
+    if r.get("ok") or not any(k in err for k in ("安全改写", "开发者", "只能改 frontend")):
+        return
+    print("  SKIP 安全改写开关未开，无法验证锚点诊断（%s）" % err[:80])
+    print("\n跳过（环境不满足，非功能缺陷）")
+    sys.exit(77)
+
+
 def reset():
     r = SD.write(REL, SRC, note="测试夹具")
     if not r.get("ok") and "熔断" in str(r.get("error")):
@@ -66,6 +100,7 @@ def reset():
         except OSError:
             pass
         r = SD.write(REL, SRC, note="测试夹具")
+    _skip_if_gated(r)
     assert r.get("ok"), r
 
 
@@ -73,8 +108,7 @@ def body():
     return SD.read(REL).get("raw") or ""
 
 
-def main():
-    _utf8()
+def _body():
     reset()
 
     # ① find 为空 → 必须报 find_empty，不能报「不唯一」
@@ -129,6 +163,43 @@ def main():
     check("空白不一致 -> 降级命中", r.get("ok") and r.get("fallback") == "loose",
           (r.get("ok"), r.get("fallback"), r.get("error")))
     check("降级后文件正确", "return 1" in body())
+
+
+def main():
+    _utf8()
+
+    from backend import config as CFG
+    from backend import version as V
+
+    _tmp = tempfile.mkdtemp(prefix="anchor_")
+    _old_env = os.environ.get("MM_DATA_DIR")
+    _real_load = CFG.load_config
+    _old_task_path = V._task_path
+
+    # 数据根挪到临时目录：备份 / journal / scoregate 都跟着走
+    os.environ["MM_DATA_DIR"] = _tmp
+    # 任务池走 project_root()，不看 MM_DATA_DIR，单独指过去
+    V._task_path = lambda: os.path.join(_tmp, "version_task.json")
+
+    def _load_dev_on():
+        c = dict(_real_load() or {})
+        c["self_dev_enabled"] = True
+        c["self_dev_full_access"] = True
+        return c
+
+    # 只在内存里打开安全改写开关（临时数据目录里默认是关的）
+    CFG.load_config = _load_dev_on
+
+    try:
+        _body()
+    finally:
+        CFG.load_config = _real_load
+        V._task_path = _old_task_path
+        if _old_env is None:
+            os.environ.pop("MM_DATA_DIR", None)
+        else:
+            os.environ["MM_DATA_DIR"] = _old_env
+        shutil.rmtree(_tmp, ignore_errors=True)
 
     # 收尾：删掉夹具
     try:
