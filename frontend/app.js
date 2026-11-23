@@ -17056,9 +17056,9 @@
       .catch(function () { node.innerHTML = old; node.dataset.busy = "0"; });
   }
 
-  // ---------- RSI 曲线图（用户 2026-11-23 要求：肉眼可见的数据与图表） ----------
+  // ---------- 分数曲线图（用户 2026-11-23 要求：肉眼可见的数据与图表） ----------
   // 双线的原因：综合指数看「现在多好」，加速指数看「修得多快」——
-  // 只有后者出现斜率递增，才算真的 RSI，光看一个分数永远看不出来。
+  // 只有后者出现斜率递增，才算真的在加速，光看一个分数永远看不出来。
   function rsiSvgLine(pts, key, color) {
     const n = pts.length;
     if (!n) return "";
@@ -17078,7 +17078,7 @@
   function rsiPaint(d) {
     const box = document.getElementById("iter-rsi");
     if (!box) return;
-    if (!d || !d.ok) { box.innerHTML = '<div class="iter-li">RSI 数据取不到</div>'; return; }
+    if (!d || !d.ok) { box.innerHTML = '<div class="iter-li">分数曲线取不到</div>'; return; }
     const pts = ((d.trend || {}).points) || [];
     const ix = d.index || {}, sp = d.speed || {};
     let grid = "";
@@ -17114,7 +17114,7 @@
       .then(rsiPaint)
       .catch(function () {
         const box = document.getElementById("iter-rsi");
-        if (box) box.innerHTML = '<div class="iter-li">RSI 数据取不到（后端还没准备好）</div>';
+        if (box) box.innerHTML = '<div class="iter-li">分数曲线取不到（后端还没准备好）</div>';
       });
     speedLoad();
   }
@@ -17195,7 +17195,7 @@
 
     const body = el.querySelector(".iter-body");
     // ★ 常驻站点条放在最前面：用户要求「外面单独放一排、不进折叠、每次打开都在」
-    let h = sec("📈 RSI 曲线（越陡 = 修得越快）",
+    let h = sec("📈 分数曲线（越陡 = 修得越快）",
       '<div class="iter-speed-bar" id="iter-speed-bar"><div class="iter-li">加速状态加载中…</div></div>' +
       '<div class="iter-rsi" id="iter-rsi"><div class="iter-li">加载中…</div></div>') +
       paperSitesBar() + expHtml() + sec("🛠️ 最近自动执行（信任模式）", actlogHtml());
@@ -17241,7 +17241,7 @@
     }).join("") || '<div class="iter-li">（暂无）</div>');
     h += '<div class="iter-pc-wrap">' + planCacheHtml() + '</div>';
     body.innerHTML = h;
-    // RSI 图表：容器已在 h 顶部渲染，这里拉数据把曲线画进去
+    // 分数曲线：容器已在 h 顶部渲染，这里拉数据把曲线画进去
     rsiLoad();
   }
 

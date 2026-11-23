@@ -605,8 +605,8 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                            top_p: float | None = None,
                            thinking: bool | None = None,
                            reasoning_effort: str | None = None,
-                           system_prompt: str | None = None,
-                           guard=None):
+                            system_prompt: str | None = None,
+                            guard=None, should_stop=None):
     """**带工具调用**的流式对话（2026-11-08 新增）。
 
     为什么需要它
@@ -662,6 +662,13 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
     cont_used = 0               # 被 max_tokens 截断后自动续写的次数（最多 2 次）
 
     for rnd in range(max_rounds):
+        # ★ 2026-11-23：**用户点了「■ 终止」就立刻停** —— 云端通道原来完全没接终止，
+        #   /api/chat/stop 只对本地通道有效，这条流照样跑到完（用户看到"点了没停"，
+        #   而且还在继续烧 API 费用）。
+        if should_stop is not None and should_stop():
+            logger.warning("[ds] 轮次开始前已收到终止，直接收场")
+            yield ("note", "已终止：不再继续调用模型。")
+            return
         body: dict = {
             "model": wire_model,
             "messages": msgs,
@@ -748,6 +755,12 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
 
         try:
             for raw in resp.iter_lines(decode_unicode=True):
+                # ★ 2026-11-23：**每收到一片就查一次终止令牌**。置位就 break，
+                #   下面的 finally 会 resp.close() 掐掉上游连接 —— 云端立刻停止计费。
+                if should_stop is not None and should_stop():
+                    logger.warning("[ds] 流式接收中被终止，关闭上游连接")
+                    finish = "aborted"
+                    break
                 if not raw:
                     continue
                 line = raw.strip()
@@ -805,6 +818,11 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                 resp.close()
             except Exception:
                 logger.debug("silent-except", exc_info=True)
+
+        # ★ 2026-11-23：被终止的轮次**立刻收场** —— 绝不能往下走「截断续写」或
+        #   工具循环，否则"点了终止"之后还会再发请求（用户点了停，账单继续涨）。
+        if finish == "aborted":
+            return
 
         try:
             _full_txt = "".join(content_buf)

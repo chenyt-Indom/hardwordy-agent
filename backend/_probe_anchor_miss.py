@@ -52,6 +52,19 @@ REPLACE = "def target():\n    x = 10\n    y = 20\n    return x * y\n"
 
 bad = []
 
+# 收尾（删探针目标 / 删探针账本）失败的记账本。
+# 为什么不再写 `except OSError: pass`（2026-11-23 静态自检 silent-except 压分点）：
+#   这两处**本身就该兜住** —— 目标文件可能已被前面的用例删掉、或者被占用，
+#   删不掉不影响任何断言的结论；若让 finally 抛出去，反而会把真正的失败原因盖掉。
+#   但「彻底 pass」会让清理失败无痕（自检把它算成压分点），所以改成兜住但记一笔：
+#   控制流完全不变，出问题时能在 _cleanup_log 里看到现场。
+_cleanup_log = []
+
+
+def _note_cleanup(e) -> None:
+    """清理失败只记录 (阶段, 异常)，绝不抛（探针收尾不能打断断言结论）。"""
+    _cleanup_log.append("%s: %s" % (type(e).__name__, e))
+
 
 def check(name, cond):
     print(("  ok   " if cond else "  FAIL ") + name)
@@ -114,13 +127,13 @@ def main():
         try:
             if os.path.exists(ABS):
                 os.remove(ABS)
-        except OSError:
-            pass
+        except OSError as e:
+            _note_cleanup(e)      # 探针目标删不掉：不影响断言结论，只记一笔
         try:
             if os.path.exists(AL._path(SES)):
                 os.remove(AL._path(SES))
-        except OSError:
-            pass
+        except OSError as e:
+            _note_cleanup(e)      # 探针账本删不掉：同上，只记一笔
         cur = dict(CFG.load_config() or {})
         ch = False
         for k, v in _was.items():
@@ -134,6 +147,9 @@ def main():
 if __name__ == "__main__":
     main()
     print()
+    if _cleanup_log:
+        # 收尾没删干净不改变结论，但必须让人看得见（不再静默吞掉）
+        print("  收尾提示（不影响断言结论）：%s" % "；".join(_cleanup_log))
     if bad:
         print("失败 %d 项：%s" % (len(bad), bad))
         sys.exit(1)

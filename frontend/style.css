@@ -6513,7 +6513,7 @@ html[data-theme="light"] .composer {
 .iter-pause.off .iter-pause-t { color: #8b939b; }
 .iter-pause:disabled { opacity: .6; }
 .iter-body { flex: 1 1 auto; overflow-y: auto; padding: 12px 16px 28px; }
-/* RSI 曲线卡片（2026-11-23 用户要求：肉眼可见的数据与图表） */
+/* 分数曲线卡片（2026-11-23 用户要求：肉眼可见的数据与图表） */
 .iter-rsi { background: var(--panel2, #fafbfc); border: 1px solid var(--border, #e6e9ee);
   border-radius: 8px; padding: 10px 12px; }
 .iter-rsi-top { font-size: 13px; color: var(--text, #2d3748); margin-bottom: 4px; }
@@ -6533,7 +6533,7 @@ html[data-theme="light"] .composer {
 .iter-rsi-sp { font-size: 11.5px; color: var(--muted, #7a8494); margin-top: 6px; line-height: 1.5; }
 
 /* 加速模式开关（2026-11-23 用户要求「可以开启和关闭」）
-   单独一条，放在 RSI 卡片上方；不动任何既有布局骨架。 */
+   单独一条，放在 分数曲线 卡片上方；不动任何既有布局骨架。 */
 .iter-speed-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   background: var(--panel2, #fafbfc); border: 1px solid var(--border, #e6e9ee);
   border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }

@@ -11195,6 +11195,13 @@ async def chat_deepseek(req: ChatRequest,
         logger.warning("云端通道注入手动技能失败（本轮忽略）", exc_info=True)
 
     loop = asyncio.get_running_loop()
+    # ★ 2026-11-23：**云端通道接上终止令牌**（这是"点了终止没停"的真正根因）。
+    #   原来只有本地 /api/chat 登记令牌，云端 /api/chat/deepseek 一个都没登记 ——
+    #   /api/chat/stop 置位的 Event 根本没人看，那条流就一路跑完。
+    #   实测日志：近 1.2MB 里 /api/chat/deepseek 17 次、本地 /api/chat 0 次，
+    #   而 [stop] 记录只有自测的 __probe__ / brandtest —— 真实点击一次都没生效过。
+    _stop_token = _new_stop_token(session)
+    _stopped = {"v": False}  # 被终止后要跳过「补句」等收尾动作，别再发请求
     _ACC: list = []          # 本轮完整正文（收尾回填用，见 __end.answer）
     _TOOL_EV: list = []      # 本轮工具事件（name, ok, text），给 _verification_card 用
 
@@ -11242,6 +11249,16 @@ async def chat_deepseek(req: ChatRequest,
 
                 def executor(name: str, args: dict) -> str:
                     ui_events.clear()
+                    # ★ 2026-11-23：已点终止就不再**开新工具**（尤其别再去写文件/跑代码）。
+                    #   工具跑在线程里掐不断，但至少能保证"不再开新的"。
+                    if _stop_token.is_set():
+                        logger.warning("[stop] 云端通道已终止，跳过工具 %s", name)
+                        try:
+                            actlog.record(session, name, args, ok=False,
+                                          result="[已终止] 用户中断，未执行")
+                        except Exception:
+                            logger.debug("silent-except", exc_info=True)
+                        return "[已终止] 用户点了终止，这个工具没有执行"
                     try:
                         _r = tools.dispatch(name, args, ui_events, ctx)
                     except Exception as _e:
@@ -11272,7 +11289,10 @@ async def chat_deepseek(req: ChatRequest,
                         # 轮次上限跟主通道用同一份配置（用户要求放到最多）
                         max_rounds=max(1, min(int(cfg.get("max_tool_rounds") or MAX_TOOL_ROUNDS), 500)),
                         # ★ 「光嘴上说说」兜底：要文件/图片却只写正文时退回一轮
-                        guard=_ds_guard_factory(last_user)):
+                        guard=_ds_guard_factory(last_user),
+                        # ★ 2026-11-23：每轮开头 / 每收到一片都查这个令牌，
+                        #   置位就关掉上游连接 —— 云端通道的「终止」靠它生效
+                        should_stop=_stop_token.is_set):
                     # 先把上一轮工具产生的 UI 事件排出去
                     while ui_events:
                         q.put(("ui", ui_events.pop(0)))
@@ -11325,6 +11345,13 @@ async def chat_deepseek(req: ChatRequest,
         # 不用超时轮询（会泄漏 run_in_executor 任务、导致消息丢失），
         # 直接阻塞读 —— worker 结束时一定会 put ("__done__", None) 把这里放出来。
         while True:
+            # ★ 2026-11-23：消费端也要看终止令牌 —— 前端可能只打了 /api/chat/stop
+            #   而连接没断干净（点了终止又切会话等），这里主动收场，别再往外吐内容。
+            if _stop_token.is_set() and not _stopped["v"]:
+                _stopped["v"] = True
+                logger.warning("[stop] 云端通道收到终止，结束本轮输出")
+                yield json.dumps({"note": "已终止。"}) + "\n"
+                break
             # 2026-11-09：长工具（跑代码/爬网页）会让这里**静默几分钟**，
             #   nginx 60s 就掐连接、前端也以为卡死。每 15 秒发一个心跳包。
             def _qget():
@@ -11386,7 +11413,8 @@ async def chat_deepseek(req: ChatRequest,
         except Exception:
             _cut = False
         # 宁多勿少：最多补 3 轮，直到结尾落在终止标点上（用户明确要求）
-        for _try in range(3):
+        # ★ 2026-11-23：被终止就**不补句** —— 否则"点了停"之后还要再发 3 次请求
+        for _try in (range(0) if _stopped["v"] else range(3)):
             try:
                 _bad_tail = (len(_full.strip()) > 60 and
                              not re.search(r"[。！？!?….…”』」）)】`~\n]$", _full.rstrip()))
@@ -11450,7 +11478,25 @@ async def chat_deepseek(req: ChatRequest,
                                              since=_ds_round_mark)
         yield json.dumps({"__end": True, "answer": _answer}, ensure_ascii=False) + "\n"
 
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
+    async def _gen_guarded():
+        """把 gen() 包一层：**无论怎么结束，都要置位终止令牌**。
+
+        为什么必须有：`gen()` 只负责把内容转给前端，真正干活的是那个 worker 线程。
+        用户点「■ 终止」时前端会 abort 连接 → Starlette 关掉本生成器 → gen 里
+        所有 yield 作废，但 **worker 线程毫不知情，还在继续跑**：继续调模型、
+        继续烧 API 费用、跑完还会把结果写进会话（实测就是这么发生的）。
+        这一层 finally 把令牌置位，worker 里的 should_stop 立刻看得到，主动收场。
+        """
+        try:
+            async for _chunk in gen():
+                yield _chunk
+        finally:
+            try:
+                _stop_token.set()
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+
+    return StreamingResponse(_gen_guarded(), media_type="application/x-ndjson")
 
 
 @app.post("/api/tool/confirm")
