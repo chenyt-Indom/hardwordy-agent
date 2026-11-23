@@ -22,6 +22,13 @@ import subprocess
 import sys
 import time
 
+# ⚠️ 2026-11-24 实测：Windows 控制台默认 GBK，汇总行的「合计 / 通过」会变成
+#   乱码（�ϼ� / ͨ��），看起来像程序坏了。统一按 UTF-8 输出。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:                                       # noqa: BLE001
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 SELF = os.path.basename(os.path.abspath(__file__))

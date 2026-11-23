@@ -1472,6 +1472,86 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
             "delta": round(ys[-1] - ys[0], 1), "window": window}
 
 
+# 失败原因归一化表（**顺序即优先级**：护栏拦截最先判，因为它的 detail 里
+# 往往同时含「已自动回滚」，不分先后会归错类）。
+# 为什么需要这张表：actlog 的 `action` 是**计划内序号**（a1 / f6），同一编号在
+# 不同计划里指完全不同的事。实测 2026-11-24：按 action 聚合得出「a1 失败 18 次、
+# f6 失败 14 次」—— 这个结论**无法行动**，因为根本不知道 a1 是什么动作。
+# 真正能指导改进的只有两个维度：**改哪个文件**、**为什么失败**。
+_FAIL_KINDS = (
+    # ⚠️⚠️ 顺序至关重要（2026-11-24 实测）：`（已自动回滚）` 是**结果后缀**，
+    #   几乎出现在每条失败记录的 detail 末尾。原来把它排在中间，
+    #   43% 的失败被归成「回滚」，真原因（锚点找不到 / 语法校验失败）全被吃掉。
+    #   所以「回滚」必须放**最后**当兜底，前面先判具体原因。
+    ("护栏拦截", ("护栏文件被修改", "熔断", "禁止模型改写", "篡改分类器",
+                  "占位式修补", "待人工复核")),
+    ("越界写入", ("不在允许范围", "不允许写入", "越界")),
+    ("锚点没命中", ("find 在文件里找不到", "find 找不到", "锚点", "不唯一",
+                    "未命中", "找不到待替换")),
+    ("语法校验失败", ("语法校验失败", "SyntaxError", "语法错误")),
+    ("行为回归失败", ("回归新增失败", "行为回归")),
+    ("模型没给出补丁", ("没有给出任何 patch", "没有给出 patch", "未给出合法 JSON",
+                        "仍未给出合法 JSON", "patch 为空", "空 patch")),
+    ("无实际改动", ("no_change", "没有实际改动", "diff 为空", "未产生改动")),
+    ("JSON 不合法", ("不是合法 JSON", "JSON 解析", "json 解析", "JSONDecode")),
+    ("超时", ("超时", "timeout", "Timeout")),
+    ("模型输出不可用", ("截断", "为空", "不可用")),
+    # 兜底：只有上面全不命中、且确实写了「回滚」时才归这里
+    ("回滚（原因未分类）", ("回滚", "rollback")),
+)
+
+
+def _fail_kind(detail: str) -> str:
+    """把一条失败记录归到可读的原因类别；认不出来就归「其他」。"""
+    s = str(detail or "")
+    for name, marks in _FAIL_KINDS:
+        if any(m in s for m in marks):
+            return name
+    return "其他"
+
+
+def failure_breakdown(limit: int = 400, top: int = 3) -> dict:
+    """真失败按「文件 / 原因」归因 —— 给 rsi_weakest 提供**可执行**的改进方向。
+
+    口径与 rsi_index 完全一致（排除探针行、审批事件、护栏拦截），
+    所以这里的 n 与「动作成功率」里的失败数能对上。
+    """
+    import collections
+    try:
+        rows = _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))[-max(20, limit):]
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读 actlog 失败", exc_info=True)
+        return {"ok": False, "error": "读不到 actlog"}
+    judged = [r for r in rows
+              if not _is_probe_row(r) and r.get("kind") != "review_approve"]
+    real = [r for r in judged
+            if str(r.get("result") or "").lower() in ("fail", "failed", "error")
+            and not _is_gate_block(r)]
+    if not real:
+        return {"ok": True, "n": 0, "by_file": [], "by_kind": [], "hint": ""}
+    by_file = collections.Counter()
+    by_kind = collections.Counter()
+    for r in real:
+        files = r.get("files") or []
+        if isinstance(files, list) and files:
+            by_file[str(files[0]).replace("\\", "/")] += 1
+        else:
+            by_file["（未记录文件）"] += 1
+        by_kind[_fail_kind(r.get("detail"))] += 1
+    n = len(real)
+    fl = [{"name": k, "n": v, "pct": round(100.0 * v / n, 1)}
+          for k, v in by_file.most_common(top)]
+    kl = [{"name": k, "n": v, "pct": round(100.0 * v / n, 1)}
+          for k, v in by_kind.most_common(top)]
+    hint = ""
+    if kl:
+        hint = "真失败 %d 次，最常见原因是「%s」%d 次（%.0f%%）" % (
+            n, kl[0]["name"], kl[0]["n"], kl[0]["pct"])
+        if fl:
+            hint += "；最常失败的文件是 %s（%d 次）" % (fl[0]["name"], fl[0]["n"])
+    return {"ok": True, "n": n, "by_file": fl, "by_kind": kl, "hint": hint}
+
+
 def rsi_weakest() -> dict:
     """当前**最该修**的一项：权重最高、得分最低。
 
@@ -1510,11 +1590,23 @@ def rsi_weakest() -> dict:
     # 拖后腿程度 = 权重 × (1 - 得分)
     worst = max(cands, key=lambda p: p["weight"] * (1 - p["value"]))
     advice = {
-        "动作成功率": "挑最近失败最多的动作类型，看它的失败原因，先修掉重复出现的那个",
+        # ⚠️ 2026-11-24 修：原来写「挑最近失败最多的动作类型」—— 实测发现
+        #   actlog 的 action 是**计划内序号**（a1/f6），按它聚合毫无意义，
+        #   这条建议等于没法执行。改成带上真实归因（原因类别 + 文件）。
+        "动作成功率": "先修重复出现的失败原因",
         "无幽灵率": "检查「声称改了但 diff 为空」的动作，把校验卡在提交前",
         "教训落地率": "把 pending 教训按 fix 逐条落到代码，并用探针复核",
         "静态质量": "先清 high 级静态问题，再谈别的",
     }.get(worst["name"], "先处理这一项")
+    if worst["name"] == "动作成功率":
+        try:
+            fb = failure_breakdown()
+            if fb.get("ok") and fb.get("hint"):
+                advice = ("%s。按原因/文件定位（不要按 a1/f6 这类计划内序号挑，"
+                          "它们在不同计划里指不同的事）：先修掉占比最高的那一类，"
+                          "修完用探针复核。" % fb["hint"])
+        except Exception:                               # noqa: BLE001
+            logger.debug("失败归因失败", exc_info=True)
     return {"ok": True, "name": worst["name"], "value": worst["value"],
             "weight": worst["weight"], "detail": worst.get("detail"),
             "drag": round(worst["weight"] * (1 - worst["value"]), 3),
