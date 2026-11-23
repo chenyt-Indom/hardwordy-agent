@@ -938,9 +938,36 @@ def _check_dead_private_func(trees):
 
 # ---------------------------------------------------------------- 5. 裸 except / 静默吞异常
 
+def _is_guard_file(rel):
+    """这个文件是不是**模型改不动**的护栏（改了会被判违规、整轮回滚）。
+
+    ★ 2026-11-24 修（连续 3 轮都挂着的同一个扣分点）：
+      `backend/_feature_tests/test_anchor_diagnose.py` 里两处 `except OSError: pass`
+      被算成 silent-except（info，0.5 分/轮），可那个文件正是护栏 ——
+      `iter_agent._GUARD_DIRS` 把 `_feature_tests/` 下非下划线开头的 `test_*.py`
+      全算护栏，模型一改 `_final_verify` 就判「护栏文件被修改（不允许）」→
+      整轮改动回滚；`iter_runner._AUTOFIX_DENY` 也明写「这些文件**绝不自动改**」。
+      也就是说这条扣分点**永远修不掉**，只会在报告里永久压分。
+
+      这和 `_SKIP_FILES`（selfdev / restore 被回撤机制锁死，报出来也修不掉，
+      「只会让报告永久挂一条噪音」）是同一个道理：自检只该对**能改的代码**
+      提扣分点。判据统一走 `iter_agent._is_guard()`，不在这里另写一份规则，
+      免得两处护栏定义日后漂移（改了一处、另一处还在按老名单报）。
+    """
+    try:
+        from . import iter_agent as _ia
+        return bool(_ia._is_guard(rel))
+    except Exception:                                       # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return False
+
+
 def _check_except(trees):
     out = []
     for rel, (p, tree) in trees.items():
+        # 护栏文件（模型改不动）不进来：见 _is_guard_file 的注释。
+        if _is_guard_file(rel):
+            continue
         src_lines = _read(p).splitlines()
         silent = 0
         silent_first = 0

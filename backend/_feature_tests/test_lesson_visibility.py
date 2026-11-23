@@ -30,10 +30,22 @@ except Exception:                                       # noqa: BLE001
 
 # ⚠️ 必须先隔离数据目录：留痕会写 data/self_iterate/，绝不能在测试里污染真账本。
 _TMP = tempfile.mkdtemp(prefix="mm_lesson_vis_")
-os.environ["MM_DATA_DIR"] = _TMP
 
 
 def run() -> int:
+    """跑测试，并把 MM_DATA_DIR 隔离**限定在本函数内**（跑完恢复原值）。"""
+    old = os.environ.get("MM_DATA_DIR")
+    os.environ["MM_DATA_DIR"] = _TMP
+    try:
+        return _run_body()
+    finally:
+        if old is None:
+            os.environ.pop("MM_DATA_DIR", None)
+        else:
+            os.environ["MM_DATA_DIR"] = old
+
+
+def _run_body() -> int:
     from backend import main as M
     from backend import lessonloop as LL
 

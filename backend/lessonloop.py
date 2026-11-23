@@ -403,6 +403,55 @@ def _recur_after(kind_zh: str, since: float) -> int:
     return n
 
 
+def _hit_state_path() -> str:
+    return os.path.join(_data_dir(), "lesson_hit.json")
+
+
+def _hit_state() -> dict:
+    try:
+        with open(_hit_state_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:                                   # noqa: BLE001
+        return {}
+
+
+def _hit_state_save(d: dict) -> None:
+    try:
+        with open(_hit_state_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+    except OSError:
+        logger.debug("写 lesson_hit 失败", exc_info=True)
+
+
+def _first_hit_ts(kind: str, fallback: float) -> float:
+    """探针**第一次命中**的时间 —— 观察窗从这里算，而不是文件的最后编辑时间。
+
+    ⚠️⚠️ 2026-11-24 实测缺陷：原来 `edited = _last_ok_edit(rel)` 取的是该文件
+    最后一次成功编辑的时间。于是**任何无关改动都会重置观察窗** ——
+    实测：只改了 backend/lessonloop.py 里另两处（锚点诊断），5 条探针指向
+    lessonloop.py 的教训 progress 全部归零，教训落地率 0.354 → 0.147，
+    RSI 71.1 → 66.0。这也是 RSI 长期在 70 附近「原地跑」的机制原因：
+    自迭代每次都在改这些文件，进度永远攒不起来。
+    改成记住首次命中时间后，只有「修复真的消失又重新出现」才重新计时。
+    """
+    st = _hit_state()
+    cur = st.get(kind)
+    if isinstance(cur, (int, float)) and float(cur) > 0:
+        return float(cur)
+    st[kind] = float(fallback)
+    _hit_state_save(st)
+    return float(fallback)
+
+
+def _clear_hit_ts(kind: str) -> None:
+    """修复消失 / 复发 → 丢掉首次命中时间，下次重新计时（不能拿旧进度冒充）。"""
+    st = _hit_state()
+    if kind in st:
+        st.pop(kind, None)
+        _hit_state_save(st)
+
+
 def judge(it: dict) -> dict:
     """单条教训的真实判定（不靠模型自称，只看账本 + 文件）。
 
@@ -445,6 +494,7 @@ def judge(it: dict) -> dict:
     }
     # ① 修复逻辑不在代码里 —— 这是硬事实，与 mtime 无关
     if not hit:
+        _clear_hit_ts(kind)
         if edited > t0:
             return {"kind": kind, "status": "pending", "recur": recur,
                     "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
@@ -457,6 +507,7 @@ def judge(it: dict) -> dict:
                 "evidence": "修复逻辑不在代码里，该文件也没改过（只说不做）", "detail": ev}
     # ② 修复逻辑在，但教训之后又复发 —— 改得不够，继续 pending
     if recur > 0:
+        _clear_hit_ts(kind)
         return {"kind": kind, "status": "pending", "recur": recur,
                 "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
                 "progress": 0.0,
@@ -466,7 +517,9 @@ def judge(it: dict) -> dict:
     #    该条件为假 → 跳过观察窗直接判 fixed。实测 12:32 记的教训 12:33 就
     #    判成「已修」，而「未复发」此时只代表「才过了一分钟」—— 假阳性，
     #    会把 RSI 的教训落地率抬虚高。取 max 后，刚记的教训一律先进观察窗。
-    base = max(edited, t0)
+    # 起点 = 「探针第一次命中」与「教训记录时间」的晚者。
+    # 不再直接用文件 mtime：否则改这个文件里任何别的地方都会把进度清零。
+    base = max(_first_hit_ts(kind, max(edited, t0)), t0)
     elapsed = max(0.0, time.time() - base)
     h1 = OBSERVE_PENDING_HOURS * 3600.0
     h24 = OBSERVE_CONFIRM_HOURS * 3600.0
@@ -846,6 +899,54 @@ def loose_span(text: str, find: str):
     return ms[0].span()
 
 
+def anchor_candidates(text: str, find: str, limit: int = 8) -> list:
+    """把 find 在文件里的每一处命中，连同行号与前后一行一起交出去。
+
+    为什么必须给候选（2026-11-24 实测）：actlog 里 6 次
+    「find 命中 N 处，不唯一（已自动回滚）」的失败，原实现只回一句「不唯一」，
+    模型下一轮拿不到任何新信息，只能照着同一个锚点再猜一次 → 再失败一次。
+    把行号和上下文交出去，下一轮才能把锚点扩成含唯一上下文的多行块。
+    """
+    out = []
+    if not find:
+        return out
+    lines = text.splitlines()
+    pos = text.find(find)
+    while pos != -1 and len(out) < limit:
+        ln = text.count("\n", 0, pos) + 1
+        out.append({
+            "line": ln,
+            "prev": (lines[ln - 2].strip()[:80] if ln >= 2 else ""),
+            "cur": (lines[ln - 1].strip()[:80] if ln - 1 < len(lines) else ""),
+            "next": (lines[ln].strip()[:80] if ln < len(lines) else ""),
+        })
+        pos = text.find(find, pos + max(1, len(find)))
+    return out
+
+
+def near_miss(text: str, find: str, limit: int = 3) -> list:
+    """锚点没命中时，用 find 的首个非空行去搜，给出「最像的那几行」。
+
+    实测价值：模型记错缩进/函数名时，一句「没找到」它下一轮还是照原样再试；
+    给出真实原文的相近行，它一次就能改对。
+    """
+    import re
+    parts = [p for p in re.split(r"\s+", find or "") if p]
+    if not parts:
+        return []
+    key = parts[0][:40]
+    if len(key) < 3:
+        return []
+    out = []
+    lines = text.splitlines()
+    for i, ln in enumerate(lines, 1):
+        if key in ln:
+            out.append({"line": i, "text": ln.strip()[:120]})
+            if len(out) >= limit:
+                break
+    return out
+
+
 def patch_with_fallback(rel: str, find: str, replace: str, note: str = "",
                         session: str = "default") -> dict:
     """带锚点降级的 patch —— 给自迭代链 / 反思链 / 修复链调用。
@@ -856,6 +957,19 @@ def patch_with_fallback(rel: str, find: str, replace: str, note: str = "",
     所以降级放在**调用层**：先试精确 patch，失败再按空白归一化定位后整段替换，
     并记一条 `anchor_miss` 事件（带 fallback=loose），便于统计这类失败还剩多少。
     """
+    # ⚠️⚠️ 2026-11-24 实测缺陷（actlog 可查）：
+    #   find 为空时 `text.count("") == len(text) + 1`，selfdev.patch 会报
+    #   「find 命中 48607 处，不唯一（已自动回滚）」—— 把「模型压根没给锚点」
+    #   误诊成「锚点不唯一」。两者修法完全不同，必须在这里先分开。
+    if not str(find or "").strip():
+        return {"ok": False, "reason": "find_empty",
+                "error": "锚点（find）为空：请给出要替换的原文片段；"
+                         "只改一处插入可用 selfdev_insert_after（一行锚点即可）。"}
+    if len(str(find).strip()) < 8 and "\n" not in str(find):
+        # 太短的锚点几乎必然命中多处（`}、return out` 之类），提前说清而不是让它撞墙。
+        return {"ok": False, "reason": "anchor_too_short",
+                "error": "锚点太短（%r）：请带上前后各一行组成唯一多行块。"
+                         % str(find)[:20]}
     from . import selfdev as _sd
     r = _sd.patch(rel, find, replace, note=note)
     if r.get("ok"):
@@ -870,6 +984,16 @@ def patch_with_fallback(rel: str, find: str, replace: str, note: str = "",
     anchor_miss = ("没找到这段原文" in err) or ("没找到包含" in err)
     phantom = (str(r.get("reason") or "") == "phantom") or ("幽灵修复" in err)
     if not anchor_miss and not phantom:
+        # 命中多处 → 不猜（改错地方比不改更糟），但要把「该改哪一处」的证据交出去，
+        # 否则下一轮拿同一个锚点还会再失败一次（2026-11-24 实测 6 次）。
+        if "不唯一" in err:
+            got = _sd.read(rel)
+            text = (got.get("raw") if got.get("ok") else "") or ""
+            cands = anchor_candidates(text, find)
+            r["reason"] = "ambiguous"
+            r["candidates"] = cands
+            r["hint"] = ("锚点命中多处，已给出前 %d 处的行号与上下文（candidates）；"
+                         "请把 find 扩成含**前后各一行**的唯一多行块再试。" % len(cands))
         return r
     got = _sd.read(rel)
     if not got.get("ok"):
@@ -884,8 +1008,30 @@ def patch_with_fallback(rel: str, find: str, replace: str, note: str = "",
     else:
         span = loose_span(text, find)
     if not span:
-        r["hint"] = ("空白归一化后也没唯一命中：先用 selfdev_grep 搜关键字拿到真实原文，"
-                     "或改用 selfdev_insert_after（只要一行锚点）。")
+        # ⚠️⚠️ 2026-11-24 实测缺陷：不带 fail_kind 调 _sd.patch 时，第一步就被
+        #   「幽灵修复」闸门拦下（reason=phantom），于是**永远走不到**上面那句
+        #   `if "不唯一" in err` —— 锚点其实命中多处，模型看到的却是
+        #   「幽灵修复」这种风马牛不相及的错误，下一轮去改 fail_kind，白跑。
+        #   所以这里必须自己判一次：多处命中 → ambiguous（带候选），真的没命中 → near。
+        cands = anchor_candidates(text, find)
+        if len(cands) >= 2:
+            r["reason"] = "ambiguous"
+            r["candidates"] = cands
+            r.pop("phantom", None)
+            r["error"] = ("锚点命中 %d 处，不能猜（改错地方比不改更糟）。"
+                          "请把 find 扩成含前后各一行的唯一多行块。" % len(cands))
+            r["hint"] = ("候选行号与上下文见 candidates（line/prev/cur/next）。"
+                         "只插不改可用 selfdev_insert_after。")
+            return r
+        near = near_miss(text, find)
+        r["reason"] = "anchor_miss" if r.get("reason") in (None, "", "phantom") \
+            else r.get("reason")
+        r.pop("phantom", None)
+        r["near"] = near
+        r["hint"] = (("没命中。文件里最相近的 %d 行见 near，请照抄真实原文（含缩进）再试；"
+                      "只插不改可用 selfdev_insert_after。") % len(near) if near else
+                     ("空白归一化后也没命中：先用 selfdev_grep 搜关键字拿到真实原文，"
+                      "或改用 selfdev_insert_after（只要一行锚点）。"))
         return r
     s0, s1 = span
     # 降级走 write 会绕过 patch 里的篡改分类器，这里补一遍同样的检查。

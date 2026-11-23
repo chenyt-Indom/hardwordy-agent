@@ -5645,7 +5645,27 @@ def _plan_patch_for_action(plan, action, prev_fail=""):
         return None, "模型判断无法安全实施：%s" % str(data.get("skip"))[:200]
     patches = data.get("patches") or []
     if not isinstance(patches, list) or not patches:
-        return None, "模型没有给出任何 patch"
+        # ⚠️ 2026-11-24 实测（actlog 6 次「模型没有给出任何 patch」直接判死）：
+        #   合法 JSON 但 patches 为空 —— 模型多半是"想说点什么"又没按格式给，
+        #   或者把改动写在别的键里（如 {"replace":...}）。直接判死等于白花这一轮，
+        #   重试一次并明确二选一（给 patches / 用 skip 说明为什么不能改）。
+        _p3 = prompt + (
+            "\n\n## 特别注意（你上一次给了合法 JSON，但里面没有 patches）\n"
+            "必须二选一，不要再输出空的 patches：\n"
+            "1) 能改 → 输出 {\"patches\":[{\"file\":\"...\",\"find\":\"原文\","
+            "\"replace\":\"替换后\"}]}，find 必须是文件里**真实存在且唯一**的原文；\n"
+            "2) 不能改 → 输出 {\"skip\":\"具体原因\"}。\n")
+        _t3, _e3 = _llm_text(_p3, max_tokens=3600, temperature=0.0)
+        if not _e3:
+            _d3 = _parse_json(_t3)
+            if isinstance(_d3, dict):
+                if _d3.get("skip"):
+                    return None, ("模型判断无法安全实施：%s"
+                                  % str(_d3.get("skip"))[:200])
+                _p3_list = _d3.get("patches") or []
+                if isinstance(_p3_list, list) and _p3_list:
+                    return _p3_list, ""
+        return None, "模型没有给出任何 patch（已重试 1 次，两次都为空）"
     return patches, ""
 
 
