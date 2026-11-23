@@ -1,21 +1,21 @@
 {
- "total": 154.65,
- "quality": 99.5,
- "ability": 55.15,
+ "total": 155.15,
+ "quality": 99.0,
+ "ability": 56.15,
  "static": {
-  "score": 39.5,
+  "score": 39.0,
   "max": 40,
   "high": 0,
   "mid": 0,
-  "info": 1
+  "info": 2
  },
  "static_findings": [
   {
    "file": "backend/lessonloop.py",
-   "line": 180,
+   "line": 271,
    "kind": "silent-except",
    "level": "info",
-   "msg": "有 2 处 `except ...: pass` 把异常完全吞掉了（未标 noqa）"
+   "msg": "有 1 处 `except ...: pass` 把异常完全吞掉了（未标 noqa）"
   },
   {
    "file": "backend/main.py",
@@ -24,12 +24,19 @@
    "level": "info",
    "msg": "检测到 28 处 subprocess 直接调用，但 procwin.install_nowin_patch() 已全局兜住（实测窗口数 0），故不逐处报 high/mid",
    "noscore": true
+  },
+  {
+   "file": "backend/self_iterate.py",
+   "line": 1230,
+   "kind": "silent-except",
+   "level": "info",
+   "msg": "有 1 处 `except ...: pass` 把异常完全吞掉了（未标 noqa）"
   }
  ],
  "regress": {
   "score": 30.0,
   "max": 30,
-  "passed": 44,
+  "passed": 45,
   "failed": 0,
   "failed_items": []
  },

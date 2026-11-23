@@ -311,6 +311,33 @@ def _code_for_exc(e: BaseException) -> str:
     return "unknown"
 
 
+def _sanitize(obj):
+    """把字符串里的**孤立代理字符**（半个 emoji）替换掉，返回清洗后的新对象。
+
+    2026-11-23 实测真故障：每日自我反思（04:30）连续失败，DeepSeek 返回
+    `400 ... messages[0].content: lone leading surrogate in hex escape`。
+    根因是历史消息里混进了被截断的 emoji（surrogate pair 只剩前半），
+    而 `json=` 走 requests 的默认序列化（ensure_ascii=True），会把它写成
+    `\\ud83d` 这种非法转义，服务端直接拒收。
+
+    这里用 utf-8 的 replace 编解码把它换成 `?`，**其余字符一个不动**。
+    只清洗、不截断，也不改消息结构。
+    """
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+            return obj
+        except UnicodeEncodeError:
+            return obj.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(obj, list):
+        return [_sanitize(x) for x in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize(x) for x in obj)
+    if isinstance(obj, dict):
+        return {_sanitize(k): _sanitize(v) for k, v in obj.items()}
+    return obj
+
+
 def _vision_content(prompt: str, image_b64) -> list:
     """组装多模态 content。image_b64 可以是单张 base64，也可以是列表。
 
@@ -358,7 +385,7 @@ def vision_chat(prompt: str, image_b64, model: str, api_key: str,
     if temperature is not None:
         body["temperature"] = float(temperature)
     try:
-        r = _session().post(f"{BASE}/chat/completions", json=body,
+        r = _session().post(f"{BASE}/chat/completions", json=_sanitize(body),
                             headers={"Authorization": f"Bearer {api_key}",
                                      "Content-Type": "application/json"},
                             timeout=timeout, proxies=NO_PROXY_MAP)
@@ -448,7 +475,7 @@ def chat_stream(messages: list[dict], model: str, api_key: str,
                     "Content-Type": "application/json",
                     "Accept": "text/event-stream",
                 },
-                json=body,
+                json=_sanitize(body),
                 stream=True,
                 timeout=TIMEOUT,
                 proxies=NO_PROXY_MAP,
@@ -672,7 +699,7 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
                     },
                     # 用 data= 显式 UTF-8：json= 默认 ensure_ascii=True，
                     # 中文工具描述会被转义，请求体膨胀 1.6 倍（65KB→105KB）
-                    data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                    data=json.dumps(_sanitize(body), ensure_ascii=False).encode("utf-8"),
                     stream=True, timeout=TIMEOUT, proxies=NO_PROXY_MAP,
                 )
             except requests.RequestException as e:
@@ -905,7 +932,7 @@ def chat_stream_with_tools(messages: list[dict], model: str, api_key: str,
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json",
                      "Accept": "text/event-stream"},
-            data=json.dumps(_body, ensure_ascii=False).encode("utf-8"),
+            data=json.dumps(_sanitize(_body), ensure_ascii=False).encode("utf-8"),
             stream=True, timeout=TIMEOUT, proxies=NO_PROXY_MAP,
         )
         if _r.status_code == 200:

@@ -6395,6 +6395,8 @@ html[data-theme="light"] .composer {
 /* 2026-11-22 推荐卡片开关：与信任模式同一套视觉，不新增布局 */
 .iter-rec-hint { font-size: 12px; color: var(--muted, #7a8494); }
 .iter-rec-hint.on { color: #2f855a; }
+.iter-boost-hint { font-size: 12px; color: var(--muted, #7a8494); }
+.iter-boost-hint.on { color: #2f855a; }
 /* 需要重启时的提示条 */
 .iter-restart {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -6504,6 +6506,19 @@ html[data-theme="light"] .composer {
 .iter-rsi-bar i { display: block; height: 6px; border-radius: 3px; background: #6ea8fe; }
 .iter-rsi-bar b { font-weight: 600; color: var(--text, #2d3748); text-align: right; }
 .iter-rsi-sp { font-size: 11.5px; color: var(--muted, #7a8494); margin-top: 6px; line-height: 1.5; }
+
+/* 加速模式开关（2026-11-23 用户要求「可以开启和关闭」）
+   单独一条，放在 RSI 卡片上方；不动任何既有布局骨架。 */
+.iter-speed-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--panel2, #fafbfc); border: 1px solid var(--border, #e6e9ee);
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
+.iter-speed-btn { font-size: 12.5px; padding: 4px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border, #d8dee8); background: #fff; color: #2d3748; }
+.iter-speed-btn:hover { border-color: #6ea8fe; }
+.iter-speed-btn.on { background: #2f855a; border-color: #2f855a; color: #fff; }
+.iter-speed-btn:disabled { opacity: .6; cursor: default; }
+.iter-speed-txt { font-size: 12px; color: var(--muted, #7a8494); }
+.iter-speed-bl { flex-basis: 100%; font-size: 11.5px; color: #b7791f; line-height: 1.5; }
 
 .iter-sec { margin-bottom: 16px; }
 .iter-sec-t {

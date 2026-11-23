@@ -4583,6 +4583,34 @@ def selfiter_rsi(limit: int = 120):
     return out
 
 
+@app.get("/api/selfiter/speed")
+def selfiter_speed_get():
+    """加速模式状态：是否开启、当前档位、以及**阻碍加速的真实原因**。
+
+    用户 2026-11-23：「我想让他加速，但是我希望可以开启和关闭」。
+    """
+    from . import self_iterate as _si
+    try:
+        return _si.speed_state()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+@app.post("/api/selfiter/speed")
+def selfiter_speed_set(body: dict = None):
+    """开 / 关加速模式。body: {"on": true|false}；不给 on = 翻转当前状态。
+
+    开启只提高「开工频率」（自我维护节律 + 迭代执行强度），
+    **不碰**信任模式、暂停闸和任何护栏。
+    """
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        return _si.speed_boost(b.get("on"))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 @app.get("/api/selfiter/settings")
 def selfiter_settings_get():
     """读设置（信任模式 / 自动自检 / 诊断开关）。"""
@@ -4676,6 +4704,36 @@ def selfiter_maint_toggle(body: dict):
                             every_minutes=b.get("every_minutes"))
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/selfiter/maint/boost")
+def selfiter_maint_boost_status():
+    """加速开关状态：是否开启、是否真生效、加速档位、当前实际节律。
+
+    ★ 2026-11-23 用户要求「想让他加速，但要能开启和关闭」：
+      开 = 提高自我维护节律 + 迭代执行强度；关 = 按快照逐项还原。
+      这里只读状态，改档走 POST。
+    """
+    from . import self_iterate as _si
+    try:
+        return _si.speed_state()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+@app.post("/api/selfiter/maint/boost")
+def selfiter_maint_boost_set(body: dict = None):
+    """开 / 关加速档。body: on=true/false（不传则翻转当前状态）。
+
+    幂等：已经开着再开一次不会覆盖原始快照，所以关的时候一定还原得回来。
+    不碰护栏（熔断 / 质量闸门 / 暂停闸），只提高开工频率。
+    """
+    from . import self_iterate as _si
+    b = body or {}
+    try:
+        return _si.speed_boost(b.get("on"))
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
 @app.get("/api/selfiter/maint/history")

@@ -15737,6 +15737,15 @@
           '</label>' +
           '<span class="iter-rec-hint">开启后：改进计划会直接在对话里推一张卡片（写清改进原因和好处，思路可展开）等你批；关闭后只进「待批准」面板</span>' +
         '</div>' +
+        // ★ 2026-11-23 用户要求：「我想让他加速，但是我希望可以开启和关闭」。
+        //   开 = 提高反思/自检/评估频率 + 单轮自动动作数；关 = 按快照逐项还原。
+        '<div class="iter-trust">' +
+          '<label class="iter-sw">' +
+            '<input type="checkbox" class="iter-boost-cb">' +
+            '<span class="iter-sw-t">加速</span>' +
+          '</label>' +
+          '<span class="iter-boost-hint">开启后：反思每 45 分钟、代码自检/体验评估每 8 小时、单轮自动动作 6→16；关闭即按快照还原原节律</span>' +
+        '</div>' +
         '<div class="iter-bar">' +
           '<button type="button" class="btn sm iter-run">🔄 现在反思一次</button>' +
           '<button type="button" class="btn sm ghost iter-audit-btn">🔍 代码自检</button>' +
@@ -15771,6 +15780,7 @@
     el.querySelector(".iter-restart-btn").onclick = doRestart;
     el.querySelector(".iter-trust-cb").onchange = onTrustToggle;
     el.querySelector(".iter-rec-cb").onchange = onRecToggle;
+    el.querySelector(".iter-boost-cb").onchange = onBoostToggle;
     el.querySelector(".iter-pause").onclick = togglePause;
     el.querySelector(".iter-diag-btn").onclick = toggleDiag;
     el.querySelector(".iter-diag-go").onclick = runDiagnose;
@@ -15796,6 +15806,7 @@
     loadPapers();
     loadActlog();
     loadMaint();
+    loadBoost();
     loadLoop();
     loadPlanCache();
     pushSignals();
@@ -16972,6 +16983,50 @@
         const box = document.getElementById("iter-rsi");
         if (box) box.innerHTML = '<div class="iter-li">RSI 数据取不到（后端还没准备好）</div>';
       });
+    speedLoad();
+  }
+
+  // ---- 加速模式开关（2026-11-23 用户要求「可以开启和关闭」）----
+  // 只调 /api/selfiter/speed：开启提高开工频率，关闭按快照还原。
+  // 瓶颈（信任模式关着 / 某项上次失败）直接显示在开关下面，避免「开了却不动」。
+  function speedPaint(s) {
+    const bar = document.getElementById("iter-speed-bar");
+    if (!bar) return;
+    if (!s || !s.ok) {
+      bar.innerHTML = '<span class="iter-li">加速状态取不到</span>';
+      return;
+    }
+    const on = !!s.on;
+    const bl = (s.bottlenecks || []).filter(function (x) { return !!x; });
+    bar.innerHTML =
+      '<button class="iter-speed-btn' + (on ? " on" : "") + '" type="button">' +
+        (on ? "⚡ 加速中 · 点此关闭" : "⚡ 开启加速") + '</button>' +
+      '<span class="iter-speed-txt">' + esc(s.label || "") + '</span>' +
+      (bl.length ? '<div class="iter-speed-bl">' + bl.map(function (x) {
+        return '<div>⚠️ ' + esc(x) + '</div>';
+      }).join("") + '</div>' : "");
+    const btn = bar.querySelector(".iter-speed-btn");
+    if (!btn) return;
+    btn.onclick = function () {
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = "切换中…";
+      fetch("/api/selfiter/speed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: !on })
+      }).then(function (r) { return r.json(); })
+        .then(function (r) { speedPaint(r); rsiLoad(); })
+        .catch(function () { btn.disabled = false; btn.textContent = old; });
+    };
+  }
+
+  function speedLoad() {
+    if (!document.getElementById("iter-speed-bar")) return;
+    fetch("/api/selfiter/speed")
+      .then(function (r) { return r.json(); })
+      .then(speedPaint)
+      .catch(function () {});
   }
 
   function render() {
@@ -17008,6 +17063,7 @@
     const body = el.querySelector(".iter-body");
     // ★ 常驻站点条放在最前面：用户要求「外面单独放一排、不进折叠、每次打开都在」
     let h = sec("📈 RSI 曲线（越陡 = 修得越快）",
+      '<div class="iter-speed-bar" id="iter-speed-bar"><div class="iter-li">加速状态加载中…</div></div>' +
       '<div class="iter-rsi" id="iter-rsi"><div class="iter-li">加载中…</div></div>') +
       paperSitesBar() + expHtml() + sec("🛠️ 最近自动执行（信任模式）", actlogHtml());
     const p = d.latest;
@@ -17147,6 +17203,42 @@
   // ★ 2026-11-22 用户要求加的【推荐卡片】开关。
   //   开：改进计划在对话里直接推卡片等批准（卡片写清改进原因 + 好处，思路可展开）
   //   关：只在「待批准」面板里推，不打扰对话
+  async function loadBoost() {
+    // 加速开关：面板一打开就同步真实状态，避免「显示开着其实没开」。
+    try {
+      const r = await api("/api/selfiter/maint/boost");
+      const cb = el && el.querySelector(".iter-boost-cb");
+      if (!cb) return;
+      const on = !!(r && r.on);
+      cb.checked = on;
+      const hint = el.querySelector(".iter-boost-hint");
+      if (hint) {
+        hint.className = "iter-boost-hint" + (on ? " on" : "");
+        hint.textContent = on
+          ? ("加速中" + (r.effective ? "" : "（自动化已暂停，暂不生效）") +
+             "：反思 45 分钟一次、自检/评估 8 小时一次、单轮自动动作 " +
+             ((r.settings_now || {}).max_auto_actions || "-") + " 条")
+          : "开启后：反思每 45 分钟、代码自检/体验评估每 8 小时、单轮自动动作 6→16；关闭即按快照还原原节律";
+      }
+    } catch (err) { /* 读不到就保持默认文案 */ }
+  }
+
+  async function onBoostToggle(e) {
+    const on = !!(e && e.target && e.target.checked);
+    const hint = el && el.querySelector(".iter-boost-hint");
+    if (hint) hint.textContent = on ? "正在开启加速…" : "正在关闭加速…";
+    const r = await api("/api/selfiter/maint/boost", { on: on });
+    if (!r || !r.ok) {
+      say((r && r.error) || "加速开关操作失败", "bad");
+      if (e && e.target) e.target.checked = !on;
+      loadBoost();
+      return;
+    }
+    say(on ? "加速已开启：反思/自检/体验评估都会更勤，单轮自动动作也更多；随时可以关掉，关掉会按快照还原原节律。"
+           : "加速已关闭：节律和执行强度都已按快照还原。", on ? "good" : "warn");
+    loadBoost();
+  }
+
   async function onRecToggle(e) {
     const on = !!(e && e.target && e.target.checked);
     const r = await api("/api/selfiter/settings", { rec_card: on });

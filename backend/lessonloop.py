@@ -59,10 +59,20 @@ _SILENT_LOG_MAX = 200
 
 
 def _note_silent(e) -> None:
-    """把被兜住的异常记进 `_silent_log`（不抛、不改控制流）。"""
-    _silent_log.append((time.time(), repr(e)))
-    if len(_silent_log) > _SILENT_LOG_MAX:
-        del _silent_log[:-_SILENT_LOG_MAX]
+    """兜住异常但记一笔（不改变控制流），供事后查「静默失效」。
+
+    ⚠️ 2026-11-23 实测缺陷：这个函数**一直被调用、却从来没定义过**
+       （`_num_ts` 时间戳解析失败、`_last_ok_edit` 取 mtime 失败时都会调它）。
+       一旦走到异常分支就抛 NameError，把整条教训判定/统计链直接打断 ——
+       比原来的 `except: pass` 更糟：静默失效变成了显式崩溃。
+       现在补上：只记录 (时间, 异常)，绝不抛。
+    """
+    try:
+        _silent_log.append((time.time(), "%s: %s" % (type(e).__name__, e)))
+        if len(_silent_log) > _SILENT_LOG_MAX:
+            del _silent_log[:len(_silent_log) - _SILENT_LOG_MAX]
+    except Exception:                                   # noqa: BLE001
+        pass
 
 
 def _data_dir() -> str:
@@ -156,13 +166,23 @@ def record(item: dict) -> dict:
     return {"ok": True, "item": item}
 
 
-def _probe_hit(rel: str, needle: str) -> bool:
+def _probe_hit(rel: str, needle: str):
+    """三态探针：True=命中 / False=读到了但没有这段代码 / None=**读不到文件**。
+
+    ⚠️ 2026-11-23 实测缺陷（用户要求「不要记录错误污染的样本」）：
+       原来读失败一律 return False，而 judge() 把 False 解释成
+       「修复逻辑不在代码里 → 只说不做」。于是文件被占用、权限不足、
+       路径变动这类**观测失败**，会把一条**已经修好**的教训判成 pending，
+       直接压低落地率、污染 RSI。
+       读不到 ≠ 没修，必须单独一态，交给 judge 判 unprobed（不瞎判）。
+    """
     p = os.path.join(_PROJECT_ROOT, rel.replace("/", os.sep))
     try:
         with open(p, "r", encoding="utf-8", errors="ignore") as f:
             return needle in f.read()
-    except OSError:
-        return False
+    except OSError as e:
+        _note_silent(e)
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -185,10 +205,25 @@ def _fail_attr_path() -> str:
     return os.path.join(_data_dir(), "fail_attribution.jsonl")
 
 
+# 账本读取质量统计（2026-11-23 用户要求「不要落下样本、也不要让错误样本污染统计」）。
+# 原来坏行是 `continue` 直接丢掉：既不计数也不留证，等于样本凭空消失，
+# 而且**没人知道丢了**——统计照样给出一个看起来正常的数字。
+# 现在：坏行原样隔离到 <账本>.bad，并计入 _READ_STATS，可随时查 read_quality()。
+_READ_STATS = {"files": 0, "lines": 0, "bad": 0, "read_error": 0}
+_READ_LOCK = threading.Lock()
+
+
+def read_quality() -> dict:
+    """账本读取质量：读了多少行、坏行几条、整个文件读失败几次。"""
+    with _READ_LOCK:
+        return dict(_READ_STATS)
+
+
 def _read_jsonl(p: str) -> list:
     out = []
     if not os.path.isfile(p):
         return out
+    bad_lines = []
     try:
         with open(p, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
@@ -198,11 +233,29 @@ def _read_jsonl(p: str) -> list:
                 try:
                     o = json.loads(line)
                 except Exception:                       # noqa: BLE001
+                    bad_lines.append(line)
                     continue
                 if isinstance(o, dict):
                     out.append(o)
     except OSError:
         logger.debug("读 %s 失败", p, exc_info=True)
+        with _READ_LOCK:
+            _READ_STATS["read_error"] += 1
+    if bad_lines:
+        # 隔离而不是丢弃：坏行原样留档，事后能查「是哪条样本写坏了」
+        try:
+            with _READ_LOCK:
+                with open(p + ".bad", "a", encoding="utf-8") as f:
+                    for ln in bad_lines:
+                        f.write(ln + "\n")
+                _READ_STATS["bad"] += len(bad_lines)
+        except OSError:
+            with _READ_LOCK:
+                _READ_STATS["bad"] += len(bad_lines)
+            logger.warning("坏行隔离失败（%s），这些行已计入 bad 计数", p, exc_info=True)
+    with _READ_LOCK:
+        _READ_STATS["files"] += 1
+        _READ_STATS["lines"] += len(out) + len(bad_lines)
     return out
 
 
@@ -215,8 +268,13 @@ def _num_ts(v) -> float:
         return 0.0
     try:
         return float(s)
-    except Exception as e:                          # noqa: BLE001 —— 兜住但要记一笔
-        _note_silent(e)
+    except (ValueError, TypeError):
+        # ⚠️ 这里是**正常的格式探测**：ISO 时间串（"2026-11-16 12:40:51"）必然
+        #    过不了 float()，接着走下面的 strptime 分支。
+        #    实测把它记成异常后，光读一遍 actlog 就产生上千条噪音，
+        #    200 条上限瞬间被灌满，**真正的静默失效反而被挤掉** ——
+        #    那是记录污染，不是记录（2026-11-23 修）。
+        pass
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
             return time.mktime(time.strptime(s[:19] if len(s) >= 19 else s, fmt))
@@ -245,7 +303,8 @@ def _last_ok_edit(rel: str) -> float:
     try:
         best = max(best, os.path.getmtime(p))
     except Exception as e:                          # noqa: BLE001 —— 兜住但要记一笔
-        _note_silent(e)
+        _silent_log.append((time.time(), repr(e)))
+        del _silent_log[:-_SILENT_LOG_MAX]          # 只留最近 200 条
     return best
 
 
@@ -290,6 +349,15 @@ def judge(it: dict) -> dict:
     edited = _last_ok_edit(rel)
     hit = _probe_hit(rel, needle)
     recur = _recur_after(kind, t0)
+    # 探针文件读不到（被占用 / 权限 / 路径变动）＝ **观测失败**，不是「没修」。
+    # 单列 unprobed，既不算落地也不算没落地，绝不污染落地率。
+    if hit is None:
+        return {"kind": kind, "status": "unprobed", "recur": recur,
+                "edited_at": edited, "probe": "%s 含 %r（文件读不到）" % (rel, needle),
+                "progress": None,
+                "evidence": "探针文件读不到（%s），本次不做判定，避免把观测失败误判成没修" % rel,
+                "detail": {"file": rel, "needle": needle, "code_hit": None,
+                           "observe_error": True, "recur": recur}}
     ev = {
         "file": rel, "needle": needle, "code_hit": hit,
         "edited_at": time.strftime("%m-%d %H:%M", time.localtime(edited)) if edited else "",
@@ -867,10 +935,15 @@ def rsi_speed(days: float = 7.0, target_per_day: float = 20.0) -> dict:
     per_day = len(ok_rows) / max(0.5, float(days))
     a = audit()
     rows_a = a.get("rows") or []
-    land = (sum(float(r.get("progress") or 0.0) for r in rows_a) / len(rows_a)
-            if rows_a else 0.0)
-    recur = sum(1 for r in rows_a if int(r.get("recur") or 0) > 0)
-    norecur = (1.0 - recur / len(rows_a)) if rows_a else 0.0
+    # 落地率 / 不复发率的分母只算**可判定**的教训（progress is not None）。
+    # 2026-11-23 修：unprobed（没有探针、或探针文件读不到）的 progress 是 None，
+    # 原来用 `or 0.0` 会把它当「没落地」算进分母 —— 等于「判不了」就被罚分，
+    # 落地率凭空被压低，RSI 曲线跟着失真。
+    judgeable = [r for r in rows_a if r.get("progress") is not None]
+    land = (sum(float(r.get("progress") or 0.0) for r in judgeable) / len(judgeable)
+            if judgeable else 0.0)
+    recur = sum(1 for r in judgeable if int(r.get("recur") or 0) > 0)
+    norecur = (1.0 - recur / len(judgeable)) if judgeable else 0.0
     first_ok = (len(ok_rows) / (len(ok_rows) + len(real_fail))
                 if (ok_rows or real_fail) else 0.0)
     parts = [
@@ -880,9 +953,10 @@ def rsi_speed(days: float = 7.0, target_per_day: float = 20.0) -> dict:
          "%d 成 / %d 真失败（护栏拦截 %d 次不计入）"
          % (len(ok_rows), len(real_fail), len(fail_rows) - len(real_fail))),
         ("落地率", min(1.0, land), 0.25,
-         "%.2f/%d 条" % (land * len(rows_a), len(rows_a))),
+         "%.2f/%d 条可判定（另有 %d 条无法判定，不计入）"
+         % (land * len(judgeable), len(judgeable), len(rows_a) - len(judgeable))),
         ("不复发率", norecur, 0.15,
-         "复发 %d/%d" % (recur, len(rows_a))),
+         "复发 %d/%d" % (recur, len(judgeable))),
     ]
     tw = sum(p[2] for p in parts) or 1.0
     score = round(100 * sum(p[1] * p[2] for p in parts) / tw, 1)

@@ -479,6 +479,148 @@ def set_settings(**kw):
     return {"ok": True, "settings": cur, "changed": changed}
 
 
+# ------------------------------------------------- 加速模式（2026-11-23）
+# 用户原话：「我想让他加速，但是我希望可以开启和关闭」。
+#
+# ⚠️ 只动**真实被读取**的参数（每条都已在别处核实有消费方）：
+#     · selfexp/selfiter/selfaudit 的节律 → selfmaint.set_item 写盘，调度器读
+#     · converge_rounds       → 本文件 6895 行附近真实读取
+#     · feature_repair_rounds → 本文件 6604 行附近真实读取
+#     · max_auto_actions      → 本文件 8414 行附近真实读取
+#   实测反例：`evaluate_every_min` 全文**只在默认值里出现过一次**，没有任何
+#   消费方 —— 改它等于没改，所以不放进加速档位。
+#
+# ⚠️ 不碰护栏：熔断、质量闸门、loop_guard、暂停闸（paused）一律照旧。
+#    加速只提高「开工频率」，不降低「改动门槛」。
+_SPEED = _DATA / "speed_boost.json"
+
+_SPEED_PROFILE = {
+    # 自我维护三项的节律（分钟）。默认 selfexp 每 120 分钟、selfiter/selfaudit
+    # 每天一次；加速后提到 45 分钟 / 8 小时一次（约 2~3 倍事件供给）。
+    "maint": {"selfexp": 45, "selfiter": 480, "selfaudit": 480},
+    # 迭代执行强度（都在执行路径里被真实读取）
+    "settings": {
+        "converge_rounds": 4,        # 单轮自动接续 2→4：一轮多修几条同类问题
+        "feature_repair_rounds": 5,  # 新功能验收到通过 3→5 轮
+        "max_auto_actions": 16,      # 信任模式单轮自动动作 10→16
+        "audit_cooldown_sec": 20,    # 同源重复触发冷却 60→20 秒
+    },
+}
+
+
+def _maint_snapshot():
+    """记下三项自我维护**当前**的节律（开加速前存档，关加速时按它还原）。"""
+    from . import selfmaint as _sm
+    out = {}
+    for it in (_sm.status().get("items") or []):
+        k = str(it.get("kind") or "")
+        if k in _SPEED_PROFILE["maint"]:
+            out[k] = {"at_time": it.get("at_time") or "",
+                      "every_minutes": int(it.get("every_minutes") or 0)}
+    return out
+
+
+def speed_state():
+    """加速模式的当前状态 + **当前阻碍加速的真实原因**（前端开关据此点亮）。
+
+    2026-11-23 补：只给一个开关不够 —— 实测 trust_mode=False 时，加速只会
+    多产出「待批准」计划，一条修复事件都不会发生。所以这里把瓶颈一并列出，
+    让用户看到「为什么开了加速还是不动」。
+    """
+    d = _read_json(_SPEED, {}) or {}
+    on = bool(d.get("on"))
+    s = load_settings()
+    paused = bool(s.get("paused"))
+    items = []
+    try:
+        from . import selfmaint as _sm
+        items = _sm.status().get("items") or []
+    except Exception:                                   # noqa: BLE001
+        logger.debug("加速状态：读自我维护节律失败", exc_info=True)
+    maint = {}
+    for it in items:
+        k = str(it.get("kind") or "")
+        if k in _SPEED_PROFILE["maint"]:
+            maint[k] = {"at_time": it.get("at_time") or "",
+                        "every_minutes": int(it.get("every_minutes") or 0)}
+
+    bottlenecks = []
+    if paused:
+        bottlenecks.append("自动化总闸处于暂停（paused=true）—— 加速不会生效")
+    if not s.get("trust_mode"):
+        bottlenecks.append("信任模式关着 —— 加速只会多出「待批准」计划，"
+                           "不会自动产生修复事件")
+    for it in items:
+        name = it.get("name") or it.get("kind")
+        if not it.get("enabled"):
+            bottlenecks.append("%s 被单独暂停了" % name)
+        st = str(it.get("last_status") or "")
+        if st.lower().startswith("error"):
+            bottlenecks.append("%s 上次运行失败：%s" % (name, st[:110]))
+
+    label = "加速中" if on else "未加速"
+    if on and paused:
+        label = "加速中（自动化已暂停，暂不生效）"
+    return {"ok": True, "on": on, "on_at": d.get("on_at") or "",
+            "paused": paused, "effective": bool(on and not paused),
+            "profile": _SPEED_PROFILE, "maint_now": maint,
+            "settings_now": {k: s.get(k) for k in _SPEED_PROFILE["settings"]},
+            "trust_mode": bool(s.get("trust_mode")),
+            "bottlenecks": bottlenecks,
+            "label": label}
+
+
+def speed_boost(on=None):
+    """开 / 关加速模式。on=None 时翻转；重复调用幂等（不覆盖已存的原始快照）。
+
+    开启：先把三项节律和四个强度参数的**原值**存进 speed_boost.json，
+          再写入加速档位；
+    关闭：严格按快照逐项还原，然后清空快照（下次开启重新取当前值）。
+    """
+    from . import selfmaint as _sm
+    d = _read_json(_SPEED, {}) or {}
+    cur = bool(d.get("on"))
+    target = (not cur) if on is None else bool(on)
+    if target == cur:
+        return dict(speed_state(), changed=False,
+                    note="已经是「%s」状态，无需改动" % ("加速中" if cur else "未加速"))
+
+    if target:
+        prev = {"maint": _maint_snapshot(),
+                "settings": {k: load_settings().get(k)
+                             for k in _SPEED_PROFILE["settings"]}}
+        applied = {}
+        for kind, mins in _SPEED_PROFILE["maint"].items():
+            try:
+                r = _sm.set_item(kind, every_minutes=int(mins))
+                applied[kind] = (r.get("rhythm") if r.get("ok")
+                                 else "失败：%s" % r.get("error"))
+            except Exception as e:                      # noqa: BLE001
+                applied[kind] = "失败：%s: %s" % (type(e).__name__, e)
+        set_settings(**_SPEED_PROFILE["settings"])
+        _write_json(_SPEED, {"on": True, "on_at": _now(), "prev": prev})
+        logger.info("加速模式已开启：%s", applied)
+        return dict(speed_state(), changed=True, applied=applied)
+
+    prev = d.get("prev") or {}
+    restored = {}
+    for kind, v in (prev.get("maint") or {}).items():
+        try:
+            if v.get("at_time"):
+                r = _sm.set_item(kind, at_time=v["at_time"])
+            else:
+                r = _sm.set_item(kind, every_minutes=int(v.get("every_minutes") or 0))
+            restored[kind] = (r.get("rhythm") if r.get("ok")
+                              else "失败：%s" % r.get("error"))
+        except Exception as e:                          # noqa: BLE001
+            restored[kind] = "失败：%s: %s" % (type(e).__name__, e)
+    if prev.get("settings"):
+        set_settings(**prev["settings"])
+    _write_json(_SPEED, {"on": False, "on_at": "", "prev": {}})
+    logger.info("加速模式已关闭，节律还原：%s", restored)
+    return dict(speed_state(), changed=True, restored=restored)
+
+
 def save_settings(d):
     _write_json(_SETTINGS, d)
 
@@ -1063,15 +1205,40 @@ def save_plans(d):
                 lf.close()
 
 
+# ★ 2026-11-23 用户要求「重点记录细节，不要落下样本」——实测（8 线程 × 50 条
+#   并发追加同一个 jsonl）**丢了 45/400 = 11.25% 的行**，且没有任何报错。
+#   原因是 `open(..., "a")` + write 在多线程下不是原子追加：两个线程各自持有
+#   文件位置指针，短行会互相覆盖。账本是 RSI 唯一的数据来源，丢一行就等于
+#   一个真实修复事件凭空消失，而且越并发（加速模式）丢得越多。
+#   所以：① 加模块级锁串行化追加 ② 写完 flush+fsync 真落盘
+#   ③ 写失败**不再静默**——记 warning 并把这条塞进 .pending 文件，下轮补写。
+_ACTLOG_LOCK = threading.Lock()
+
+
 def _actlog(entry):
     """信任模式自动执行时写一条 actlog，供用户查「有没有在改代码」。"""
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
     try:
         p = _DATA / "actlog.jsonl"
         _ensure()
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:                                   # noqa: BLE001
-        logger.debug("silent-except", exc_info=True)
+        with _ACTLOG_LOCK:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass          # 某些文件系统不支持 fsync，不算写入失败
+    except Exception as e:                              # noqa: BLE001
+        # 不静默：账本写不进去必须留痕，否则统计会「凭空少样本」而无人知晓
+        logger.warning("actlog 写入失败：%s", e, exc_info=True)
+        try:
+            with _ACTLOG_LOCK:
+                with open(str(_DATA / "actlog.pending"), "a", encoding="utf-8") as f:
+                    f.write(line)
+        except Exception:                               # noqa: BLE001
+            logger.warning("actlog.pending 也写不进去，这条样本已丢失：%s",
+                           line[:200], exc_info=True)
 
 
 # 2026-11-16 实测发现的问题：`runtime_metrics()` 的成功率被**验证用例污染**了。
