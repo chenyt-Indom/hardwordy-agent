@@ -885,6 +885,23 @@ def _worker(item):
                            "会自动接着验证、跑分、反思" % len(changed),
                       files=changed[:12], manual=True)
 
+        # ★ 2026-11-23（教训：「没产生实际改动」×2）：
+        #   模型可以「只说不做」—— 在回合里读文件、写结论，最后 diff 为空，
+        #   却按 ok 收工，评分照跑、重启照触发，用户什么也没得到。
+        #   这里做硬检查点：动作声称成功但**一个文件都没变** → 记 no_change、
+        #   判失败、不进评分。这是「改完必须真有改动」的底线。
+        if ok_n and not changed:
+            try:
+                from . import actlog as _al3
+                _al3.record_stage(plan_id, "no_change",
+                                  detail="动作声称成功但 diff 为空（no_change）")
+            except Exception:                           # noqa: BLE001
+                logger.debug("记 no_change 失败", exc_info=True)
+            _emit(tid, "error",
+                  text="这一轮没有任何文件改动（no_change）：模型只说了没做，判失败重来")
+            ok_n = 0
+            fail_n = fail_n or 1
+            err_all = ((err_all or "") + " no_change：声称改完但 diff 为空").strip()
         _finish(tid, "cancelled" if cancelled else ("done" if ok_n else "failed"),
                 ok_n, fail_n, skip_n, changed,
                 _cancel_reason or err_all)
@@ -1169,8 +1186,29 @@ def _score_after_verify(tid, v):
     """
     try:
         from . import scoregate as _sg
+        # ★ 2026-11-23（教训：「跑分退步（低于上一版）」×2）：
+        #   验证器虽然已经跑过 code_audit 并拦 high/mid，但**评分这一步跟静态结果
+        #   脱钩** —— 于是「静态扣分点被引入」只能等分数掉下来才发现，修复链还得
+        #   重新猜是哪个改动弄的。这里做 static_first：跑分前再取一次自检计数，
+        #   塞进结果里；退步时直接告诉修复链「先修静态扣分点再重跑」。
+        _static = {"ran": False, "high": 0, "mid": 0}
+        try:
+            from . import code_audit as _ca2
+            _a2 = _ca2.audit()
+            _fs = _a2.get("findings") or []
+            _static = {"ran": True,
+                       "high": sum(1 for f in _fs if f.get("level") == "high"),
+                       "mid": sum(1 for f in _fs if f.get("level") == "mid")}
+        except Exception:                               # noqa: BLE001
+            logger.debug("跑分前静态检查没跑成（不影响评分）", exc_info=True)
         sc = _sg.gate(force=True, block_on_drop=False,
                       note="迭代验证通过后自动跑分：%s" % (v.get("title") or ""))
+        if isinstance(sc, dict):
+            sc["static_first"] = _static
+            if _static.get("ran") and (_static["high"] or _static["mid"]):
+                sc["static_hint"] = ("静态面还有 %d high / %d mid 扣分点，"
+                                     "退步时先修这些再重跑"
+                                     % (_static["high"], _static["mid"]))
         return sc if isinstance(sc, dict) else {}
     except Exception as e:                              # noqa: BLE001
         return {"ran": False, "verdict": "error",

@@ -1908,18 +1908,43 @@ def experience_summary():
         return round(sum(vals) / len(vals), 1) if vals else None
     comp = _avg([t.get("completion") for t in turns])
     eff = _avg([t.get("efficiency") for t in turns])
-    # 趋势：最近 10 轮 vs 之前 10 轮（turns 是按时间正序塞进 records 的）
+    # turns 按时间正序（后面算 low 还要用）
     ordered = []
     for r in reversed(items):
         ordered.extend(r.get("turns") or [])
     trend = ""
-    if len(ordered) >= 8:
+    curve = {}
+    # ★ 2026-11-23 用户要求：趋势改成**跨评估**斜率 + 标准差。
+    #   原来这里是「最近一半 turns vs 前一半 turns」的**轮内**对比 ——
+    #   16 次评估里 16 次都写「趋势：上升 0.7」，而同一序列的跨评估斜率是
+    #   -0.06、最近 4 次窗口斜率 -1.15（末段在跌），等于每份报告都在给一个
+    #   跟走势无关的乐观数字。用户明确说这会误导。
+    #   新口径（RSI 判据靠的就是这个）：
+    #     slope 跨评估斜率（分/次） / stdev 标准差 / win4 最近 4 次窗口斜率
+    try:
+        from . import lessonloop as _ll
+        curve = _ll.curve(window=4)
+        if curve.get("ok") and curve.get("n"):
+            trend = ("斜率 %+.3f 分/次（跨 %d 次评估），标准差 %.2f，"
+                     "近 4 次窗口斜率 %s，形态 %s" % (
+                         curve.get("slope") or 0.0, curve.get("n"),
+                         curve.get("stdev") or 0.0,
+                         ("%+.2f" % curve["current_window_slope"])
+                         if curve.get("current_window_slope") is not None else "—",
+                         curve.get("shape") or ""))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("跨评估曲线算不出来，退回轮内对比", exc_info=True)
+    if not trend and len(ordered) >= 8:
+        # 兜底：跨评估算不出来时才用轮内对比，且**明确标注「轮内」**，
+        # 不让它冒充整体走势。
         half = len(ordered) // 2
         a = _avg([t.get("completion") for t in ordered[:half]])
         b = _avg([t.get("completion") for t in ordered[half:]])
         if a is not None and b is not None:
             d = b - a
-            trend = ("上升 %.1f" % d) if d >= 0.5 else (("下降 %.1f" % abs(d)) if d <= -0.5 else "持平")
+            trend = "（轮内）" + (
+                ("上升 %.1f" % d) if d >= 0.5
+                else (("下降 %.1f" % abs(d)) if d <= -0.5 else "持平"))
     # 摩擦点按 tag 累计
     fmap = {}
     for r in items:
@@ -1952,7 +1977,7 @@ def experience_summary():
     return {"ok": True, "count": len(items), "avg_completion": comp,
             "avg_efficiency": eff, "trend": trend, "frictions": frictions,
             "suggestions": sugg[:10],
-            "recent": items[:3], "low": low}
+            "recent": items[:3], "low": low, "curve": curve}
 
 
 def runtime_metrics():

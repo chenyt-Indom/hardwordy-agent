@@ -147,6 +147,31 @@ def _close_truncated(body: str):
     return v
 
 
+_PARSE_FAIL_LAST = [0.0]
+
+
+def _note_parse_fail(s: str) -> None:
+    """记一条 parse_fail 事件（节流 5 秒，避免同一轮刷爆账本）。
+
+    ★ 2026-11-23（教训：「模型输出不可用」×2）：模型给的 JSON 解析失败时
+      原来**静默返回 None**，上层只能报一句「模型返回的不是合法 JSON」，
+      分不清是围栏没剥、被截断、还是真乱码。有了这条账本，下次同类失败
+      直接看 data/actlog/jsonfix.jsonl 就知道，不用重跑一遍再猜。
+    """
+    import time as _t
+    now = _t.time()
+    if now - _PARSE_FAIL_LAST[0] < 5.0:
+        return
+    _PARSE_FAIL_LAST[0] = now
+    try:
+        from . import actlog as _al
+        _al.record("jsonfix", "parse_fail",
+                   {"chars": len(s or ""), "head": (s or "")[:60]},
+                   ok=False, note="JSON 解析失败（围栏/大括号/清洗/截断修复都试过）")
+    except Exception:                                   # noqa: BLE001
+        logger.debug("记 parse_fail 失败", exc_info=True)
+
+
 def parse(txt: str | None):
     """从 LLM 输出里抠出 JSON dict；失败返回 None。
 
@@ -207,6 +232,7 @@ def parse(txt: str | None):
     fixed = _close_truncated(body)
     if isinstance(fixed, dict):
         return fixed
+    _note_parse_fail(s)
     return None
 
 

@@ -7631,6 +7631,21 @@ class _SystemPrompt:
                     parts.append(_sk_blk)
         except Exception:
             logger.warning("技能注入系统提示失败（不影响对话）", exc_info=True)
+        # ---------- 历史教训（教训闭环，2026-11-23）----------
+        # 为什么放这里：lessons.jsonl 原来**只**被 failattr 注回「反思提示词」，
+        # 所以「跟用户对话」这条主循环完全看不到历史教训（main.py 里
+        # `lessons` 原本 0 命中）—— 结果同一个坑（锚点没命中、只说不做）
+        # 在对话里反复踩、在反思里反复记，一次都没真正修掉。
+        # ⚠️ 这段随教训状态变化会动到 Ollama 的前缀缓存，所以 hint() 只在
+        #    存在**未落地**教训时返回非空，且条数/排序固定 —— 同一状态下是
+        #    稳定字符串，不会每轮都变。
+        try:
+            from . import lessonloop as _ll_sp
+            _ll_blk = _ll_sp.hint()
+            if _ll_blk:
+                parts.append(_ll_blk)
+        except Exception:
+            logger.warning("教训注入系统提示失败（不影响对话）", exc_info=True)
         parts.append("回答请使用中文；直接、可执行。"
                      "长度严格按上面【回复长度分档】执行，不许凭感觉伸缩。")
         if no_tools:

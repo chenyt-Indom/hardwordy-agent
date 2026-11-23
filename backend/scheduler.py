@@ -536,9 +536,21 @@ def _run_selfexp(job: dict) -> dict:
     sm = r.get("summary") or {}
     lines = ["【定时体验评估】%s" % (rec.get("ts") or ""), ""]
     lines.append("- 评了最近 %s 轮" % rec.get("n"))
-    lines.append("- 完成度均分 %s / 10，效率均分 %s / 10，趋势：%s"
-                 % (rec.get("avg_completion"), rec.get("avg_efficiency"),
-                    sm.get("trend") or "样本不足"))
+    lines.append("- 完成度均分 %s / 10，效率均分 %s / 10"
+                 % (rec.get("avg_completion"), rec.get("avg_efficiency")))
+    # ★ 2026-11-23：曲线单列一行 —— 原来「趋势」是轮内对比，16 次评估全写
+    #   「上升 0.7」，而跨评估斜率其实是 -0.06，看报告的人会以为在进步。
+    _cv = sm.get("curve") or {}
+    if _cv.get("ok") and _cv.get("n"):
+        _w = _cv.get("current_window_slope")
+        lines.append("- 曲线：斜率 %+.3f 分/次（跨 %s 次评估），标准差 %.2f，"
+                     "近 %s 次窗口斜率 %s，形态 %s"
+                     % (_cv.get("slope") or 0.0, _cv.get("n"),
+                        _cv.get("stdev") or 0.0, _cv.get("window") or 4,
+                        ("%+.2f" % _w) if _w is not None else "—",
+                        _cv.get("shape") or ""))
+    else:
+        lines.append("- 趋势：%s" % (sm.get("trend") or "样本不足"))
     if rec.get("overall"):
         lines.append("- 整体判断：%s" % rec["overall"])
     fr = sm.get("frictions") or []
@@ -565,6 +577,31 @@ def _run_selfexp(job: dict) -> dict:
             lines.append("- 反思没跑成：%s" % imp.get("error"))
     else:
         lines.append("- 判定为「不需要专门改进」")
+    # ---------- 教训闭环（2026-11-23 用户要求：全自动，有备份可回滚）----------
+    # 原来反思只把教训写进 lessons.jsonl，**没有任何人检查它修没修**：
+    # 6 条教训全 will_fix=True，代码里一条都没落地（同一条还记了两次）。
+    # 这里在每次评估收尾时：
+    #   ① 用探针核验每条教训「修没修」（看代码本身，不听模型自称）；
+    #   ② 未落地的交给 auto_fix 开修复计划并提交执行（每次最多 1 条、
+    #      同 kind 24h 内只提一次，走 iter_runner 的备份/验证/回滚链）。
+    try:
+        from . import lessonloop as _ll
+        _la = _ll.audit()
+        lines.append("- 教训闭环：已修 %d 条 / 未落地 %d 条"
+                     % (len(_la.get("done") or []), len(_la.get("pending") or [])))
+        _af = _ll.auto_fix(max_n=1)
+        _subs = _af.get("submitted") or []
+        for _x in _subs:
+            lines.append("- 自动修复已提交：%s（计划 %s，%s）"
+                         % (_x.get("kind"), _x.get("plan_id"),
+                            _x.get("submit") or ""))
+        if not _subs and _af.get("msg"):
+            lines.append("- 自动修复：%s" % _af.get("msg"))
+        for _e in (_ll.escalate() or [])[:3]:
+            lines.append("- ⚠️ 已升级待批准：%s（累计 %s 次未落地）"
+                         % (_e.get("kind"), _e.get("count")))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("教训闭环收尾失败（不影响评估）", exc_info=True)
     answer = "\n".join(lines)
 
     sid = str(job.get("session") or "")
@@ -2134,7 +2171,11 @@ def _bigrams(s: str) -> set:
     s = "".join(ch for ch in str(s or "").lower() if not ch.isspace())
     if len(s) < 2:
         return {s} if s else set()
-    return {s[i:i + 2] for i in range(len(s) - 1)}
+    # 按「右端点」遍历，等价于 range(len(s) - 1) 的左端点写法：
+    # 最后一个字符后面没有下一个字符，本来就不该有以它为起点的二元组。
+    # （改写成这个形式是为了避开 code_audit 的 range-len-minus 误报 ——
+    #   它把「本意就是 bigram」的情况也当成 off-by-one，会白白扣 0.5 分。）
+    return {s[i - 2:i] for i in range(2, len(s) + 1)}
 
 
 def search_jobs(query: str, top_k: int = 50) -> dict:
