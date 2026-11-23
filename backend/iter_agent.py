@@ -969,6 +969,11 @@ _PREV_FAIL = """
 #     _REPAIR    —— 内层就地修，**代码保持原样**，看着真实报错修。
 #   后者才是人排查 bug 的方式，也不会把前面几十步的工作白扔掉。
 _REPAIR = """
+## 原始任务（★ 别丢：修复要照着它做，不是照着报错瞎改）
+标题：{task_title}
+说明：{task_detail}
+点名文件：{task_files}
+
 ## 系统复核没通过（第 {n} 轮就地修复）
 
 你刚才的改动**没有被回滚，文件现在就是改过之后的状态**。系统另外跑了一遍
@@ -1587,10 +1592,20 @@ def _run_once(plan, action, ev=None, stop=None, prev_fail="", attempt=0):
                 prompt = _REPAIR.format(
                     n=rnd, why=str(why or "")[:3000], diff=(diff or "")[:3000],
                     steps=max(6, int(ctx.steps) - ctx.n_calls),
-                    minutes=max(1, int(max(0, ctx.seconds - ctx.elapsed())) // 60))
+                    minutes=max(1, int(max(0, ctx.seconds - ctx.elapsed())) // 60),
+                    # ★ 2026-11-23：修复轮必须带着原始任务，否则模型只剩「你只说了没做」
+                    #   这一句，根本不知道该做什么（实测 a5 就是这样空手失败的）。
+                    task_title=str(act.get("title") or ""),
+                    task_detail=str(act.get("detail") or "")[:2000],
+                    task_files=("、".join([f for f in (act.get("files") or [])
+                                          if isinstance(f, str)]) or "（未指定）"))
             except Exception:                               # noqa: BLE001
-                prompt = ("系统复核没通过：%s\n请就地修好，然后跑 "
-                          "run_check(kind=\"all\") 再 finish。" % str(why)[:3000])
+                prompt = ("原始任务：%s\n说明：%s\n\n系统复核没通过：%s\n"
+                          "请照着原始任务就地修好，然后跑 "
+                          "run_check(kind=\"all\") 再 finish。"
+                          % (str(act.get("title") or "")[:200],
+                             str(act.get("detail") or "")[:1500],
+                             str(why)[:3000]))
         else:
             prompt = task_prompt
 
