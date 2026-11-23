@@ -9152,7 +9152,12 @@
         //    选区蒙版和文档仍然只在本地通道用，云端不支持就保持 null。
         _payload.model = _prov;
         _payload.mask_b64 = null;
-        _payload.docs = null;
+        // ⚠️⚠️ 2026-11-24 修：原来这里是 `_payload.docs = null;`，理由写的是
+        //   「云端不支持就保持 null」—— **这是错的**：文档是**纯文本**，
+        //   云端通道完全能读（后端已把正文拼进系统提示）。
+        //   置 null 的直接后果：用户拖进一份 PDF，界面上挂着附件卡片，
+        //   模型却回答「没有看到任何附件」（用户实测报过，截图可证）。
+        //   蒙版仍然不发（黑白图对模型没意义，只给 edit_image 用）。
         _payload.studio = false;
       } else if (_prov && _prov !== "auto") {
         // 本地模式指定了具体模型（下拉里选了 30B 或 8B）

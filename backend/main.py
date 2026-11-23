@@ -11176,7 +11176,7 @@ async def chat_deepseek(req: ChatRequest,
         _ts_trim = _ds_tools(_cfg_trim)
         _lu_trim = next((str(m.get("content") or "") for m in reversed(messages)
                          if str(m.get("role") or "") == "user"), "")
-        _sys_trim = _SystemPrompt.build(_lu_trim, session) + _ask_rules(_cfg_trim)
+        _sys_trim = _SystemPrompt.build(_lu_trim, session, req.docs) + _ask_rules(_cfg_trim)
         messages, _dropped_trim, _ = _trim_history_to_budget(
             messages, _sys_trim, _ts_trim, _cfg_trim,
             images_b64=(list(_imgs or []) + list(_hist_imgs or [])))
@@ -11229,7 +11229,10 @@ async def chat_deepseek(req: ChatRequest,
     # DeepSeek 用精简工具集（压到 ~18KB，绕开 EdgeOne 对 30KB+ POST 的拦截）
     tool_schemas = _ds_tools(cfg)
     # 复用主通道的系统提示（工具规则 / 记忆 / 时间指引都在里面）
-    sys_prompt = _SystemPrompt.build(last_user, session)
+    # ⚠️⚠️ 2026-11-24 修（用户报「我拖进来的文档叫 RSI基准接入施工单.pdf，你说没看到附件」）：
+    #   这里原来没传 req.docs —— 文档正文压根进不了系统提示。
+    #   前端那边（app.js）还有第二处断点：云端模式直接把 docs 置 null 了，一起修。
+    sys_prompt = _SystemPrompt.build(last_user, session, req.docs)
     # ⚠️⚠️ 2026-11-08 补：漏了这句 —— 「信息不足就先问」这一整段规则原来只在
     # 主通道（/api/chat）里 `sys_prompt += _ask_rules(cfg)`，DeepSeek 通道没加。
     # 症状：用户让 DeepSeek「做个 PPT / 画张图」，它不调 ask_user 直接瞎猜着做。
