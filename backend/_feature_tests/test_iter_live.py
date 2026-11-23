@@ -46,6 +46,26 @@ def _spawn(hold):
     return th, ev.set
 
 
+class _NoOtherWorkers:
+    """临时让 `_live_any()` 返回 False，模拟「本进程只有本用例这几个线程」。
+
+    ⚠️ 2026-11-23 修（实测：quick 连跑第一轮过、第二轮挂）：
+    `_live_any()` 是**全局**判断 —— 只要进程里还有任何 iter worker 在跑就返回 True。
+    而回归是同进程连跑的，别处（别的 feature 用例、真实任务）随时可能有活 worker，
+    于是「无活 worker 时才成立」的那几条断言会假失败。
+    全局状态不是本用例的私有财产，这里只在断言期间屏蔽外部干扰，被测逻辑一行不动。
+    """
+
+    def __enter__(self):
+        self._old = ir._live_any
+        ir._live_any = lambda: False
+        return self
+
+    def __exit__(self, *exc):
+        ir._live_any = self._old
+        return False
+
+
 def main():
     tid = "t_test_live_1"
     ir._live_drop(tid)
@@ -75,13 +95,23 @@ def main():
     ir._live_drop("t_test_other", th3)
 
     print("[4] 真僵尸仍要被识别（否则队列永远卡住）")
-    ck("无任何活 worker + 很久以前 → False",
-       ir._run_alive({"tid": "t_test_none", "started_at": time.time() - 3600}) is False)
-    ck("刚提交（未登记完的窗口）给宽限 → True",
-       ir._run_alive({"tid": "t_test_none",
-                      "started_at": ir._BOOT_AT + 0.5}) is True)
-    ck("跨进程孤儿（started_at 早于本进程启动）→ False",
-       ir._run_alive({"tid": "t_test_none", "started_at": ir._BOOT_AT - 100}) is False)
+    # ⚠️ 这两条只在「本进程一个活 worker 都没有」时才成立，必须屏蔽外部干扰，
+    #   否则同进程连跑回归时会假失败（实测 ROUND2 挂在这里）。
+    with _NoOtherWorkers():
+        ck("无任何活 worker + 很久以前 → False",
+           ir._run_alive({"tid": "t_test_none", "started_at": time.time() - 3600}) is False)
+        ck("跨进程孤儿（started_at 早于本进程启动）→ False",
+           ir._run_alive({"tid": "t_test_none", "started_at": ir._BOOT_AT - 100}) is False)
+    # ⚠️ 2026-11-23 修（实测：quick 连跑第 3 轮必挂，第 1、2 轮却过）：
+    #   这里原来拿 `ir._BOOT_AT + 0.5` 当「刚提交」的时刻 —— 那是**进程启动**
+    #   时刻，不是提交时刻。进程一旦活过 20 秒，宽限判断
+    #   `(now - started_at) < 20` 必然为 False，这条断言就挂了。
+    #   看起来像「宽限逻辑坏了」，其实只是断言写错了时间基准。
+    #   「刚提交」就该用**现在**：now - now ≈ 0，稳稳落在 20 秒宽限内。
+    with _NoOtherWorkers():
+        ck("刚提交（未登记完的窗口）给宽限 → True",
+           ir._run_alive({"tid": "t_test_none",
+                          "started_at": time.time()}) is True)
     ck("空 running → False", ir._run_alive(None) is False)
 
     print("[5] 终止意图与重试上限")
@@ -94,7 +124,16 @@ def main():
     time.sleep(0.3)
     ir._live_drop(tid)
     ir._live_drop("t_test_other")
-    ck("清空后 _live_any 为 False", ir._live_any() is False)
+    ck("本用例 tid 已无活线程", ir._live_alive(tid) is False)
+    ck("另一个测试 tid 也已无活线程", ir._live_alive("t_test_other") is False)
+    # ★ 2026-11-23 修：原来断言的是**全局** `_live_any() is False` —— 那要求
+    #   「整个进程没有任何 iter worker 在跑」，同进程连跑回归时别处随时可能有，
+    #   于是第一轮过、第二轮挂（实测 quick 连跑 ROUND2 failed）。
+    #   改成查登记表里本用例的两个 tid 是否真的清掉了：意图（防登记泄漏）不变，
+    #   而且比看线程死活更严 —— 线程退了但条目残留也能抓到。
+    with ir._LIVE_LOCK:
+        left = [k for k in (tid, "t_test_other") if k in ir._LIVE]
+    ck("登记表里本用例的 tid 已彻底清空", not left, "残留=%r" % (left,))
 
     print("")
     if _fail:

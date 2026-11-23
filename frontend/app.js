@@ -9523,6 +9523,26 @@
   setStopVisible(false);
   setResumeVisible(false);
 
+  // ★ 2026-11-23：刷新页面后把「继续」找回来。
+  //   pendingResume 只活在内存里，一刷新就没了 —— 断点内容还在 history 里，
+  //   但按钮不出现，用户等于没法接着写，「暂停」这个功能就废了一半。
+  //   后端 /api/chat/pause_state 本来就是为这件事写的，但**前端一次都没调用过**
+  //   （grep 无命中，属死接口）。这里补上：加载时问一次，是暂停过就把按钮亮出来。
+  //   ⚠️ 用户发了新消息后后端会清掉这个标记（见 _new_stop_token），
+  //      所以不会出现"早就翻篇了还提示可以继续"。
+  (async () => {
+    try {
+      const sid = String(sessionId || "");
+      if (!sid || streaming) return;
+      const r = await fetch("/api/chat/pause_state?session_id=" + encodeURIComponent(sid));
+      const d = await r.json();
+      if (d && d.paused && !pendingResume && !streaming) {
+        pendingResume = { answer: "", prompt: "" };
+        setResumeVisible(true);
+      }
+    } catch (e) { /* 后端没起 / 老版本没这个接口 → 忽略 */ }
+  })();
+
   $("#sendBtn").onclick = send;
   inputEl.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } };
   function autoGrow() { inputEl.style.height = "auto"; inputEl.style.height = inputEl.scrollHeight + "px"; }

@@ -7943,10 +7943,17 @@ _pause_flags: dict = {}
 
 
 def _new_stop_token(session: str) -> threading.Event:
-    """为这一次请求生成并登记新的终止令牌。"""
+    """为这一次请求生成并登记新的终止令牌。
+
+    ★ 2026-11-23：顺手清掉「上一轮是暂停」的标记。
+      一旦用户发了新请求，就不该再处于「暂停可继续」状态 ——
+      不清的话会这样：暂停 → 刷新（看到「▶ 继续」）→ 正常发一条新消息 →
+      再刷新又冒出「继续」，用户会以为上一轮的活还挂着、还没做完。
+    """
     ev = threading.Event()
     with _cancel_lock:
         _cancel_flags[session or ""] = ev
+        _pause_flags.pop(session or "", None)
     return ev
 
 
@@ -13018,12 +13025,6 @@ def chat_pause_state(session_id: str = ""):
     s = str(session_id or "").strip()
     with _cancel_lock:
         paused = bool(_pause_flags.get(s or ""))
-    # ★ 2026-11-23：终止判定统一走 `_is_stopping`（单一事实源）。
-    #   原来这里自己手写了一份「取令牌 → is_set」，和 `_is_stopping` 一字不差的重复 ——
-    #   自检（self_audit）因此把 `_is_stopping` 报成死函数。重复实现迟早漂移，
-    #   一旦漂移就表现成「暂停后状态显示不对 / 终止了仍显示在跑」。
-    #   ⚠️ 必须在 `_cancel_lock` 块**外面**调用：_is_stopping 内部自己会拿同一把
-    #      非重入锁，套在里面会直接死锁。
     # ★ 2026-11-23：终止判定统一走 `_is_stopping`（单一事实源）。
     #   原来这里自己手写了一份「取令牌 → is_set」，和 `_is_stopping` 一字不差的重复 ——
     #   自检（self_audit）因此把 `_is_stopping` 报成死函数。重复实现迟早漂移，
