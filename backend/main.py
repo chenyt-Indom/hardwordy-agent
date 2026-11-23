@@ -13018,9 +13018,19 @@ def chat_pause_state(session_id: str = ""):
     s = str(session_id or "").strip()
     with _cancel_lock:
         paused = bool(_pause_flags.get(s or ""))
-        ev = _cancel_flags.get(s or "")
-    return {"ok": True, "paused": paused,
-            "stopped": bool(ev is not None and ev.is_set())}
+    # ★ 2026-11-23：终止判定统一走 `_is_stopping`（单一事实源）。
+    #   原来这里自己手写了一份「取令牌 → is_set」，和 `_is_stopping` 一字不差的重复 ——
+    #   自检（self_audit）因此把 `_is_stopping` 报成死函数。重复实现迟早漂移，
+    #   一旦漂移就表现成「暂停后状态显示不对 / 终止了仍显示在跑」。
+    #   ⚠️ 必须在 `_cancel_lock` 块**外面**调用：_is_stopping 内部自己会拿同一把
+    #      非重入锁，套在里面会直接死锁。
+    # ★ 2026-11-23：终止判定统一走 `_is_stopping`（单一事实源）。
+    #   原来这里自己手写了一份「取令牌 → is_set」，和 `_is_stopping` 一字不差的重复 ——
+    #   自检（self_audit）因此把 `_is_stopping` 报成死函数。重复实现迟早漂移，
+    #   一旦漂移就表现成「暂停后状态显示不对 / 终止了仍显示在跑」。
+    #   ⚠️ 必须在 `_cancel_lock` 块**外面**调用：_is_stopping 内部自己会拿同一把
+    #      非重入锁，套在里面会直接死锁。
+    return {"ok": True, "paused": paused, "stopped": _is_stopping(s)}
 
 
 # 「现实世界里要查证才有把握」的名词线索（配合 _WEB_FACT_VERBS 一起用）。

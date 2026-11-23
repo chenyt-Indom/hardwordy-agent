@@ -890,3 +890,87 @@ def _c_gate_unbalanced():
     out = format_reply("结论：短。", "过程" * 9000, "", 800)
     assert out.count("<details") == out.count("</details>"), \
         "留下了未闭合的 <details>（浏览器会把后面内容全吞掉）"
+
+
+# ---------------------------------------------------------------- 增量项（2026-11-23）
+@case("ability.失败用例翻通过才计分")
+def _c_ability_fix_landed():
+    """回归用例「失败→通过」才加分；同一修复不重复计；复发倒扣。
+
+    ⚠️ 必须隔离数据目录：这套逻辑会写 ability_snapshot.json，
+    在真实 data/ 里跑会把真实快照冲掉 —— 等于伪造了一次修复。
+    """
+    import tempfile
+    from . import iterloop as IL
+    old = os.environ.get("MM_DATA_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["MM_DATA_DIR"] = td
+        try:
+            bad = {"all_names": ["a", "b"], "failed_names": ["a"], "passed": 1}
+            good = {"all_names": ["a", "b"], "failed_names": [], "passed": 2}
+            r1 = IL._fix_landed_rows(bad)
+            assert r1 and r1["score"] == 0, "首次出现失败不该计分：%r" % (r1,)
+            r2 = IL._fix_landed_rows(good)
+            assert r2 and r2["count"] == 1, "翻通过没计分：%r" % (r2,)
+            assert r2["score"] == IL.ABILITY_PER_FIX, r2
+            # 复跑：分要**保持住**（按累计计分）。原来这里断言 0，
+            # 那正是「修好一次、下一份评分就掉回去」的尖峰曲线缺陷。
+            r3 = IL._fix_landed_rows(good)
+            assert r3 and r3["count"] == 1, "已修复条数没保持：%r" % (r3,)
+            assert r3["score"] == IL.ABILITY_PER_FIX, \
+                "已修复的分没保持住（曲线会涨一次就掉回去）：%r" % (r3,)
+            # 复发 → 倒扣回 0（不是负分：累计口径下 done 被剔除即归零）
+            r4 = IL._fix_landed_rows(bad)
+            assert r4 and r4["score"] == 0, "复发没倒扣回 0：%r" % (r4,)
+            r5 = IL._fix_landed_rows(good)
+            assert r5 and r5["score"] == IL.ABILITY_PER_FIX, "修好后没重新计：%r" % (r5,)
+        finally:
+            if old is None:
+                os.environ.pop("MM_DATA_DIR", None)
+            else:
+                os.environ["MM_DATA_DIR"] = old
+
+
+@case("ability.删掉失败用例不算修好")
+def _c_ability_del_case():
+    """把失败用例从用例集里删掉不能算「修好」，否则删测试就能刷分。"""
+    import tempfile
+    from . import iterloop as IL
+    old = os.environ.get("MM_DATA_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["MM_DATA_DIR"] = td
+        try:
+            IL._fix_landed_rows({"all_names": ["a", "b"], "failed_names": ["a"]})
+            r = IL._fix_landed_rows({"all_names": ["b"], "failed_names": []})
+            assert r and r["score"] == 0, "删掉用例被当成修好：%r" % (r,)
+        finally:
+            if old is None:
+                os.environ.pop("MM_DATA_DIR", None)
+            else:
+                os.environ["MM_DATA_DIR"] = old
+
+
+# ---------------------------------------------------------------- 终止判定（2026-11-23）
+@case("stop.终止判定单一事实源（不是死函数）")
+def _c_stop_single_source():
+    """`_is_stopping` 必须是**唯一**的终止判定，且真被调用。
+
+    自检（self_audit）报过它是死函数：定义了、全项目没人调，
+    于是 chat_pause_state 自己手写了一份等价判断 —— 两份逻辑迟早漂移，
+    表现就是「暂停后状态显示不对 / 终止后仍显示在跑」。
+    """
+    from . import main as M
+    key = "__regress_stop__"
+    try:
+        ev = M._new_stop_token(key)
+        assert M._is_stopping(key) is False, "新令牌不该判成已终止"
+        ev.set()
+        assert M._is_stopping(key) is True, "置位后没判成已终止"
+        assert M.chat_pause_state(key)["stopped"] is True, \
+            "pause_state 的 stopped 与 _is_stopping 不一致"
+        src = (_BACKEND / "main.py").read_text(encoding="utf-8")
+        assert src.count("_is_stopping(") >= 2, \
+            "_is_stopping 定义了却没有任何调用点（死函数）"
+    finally:
+        with M._cancel_lock:
+            M._cancel_flags.pop(key, None)

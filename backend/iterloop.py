@@ -444,11 +444,17 @@ def _fix_landed_rows(rg):
     done.extend(newly)
     snap["failed"], snap["fixed"] = cur_fail, done
     _save_ability_snap(snap)
+    # ★ 2026-11-23 实测修正：**按累计已修复条数**计分，不是按「本次新增」。
+    #   原来写的是 (新增 - 复发) × 单价 → 复跑验证时暴露真问题：
+    #   修好那一次 +3、下一份评分立刻掉回原值，曲线是**尖峰**不是台阶，
+    #   等于「修好的能力下一分钟就不算数了」，和「能力只会累加」的语义相反。
+    #   改成累计后：修好就一直算，复发时 done 被剔除 → 自动倒扣，且天然不重复计。
     return {"key": "fix_landed", "label": "失败用例翻通过",
-            "count": len(newly), "unit": ABILITY_PER_FIX,
-            "score": round((len(newly) - len(relapse)) * ABILITY_PER_FIX, 2),
-            "detail": {"newly_fixed": newly[:8], "relapse": relapse[:8]},
-            "note": "只认「上次失败→这次通过」，删用例不算修好，复发倒扣"}
+            "count": len(done), "unit": ABILITY_PER_FIX,
+            "score": round(len(done) * ABILITY_PER_FIX, 2),
+            "detail": {"newly_fixed": newly[:8], "relapse": relapse[:8],
+                       "fixed_total": len(done)},
+            "note": "按累计已修复条数计分（修好就保持，复发自动倒扣）；删用例不算修好"}
 
 
 def _lesson_fixed_rows():
@@ -477,11 +483,14 @@ def _lesson_fixed_rows():
     done.extend(newly)
     snap["lessons"] = done
     _save_ability_snap(snap)
+    # ★ 与 fix_landed 同一处修正（2026-11-23）：按**累计**已转 fixed 的教训计分。
+    #   按「本次新增」算的话，教训转 fixed 那一次 +5、下一份评分又归零 —— 曲线抖动。
     return {"key": "lesson_fixed", "label": "教训转为已修复",
-            "count": len(newly), "unit": ABILITY_PER_LESSON,
-            "score": round((len(newly) - len(relapse)) * ABILITY_PER_LESSON, 2),
-            "detail": {"newly_fixed": newly[:8], "relapse": relapse[:8]},
-            "note": "同一教训只计一次分，复发倒扣"}
+            "count": len(done), "unit": ABILITY_PER_LESSON,
+            "score": round(len(done) * ABILITY_PER_LESSON, 2),
+            "detail": {"newly_fixed": newly[:8], "relapse": relapse[:8],
+                       "fixed_total": len(done)},
+            "note": "按累计已修复教训计分（转 fixed 就保持，复发自动倒扣）"}
 
 
 def ability_part(rg=None, fn=None):
