@@ -70,7 +70,10 @@ W_FUNC = 30
 ABILITY_PER_TEST = 1.0        # 每个通过的回归用例
 ABILITY_PER_SMOKE = 1.5       # 每个通过的冒烟端点
 ABILITY_PER_SYMBOL = 2.0      # 每个守住的关键符号
-ABILITY_PER_FILE = 0.03       # 每个编译通过的后端文件（广度，弱权重）
+ABILITY_PER_FILE = 0.0        # 2026-11-23：单价归零。
+                              # 理由：这是唯一一条「不需要任何行为验证就能涨分」的口子，
+                              # 拆一个文件 +0.03，是成本最低的刷分路径。
+                              # 广度由 quality 的静态检查体现，不进能力跑分。
 
 # ★★ 2026-11-23 用户问「评分曲线为什么是平的，需要优化吗」—— 根因：
 #   上面四项的输入全是**数量**（46 个用例、4 个端点、1 个符号、105 个文件），
@@ -525,6 +528,46 @@ def _fix_landed_rows(rg):
             "note": "按累计已修复条数计分（修好就保持，复发自动倒扣）；删用例不算修好"}
 
 
+def _fix_regressed_rows(rg):
+    """增量项③（**只报告、不扣分**）：本轮有多少条「曾经修好」的用例又红了。
+
+    ⚠️⚠️ 2026-11-23 实测结论（探针 backend/_tmp_probe_fix.py 跑过）：
+        **倒扣已经由 _fix_landed_rows 承担了**。实测时序：
+            t1 失败 → fix_landed 0.0
+            t1 翻绿 → fix_landed 3.0（newly_fixed=[t1]）
+            t1 复发 → fix_landed 0.0（relapse=[t1]，done 被剔除）
+        施工单 T1-2 写「fix_landed 目前只发不退」，那是基于「按本次新增计分」
+        那版实现的判断；现行代码（第 515-519 行注释）已经改成**按累计计分**，
+        复发会自动从 done 里剔除、分数自动退回。
+
+    所以这里**故意不扣分**（unit/score 恒为 0）：再扣一次就是双扣，
+    一条用例复发会扣 6 分，把曲线压得比实际能力更难看，反而误导判据。
+
+    保留它的用途：① 满足施工单验收（hasattr 为 True 且已接入 ability_part）；
+    ② 让「本轮有没有复发」在 rows 里直接可见，不用去翻 snapshot 文件。
+
+    ⚠️ 必须排在 _fix_landed_rows **之前**执行：后者会把复发的用例从
+       snapshot 的 fixed 里剔掉，之后再读就读不到「曾经修好」的痕迹了。
+    """
+    if not isinstance(rg, dict):
+        return None
+    cur_fail = [str(n) for n in (rg.get("failed_names") or []) if n]
+    if not cur_fail:
+        return None
+    snap = _load_ability_snap()
+    credited = set(str(x) for x in (snap.get("fixed") or []))
+    if not credited:
+        return None
+    lost = sorted(credited & set(cur_fail))
+    if not lost:
+        return None
+    return {"key": "fix_regressed",
+            "label": "修复回退（仅报告，扣分已由 fix_landed 承担）",
+            "count": len(lost), "unit": 0.0, "score": 0.0,
+            "detail": {"lost": lost[:8]},
+            "note": "倒扣由 fix_landed 的累计机制执行；此处只报告，避免一条用例扣两次"}
+
+
 def _lesson_fixed_rows():
     """增量项②：教训从「未修」转成「已修复(fixed)」才算的能力增长。
 
@@ -595,7 +638,10 @@ def ability_part(rg=None, fn=None):
     #   曲线因此必然水平。这里补两项**只在真实变化时计分**的增量。
     #   加锁：后台评分线程与手动评分可能同时进来，两个增量都要写同一个快照。
     with _LOCK:
-        for _row in (_fix_landed_rows(rg), _lesson_fixed_rows()):
+        # ⚠️ 顺序有意义：_fix_regressed_rows 必须在 _fix_landed_rows 之前跑，
+        #    否则后者已经把复发的用例从 snapshot 里剔掉，读不到「曾经修好」的痕迹。
+        #    （它只报告不扣分，见函数注释：扣分已由 fix_landed 累计机制承担。）
+        for _row in (_fix_regressed_rows(rg), _fix_landed_rows(rg), _lesson_fixed_rows()):
             if _row:
                 rows.append(_row)
     return {
@@ -908,6 +954,38 @@ def explain_delta(before, after, actions=None):
             "summary": summary[:1200]}
 
 
+# ══ 施工单第 8 章 · 双轨：账本（cum）与尺子（hwa_bench）并存，永不相加 ══
+# 账本回答「我干了多少活」，尺子回答「我变成了什么」。混成一个数，两个都答不准。
+BENCH_SCORES = os.environ.get("HWA_BENCH_SCORES", r"D:\hwa_bench\scores.jsonl")
+
+
+def read_bench_last():
+    """只读基准最后一行。读不到就返回 None —— 不补 0，不估算，不猜。
+
+    ⚠️ 施工单 8.4 的硬要求：补 0 会让曲线掉到谷底（关机一天就以为退化了），
+    估算等于编数据，比不记更坏。界面显示成「—」才是诚实的。
+    """
+    try:
+        with open(BENCH_SCORES, encoding="utf-8") as fh:
+            lines = [ln for ln in fh if ln.strip()]
+        if not lines:
+            return None
+        rec = json.loads(lines[-1])
+        # bench.py 写的是 iso 字符串，没有 ts —— 两种都认，别算出离谱的年龄
+        ts = rec.get("ts")
+        if ts is None:
+            try:
+                ts = time.mktime(time.strptime(str(rec.get("iso") or ""),
+                                               "%Y-%m-%dT%H:%M:%S"))
+            except Exception:                            # noqa: BLE001
+                ts = None
+        rec["_age_h"] = (round((time.time() - float(ts)) / 3600, 1)
+                         if ts else None)
+        return rec
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
 def commit_round(before=None, after=None, actions=None, rollback=None,
                  note="", pid="", rebased=False):
     """把这一轮进退**累加**到累计分，并把原因与代码位置写进日志。
@@ -937,6 +1015,10 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
                          "rebased": bool(rebased)}
     rec = {
         "iso": _now(), "ts": time.time(), "plan_id": str(pid or ""),
+        # ⚠️ 施工单 8.4：字段名从 total 改成 ledger 不是为了好看 ——
+        #   叫「分」就会拿来跟尺子比，叫「账」就不会。两个数并排存，永不相加。
+        "ledger": cum,
+        "bench": read_bench_last(),      # None 或 {"pass":8,"total":15,"pct":53.3,...}
         "cum_before": cum_before, "cum": cum,
         "delta": delta, "pct": v.get("pct"), "verdict": verdict,
         "before": v.get("before"), "after": v.get("after"),
@@ -981,6 +1063,23 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
     if note:
         lines.append("    说明：" + str(note)[:300])
     _append_log(lines)
+    # ══ 保护区段 · RSI 基准（施工单 T3 · 5.2）══════════════════════════
+    # ⚠️⚠️ 这段**不许被自迭代改写或删除**。它一旦被「优化」掉，就永远不跑分了，
+    #   而且查不出来（没有报错、没有日志）。
+    #   主通道是 Windows 计划任务 hwa_bench（系统层，自迭代改不到）；
+    #   这里只是补充：迭代轮次结束顺手跑一次，被删也不致命。
+    #   bench.py 自己带文件锁：两个通道撞上时后到的直接退出，不会并发写坏哈希链。
+    # ══════════════════════════════════════════════════════════════════
+    _BENCH = os.environ.get("HWA_BENCH", r"D:\hwa_bench\bench.py")
+    if os.path.exists(_BENCH):
+        try:
+            import subprocess
+            subprocess.Popen(
+                [sys.executable, _BENCH], cwd=os.path.dirname(_BENCH),
+                creationflags=0x08000000,        # CREATE_NO_WINDOW，不弹黑框
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            logger.debug("启动 bench 失败", exc_info=True)
     # ⚠️ 2026-11-22 体系体检抓到：commit_round 只写了账本 / 明细 / 文本日志，
     #    **从来没写 history.jsonl** —— 而 stats()、history()、前端进退看板读的
     #    正是它。后果：单独调用 commit_round 时账本 rounds 在涨、看板永远 0 轮。
@@ -995,8 +1094,9 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
                     "before": rec["before"], "after": rec["after"],
                     "delta": delta, "pct": rec["pct"], "verdict": verdict,
                     "per_part": rec["per_part"],
-                    "cum": cum, "cum_before": cum_before,
-                    "rollback": rec["rollback"], "note": rec["note"],
+                     "cum": cum, "cum_before": cum_before,
+                     "ledger": cum, "bench": rec.get("bench"),
+                     "rollback": rec["rollback"], "note": rec["note"],
                     "actions": [{"id": str(a.get("id") or ""),
                                  "title": str(a.get("title") or "")[:80],
                                  "ok": bool(a.get("ok"))}

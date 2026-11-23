@@ -24,6 +24,7 @@
   var expanded = {};          // tid -> true 展开详情
   var audit = null;           // {count, claims, scanned, items:[{path,t}]}
   var auditAt = 0;            // 上次取回检计数的时间（ms），30 秒内不重复请求
+var bench = null;           // 施工单 8.5：尺子（项目外固定基准）最新读数
 
   function $(id) { return document.getElementById(id); }
   function mk(t, c, x) {
@@ -212,8 +213,32 @@
       var h = (d && d.health) || {};
       var a = h.history_claims || (d && d.history_claims) || null;
       if (a && typeof a === "object") { audit = a; auditAt = now; }
+      // ⚠️ 施工单第 8 章：尺子只并排显示，**不与账本相加/加权/平均**。
+      //    读不到就是 null → 界面显示「—」，绝不补 0（补 0 会把关机当成退化）。
+      bench = (d && d.bench && typeof d.bench === "object") ? d.bench : null;
       return audit;
     }).catch(function () { return audit; });
+  }
+
+  // 施工单 8.5：尺子一行。首屏能看到「现在多能打」，而不是「攒了多少家当」。
+  function benchNode() {
+    if (!bench) { return null; }
+    var row = mk("div", "ij-stat");
+    var p = Number(bench.pass), tot = Number(bench.total);
+    var txt = "尺子（项目外固定基准）：";
+    txt += (tot > 0 ? (isFinite(p) ? p : "—") + " / " + tot : "—");
+    if (bench.pct !== undefined && bench.pct !== null) {
+      txt += "（" + bench.pct + "%）";
+    }
+    var age = bench._age_h;
+    if (typeof age === "number" && age >= 0) {
+      txt += age < 1 ? "　刚跑过" : ("　" + Math.round(age) + " 小时前");
+    }
+    row.textContent = txt;
+    row.style.fontWeight = "600";
+    row.title = "施工单第 8 章：账本是施工日志（累计只增），尺子是体检报告（会抖但不说谎）。\n" +
+                "两个数并排看，永不相加。";
+    return row;
   }
 
   function auditNode() {
@@ -252,6 +277,8 @@
       " · 历史 " + (c.history || 0) + "　本轮 " + (d.budget || 0) +
       "/" + (d.max_rounds || "?");
     body.appendChild(stat);
+    var bn = benchNode();
+    if (bn) { body.appendChild(bn); }
     var an = auditNode();
     if (an) { body.appendChild(an); }
     if (d.verify) {

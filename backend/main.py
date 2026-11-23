@@ -1604,20 +1604,36 @@ def _clamp_message_text(text: str, max_tokens: int) -> tuple:
         return s, len(s), len(s)
     if _est_tokens(s) <= max_tokens:
         return s, len(s), len(s)
-    head_ratio = 0.55
+    # ⚠️⚠️ 2026-11-23 修（真缺口，RSI 基准 ctx-01 抓到）：原来只保**头尾**
+    #   （head_ratio=0.55），正中间那段**必然被扔掉**。实测：6050 字的题面里，
+    #   正中间那句「本次会话的备用口令是 KX-2048」被裁掉，模型老老实实回答
+    #   「没有提到过任何备用口令」—— 这不是模型不会，是我们把材料删了。
+    #   改法：**头 / 中 / 尾三段都留**（40% / 20% / 40%）。长文档的关键条款、
+    #   长表格的中间行、长日志的中间报错，通常就落在正中间。
+    head_ratio, mid_ratio = 0.40, 0.20
     best = ""
     lo, hi = 0, len(s)
     while lo <= hi:
-        mid = (lo + hi) // 2
-        h = int(mid * head_ratio)
-        t = mid - h
-        mark = "\n\n…（中间省略 %d 字）…\n\n" % max(0, len(s) - mid)
-        cand = s[:h] + mark + (s[len(s) - t:] if t else "")
+        keep = (lo + hi) // 2
+        h = int(keep * head_ratio)
+        md = int(keep * mid_ratio)
+        t = keep - h - md
+        # 中段取「去掉头尾之后那一大块的中央」，保证正中间的信息一定在里面
+        m_start = max(h, (len(s) - md) // 2)
+        m_end = min(len(s) - t, m_start + md)
+        gap1 = max(0, m_start - h)
+        gap2 = max(0, (len(s) - t) - m_end)
+        mark = "\n\n…（中间省略 %d 字）…\n\n"
+        cand = (s[:h]
+                + (mark % gap1 if gap1 else "")
+                + s[m_start:m_end]
+                + (mark % gap2 if gap2 else "")
+                + (s[len(s) - t:] if t else ""))
         if _est_tokens(cand) <= max_tokens:
             best = cand
-            lo = mid + 1
+            lo = keep + 1
         else:
-            hi = mid - 1
+            hi = keep - 1
     if not best:                      # 极端情况：连一小段都装不下
         best = s[: max(1, int(len(s) * 0.1))]
     return best, len(s), len(best)
@@ -1716,6 +1732,20 @@ def _trim_history_to_budget(messages: list, sys_prompt: str, tool_schemas: list,
 # 丢掉会让模型以为"没查到"，截断至少保住主要信息。
 ROUND_MSG_MAX_TOKENS = 4000
 
+# ⚠️⚠️ 2026-11-23 修（真缺口）：4000 是 8k 窗口时代的保守值，但窗口早就开到
+#   40960 了，这条**硬上限却与窗口无关** —— 于是用户贴一篇 6000 字的文档，
+#   哪怕窗口空得很，也会被裁到 4000 token 以内（保头保尾 → 正中间丢掉）。
+#   RSI 基准 ctx-01 就是这么挂的。现在改成按窗口自适应：
+#   下限 4000（小窗口的保护不变），上限 12000（别让单条吃掉整窗）。
+def _round_msg_max(ctx: int) -> int:
+    try:
+        ctx = int(ctx or 0)
+    except Exception:
+        ctx = 0
+    if ctx <= 0:
+        return ROUND_MSG_MAX_TOKENS
+    return max(ROUND_MSG_MAX_TOKENS, min(12000, int(ctx * 0.25)))
+
 
 def _shrink_round_prompt(working: list, cfg: dict, tool_schemas: list) -> int:
     """工具轮之间再核一次预算：装不下就先压大的、再丢最旧的。返回估算 token 数。
@@ -1734,6 +1764,7 @@ def _shrink_round_prompt(working: list, cfg: dict, tool_schemas: list) -> int:
         ctx = 8192
     overhead = _est_tokens(_json.dumps(tool_schemas or [], ensure_ascii=False))
     room = ctx - overhead - DIGEST_RESERVE - 512
+    _msg_max = _round_msg_max(ctx)
 
     def _total():
         return sum(_est_tokens(m.get("content") or "")
@@ -1743,8 +1774,8 @@ def _shrink_round_prompt(working: list, cfg: dict, tool_schemas: list) -> int:
         if not isinstance(m, dict) or m.get("role") == "system":
             continue
         t = m.get("content") or ""
-        if isinstance(t, str) and _est_tokens(t) > ROUND_MSG_MAX_TOKENS:
-            new_t, _o, _k = _clamp_message_text(t, ROUND_MSG_MAX_TOKENS)
+        if isinstance(t, str) and _est_tokens(t) > _msg_max:
+            new_t, _o, _k = _clamp_message_text(t, _msg_max)
             m2 = dict(m)
             m2["content"] = new_t
             working[i] = m2
@@ -4412,6 +4443,19 @@ def iter_health(days: int = 30):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+def _bench_latest():
+    """施工单第 8 章：尺子（项目外固定基准）最新一次读数。
+
+    只读、不跑分。**读不到就返回 None** —— 前端显示成「—」，
+    绝不补 0（补 0 会让「关机一天」看起来像能力退化）。
+    """
+    try:
+        from . import iterloop as _il
+        return _il.read_bench_last()
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
 @app.get("/api/iter/panel")
 def iter_panel(days: int = 30):
     """自迭代体系「详情面板」—— 一个接口喂满前端那张卡。
@@ -4448,6 +4492,8 @@ def iter_panel(days: int = 30):
             "semantic": _jf.safe_get(raw, "semantic", None, where=w),
             "health": _jf.safe_get(raw, "health", None, where=w),
             "chain": _jf.safe_get(raw, "chain", None, where=w),
+            # ⚠️ 施工单 8.2：尺子**只并排展示，不与账本相加/加权/平均/归一化**
+            "bench": _bench_latest(),
         }
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
