@@ -63,12 +63,22 @@ def _escalation_path() -> str:
 PROBES: dict[str, tuple[str, str]] = {
     # ⚠️ selfdev.py 是回撤机制自身，写入工具拒绝改写它，所以锚点降级
     #    落在**调用层**（本模块的 patch_with_fallback），探针也指这里。
-    "改动锚点没命中": ("backend/lessonloop.py", "anchor_miss"),
-    "修 selfdev_patch 锚点没命中": ("backend/lessonloop.py", "anchor_miss"),
+    #
+    # ⚠️⚠️ needle 必须是**修复逻辑本身**才有的字符串（2026-11-23 实测教训）：
+    #   原来 "模型输出不可用" 指向 `parse_fail`、"字段名/键读错" 指向 `field_miss`，
+    #   而这两个词就写在「记录这次失败」的函数里（jsonfix._note_parse_fail /
+    #   _note_miss）—— 只要账本代码还在，探针就**恒命中**，等于没检查。
+    #   现在改成指向修复能力：容错解析 / 截断补齐 / 容错取值。
+    "改动锚点没命中": ("backend/lessonloop.py", "def patch_with_fallback"),
+    "修 selfdev_patch 锚点没命中": ("backend/lessonloop.py", "def patch_with_fallback"),
+    # 硬检查点：diff 为空直接判失败重来（不是单纯记账）
     "没产生实际改动": ("backend/iter_runner.py", "no_change"),
-    "模型输出不可用": ("backend/jsonfix.py", "parse_fail"),
+    # 容错解析链：strip_notice → balanced → _close_truncated → parse
+    "模型输出不可用": ("backend/jsonfix.py", "def _close_truncated"),
+    # 跑分前先取自检计数（static_first）
     "跑分退步（低于上一版）": ("backend/iter_runner.py", "static_first"),
-    "字段名/键读错": ("backend/jsonfix.py", "field_miss"),
+    # 容错取值：键名写错/层级读错时不抛错
+    "字段名/键读错": ("backend/jsonfix.py", "def safe_get"),
 }
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -231,9 +241,16 @@ def judge(it: dict) -> dict:
     """单条教训的真实判定（不靠模型自称，只看账本 + 文件）。
 
     返回 {kind, status, evidence, recur, edited_at, probe}
-      fixed    —— 教训之后该文件真被改过，且同一 kind 之后没再复发
-      pending  —— 教训之后没改过这个文件（只说不做），或改完又复发
+      fixed    —— **代码里有修复逻辑**（探针命中），且教训之后没再复发
+      verifying—— 修复逻辑在、没复发，但刚改完还在观察窗内（不自封修好）
+      pending  —— 修复逻辑不在代码里（只说不做/改歪了），或修复后仍复发
       unprobed —— 没有可判定的文件，不瞎判
+
+    ⚠️ 判定主证据是 **probe 命中**，不是文件 mtime（2026-11-23 实测修正）：
+       原逻辑 `if edited <= t0: pending(只说不做)` 把「修复早于教训记录」
+       的条目一律判成没修 —— 实测 2 条 pending 里，探针 code_hit 全是 True
+       （iter_runner 里 static_first / no_change 都在），落地率被压成 0/6，
+       RSI 的「教训落地率」项恒为 0，auto_fix 还会反复去修已经修好的东西。
     """
     kind = str(it.get("kind") or "").strip()
     t0 = _num_ts(it.get("ts") or it.get("iso"))
@@ -243,37 +260,54 @@ def judge(it: dict) -> dict:
                 "edited_at": 0.0, "probe": "", "evidence": "没有可判定的文件"}
     rel, needle = pr
     edited = _last_ok_edit(rel)
-    recur = _recur_after(kind, max(t0, edited) if edited > t0 else t0)
     hit = _probe_hit(rel, needle)
+    recur = _recur_after(kind, t0)
     ev = {
         "file": rel, "needle": needle, "code_hit": hit,
         "edited_at": time.strftime("%m-%d %H:%M", time.localtime(edited)) if edited else "",
         "lesson_at": time.strftime("%m-%d %H:%M", time.localtime(t0)) if t0 else "",
         "recur": recur,
     }
-    if edited <= t0:
+    # ① 修复逻辑不在代码里 —— 这是硬事实，与 mtime 无关
+    if not hit:
+        if edited > t0:
+            return {"kind": kind, "status": "pending", "recur": recur,
+                    "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+                    "evidence": "改过 %s，但**修复逻辑不在代码里**（改歪了）" % rel,
+                    "detail": ev}
         return {"kind": kind, "status": "pending", "recur": recur,
                 "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
-                "evidence": "教训之后该文件没有任何改动（只说不做）", "detail": ev}
+                "evidence": "修复逻辑不在代码里，该文件也没改过（只说不做）", "detail": ev}
+    # ② 修复逻辑在，但教训之后又复发 —— 改得不够，继续 pending
     if recur > 0:
         return {"kind": kind, "status": "pending", "recur": recur,
                 "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
-                "evidence": "改过，但之后又复发 %d 次" % recur, "detail": ev}
-    # 观察窗：刚改完还没被「下一次真实使用」检验过，不许自封修好
-    # （实测漏洞：任何无关改动刷新 mtime 就会把旧教训判成 fixed）
-    left = OBSERVE_HOURS * 3600.0 - (time.time() - edited)
+                "evidence": "修复逻辑已在代码里，但之后又复发 %d 次" % recur, "detail": ev}
+    # ③ 修复逻辑在、没复发。观察窗从「改动时间 / 教训时间」的**晚者**算起。
+    #    ⚠️ 原来写 `if edited > t0`：教训若比改动更新（同一 kind 被反复重记），
+    #    该条件为假 → 跳过观察窗直接判 fixed。实测 12:32 记的教训 12:33 就
+    #    判成「已修」，而「未复发」此时只代表「才过了一分钟」—— 假阳性，
+    #    会把 RSI 的教训落地率抬虚高。取 max 后，刚记的教训一律先进观察窗。
+    base = max(edited, t0)
+    left = OBSERVE_HOURS * 3600.0 - (time.time() - base)
     if left > 0:
         return {"kind": kind, "status": "verifying", "recur": 0,
                 "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
-                "evidence": "改过、暂未复发，观察中（还差 %.1f 小时）" % (left / 3600.0),
+                "evidence": "修复逻辑已在、暂未复发，观察中（还差 %.1f 小时）" % (left / 3600.0),
                 "detail": ev}
     return {"kind": kind, "status": "fixed", "recur": 0,
             "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
-            "evidence": "改过且未复发（代码探针%s）" % ("命中" if hit else "未命中"),
+            "evidence": "代码探针命中（%s 含 %r）且教训之后未复发"
+                        % (rel, needle),
             "detail": ev}
 
 
-def rsi_index(limit: int = 400) -> dict:
+# RSI 缓存：hint() 每轮构建系统提示都会走到这里，
+# 不能每次都把 actlog.jsonl 全解析一遍（几千行）。
+_RSI_CACHE: dict = {"ts": 0.0, "val": None}
+
+
+def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
     """客观 RSI 指数（0~100）—— 只用可复现账本，**不含 LLM 自评**。
 
     为什么必须换掉自评：94 次评估的跨评估斜率 0.001、标准差 1.74（10 分制），
@@ -285,6 +319,10 @@ def rsi_index(limit: int = 400) -> dict:
       3) 教训落地率   fixed / (fixed+pending)         —— 学到的东西有没有落地
       4) 静态质量     1 - min(1,(high*3+mid)/10)      —— 代码本身有没有变差
     """
+    _now = time.time()
+    if (cache_sec > 0 and _RSI_CACHE["val"] is not None
+            and _now - _RSI_CACHE["ts"] < cache_sec):
+        return _RSI_CACHE["val"]
     rows = _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))[-max(20, limit):]
     ok = sum(1 for r in rows if str(r.get("result") or "").lower() == "ok")
     bad = sum(1 for r in rows if str(r.get("result") or "").lower() in ("fail", "failed", "error"))
@@ -314,9 +352,12 @@ def rsi_index(limit: int = 400) -> dict:
                   "high %d / mid %d" % (hi, mid)))
     tw = sum(p[2] for p in parts) or 1.0
     score = round(100 * sum(p[1] * p[2] for p in parts) / tw, 1)
-    return {"ok": True, "score": score,
-            "parts": [{"name": n, "value": round(v, 3), "weight": w, "detail": d}
-                      for n, v, w, d in parts]}
+    res = {"ok": True, "score": score,
+           "parts": [{"name": n, "value": round(v, 3), "weight": w, "detail": d}
+                     for n, v, w, d in parts],
+           "at": time.strftime("%H:%M:%S", time.localtime(_now))}
+    _RSI_CACHE["ts"], _RSI_CACHE["val"] = _now, res
+    return res
 
 
 def audit() -> dict:
@@ -408,9 +449,20 @@ def hint(max_n: int = 4, max_chars: int = 700) -> str:
     pend = a.get("pending") or []
     if not pend:
         return ""
-    lines = ["\n【历史教训（未修完，别重复踩）】",
-             "下面这些是前几轮反思里发现、但**代码里还没落地**的问题。"
-             "本轮如果碰到同类情况，直接按「改法」做，别重新想一遍："]
+    lines = ["\n【历史教训（未修完，别重复踩）】"]
+    # RSI 当前最弱项：让主循环知道「整体最该修哪一项」。
+    # 没有这行，模型只看到零散教训，不知道该先动哪个。
+    # ⚠️ 放在最前面，避免被 max_chars 截断。
+    try:
+        _w = rsi_weakest()
+        if _w.get("ok"):
+            lines.append("- 【RSI 最弱项】%s（%.0f%%，权重 %.2f）：%s"
+                         % (_w["name"], (_w.get("value") or 0) * 100,
+                            _w.get("weight") or 0, _w.get("advice")))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("RSI 最弱项注入失败", exc_info=True)
+    lines += ["下面这些是前几轮反思里发现、但**代码里还没落地**的问题。"
+              "本轮如果碰到同类情况，直接按「改法」做，别重新想一遍："]
     for r in pend[:max_n]:
         fix = " ".join(str(r.get("fix") or "").split())[:120]
         lines.append("- 「%s」累计 %s 次：%s" % (r.get("kind"), r.get("count"), fix))
@@ -681,6 +733,129 @@ def auto_fix(max_n: int = 1, submit: bool = True, cooldown_hours: float = 24.0) 
     st["last_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     _auto_save(st)
     return {"ok": True, "submitted": out}
+
+
+# --------------------------------------------------------------------------
+# RSI 主指标：客观指数（rsi_index）+ 历史序列 + 趋势形态
+#
+# 为什么必须落盘历史：rsi_index() 只给**当前瞬时值**，单点没法判断
+# 「斜率是否逐渐变陡」—— 那正是 RSI 与普通指标的区别。
+# 只有按时间采样、再对序列算**分段斜率**，才能区分四种形态：
+#   ① 平台（原地跑）② 直线上升 ③ 斜率递增（RSI）④ 锯齿下滑
+# --------------------------------------------------------------------------
+
+def _rsi_hist_path() -> str:
+    return os.path.join(_data_dir(), "rsi_history.jsonl")
+
+
+def rsi_sample(force: bool = False, min_gap: float = 60.0) -> dict:
+    """采样一次 RSI 写入历史。同一分钟内重复调用只记一条（防刷爆账本）。"""
+    cur = rsi_index()
+    p = _rsi_hist_path()
+    rows = _read_jsonl(p)
+    now = time.time()
+    if not force and rows:
+        last = _num_ts(rows[-1].get("ts"))
+        if now - last < min_gap:
+            return {"ok": True, "skipped": True, "score": cur.get("score"),
+                    "n": len(rows), "why": "距上次采样不足 %.0f 秒" % min_gap}
+    rec = {"ts": now,
+           "iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+           "score": cur.get("score"),
+           "parts": {x["name"]: x["value"] for x in (cur.get("parts") or [])}}
+    try:
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:
+        return {"ok": False, "error": "写 rsi_history 失败：%s" % e}
+    return {"ok": True, "score": rec["score"], "n": len(rows) + 1,
+            "iso": rec["iso"]}
+
+
+def rsi_trend(limit: int = 120, window: int = 5) -> dict:
+    """RSI 历史序列的趋势形态（判断有没有 RSI 那种斜率递增）。
+
+    判定用**三段斜率**而不是只看整体斜率：
+      前 1/3、中 1/3、后 1/3 各算一次斜率，
+      s1 < s2 < s3 且 s1 > 0 → 斜率递增（RSI 形态）；
+      整体 > 0 但三段不递增 → 直线上升；
+      |整体| ≤ 0.05 → 平台（原地跑）；
+      整体 < -0.05 → 下滑。
+    """
+    rows = _read_jsonl(_rsi_hist_path())[-max(10, limit):]
+    pts = [{"ts": r.get("iso") or "", "score": float(r.get("score") or 0)}
+           for r in rows if isinstance(r.get("score"), (int, float))]
+    ys = [p["score"] for p in pts]
+    if len(ys) < 4:
+        return {"ok": True, "n": len(ys), "points": pts, "shape": "样本不足",
+                "slope": None, "segs": [],
+                "advice": "继续采样（每次评估收尾会自动记一条）"}
+    sl = _slope(ys) or 0.0
+    sd = _stdev(ys) or 0.0
+    k = max(1, len(ys) // 3)
+    segs = []
+    for i, name in enumerate(("前段", "中段", "后段")):
+        a0 = i * k if i < 2 else 2 * k
+        a1 = (i + 1) * k if i < 2 else len(ys)
+        seg = ys[a0:a1]
+        segs.append({"name": name, "n": len(seg),
+                     "slope": round(_slope(seg) or 0.0, 3),
+                     "mean": round(sum(seg) / max(1, len(seg)), 1)})
+    s1, s2, s3 = [x["slope"] for x in segs]
+    if s1 < s2 < s3 and s1 > 0:
+        shape = "③ 斜率递增（RSI）"
+    elif sl > 0.05:
+        shape = "② 直线上升"
+    elif sl < -0.05:
+        shape = "④ 锯齿下滑"
+    else:
+        shape = "① 平台（原地跑）"
+    return {"ok": True, "n": len(ys), "points": pts[-40:],
+            "slope": round(sl, 3), "stdev": round(sd, 2),
+            "segs": segs, "shape": shape,
+            "first": ys[0], "last": ys[-1],
+            "delta": round(ys[-1] - ys[0], 1), "window": window}
+
+
+def rsi_weakest() -> dict:
+    """当前**最该修**的一项：权重最高、得分最低。
+
+    RSI 的实质不是「有个分数」，而是**拿分数决定下一步改什么**。
+    没有这一步，指数只是仪表盘，不会自我改进。
+    """
+    cur = rsi_index()
+    parts = cur.get("parts") or []
+    if not parts:
+        return {"ok": False, "error": "无可用指标"}
+    # 拖后腿程度 = 权重 × (1 - 得分)
+    worst = max(parts, key=lambda p: p["weight"] * (1 - p["value"]))
+    advice = {
+        "动作成功率": "挑最近失败最多的动作类型，看它的失败原因，先修掉重复出现的那个",
+        "无幽灵率": "检查「声称改了但 diff 为空」的动作，把校验卡在提交前",
+        "教训落地率": "把 pending 教训按 fix 逐条落到代码，并用探针复核",
+        "静态质量": "先清 high 级静态问题，再谈别的",
+    }.get(worst["name"], "先处理这一项")
+    return {"ok": True, "name": worst["name"], "value": worst["value"],
+            "weight": worst["weight"], "detail": worst.get("detail"),
+            "drag": round(worst["weight"] * (1 - worst["value"]), 3),
+            "advice": advice, "score": cur.get("score")}
+
+
+def rsi_line() -> str:
+    """一行 RSI 结论（写进评估报告 / 对话提示）。"""
+    cur = rsi_index()
+    w = rsi_weakest()
+    t = rsi_trend()
+    s = "RSI %.1f 分" % (cur.get("score") or 0)
+    if t.get("n", 0) >= 4:
+        s += "（%d 次采样，斜率 %+.2f/次，形态：%s）" % (
+            t["n"], t.get("slope") or 0.0, t.get("shape"))
+    else:
+        s += "（历史采样 %d 条，还不够判趋势）" % t.get("n", 0)
+    if w.get("ok"):
+        s += "；最该修：%s（%.0f%%，拖 %s）" % (
+            w["name"], (w.get("value") or 0) * 100, w.get("drag"))
+    return s
 
 
 def summary_line(c: dict | None = None) -> str:

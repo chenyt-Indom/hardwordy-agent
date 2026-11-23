@@ -1,0 +1,40 @@
+{
+ "total": 154.65,
+ "quality": 99.5,
+ "ability": 55.15,
+ "static": {
+  "score": 39.5,
+  "max": 40,
+  "high": 0,
+  "mid": 0,
+  "info": 1
+ },
+ "static_findings": [
+  {
+   "file": "backend/lessonloop.py",
+   "line": 180,
+   "kind": "silent-except",
+   "level": "info",
+   "msg": "有 2 处 `except ...: pass` 把异常完全吞掉了（未标 noqa）"
+  },
+  {
+   "file": "backend/main.py",
+   "line": 76,
+   "kind": "subprocess-global-patched",
+   "level": "info",
+   "msg": "检测到 28 处 subprocess 直接调用，但 procwin.install_nowin_patch() 已全局兜住（实测窗口数 0），故不逐处报 high/mid",
+   "noscore": true
+  }
+ ],
+ "regress": {
+  "score": 30.0,
+  "max": 30,
+  "passed": 44,
+  "failed": 0,
+  "failed_items": []
+ },
+ "func": {
+  "score": 30.0,
+  "max": 30
+ }
+}

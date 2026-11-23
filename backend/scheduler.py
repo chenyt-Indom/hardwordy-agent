@@ -591,6 +591,13 @@ def _run_selfexp(job: dict) -> dict:
                      % (len(_la.get("done") or []),
                         len(_la.get("verifying") or []),
                         len(_la.get("pending") or [])))
+        # RSI 主指标：每次评估收尾采一条样本（同分钟自动去重），
+        # 有了时间序列才能判「斜率是否逐渐变陡」，单点分数看不出趋势。
+        try:
+            _ll.rsi_sample()
+            lines.append("- %s" % _ll.rsi_line())
+        except Exception:                               # noqa: BLE001
+            logger.debug("RSI 采样失败（不影响评估）", exc_info=True)
         _af = _ll.auto_fix(max_n=1)
         _subs = _af.get("submitted") or []
         for _x in _subs:
