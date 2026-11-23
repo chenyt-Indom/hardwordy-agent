@@ -1608,6 +1608,40 @@ def clear_review(plan_id="", action_id=""):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+def _guard_only_targets(files) -> list:
+    """目标文件**全部**是护栏文件时返回它们，否则返回 []。
+
+    ★ 2026-11-24 实测缺陷（actlog 11-24 05:42 a1）：计划会生成
+      「修 backend/_feature_tests/test_anchor_diagnose.py:116 的 silent-except」
+      这种动作 —— 而 _feature_tests/test_*.py 是**护栏文件**，模型写到那里
+      必然被判「护栏文件被修改（不允许）」→ 整轮回滚 + 记一次 fail。
+      这类动作从生成那一刻就注定失败：白烧一次模型调用（几十秒 + 一次云端
+      调用），还把「动作成功率」分母拉大 —— 越诚实生成「修测试」的动作，
+      RSI 越难看。执行前直接判掉，不进分母。
+
+    判不了（import 失败 / 路径不规范）时返回 []，宁可放过也不误杀。
+    """
+    fs = [str(x).strip() for x in (files or []) if str(x).strip()]
+    if not fs:
+        return []
+    try:
+        from . import iter_agent as _IA
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return []
+    out = []
+    for f in fs:
+        rel = f.replace("\\", "/").lstrip("./")
+        try:
+            if not _IA._is_guard(rel):
+                return []      # 只要有一个能改，这条动作就还有救，别拦
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+            return []
+        out.append(rel)
+    return out
+
+
 def _loop_guard(files, root_cause=""):
     """反复修改熔断。返回 (allow, why)。读不到日志时放行（不误伤）。
 
@@ -6376,6 +6410,21 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
         _ev("action_start", action_id=str(a.get("id") or ""),
             title=str(a.get("title") or ""), index=_i + 1, total=len(todo),
             files=_want[:20], new_files=_fresh[:20])
+        # ★ 2026-11-24 实测缺陷：目标文件**全是护栏文件**的动作注定失败
+        #   （模型无权写，必然被判「护栏文件被修改（不允许）」→ 回滚 + 记 fail）。
+        #   实测 11-24 05:42 a1「修 test_anchor_diagnose.py:116 的 silent-except」
+        #   就是这样白跑一轮、白扣一次成功率。执行前直接跳过：
+        #   状态记 skipped（不是 failed），且**不写 actlog**（不污染 RSI 分母）。
+        _gonly = _guard_only_targets(a.get("files"))
+        if _gonly:
+            _gwhy = ("目标文件全是护栏文件（%s），模型无权修改，已跳过（不计失败）"
+                     % "、".join(_gonly[:3]))
+            a["status"] = "skipped"
+            a["note"] = ((a.get("note") or "") + "｜" + _gwhy).strip("｜")
+            results.append({"id": a["id"], "ok": True, "skipped": True,
+                            "why": _gwhy})
+            _ev("step", text="%s 跳过：%s" % (a.get("id"), _gwhy))
+            continue
         if not _pk:
             a["status"] = "done"
             a["note"] = ((a.get("note") or "") + "｜" + _pwhy).strip("｜")
