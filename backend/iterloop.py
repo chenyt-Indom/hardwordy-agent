@@ -72,6 +72,22 @@ ABILITY_PER_SMOKE = 1.5       # 每个通过的冒烟端点
 ABILITY_PER_SYMBOL = 2.0      # 每个守住的关键符号
 ABILITY_PER_FILE = 0.03       # 每个编译通过的后端文件（广度，弱权重）
 
+# ★★ 2026-11-23 用户问「评分曲线为什么是平的，需要优化吗」—— 根因：
+#   上面四项的输入全是**数量**（46 个用例、4 个端点、1 个符号、105 个文件），
+#   代码一改不动，这四项就是常数 → ability 恒定、曲线必然水平。
+#   实测最近 60 份：total 155.09→157.15，斜率 +0.013/份。
+#
+#   所以补两项「只在真实变化时才计分」的**增量项**（不改变上面四项的基线）：
+#     · fix_landed     —— 某条回归用例从「失败」翻成「通过」→ 计一次
+#     · lesson_fixed   —— 某条教训从「未修」转成「已修复(fixed)」→ 计一次
+#   代码没真改动时这两项恒为 0（曲线该平就平）；真修好了才涨，
+#   这样「涨」才等于「能力在增长」，而不是「资产存量」。
+#
+#   ⚠️ 都靠 ability_snapshot.json 去重：同一次修复只计一次分，
+#      不会因为反复评分而无限累加。教训**复发**会把这笔分扣回去。
+ABILITY_PER_FIX = 3.0         # 一条回归用例由失败翻通过
+ABILITY_PER_LESSON = 5.0     # 一条教训由未修转为 fixed（且未复发）
+
 # 冒烟端点：挑**只读、轻量、不触发外部请求**的四个。
 # ⚠️ 刻意不碰 /api/selfiter/stream（长连接）、/api/net/check（联网）、
 #    /api/selftest（会跑全量测试，几秒到几十秒）。
@@ -225,6 +241,14 @@ def regress_part(timeout=180):
             "skipped": int(r.get("skipped") or 0),
             "seconds": r.get("seconds"),
             "failed_items": [i.get("name") for i in (r.get("failed_items") or [])][:8],
+            # ★ 2026-11-23：fix_landed 要判「某条用例由失败翻成通过」，
+            #   截断到 8 个会漏判（失败多于 8 条时后半截永远看不见），
+            #   而且必须知道「这条用例现在还在不在」—— 否则删掉一条失败用例
+            #   会被误判成「修好了」。所以两个名单都给全量。
+            "failed_names": [str(i.get("name") or "") for i in (r.get("failed_items") or [])
+                             if i.get("name")],
+            "all_names": [str(i.get("name") or "") for i in (r.get("items") or [])
+                          if i.get("name")],
         }
     except Exception as e:                              # noqa: BLE001
         logger.debug("回归分算不出来: %s", e, exc_info=True)
@@ -357,6 +381,109 @@ def func_part():
     }
 
 
+def _ability_snap_path():
+    return os.path.join(_data_dir(), "ability_snapshot.json")
+
+
+def _load_ability_snap():
+    """读增量项的去重快照。
+
+    结构：
+      failed   —— 上次评分时还在失败的用例名
+      fixed    —— 已计过「翻通过」分的用例名
+      lessons  —— 已计过「转 fixed」分的教训 kind
+    """
+    try:
+        with open(_ability_snap_path(), encoding="utf-8") as fh:
+            d = json.load(fh)
+        if isinstance(d, dict):
+            return {"failed": [str(x) for x in (d.get("failed") or [])],
+                    "fixed": [str(x) for x in (d.get("fixed") or [])],
+                    "lessons": [str(x) for x in (d.get("lessons") or [])]}
+    except FileNotFoundError:
+        pass
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读 ability_snapshot 失败，按空快照处理", exc_info=True)
+    return {"failed": [], "fixed": [], "lessons": []}
+
+
+def _save_ability_snap(snap):
+    try:
+        with open(_ability_snap_path(), "w", encoding="utf-8") as fh:
+            json.dump(snap, fh, ensure_ascii=False, indent=1)
+        return True
+    except Exception:                                   # noqa: BLE001
+        logger.debug("写 ability_snapshot 失败", exc_info=True)
+        return False
+
+
+def _fix_landed_rows(rg):
+    """增量项①：回归用例「失败 → 通过」才算的能力增长。
+
+    为什么需要它：原有 regress_pass 是「通过数 × 单价」，用例总数不变时
+    它就是常数，代码改得再好也不动（实测 46 条一直是 46，曲线因此水平）。
+
+    只认**翻转**：上次失败、这次通过、且这条用例现在还在
+    （**删掉用例不算修好**）→ 计 ABILITY_PER_FIX，并记进快照防重复计分。
+    反过来，已计过分又失败（复发）→ 倒扣，允许修好后重新计。
+    """
+    if not isinstance(rg, dict):
+        return None
+    all_now = [str(n) for n in (rg.get("all_names") or []) if n]
+    if not all_now:
+        return None                    # 拿不到逐条结果 → 不判，别瞎记
+    cur_fail = [str(n) for n in (rg.get("failed_names") or []) if n]
+    cur_fail_set, all_set = set(cur_fail), set(all_now)
+    snap = _load_ability_snap()
+    prev_fail = list(snap.get("failed") or [])
+    done = list(snap.get("fixed") or [])
+    newly = [n for n in prev_fail
+             if n not in cur_fail_set and n in all_set and n not in done]
+    relapse = [n for n in cur_fail if n in done]
+    done = [n for n in done if n not in set(relapse)]
+    done.extend(newly)
+    snap["failed"], snap["fixed"] = cur_fail, done
+    _save_ability_snap(snap)
+    return {"key": "fix_landed", "label": "失败用例翻通过",
+            "count": len(newly), "unit": ABILITY_PER_FIX,
+            "score": round((len(newly) - len(relapse)) * ABILITY_PER_FIX, 2),
+            "detail": {"newly_fixed": newly[:8], "relapse": relapse[:8]},
+            "note": "只认「上次失败→这次通过」，删用例不算修好，复发倒扣"}
+
+
+def _lesson_fixed_rows():
+    """增量项②：教训从「未修」转成「已修复(fixed)」才算的能力增长。
+
+    复用 lessonloop.audit() 现成的 fixed 判定（探针命中 + 观察窗内未复发），
+    不另造状态。同一条教训只计一次分；**复发退回时倒扣**，
+    防止「反复自封修好」刷分。
+    """
+    try:
+        from . import lessonloop as LL
+        a = LL.audit() or {}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读教训清单失败，本次不判 lesson_fixed", exc_info=True)
+        return None
+    if not a.get("ok") or not int(a.get("total") or 0):
+        return None                    # 没有教训 / 拿不到清单 → 不判，别乱扣
+    fixed_now = [str(r.get("kind") or "") for r in (a.get("fixed") or [])
+                 if r.get("kind")]
+    fixed_set = set(fixed_now)
+    snap = _load_ability_snap()
+    done = list(snap.get("lessons") or [])
+    newly = [k for k in fixed_now if k not in done]
+    relapse = [k for k in done if k not in fixed_set]
+    done = [k for k in done if k in fixed_set]
+    done.extend(newly)
+    snap["lessons"] = done
+    _save_ability_snap(snap)
+    return {"key": "lesson_fixed", "label": "教训转为已修复",
+            "count": len(newly), "unit": ABILITY_PER_LESSON,
+            "score": round((len(newly) - len(relapse)) * ABILITY_PER_LESSON, 2),
+            "detail": {"newly_fixed": newly[:8], "relapse": relapse[:8]},
+            "note": "同一教训只计一次分，复发倒扣"}
+
+
 def ability_part(rg=None, fn=None):
     """能力跑分（**无上限**）—— 只累加「真实被验证到」的能力。
 
@@ -387,10 +514,18 @@ def ability_part(rg=None, fn=None):
             rows.append({"key": "file_compile", "label": "后端文件编译通过",
                          "count": n, "unit": ABILITY_PER_FILE,
                          "score": round(n * ABILITY_PER_FILE, 2)})
+    # ★ 2026-11-23：上面四项都是「存量」（数量×单价，代码不动就不动），
+    #   曲线因此必然水平。这里补两项**只在真实变化时计分**的增量。
+    #   加锁：后台评分线程与手动评分可能同时进来，两个增量都要写同一个快照。
+    with _LOCK:
+        for _row in (_fix_landed_rows(rg), _lesson_fixed_rows()):
+            if _row:
+                rows.append(_row)
     return {
         "score": round(sum(float(r["score"]) for r in rows), 2),
         "max": None, "unbounded": True, "rows": rows,
-        "note": "无上限：随被验证到的能力累加，删测试/端点会掉分",
+        "note": ("无上限：存量项随被验证到的能力累加（删测试/端点会掉分）；"
+                 "增量项 fix_landed / lesson_fixed 只在真实修好时计分，复发倒扣"),
     }
 
 

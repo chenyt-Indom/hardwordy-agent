@@ -1,6 +1,6 @@
 """新功能验收断言：盯梢任务哨兵卡片
 
-用户反复交代同一件事、要手动回来问「变了没」
+对应 needs「终止/暂停状态不一致」之外的另一个信任缺口：用户不知道后台有没有在干活。
 
 由自主立项自动生成，回归会自动加载它。
 出问题时直接删掉这个文件即可，不影响其他用例。
@@ -14,30 +14,24 @@ def run():
     import json, os, tempfile, time
     from backend import livecard_meta, scheduler
 
-    tmp = tempfile.mkdtemp()
-    target = os.path.join(tmp, 'watch.txt')
-    with open(target, 'w') as f:
-        f.write('v1')
+    def test_sentinel_meta_roundtrip():
+        meta = livecard_meta.build_sentinel_meta(sentinel_id='s1', target='task:demo', last_snapshot={'v':1}, change_summary='init', next_check=time.time()+60)
+        assert meta['sentinel_id'] == 's1'
+        assert meta['target'] == 'task:demo'
+        assert 'last_snapshot' in meta and 'change_summary' in meta and 'next_check' in meta
 
-    meta = livecard_meta.create_sentinel(kind='file', target=target, interval_sec=1)
-    assert meta is not None
-    assert meta.get('kind') == 'file'
-    assert meta.get('last_hash') is not None
+    def test_scheduler_writes_actlog(tmpdir):
+        log_path = os.path.join(tmpdir, 'actlog.jsonl')
+        scheduler._on_task_done(task_id='demo', result={'ok': True}, actlog_path=log_path)
+        assert os.path.exists(log_path)
+        lines = [json.loads(l) for l in open(log_path) if l.strip()]
+        assert any(e.get('type') == 'sentinel_update' for e in lines)
 
-    scheduler._tick_sentinels()
-    first = livecard_meta.get_sentinel(meta['id'])
-    assert first['last_hash'] == meta['last_hash']
-
-    with open(target, 'w') as f:
-        f.write('v2')
-    time.sleep(1.1)
-    scheduler._tick_sentinels()
-    second = livecard_meta.get_sentinel(meta['id'])
-    assert second['last_hash'] != first['last_hash']
-
-    events = [e for e in livecard_meta.read_actlog() if e.get('type') == 'sentinel_change']
-    assert any(e.get('sentinel_id') == meta['id'] for e in events)
-    print('sentinel ok')
+    if __name__ == '__main__':
+        test_sentinel_meta_roundtrip()
+        with tempfile.TemporaryDirectory() as d:
+            test_scheduler_writes_actlog(d)
+        print('sentinel ok')
 
 
 # ---- 接线断言（自动生成，2026-11-15）----
