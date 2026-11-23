@@ -17354,6 +17354,18 @@
     return d ? '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2"/>' : "";
   }
 
+  // 2026-11-24（用户要求「教训要能被看见」）：教训正文挂在用户消息末尾（省缓存），
+  // 界面上原本看不到。这里显示一行摘要，鼠标悬停可看全部条目。
+  function injLine(li) {
+    if (!li || !li.ok) return "";
+    const ls = li.lines || [];
+    const n = li.count || ls.length || 0;
+    if (!n) return "";
+    const t = String(li.iso || "").slice(11, 16);
+    return '<div class="iter-rsi-sp" title="' + esc(ls.join(" / ")) + '">📌 上次注入教训 ' +
+      n + ' 条 · ' + esc(t) + ' · ' + (li.chars || 0) + ' 字</div>';
+  }
+
   function rsiPaint(d) {
     const box = document.getElementById("iter-rsi");
     if (!box) return;
@@ -17383,7 +17395,8 @@
       '<div class="iter-rsi-legend"><i class="c1"></i>综合指数<i class="c2"></i>加速指数</div>' +
       '<div class="iter-rsi-line">' + esc(d.line || "") + "</div>" +
       '<div class="iter-rsi-bars">' + bars + "</div>" +
-      (spTxt ? '<div class="iter-rsi-sp">' + spTxt + "</div>" : "");
+      (spTxt ? '<div class="iter-rsi-sp">' + spTxt + "</div>" : "") +
+      injLine(d.last_injected);
   }
 
   function rsiLoad() {

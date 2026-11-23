@@ -93,6 +93,74 @@ def _escalation_path() -> str:
 
 
 # --------------------------------------------------------------------------
+# 注入留痕（2026-11-24 用户要求：「教训涉及反思机制，希望它**能被看见**」）
+#
+# 背景：教训正文挂在最后一条用户消息末尾（省前缀缓存），前端**看不到** ——
+#   用户没法确认「反思机制的产物到底有没有进模型」。这里每轮留一条记录，
+#   供界面显示「上次注入了哪几条教训、什么时候、多长」。
+# ⚠️ 只留最近 _INJ_MAX 条，避免常驻服务里无限长大。
+# ⚠️ 节流：内容完全相同且距上次 < _INJ_MIN_GAP 秒 → 不重复写盘（对话主循环里调，不能每轮都 IO）。
+# --------------------------------------------------------------------------
+_INJ_MAX = 20
+_INJ_MIN_GAP = 300.0
+_last_inj = {"ts": 0.0, "text": ""}
+
+
+def _injections_path() -> str:
+    return os.path.join(_data_dir(), "lesson_injections.jsonl")
+
+
+def record_injection(text: str) -> None:
+    """记一笔「本轮真的把哪些教训送进了上下文」。绝不抛。"""
+    try:
+        raw = str(text or "")
+        key = " ".join(raw.split())
+        if not key:
+            return
+        now = time.time()
+        if key == _last_inj.get("text") and now - float(_last_inj.get("ts") or 0) < _INJ_MIN_GAP:
+            return
+        _last_inj["ts"] = now
+        _last_inj["text"] = key
+        rec = {"ts": now,
+               "iso": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "chars": len(raw),
+               "lines": [ln.strip() for ln in raw.splitlines() if ln.strip()][:12],
+               "text": raw[:2000]}
+        p = _injections_path()
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with open(p, "r", encoding="utf-8") as f:
+            lines = [ln for ln in f if ln.strip()]
+        if len(lines) > _INJ_MAX:
+            with open(p, "w", encoding="utf-8") as f:
+                f.writelines(lines[-_INJ_MAX:])
+    except Exception:                                   # noqa: BLE001
+        logger.debug("记录教训注入失败（不影响对话）", exc_info=True)
+
+
+def last_injection() -> dict:
+    """最近一次注入的教训（界面「能被看见」用）。没有记录就返回 ok=False。"""
+    try:
+        with open(_injections_path(), "r", encoding="utf-8") as f:
+            lines = [ln for ln in f if ln.strip()]
+    except OSError:
+        return {"ok": False, "error": "还没有注入记录"}
+    if not lines:
+        return {"ok": False, "error": "还没有注入记录"}
+    for ln in reversed(lines):
+        try:
+            rec = json.loads(ln)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(rec, dict) and rec.get("lines"):
+            rec["ok"] = True
+            rec["count"] = len(rec["lines"])
+            return rec
+    return {"ok": False, "error": "注入记录读不出来"}
+
+
+# --------------------------------------------------------------------------
 # 探针表：kind → (相对项目根的文件, 该修法落地后必然出现的字符串)
 #
 # ⚠️ 只放**能一句话判定**的：文件里出现这个字符串 = 修了。

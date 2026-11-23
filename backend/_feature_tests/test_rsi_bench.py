@@ -20,6 +20,15 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# ⚠️ 2026-11-24：断言名里带 🔒（锁区标记），Windows 控制台默认 GBK **编不出来**，
+#    print 时抛 UnicodeEncodeError 直接中断整个测试 —— 功能全对却显示失败。
+#    统一按 UTF-8 输出，编不出的字符退化成 ? 而不是崩。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:                                   # noqa: BLE001
+        pass
+
 from backend import iterloop as IL      # noqa: E402
 
 BENCH = r"D:\hwa_bench"

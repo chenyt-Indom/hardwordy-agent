@@ -1100,7 +1100,7 @@ def _postprocess_reply(text: str) -> str:  # noqa: dead-func 非流式通道预�
 def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
                      rag_ctx: str = "", img_ctx: str = "", skill_ctx: str = "",
                      sched_ctx: str = "", lesson_ctx: str = "",
-                     doc_ctx: str = "") -> list:
+                     doc_ctx: str = "", short_ctx: str = "") -> list:
     """把**每轮会变的**内容（历史摘要/记忆/知识库检索/当前时间）挂到**最后一条用户消息**上。
 
     返回一份新列表；`working` 本身不动。
@@ -1181,10 +1181,28 @@ def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
             #   和「累计 N 次」—— RSI 每小时采样、教训计数一变，这段字符串就变。
             #   原来它排在系统提示里（工具定义之前），于是**每变一次就废掉整段工具定义**。
             #   挪到这里：教训内容照样每轮都送进模型，只是不再当缓存前缀。
+            # ⚠️ 2026-11-24（用户要求）：教训是反思机制的产物，口径必须是**硬约束**，
+            #   不能写「参考建议」—— 那样模型会随手忽略。系统提示里另有一段静态声明
+            #   （见 build() 里【历史教训 = 硬约束】）负责「它算不算数」，这里只放正文。
             blocks.append(
-                "【历史教训（系统注入，不是用户说的话）】\n" + lesson_ctx
-                + "\n（以上是系统根据前几轮反思自动注入的教训，属于参考建议；"
-                  "和用户本轮的要求冲突时**以用户为准**。）")
+                "【历史教训（系统注入·硬约束，不是用户说的话）】\n" + lesson_ctx
+                + "\n（以上是系统根据前几轮反思自动注入的教训，**按硬约束执行**；"
+                  "只有用户本轮**明确要求**冲突时才以用户为准，并点明覆盖了哪一条。）")
+            # ★ 2026-11-24：留痕，让用户「看得见」本轮到底注入了什么（绝不抛）。
+            try:
+                from . import lessonloop as _ll_rc
+                _ll_rc.record_injection(lesson_ctx)
+            except Exception:                           # noqa: BLE001
+                logger.debug("教训注入留痕失败（不影响对话）", exc_info=True)
+        if short_ctx:
+            # ⚠️⚠️ 2026-11-24：短确认规则**不再拼进系统提示**。
+            #   它只在本轮消息满足条件时才出现 → 一旦出现/消失，
+            #   排在它后面的工具定义（≈13000 token）缓存全废。
+            #   挂到这里：规则一个字不少，稳定前缀不受影响。
+            blocks.append(
+                "【本轮篇幅规则（系统注入，不是用户说的话）】" + short_ctx
+                + "\n（以上只约束**篇幅**，不改变该做什么；"
+                  "该动手的活儿照样调工具做完。）")
         if skill_ctx:
             blocks.append(skill_ctx)
         if sched_ctx:
@@ -1243,8 +1261,13 @@ _SHORT_CONFIRM_MAX_CHARS = 10
 # 「了」单字最容易误伤，所以下面配了排除词表（写/画/生成…一律不算确认）。
 _SHORT_CONFIRM_HINTS = (
     "是", "否", "对", "行不行", "对不对",
-    "吗", "呢", "？", "?", "了", "继续", "然后呢", "还有呢", "确认",
+    "吗", "呢", "？", "?", "了", "确认",
 )
+# ⚠️⚠️ 2026-11-24 二次收紧：**"继续 / 然后呢 / 还有呢" 已从特征表移除**。
+#   用户原话「质量只能提升不能降」。这三个是**催活指令**（＝接着把活干完），
+#   不是确认 —— 判成短确认后会被「3 行 + 不要重新规划」压住，
+#   本该动手的活儿反而被挡回去（实测风险：回一句"要我改吗？"就收工）。
+#   真正需要压缩的只是「是 / 好了吗 / 对不对」这类纯确认，够用了。
 # ⚠️ 故意**不收录**「好 / 嗯 / 可以 / 行」：这些多半是"同意动手"（「好的」＝去做吧），
 #    套上 3 行限制反而会把该做的活儿挡下来；不然「你好」这种问候也会被判成短确认。
 # 命中这些词就是"真任务"，哪怕字数很短也不能按短确认处理
@@ -1252,6 +1275,12 @@ _SHORT_CONFIRM_HINTS = (
 _SHORT_CONFIRM_EXCLUDE = _COMPLEX_HINTS + (
     "什么", "为什么", "怎么", "如何", "区别", "对比", "介绍", "解释", "分析",
     "讲讲", "说说", "帮我",
+)
+# ⚠️⚠️ 2026-11-24：**催活短语**黑名单 —— 光从 _SHORT_CONFIRM_HINTS 里删掉还不够：
+#   「然后呢 / 还有呢」都含特征词「呢」，删了照样会被"呢"捞回来（实测就是如此）。
+#   这些词的真实含义是"接着把活干完"，必须走正常轮次（能做工具、能展开）。
+_SHORT_CONFIRM_CANCEL = (
+    "继续", "然后呢", "还有呢", "接着", "往下", "下一步",
 )
 
 
@@ -1266,6 +1295,9 @@ def _is_short_confirm(text) -> bool:
     if not t or len(t) > _SHORT_CONFIRM_MAX_CHARS:
         return False
     if any(k in t for k in _SHORT_CONFIRM_EXCLUDE):
+        return False
+    # ⚠️ 催活短语优先判否：它们含「呢」之类的特征词，不先拦就会被误判（见常量注释）。
+    if any(k in t for k in _SHORT_CONFIRM_CANCEL):
         return False
     return any(k in t for k in _SHORT_CONFIRM_HINTS)
 
@@ -1283,8 +1315,10 @@ def _short_confirm_ctx() -> str:
         "- 正文最后附**恰好一条**能自己复核的**只读**命令（单独一行代码块），"
         "例如 `git status --short`、`git log -1 --stat`、`py -3 -m pytest -q backend/_feature_tests`、"
         "`dir`；**禁止**给会改变状态或产生副作用的命令（写文件、git commit、pip install、删目录…）。\n"
-        "- 若这件事**确实没法用一句话答完**（要改文件、要跑长任务），"
-        "就只用一行回「这需要动手改，要我改吗？」，**不要**展开长文。"
+        "- ⚠️ **但绝不因为要短就不干活**：这句话如果确实要求**动手**（改文件、跑验证、"
+        "生成产物），就**照常调用工具把它做完**，只把**汇报**压到 3 行内"
+        "（做了什么 / 结果如何 / 产物在哪）。\n"
+        "  **禁止**只回一句请示就把该做的活推回去 —— 用户要的是结果，不是请示。"
     )
 
 
@@ -4751,6 +4785,8 @@ def selfiter_rsi(limit: int = 120):
         ("trend", lambda: _ll.rsi_trend(limit=limit)),
         ("weakest", lambda: _ll.rsi_weakest()),
         ("lessons", lambda: _ll.audit()),
+        # 2026-11-24：让教训「能被看见」—— 最近一次真正注入进上下文的教训
+        ("last_injected", lambda: _ll.last_injection()),
     ):
         try:
             out[key] = fn()
@@ -7923,6 +7959,22 @@ class _SystemPrompt:
         except Exception:
             _lesson_ctx = ""
             logger.warning("取历史教训失败（不影响对话）", exc_info=True)
+        # ⚠️⚠️ 2026-11-24（用户要求）：教训涉及反思机制，必须放在**约束力高**的位置。
+        #   分工：
+        #     · 教训**正文**仍挂在最后一条用户消息末尾（`_attach_live_ctx` 的
+        #       lesson_ctx）—— 那是最省缓存的位置（不动系统提示前缀）；
+        #     · 「它算不算数」这件事**必须写进系统提示**，否则模型会把教训当普通参考资料。
+        #   ⚠️ 这段是**静态字符串**（不随教训内容变化）→ 不会作废前缀缓存，零代价。
+        #   教训正文要是挪回系统提示，每变一次就废掉后面 ≈13000 token 的工具定义。
+        parts.append(
+            "\n【历史教训 = 硬约束（系统注入，不是用户说的话）】\n"
+            "本轮用户消息末尾可能附有【历史教训】块，那是你前几轮反思得出、"
+            "流程/代码里**尚未落地**的结论。\n"
+            "· 它不是「参考资料」，是**必须执行**的硬约束：碰到同类情况，"
+            "直接按它写的「改法」做，不要重新推演一遍。\n"
+            "· 不得因为「这次情况略有不同」就跳过它；拿不准时按更严的那条做。\n"
+            "· 只有用户本轮**明确要求**与它冲突时才以用户为准，并在回答里点明覆盖了哪一条。\n"
+            "· 教训块为空 = 本轮没有未落地的教训，照常做事，**不要自己编造教训**。")
         parts.append("回答请使用中文；直接、可执行。"
                      "长度严格按上面【回复长度分档】执行，不许凭感觉伸缩。")
         if no_tools:
@@ -8609,9 +8661,18 @@ async def chat(req: ChatRequest,
     #   （理由见 _is_short_confirm 上面的注释）。
     #   ⚠️ 带图 / 带前图的轮次不套这条：「改成这样了」这类短句其实是微改指令，
     #      压成 3 行会把改法丢掉（同 simple_q 的判据）。
+    # ⚠️⚠️ 2026-11-24 二次修（用户要求「质量只能提升不能降，token 消耗也要降」）：
+    #   ① 这段规则**不再 `sys_prompt +=`** —— 它按本轮消息变化，一变就把排在后面的
+    #      38 个工具定义（≈13000 token）缓存全部作废。改挂到最后一条用户消息
+    #      （_sp_out["short"] → _attach_live_ctx 的 short_ctx），规则一字不少。
+    #   ② 顺带启用 **lean 工具集**：短确认轮次本来就不该做重活（规则里写着"不是新任务"），
+    #      砍掉地图/天气/工作区/上传托管 ≈ **3400 token**；run_python、文件、图片、
+    #      文档生成、联网、知识库全都保留，需要核实/动手时照样够用。
     if _is_short_confirm(last_user) and not images and not prev_img:
-        sys_prompt += _short_confirm_ctx()
-        logger.info("[chat] 短确认轮次 → 注入短回答规则（%r）", str(last_user)[:20])
+        _sp_out["short"] = _short_confirm_ctx()
+        _lean = True
+        logger.info("[chat] 短确认轮次 → 规则挂用户消息 + lean 工具集（%r）",
+                    str(last_user)[:20])
     if writing_mode or office_mode:
         # 长产物的**工具调用 JSON 本身就很长**（一份 15 页 PPT 的内容都在
         # tool_calls 的参数里），额度给小了会被截断 → 生成失败或只剩半份。
@@ -8955,7 +9016,8 @@ async def chat(req: ChatRequest,
                                    img_ctx=_img_available_note(), skill_ctx=_skill_ctx,
                                    sched_ctx=_sched_ctx(),
                                    lesson_ctx=_sp_out.get("lesson", ""),
-                                   doc_ctx=_sp_out.get("doc", ""))
+                                   doc_ctx=_sp_out.get("doc", ""),
+                                   short_ctx=_sp_out.get("short", ""))
         final_text = ""
         final_thinking = ""
         used_tools = set()          # 本轮真正调用过的工具（用来判断"是不是光嘴上说说"）
@@ -11356,17 +11418,22 @@ async def chat_deepseek(req: ChatRequest,
     # 症状：用户让 DeepSeek「做个 PPT / 画张图」，它不调 ask_user 直接瞎猜着做。
     # 工具在（41 个里有 ask_user），但模型不知道**什么时候该用**。
     sys_prompt += _ask_rules(cfg)
-    # ★ 2026-11-23：上面裁剪掉的较早历史，压成摘要并进系统提示 ——
+    # ⚠️⚠️ 2026-11-24：下面这两段都是**每轮会变**的内容，原来直接拼进 sys_prompt，
+    #   一变就把整段系统提示作废（云端前缀缓存归零，等于每轮重付一次全量）。
+    #   改成挂到最后一条用户消息（见下面 `_ctx2 = list(_ds_user_ctx)`）——
+    #   内容一字不少，稳定前缀不再被冲掉。
+    _ds_user_ctx = []
+    # ★ 2026-11-23：上面裁剪掉的较早历史，压成摘要 ——
     #   否则用户回头问「开头聊了什么」，模型会一脸茫然（本地通道同款做法）。
     if _hist_digest_extra:
-        sys_prompt += "\n\n" + _hist_digest_extra
+        _ds_user_ctx.append(_hist_digest_extra)
     # ★ 2026-11-24：短确认轮次（主通道 /api/chat 同款规则，见 _is_short_confirm）。
     #   ⚠️ 必须在这里也接一遍：日志实测真实流量全走这条云端通道
     #   （/api/chat/deepseek 17 次 / 本地 /api/chat 0 次），只改本地等于没生效。
     #   带图轮次不套（同主通道判据）。
     if _is_short_confirm(last_user) and not _imgs:
-        sys_prompt += _short_confirm_ctx()
-        logger.info("[chat.deepseek] 短确认轮次 → 注入短回答规则（%r）",
+        _ds_user_ctx.append(_short_confirm_ctx())
+        logger.info("[chat.deepseek] 短确认轮次 → 规则挂用户消息（%r）",
                     str(last_user)[:20])
 
     # ★ 2026-11-09：云端通道原来**完全没接**交接卡和工具账本 —— 用户用 DeepSeek 时
@@ -11374,7 +11441,7 @@ async def chat_deepseek(req: ChatRequest,
     #   和主通道一样挂在**最后一条用户消息**上（不动 system，保住前缀缓存）。
     try:
         from . import handoff as _handoff2
-        _ctx2 = []
+        _ctx2 = list(_ds_user_ctx)
         _h2 = _handoff2.render(session)
         if _h2:
             _ctx2.append(_h2)
