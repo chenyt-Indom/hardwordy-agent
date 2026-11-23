@@ -1228,7 +1228,10 @@ def _actlog(entry):
                 try:
                     os.fsync(f.fileno())
                 except OSError:
-                    pass          # 某些文件系统不支持 fsync，不算写入失败
+                    # 某些文件系统不支持 fsync，不算写入失败 —— 所以不能当错误抛，
+                    # 但也不能 `pass` 静默吞掉：真出现「账本说写成功其实没落盘」时，
+                    # 这是唯一能证明 fsync 失败过的线索，debug 层留痕。
+                    logger.debug("actlog fsync 失败（文件系统可能不支持）", exc_info=True)
     except Exception as e:                              # noqa: BLE001
         # 不静默：账本写不进去必须留痕，否则统计会「凭空少样本」而无人知晓
         logger.warning("actlog 写入失败：%s", e, exc_info=True)
@@ -8270,11 +8273,60 @@ def _plan_notice(plan):
     return "\n".join(lines)[:1800]
 
 
+_NEW_POINT_FIRST = (
+    "★ 新增扣分点优先修：这一条针对的是**本轮改动新引入**的静态扣分点"
+    "（评分前的静态预检挑出来的）。先把它们改掉再谈别的 —— 每留一条都会直接"
+    "从质量分里扣分，功能做得再好也会被判「退步」。改法是改那一处代码本身"
+    "（该留痕日志就留痕、该限定异常类型就限定），不要靠加 noqa / 改评分口径绕过。")
+
+
+def _focus_actions(focus, limit=3):
+    """把「新增扣分点」整理成**排在最前面**的修复动作。
+
+    ★ 2026-11-23 需求：「评分前先跑静态检查，新增扣分点先走修复链修掉再评分，
+      并把『新增扣分点优先修』写进修复链 prompt」。
+      这些点大多是 info 级（silent-except 之类），走不到「只有 high/mid 才变动作」
+      那条老路 —— 所以由调用方显式传进来，这里单独变成动作，并在 detail 第一行
+      写明「新增扣分点优先修」，让它成为修复链 prompt 的第一件事。
+    """
+    groups = {}
+    for f in (focus or []):
+        if not isinstance(f, dict):
+            continue
+        rel = _norm_rel(f.get("file"))
+        if not rel:
+            continue
+        groups.setdefault(rel, []).append(f)
+    out = []
+    for rel, items in groups.items():
+        if len(out) >= limit:
+            break
+        if not _keep_real_files([rel]):
+            continue                    # 文件不存在 → 这条改不动，别造动作
+        lines = []
+        for it in items[:8]:
+            lines.append("第 %d 行 [%s] %s%s"
+                         % (int(it.get("line") or 0), it.get("kind") or "",
+                            it.get("msg") or "",
+                            ("　→ " + it["hint"]) if it.get("hint") else ""))
+        out.append({
+            "title": "★ 新增扣分点优先修：%s 里的 %d 处" % (rel, len(items)),
+            "detail": _NEW_POINT_FIRST + "\n" + "\n".join(lines),
+            "risk": "low",
+            "files": [rel],
+            "targets": [{"file": rel, "kind": i.get("kind"),
+                         "line": int(i.get("line") or 0)} for i in items[:20]],
+        })
+    return out
+
+
 def _actions_from_findings(findings, limit=6):
     """把静态检查发现按文件聚合成「可执行的动作」。
 
     聚合而不是一条一个动作：一个文件里同类的 5 处问题，一次改完比改 5 次
     安全得多（每次改都要备份 + 校验 + 回滚，来回 5 次更容易撞车）。
+    ★ 每条动作的 detail 第一行都写死「新增扣分点优先修」—— 这就是修复链
+      最终喂给模型的 prompt 正文，模型第一眼看到的必须是这句优先级。
     """
     groups = {}
     for f in findings or []:
@@ -8300,7 +8352,7 @@ def _actions_from_findings(findings, limit=6):
         top = "high" if any(i.get("level") == "high" for i in items) else "mid"
         out.append({
             "title": "修 %s 里的 %d 处问题" % (rel, len(items)),
-            "detail": "\n".join(lines),
+            "detail": _NEW_POINT_FIRST + "\n" + "\n".join(lines),
             "risk": "mid" if top == "high" else "low",
             "files": [rel],
             # 结构化记录「这条动作到底针对哪几处问题」。
@@ -8368,7 +8420,8 @@ _AUDIT_LOCK = threading.Lock()
 _AUDIT_LAST = {}          # source -> 上次触发的时间戳
 
 
-def run_audit(deep=False, source="manual", create_plan=True, auto_fix=None, verify=None):
+def run_audit(deep=False, source="manual", create_plan=True, auto_fix=None,
+              verify=None, focus=None):
     """自检入口：防重入 + 同源冷却，防止「反复建计划、反复改代码」。
 
     ⚠️ 2026-11-15 实测事故：一个卡死的测试脚本每分钟调一次自检，配合信任模式
@@ -8394,13 +8447,13 @@ def run_audit(deep=False, source="manual", create_plan=True, auto_fix=None, veri
     try:
         _AUDIT_LAST[source] = now
         return _run_audit_impl(deep=deep, source=source, create_plan=create_plan,
-                               auto_fix=auto_fix, verify=verify)
+                               auto_fix=auto_fix, verify=verify, focus=focus)
     finally:
         _AUDIT_LOCK.release()
 
 
 def _run_audit_impl(deep=False, source="manual", create_plan=True, auto_fix=None,
-                    verify=None):
+                    verify=None, focus=None):
     """跑一次代码自检。
 
     deep=True 时再让 LLM 审一遍（费 token，手动点才用）。
@@ -8465,6 +8518,14 @@ def _run_audit_impl(deep=False, source="manual", create_plan=True, auto_fix=None
         actions, llm_summary = _llm_deep_review({**res, "findings": confirmed})
     if not actions:
         actions = _actions_from_findings(confirmed)
+    # ★ 2026-11-23 需求：「新增扣分点优先修」—— 调用方（iter_runner 的评分前
+    #   静态预检）把「这一轮新引入、又没法安全自动修掉」的扣分点传进来，
+    #   这里**插到动作列表最前面**，于是修复链的 prompt 第一件事就是修它们。
+    _focus = _focus_actions(focus) if focus else []
+    if _focus:
+        _take = {str(a.get("title") or "") for a in _focus}
+        actions = _focus + [a for a in actions
+                            if str(a.get("title") or "") not in _take]
 
     def _brief(items, n=12):
         return [{"file": f.get("file"), "line": f.get("line"),
@@ -8478,9 +8539,11 @@ def _run_audit_impl(deep=False, source="manual", create_plan=True, auto_fix=None
         plan = _make_plan(
             trigger="audit:" + str(source),
             summary=("代码自检：%d 处问题 → 复核确认 %d 处（排除误报 %d / 存疑 %d）"
-                     "→ 整理成 %d 条待办"
+                     "→ 整理成 %d 条待办%s"
                      % (res.get("total") or 0, len(confirmed),
-                        len(rejected), len(unsure), len(actions))),
+                        len(rejected), len(unsure), len(actions),
+                        ("；其中 %d 条是「新增扣分点优先修」" % len(_focus))
+                        if _focus else "")),
             actions=actions,
             extra={"audit_counts": cnt, "verify": vstats,
                    "rejected": _brief(rejected), "unsure": _brief(unsure)})

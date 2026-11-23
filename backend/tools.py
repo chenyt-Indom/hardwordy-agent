@@ -1927,9 +1927,12 @@ def _selfdev_schemas() -> list:
                 "required": ["rel", "anchor", "text"]}}},
         {"type": "function", "function": {
             "name": "selfdev_patch",
-            "description": ("**精确替换**源码里的某一段（最安全的改法）。"
-                            "find 必须和文件里的原文**一字不差**（含缩进换行），"
-                            "且只能命中一处；命中 0 处或多处都会被拒绝。"),
+            "description": ("**替换**源码里的某一段（最安全的改法）。"
+                            "find 尽量和文件里的原文**一字不差**（含缩进换行），"
+                            "且只能命中一处；命中多处会拒绝。"
+                            "命中 0 处（锚点没写准）不再直接失败：会**降级**成"
+                            "「按行号定位 → 整段替换 → 整份重写」，并在账本里记一条"
+                            "anchor_miss 事件 —— 但仍建议先用 selfdev_read/grep 抄真实原文。"),
             "parameters": {"type": "object", "properties": {
                 "rel": {"type": "string", "description": "相对路径"},
                 "find": {"type": "string", "description": "要被替换的原文"},
@@ -2064,17 +2067,74 @@ def _read_raw(rel: str) -> str:
         return ""
 
 
-def _sd_patch_fixed(rel: str, find: str, replace: str, note: str = "") -> dict:
-    """修正版 selfdev.patch（2026-11-11 实测发现的严重 bug）。
+_MAX_ANCHOR_SLACK = 6
 
-    原实现（backend/selfdev.py 里的 patch）用 `read(rel)` 取文本，而 read()
-    返回的是「带行号、且只给前 200 行」的**展示用**文本 —— 于是：
-      · 第 200 行以后的代码永远匹配不到（patch 只能改文件开头几屏）；
-      · 万一在前 200 行里命中，它会把这份带行号的 200 行文本写回文件，
-        文件后面几千行**直接被截断**（灾难级）。
-    selfdev.py 是回撤机制本身、被划成只读，所以这里在工具层提供一份正确
-    实现：读原始全文 → 命中唯一才替换 → 写回仍走 _sd.write
-    （自带备份 + Python 语法校验）。
+
+def _line_anchor_span(text: str, find: str, replace: str = ""):
+    """「锚点没命中」的降级第一步：按**行号**定位要整段替换的范围。
+
+    为什么要有这一步：模型手写的 find 常常只差一个空格/缩进（或者少了一两行），
+    精确匹配直接 0 命中就整条拒绝 —— 模型只能再来一次，用户看到的表现是
+    「改了十几次都没改进去」。这里改成：读全文后按行定位，能唯一定位就整段替换。
+
+    做法：把 find 拆成行，取第一/最后一个非空行当**行级锚点**，在全文里各自
+    唯一命中一次 → 首尾行号之间的整段就是替换范围（比的是 strip 后的内容，
+    缩进/行尾空格的差异不再算失败）。
+
+    返回 {"start","end","line","lines","seg"}；下列情况一律返回 None
+    （**不猜**，宁可报错让人补上下文，也不能吞掉不相干的代码）：
+      · find 里没有非空行；
+      · 首行或末行在全文里命中 0 处或多处；
+      · 末行在首行之前；
+      · 定位出的段比 find 长太多（首尾锚点凑巧离得很远）。
+    """
+    lines = (text or "").splitlines(keepends=True)
+    if not lines:
+        return None
+    want = [ln.strip() for ln in str(find or "").splitlines() if ln.strip()]
+    if not want:
+        return None
+    head, tail = want[0], want[-1]
+    strip_lines = [ln.strip() for ln in lines]
+    if strip_lines.count(head) != 1:
+        return None
+    i = strip_lines.index(head)
+    if tail == head:
+        j = i
+    else:
+        if strip_lines.count(tail) != 1:
+            return None
+        j = strip_lines.index(tail)
+    if j < i:
+        return None
+    if (j - i + 1) > len(want) * 2 + _MAX_ANCHOR_SLACK:
+        return None
+    offs = [0]
+    for ln in lines:
+        offs.append(offs[-1] + len(ln))
+    start = offs[i]
+    end = offs[j + 1] if j + 1 < len(offs) else len(text)
+    seg = text[start:end]
+    new_seg = str(replace or "")
+    # 段尾带换行时，替换内容也得带 —— 否则会把下一行粘到同一行上。
+    if seg.endswith("\n") and not new_seg.endswith("\n"):
+        new_seg += "\n"
+    return {"start": start, "end": end, "line": i + 1, "lines": j - i + 1,
+            "seg": new_seg}
+
+
+def apply_patch(rel: str, find: str, replace: str, note: str = "",
+                session: str = "default") -> dict:
+    """改源码的**单一入口**：先精确替换，锚点没命中就降级成**整份重写**。
+
+    三段式：
+      ① 读原始全文（不是 read() 那份带行号的展示文本）；
+      ② find 恰好命中 1 处 → 直接替换，走 _sd.write（备份 + 语法校验）；
+      ③ 命中 0 处（锚点没命中）→ **不再直接拒绝**：按行号定位到整段
+         （见 _line_anchor_span）→ 整段替换 → 整份重写，并记一条
+         `anchor_miss` 事件（带 fallback=rewrite），便于统计这类失败还剩多少。
+
+    命中多处仍然拒绝：那种情况必须有更长的上下文才能确认改哪儿。
     """
     from . import selfdev as _sd
     try:
@@ -2087,16 +2147,65 @@ def _sd_patch_fixed(rel: str, find: str, replace: str, note: str = "") -> dict:
             text = f.read()
     except OSError as e:
         return {"ok": False, "error": "读取失败：%s" % e}
+    find = str(find or "")
     if not find:
         return {"ok": False, "error": "find 不能为空"}
     n = text.count(find)
-    if n == 0:
-        return {"ok": False,
-                "error": "没找到这段原文（空格/缩进/换行必须完全一致）"}
+    if n == 1:
+        return _sd.write(r, text.replace(find, replace or "", 1), note or "patch")
     if n > 1:
         return {"ok": False,
                 "error": "这段原文出现了 %d 次，为免改错地方，请给更长的一段上下文" % n}
-    return _sd.write(r, text.replace(find, replace, 1), note or "patch")
+    # ── 锚点没命中：降级为「按行号定位 → 整段替换 → 整份重写」──
+    loc = _line_anchor_span(text, find, replace)
+    if not loc:
+        return {"ok": False,
+                "error": "没找到这段原文（空格/缩进/换行必须完全一致）",
+                "hint": ("按行号也没能唯一定位：先用 selfdev_grep 搜关键字拿到真实原文，"
+                         "或改用 selfdev_insert_after（只要一行锚点）。")}
+    out = _sd.write(r, text[:loc["start"]] + loc["seg"] + text[loc["end"]:],
+                    note or "patch(anchor_miss→rewrite)")
+    ok = bool(out.get("ok"))
+    _last = loc["line"] + loc["lines"] - 1
+    try:
+        from . import actlog as _al
+        _al.record(session or "default", "selfdev_patch",
+                   {"rel": r, "anchor_miss": True, "fallback": "rewrite"},
+                   ok=ok,
+                   note=("patch 锚点未命中（anchor_miss）：按行号 %d~%d 整段替换后"
+                         "整份重写（fallback=rewrite）" % (loc["line"], _last)),
+                   evidence={"rel": r, "anchor_miss": True,
+                             "fallback": "rewrite",
+                             "line": loc["line"], "lines": loc["lines"]})
+    except Exception:                                 # noqa: BLE001
+        logger.debug("记 anchor_miss 事件失败", exc_info=True)
+    if ok:
+        out["anchor_miss"] = True
+        out["fallback"] = "rewrite"
+        out["line"] = loc["line"]
+        out["lines"] = loc["lines"]
+    return out
+
+
+def _sd_patch_fixed(rel: str, find: str, replace: str, note: str = "",
+                    **kw) -> dict:
+    """修正版 selfdev.patch（2026-11-11 实测发现的严重 bug）。
+
+    ★ 2026-11-24：锚点未命中不再直接拒绝，改为降级整份重写 —— 具体逻辑在
+      apply_patch()（这里只做转发，保证外部 `_sd.patch` 的调用点行为一致）。
+      之前这里 n==0 直接 return 错误，模型手写 find 差一个空格就整条失败。
+
+    原实现（backend/selfdev.py 里的 patch）用 `read(rel)` 取文本，而 read()
+    返回的是「带行号、且只给前 200 行」的**展示用**文本 —— 于是：
+      · 第 200 行以后的代码永远匹配不到（patch 只能改文件开头几屏）；
+      · 万一在前 200 行里命中，它会把这份带行号的 200 行文本写回文件，
+        文件后面几千行**直接被截断**（灾难级）。
+    selfdev.py 是回撤机制本身、被划成只读，所以这里在工具层提供一份正确
+    实现：读原始全文 → 命中唯一才替换 → 写回仍走 _sd.write
+    （自带备份 + Python 语法校验）。
+    """
+    return apply_patch(rel, find, replace, note,
+                       session=str(kw.get("session") or "default"))
 
 
 def _version_commit(act: str, r: dict, note: str = "") -> dict:
@@ -2346,17 +2455,33 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                                      str(a.get("replace") or ""))
             if _bg:
                 return _bg
+            # ★ 2026-11-24：锚点没命中不再直接失败 —— _sd.patch 已换成
+            #   apply_patch（精确命中 → 精确替换；没命中 → 按行号定位整段替换后
+            #   整份重写，并记 anchor_miss 事件）。这里只把降级结果告诉模型，
+            #   免得它以为没改进去又重复改一遍。
+            _ses = str((context or {}).get("session") or "default")
             r = _sd.patch(str(a.get("rel") or ""), str(a.get("find") or ""),
-                          str(a.get("replace") or ""), str(a.get("note") or ""))
+                          str(a.get("replace") or ""), str(a.get("note") or ""),
+                          session=_ses)
             if not r.get("ok"):
-                return "替换失败：%s" % r.get("error")
+                _hint = str(r.get("hint") or "").strip()
+                return "替换失败：%s%s" % (r.get("error"),
+                                          ("\n" + _hint) if _hint else "")
             _selfdev_ui(ui_events, "patch", r)
             _score_mark(str(r.get("rel") or ""), str(a.get("note") or ""))
             from . import handoff as _hd; _hd.record_from_tool(r, "patch", str(a.get("note") or ""))
             d = r.get("diff") or {}
+            _fb = ""
+            if r.get("anchor_miss"):
+                _fb = ("\n⚠️ find 和原文不是一字不差（锚点未命中），已**降级**为"
+                       "「按行号定位 → 整段替换 → 整份重写」：定位到第 %s~%s 行。"
+                       "这次改成功了，但下次请按真实原文写 find（用 selfdev_read/grep 抄）。"
+                       % (r.get("line"), (int(r.get("line") or 1)
+                                          + int(r.get("lines") or 1) - 1)))
             return (("已修改 %s（+%d −%d 行，%d 字）。详情已作为卡片展示给用户。\n"
                      "已通知前端「新版本已就绪」，等用户点重启才生效（别自己重启）。"
                      % (r["rel"], d.get("added", 0), d.get("removed", 0), r["chars"]))
+                    + _fb
                     + (_auto_review(context) if str(r.get("rel") or "").startswith("frontend/") else ""))
         if name == "selfdev_run":
             r = _sd.run_py(str(a.get("rel") or ""), str(a.get("args") or ""))

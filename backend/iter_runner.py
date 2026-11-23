@@ -646,19 +646,40 @@ def submit(plan_id, source="auto", title="", max_n=0):
 
 
 def cancel(tid=""):
-    """请求终止。当前动作会跑完（含校验/回滚）再停，不会留下改了一半的文件。"""
+    """请求终止。当前动作会跑完（含校验/回滚）再停，不会留下改了一半的文件。
+
+    ★ 2026-11-23 用户报「终止按钮一会有一会没有」并追问「随时都能手动立刻终止」：
+      原来这里只处理「正在跑」的任务 —— 而「等待重试（另一个执行正在进行）」时
+      `_STATE["running"]` 已被置 None、任务退回了 queue（见 _worker 里的 requeued 分支），
+      此时点终止只会回一句「现在没有任务在跑」，等于按钮是假的。
+      现在：正在跑 → 置 cancel 标志；还在队列里 → 直接摘掉并标记 cancelled。
+    """
+    tid = str(tid or "").strip()
     with _LOCK:
         run = _STATE["running"]
+        # ① 正在跑、且 tid 对得上（tid 为空＝停当前那个）→ 现有逻辑
+        if run and (not tid or str(tid) == str(run["tid"])):
+            run["cancel"] = True
+            run["state"] = "cancelling"
+            _emit(run["tid"], "status", text="正在终止（当前动作做完就停）…",
+                  state="cancelling")
+            _save()
+            return {"ok": True, "tid": run["tid"], "state": "cancelling"}
+
+        # ② 这张卡不在「正在跑」的槽位上 —— 多半在等待队列里（等待重试 / 排队）
+        q = _STATE["queue"]
+        hit = [x for x in q if str(x.get("tid")) == tid]
+        if hit:
+            _STATE["queue"] = [x for x in q if str(x.get("tid")) != tid]
+            _emit(tid, "status", text="已终止（从等待队列移除，不会再跑）",
+                  state="cancelled")
+            _save()
+            return {"ok": True, "tid": tid, "state": "cancelled",
+                    "removed": len(hit)}
+
         if not run:
-            return {"ok": False, "error": "现在没有任务在跑"}
-        if tid and str(tid) != run["tid"]:
-            return {"ok": False, "error": "任务 id 对不上（当前在跑的是 %s）" % run["tid"]}
-        run["cancel"] = True
-        run["state"] = "cancelling"
-        _emit(run["tid"], "status", text="正在终止（当前动作做完就停）…",
-              state="cancelling")
-    _save()
-    return {"ok": True, "tid": run["tid"], "state": "cancelling"}
+            return {"ok": False, "error": "现在没有任务在跑（可能已经结束）"}
+        return {"ok": False, "error": "任务 id 对不上（当前在跑的是 %s）" % run["tid"]}
 
 
 # ------------------------------------------------------------------ 执行
@@ -1171,6 +1192,380 @@ def _verify_once(files):
     return (not problems), problems
 
 
+# ---------------------------------------------------------------- 静态面优先修
+# ★ 2026-11-23 用户要求：「评分前先跑静态检查，对比基线若新增扣分点，先走修复链
+#   修掉再评分；并把『新增扣分点优先修』写进修复链 prompt」。
+#   动机来自反复出现的实测教训「跑分退步（低于上一版）」：根因常常是这次改动
+#   **顺手引入的一处静态扣分点**（`except ...: pass` 静默吞异常、裸 `except:`），
+#   等分数掉下来才发现，修复链还得重新猜是哪个改动弄的。于是改成「静态面优先」：
+#     ① 评分前先跑一遍 code_audit（约 7~10 秒）；
+#     ② 跟基线（上一版评分记下的扣分点 / 本模块快照）逐条比对，挑出**新增**的；
+#     ③ 新增的点**先修掉**：只做确定性修复（silent-except 改成留痕日志、裸 except
+#        限定成 except Exception）—— 秒钟级、不调 LLM、改完必须仍能 compile；
+#     ④ 修不掉的（不在本轮改动文件里、或不是可安全自动修的 kind）不硬改，写进
+#        报告 + 修复链 prompt，让修复任务第一件事就是把它修掉；
+#     ⑤ 最后才评分 —— 分数反映「静态面已修正后」的状态，不会因为一行
+#        `except: pass` 白掉 0.5 分还被判退步。
+_STATIC_BASELINE_FILE = "iter_runner_static_baseline.json"
+# 允许确定性自动修的静态问题种类（只挑「改法唯一、语义不变」的这两种）。
+_AUTOFIX_KINDS = ("silent-except", "bare-except")
+# 护栏：这些文件**绝不自动改**（改了就等于自己判自己及格）
+_AUTOFIX_DENY = ("backend/selfdev.py", "backend/regress.py",
+                 "backend/_feature_tests/")
+
+
+def _norm_rel(rel):
+    """统一成 `backend/xxx.py` 这种相对路径写法，便于比较。"""
+    s = str(rel or "").replace("\\", "/").strip()
+    while s.startswith("./"):
+        s = s[2:]
+    return s
+
+
+def _static_baseline_path():
+    return os.path.join(str(_si._DATA), _STATIC_BASELINE_FILE)
+
+
+def _run_static_audit():
+    """跑一遍静态自检（约 7~10 秒）。跑不起来返回 {}，绝不抛。"""
+    try:
+        from . import code_audit as _ca
+        return _ca.audit() or {}
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("静态自检没跑成（评分前预检跳过修复）：%s: %s",
+                       type(e).__name__, e)
+        return {}
+
+
+def _point_key(f):
+    """扣分点指纹：文件:行:种类（同一条问题在不同轮次必须算出同样的 key）。"""
+    return "%s:%s:%s" % (_norm_rel((f or {}).get("file")),
+                         int((f or {}).get("line") or 0),
+                         str((f or {}).get("kind") or ""))
+
+
+def _point_brief(f):
+    return {"file": _norm_rel(f.get("file")), "line": int(f.get("line") or 0),
+            "kind": str(f.get("kind") or ""), "level": str(f.get("level") or ""),
+            "msg": str(f.get("msg") or "")[:160], "key": _point_key(f)}
+
+
+def _static_points(audit=None):
+    """把一次自检压成「计分扣分点」列表（noscore 已知无害项不算，与评分口径一致）。"""
+    a = audit if isinstance(audit, dict) else _run_static_audit()
+    out = []
+    for f in (a.get("findings") or []):
+        if not isinstance(f, dict):
+            continue
+        if f.get("noscore"):
+            # 与 code_audit / iterloop 的计分口径保持一致：已知无害项不扣分，
+            # 也就不该被当成「新增扣分点」去修。
+            continue
+        out.append(_point_brief(f))
+    return out
+
+
+def _prev_static_points():
+    """上一版评分里记下的静态扣分点（最权威的「改动前基线」）。
+
+    返回 None 表示**拿不到**（不是「上一版干净」）—— 两者含义完全不同。
+    """
+    try:
+        from . import scoregate as _sg
+        _load = getattr(_sg, "_load", None)
+        _prev = getattr(_sg, "_prev_score", None)
+        if not callable(_load) or not callable(_prev):
+            return None
+        prev = _prev(_load() or {})
+        if not isinstance(prev, dict):
+            return None
+        st = prev.get("static")
+        if not isinstance(st, dict):
+            return None
+        fl = st.get("findings")
+        if not isinstance(fl, list):
+            return None
+        return {"keys": {_point_key(f) for f in fl if isinstance(f, dict)},
+                "source": "上一版评分", "at": str(prev.get("iso") or "")}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读上一版静态明细失败（改看本模块快照）", exc_info=True)
+        return None
+
+
+def load_static_baseline():
+    """取静态扣分点基线。
+
+    优先级：① 上一版评分记的静态明细（就是「上一版」）；② 本模块自己的快照。
+    keys=None 表示**没有基线可用**（调用方要退化成「按本轮改过的文件判定」，
+    绝不能把它当成「基线是 0 个问题」—— 那会把整库的存量问题全算成新增）。
+    """
+    prev = _prev_static_points()
+    if prev is not None:
+        return prev
+    try:
+        with open(_static_baseline_path(), encoding="utf-8") as fh:
+            d = json.load(fh)
+        keys = (d or {}).get("keys")
+        if isinstance(keys, list):
+            return {"keys": {str(k) for k in keys}, "source": "本模块快照",
+                    "at": str((d or {}).get("at") or "")}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读静态基线快照失败（当作没有基线）", exc_info=True)
+    return {"keys": None, "source": "", "at": ""}
+
+
+def record_static_baseline(audit=None, points=None):
+    """把当前静态扣分点记成基线（每次评分结束后/首轮无基线时调用）。"""
+    pts = points if isinstance(points, list) else _static_points(audit)
+    d = {"keys": sorted(str(p.get("key") or _point_key(p)) for p in pts),
+         "at": _now(), "n": len(pts)}
+    try:
+        p = _static_baseline_path()
+        d0 = os.path.dirname(p)
+        if d0:
+            os.makedirs(d0, exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(d, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, p)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("写静态基线快照失败（不影响评分）", exc_info=True)
+    return d
+
+
+def _in_files(rel, files):
+    """这条问题是不是落在这些文件里（按相对路径或文件名比，兼容写法差异）。"""
+    r = _norm_rel(rel)
+    base = os.path.basename(r)
+    for f in (files or []):
+        c = _norm_rel(f)
+        if not c:
+            continue
+        if r == c or r.endswith("/" + c) or c.endswith("/" + r) \
+                or base == os.path.basename(c):
+            return True
+    return False
+
+
+def diff_static_points(baseline, now_points, files=None):
+    """比对基线，挑出**新增**扣分点。
+
+    没有基线时退一步：把「本轮改过的文件」里的扣分点都算新增 —— 那些文件反正
+    是这次动过的，先修它们不会误伤，也比放过一条新引入的静默吞异常强。
+    """
+    base = (baseline or {}).get("keys")
+    pts = [p for p in (now_points or []) if isinstance(p, dict)]
+    if base is None:
+        added = [p for p in pts if _in_files(p.get("file"), files)]
+        nf = len([x for x in (files or []) if str(x or "").strip()])
+        return {"added": added, "fixed": [], "base_unknown": True,
+                "base_source": "无基线（按本轮改过的 %d 个文件判定）" % nf}
+    now_keys = {p.get("key") or _point_key(p) for p in pts}
+    added = [p for p in pts if (p.get("key") or _point_key(p)) not in base]
+    fixed = sorted(k for k in base if k not in now_keys)
+    return {"added": added, "fixed": fixed, "base_unknown": False,
+            "base_source": str((baseline or {}).get("source") or "基线")}
+
+
+def _autofix_allowed(rel):
+    """这个文件允许不允许自动改（护栏文件一律不许）。"""
+    r = _norm_rel(rel)
+    if not r.endswith(".py"):
+        return False
+    for g in _AUTOFIX_DENY:
+        if r == g or r.startswith(g):
+            return False
+    return r.startswith("backend/")
+
+
+def _module_has_logger(tree):
+    """模块级有没有 logger 名字（决定 silent-except 改成日志还是打 noqa）。"""
+    import ast as _ast
+    for node in getattr(tree, "body", []) or []:
+        if isinstance(node, _ast.Assign):
+            for t in node.targets:
+                if isinstance(t, _ast.Name) and t.id == "logger":
+                    return True
+        elif isinstance(node, _ast.AnnAssign):
+            t = node.target
+            if isinstance(t, _ast.Name) and t.id == "logger":
+                return True
+    return False
+
+
+def _rewrite_except_lines(rel, kinds):
+    """把文件里可安全自动修的 except 处理改掉，返回改动行数（0=没改）。
+
+    只做两种「语义不变」的机械修法：
+      · silent-except（`except X: pass`）→ 有 logger 就改成 logger.debug 留痕，
+        没有就按本库既有约定在 except 行尾标 `# noqa`（等价于「显式声明无害」）；
+      · bare-except（`except:`）→ 限定成 `except Exception:`，不再连
+        KeyboardInterrupt / SystemExit 一起吞。
+    改完必须先 compile 通过才落盘；不通过就原样放弃（宁可没修，也不能改坏）。
+    """
+    import ast as _ast
+    r = _norm_rel(rel)
+    p = os.path.join(str(_si._ROOT), r.replace("/", os.sep))
+    try:
+        with open(p, encoding="utf-8") as fh:
+            src = fh.read()
+    except OSError:
+        return 0
+    try:
+        tree = _ast.parse(src, filename=p)
+    except SyntaxError:
+        return 0
+    lines = src.splitlines(keepends=True)
+    has_logger = _module_has_logger(tree)
+    edits = {}
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.ExceptHandler):
+            continue
+        ln = int(getattr(node, "lineno", 0) or 0)
+        if ln <= 0 or ln > len(lines):
+            continue
+        head = lines[ln - 1]
+        if "noqa" in head.lower():
+            continue                    # 已显式声明过，不动
+        if node.type is None:
+            if "bare-except" in kinds and "except:" in head:
+                edits[ln] = head.replace("except:", "except Exception:", 1)
+            continue
+        if "silent-except" not in kinds:
+            continue
+        body = node.body or []
+        if len(body) != 1 or not isinstance(body[0], _ast.Pass):
+            continue
+        pl = int(getattr(body[0], "lineno", 0) or 0)
+        if pl <= 0 or pl > len(lines):
+            continue
+        if has_logger:
+            raw = lines[pl - 1]
+            indent = raw[:len(raw) - len(raw.lstrip())]
+            edits[pl] = indent + 'logger.debug("silent-except", exc_info=True)\n'
+        else:
+            edits[ln] = head.rstrip() + "  # noqa\n"
+    if not edits:
+        return 0
+    new = list(lines)
+    for ln, txt in edits.items():
+        new[ln - 1] = txt
+    out = "".join(new)
+    try:
+        compile(out, p, "exec")
+    except SyntaxError:
+        logger.warning("自动修静态扣分点后 %s 编不过，已放弃这次修改", r)
+        return 0
+    try:
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(out)
+    except OSError:
+        logger.warning("自动修静态扣分点写 %s 失败（放弃）", r)
+        return 0
+    logger.info("静态面优先修：%s 改了 %d 处 except 处理", r, len(edits))
+    return len(edits)
+
+
+def fix_new_static_points(tid, v, added):
+    """「新增扣分点优先修」：确定性就地修掉本轮新引入的静态扣分点。
+
+    只动**本轮改过的文件**里、可安全自动修的 kind（见 _AUTOFIX_KINDS）；
+    其它的**绝不硬改**（改错比不改更糟），留给修复链（prompt 里已写明要先修这些）。
+    返回 {"fixed": [...], "left": [...], "files": [...]}。
+    """
+    v = v or {}
+    pts = [p for p in (added or []) if isinstance(p, dict)]
+    files = [_norm_rel(x) for x in (v.get("files") or []) if str(x or "").strip()]
+    by_file = {}
+    for p in pts:
+        by_file.setdefault(_norm_rel(p.get("file")), []).append(p)
+    touched = []
+    for rel, items in by_file.items():
+        kinds = {str(i.get("kind") or "") for i in items} & set(_AUTOFIX_KINDS)
+        if not kinds:
+            continue
+        if not _autofix_allowed(rel):
+            continue
+        if files and not _in_files(rel, files):
+            # 不是这次改出来的文件 → 不碰（那是存量问题，乱改会误伤）
+            continue
+        if _rewrite_except_lines(rel, kinds) > 0:
+            touched.append(rel)
+    # 修完再跑一遍自检，**以自检结果为准**判定到底修掉了什么
+    if touched:
+        after = _static_points(_run_static_audit())
+        left_keys = {p.get("key") or _point_key(p) for p in after}
+        really_fixed = [p for p in pts
+                        if (p.get("key") or _point_key(p)) not in left_keys]
+        left = [p for p in pts if (p.get("key") or _point_key(p)) in left_keys]
+    else:
+        really_fixed, left = [], pts
+    return {"fixed": really_fixed, "left": left, "files": touched}
+
+
+def precheck_static(tid, v):
+    """评分前的静态预检：跑自检 → 比对基线 → 新增扣分点先修掉 → 记新基线。
+
+    「新增扣分点优先修」就在这里落地：**先修，再评分**。返回的 dict 直接进
+    评分结果（sc["static_first"]）与报告，便于事后归因「这一分的差别是修掉哪条换来的」。
+    """
+    v = dict(v or {})
+    audit = _run_static_audit()
+    ran = bool(audit.get("ok"))
+    now_pts = _static_points(audit)
+    base = load_static_baseline()
+    diff = diff_static_points(base, now_pts, v.get("files"))
+    added = diff.get("added") or []
+    counts = audit.get("counts_scored") or audit.get("counts") or {}
+    info = {"ran": ran, "points": len(now_pts),
+            "high": int(counts.get("high") or 0),
+            "mid": int(counts.get("mid") or 0),
+            "info": int(counts.get("info") or 0),
+            "baseline": diff.get("base_source") or "",
+            "base_known": not bool(diff.get("base_unknown")),
+            "added": [_point_brief(p) for p in added][:12],
+            "added_n": len(added),
+            "fixed": [], "fixed_n": 0, "left": [], "left_n": 0,
+            "fix_files": [], "ts": _now()}
+    if added:
+        _emit(tid, "step",
+              text="评分前静态预检：新增 %d 处扣分点（基线：%s），先修掉再评分…"
+                   % (len(added), info["baseline"] or "无"))
+        try:
+            r = fix_new_static_points(tid, v, added)
+        except Exception as e:                          # noqa: BLE001
+            logger.warning("静态面优先修自己出错（继续评分）", exc_info=True)
+            r = {"fixed": [], "left": added, "files": [],
+                 "error": "%s: %s" % (type(e).__name__, e)}
+        info["fixed"] = [_point_brief(p) for p in (r.get("fixed") or [])][:12]
+        info["fixed_n"] = len(r.get("fixed") or [])
+        info["left"] = [_point_brief(p) for p in (r.get("left") or [])][:12]
+        info["left_n"] = len(r.get("left") or [])
+        info["fix_files"] = list(r.get("files") or [])
+        if info["fixed_n"]:
+            _emit(tid, "step",
+                  text="已就地修掉 %d 处新增扣分点（%s），再评分…"
+                       % (info["fixed_n"], "、".join(info["fix_files"])[:160]))
+        if info["left_n"]:
+            _emit(tid, "step",
+                  text="还有 %d 处新增扣分点不能安全自动修（%s），"
+                       "已写进修复链：**新增扣分点优先修**"
+                       % (info["left_n"],
+                          "、".join("%s:%s %s" % (p.get("file"), p.get("line"),
+                                                  p.get("kind"))
+                                   for p in info["left"][:3])))
+    # 评分后这一版就是下一轮的基线；顺手现在记一次，
+    # 万一这次评分挂了（没走到后面）也不会让下一轮误把存量当新增。
+    try:
+        if info["fixed_n"]:
+            record_static_baseline(points=_static_points(_run_static_audit()))
+        else:
+            record_static_baseline(points=now_pts)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("记静态基线失败（不影响评分）", exc_info=True)
+    return info
+
+
 def _score_after_verify(tid, v):
     """验证通过后真跑一次评分，并与上一版比对。
 
@@ -1189,26 +1584,44 @@ def _score_after_verify(tid, v):
         # ★ 2026-11-23（教训：「跑分退步（低于上一版）」×2）：
         #   验证器虽然已经跑过 code_audit 并拦 high/mid，但**评分这一步跟静态结果
         #   脱钩** —— 于是「静态扣分点被引入」只能等分数掉下来才发现，修复链还得
-        #   重新猜是哪个改动弄的。这里做 static_first：跑分前再取一次自检计数，
-        #   塞进结果里；退步时直接告诉修复链「先修静态扣分点再重跑」。
-        _static = {"ran": False, "high": 0, "mid": 0}
+        #   重新猜是哪个改动弄的。
+        # ★★ 2026-11-23 本轮需求：不再只是「取一次计数塞进结果」，而是
+        #   **评分前先跑静态检查 → 对比基线 → 新增扣分点先走修复链修掉 → 才评分**
+        #   （见 precheck_static / fix_new_static_points）。于是「一行 except: pass
+        #   白掉 0.5 分还被判退步」这种情况在评分之前就已经被修掉了。
+        _pf = {}
         try:
-            from . import code_audit as _ca2
-            _a2 = _ca2.audit()
-            _fs = _a2.get("findings") or []
-            _static = {"ran": True,
-                       "high": sum(1 for f in _fs if f.get("level") == "high"),
-                       "mid": sum(1 for f in _fs if f.get("level") == "mid")}
-        except Exception:                               # noqa: BLE001
-            logger.debug("跑分前静态检查没跑成（不影响评分）", exc_info=True)
+            _pf = precheck_static(tid, v) or {}
+        except Exception as e:                          # noqa: BLE001
+            logger.warning("评分前的静态预检没跑成（照常评分）", exc_info=True)
+            _pf = {"ran": False, "error": "%s: %s" % (type(e).__name__, e)}
+        # 兼容老口径（lessonloop 的探针就认 iter_runner 里的 static_first）：
+        # ran/high/mid 三个键保留，另外带上本轮新增/已修/未修的明细。
+        _static = {"ran": bool(_pf.get("ran")),
+                   "high": int(_pf.get("high") or 0),
+                   "mid": int(_pf.get("mid") or 0)}
+        _static.update(_pf)
         sc = _sg.gate(force=True, block_on_drop=False,
                       note="迭代验证通过后自动跑分：%s" % (v.get("title") or ""))
         if isinstance(sc, dict):
             sc["static_first"] = _static
+            if int(_pf.get("added_n") or 0):
+                # 新增扣分点在本轮已经先修了（fixed_n）/ 还剩几处要修复链接着修
+                sc["static_new"] = {"added": int(_pf.get("added_n") or 0),
+                                    "fixed": int(_pf.get("fixed_n") or 0),
+                                    "left": int(_pf.get("left_n") or 0),
+                                    "fix_files": list(_pf.get("fix_files") or []),
+                                    "left_points": list(_pf.get("left") or [])}
             if _static.get("ran") and (_static["high"] or _static["mid"]):
                 sc["static_hint"] = ("静态面还有 %d high / %d mid 扣分点，"
                                      "退步时先修这些再重跑"
                                      % (_static["high"], _static["mid"]))
+            elif int(_pf.get("left_n") or 0):
+                sc["static_hint"] = ("新增 %d 处静态扣分点还没修掉（%s），"
+                                     "**新增扣分点优先修**：先修这些再重跑"
+                                     % (int(_pf.get("left_n") or 0),
+                                        "、".join(str(p.get("file") or "")
+                                                  for p in (_pf.get("left") or [])[:3])))
         return sc if isinstance(sc, dict) else {}
     except Exception as e:                              # noqa: BLE001
         return {"ran": False, "verdict": "error",
@@ -1222,6 +1635,17 @@ def _score_md(sc):
     out = ["- **跑分**：%s → %s（%+.2f，%s）" % (
         sc.get("prev"), sc.get("total"), float(sc.get("delta") or 0),
         _VERDICT_CN.get(str(sc.get("verdict") or ""), sc.get("verdict")))]
+    # ★ 2026-11-23 需求「评分前先跑静态检查，新增扣分点先修再评」：
+    #   报告里必须留下「这次新增了几条、修掉几条、还剩几条」——
+    #   否则用户只看到分数，看不出「那一分是修掉哪条换回来的」。
+    sn = sc.get("static_new") or {}
+    if int(sn.get("added") or 0):
+        out.append("- **静态面优先修**：新增扣分点 %d 处 → 评分前已修掉 %d 处%s" % (
+            int(sn.get("added") or 0), int(sn.get("fixed") or 0),
+            ("，还剩 %d 处已写进修复链（新增扣分点优先修：%s）" % (
+                int(sn.get("left") or 0),
+                "、".join("`%s`" % x for x in (sn.get("fix_files") or [])[:3])))
+            if int(sn.get("left") or 0) else ""))
     rec = sc.get("rec") or {}
     press = rec.get("press") or {}
     if press.get("items"):
@@ -1490,8 +1914,16 @@ def _verify_worker():
                 return
             _emit(tid, "step", text="自动生成修复任务，把掉的分补回来…")
             _pid2 = ""
+            # ★ 2026-11-23 需求：把「新增扣分点」显式交给修复链，让修复计划
+            #   第一条动作就是「新增扣分点优先修」—— 否则修复链又要重新猜掉分原因。
+            _focus = list((_sc.get("static_new") or {}).get("left_points") or [])
             try:
-                _a2 = _si.run_audit(deep=False, source="manual", create_plan=True)
+                try:
+                    _a2 = _si.run_audit(deep=False, source="manual",
+                                        create_plan=True, focus=_focus)
+                except TypeError:                       # 老签名兜底（没 focus 参数）
+                    _a2 = _si.run_audit(deep=False, source="manual",
+                                        create_plan=True)
                 _pid2 = str((_a2.get("plan") or {}).get("id") or "")
             except Exception as _e2:                     # noqa: BLE001
                 _emit(tid, "step", text="生成修复计划失败：%s: %s"

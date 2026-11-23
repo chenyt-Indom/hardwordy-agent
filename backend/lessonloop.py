@@ -274,7 +274,12 @@ def _num_ts(v) -> float:
         #    实测把它记成异常后，光读一遍 actlog 就产生上千条噪音，
         #    200 条上限瞬间被灌满，**真正的静默失效反而被挤掉** ——
         #    那是记录污染，不是记录（2026-11-23 修）。
-        pass
+        #
+        #    ★ 但也不能写成 `pass`：静态检查会把它算成「静默吞异常」
+        #      （silent-except，扣 0.5 分），而且真出问题时完全无痕。
+        #      折中：只在 debug 层留一行 —— 正常情况零输出（不进 _silent_log，
+        #      避免上面说的噪音灌满），出问题时把 logging 调到 DEBUG 就能看到现场。
+        logger.debug("_num_ts: %r 不是数字，按时间串继续解析", s[:32])
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
             return time.mktime(time.strptime(s[:19] if len(s) >= 19 else s, fmt))

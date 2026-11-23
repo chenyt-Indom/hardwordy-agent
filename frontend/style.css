@@ -382,6 +382,10 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .btn.ghost:hover { background: var(--panel2); }
 .btn.danger { color: var(--danger); }
 .btn.danger:hover { background: var(--danger-soft); }
+/* 终止按钮常显：没任务在跑时弱化，有任务在跑时高亮闪烁（2026-11-23 用户要求） */
+.btn.stop { opacity: .55; }
+.btn.stop.running { opacity: 1; background: var(--danger-soft); animation: stopPulse 1.4s ease-in-out infinite; }
+@keyframes stopPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(220,60,60,.35); } 50% { box-shadow: 0 0 0 4px rgba(220,60,60,0); } }
 
 .mini-toolbar { display: flex; gap: 6px; margin-top: 10px; }
 
@@ -1590,6 +1594,27 @@ body.dragging .drop-overlay,
 .btn.stop:hover { background: rgba(229, 83, 75, .14); animation: none; }
 @keyframes stopPulse { 0%, 100% { opacity: 1 } 50% { opacity: .6 } }
 @media (prefers-reduced-motion: reduce) { .btn.stop { animation: none } }
+
+/* ---------- 「⏸ 暂停」/「▶ 继续」按钮（2026-11-23）----------
+   和 .btn.stop 一样：必须覆盖 .btn 的 width:100% + margin-top，
+   否则会被当成侧栏的整行按钮，把输入框挤扁。 */
+.btn.pause, .btn.resume {
+  width: auto; margin: 0; padding: 10px 14px;
+  flex: 0 0 auto; white-space: nowrap;
+}
+.btn.pause {
+  border: 1px solid rgba(214, 158, 46, .5);
+  background: transparent;
+}
+.btn.pause:hover { background: rgba(214, 158, 46, .14); }
+.btn.resume {
+  border: 1px solid rgba(64, 145, 108, .5);
+  background: transparent;
+  animation: resumeNudge 2.2s ease-in-out infinite;
+}
+.btn.resume:hover { background: rgba(64, 145, 108, .16); animation: none; }
+@keyframes resumeNudge { 0%, 100% { opacity: 1 } 50% { opacity: .68 } }
+@media (prefers-reduced-motion: reduce) { .btn.resume { animation: none } }
 
 /* ---------- 代码卡片（模型执行的代码 / 回答里的代码块）---------- */
 .code-card {

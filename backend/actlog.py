@@ -208,8 +208,12 @@ def record(session: str, name: str, args=None, ok: bool = True,
         #     ③ regression / phantom 等字段按白名单落盘，避免把大对象塞进账本。
         ev = {}
         if isinstance(evidence, dict):
+            # ★ 2026-11-24：白名单加上 anchor_miss / fallback —— patch 锚点没命中
+            #   而走降级重写时，这两个字段要真的落盘，否则「这类失败还剩多少」
+            #   根本统计不出来（args 里带了但 row["a"] 只保留 rel）。
             for k in ("fail_kind", "count", "regression", "phantom", "rel",
-                      "history", "line", "lines", "root_cause"):
+                      "history", "line", "lines", "root_cause",
+                      "anchor_miss", "fallback"):
                 if k in evidence and evidence[k] is not None:
                     ev[k] = evidence[k]
         elif isinstance(evidence, str) and evidence.strip():

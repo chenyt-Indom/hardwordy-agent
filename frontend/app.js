@@ -14,6 +14,12 @@
   let typingHintShown = false;
   let abortCtl = null;      // 用于「■ 终止」：中断当前的流式请求
   let aborted = false;      // 标记本轮是用户主动终止的（不是出错）
+  // ★ 2026-11-23：「⏸ 暂停」用的两个状态。
+  //   pausedNow —— 这一轮是"暂停"而不是"终止"：收尾时**不写〔已终止〕作废标记**，
+  //                因为用户要的是"接着写"，写作业标记会让模型下次不敢续。
+  //   pendingResume —— 暂停时的断点快照 {answer, prompt}，点「▶ 继续」时用。
+  let pausedNow = false;
+  let pendingResume = null;
   const history = [];       // 会话消息（用于多轮上下文）
   // 会话标识（后端据此把历史会话落盘，供记忆检索）
   let sessionId = localStorage.getItem("ai_session_id") || "";
@@ -7611,6 +7617,11 @@
   }
 
   async function send() {
+    // ★ 2026-11-23：用户直接发新消息 → 上一次的「暂停断点」就作废了（按钮一并收起）
+    if (pendingResume) {
+      pendingResume = null;
+      try { setResumeVisible(false); } catch (e) { /* 忽略 */ }
+    }
     setFreeView(false);        // 自己发消息 → 恢复跟随，别停在半路
     lastMap = null;            // 新一轮：地图卡片重新从一张开始（合并只在一轮内生效）
     const text = inputEl.value.trim();
@@ -7920,6 +7931,8 @@
   }
 
   async function doSend(promptText, mediaB64, docPayload) {
+    // ★ 2026-11-23：每一轮开始都清掉「暂停」标记（暂停只属于它那一轮）
+    pausedNow = false;
     // 用户自己发的（不是系统续写）→ 重置自动续写次数，避免"断两次以后再也不敢续"
     try {
       if (!/上一条回复被截断/.test(String(promptText || ""))) window.__autoCont = 0;
@@ -9297,6 +9310,22 @@
         if (answer) history.push({ role: "assistant", content: answerBubble.textContent });
         showToast("连接卡住了，已自动断开（内容已保留）");
         try { persistSession(); } catch (e) { /* 落盘失败不影响使用 */ }
+      } else if (pausedNow) {
+        // ★ 2026-11-23 用户要求：「暂停但是可以继续」。
+        //   和「终止」的区别全在这里 —— 不写〔已终止〕作废标记，而是把已生成的部分
+        //   当成一条**正常的助手消息**存进历史，再记下断点，点「▶ 继续」时
+        //   模型能看到自己写到哪儿、接着往下写，不会重复也不会重来。
+        answerBubble.classList.remove("empty-answer");
+        const keepP = (answer || "").trim();
+        answerBubble.textContent = keepP || "（已暂停：这一轮还没有输出内容）";
+        history.push({ role: "assistant",
+                       content: keepP || "（用户暂停了这次生成，还没有输出内容）" });
+        pendingResume = { answer: keepP, prompt: String(promptText || "") };
+        try { setResumeVisible(true); } catch (e) { /* 忽略 */ }
+        try { persistSession(); } catch (e) { /* 落盘失败不影响使用 */ }
+        if (typeof showToast === "function") {
+          showToast(keepP ? "已暂停，点「▶ 继续」接着写" : "已暂停");
+        }
       } else if (aborted || (err && err.name === "AbortError")) {
         // 用户点了「■ 终止」：把已经生成出来的部分留着，别报成错误
         answerBubble.classList.remove("empty-answer");
@@ -9361,19 +9390,44 @@
   }
 
   // ---------- 终止当前任务 ----------
+  // ★ 2026-11-23 用户要求：「时刻都有那个终止按键，随时都能手动立刻终止」。
+  //   所以按钮**永远显示、永远可点**；on=true 只表示"现在有任务在跑"，用来高亮。
   function setStopVisible(on) {
     const b = $("#stopBtn");
     if (!b) return;
-    b.hidden = !on;
-    b.disabled = !on;
+    b.hidden = false;
+    b.disabled = false;
+    b.classList.toggle("running", !!on);
+    // ★ 2026-11-23：「⏸ 暂停」只在真的有任务在跑时才出现 ——
+    //   没东西可暂停时摆一个按钮，点了什么都不发生，反而让人以为坏了。
+    // ⚠️ 2026-11-23：暂停按钮原来 `hidden = !on` —— 只要某一处调 setStopVisible(false)，
+    //   它就整个消失，跟「终止」之前"一会有一会没有"是同一个病。
+    //   改成**常驻显示**：没任务可暂停时置灰（disabled），有任务时亮起来。
+    //   这样按钮位置永远固定，用户不用满屏找它。
+    const p = $("#pauseBtn");
+    if (p) { p.hidden = false; p.disabled = !on; }
+  }
+
+  // 「▶ 继续」按钮：暂停之后才出现，点一下接着写
+  function setResumeVisible(on) {
+    const r = $("#resumeBtn");
+    if (!r) return;
+    r.hidden = !on;
+    r.disabled = !on;
   }
 
   function stopStreaming() {
-    if (!streaming) return;
+    const wasStreaming = !!streaming;
     aborted = true;
+    // ★ 终止 = 真的不干了 → 把「可继续」的断点丢掉（暂停才留）
+    pausedNow = false;
+    pendingResume = null;
+    try { setResumeVisible(false); } catch (e) { /* 忽略 */ }
     // ① 断掉前端的流（连接一断，服务端就会掐掉到 Ollama 的连接）
     try { abortCtl && abortCtl.abort(); } catch (e) { /* 忽略 */ }
-    // ② 再补一刀：显式通知后端停止，防止连接没断干净导致模型继续跑
+    // ② 再补一刀：通知后端置位终止令牌 —— 工具跑在线程池里，光断连接管不到它，
+    //    只有这个令牌能让它在当前这步做完后**不再继续下一轮**。
+    //    ⚠️ 不管有没有在流式都要发：点的时候可能正好卡在工具里（界面已恢复）。
     try {
       fetch("/api/chat/stop", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -9381,14 +9435,73 @@
       });
     } catch (e) { /* 忽略 */ }
     // ③ 立刻恢复界面，不用等 finally
+    if (wasStreaming) {
+      streaming = false;
+      $("#sendBtn").disabled = false;
+    }
+    setStopVisible(false);
+    if (typeof showToast === "function") {
+      showToast(wasStreaming
+        ? "已终止"
+        : "已发出终止请求（后台任务会在当前这步做完时停下）", "warn");
+    }
+  }
+
+  // ---------- 暂停（停下但保住进度） ----------
+  // 和「■ 终止」的唯一区别在**收尾怎么记这一笔**：
+  //   · 终止 → 历史里写〔已终止〕作废标记，模型下次不会自己接着做；
+  //   · 暂停 → 把已生成的内容当助手消息存下来，并记住断点，等用户点「▶ 继续」。
+  // 两者对后端做的事是同一件（abort 连接 + 置位终止令牌），
+  // 因为工具跑在线程池里没法真"挂起"，能保证的是"当前这步做完就停"。
+  function pauseStream() {
+    if (!streaming) return;
+    pausedNow = true;
+    aborted = true;
+    try { abortCtl && abortCtl.abort(); } catch (e) { /* 忽略 */ }
+    try {
+      fetch("/api/chat/stop", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+    } catch (e) { /* 忽略 */ }
     streaming = false;
     $("#sendBtn").disabled = false;
     setStopVisible(false);
+    if (typeof showToast === "function") {
+      showToast("已暂停：内容都留着，点「▶ 继续」接着写", "warn");
+    }
+  }
+
+  // ---------- 继续（从断点接着写） ----------
+  // 做法：暂停时已经把"已生成的部分"作为助手消息写进了 history，
+  // 这里再发一条**不出现在界面上的**续写指令 —— doSend 只 push 历史 + 建回答卡，
+  // 不 addMsg 用户气泡（气泡是 send() 里加的），所以不会多出一条「继续」的气泡。
+  async function resumeStream() {
+    const snap = pendingResume;
+    if (!snap) { setResumeVisible(false); return; }
+    if (streaming) {
+      if (typeof showToast === "function") showToast("还在生成，先终止或等它结束", "warn");
+      return;
+    }
+    pendingResume = null;
+    setResumeVisible(false);
+    const cont = "（接着上一条被暂停的回答继续写：不要重复已经写过的内容，直接从断点续上；"
+               + "如果上一次有工具没跑完，先把它的结果用上再往下写。）";
+    try {
+      await doSend(cont, null, null);
+    } catch (e) {
+      if (typeof showToast === "function") showToast("继续失败：" + (e && e.message ? e.message : e), "warn");
+    }
   }
 
   const stopBtnEl = $("#stopBtn");
   if (stopBtnEl) stopBtnEl.onclick = stopStreaming;
+  const pauseBtnEl = $("#pauseBtn");
+  if (pauseBtnEl) pauseBtnEl.onclick = pauseStream;
+  const resumeBtnEl = $("#resumeBtn");
+  if (resumeBtnEl) resumeBtnEl.onclick = resumeStream;
   setStopVisible(false);
+  setResumeVisible(false);
 
   $("#sendBtn").onclick = send;
   inputEl.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } };
@@ -17569,12 +17682,14 @@
     // 排队中被提上来时（waiting → running）必须把外观也改回 running，
     // 否则这一条跑完了还挂着「正在等待执行」的样式，看起来像卡住了。
     el.setAttribute("data-state", state);
-    if (state !== "running") {
-      const stop = el.querySelector(".if-stop");
-      if (stop) stop.hidden = true;
-    } else {
-      const stop = el.querySelector(".if-stop");
-      if (stop) stop.hidden = false;
+    // ★ 2026-11-23 用户报「终止按钮一会有一会没有」：
+    //   原来只要 state !== "running" 就把 ⏹ 藏起来 —— 于是「等待重试（另一个执行
+    //   正在进行）」「排队等待」这些**任务还在、根本没结束**的状态下按钮就消失了，
+    //   用户想停却找不到按钮。改成：只有**终态**（done/cancelled/error）才藏，
+    //   running / waiting / paused / retry 一律保留，随时能停。
+    const stop = el.querySelector(".if-stop");
+    if (stop) {
+      stop.hidden = (state === "done" || state === "cancelled" || state === "error");
     }
   }
 
@@ -17795,6 +17910,10 @@
       feedRunningTid = run.tid;
       const el = feedEnsure(run.tid);
       if (el) {
+        // ★ 2026-11-23：只要后端确实有任务在跑，⏹ 就必须在 ——
+        //   别受上一次 waiting / paused 留下的 hidden 影响。
+        const st0 = el.querySelector(".if-stop");
+        if (st0) st0.hidden = false;
         const e2 = el.querySelector(".if-elapsed");
         if (e2) e2.textContent = run.elapsed + "s";
         const q = el.querySelector(".if-queue");
@@ -17839,8 +17958,10 @@
       const last = cards.length ? cards[cards.length - 1] : null;
       if (last) {
         last.setAttribute("data-state", "paused");
+        // ★ 2026-11-23：暂停态也保留 ⏹ ——「暂停」只是停在这里还能继续，
+        //   用户想彻底放弃时不该先把暂停条点掉才能终止。
         const stop = last.querySelector(".if-stop");
-        if (stop) stop.hidden = true;
+        if (stop) stop.hidden = false;
         const t = last.querySelector(".if-title");
         if (t) t.textContent = "⏸ 已暂停：本轮连续完成 " + (r.budget || 0) + " 个功能";
         const q = last.querySelector(".if-queue");
@@ -17940,8 +18061,11 @@
       e.preventDefault();
       const tid = el.getAttribute("data-tid");
       api("/api/selfiter/cancel", { tid: tid }).then(function (r) {
-        if (r && r.ok) say("已请求终止：当前这条动作做完就停（不会留改了一半的文件）", "warn");
-        else say((r && r.error) || "终止失败", "bad");
+        if (r && r.ok) {
+          // 队列里的任务能直接摘掉，正在跑的只能等当前动作收尾 —— 提示要说准。
+          if (r.state === "cancelled") say("已终止：这个任务已从等待队列移除，不会再跑", "warn");
+          else say("已请求终止：当前这条动作做完就停（不会留改了一半的文件）", "warn");
+        } else say((r && r.error) || "终止失败", "bad");
       });
       return;
     }

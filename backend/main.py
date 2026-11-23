@@ -7919,6 +7919,64 @@ def _stop_streams(session: str = "") -> int:
         return killed
 
 
+# ---------- 每会话的「终止令牌」（2026-11-23 用户要求：随时能立刻终止）----------
+# 为什么必须有它：`_stop_streams()` 只能 close **上游连接**，它管不到已经丢进
+# 线程池的同步工具（`asyncio.to_thread` 没有中断入口）。实测用户点终止时若正好
+# 在跑 workspace_run / web_search，界面立刻恢复了，后台工具却还在跑，跑完还会
+# 继续调模型进入下一轮 —— 用户看到的就是"点了没停下"。
+# 做法：每次请求生成一个**新的** Event 当令牌并登记为该会话的当前令牌；
+# 终止接口把它置位。agent loop 在**每轮开头**和**每次工具执行前后**都检查它，
+# 一旦置位就不再调模型、丢弃工具结果、直接收尾。
+# ⚠️ 用"新令牌"而不是 clear 旧标志：用户点完终止马上又发一条消息时，旧任务
+#    仍然握着自己的旧令牌（仍是置位状态 → 会正确停下），新请求的令牌是干净的
+#    —— 不会出现"上一刀的终止把新任务也砍了"或者"旧任务跟着新请求一起复活"。
+_cancel_flags: dict = {}
+_cancel_lock = threading.Lock()
+
+# ★ 2026-11-23：区分「终止」和「暂停」。
+#   两者底层动作一样（掐上游 + 置终止令牌），但语义不同：
+#     终止 = 这轮不干了，前端会在历史里写〔已终止〕作废标记；
+#     暂停 = 先停这儿，前端把已写的内容当正常回答存下，等「▶ 继续」接着写。
+#   这里只记一个标记，供日志和状态查询区分「被暂停」还是「被终止」——
+#   前端不需要读它（前端自己知道点的是哪个按钮），但它让事后排查不再抓瞎。
+_pause_flags: dict = {}
+
+
+def _new_stop_token(session: str) -> threading.Event:
+    """为这一次请求生成并登记新的终止令牌。"""
+    ev = threading.Event()
+    with _cancel_lock:
+        _cancel_flags[session or ""] = ev
+    return ev
+
+
+def _request_stop(session: str = "") -> int:
+    """置位终止令牌，返回置位的数量。session 为空=所有会话都停。"""
+    if session:
+        with _cancel_lock:
+            ev = _cancel_flags.get(session)
+            if ev is None:
+                ev = threading.Event()
+                _cancel_flags[session] = ev
+        ev.set()
+        return 1
+    with _cancel_lock:
+        items = list(_cancel_flags.values())
+        if not items:
+            items = [threading.Event()]
+            _cancel_flags[""] = items[0]
+    for ev in items:
+        ev.set()
+    return len(items)
+
+
+def _is_stopping(session: str = "") -> bool:
+    """该会话当前的令牌是否已置位（没登记过＝没在跑＝未终止）。"""
+    with _cancel_lock:
+        ev = _cancel_flags.get(session or "")
+    return bool(ev is not None and ev.is_set())
+
+
 def _ollama_loaded_models() -> set:
     """查询 Ollama 当前**已加载在显存/内存里**的模型名集合。
 
@@ -8751,7 +8809,16 @@ async def chat(req: ChatRequest,
         # 「提示词超出窗口」只自动重试一次（见下面 _is_context_err 分支）——
         # 再砍就什么都没了，第二次还失败就如实告诉用户。
         _ctx_trimmed = False
+        # ★ 2026-11-23：这一次请求的**终止令牌**。用户点「■ 终止」→ 后端置位它，
+        #   下面每轮开头、每次工具前后都检查 —— 保证"点了就真的不再往下跑"。
+        _stop_token = _new_stop_token(session)
         for _round in range(_max_rounds):
+            # ★★ 每轮开头先看有没有被终止。用户点终止时后台可能正卡在工具里，
+            #   工具一跑完就会走到这里；不检查的话它还会再调一次模型、再跑一轮工具。
+            if _stop_token.is_set():
+                logger.warning("[stop] 已终止，不再继续（第 %d 轮）", _round)
+                yield json.dumps({"note": "已终止：不再继续调用模型。"}) + "\n"
+                break
             # ★ 时间预算：轮次管不住"一轮很慢"的情况（读大文件、跑长脚本），
             #   所以再加一道墙钟上限。超了就收尾，但**不做静默退出**。
             if _round > 0 and (time.time() - _t_start) > _budget_s:
@@ -9322,6 +9389,9 @@ async def chat(req: ChatRequest,
             # 最后再按原顺序合并，保证前端看到的次序稳定。
             async def _run_one(idx, name, args):
                 ev = []
+                # ★ 2026-11-23：已点终止就不再**开新工具**（尤其别再去写文件/跑代码）
+                if _stop_token.is_set():
+                    return idx, name, "[已终止] 用户点了终止，这个工具没有执行", ev
                 # 诊断：把"每个工具执行那一刻的当前项目"打出来。
                 # 排查"AI 建完项目、文件却落进上一个项目"时必须看这个 ——
                 # 光看工具调用顺序是看不出来的，关键是**执行时**的 active_project。
@@ -9336,6 +9406,12 @@ async def chat(req: ChatRequest,
                                                   dict(ctx))
                 except Exception as e:
                     res = f"[工具执行失败] {name}：{e}"
+                # ★ 2026-11-23：工具跑的过程中被终止了 → 结果丢弃，就此打住。
+                #   线程里的同步工具没法中途掐断（asyncio.to_thread 没有中断入口），
+                #   这里保证的是"这步做完立刻停"，不会再进下一轮调模型。
+                if _stop_token.is_set():
+                    logger.warning("[stop] 工具 %s 执行期间被终止，结果丢弃", name)
+                    return idx, name, "[已终止] 用户中断，这个工具的结果已丢弃", ev
                 # ★ 画完图后**后台把对话模型请回显存**（不阻塞这里）。
                 #   画图前 t2i 会主动卸载对话模型（12GB 卡装不下 SDXL + 30B），
                 #   而 30B 冷启动要 ~20 秒 —— 不请回来的话，用户画完图接着聊
@@ -9409,9 +9485,9 @@ async def chat(req: ChatRequest,
                 # 记进「工具动作账本」：这是"刚才改了什么"唯一的可靠来源
                 try:
                     _args = calls[_idx][1] if 0 <= _idx < len(calls) else {}
-                    actlog.record(session, name, _args,
-                                  ok=not str(result).startswith("[工具执行失败]"),
-                                  result=result)
+                    _ok = not (str(result).startswith("[工具执行失败]")
+                               or str(result).startswith("[已终止]"))
+                    actlog.record(session, name, _args, ok=_ok, result=result)
                 except Exception:
                     logger.debug("silent-except", exc_info=True)
                 # 把本次新产生的图片登记下来，后续工具（如保存到图库）可按序号引用
@@ -12853,7 +12929,52 @@ def chat_stop(body: dict | None = None):
     """
     session = str(((body or {}).get("session_id")) or "").strip()
     killed = _stop_streams(session)
-    return {"ok": True, "stopped": killed}
+    # ★ 2026-11-23：除了掐上游连接，还必须**置位终止令牌** —— 工具跑在线程池里，
+    #   断连接管不到它；令牌置位后，工具一结束就不再继续下一轮、不再调模型。
+    flagged = _request_stop(session)
+    logger.warning("[stop] 收到终止请求 session=%r 掐连接=%d 置令牌=%d",
+                   session, killed, flagged)
+    with _cancel_lock:
+        _pause_flags.pop(session or "", None)   # 终止了就不是暂停，把标记清掉
+    return {"ok": True, "stopped": killed, "flagged": flagged}
+
+
+@app.post("/api/chat/pause")
+def chat_pause(body: dict | None = None):
+    """暂停当前正在进行的生成（界面上的「⏸ 暂停」按钮）。
+
+    和「■ 终止」做的是同一件底层动作（掐上游连接 + 置位终止令牌），
+    差别只在**收尾怎么记这一笔**，而那一段在前端：
+      · 终止 → 历史里写〔已终止〕作废标记，模型下次不会自己接着做；
+      · 暂停 → 已生成的部分当**正常回答**存下来，并记住断点，点「▶ 继续」接着写。
+
+    后端这里多做一件事：记一个 `_pause_flags` 标记，
+    这样事后翻日志能分清「用户是终止了」还是「用户只是暂停了」——
+    以前两者在日志里长得一模一样，排查时只能猜。
+    """
+    session = str(((body or {}).get("session_id")) or "").strip()
+    killed = _stop_streams(session)
+    flagged = _request_stop(session)
+    with _cancel_lock:
+        _pause_flags[session or ""] = True
+    logger.warning("[pause] 收到暂停请求 session=%r 掐连接=%d 置令牌=%d",
+                   session, killed, flagged)
+    return {"ok": True, "paused": True, "stopped": killed, "flagged": flagged}
+
+
+@app.get("/api/chat/pause_state")
+def chat_pause_state(session_id: str = ""):
+    """查这个会话上一次停下来的原因：是「暂停」还是「终止」还是没停过。
+
+    给「▶ 继续」用：刷新页面后断点快照会丢（它只存在前端内存里），
+    靠这个接口至少能知道"上一轮是被暂停的、可以接着写"，而不是完全失忆。
+    """
+    s = str(session_id or "").strip()
+    with _cancel_lock:
+        paused = bool(_pause_flags.get(s or ""))
+        ev = _cancel_flags.get(s or "")
+    return {"ok": True, "paused": paused,
+            "stopped": bool(ev is not None and ev.is_set())}
 
 
 # 「现实世界里要查证才有把握」的名词线索（配合 _WEB_FACT_VERBS 一起用）。
