@@ -4555,6 +4555,34 @@ def selfiter_loop_score(body: dict = None):
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+@app.get("/api/selfiter/rsi")
+def selfiter_rsi(limit: int = 120):
+    """RSI 看板：综合指数 + 加速指数 + 历史序列 + 趋势形态 + 最弱项。
+
+    用户 2026-11-23 要求「前端增加图表可视化，我要肉眼可见的数据以及图表」——
+    单个分数看不出有没有在加速，必须把**序列**给前端画成折线：
+    综合指数（当前水平）一条线，加速指数（真实修复事件的速度）另一条线。
+    """
+    from . import lessonloop as _ll
+    out = {"ok": True}
+    for key, fn in (
+        ("index", lambda: _ll.rsi_index(cache_sec=0)),
+        ("speed", lambda: _ll.rsi_speed()),
+        ("trend", lambda: _ll.rsi_trend(limit=limit)),
+        ("weakest", lambda: _ll.rsi_weakest()),
+        ("lessons", lambda: _ll.audit()),
+    ):
+        try:
+            out[key] = fn()
+        except Exception as e:                          # noqa: BLE001
+            out[key] = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    try:
+        out["line"] = _ll.rsi_line()
+    except Exception as e:                              # noqa: BLE001
+        out["line"] = "RSI 结论取不到：%s" % e
+    return out
+
+
 @app.get("/api/selfiter/settings")
 def selfiter_settings_get():
     """读设置（信任模式 / 自动自检 / 诊断开关）。"""

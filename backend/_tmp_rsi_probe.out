@@ -1,0 +1,7 @@
+n_paths=128
+lessonloop_found=True
+rsi_speed_in_names=True n_names=56
+has_speed_def=True
+sym_lessonloop_has_speed=True
+sym_lessonloop_size=56
+cross_module_findings=0

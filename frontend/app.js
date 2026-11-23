@@ -16912,6 +16912,68 @@
       .catch(function () { node.innerHTML = old; node.dataset.busy = "0"; });
   }
 
+  // ---------- RSI 曲线图（用户 2026-11-23 要求：肉眼可见的数据与图表） ----------
+  // 双线的原因：综合指数看「现在多好」，加速指数看「修得多快」——
+  // 只有后者出现斜率递增，才算真的 RSI，光看一个分数永远看不出来。
+  function rsiSvgLine(pts, key, color) {
+    const n = pts.length;
+    if (!n) return "";
+    const x0 = 34, x1 = 612, y0 = 10, y1 = 120;
+    let d = "", on = false;
+    for (let i = 0; i < n; i++) {
+      const v = pts[i][key];
+      if (typeof v !== "number") { on = false; continue; }
+      const x = n < 2 ? (x0 + x1) / 2 : x0 + (x1 - x0) * i / (n - 1);
+      const y = y1 - (y1 - y0) * Math.max(0, Math.min(100, v)) / 100;
+      d += (on ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1) + " ";
+      on = true;
+    }
+    return d ? '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2"/>' : "";
+  }
+
+  function rsiPaint(d) {
+    const box = document.getElementById("iter-rsi");
+    if (!box) return;
+    if (!d || !d.ok) { box.innerHTML = '<div class="iter-li">RSI 数据取不到</div>'; return; }
+    const pts = ((d.trend || {}).points) || [];
+    const ix = d.index || {}, sp = d.speed || {};
+    let grid = "";
+    [0, 50, 100].forEach(function (v) {
+      const y = 120 - 110 * v / 100;
+      grid += '<line x1="34" y1="' + y + '" x2="612" y2="' + y + '" stroke="#2a3140"/>' +
+        '<text x="6" y="' + (y + 4) + '" fill="#7b8496" font-size="10">' + v + "</text>";
+    });
+    const bars = (ix.parts || []).map(function (p) {
+      const w = Math.round((p.value || 0) * 100);
+      return '<div class="iter-rsi-bar"><span>' + esc(p.name) + '</span>' +
+        '<i style="width:' + w + '%"></i><b>' + w + '%</b></div>';
+    }).join("");
+    const spTxt = (sp.parts || []).map(function (p) {
+      return esc(p.name) + " " + Math.round((p.value || 0) * 100) + "%（" + esc(p.detail) + "）";
+    }).join(" · ");
+    box.innerHTML =
+      '<div class="iter-rsi-top">综合 <b>' + (ix.score == null ? "—" : ix.score) +
+      '</b> ｜ 加速 <b>' + (sp.score == null ? "—" : sp.score) + '</b> ｜ 采样 ' +
+      pts.length + ' 点</div>' +
+      '<svg viewBox="0 0 620 132" class="iter-rsi-svg">' + grid +
+      rsiSvgLine(pts, "score", "#6ea8fe") + rsiSvgLine(pts, "speed", "#7bd88f") + "</svg>" +
+      '<div class="iter-rsi-legend"><i class="c1"></i>综合指数<i class="c2"></i>加速指数</div>' +
+      '<div class="iter-rsi-line">' + esc(d.line || "") + "</div>" +
+      '<div class="iter-rsi-bars">' + bars + "</div>" +
+      (spTxt ? '<div class="iter-rsi-sp">' + spTxt + "</div>" : "");
+  }
+
+  function rsiLoad() {
+    if (!document.getElementById("iter-rsi")) return;
+    fetch("/api/selfiter/rsi?limit=120")
+      .then(function (r) { return r.json(); })
+      .then(rsiPaint)
+      .catch(function () {
+        const box = document.getElementById("iter-rsi");
+        if (box) box.innerHTML = '<div class="iter-li">RSI 数据取不到（后端还没准备好）</div>';
+      });
+  }
+
   function render() {
     if (!el) return;
     const d = data || {};
@@ -16945,7 +17007,9 @@
 
     const body = el.querySelector(".iter-body");
     // ★ 常驻站点条放在最前面：用户要求「外面单独放一排、不进折叠、每次打开都在」
-    let h = paperSitesBar() + expHtml() + sec("🛠️ 最近自动执行（信任模式）", actlogHtml());
+    let h = sec("📈 RSI 曲线（越陡 = 修得越快）",
+      '<div class="iter-rsi" id="iter-rsi"><div class="iter-li">加载中…</div></div>') +
+      paperSitesBar() + expHtml() + sec("🛠️ 最近自动执行（信任模式）", actlogHtml());
     const p = d.latest;
     if (!p) {
       body.innerHTML = h + '<div class="iter-empty">还没有反思过。<br><br>' +
@@ -16953,6 +17017,7 @@
         '然后告诉你：我哪里做得不好、你在怎么用我、可以加什么功能、以及我想改哪些代码。<br><br>' +
         '⚠️ 想改的东西<b>不会自己动手</b>，都要你点批准。</div>' +
         sec("📡 论文雷达（向量检索 + 四维评估）", papersHtml());
+      rsiLoad();
       return;
     }
     h += sec("⏳ 我打算做的改动（" + (p.actions || []).length + " 条，等你批准）",
@@ -16987,6 +17052,8 @@
     }).join("") || '<div class="iter-li">（暂无）</div>');
     h += '<div class="iter-pc-wrap">' + planCacheHtml() + '</div>';
     body.innerHTML = h;
+    // RSI 图表：容器已在 h 顶部渲染，这里拉数据把曲线画进去
+    rsiLoad();
   }
 
   // ---------------------------------------------------- 计划缓存（可增删改查）

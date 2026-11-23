@@ -1,0 +1,257 @@
+diff --git a/backend/lessonloop.py b/backend/lessonloop.py
+index 32388ed..ef13a7d 100644
+--- a/backend/lessonloop.py
++++ b/backend/lessonloop.py
+@@ -26,4 +26,5 @@ import json
+ import logging
+ import os
++import threading
+ import time
+ 
+@@ -35,5 +36,15 @@ ESCALATE_AT = 3
+ # 改完之后要观察多久才敢判「真修好了」（小时）。
+ # 太短 = 刚改完就自封修好（实测：任何无关改动刷新 mtime 就会把旧教训判成 fixed）。
+-OBSERVE_HOURS = 6.0
++#
++# 2026-11-23 用户选定：**分两级**，不再用单一 6 小时窗。
++#   0~1 小时        → verifying （待确认，progress 0 → 0.5）
++#   1~24 小时       → confirming（过半确认，progress 0.5 → 0.95）
++#   ≥24 小时且未复发 → fixed     （已确认，progress 1.0）
++# 为什么必须拆：单窗 6 小时会让「刚修好」在账本上看起来像「没修」——
++# 实测 6 条教训探针全部 code_hit=true，落地率却只有 1.7%，RSI 被钉死，
++# 根本看不出有没有加速。
++OBSERVE_HOURS = 6.0           # 兼容旧调用方，不再作为判定主窗口
++OBSERVE_PENDING_HOURS = 1.0   # 1 小时内算「待确认」
++OBSERVE_CONFIRM_HOURS = 24.0  # 满 24 小时且未复发才算「已确认」
+ 
+ # 静默异常账本（2026-11-23 修）。
+@@ -205,5 +216,5 @@ def _num_ts(v) -> float:
+     try:
+         return float(s)
+-    except (TypeError, ValueError) as e:
++    except Exception as e:                          # noqa: BLE001 —— 兜住但要记一笔
+         _note_silent(e)
+     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+@@ -234,5 +245,5 @@ def _last_ok_edit(rel: str) -> float:
+     try:
+         best = max(best, os.path.getmtime(p))
+-    except OSError as e:
++    except Exception as e:                          # noqa: BLE001 —— 兜住但要记一笔
+         _note_silent(e)
+     return best
+@@ -310,28 +321,59 @@ def judge(it: dict) -> dict:
+     #    会把 RSI 的教训落地率抬虚高。取 max 后，刚记的教训一律先进观察窗。
+     base = max(edited, t0)
+-    left = OBSERVE_HOURS * 3600.0 - (time.time() - base)
+-    if left > 0:
+-        # progress = 观察窗已走过的比例（0 = 刚改完，1 = 熬满窗口）
+-        # ⚠️ 为什么必须给部分信用（2026-11-23 实测修正）：
+-        #    原来 verifying 在落地率里算 0 分 → 6 条全在观察中时落地率恒为 0，
+-        #    RSI 被钉在 57 分一动不动；6 小时一到 6 条同时转 fixed，
+-        #    落地率 0→100%，RSI 一次突跳 25 分。那是**阶跃**，
+-        #    与 RSI「斜率逐渐变陡」正好相反。按窗口进度线性给分后，
+-        #    落地率随时间连续爬升，RSI 曲线才可能是平滑的。
+-        prog = 1.0 - max(0.0, left) / (OBSERVE_HOURS * 3600.0)
++    elapsed = max(0.0, time.time() - base)
++    h1 = OBSERVE_PENDING_HOURS * 3600.0
++    h24 = OBSERVE_CONFIRM_HOURS * 3600.0
++    # 为什么必须给部分信用（2026-11-23 实测修正）：
++    #    原来 verifying 在落地率里算 0 分 → 6 条全在观察中时落地率恒为 0，
++    #    RSI 被钉在 57 分一动不动；窗口一到又同时转 fixed，
++    #    落地率 0→100%，RSI 一次突跳 —— 那是**阶跃**，与 RSI 要的平滑上升相反。
++    if elapsed < h1:
++        # 第一级：待确认（progress 0 → 0.5）
++        prog = 0.5 * elapsed / h1
+         return {"kind": kind, "status": "verifying", "recur": 0,
+                 "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+                 "progress": round(prog, 4),
+-                "evidence": "修复逻辑已在、暂未复发，观察中（已过 %.0f%%，还差 %.1f 小时）"
+-                            % (prog * 100, left / 3600.0),
++                "evidence": "修复逻辑已在、暂未复发，待确认（已过 %.0f%%，还差 %.1f 小时转「过半确认」）"
++                            % (prog * 100, (h1 - elapsed) / 3600.0),
++                "detail": ev}
++    if elapsed < h24:
++        # 第二级：过半确认（progress 0.5 → 0.95）
++        prog = 0.5 + 0.45 * (elapsed - h1) / max(1.0, h24 - h1)
++        return {"kind": kind, "status": "confirming", "recur": 0,
++                "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
++                "progress": round(prog, 4),
++                "evidence": "修复逻辑已在、暂未复发，过半确认（已过 %.0f%%，还差 %.1f 小时转「已确认」）"
++                            % (prog * 100, (h24 - elapsed) / 3600.0),
+                 "detail": ev}
+     return {"kind": kind, "status": "fixed", "recur": 0,
+             "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+             "progress": 1.0,
+-            "evidence": "代码探针命中（%s 含 %r）且教训之后未复发"
+-                        % (rel, needle),
++            "evidence": "代码探针命中（%s 含 %r）且满 %.0f 小时未复发"
++                        % (rel, needle, OBSERVE_CONFIRM_HOURS),
+             "detail": ev}
+ 
+ 
++# 哪些失败属于「护栏按设计拦下」，不能算成「修失败」。
++# 实测依据（2026-11-23，actlog 407 条动作）：169 次 fail 里 65 次是这一类
++# —— 熔断 51 次（同一文件 60 分钟内改太多次，主动停手）+ 质量闸门 14 次
++# （占位式修补 / 待人工复核 / 无法安全实施）。
++# 混进成功率分母会把 69.6% 压成 58.5%，等于「越安全越像在退步」。
++_GATE_MARKS = ("熔断", "占位式修补", "待人工复核", "无法安全实施",
++               "篡改分类器", "禁止模型改写")
++
++
++def _is_gate_block(row: dict) -> bool:
++    """这条失败是不是「安全 / 质量护栏主动拦下」—— 不算能力失败。"""
++    try:
++        d = row.get("detail")
++        d = d if isinstance(d, str) else json.dumps(d, ensure_ascii=False)
++        c = row.get("changelog")
++        c = c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)
++    except Exception:                                   # noqa: BLE001
++        return False
++    s = (d or "") + " " + (c or "")
++    return any(m in s for m in _GATE_MARKS)
++
++
+ # RSI 缓存：hint() 每轮构建系统提示都会走到这里，
+ # 不能每次都把 actlog.jsonl 全解析一遍（几千行）。
+@@ -357,5 +399,8 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
+     rows = _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))[-max(20, limit):]
+     ok = sum(1 for r in rows if str(r.get("result") or "").lower() == "ok")
+-    bad = sum(1 for r in rows if str(r.get("result") or "").lower() in ("fail", "failed", "error"))
++    _fail = [r for r in rows
++             if str(r.get("result") or "").lower() in ("fail", "failed", "error")]
++    gate = sum(1 for r in _fail if _is_gate_block(r))
++    bad = len(_fail) - gate
+     marked = [r for r in rows if r.get("phantom") is not None]
+     ph = sum(1 for r in marked if r.get("phantom") is True)
+@@ -379,5 +424,6 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
+     if ok + bad:
+         parts.append(("动作成功率", ok / (ok + bad), 0.40,
+-                      "%d/%d" % (ok, ok + bad)))
++                      "%d/%d%s" % (ok, ok + bad,
++                                   ("（另 %d 次护栏拦截，不计入分母）" % gate) if gate else "")))
+     if marked:
+         parts.append(("无幽灵率", 1 - ph / len(marked), 0.15,
+@@ -422,6 +468,7 @@ def audit() -> dict:
+             merged[k] = r
+             continue
+-        # fixed 优先于 verifying 优先于 pending 优先于 unprobed
+-        rank = {"fixed": 0, "verifying": 1, "pending": 2, "unprobed": 3}
++        # fixed > confirming > verifying > pending > unprobed
++        rank = {"fixed": 0, "confirming": 1, "verifying": 2, "pending": 3,
++                "unprobed": 4}
+         if rank[r["status"]] < rank[old["status"]]:
+             merged[k] = r
+@@ -429,7 +476,7 @@ def audit() -> dict:
+                                  int(r.get("count") or 1))
+     out = list(merged.values())
+-    out.sort(key=lambda x: ({"pending": 0, "verifying": 1, "unprobed": 2,
+-                             "fixed": 3}[x["status"]],
+-                            -int(x.get("count") or 1)))
++    _ord = {"pending": 0, "verifying": 1, "confirming": 2, "unprobed": 3,
++            "fixed": 4}
++    out.sort(key=lambda x: (_ord.get(x["status"], 9), -int(x.get("count") or 1)))
+     return {
+         "ok": True,
+@@ -440,4 +487,5 @@ def audit() -> dict:
+         "pending": [r for r in out if r["status"] == "pending"],
+         "verifying": [r for r in out if r["status"] == "verifying"],
++        "confirming": [r for r in out if r["status"] == "confirming"],
+         "unprobed": [r for r in out if r["status"] == "unprobed"],
+         "rows": out,
+@@ -793,6 +841,71 @@ def _rsi_hist_path() -> str:
+ 
+ 
++def rsi_speed(days: float = 7.0, target_per_day: float = 20.0) -> dict:
++    """加速指数（0~100）：真实修复事件有没有「越来越快」。
++
++    为什么要单独一条（2026-11-23 用户要求「四个都要，合成一个指数」）：
++    rsi_index 算的是**当前水平**（改得动不动 / 落地率 / 代码质量），
++    它回答不了「速度在不在涨」。而 RSI 那张图的关键特征是**斜率逐渐变陡**，
++    所以必须把「速度」单独抽出来做成序列，否则永远只能看到一条水平线。
++
++    四个分量（各 0~1）：
++      吞吐      最近 days 天真实改动事件/天 ÷ target_per_day
++      首修成功率 1 - 真失败率（护栏拦截不计，见 _is_gate_block）
++      落地率    audit 的 progress 加权（fixed=1 / confirming≈.5~.95 / pending=0）
++      不复发率  1 - 复发教训数 / 教训总数
++    权重：吞吐 .30 / 首修 .30 / 落地 .25 / 不复发 .15
++    """
++    now = time.time()
++    t0 = now - max(0.5, float(days)) * 86400.0
++    rows = [r for r in _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))
++            if _num_ts(r.get("ts")) >= t0]
++    ok_rows = [r for r in rows
++               if str(r.get("result") or "").lower() == "ok" and r.get("files")]
++    fail_rows = [r for r in rows
++                 if str(r.get("result") or "").lower() in ("fail", "failed", "error")]
++    real_fail = [r for r in fail_rows if not _is_gate_block(r)]
++    per_day = len(ok_rows) / max(0.5, float(days))
++    a = audit()
++    rows_a = a.get("rows") or []
++    land = (sum(float(r.get("progress") or 0.0) for r in rows_a) / len(rows_a)
++            if rows_a else 0.0)
++    recur = sum(1 for r in rows_a if int(r.get("recur") or 0) > 0)
++    norecur = (1.0 - recur / len(rows_a)) if rows_a else 0.0
++    first_ok = (len(ok_rows) / (len(ok_rows) + len(real_fail))
++                if (ok_rows or real_fail) else 0.0)
++    parts = [
++        ("吞吐", min(1.0, per_day / max(1.0, float(target_per_day))), 0.30,
++         "%.1f 次/天（目标 %.0f）" % (per_day, target_per_day)),
++        ("首修成功率", first_ok, 0.30,
++         "%d 成 / %d 真失败（护栏拦截 %d 次不计入）"
++         % (len(ok_rows), len(real_fail), len(fail_rows) - len(real_fail))),
++        ("落地率", min(1.0, land), 0.25,
++         "%.2f/%d 条" % (land * len(rows_a), len(rows_a))),
++        ("不复发率", norecur, 0.15,
++         "复发 %d/%d" % (recur, len(rows_a))),
++    ]
++    tw = sum(p[2] for p in parts) or 1.0
++    score = round(100 * sum(p[1] * p[2] for p in parts) / tw, 1)
++    return {"ok": True, "score": score, "days": days,
++            "parts": [{"name": n, "value": round(v, 3), "weight": w, "detail": d}
++                      for n, v, w, d in parts],
++            "at": time.strftime("%H:%M:%S", time.localtime(now))}
++
++
++_RSI_SAMPLE_LOCK = threading.Lock()
++
++
+ def rsi_sample(force: bool = False, min_gap: float = 60.0) -> dict:
+-    """采样一次 RSI 写入历史。同一分钟内重复调用只记一条（防刷爆账本）。"""
++    """采样一次 RSI 写入历史。同一分钟内重复调用只记一条（防刷爆账本）。
++
++    2026-11-23 实测缺陷：不加锁会**并发双写** —— 12:35:32 落了 2 条完全相同的
++    采样（ts 只差 0.04 秒），rsi_trend 会把同一个点当成两个点去算斜率，
++    斜率/分段形态全被污染。
++    """
++    with _RSI_SAMPLE_LOCK:
++        return _rsi_sample_locked(force=force, min_gap=min_gap)
++
++
++def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0) -> dict:
+     cur = rsi_index()
+     p = _rsi_hist_path()
+@@ -804,7 +917,13 @@ def rsi_sample(force: bool = False, min_gap: float = 60.0) -> dict:
+             return {"ok": True, "skipped": True, "score": cur.get("score"),
+                     "n": len(rows), "why": "距上次采样不足 %.0f 秒" % min_gap}
++    try:
++        sp = rsi_speed().get("score")
++    except Exception:                                   # noqa: BLE001
++        logger.debug("rsi_speed 采样失败", exc_info=True)
++        sp = None
+     rec = {"ts": now,
+            "iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+            "score": cur.get("score"),
++           "speed": sp,
+            "parts": {x["name"]: x["value"] for x in (cur.get("parts") or [])}}
+     try:
+@@ -849,5 +968,8 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
+     """
+     rows = _read_jsonl(_rsi_hist_path())[-max(10, limit):]
+-    pts = [{"ts": r.get("iso") or "", "score": float(r.get("score") or 0)}
++    pts = [{"ts": r.get("iso") or "",
++            "score": float(r.get("score") or 0),
++            "speed": (float(r["speed"])
++                      if isinstance(r.get("speed"), (int, float)) else None)}
+            for r in rows if isinstance(r.get("score"), (int, float))]
+     ys = [p["score"] for p in pts]
