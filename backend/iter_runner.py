@@ -95,6 +95,9 @@ _DEFAULT_TASK_TIMEOUT_MIN = 30
 _RESTART_DELAY = 1.5
 # 撞上「另一个执行占着锁」时，隔多久把任务重新提上来（秒）。
 _LOCK_RETRY_DELAY = 20
+# ★ 2026-11-23：撞执行锁最多重试几次。原来没有上限，只要那条执行卡着，
+#   就会每 20 秒重试一次、永远不停（实测无限循环）。
+_MAX_LOCK_RETRY = 3
 
 # ★ 2026-11-20 修（用户报「卡住不动了」）：
 #   重启后 _STATE["running"] 会从 task.json 恢复出来，但那条的 worker 线程
@@ -115,7 +118,69 @@ _VERIFYING = [False]
 #   记录会一直留着，submit 的 dup 判断永远返回「已在跑」，
 #   于是同一个计划再也提交不进去，界面上看就是「重启之后没继续」。
 #   这里登记「这个 tid 的 worker 是否还在」，用线程对象自己判存活。
+# ★ 2026-11-23 修（用户报「每 20 秒重复一次重试、状态和实际执行对不上」）：
+#   原来 _LIVE 是 tid -> 单个线程对象，而 _next() 从队列提任务起的 worker
+#   **根本没登记** —— 于是那个任务一过 20 秒宽限就被 _run_alive 判成僵尸：
+#   清 running、退回队列、再起一个 worker → 撞执行锁 → 又退回队列 → 20 秒后
+#   再来一次，无限空转；而真正在跑的老线程没人知道（卡片不显示、终止也停不了）。
+#   现在：① 一个 tid 可以登记多个线程；② 额外判「本进程还有没有任何活着的
+#   iter worker」——只要还有一个活的，就绝不许把 running 判死。
 _LIVE = {}
+_LIVE_LOCK = threading.Lock()
+
+# ★ 2026-11-23：用户点了终止，但任务卡在「等待重试」时 running 槽位是空的，
+#   should_cancel() 只看 running.cancel 会返回 False —— 那个 worker 还在跑，
+#   按钮就等于失效。这里按 tid 记一份终止意图，worker 退出时清掉。
+_cancel_tids = set()
+
+
+def _live_add(tid, th):
+    """登记一个 worker 线程（同一 tid 允许多个，绝不互相覆盖）。"""
+    tid = str(tid or "")
+    if not tid or th is None:
+        return
+    with _LIVE_LOCK:
+        _LIVE.setdefault(tid, []).append(th)
+
+
+def _live_drop(tid, th=None):
+    """注销登记：给了 th 只摘掉这一个，不给就整个 tid 清空。"""
+    tid = str(tid or "")
+    with _LIVE_LOCK:
+        if th is None:
+            _LIVE.pop(tid, None)
+            return
+        lst = [x for x in (_LIVE.get(tid) or []) if x is not th]
+        if lst:
+            _LIVE[tid] = lst
+        else:
+            _LIVE.pop(tid, None)
+
+
+def _live_alive(tid):
+    """这个 tid 是否还有活着的 worker。"""
+    with _LIVE_LOCK:
+        lst = list(_LIVE.get(str(tid or "")) or [])
+    for th in lst:
+        try:
+            if th.is_alive():
+                return True
+        except Exception:                               # noqa: BLE001
+            continue
+    return False
+
+
+def _live_any():
+    """本进程还有没有任何活着的 iter worker（不管 tid 对不对）。"""
+    with _LIVE_LOCK:
+        all_th = [th for lst in _LIVE.values() for th in lst]
+    for th in all_th:
+        try:
+            if th.is_alive():
+                return True
+        except Exception:                               # noqa: BLE001
+            continue
+    return False
 
 
 def _run_alive(run) -> bool:
@@ -128,22 +193,26 @@ def _run_alive(run) -> bool:
     """
     if not run:
         return False
+    tid = str(run.get("tid") or "")
+    # ① 本进程登记过这个 tid 的 worker，且它还活着 → 铁定活着。
+    #    ★ 必须排在孤儿判断**之前**：本进程起的线程不可能是「上个进程的孤儿」，
+    #    先判孤儿会把一个已经跑了半小时的任务误杀（实测：这是空转的另一条触发路径）。
+    if _live_alive(tid):
+        return True
+    # ② 本进程还有别的活 worker → 确实有执行在进行。宁可让 running 多留一会儿，
+    #    也不要回收后再起一个去撞执行锁（那正是「每 20 秒重试一次」的来源）。
+    if _live_any():
+        return True
+    # ③ 一个活线程都没有：started_at 早于本进程启动时间 ⇒ 上个进程留下的孤儿。
     try:
         if float(run.get("started_at") or 0) < _BOOT_AT - 0.5:
             return False
     except (TypeError, ValueError):
         return False
-    tid = str(run.get("tid") or "")
-    th = _LIVE.get(tid)
-    if th is None:
-        # 刚 submit、还没登记完的极短窗口：给 20 秒宽限，别把刚起的任务误杀。
-        try:
-            return (time.time() - float(run.get("started_at") or 0)) < 20
-        except (TypeError, ValueError):
-            return False
+    # ④ 刚 submit、还没登记完的极短窗口给 20 秒宽限，超过就认定线程已经没了。
     try:
-        return bool(th.is_alive())
-    except Exception:                                   # noqa: BLE001
+        return (time.time() - float(run.get("started_at") or 0)) < 20
+    except (TypeError, ValueError):
         return False
 
 
@@ -639,8 +708,7 @@ def submit(plan_id, source="auto", title="", max_n=0):
                           name="iter-%s" % tid)
     # 先登记再 start：start 之前 is_alive() 还是 False，
     # 若这中间有别的请求进来判存活，会被误判成僵尸、把刚起的任务回收掉。
-    with _LOCK:
-        _LIVE[str(tid)] = th
+    _live_add(tid, th)
     th.start()
     return {"ok": True, "state": "running", "tid": tid, "ahead": 0}
 
@@ -661,6 +729,7 @@ def cancel(tid=""):
         if run and (not tid or str(tid) == str(run["tid"])):
             run["cancel"] = True
             run["state"] = "cancelling"
+            _cancel_tids.add(str(run["tid"]))
             _emit(run["tid"], "status", text="正在终止（当前动作做完就停）…",
                   state="cancelling")
             _save()
@@ -670,6 +739,7 @@ def cancel(tid=""):
         q = _STATE["queue"]
         hit = [x for x in q if str(x.get("tid")) == tid]
         if hit:
+            _cancel_tids.add(tid)
             _STATE["queue"] = [x for x in q if str(x.get("tid")) != tid]
             _emit(tid, "status", text="已终止（从等待队列移除，不会再跑）",
                   state="cancelled")
@@ -717,6 +787,11 @@ def _worker(item):
         _emit(tid, kind, **kw)
 
     def should_cancel():
+        # ★ 2026-11-23：除了 running.cancel，还要认「按 tid 记下的终止意图」——
+        #   任务处于「等待重试」时 running 槽位是空的，光看它会返回 False，
+        #   用户在界面上点了终止也停不下来。
+        if str(tid) in _cancel_tids:
+            return True
         with _LOCK:
             r = _STATE["running"]
             return bool(r and r.get("cancel"))
@@ -798,13 +873,32 @@ def _worker(item):
         #   或上一个 worker 还没退干净）。这不是本任务的问题 —— 把它放回队首，
         #   过一会儿重试，别报「这次没有可执行的动作」误导用户。
         if err_all and "已有一个自动执行在进行中" in err_all:
+            # ★ 2026-11-23：① 用户已点终止 → 绝不放回队列（否则它会自己跑回来）
+            if str(tid) in _cancel_tids:
+                _emit(tid, "status",
+                      text="已终止（等待重试期间被手动终止，不会再跑）",
+                      state="cancelled", _force_save=True)
+                _finish(tid, "cancelled", ok_n, fail_n, skip_n, changed,
+                        "用户手动终止（撞执行锁后、重试前被终止）")
+                return
+            # ② 重试次数上限：原来没有上限，只要那条执行卡着就每 20 秒重试一次、
+            #    永远不停（实测无限循环）。超限就明确失败并说明原因，交给人判断。
+            _try = int(item.get("_retry") or 0) + 1
+            item["_retry"] = _try
+            if _try > _MAX_LOCK_RETRY:
+                _emit(tid, "error",
+                      text="连续 %d 次撞到「另一个执行正在进行」，已停止重试："
+                           "那条执行可能卡住了，确认后请手动重新提交" % (_try - 1))
+                _finish(tid, "failed", ok_n, fail_n, skip_n, changed,
+                        "撞执行锁重试 %d 次仍失败（另一条执行一直没释放）" % (_try - 1))
+                return
             with _LOCK:
                 _STATE["queue"].insert(0, item)
                 _STATE["running"] = None
             _save()
             _emit(tid, "step",
-                  text="另一个执行正在进行，本任务已放回队列，%d 秒后自动重试…"
-                       % _LOCK_RETRY_DELAY)
+                  text="另一个执行正在进行，本任务已放回队列，%d 秒后自动重试"
+                       "（第 %d/%d 次）…" % (_LOCK_RETRY_DELAY, _try, _MAX_LOCK_RETRY))
             _emit(tid, "status", text="等待重试（另一个执行正在进行）", state="waiting")
             threading.Timer(_LOCK_RETRY_DELAY, _next).start()
             requeued = True
@@ -943,8 +1037,13 @@ def _worker(item):
         # ★ 2026-11-22：注销本任务的存活登记。必须放在 _next()/_auto_restart()
         #   之前 —— 它们要用 _run_alive() 判「还有没有任务在跑」，
         #   注销晚了会让刚结束的任务被当成还活着，接下一个 / 重启都要白等。
-        with _LOCK:
-            _LIVE.pop(str(tid), None)
+        # 只摘掉「我自己这个线程」—— 同一个 tid 可能有另一个 worker 还在跑，
+        # 整个 tid 清空会让它立刻被判成僵尸（这正是 11-23 空转的成因）。
+        _live_drop(tid, threading.current_thread())
+        if not requeued:
+            # 任务回队列时**不能**清终止意图 —— 用户可能在「等待重试」期间点了终止，
+            # 清掉的话重试时它又会自己跑起来。
+            _cancel_tids.discard(str(tid))
         if requeued:
             # 已经放回队列、并挂了一个延迟的 _next —— 这里不能再接下一个，
             # 否则会立刻把同一个任务再捞起来，空转。
@@ -1048,6 +1147,10 @@ def _next():
     if nxt:
         th = threading.Thread(target=_worker, args=(nxt,), daemon=True,
                               name="iter-%s" % (nxt.get("tid") or "x"))
+        # ★ 2026-11-23 修（空转根因）：这里原来**没有**登记 —— 于是 _next 拉起的
+        #   任务一过 20 秒宽限就被 _run_alive 判成僵尸，回收 → 重起 → 撞锁 → 退回
+        #   队列 → 20 秒后再来，无限循环。先登记再 start。
+        _live_add(nxt.get("tid"), th)
         th.start()
 
 
