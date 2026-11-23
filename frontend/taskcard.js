@@ -122,7 +122,7 @@
 
     var r = c.rsi || null;
     if (r && (r.score !== null && r.score !== undefined)) {
-      var line = "RSI " + fmt(r.score, 1) + " 分";
+      var line = "评分 " + fmt(r.score, 1) + " 分";
       if (r.shape) {
         line += " · " + r.shape;
         if (r.slope !== null && r.slope !== undefined) {
