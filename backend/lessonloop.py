@@ -986,10 +986,15 @@ def patch_with_fallback(rel: str, find: str, replace: str, note: str = "",
     if not anchor_miss and not phantom:
         # 命中多处 → 不猜（改错地方比不改更糟），但要把「该改哪一处」的证据交出去，
         # 否则下一轮拿同一个锚点还会再失败一次（2026-11-24 实测 6 次）。
-        if "不唯一" in err:
-            got = _sd.read(rel)
-            text = (got.get("raw") if got.get("ok") else "") or ""
-            cands = anchor_candidates(text, find)
+        # ⚠️ 2026-11-24 修（regress 里 4 条断言长期挂红）：判定**不能只看文案**。
+        #   selfdev.patch 的真实文案是「这段原文出现了 N 次，为免改错地方…」，
+        #   里面根本没有「不唯一」三个字 → 这个分支永远走不到，
+        #   模型拿到的仍是一句没有候选的报错（实测 candidates=0、reason=None）。
+        #   改成自己数候选：≥2 处就是多处命中，与上游文案无关。
+        got = _sd.read(rel)
+        text = (got.get("raw") if got.get("ok") else "") or ""
+        cands = anchor_candidates(text, find)
+        if "不唯一" in err or len(cands) >= 2:
             r["reason"] = "ambiguous"
             r["candidates"] = cands
             r["hint"] = ("锚点命中多处，已给出前 %d 处的行号与上下文（candidates）；"

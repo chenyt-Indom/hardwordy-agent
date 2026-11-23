@@ -25,9 +25,20 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _TMP = tempfile.mkdtemp(prefix="mm_rsi_test_")
+# ⚠️ 2026-11-24 修（regress 里假失败的根因）：
+#   原来这里设了 MM_DATA_DIR 就**不还了**，于是同一进程里排在后面的
+#   test_observe_base 读到这个空目录 → 「改动前有可判定的教训」等 2 条假失败
+#   （单独跑全过、regress 里必挂）。这里只为了让下面的 import 在隔离目录里
+#   完成初始化，**必须立刻还原**；真正的隔离由 main() 自己负责。
+_OLD_ENV = os.environ.get("MM_DATA_DIR")
 os.environ["MM_DATA_DIR"] = _TMP
 
 from backend import lessonloop as ll  # noqa: E402
+
+if _OLD_ENV is None:
+    os.environ.pop("MM_DATA_DIR", None)
+else:
+    os.environ["MM_DATA_DIR"] = _OLD_ENV
 
 _ok = 0
 _fail = 0
@@ -58,6 +69,31 @@ def _reset_rsi_cache():
 
 
 def main():
+    """跑测试，并把**所有全局副作用**限定在本函数内（跑完恢复原值）。
+
+    ⚠️ 2026-11-24 修：本文件会改三处全局状态 —— MM_DATA_DIR、ll.PROBES
+    里塞一条假探针、ll._RSI_CACHE。以前一条都不还原，在 regress 里就会
+    把后面用例的 audit() 结果搅乱（表现为「假失败」）。统一在这里收口。
+    """
+    _old = os.environ.get("MM_DATA_DIR")
+    _probe = "假问题_不存在探针"
+    _had_probe = _probe in ll.PROBES
+    _saved_cache = dict(ll._RSI_CACHE)
+    os.environ["MM_DATA_DIR"] = _TMP
+    try:
+        return _main_body()
+    finally:
+        if not _had_probe:
+            ll.PROBES.pop(_probe, None)
+        ll._RSI_CACHE.clear()
+        ll._RSI_CACHE.update(_saved_cache)
+        if _old is None:
+            os.environ.pop("MM_DATA_DIR", None)
+        else:
+            os.environ["MM_DATA_DIR"] = _old
+
+
+def _main_body():
     now = time.time()
 
     # ---------- 1. judge：探针命中就该算修了，不看 mtime ----------

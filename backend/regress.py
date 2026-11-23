@@ -640,6 +640,13 @@ def _run_inner(scope="quick", only=None, t0=None):
 
     items, passed, failed, skipped = [], 0, 0, 0
     import io
+    # ⚠️ 2026-11-24 加：用例之间的**环境隔离兜底**。
+    #   实测 test_rsi.py 在模块级把 MM_DATA_DIR 指向临时目录且不恢复，
+    #   排在它后面的 test_observe_base 于是读到空账本 → 两条断言假失败
+    #   （单独跑全过、在 regress 里必挂）。断言文件是护栏文件、模型改不动，
+    #   所以在「跑用例」这一层兜：每个用例跑完，把 MM_DATA_DIR 还原成进入本次
+    #   回归时的值。用例自己写了 finally 恢复的，这里是一次无副作用的空操作。
+    _env_mm = os.environ.get("MM_DATA_DIR")
     for c in picked:
         # 断言文件里有会重写 sys.stdout 的（test_tool_registry.py），跑完会
         # 把真实 stdout 弄坏，后面所有用例全报
@@ -680,6 +687,12 @@ def _run_inner(scope="quick", only=None, t0=None):
                           "why": "%s: %s" % (type(e).__name__, e)})
         finally:
             sys.stdout = saved_out
+            if os.environ.get("MM_DATA_DIR") != _env_mm:
+                # 某个用例改了数据目录却没恢复 → 还原，别让它传染后面的用例。
+                if _env_mm is None:
+                    os.environ.pop("MM_DATA_DIR", None)
+                else:
+                    os.environ["MM_DATA_DIR"] = _env_mm
 
     failed_items = [i for i in items if not i["ok"]]
     return {
