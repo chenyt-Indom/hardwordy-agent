@@ -52,7 +52,7 @@ _CKPT_KEEP = 8      # 只留最近 8 份：磁盘被无上限增长吃过一次�
 # ⚠️ 为什么不改 chat_stream 的 yield 协议：它被对话/反思/迭代/自检等十几处
 #   调用，加一个新的 kind 要逐个确认调用方能容忍未知类型 —— 风险远大于收益。
 #   累加器对现有调用方完全透明。
-_USAGE = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+_USAGE = {"prompt": 0, "completion": 0, "total": 0, "calls": 0, "cached": 0}
 _USAGE_LOCK = threading.Lock()
 
 
@@ -66,7 +66,7 @@ def take_usage(reset=True):
                     _USAGE[_k] = 0
             return out
     except Exception:                                   # noqa: BLE001
-        return {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+        return {"prompt": 0, "completion": 0, "total": 0, "calls": 0, "cached": 0}
 
 
 def _add_usage(u, model=""):
@@ -82,15 +82,41 @@ def _add_usage(u, model=""):
         p = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
         c = int(u.get("completion_tokens") or u.get("output_tokens") or 0)
         t = int(u.get("total_tokens") or (p + c))
+        # ★ 2026-11-24：读「有多少 prompt token 命中了前缀缓存」。
+        #   各家字段名不同，逐个试；一个都没有就当 0（Ollama 本地不报这个）。
+        #   · DeepSeek：prompt_cache_hit_tokens / prompt_cache_miss_tokens
+        #   · OpenAI  ：prompt_tokens_details.cached_tokens
+        #   · Anthropic：cache_read_input_tokens
+        cached = 0
+        try:
+            for _k in ("prompt_cache_hit_tokens", "cache_read_input_tokens",
+                       "cached_tokens"):
+                _v = u.get(_k)
+                if isinstance(_v, (int, float)) and _v > 0:
+                    cached = int(_v)
+                    break
+            if not cached:
+                for _dk in ("prompt_tokens_details", "input_tokens_details"):
+                    _det = u.get(_dk)
+                    if isinstance(_det, dict):
+                        _v = _det.get("cached_tokens")
+                        if isinstance(_v, (int, float)) and _v > 0:
+                            cached = int(_v)
+                            break
+        except Exception:                               # noqa: BLE001
+            cached = 0
+        # 夹一道：命中数不可能超过 prompt 总数（接口偶发脏值时别把命中率算成 >100%）
+        cached = max(0, min(int(cached), max(0, p)))
         with _USAGE_LOCK:
             _USAGE["prompt"] += max(0, p)
             _USAGE["completion"] += max(0, c)
             _USAGE["total"] += max(0, t)
             _USAGE["calls"] += 1
+            _USAGE["cached"] += max(0, cached)
         # 记账是旁路：任何失败都不能影响主流程
         try:
             from . import usage_ledger as _ul
-            _ul.record(p, c, t, model=model)
+            _ul.record(p, c, t, model=model, cached=cached)
         except Exception:                               # noqa: BLE001
             logger.debug("usage ledger failed", exc_info=True)
     except Exception:                                   # noqa: BLE001

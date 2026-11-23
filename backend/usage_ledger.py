@@ -80,8 +80,17 @@ def get_tag() -> str:
         return ""
 
 
-def record(prompt, completion, total, model="", tag=None):
-    """记一次调用。参数全是数字或字符串，任何脏值都不该抛异常。"""
+def record(prompt, completion, total, model="", tag=None, cached=0):
+    """记一次调用。参数全是数字或字符串，任何脏值都不该抛异常。
+
+    ★ 2026-11-24：新增 ``cached`` —— 各家 API 都会回「这次有多少 prompt token
+      命中了前缀缓存」（DeepSeek: ``prompt_cache_hit_tokens`` /
+      OpenAI: ``prompt_tokens_details.cached_tokens``）。
+      以前这里**一个缓存字段都没读**，所以本地账本里根本没有命中率，
+      用户只能对着云平台后台的图猜。写进 ``h`` 字段后可以直接算：
+      ``h / p`` 就是这一天的真实命中率。
+      ⚠️ 老账本没有 ``h`` 字段，读取方一律按 0 处理（不是缺失错误）。
+    """
     try:
         p = int(prompt or 0)
         c = int(completion or 0)
@@ -90,6 +99,10 @@ def record(prompt, completion, total, model="", tag=None):
         return
     if p <= 0 and c <= 0:
         return
+    try:
+        h = max(0, min(int(cached or 0), p))     # 命中数不该超过 prompt 总数
+    except Exception:                                   # noqa: BLE001
+        h = 0
     rec = {
         "ts": round(time.time(), 3),
         "at": time.strftime("%H:%M:%S"),
@@ -98,6 +111,7 @@ def record(prompt, completion, total, model="", tag=None):
         "p": max(0, p),
         "c": max(0, c),
         "t": max(0, t),
+        "h": h,
     }
     try:
         path = _dir() / ("%s.jsonl" % _day())
@@ -182,7 +196,7 @@ _PRICE = {"in": 2.0, "out": 8.0}
 
 def _blank() -> dict:
     """一格空的聚合桶（按天 / 按标签 / 按时段都用它，字段名保持一致）。"""
-    return {"calls": 0, "p": 0, "c": 0, "t": 0, "reason": 0, "cost": 0.0}
+    return {"calls": 0, "p": 0, "c": 0, "t": 0, "reason": 0, "cost": 0.0, "h": 0}
 
 
 def _cost(p, c, reason) -> float:
@@ -292,6 +306,12 @@ def summarize(days: int = 7) -> dict:
             reason = max(0, t - p - c)      # 推理 token：总量里扣掉进出两份的余量
             cost = _cost(p, c, reason)
             tag = str(r.get("tag") or "未标注")
+            # ⚠️ 2026-11-24：缓存命中数。**老账本没有 h 字段**，一律按 0 处理 ——
+            #   不能因为缺字段就跳过整条记录（那样历史账会凭空变少）。
+            try:
+                ch = max(0, min(int(r.get("h") or 0), p))
+            except Exception:                           # noqa: BLE001
+                ch = 0
             for slot in (day, total,
                          per_tag.setdefault(tag, _blank()),
                          by_tag.setdefault(tag, _blank())):
@@ -301,6 +321,7 @@ def summarize(days: int = 7) -> dict:
                 slot["t"] += t
                 slot["reason"] += reason
                 slot["cost"] += cost
+                slot["h"] += ch
             h = _hour_of(r)
             if 0 <= h <= 23:
                 for slot in (per_hour.setdefault(h, _blank()),
@@ -311,6 +332,7 @@ def summarize(days: int = 7) -> dict:
                     slot["t"] += t
                     slot["reason"] += reason
                     slot["cost"] += cost
+                    slot["h"] += ch
         by_day.append({"date": name.replace(".jsonl", ""), **day,
                        "by_tag": per_tag, "by_hour": per_hour})
 
@@ -339,6 +361,12 @@ def summarize(days: int = 7) -> dict:
         "total_prompt_tokens": int(total["p"]),
         "total_completion_tokens": int(total["c"]),
         "total_reasoning_tokens": int(total["reason"]),
+        # —— 前缀缓存命中（2026-11-24 新增）
+        # ⚠️ 全 0 时返回 None 而不是 0.0：老账本压根没记过这个字段，
+        #    给个 0% 会让用户以为"命中率一直是零"，那是假数据。
+        "total_cached_tokens": int(total["h"]),
+        "cache_hit_rate": (round(total["h"] / float(total["p"]), 4)
+                           if total["p"] > 0 and total["h"] > 0 else None),
         # 价格加权的复合指标（元）：比裸 token 数更能回答「省了多少」
         "weighted_cost": round(total["cost"], 6),
         # —— 折叠明细：值是调用次数，明细表在 *_detail 里
@@ -349,7 +377,9 @@ def summarize(days: int = 7) -> dict:
         "by_day": by_day,
         # —— 对比口径
         "today": {"date": today.get("date", ""), "calls": int(today["calls"]),
-                  "tokens": int(today["t"]), "cost": round(today["cost"], 6)},
+                  "tokens": int(today["t"]), "cost": round(today["cost"], 6),
+                  "cache_hit_rate": (round(today["h"] / float(today["p"]), 4)
+                                     if today["p"] > 0 and today["h"] > 0 else None)},
         "prev": {"date": (prev or {}).get("date", ""), "calls": prev_calls,
                  "tokens": int((prev or {}).get("t") or 0),
                  "cost": round((prev or {}).get("cost") or 0.0, 6)},

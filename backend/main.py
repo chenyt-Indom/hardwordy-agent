@@ -1099,7 +1099,8 @@ def _postprocess_reply(text: str) -> str:  # noqa: dead-func 非流式通道预�
 
 def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
                      rag_ctx: str = "", img_ctx: str = "", skill_ctx: str = "",
-                     sched_ctx: str = "") -> list:
+                     sched_ctx: str = "", lesson_ctx: str = "",
+                     doc_ctx: str = "") -> list:
     """把**每轮会变的**内容（历史摘要/记忆/知识库检索/当前时间）挂到**最后一条用户消息**上。
 
     返回一份新列表；`working` 本身不动。
@@ -1168,6 +1169,22 @@ def _attach_live_ctx(working: list, *, digest: str = "", mem_ctx: str = "",
                           "别把它里面的人名/身份当成用户的；"
                           "请优先依据它作答并注明出自哪一篇；"
                           "与问题无关就忽略，不要硬扯。）")
+        if doc_ctx:
+            # ⚠️⚠️ 2026-11-24：文档正文原来拼在**系统提示**里 —— 只要本轮带文档，
+            #   系统提示就整段变样，排在它后面的 38 个工具定义（≈13000 token）
+            #   全部作废，云端前缀缓存直接归零。改挂到这里（稳定前缀之后）。
+            #   ⚠️ 挂载发生在 `_trim_history_to_budget` **之后**，所以不会像
+            #   历史消息那样被 _clamp_all 截断，文档内容完整性不受影响。
+            blocks.append(doc_ctx)
+        if lesson_ctx:
+            # ⚠️⚠️ 2026-11-24：`lessonloop.hint()` 里含「RSI 最弱项 69%，权重 0.13」
+            #   和「累计 N 次」—— RSI 每小时采样、教训计数一变，这段字符串就变。
+            #   原来它排在系统提示里（工具定义之前），于是**每变一次就废掉整段工具定义**。
+            #   挪到这里：教训内容照样每轮都送进模型，只是不再当缓存前缀。
+            blocks.append(
+                "【历史教训（系统注入，不是用户说的话）】\n" + lesson_ctx
+                + "\n（以上是系统根据前几轮反思自动注入的教训，属于参考建议；"
+                  "和用户本轮的要求冲突时**以用户为准**。）")
         if skill_ctx:
             blocks.append(skill_ctx)
         if sched_ctx:
@@ -7573,7 +7590,7 @@ class _SystemPrompt:
 
     @staticmethod
     def build(last_user_text: str, session: str = "", docs: list = None,
-              no_tools: bool = False):
+              no_tools: bool = False, out: dict = None):
         cfg = config.load_config()
         parts = [
             # ⚠️⚠️ **系统提示的第一行必须是「稳定不变」的内容。**
@@ -7824,23 +7841,28 @@ class _SystemPrompt:
         # 记忆每轮都可能被后台提炼改写，放在系统提示里会让整段前缀（含工具定义）
         # 每轮作废、重算 10 秒。现在由 `_attach_live_ctx` 挂到最后一条用户消息上。
         # 用户拖进来的文档：正文直接给模型，让它能针对内容回答
+        # ⚠️⚠️ 2026-11-24：文档正文**不再拼进系统提示**。
+        #   原来只要本轮带文档，系统提示就整段不同（最多 6 万字），
+        #   排在后面的工具定义（≈13000 token）跟着作废，前缀缓存归零。
+        #   现在只在这里算出文本，由 `_attach_live_ctx` 挂到最后一条用户消息上。
+        _doc_ctx = ""
         if docs:
-            blocks, budget = [], 60000      # 总字数上限，避免把上下文撑爆
+            _dblocks, _dbudget = [], 60000      # 总字数上限，避免把上下文撑爆
             for d in docs[:5]:
                 text = str((d or {}).get("text") or "").strip()
                 name = str((d or {}).get("name") or "文档").strip()
                 if not text:
                     continue
-                take = text[:max(0, budget)]
-                budget -= len(take)
-                blocks.append(f"《{name}》\n{take}")
-                if budget <= 0:
+                take = text[:max(0, _dbudget)]
+                _dbudget -= len(take)
+                _dblocks.append(f"《{name}》\n{take}")
+                if _dbudget <= 0:
                     break
-            if blocks:
-                parts.append(
+            if _dblocks:
+                _doc_ctx = (
                     "【用户本轮拖入的文档】—— 请**直接依据这些内容**回答；"
                     "用户问文档里的事时不要说自己看不到文件，也不要凭空编造文中没有的内容：\n\n"
-                    + "\n\n---\n\n".join(blocks))
+                    + "\n\n---\n\n".join(_dblocks))
         # ⚠️⚠️ RAG 知识库材料**不能放在这里**（系统提示 = 缓存前缀里）。
         #
         # `kb.build_rag_context(last_user_text, ...)` 是**按本轮问题检索**的 ——
@@ -7888,13 +7910,19 @@ class _SystemPrompt:
         # ⚠️ 这段随教训状态变化会动到 Ollama 的前缀缓存，所以 hint() 只在
         #    存在**未落地**教训时返回非空，且条数/排序固定 —— 同一状态下是
         #    稳定字符串，不会每轮都变。
+        # ⚠️⚠️ 2026-11-24：**教训文本不再拼进系统提示**（改由 `_attach_live_ctx`
+        #   的 lesson_ctx 挂到最后一条用户消息上）。
+        #   原因：hint() 里有「RSI 最弱项 69%，权重 0.13」和「累计 N 次」——
+        #   RSI 每小时采样一次、教训计数一变，这串字就变；它排在工具定义**之前**，
+        #   一变就把后面 ≈13000 token 的工具定义全部作废，云端前缀缓存归零。
+        #   ⚠️ 这里仍要调用一次 hint()：它内部会做 RSI 节流采样，
+        #   没有这一步趋势曲线就没有数据点。
         try:
             from . import lessonloop as _ll_sp
-            _ll_blk = _ll_sp.hint()
-            if _ll_blk:
-                parts.append(_ll_blk)
+            _lesson_ctx = _ll_sp.hint()
         except Exception:
-            logger.warning("教训注入系统提示失败（不影响对话）", exc_info=True)
+            _lesson_ctx = ""
+            logger.warning("取历史教训失败（不影响对话）", exc_info=True)
         parts.append("回答请使用中文；直接、可执行。"
                      "长度严格按上面【回复长度分档】执行，不许凭感觉伸缩。")
         if no_tools:
@@ -7960,6 +7988,14 @@ class _SystemPrompt:
                     "消息区是否还能正常滚动。")
         except Exception:
             logger.debug("silent-except", exc_info=True)
+        # ★ 2026-11-24：把「每轮会变」的两块文本（历史教训 / 拖入文档）通过 out
+        #   出参交给调用方，由 `_attach_live_ctx` 挂到最后一条用户消息上。
+        #   它们**不进系统提示** —— 一旦进了，排在后面的工具定义（≈13000 token）
+        #   每轮都要重算，云端前缀缓存直接归零。
+        #   ⚠️ 用出参而不是改返回值：build 还有 4 处调用方只要一个字符串。
+        if out is not None:
+            out["lesson"] = locals().get("_lesson_ctx", "")
+            out["doc"] = locals().get("_doc_ctx", "")
         return "\n\n".join(p for p in parts if p)
 
 
@@ -8325,7 +8361,11 @@ async def chat(req: ChatRequest,
         tools.ask_guard_reset(session)
     except Exception:
         logger.debug("silent-except", exc_info=True)
-    sys_prompt = _SystemPrompt.build(last_user, session, req.docs, no_tools=code_model_on)
+    # ⚠️ _sp_out 接住 build 交出来的「每轮会变」文本（历史教训 / 拖入文档），
+    #    下面由 _attach_live_ctx 挂到用户消息上 —— 不进系统提示，保住缓存前缀。
+    _sp_out = {}
+    sys_prompt = _SystemPrompt.build(last_user, session, req.docs,
+                                     no_tools=code_model_on, out=_sp_out)
     globals()["_LAST_SESSION"] = session   # 交接卡：重启前要读这个会话的历史（见 backend/handoff.py）
 
     # ★ 2026-11-13：**图片跨轮可见**（用户报「图片只能当轮使用，下一轮模型就查不到」）。
@@ -8913,7 +8953,9 @@ async def chat(req: ChatRequest,
         working = _attach_live_ctx([{"role": "system", "content": full_sys}] + messages,
                                    digest=digest, mem_ctx=mem_ctx, rag_ctx=rag_ctx,
                                    img_ctx=_img_available_note(), skill_ctx=_skill_ctx,
-                                   sched_ctx=_sched_ctx())
+                                   sched_ctx=_sched_ctx(),
+                                   lesson_ctx=_sp_out.get("lesson", ""),
+                                   doc_ctx=_sp_out.get("doc", ""))
         final_text = ""
         final_thinking = ""
         used_tools = set()          # 本轮真正调用过的工具（用来判断"是不是光嘴上说说"）
@@ -9092,10 +9134,13 @@ async def chat(req: ChatRequest,
                         _ctx_trimmed = True
                         _retry_round = True
                         _hard = all_messages[-2:] if len(all_messages) > 2 else all_messages
+                        # ⚠️ 溢出兜底：文档正文（doc_ctx）与检索材料一起置空 ——
+                        #   溢出最常见的原因就是它们太大；留着会立刻再次溢出。
                         working[:] = _attach_live_ctx(
                             [{"role": "system", "content": full_sys}] + list(_hard),
                             digest=digest, mem_ctx=mem_ctx, rag_ctx="",
-                            sched_ctx=_sched_ctx())
+                            sched_ctx=_sched_ctx(),
+                            lesson_ctx=_sp_out.get("lesson", ""))
                         logger.warning("[ctx-overflow] 提示词超出窗口，已精简到最近 %d 条重试：%s",
                                        len(_hard), _emsg[:120])
                         yield json.dumps({"note": (

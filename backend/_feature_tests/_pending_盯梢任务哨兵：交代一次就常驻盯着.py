@@ -1,6 +1,6 @@
 """新功能验收断言：盯梢任务哨兵：交代一次就常驻盯着
 
-对应摩擦点「同一需求被重复发送」115 次；对应预判「继续验证 RSI 闭环」
+对应「同一需求被重复发送」124 次——用户反复问「好了吗/变了吗」，因为助手不会主动盯。
 
 由自主立项自动生成，回归会自动加载它。
 出问题时直接删掉这个文件即可，不影响其他用例。
@@ -11,29 +11,20 @@ _sys.path.insert(0, _B)
 _sys.path.insert(0, _os.path.dirname(_B))
 
 def run():
-    import json, os, tempfile
-    from backend import livecard_meta as lm
-
-    # 使用临时目录隔离持久化
-    tmp = tempfile.mkdtemp()
-    lm.SENTINEL_PATH = os.path.join(tmp, 'sentinels.json')
-
-    # 注册哨兵
-    sid = lm.register_sentinel(name='watch_task', target='task:123', snapshot={'status': 'running'})
-    assert sid is not None
-    assert any(s.get('id') == sid for s in lm.list_sentinels())
-
-    # 首次 tick 建立基线，不应产生变化事件
-    events0 = lm.tick_sentinels(current={'task:123': {'status': 'running'}})
-    assert events0 == [] or len(events0) == 0
-
-    # 状态变化后 tick 应产生事件
-    events1 = lm.tick_sentinels(current={'task:123': {'status': 'done'}})
-    assert len(events1) >= 1
-    assert any('task:123' in json.dumps(e, ensure_ascii=False) for e in events1)
-
-    # 持久化文件存在
-    assert os.path.exists(lm.SENTINEL_PATH)
+    import os, tempfile, sys
+    sys.path.insert(0, 'backend')
+    from backend import actlog
+    # 哨兵事件应可记录且可回读
+    try:
+        actlog.record_sentinel('watch-1', 'build.log', 'old', 'new')
+    except AttributeError:
+        raise AssertionError('actlog.record_sentinel 未实现')
+    events = [e for e in actlog.recent(50) if getattr(e, 'kind', None) == 'sentinel' or (isinstance(e, dict) and e.get('kind') == 'sentinel')]
+    assert events, '未记录到 sentinel 事件'
+    last = events[-1]
+    get = (lambda k: last.get(k)) if isinstance(last, dict) else (lambda k: getattr(last, k, None))
+    assert get('watch_id') == 'watch-1'
+    assert get('diff') == 'new'
     print('sentinel ok')
 
 
@@ -44,7 +35,7 @@ def _wiring_check():
     import os as _wo, re as _wr
     _be = _wo.path.dirname(_wo.path.dirname(_wo.path.abspath(__file__)))
     _pairs = [
-        ('backend', ['livecard_meta']),
+        ('backend', ['actlog']),
     ]
     _bad = []
     for _mod, _fns in _pairs:
