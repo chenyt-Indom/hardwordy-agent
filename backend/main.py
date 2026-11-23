@@ -3454,6 +3454,35 @@ def selfiter_health():
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfiter/cards")
+def selfiter_cards():
+    """待播报的「任务结束卡」—— 重启后复核跑完就落一张，前端轮询取走渲染。
+
+    ★ 2026-11-23 用户原话：「自动迭代重启之后没有弹出卡片并显示已验证然后
+      结束，结束任务时卡片必须有弹出来」。复核发生在重启后的新进程里，
+      只写日志用户看不到，所以必须有一条能跨进程带到界面的通道。
+    """
+    from . import iterloop as _IL
+    try:
+        items = _IL.pending_cards()
+        return {"ok": True, "count": len(items), "items": items}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e), "items": []}
+
+
+@app.post("/api/selfiter/cards/ack")
+def selfiter_cards_ack(payload: dict = Body(default={})):
+    """前端渲染完就出队（ids 为空表示全清）。"""
+    from . import iterloop as _IL
+    try:
+        ids = (payload or {}).get("ids") or []
+        if isinstance(ids, str):
+            ids = [ids]
+        return _IL.ack_cards(ids)
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/selfiter/status")
 def selfiter_status():
     """运行状态：现在在做什么、跑到哪个阶段、已经用了多少秒。
@@ -12151,29 +12180,12 @@ def _brand_seal_on_boot():
         logger.warning("品牌盖章校验失败：%s", e)
 
 
-@app.on_event("startup")
-def _loop_post_verify_on_boot():
-    """闭环：上次自动重启前留了「重启后复核」标记 → 这次启动后自动再量一次分。
-
-    用户 2026-11-22：「改进过程可以进行自动重启然后自动验证」——
-    重启会清掉内存，只能靠磁盘标记把「还要复核」这件事带过重启。
-
-    ⚠️ 两个约束：延迟 8 秒（等 FastAPI 完全起来再跑，否则冒烟会打到自己还没
-    注册完的路由）；**没有标记时什么都不做**，不拖慢正常启动。
-    """
-    def _go():
-        try:
-            from . import iterloop as _IL
-            r = _IL.run_post_verify()
-            if r:
-                logger.info("[loop] 重启后复核完成：%s", str(r)[:400])
-        except Exception:                               # noqa: BLE001
-            logger.warning("重启后复核失败", exc_info=True)
-    try:
-        import threading as _th
-        _th.Timer(8.0, _go).start()
-    except Exception:                                   # noqa: BLE001
-        logger.warning("启动复核线程失败", exc_info=True)
+# ⚠️ 2026-11-23 删掉了原来的 `_loop_post_verify_on_boot`（延迟 8 秒的那个）。
+#   它和下面的 `_loop_post_verify` 是**同一个钩子写了两遍**：
+#   两个 startup 都会去 take 磁盘上的复核标记，谁先拿到谁跑、另一个拿到 None，
+#   于是「重启后复核」到底跑没跑、跑了几次，全看两个线程谁先醒 ——
+#   这正是用户报的「重启之后没有弹出卡片」里最难查的一层（有时根本没量分）。
+#   现在只保留一个入口（下面的 `_loop_post_verify`），一次重启只复核一次。
 
 
 @app.on_event("startup")

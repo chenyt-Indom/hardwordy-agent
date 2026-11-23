@@ -1088,7 +1088,13 @@ def run_post_verify(pid=""):
         s = score(full=True)
         total = s.get("total")
         if total is None:
-            return {"ok": False, "error": "重启后评分拿不到", "pid": pid}
+            out = {"ok": False, "error": "重启后评分拿不到", "pid": pid,
+                   "verdict": "error", "plan_id": pid}
+            try:
+                _push_post_verify_card(out)
+            except Exception:                           # noqa: BLE001
+                logger.debug("推任务结束卡片失败", exc_info=True)
+            return out
         d = load_ledger()
         prev = (d.get("last") or {}).get("after")
         delta = None if prev is None else round(float(total) - float(prev), 2)
@@ -1107,12 +1113,193 @@ def run_post_verify(pid=""):
                      % (rec["iso"], total, prev,
                         ("%+.2f" % delta) if delta is not None else "无基线",
                         (" 计划 " + pid) if pid else "")])
-        return {"ok": verdict == "ok", "total": total, "prev": prev,
-                "delta": delta, "cum": d.get("cum"), "verdict": verdict,
-                "pid": pid}
+        out = {"ok": verdict == "ok", "total": total, "prev": prev,
+               "delta": delta, "cum": d.get("cum"), "verdict": verdict,
+               "pid": pid, "plan_id": pid}
+        # ★ 2026-11-23：复核结论必须变成界面上的一张卡，不能只进日志。
+        try:
+            _push_post_verify_card(out)
+        except Exception:                               # noqa: BLE001
+            logger.debug("推任务结束卡片失败", exc_info=True)
+        return out
     except Exception as e:                              # noqa: BLE001
         logger.warning("重启后复核失败", exc_info=True)
-        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e), "pid": pid}
+        out = {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+               "pid": pid, "verdict": "error", "plan_id": pid}
+        try:
+            _push_post_verify_card(out)
+        except Exception:                               # noqa: BLE001
+            logger.debug("推任务结束卡片失败", exc_info=True)
+        return out
+
+
+# ------------------------------------------------- 任务结束卡片（待播报队列）
+# ★ 2026-11-23 用户原话：
+#   「自动迭代重启之后没有弹出卡片并显示已验证然后结束，结束任务时卡片必须有弹出来」
+#
+# 根因：run_post_verify 跑完只写 logger 和账本，**从来没有推给前端**。
+#   而重启后复核是在新进程的后台线程里跑的，跑完线程就结束了 ——
+#   界面上什么都不会出现，用户只能自己去翻日志，等于「验证了但没人知道」。
+#
+# 做法：把复核结论落成一条「待播报卡片」（落盘，不靠内存 ——
+#   复核在新进程里，用户刷新页面可能更晚），前端轮询取走 → 渲染成
+#   对话里的任务结束卡 → ack 掉。取走前一直留着，刷新也不会丢。
+_CARD_KEEP = 20
+
+
+def _cards_path():
+    return os.path.join(_data_dir(), "pending_cards.jsonl")
+
+
+def _read_cards():
+    try:
+        with open(_cards_path(), encoding="utf-8") as fh:
+            rows = [json.loads(x) for x in fh if str(x).strip()]
+    except Exception as e:                              # noqa: BLE001
+        logger.debug("读待播报卡片失败（视为无卡）: %s: %s", type(e).__name__, e)
+        return []
+    return [r for r in rows if isinstance(r, dict) and r.get("id")]
+
+
+def _write_cards(rows):
+    p = _cards_path()
+    tmp = p + ".tmp"
+    with _LOCK:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for r in list(rows)[-_CARD_KEEP:]:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.replace(tmp, p)
+
+
+def push_card(card):
+    """追加一张待播报卡片（前端取走后 ack）。"""
+    try:
+        d = dict(card or {})
+        d.setdefault("id", "c%d" % int(time.time() * 1000))
+        d.setdefault("ts", time.time())
+        d.setdefault("at", _now())
+        rows = _read_cards()
+        rows.append(d)
+        _write_cards(rows)
+        return {"ok": True, "id": d["id"], "n": len(rows[-_CARD_KEEP:])}
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("写待播报卡片失败", exc_info=True)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def pending_cards():
+    """还没被前端取走的卡片（不消费）。"""
+    return _read_cards()
+
+
+def ack_cards(ids=None):
+    """前端已渲染的卡片出队。ids 为空表示全部出队。"""
+    rows = _read_cards()
+    if not ids:
+        _write_cards([])
+        return {"ok": True, "left": 0}
+    drop = {str(x) for x in ids}
+    left = [r for r in rows if str(r.get("id")) not in drop]
+    _write_cards(left)
+    return {"ok": True, "left": len(left)}
+
+
+def _rsi_snapshot():
+    """卡片上要带的 RSI 快照：分数 / 趋势形态 / 最该修。
+
+    RSI 的实质不是「有个分数」，而是**拿分数决定下一步改什么** ——
+    所以任务结束卡上必须同时出现「有没有改坏」（复核分数）和
+    「有没有变好」（RSI 与最弱项），各说各话才算证据。
+    """
+    try:
+        from . import lessonloop as _LL
+        idx = _LL.rsi_index(cache_sec=0) or {}
+        tr = _LL.rsi_trend() or {}
+        wk = _LL.rsi_weakest() or {}
+        return {
+            "score": idx.get("score"),
+            "shape": tr.get("shape"),
+            "slope": tr.get("slope"),
+            "samples": tr.get("n"),
+            "weakest": ({"name": wk.get("name"),
+                         "value": wk.get("value"),
+                         "drag": wk.get("drag"),
+                         "advice": wk.get("advice")}
+                        if wk.get("ok") else None),
+        }
+    except Exception:                                   # noqa: BLE001
+        logger.debug("取 RSI 快照失败（卡片不带 RSI）", exc_info=True)
+        return None
+
+
+def _push_post_verify_card(rec):
+    """把一次重启后复核的结果变成「任务结束卡」，并推给前端。
+
+    失败（分数掉了 / 起不来 / 量不到分）时：
+      · 卡片标红，写清原因；
+      · 按用户 2026-11-23 的要求**自动重排一轮修复计划**
+        （走 self_iterate._schedule_replan：它自带预算闸门与 90 秒冷却，
+         不会变成「失败→重排→又失败」的死循环）。
+    """
+    rec = dict(rec or {})
+    verdict = str(rec.get("verdict") or "")
+    err = str(rec.get("error") or "")
+    ok = (verdict == "ok") and not err
+    total = rec.get("total")
+    prev = rec.get("prev")
+    delta = rec.get("delta")
+
+    if ok:
+        state, badge = "verified", "已验证"
+        title = "任务结束 · 重启后复核已验证"
+        why = ("重启后程序正常起来，评分没有退步"
+               + ("（%s → %s，%+.2f）" % (prev, total, float(delta))
+                  if (prev is not None and total is not None
+                      and isinstance(delta, (int, float))) else ""))
+    else:
+        state, badge = "failed", "复核未通过"
+        title = "任务结束 · 重启后复核未通过"
+        if err:
+            why = "重启后没量到分：%s" % err[:200]
+        elif isinstance(delta, (int, float)) and delta < 0:
+            why = "重启后评分退步 %.2f 分（%s → %s）" % (abs(delta), prev, total)
+        else:
+            why = "重启后复核没通过"
+
+    card = {
+        "kind": "post_restart",
+        "state": state,
+        "badge": badge,
+        "title": title,
+        "why": why,
+        "pid": str(rec.get("plan_id") or ""),
+        "total": total,
+        "prev": prev,
+        "delta": delta,
+        "rsi": _rsi_snapshot(),
+        "replan": None,
+    }
+
+    if not ok:
+        try:
+            from . import self_iterate as _SI
+            r = _SI._schedule_replan(
+                pid=card["pid"],
+                reason=why,
+                before=prev, after=total,
+                context="重启后复核失败（post_restart）：%s" % why[:300],
+            )
+            card["replan"] = {"ok": bool(r.get("ok")),
+                              "skipped": bool(r.get("skipped")),
+                              "why": r.get("why") or r.get("error") or ""}
+        except Exception as e:                          # noqa: BLE001
+            logger.warning("复核失败后重排修复计划失败", exc_info=True)
+            card["replan"] = {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+
+    r = push_card(card)
+    logger.info("[loop] 任务结束卡片已推送：%s（%s）", badge, r)
+    return r
 
 
 # ---------------------------------------------------------------- 落盘

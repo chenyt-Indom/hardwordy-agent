@@ -1902,9 +1902,12 @@
       // ★ 2026-11-21：jobplan.js 是「一句话订整件事」的侧栏进度面板。
       //   它自己往 #topQuick 里挂按钮、自己建面板，不依赖 app.js，
       //   所以放最后加载也不会漏入口（mountButton 里还有重试）。
+      // ★ 2026-11-23：taskcard.js = 「任务结束卡」（重启后复核「已验证」/「未通过」）。
+      //   它自己轮询后端待播报队列、自己往 #messages 追加一条卡片，
+      //   不改任何布局骨架，也不依赖 app.js 的内部函数。
       ["/static/livecard.js", "/static/app.js", "/static/artifacts.js",
        "/static/featpanel.js", "/static/jobplan.js",
-       "/static/iterjournal.js"].forEach(function (src) {
+       "/static/iterjournal.js", "/static/taskcard.js"].forEach(function (src) {
         document.write('<script src="' + src + '?v=' + v + '"><\/script>');
       });
     })();

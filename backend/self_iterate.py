@@ -7164,6 +7164,50 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     except Exception as _e:                             # noqa: BLE001
         logger.warning("提交累计分失败", exc_info=True)
         out["score_error"] = "%s: %s" % (type(_e).__name__, _e)
+
+    # ★★ 2026-11-23 用户原话：「结束任务时卡片必须有弹出来」。
+    #   分工（保证「一个任务恰好一张结束卡」，不会两张，也不会一张都没有）：
+    #     · 这一轮会**自动重启** → 不在这里推：重启后复核卡才是这个任务的结束卡
+    #       （它带「已验证」徽标和重启前后分数，见 iterloop._push_post_verify_card）；
+    #     · 其余（退步回滚 / 没有成功动作 / 用户终止 / 关了自动重启）→ 就在这里推，
+    #       否则任务悄悄结束，界面上什么都没有。
+    try:
+        _lp = out.get("loop") or {}
+        _ar2 = _lp.get("auto_restart") or {}
+        if not _ar2.get("scheduled"):
+            from . import iterloop as _ILc
+            _sc = out.get("score") or {}
+            _rb2 = _lp.get("rollback") or {}
+            _done2 = int(out.get("done") or 0)
+            _bad2 = max(0, int(out.get("total") or 0) - _done2)
+            if out.get("cancelled"):
+                _state, _badge = "cancelled", "已终止"
+                _title = "任务结束 · 已按你的要求停下"
+                _why = "已做完 %d 条，剩下的退回「待批准」，下次可以接着批" % _done2
+            elif _rb2.get("rolled") or _rb2.get("reason"):
+                _state, _badge = "failed", "已回滚"
+                _title = "任务结束 · 本轮改动已回滚"
+                _why = "评分退步，已回滚：%s" % str(_rb2.get("reason") or "")[:200]
+            elif _done2 > 0:
+                _state, _badge = "verified", "已完成"
+                _title = "任务结束 · 本轮迭代已完成"
+                _why = "成功 %d 条 / 失败 %d 条" % (_done2, _bad2)
+            else:
+                _state, _badge = "done", "无改动"
+                _title = "任务结束 · 本轮没有可执行的改动"
+                _why = "成功 0 条 / 失败 %d 条" % _bad2
+            _ILc.push_card({
+                "kind": "task_done", "state": _state, "badge": _badge,
+                "title": _title, "why": _why,
+                "pid": str(pid or ""),
+                "prev": _sc.get("before"), "total": _sc.get("after"),
+                "delta": _sc.get("delta"),
+                "rsi": _ILc._rsi_snapshot(),
+                "replan": None,
+            })
+    except Exception:                                   # noqa: BLE001
+        logger.debug("推任务结束卡片失败", exc_info=True)
+
     return out
 
 

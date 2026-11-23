@@ -1,6 +1,6 @@
 """新功能验收断言：盯梢任务哨兵：交代一次就常驻盯着
 
-用户每次都要手动问「现在怎么样了」，没有主动推送变化。
+对应摩擦点「同一需求被重复发送」115 次；对应预判「继续验证 RSI 闭环」
 
 由自主立项自动生成，回归会自动加载它。
 出问题时直接删掉这个文件即可，不影响其他用例。
@@ -11,29 +11,29 @@ _sys.path.insert(0, _B)
 _sys.path.insert(0, _os.path.dirname(_B))
 
 def run():
-    import sys, types, time
-    sys.modules.setdefault('backend', types.ModuleType('backend'))
+    import json, os, tempfile
     from backend import livecard_meta as lm
-    from backend import actlog
 
-    # 1. 创建哨兵
-    w = lm.create_watch(target='demo://page', interval=1)
-    assert w.watch_id and w.interval == 1
+    # 使用临时目录隔离持久化
+    tmp = tempfile.mkdtemp()
+    lm.SENTINEL_PATH = os.path.join(tmp, 'sentinels.json')
 
-    # 2. 模拟两次快照，第二次有变化
-    lm.update_snapshot(w.watch_id, 'v1')
-    lm.update_snapshot(w.watch_id, 'v2')
-    assert lm.get_watch(w.watch_id).last_snapshot == 'v2'
+    # 注册哨兵
+    sid = lm.register_sentinel(name='watch_task', target='task:123', snapshot={'status': 'running'})
+    assert sid is not None
+    assert any(s.get('id') == sid for s in lm.list_sentinels())
 
-    # 3. 变化应产生事件且带摘要
-    actlog.record_watch_event(w.watch_id, 'changed', 'v1->v2')
-    events = [e for e in actlog.list_events() if getattr(e, 'watch_id', None) == w.watch_id]
-    assert events and events[-1].diff_summary
+    # 首次 tick 建立基线，不应产生变化事件
+    events0 = lm.tick_sentinels(current={'task:123': {'status': 'running'}})
+    assert events0 == [] or len(events0) == 0
 
-    # 4. 多次变化后快照存储不线性膨胀（压缩/遗忘生效）
-    for i in range(50):
-        lm.update_snapshot(w.watch_id, 'v%d' % i)
-    assert len(lm.get_watch(w.watch_id).history) <= 10
+    # 状态变化后 tick 应产生事件
+    events1 = lm.tick_sentinels(current={'task:123': {'status': 'done'}})
+    assert len(events1) >= 1
+    assert any('task:123' in json.dumps(e, ensure_ascii=False) for e in events1)
+
+    # 持久化文件存在
+    assert os.path.exists(lm.SENTINEL_PATH)
     print('sentinel ok')
 
 
