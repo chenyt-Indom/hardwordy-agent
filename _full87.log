@@ -1,0 +1,113 @@
+======================================================================
+全量跑 87 个测试（单个上限 420 秒）
+======================================================================
+[ 1/87] test_ask_modes.py                              PASS       0.9s  通过 45 项，失败 0 项
+[ 2/87] test_ask_user.py                               PASS       0.9s  通过 47 项，失败 0 项
+[ 3/87] test_code_continue.py                          PASS       3.2s  通过 15 项，失败 0 项
+[ 4/87] test_code_routing.py                           PASS       0.9s  通过 81 项，失败 0 项
+[ 5/87] test_context_and_image_flow.py                 PASS       1.2s  通过 59 项，失败 0 项
+[ 6/87] test_cross_turn.py                             PASS       0.9s  通过 33 项，失败 0 项
+[ 7/87] test_cutout_composite.py                       PASS       0.3s  通过 51 项，失败 0 项
+[ 8/87] test_fake_artifact.py                          PASS       1.0s  通过 22 项，失败 0 项
+[ 9/87] test_first_token.py                            PASS       1.0s  通过 37 项，失败 0 项
+[10/87] test_gen_matrix.py                             PASS      29.3s  通过 48 项，失败 0 项
+[11/87] test_image_ask_and_abort.py                    PASS       0.9s  通过 25 项，失败 0 项
+[12/87] test_image_compose.py                          PASS       2.9s  通过 29 项，失败 0 项
+[13/87] test_image_inpaint.py                          PASS      24.2s  通过 35 项，失败 0 项
+[14/87] test_image_quality_and_ask.py                  PASS       0.9s  通过 84 项，失败 0 项
+[15/87] test_image_search.py                           PASS       4.7s  通过 25 项，失败 0 项
+[16/87] test_loop.py                                   PASS       7.6s  通过 25 项，失败 0 项
+[17/87] test_map_offline.py                            PASS      43.0s  ================================================================
+[18/87] test_memory_extract.py                         PASS     338.3s  ==================================================================
+[19/87] test_mode_switch.py                           [18/87] test_memory_extract.py                         FAIL     170.4s  backend.ollama_client.OllamaError: Ollama 返回错误 500: {"error":"an error was encountered whi
+        resp = client.chat([{"role": "user", "content": prompt}], model=model,
+        stream=False, params=param[22/87] test_ollama_error.py                           PASS       5.4s  通过 40 项，失败 0 项
+[23/87] test_run_timeout.py                            FAIL      41.4s  通过 32 项，失败 2 项
+        [!!] 6 秒后仍在运行、没被砍（不设时限）
+        [OK] run 登记表里有它（能停）
+        [OK] 停止按钮生效  {'ok': True, 'stopped': 1}
+        [OK] 停止后没有残留进程  {'ok': True, 'running': 0}
+        [OK] 临时工作目录被清掉了（不在 %TEMP% 里留垃圾）  残留：[]
+        ================================================================
+        通过 32 项，失败 2 项
+        ================================================================
+[24/87] test_sampling_params.py                        PASS       0.2s  通过 17 项，失败 0 项
+[25/87] test_slow_feedback.py                          PASS       1.0s  通过 16 项，失败 0 项
+[26/87] test_smoke.py                                  FAIL      14.2s  失败 1 项 / 通过 45 项
+        【5】真实运行的应用（HTTP 接口）
+        [OK] GET /api/frontend/version（前端版本）  359 字节
+        [OK] GET /api/config（配置）  2777 字节
+        [OK] GET /api/map/stats（地图状态）  311 字节
+        [OK] GET /api/map/search?q=%E6%B1%95%E5%A4%B4（地名搜索）  102 字节
+        ==============================================================
+        失败 1 项 / 通过 45 项
+        ==============================================================
+[27/87] test_text_tool_leak.py                         PASS       3.4s  通过 78 项，失败 0 项
+[28/87] test_thinking_budget.py                        PASS       1.1s  通过 17 项，失败 0 项
+[29/87] test_thinking_retry.py                         PASS       1.0s  通过 8 项，失败 0 项
+[30/87] test_tool_leak_e2e.py                          PASS      10.6s  通过 13 项，失败 0 项
+[31/87] test_voice.py                                  PASS       9.3s  通过 66 项，失败 0 项
+[32/87] test_weather.py                                PASS      14.3s  ================================================================
+[33/87] test_web_intent.py                             PASS       0.9s  通过 62 项，失败 0 项
+[34/87] backend/tests\test_tmp_cleanup.py              PASS      80.9s  临时脚本清理验收 OK
+[35/87] backend/_feature_tests\test_action_dedup.py    PASS       0.1s  通过 16 / 失败 0
+[36/87] backend/_feature_tests\test_anchor_diagnose.py PASS       0.2s  通过 22 / 失败 0
+[37/87] backend/_feature_tests\test_auto_chain.py      PASS       0.1s  全部通过（失败 0 项）
+[38/87] backend/_feature_tests\test_backlog_scope.py   PASS       0.2s  通过 12 / 失败 0
+[39/87] backend/_feature_tests\test_canvas_command.py  PASS       0.1s  通过 39 / 失败 0
+[40/87] backend/_feature_tests\test_codesync.py        PASS       0.9s  通过 44 / 失败 0
+[41/87] backend/_feature_tests\test_ds_stop.py         PASS       1.0s  [ds] 本轮 finish=None 正文=30 字 工具=0 个 尾='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+[42/87] backend/_feature_tests\test_empty_patch_retry.py PASS       0.1s  通过 11 / 失败 0
+[43/87] backend/_feature_tests\test_evolve_budget.py   PASS       0.1s  通过 27 / 失败 0
+[44/87] backend/_feature_tests\test_fail_attribution.py PASS       0.1s  通过（失败 0 项）
+[45/87] backend/_feature_tests\test_feature_isolation.py PASS       0.2s  通过（失败 0 项）
+[46/87] backend/_feature_tests\test_guard_only_skip.py PASS       0.2s  [OK] 护栏动作预检回归：全部通过
+[47/87] backend/_feature_tests\test_guard_scope.py     PASS       0.1s  全部通过（6 项）
+[48/87] backend/_feature_tests\test_handoff_card.py    PASS       3.8s  OK   存储层不做头尾拼接（长回复不出现中段省略号）  '结论：通过\n通过 327 / 失败 0\n\n我先核对当前版本是否已生效，并运行回归测试。我先核对当前版本是否已生效，并运行'
+[49/87] backend/_feature_tests\test_hardguard_and_bench.py PASS       0.1s  通过 43 / 失败 0
+[50/87] backend/_feature_tests\test_health_and_patch_fallback.py PASS       0.2s  通过 14 / 失败 0
+[51/87] backend/_feature_tests\test_holdout.py         PASS       0.1s  通过 31 / 失败 0
+[52/87] backend/_feature_tests\test_iter_live.py       PASS       0.4s  结论：全部通过
+[53/87] backend/_feature_tests\test_iter_no_progress.py PASS       0.1s  ---- 合计 40 通过 / 0 失败 ----
+[54/87] backend/_feature_tests\test_ledger_attrib.py   PASS       0.1s  通过 24 / 失败 0
+[55/87] backend/_feature_tests\test_lesson_visibility.py PASS       0.9s  [OK] 教训约束力/可见性回归：全部通过
+[56/87] backend/_feature_tests\test_llm_retry.py       PASS       2.2s  15 项，失败 0
+[57/87] backend/_feature_tests\test_map_city_level.py  PASS       1.3s  34 项，失败 0
+[58/87] backend/_feature_tests\test_mechanism_fixes.py PASS       0.1s  机制修复验收 OK：幽灵闸门数据源 / 评分去重 / think 限流 / 新建文件校验 全部生效
+[59/87] backend/_feature_tests\test_no_progress.py     PASS       0.2s  通过 24 / 失败 0
+[60/87] backend/_feature_tests\test_observe_base.py    PASS       0.1s  通过 8 / 失败 0
+[61/87] backend/_feature_tests\test_parity.py          PASS       0.1s  通过 21 / 失败 0
+[62/87] backend/_feature_tests\test_pause_resume.py    PASS       0.8s  [stop] 收到终止请求 session='t_pause_resume_probe' 掐连接=0 置令牌=1
+[63/87] backend/_feature_tests\test_press_plan_link.py PASS       0.1s  press_plan_link OK
+[64/87] backend/_feature_tests\test_probe_calibration.py PASS       0.1s  全部通过（3 项）
+[65/87] backend/_feature_tests\test_reachability.py    PASS       0.1s  通过 17 / 失败 0
+[66/87] backend/_feature_tests\test_regress_lock.py    PASS       1.1s  通过（失败 0 项）
+[67/87] backend/_feature_tests\test_restart_by_origin.py PASS       0.1s  通过 21 / 失败 0
+[68/87] backend/_feature_tests\test_result_cards_wired.py PASS       0.8s  通过（失败 0 项）
+[69/87] backend/_feature_tests\test_revive_approval.py PASS       0.1s  通过（失败 0 项）
+[70/87] backend/_feature_tests\test_rsi.py             PASS       0.1s  结果：通过 17 / 失败 0
+[71/87] backend/_feature_tests\test_rsi_bench.py       PASS       0.1s  通过 32 / 失败 0
+[72/87] backend/_feature_tests\test_rsi_landed_visible.py PASS       0.1s  全部通过（8 项）
+[73/87] backend/_feature_tests\test_rsi_window_and_syntax.py PASS       0.2s  通过 33 / 失败 0
+[74/87] backend/_feature_tests\test_safeio.py          PASS       1.5s  通过 16 / 失败 0
+[75/87] backend/_feature_tests\test_score_noise_band.py PASS       0.1s  全部通过（8 项）
+[76/87] backend/_feature_tests\test_scratch_filter.py  PASS       0.1s  结果：22 项，失败 0
+[77/87] backend/_feature_tests\test_selfdev_write_guard.py PASS       0.2s  15 项，失败 0
+[78/87] backend/_feature_tests\test_selfiter_resilience.py PASS       0.1s  通过（失败 0 项）
+[79/87] backend/_feature_tests\test_selfloop_gate.py   PASS       3.2s  通过 20 / 失败 0
+[80/87] backend/_feature_tests\test_status_key_and_scratch.py PASS       0.1s  结果：21 项，失败 0
+[81/87] backend/_feature_tests\test_submit_finished.py PASS       0.1s  通过 15 / 失败 0
+[82/87] backend/_feature_tests\test_surrogate_safety.py PASS       0.2s  通过（失败 0 项）
+[83/87] backend/_feature_tests\test_task_card.py       PASS       0.4s  通过 30 项，失败 0 项
+[84/87] backend/_feature_tests\test_token_quality.py   PASS       0.9s  通过 27 / 失败 0
+[85/87] backend/_feature_tests\test_tool_registry.py   PASS       0.1s  15 项，失败 0
+[86/87] backend/_feature_tests\test_verify_entrypoints.py PASS       0.8s  通过 21 / 失败 0
+[87/87] backend/_feature_tests\test_verify_gate.py     PASS       0.1s  全部通过（失败 0 项）
+
+======================================================================
+汇总
+======================================================================
+  FAIL     test_run_timeout.py                            通过 32 项，失败 2 项
+  FAIL     test_smoke.py                                  失败 1 项 / 通过 45 项
+
+  通过 85 / 87 ，未通过 2

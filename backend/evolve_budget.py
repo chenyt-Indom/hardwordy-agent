@@ -98,7 +98,9 @@ def load():
         if isinstance(raw, dict):
             d.update({k: v for k, v in raw.items()
                       if k in ("date", "limits", "spent", "history", "note")})
-    except FileNotFoundError:
+    # ★ 2026-11-25：账本还没生成过是**正常情况**（首次运行），不是「吞异常掩盖故障」。
+    #   显式标 noqa 说明原因，避免静态自检把它算成 silent-except 压分点。
+    except FileNotFoundError:  # noqa: BLE001 —— 首次运行没有账本，属正常，由 _blank() 兜住
         pass
     except Exception as e:                               # noqa: BLE001
         d["note"] = "账本读不出来（%s），按「今天还没花过」处理" % type(e).__name__
