@@ -40,6 +40,33 @@ import time
 logger = logging.getLogger(__name__)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_OVERRIDE = None      # 测试/临时实例注入用（set_path）；None = 走正常解析
+
+
+def set_path(p):
+    """临时改账本路径（传 None 恢复）。给测试用，避免写穿真实账本。"""
+    global _OVERRIDE
+    _OVERRIDE = str(p) if p else None
+    return _path()
+
+
+def _path() -> str:
+    """账本路径。★ 必须跟随 MM_DATA_DIR，否则测试会写穿真实账本。
+
+    2026-11-24 实测事故：PATH 在 import 时被定死成真实 data/ 下那一个，
+    于是跑一轮 _feature_tests 就往真实账本里记了 12 笔「定时反思」，
+    当天 plans 额度直接 12/12 花满 —— 之后定时反思被自己的预算挡死，
+    test_selfiter_resilience 也跟着红。改成每次现算。
+    """
+    if _OVERRIDE:
+        return _OVERRIDE
+    base = os.environ.get("MM_DATA_DIR")
+    if base:
+        return os.path.join(base, "evolve_budget.json")
+    return os.path.join(_ROOT, "data", "evolve_budget.json")
+
+
+# 兼容旧引用（模块级常量在 import 时定值，仅供只读场景/调试打印用）
 PATH = os.path.join(_ROOT, "data", "evolve_budget.json")
 
 # 每日上限（默认值；可在账本的 limits 字段里覆盖，方便用户按机器调）
@@ -66,7 +93,7 @@ def load():
     """读账本；不存在/读坏都返回一份干净的空账（并写明原因）。"""
     d = _blank()
     try:
-        with open(PATH, encoding="utf-8") as fh:
+        with open(_path(), encoding="utf-8") as fh:
             raw = json.load(fh)
         if isinstance(raw, dict):
             d.update({k: v for k, v in raw.items()
@@ -103,12 +130,13 @@ def save(d):
     d = d or _blank()
     d["date"] = str(d.get("date") or _today())
     try:
-        os.makedirs(os.path.dirname(PATH), exist_ok=True)
+        pth = _path()
+        os.makedirs(os.path.dirname(pth), exist_ok=True)
         try:
             from . import safeio
-            safeio.atomic_write_json(PATH, d, indent=1)
+            safeio.atomic_write_json(pth, d, indent=1)
         except Exception:                                # noqa: BLE001
-            with open(PATH, "w", encoding="utf-8") as fh:
+            with open(pth, "w", encoding="utf-8") as fh:
                 json.dump(d, fh, ensure_ascii=False, indent=1)
     except Exception as e:                               # noqa: BLE001
         logger.warning("evolve_budget 写盘失败：%s", e)

@@ -45,11 +45,13 @@ def main():
     print("进化预算 evolve_budget")
     print("=" * 62)
 
-    real_path = EB.PATH
+    real_path = EB._path()
     tmp = os.path.join(tempfile.gettempdir(), "_evolve_budget_test.json")
     if os.path.exists(tmp):
         os.remove(tmp)
-    EB.PATH = tmp
+    # ★ 2026-11-24：EB.PATH 只是模块级常量，改成 _path() 之后给它赋值不再生效
+    #   （实测会写穿真实账本，把当天 plans 额度花满）。必须走 set_path 注入。
+    EB.set_path(tmp)
     try:
         # ---- 1. 账本语义 ----
         st = EB.status()
@@ -130,7 +132,7 @@ def main():
             for frag in frags:
                 check("%s 里有 %s" % (os.path.basename(rel), frag), frag in src)
     finally:
-        EB.PATH = real_path
+        EB.set_path(None)
         try:
             os.remove(tmp)
         except OSError:

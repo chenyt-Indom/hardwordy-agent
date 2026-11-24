@@ -18,8 +18,10 @@
 """
 import argparse
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 # ⚠️ 2026-11-24 实测：Windows 控制台默认 GBK，汇总行的「合计 / 通过」会变成
@@ -37,6 +39,43 @@ SELF = os.path.basename(os.path.abspath(__file__))
 def _files():
     return sorted(f for f in os.listdir(HERE)
                   if f.startswith("test_") and f.endswith(".py") and f != SELF)
+
+
+def _tmp_snapshot() -> set:
+    """记下跑测试前 %TEMP% 里有什么（用来只清本次新增的）。"""
+    try:
+        return set(os.listdir(tempfile.gettempdir()))
+    except OSError:
+        return set()
+
+
+def _clean_tmp(before: set) -> int:
+    """删掉本次运行新增的测试临时目录。
+
+    ★ 2026-11-24 体检：这些测试用 tempfile.mkdtemp(prefix="mm_") 建数据目录，
+      跑完从不删 —— %TEMP% 下已经堆了 4049 个 mm_* 共 759 MB。
+      这里只清「跑之前不存在、跑之后多出来」的，绝不碰别的进程正在用的目录。
+    """
+    t = tempfile.gettempdir()
+    try:
+        now = set(os.listdir(t))
+    except OSError:
+        return 0
+    n = 0
+    for name in now - before:
+        if not (name.startswith("mm_") or name.startswith("_evolve_budget")
+                or name.startswith("_parity_test")):
+            continue
+        p = os.path.join(t, name)
+        try:
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                os.remove(p)
+            n += 1
+        except OSError:
+            pass
+    return n
 
 
 def main() -> int:
@@ -62,6 +101,7 @@ def main() -> int:
 
     ok, bad, slow = [], [], []
     t_all = time.time()
+    _tmp_before = _tmp_snapshot()
     for f in files:
         p = os.path.join(HERE, f)
         t0 = time.time()
@@ -88,6 +128,9 @@ def main() -> int:
         print("\n".join([l for l in out.splitlines() if l.strip()][-15:]))
     for f, dt in slow:
         print("超时：%s" % f)
+    _n = _clean_tmp(_tmp_before)
+    if _n:
+        print("已清理本次运行产生的临时目录 %d 个" % _n)
     return 0 if not bad and not slow else 1
 
 

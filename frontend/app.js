@@ -4273,8 +4273,7 @@
         // 只是点一下（没拖出面积）就当没发生，别把嘴位改成 0
         if (mouthState.w < 0.04 || mouthState.h < 0.02) { paintMouthBox(); return; }
         try {
-          await api("/api/avatar2/mouth", {
-            method: "POST", body: JSON.stringify(mouthState) });
+          throw new Error("嘴部标定已下线（后端接口已移除）");
           if (my) my.value = mouthState.y;
           if (mw) mw.value = mouthState.w;
           say("嘴部已标定 —— 卡通形象现在也能生成了");
@@ -4338,8 +4337,7 @@
         if (ap) ap.onclick = async () => {
           ap.disabled = true; ap.textContent = "写入中…";
           try {
-            const r2 = await api("/api/avatar2/locate", {
-              method: "POST", body: JSON.stringify({ use_llm: false, apply: true }) });
+            throw new Error("嘴部定位已下线（后端接口已移除）");
             if (r2.info) paintInfo(r2.info);
             say("嘴部位置已更新");
             lout.hidden = true;
@@ -4352,8 +4350,7 @@
         lbtn.textContent = "识别中…";
         if (lout) { lout.hidden = false; lout.textContent = "正在看图…（图像算法 + 多模态模型，约 3~10 秒）"; }
         try {
-          const d = await api("/api/avatar2/locate", {
-            method: "POST", body: JSON.stringify({ use_llm: true }) });
+          throw new Error("嘴部定位已下线（后端接口已移除）");
           renderLocate(d);
         } catch (e) {
           if (lout) lout.innerHTML = '<span class="loc-warn">识别失败：' + esc(e.message) + "</span>";
@@ -4376,12 +4373,7 @@
           // 后端不落盘，所以每次调用都从浏览器带过去。
           // ⚠️ api() 的 headers 是整体覆盖（Object.assign 浅合并），
           //    Content-Type 必须一起带上，否则后端解析不了 body。
-          const _ik = localStorage.getItem("img_api_key") || "";
-          const _hdr = { "Content-Type": "application/json" };
-          if (_ik) _hdr["X-Image-Key"] = _ik;
-          const d = await api("/api/avatar2/close_mouth", {
-            method: "POST", headers: _hdr,
-            body: JSON.stringify({ preview: true, method: "auto", use_llm: true }) });
+          throw new Error("闭嘴合成已下线（后端接口已移除）");
           if (d.closed) {
             say("预览已生成，看看满意吗 —— 满意就点「用这个」");
             if (cpImg && d.url) cpImg.src = d.url;
@@ -4403,7 +4395,7 @@
       if (cpUse) cpUse.onclick = async () => {
         cpUse.disabled = true;
         try {
-          const d = await api("/api/avatar2/closed_apply", { method: "POST", body: "{}" });
+          throw new Error("闭嘴基准已下线（后端接口已移除）");
           if (cpBox) cpBox.hidden = true;
           say("已设为闭嘴基准，之后生成就用它驱动（原图没动）");
           if (d.info) paintInfo(d.info);
@@ -4412,7 +4404,7 @@
       };
       if (cpDrop) cpDrop.onclick = async () => {
         try {
-          const d = await api("/api/avatar2/closed_drop", { method: "POST", body: "{}" });
+          throw new Error("闭嘴基准已下线（后端接口已移除）");
           if (cpBox) cpBox.hidden = true;
           say("已丢掉预览，什么都没改");
           if (d.info) paintInfo(d.info);
@@ -4695,10 +4687,7 @@
       clearTimeout(calTimer);
       calTimer = setTimeout(async () => {
         try {
-          await api("/api/avatar2/mouth", {
-            method: "POST",
-            body: JSON.stringify({ y: parseFloat(my.value), w: parseFloat(mw.value) }),
-          });
+          return;   // 嘴部标定接口已下线，不再发请求
         } catch (e) {}
       }, 220);
     }

@@ -3915,6 +3915,40 @@ def featradar_stats():
         return {"ok": False, "error": str(e), "pending": 0}
 
 
+@app.get("/api/pending/count")
+def pending_count(days: int = 0):
+    """顶栏「待批准」角标：待批准动作条数（与【待批准】面板同源）。
+
+    ★ 2026-11-24 体检：前端 app.js 从 11-20 起就在调这个接口，后端却
+      **从来没注册过** —— data/app.log 里 848 次 404，角标一直是死的
+      （用户看得到「有待批准」入口，却看不到到底有几条）。
+      这里按面板同源口径计数，避免两个数字对不上。
+    """
+    from . import self_iterate as _si
+    try:
+        d = _si.list_pending_actions(days=days, kind="normal")
+        n = d.get("total")
+        if n is None:
+            n = sum(len(g.get("actions") or []) for g in (d.get("groups") or []))
+        return {"ok": True, "count": int(n or 0)}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "count": 0, "error": str(e)}
+
+
+@app.get("/api/suggest/count")
+def suggest_count():
+    """顶栏「推荐新功能」角标的旧接口（featpanel 未就绪时的兜底）。
+
+    同上：前端一直留着这个回退分支，后端却没这个路由 —— 日志里 37 次 404。
+    """
+    from . import featradar as _fr
+    try:
+        d = _fr.stats()
+        return {"ok": True, "count": int(d.get("pending") or 0)}
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "count": 0, "error": str(e)}
+
+
 @app.post("/api/featradar/think")
 def featradar_think(body: dict = None):
     """立刻构思一批新功能（手动点按钮）。约 30~60 秒。"""
