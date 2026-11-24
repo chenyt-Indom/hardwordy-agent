@@ -185,21 +185,55 @@ body, .sidebar, .panel, .chat-header, .composer, .bubble, .btn, .icon-btn,
 .theme-btn:hover { background: var(--hover-bg); border-color: var(--accent); }
 
 /* ---------- 顶栏快捷入口：待批准 / 推荐新功能（2026-11-20）---------- */
-.top-quick { display: flex; gap: 8px; flex-wrap: wrap; }
+/* 2026-11-25 用户反馈「左侧工具栏上方排版有点乱」：
+   原来这排是 flex-wrap，7 个按钮（待批准/推荐新功能/画布/迭代日志/订整件事/盯梢/工作台）
+   文字长短不一，换行后宽窄参差、左右边缘对不齐，角标又把按钮撑得忽宽忽窄。
+   改成**两列等宽网格**：每格 1fr（侧栏内容宽 264px → 每格约 128px），
+   图标+文字左对齐、文字 12px 保证一行放得下，角标用 margin-right:auto 顶到最右，
+   于是所有按钮同宽同高、四行排齐。顺序由下面的 order 指定（DOM 挂载先后不可控）。 */
+.top-quick {
+  display: grid;
+  /* ⚠️ 必须写 minmax(0, 1fr)：直接写 1fr 时最小宽度是 auto，
+     而按钮文字是 nowrap，内容会把两列撑成不等宽（实测右列被「推荐新功能」撑宽）。 */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px; align-items: stretch;
+}
 .tq-btn {
-  position: relative; display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 12px; font-size: 13px; line-height: 1;
+  position: relative; display: flex; align-items: center; gap: 5px;
+  padding: 6px 8px; font-size: 12px; line-height: 1;
+  min-width: 0;                       /* 允许文字省略，别把格子撑破 */
   border: 1px solid var(--border); border-radius: var(--radius-md);
   background: var(--panel2); color: var(--text); cursor: pointer;
   transition: background-color .15s, border-color .15s, color .15s;
+  order: 10;                          /* 未点名的按钮排在最后，不会插队 */
 }
+/* 常用入口靠前：迭代日志 / 工作台 / 订整件事，再是待办和其余 */
+#btnIterJournal { order: 1; }
+#btnWorkbench   { order: 2; }
+#btnJobPlan     { order: 3; }
+#btnPending     { order: 4; }
+#btnSuggest     { order: 5; }
+#btnCanvas      { order: 6; }
+#btnWatch       { order: 7; }
 .tq-btn:hover { background: var(--hover-bg); border-color: var(--accent); }
 .tq-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tq-ico { font-size: 14px; }
+/* 图标盒子固定 16px：不同 emoji 的字形行高不一样（👁 只有 13px），
+   不给固定高度的话「盯梢」会比别的按钮矮 3px，整排高度参差。 */
+.tq-ico {
+  font-size: 13px; flex: none; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+}
+.tq-txt {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-right: auto;                 /* 吸收剩余宽度 → 角标统一贴最右 */
+}
 /* 角标：数字为 0 时由 JS 设 hidden，这里只管长相 */
 .tq-badge {
-  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
-  background: var(--danger); color: #fff; font-size: 11px; font-weight: 600;
+  flex: none;
+  margin-left: 4px;                   /* 最紧的一格（推荐新功能）也留出最小间距 */
+  min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+  background: var(--danger); color: #fff; font-size: 10px; font-weight: 600;
   display: inline-flex; align-items: center; justify-content: center;
   line-height: 1;
 }
