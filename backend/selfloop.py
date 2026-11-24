@@ -71,7 +71,13 @@ DEFAULTS = {
     #   反思还在往里加 5~10 条 —— 生成速度远超处理速度，这些 token 是纯浪费。
     #   积压 ≥ 这个数时**自动触发**直接跳过（手动点「立即反思」永远放行）。
     #   设 0 = 关闭闸门。
-    "backlog_gate": 30,
+    # ★ 2026-11-24：30 → 80。去重上线后真实积压从 172 降到 65，且新增会被标 dup
+    #   不再计入；30 这个值只会让「存量批不完」继续堵住对话触发，而闸门要防的是
+    #   「涨得太快」，不是「历史存货多」。
+    "backlog_gate": 80,
+    # ★ 2026-11-24：积压只统计**最近这么多天**新增的（0 = 数全部）。
+    #   历史存货（三周前堆的、早就过期的）不该永久封死新一轮思考。
+    "backlog_days": 7,
     # ★ 2026-11-24 死锁保险：积压超过阈值时，若距上次真正开跑已经 ≥ 这么多小时，
     #   就**放行一次**（一天最多一次）。没有这道保险，闸门会把对话触发永久堵死 ——
     #   实测 11-23/11-24 定时任务仍在生成 168 条待批准，而 chat 触发一条都进不来。
@@ -85,8 +91,9 @@ DEFAULTS = {
 #   所以光把 DEFAULTS 改成 300，跑起来读到的仍然是 90 —— 用户要求的
 #   节流压根没生效。这里给旧值 90 做一次性升级（写进 schema，只做一次），
 #   之后用户自己在界面上调成任何值（包括 90）都不会再被覆盖。
-_LEGACY_DEFAULTS = {"min_gap_sec": 90}   # 旧版默认值 → 需要升级掉的存量值
-_SCHEMA = 2                              # 配置结构版本（1 = 未标记的老数据）
+_LEGACY_DEFAULTS = {"min_gap_sec": 90,    # 旧版默认值 → 需要升级掉的存量值
+                    "backlog_gate": 30}  # 30 会让历史存量永久堵死对话触发
+_SCHEMA = 3                              # 配置结构版本（1 = 未标记的老数据）
 
 
 def _migrate(d):
@@ -116,25 +123,43 @@ def _migrate(d):
 
 
 # 积压条数的缓存：每次对话结束都读一遍 plans.json 没必要（几百 KB）。
-_BACKLOG_CACHE = {"at": 0.0, "n": 0}
+_BACKLOG_CACHE = {"at": 0.0, "n": 0, "days": None}
 _BACKLOG_TTL = 60.0
 
 
-def _backlog():
-    """待批准动作总数（改进 + 新功能）。失败按 0 处理 —— 统计坏了不能挡住反思。"""
+def _backlog(days=None):
+    """待批准动作总数（改进 + 新功能）。失败按 0 处理 —— 统计坏了不能挡住反思。
+
+    ★ 2026-11-24 实测（用户问「积压 172 条为什么降不下来」）：
+      原来这里数的是**全部历史 pending**。而历史存量根本批不完 ——
+      172 条里 107 条是同一件事的重复提案，于是 backlog_gate（30 条）
+      永久封死对话触发，只剩「死锁保险」一天放行一次，看起来就像
+      「自动迭代不干活」。
+      闸门的本意是「生成远快于处理时省 token」，该看的是**最近新增**，
+      不是三周前堆下来的存货。现在按 backlog_days（默认 7 天）统计：
+      存量仍可在「待批准」里看到、可以批，只是不再挡住新一轮思考。
+      days=0 恢复旧口径（数全部），需要排查时用。
+    """
+    if days is None:
+        try:
+            days = int(cfg().get("backlog_days") or 0)
+        except Exception:                               # noqa: BLE001
+            days = 7
     now = time.time()
-    if now - float(_BACKLOG_CACHE.get("at") or 0) < _BACKLOG_TTL:
+    if (now - float(_BACKLOG_CACHE.get("at") or 0) < _BACKLOG_TTL
+            and _BACKLOG_CACHE.get("days") == days):
         return int(_BACKLOG_CACHE.get("n") or 0)
     n = 0
     try:
         from . import self_iterate as _si
-        n += int((_si.list_pending_actions() or {}).get("total") or 0)
-        n += int((_si.list_pending_features() or {}).get("total") or 0)
+        n += int((_si.list_pending_actions(days=days) or {}).get("total") or 0)
+        n += int((_si.list_pending_features(days=days) or {}).get("total") or 0)
     except Exception:                                   # noqa: BLE001
         logger.debug("backlog 统计失败", exc_info=True)
         n = 0
     _BACKLOG_CACHE["at"] = now
     _BACKLOG_CACHE["n"] = n
+    _BACKLOG_CACHE["days"] = days
     return n
 
 # 寒暄词。命中且整句很短 → 判定闲聊，不触发思考。

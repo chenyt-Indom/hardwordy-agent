@@ -4432,6 +4432,22 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
             "backup": "",
         })
 
+    # ★ 2026-11-24 实测（用户问「积压为什么降不下来」）：
+    #   模型**直接给的 actions 从来没和历史未执行项比对过** —— 只有下面
+    #   _features_to_actions 那条路有跨计划去重。真实数据：同一件「回复形态闸门」
+    #   被当 action 提了 42 次（10 条至今 pending）、「数字人」25 次、
+    #   「答完给张卡」13 次；172 条积压里绝大部分是这种重复，导致
+    #   backlog_gate（30 条）永久封死对话触发。
+    #   这里补一道：说同一件事的标 dup —— 不进待批准、不占积压名额，
+    #   但记录仍留在计划里可查（不是静默丢弃）。
+    try:
+        actions, _dup_n = _mark_dup_actions(actions, _open_action_titles())
+        if _dup_n:
+            logger.warning("跨计划去重：%d 条动作与历史重复已标 dup，"
+                           "保留 %d 条新动作", _dup_n, len(actions) - _dup_n)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("actions 跨计划去重失败（不拦，按原逻辑继续）", exc_info=True)
+
     # 用户要求（2026-11-15）：「只要是对用户有用，且理论上可行……主动迭代增加
     # 这项新技术，然后记得需要跟用户说明为什么」。原来 features 只展示、永不执行，
     # 这里把它转成可执行动作，和 bug 修复走同一条链路（同四道护栏）。
@@ -8171,6 +8187,32 @@ def _similar_title(a, b):
     if r >= 0.09 and (_phrase_set(ra) & _phrase_set(rb)):
         return True
     return False
+
+
+def _mark_dup_actions(actions, open_titles):
+    """把「和历史未执行项说同一件事」的动作标成 dup，返回 (actions, 标了几条)。
+
+    ★ 2026-11-24 实测：模型直接给的 actions 从来没和历史比对过，
+      「回复形态闸门」被提 42 次、「数字人」25 次，积压 172 条里绝大多数是重复，
+      把 backlog_gate 永久顶爆。这里统一收口，**标 dup 而不是删除** ——
+      记录留在计划里可查，但不再占待批准名额、不计入积压。
+
+    只和 open_titles（pending/approved/need_review）比：done/failed 的
+    允许重新排队（可能确实要再做一次）。同一批内部也互相比，防模型一轮写两遍。
+    """
+    seen = []
+    n = 0
+    for a in (actions or []):
+        if not isinstance(a, dict):
+            continue
+        title = str(a.get("title") or "")
+        if any(_similar_title(title, t) for t in (list(open_titles or []) + seen)):
+            a["status"] = "dup"
+            a["note"] = "与历史未执行项重复，已自动跳过（不再占用待批准名额）"
+            n += 1
+        else:
+            seen.append(title)
+    return actions, n
 
 
 # ═══════════════════════════════════════════════════════════════════════════

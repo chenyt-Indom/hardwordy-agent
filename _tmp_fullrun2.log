@@ -1,0 +1,55 @@
+PASS  test_action_dedup.py                 0.1s
+PASS  test_anchor_diagnose.py              0.2s
+PASS  test_auto_chain.py                   0.1s
+PASS  test_canvas_command.py               0.1s
+PASS  test_codesync.py                     0.9s
+PASS  test_ds_stop.py                      1.0s
+PASS  test_empty_patch_retry.py            0.1s
+PASS  test_evolve_budget.py                0.1s
+PASS  test_fail_attribution.py             0.1s
+PASS  test_feature_isolation.py            0.2s
+PASS  test_guard_only_skip.py              0.2s
+PASS  test_guard_scope.py                  0.1s
+PASS  test_handoff_card.py                 3.6s
+PASS  test_hardguard_and_bench.py          0.1s
+PASS  test_holdout.py                      0.1s
+PASS  test_iter_live.py                    0.4s
+PASS  test_iter_no_progress.py             0.1s
+PASS  test_ledger_attrib.py                0.1s
+PASS  test_lesson_visibility.py            0.9s
+PASS  test_llm_retry.py                    2.2s
+PASS  test_map_city_level.py               1.3s
+PASS  test_mechanism_fixes.py              0.1s
+PASS  test_no_progress.py                  0.2s
+PASS  test_observe_base.py                 0.1s
+PASS  test_parity.py                       0.1s
+PASS  test_pause_resume.py                 0.8s
+PASS  test_press_plan_link.py              0.1s
+PASS  test_probe_calibration.py            0.1s
+PASS  test_reachability.py                 0.1s
+PASS  test_regress_lock.py                 1.1s
+PASS  test_restart_by_origin.py            0.1s
+PASS  test_result_cards_wired.py           0.9s
+PASS  test_revive_approval.py              0.1s
+PASS  test_rsi.py                          0.1s
+PASS  test_rsi_bench.py                    0.1s
+PASS  test_rsi_landed_visible.py           0.1s
+PASS  test_safeio.py                       1.5s
+PASS  test_score_noise_band.py             0.1s
+PASS  test_scratch_filter.py               0.1s
+PASS  test_selfdev_write_guard.py          0.2s
+PASS  test_selfiter_resilience.py          0.1s
+PASS  test_selfloop_gate.py                3.3s
+PASS  test_status_key_and_scratch.py       0.1s
+PASS  test_submit_finished.py              0.1s
+PASS  test_surrogate_safety.py             0.2s
+PASS  test_task_card.py                    0.4s
+PASS  test_token_quality.py                0.9s
+PASS  test_tool_registry.py                0.1s
+PASS  test_verify_entrypoints.py           0.8s
+PASS  test_verify_gate.py                  0.1s
+
+================================================================
+合计 50 个文件，用时 24.0s
+通过 50 / 失败 0 / 超时 0
+已清理本次运行产生的临时目录 11 个
