@@ -378,7 +378,7 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
     stat.textContent = "状态：" + (d.state || "空闲") +
       "　在跑 " + (c.running || 0) + " · 排队 " + (c.queue || 0) +
       " · 历史 " + (c.history || 0) + "　本轮 " + (d.budget || 0) +
-      "/" + (d.max_rounds || "?");
+      "/" + (d.max_rounds ? d.max_rounds : "不限");
     var ln = ledgerNode();
     if (ln) { body.appendChild(ln); }
     var ch = dualChart();

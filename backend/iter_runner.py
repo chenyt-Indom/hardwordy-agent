@@ -93,8 +93,22 @@ _STATE = {
 }
 _FILE = _si._DATA / "task.json"
 
-# 用户 2026-11-19 选择：「连续自动迭代最多跑 10 个功能就停」。
-_MAX_AUTO_ROUNDS = 10
+# ★ 2026-11-24 用户改要求（原话）：「自动连贯下去……反复验证修改再验证，
+#   遇到失败反复重试，一直到所有任务完成且一切正常且队列清空为止」。
+#   所以取消「做满 10 个就暂停、等用户点继续」这条上限：**0 = 不限制**，
+#   队列不空就一直往下跑，队列清空才收工（见 _budget_full / 队列空终检）。
+#   防死循环不靠这个数 —— 靠单个功能的失败链上限（_MAX_FAIL_CHAIN），
+#   超限后是「跳过这个功能、继续跑队列里剩下的」，不会卡住整条队列。
+_MAX_AUTO_ROUNDS = 0
+
+
+def _budget_full(n):
+    """本轮连续完成数是否已到上限。0（或负数）= 不限制，永远返回 False。"""
+    try:
+        cap = int(_MAX_AUTO_ROUNDS or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    return bool(cap) and int(n or 0) >= cap
 # 同一个功能验证不过时的重试上限。用户选的是「继续重试直到通过」，
 # 但必须有兜底 —— 否则一个死循环功能会把队列永远卡住。
 # ★ 2026-11-20 用户：「假如一个功能过于复杂呢？」→ 曾改为 30 轮。
@@ -109,7 +123,9 @@ _MAX_VERIFY_TRIES = 5
 #   → 连续失败链上限：**跨计划**累加的连续验证失败次数。
 #   达到就**不再自动生成修复任务**，停下来等用户决定 —— 这是防「改→重启→验证→
 #   不过→再改」无限烧 token 的最终护栏。任何一次验证通过即清零。
-_MAX_FAIL_CHAIN = 3
+# ★ 2026-11-24 用户选择：「提高重试上限（比如 5 轮）再跳过」→ 3 改 5。
+#   到 5 次仍不过就**跳过这个功能、继续跑队列里剩下的**（不卡整条队列）。
+_MAX_FAIL_CHAIN = 5
 # ★ 2026-11-22 用户要求：「务必确保反复验证修改之后反复验证完全没问题之后
 #   才显示『已验证』」。所以通过一次不算数 —— 必须**连续**这么多轮都通过。
 #   每轮 = 语法编译 + 代码自检 + 真跑一遍回归（run_disk，从磁盘重载新代码）。
@@ -123,8 +139,10 @@ _VERDICT_CN = {"improved": "进步", "regressed": "退步", "flat": "持平",
 # 队列里「等待中」的任务最多几个（★ 2026-11-20 用户明确要求：不能超过 10 个）。
 # 注意这和上面的 _MAX_AUTO_ROUNDS（本轮已完成功能数）是两回事：
 #   · _MAX_QUEUE      = 队列能排多长（满了拒绝新任务）
-#   · _MAX_AUTO_ROUNDS= 一轮连续做完几个就停下来等你点「继续」
-_MAX_QUEUE = 10
+#   · _MAX_AUTO_ROUNDS= 一轮连续做完几个就停（现在 = 0，不限制）
+# ★ 2026-11-24 用户选择：「不限，全收」→ 队列长度不再设上限。
+#   0 = 不限制（下面 submit 的判断会跳过）；要恢复上限就把这里改成数字。
+_MAX_QUEUE = 0
 
 # 单个功能最长允许跑多久（秒，含反复修）。用户要求「设上限但要可调」，
 # 所以真正生效的值从 settings.json 的 iter_task_timeout_min 读，这里是默认值。
@@ -615,7 +633,7 @@ def snapshot(since=0):
             # ★ 2026-11-20 用户要「两者都要」：卡片显示「队列 7/10」+ 列出排队任务。
             #   所以除了 queue 明细，还要给上限和剩余位。
             "max_queue": _MAX_QUEUE,
-            "queue_free": max(0, _MAX_QUEUE - len(q)),
+            "queue_free": (max(0, _MAX_QUEUE - len(q)) if _MAX_QUEUE else 9999),
             "events": evs,
             "history": _STATE["history"][:_MAX_HISTORY],
             "state": _state_name(run, q),
@@ -637,7 +655,7 @@ def _state_name(run, q):
         return "running"
     if q:
         # 连续完成数到上限、队列里还有活儿 → 停下来等用户点「继续」
-        if int(_STATE.get("budget") or 0) >= _MAX_AUTO_ROUNDS:
+        if _budget_full(_STATE.get("budget")):
             return "paused"
         return "queue_only"
     return "idle"
@@ -805,7 +823,7 @@ def submit(plan_id, source="auto", title="", max_n=0):
         #   满了就直接拒绝并说清楚，不要静默排进去让用户以为接住了。
         #   注意只有「已有任务在跑、新任务要排队」时才算占用队列位；
         #   没有任务在跑时直接开跑，不受这个上限影响。
-        if run and len(_STATE["queue"]) >= _MAX_QUEUE:
+        if run and _MAX_QUEUE and len(_STATE["queue"]) >= _MAX_QUEUE:
             return {"ok": False, "state": "rejected",
                     "error": "队列已满 %d 个，先等或取消几个再提交"
                              % _MAX_QUEUE,
@@ -1551,6 +1569,75 @@ def _verify_once(files):
                 str(rr.get("summary") or "")[:300]))
     except Exception as e:                              # noqa: BLE001
         problems.append("回归没跑成：%s: %s" % (type(e).__name__, e))
+
+    return (not problems), problems
+
+
+def _final_check(tid=""):
+    """队列清空后的**全局终检**：语法 + 静态自检(high/mid) + 全量回归。
+
+    ★ 2026-11-24 用户要求（原话）：「队列清空后跑一次全局终检再收工」，
+      并且「一切正常」才算完成。所以收工前必须过这道闸。
+
+    和 _verify_once 的分工：
+      · _verify_once = 每个功能改完的**局部**验证：只看这次改的文件、
+        回归跑 quick（几秒），不拦着队列往下走；
+      · _final_check = 收工前的**最后一道闸**：语法编全 backend、
+        回归跑 full（全量），跑不成 / 有任何失败都算没过 ——
+        宁可多花一两分钟，也不能在队列空的时候报假绿。
+
+    返回 (ok, problems)。problems 是给人看的中文清单。
+    """
+    problems = []
+
+    # ① 语法：backend 下所有 .py 逐个 compile
+    try:
+        from . import iterloop as _il
+        ok_syn, bad, total = _il._syntax_ok()
+        if not ok_syn:
+            problems.append("语法编译失败 %d 个：%s"
+                            % (len(bad), "、".join(str(x) for x in bad[:5])))
+        _emit(tid or "_sys", "step",
+              text="终检① 语法：%d 个文件%s"
+                   % (total, "全部通过" if ok_syn else "有错"))
+    except Exception as e:                              # noqa: BLE001
+        problems.append("语法检查没跑成：%s: %s" % (type(e).__name__, e))
+
+    # ② 静态自检：只认 high / mid（low/info 不影响功能，不能拦着收工）
+    try:
+        from . import code_audit as _ca
+        a = _ca.audit()
+        bad_f = [f for f in (a.get("findings") or [])
+                 if f.get("level") in ("high", "mid")]
+        if bad_f:
+            problems.append("自检有 %d 条 high/mid：%s" % (len(bad_f), "；".join(
+                "%s:%s %s" % (f.get("file"), f.get("line"), f.get("kind"))
+                for f in bad_f[:3])))
+        _emit(tid or "_sys", "step",
+              text="终检② 代码自检：%s"
+                   % ("干净" if not bad_f else "%d 条 high/mid" % len(bad_f)))
+    except Exception as e:                              # noqa: BLE001
+        problems.append("代码自检没跑成：%s: %s" % (type(e).__name__, e))
+
+    # ③ 全量回归：子进程从磁盘重新 import，验的是刚改完的代码
+    try:
+        from . import regress as _rg
+        runner = getattr(_rg, "run_disk", None) or _rg.run
+        try:
+            rr = runner(scope="full", timeout=900)
+        except TypeError:                               # 老签名兜底（没 timeout）
+            rr = runner(scope="full")
+        _record_regress(rr, tid=tid or "", where="final_check")
+        _failed = int(rr.get("failed") or 0)
+        if (not rr.get("ok")) or _failed:
+            problems.append("全量回归失败 %d/%d 条：%s" % (
+                _failed, int(rr.get("total") or 0),
+                str(rr.get("summary") or "")[:300]))
+        _emit(tid or "_sys", "step",
+              text="终检③ 全量回归：通过 %s / 共 %s（失败 %s）"
+                   % (rr.get("passed"), rr.get("total"), _failed))
+    except Exception as e:                              # noqa: BLE001
+        problems.append("全量回归没跑成：%s: %s" % (type(e).__name__, e))
 
     return (not problems), problems
 
@@ -2641,7 +2728,7 @@ def _verify_worker():
               state="done", verified=True)
         _emit(tid, "report", text=md, title=v.get("title") or "")
         _save()
-        if done_n >= _MAX_AUTO_ROUNDS:
+        if _budget_full(done_n):
             _emit_sys("本轮已连续完成 %d 个功能，达到上限先停下%s"
                       % (done_n, ("（队列里还有 %d 个，点「继续」可以接着跑）" % qn)
                          if qn else ""), state="paused")
@@ -2654,7 +2741,65 @@ def _verify_worker():
         #   （原来会 request_next() 接着推荐，等于永不收尾）。
         #   推荐引擎自己的定时 tick 不受影响，它仍会按配额/冷却慢慢攒推荐，
         #   攒出来的待批准项等用户批准后才进入队列。
-        _emit_sys("队列已空，本次迭代结束（已验证）", state="done")
+        # ★ 2026-11-24 用户要求：「队列清空后跑一次全局终检再收工」——
+        #   收工前过最后一道闸（语法 + 自检 + 全量回归），过了才敢说「一切正常」。
+        # ★ 2026-11-24：终检要跑一两分钟，这期间用户可能又提交了新任务。
+        #   真出现就先去跑新任务，别在「队列已经不空」的时候还宣布收工。
+        with _LOCK:
+            _qn2 = len(_STATE["queue"])
+        if _qn2:
+            _next()
+            return
+        _emit_sys("队列已空，开始全局终检（语法 + 自检 + 全量回归）…",
+                  state="running")
+        try:
+            _ok_all, _probs_all = _final_check(tid)
+        except Exception as _e_fc0:                     # noqa: BLE001
+            _ok_all, _probs_all = False, ["终检本身出错：%s: %s"
+                                          % (type(_e_fc0).__name__, _e_fc0)]
+        _md_all = "\n".join(
+            ["## 全局终检（队列清空后）", "",
+             "**结论**：%s" % ("✅ 通过 —— 队列已清空，一切正常" if _ok_all
+                              else "❌ 未通过 —— %d 个问题" % len(_probs_all)), ""]
+            + (["### 没过的项", ""] + ["- %s" % p for p in _probs_all]
+               if _probs_all else
+               ["### 检查项", "", "- 语法编译：通过",
+                "- 代码自检：无 high/mid", "- 全量回归：全部通过"])
+            + ["", "时间：%s" % _now()])
+        _emit(tid, "report", text=_md_all, title="全局终检")
+        with _LOCK:
+            _STATE["reports"].insert(0, {"tid": tid, "title": "全局终检",
+                                         "md": _md_all, "ok": bool(_ok_all),
+                                         "at": _now()})
+            _STATE["reports"] = _STATE["reports"][:30]
+        _save()
+        if _ok_all:
+            _emit_sys("✅ 队列已空 + 全局终检通过，本次迭代结束", state="done")
+            return
+        # 终检没过 → 不能说「一切正常」，生成修复任务接着跑（队列因此不空）
+        with _LOCK:
+            _STATE["fail_chain"] = int(_STATE.get("fail_chain") or 0) + 1
+            _fc2 = _STATE["fail_chain"]
+        _emit_sys("⚠️ 全局终检没过（%d 项）：%s（连续 %d/%d）"
+                  % (len(_probs_all), "；".join(_probs_all[:3]),
+                     _fc2, _MAX_FAIL_CHAIN), state="error")
+        _save()
+        if _fc2 >= _MAX_FAIL_CHAIN:
+            with _LOCK:
+                _STATE["fail_chain"] = 0
+            _emit_sys("连续 %d 次全局终检未通过，已停止自动修复，等你决定" % _fc2,
+                      state="error")
+            return
+        _pid_fc = ""
+        try:
+            _a_fc = _si.run_audit(deep=False, source="manual", create_plan=True)
+            _pid_fc = str((_a_fc.get("plan") or {}).get("id") or "")
+        except Exception as _e_fc:                      # noqa: BLE001
+            _emit_sys("生成修复计划失败：%s: %s"
+                      % (type(_e_fc).__name__, _e_fc), state="error")
+        if _pid_fc:
+            submit(_pid_fc, source="auto",
+                   title="修全局终检没过的问题（第 %d 次）" % _fc2)
         return
 
     # 没过 —— 先累加「跨计划连续失败链」（每轮修复都是新 plan_id，
@@ -3194,7 +3339,7 @@ def revive_candidates(limit=40):
             "can_revive": True,
             "why": "",
         })
-    if q and not run and budget < _MAX_AUTO_ROUNDS:
+    if q and not run and not _budget_full(budget):
         for x in q:
             out.append({
                 "kind": "stuck",
