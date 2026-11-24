@@ -14124,11 +14124,21 @@
 
     async function hdCancel(mid) {
       if (!curGid) return;
+      // ★ 2026-11-25 用户报「按下终止没有反应」：
+      //   原来点了之后界面**一点变化都没有**（后端如果正忙，请求要等一会儿），
+      //   于是人会连点好几次。现在点下就先把按钮置灰、写上「正在取消…」，
+      //   成功与否都能看见；失败再把按钮恢复并说明原因。
+      const btn = el("hiveStopBtn");
+      const oldTxt = btn ? btn.textContent : "";
+      if (btn) { btn.disabled = true; btn.textContent = "⏳ 正在取消…"; }
       try {
         const d = await api("/api/hive/" + encodeURIComponent(curGid) + "/hd/cancel",
           { task_id: mid });
         if (!d.ok) alert(d.error || "取消失败");
       } catch (e) { alert("取消失败：" + e.message); }
+      finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldTxt || "■ 终止"; }
+      }
     }
 
     // ★ 2026-11-15：原来的 hdAddCode（70 行手写 .sd-row）已删除。
@@ -14141,6 +14151,13 @@
     //   正文拼接、标题每帧重排…）。现在全部收进 LiveCard.makeSession().applyFrame，
     //   单聊和群聊的卡片表现来自**同一份代码**，群聊这边只剩「广播帧进来」这件事。
     function hdStream(f) {
+      // ★ 2026-11-25：取消时后端会**先**推一帧 done（不等模型线程退出），
+      //   线程真正结束时还会再推一帧。第二帧到达时卡片已经销毁，
+      //   照旧交给 hdEnsure 会重新建一张空卡片再闪一下 —— 直接忽略。
+      if (f.phase === "done" && !hdCards[f.mid || "?"]) {
+        setStopBtn(false);
+        return;
+      }
       const c = hdEnsure(f);
       const ph = c.applyFrame(f);
 

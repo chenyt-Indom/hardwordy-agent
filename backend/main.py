@@ -17163,9 +17163,28 @@ def hive_hd_cancel(gid: str, body: dict = None):
             return {"ok": False, "error": "任务状态已失效（可能刚好跑完）"}
         ev.set()
         _hd_waiting.pop(mid, None)
-        # 告诉其他成员「这次任务被取消了」，否则他们那边进度卡片会一直转
+        # ★ 2026-11-25：**立刻**给前端推一帧 done。
+        #   以前要等 worker 线程自己发现 ev 才推 —— 如果模型正卡在云端流式的
+        #   下一个 chunk 上（或某个工具还没跑完），要等几百毫秒到几十秒，
+        #   用户看到的就是「按了终止，界面一动不动」。
+        #   现在本机立刻收起进度卡；线程稍后真的退出时再推的那一帧，
+        #   前端会因为卡片已销毁而忽略（见 hdStream 里的判断）。
         try:
-            hive_client.client().send_cancel(gid, mid, me["user_id"])
+            _hd_emit(gid, mid, "done",
+                     task={"dur_ms": 0, "cancelled": True, "error": "",
+                           "think_chars": 0, "out_chars": 0})
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        # 告诉其他成员「这次任务被取消了」，否则他们那边进度卡片会一直转。
+        # ⚠️ 2026-11-25：这行以前是**同步**的 —— 中继一慢，取消接口自己先卡住，
+        #    用户连点几次都等不到返回，表现就是「按终止没反应」。
+        #    现在放后台线程：本机的取消**立刻生效**（ev 已经 set 了），
+        #    跨机广播慢慢发，发不出去也不影响本机停下。
+        try:
+            threading.Thread(
+                target=lambda: hive_client.client().send_cancel(
+                    gid, mid, me["user_id"]),
+                daemon=True).start()
         except Exception:
             logger.debug("silent-except", exc_info=True)
         return {"ok": True, "task_id": mid}
@@ -17210,6 +17229,58 @@ _HD_PUSH_GAP = 0.15         # 进度节流：最快 0.15 秒推一帧（约 6~7 
 _HD_PUSH_CHARS = 400        # 或者攒够 400 字就推，长段落不会拖太久
 
 
+# ★ 2026-11-25 修「群聊给 LLM 发消息会卡」：
+#   原来 `_hd_emit()` 在**模型的流式读取循环里**同步调用 `send_stream()`，
+#   而 send_stream 一路走到中继 socket 的 sendall —— 中继一慢，每帧都要等，
+#   模型吐字的循环就被网络拖住，界面看着就是"卡住不动"。
+#   现在：本机前端照旧同步推（run_coroutine_threadsafe 不阻塞），
+#         **跨机广播全部丢进这个有界队列**，由单独线程去发；
+#         队列满就丢最旧的一帧（流式帧本来就可丢，下一帧带 full 兜底）。
+_HD_NET_Q: "queue.Queue" = queue.Queue(maxsize=240)
+_HD_NET_UP = False
+_HD_NET_LOCK = threading.Lock()
+
+
+def _hd_net_loop() -> None:
+    while True:
+        job = _HD_NET_Q.get()
+        try:
+            hive_client.client().send_stream(
+                job[0], job[1], job[2], job[3], job[4], job[5], full=job[6])
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        finally:
+            try:
+                _HD_NET_Q.task_done()
+            except Exception:
+                logger.debug("silent-except", exc_info=True)
+
+
+def _hd_net_send(gid: str, mid: str, phase: str, delta: str, task: dict,
+                 seq_in: int, full: str) -> None:
+    """把一帧流式进度交给后台线程去跨机广播（绝不阻塞调用方）。"""
+    global _HD_NET_UP
+    with _HD_NET_LOCK:
+        if not _HD_NET_UP:
+            _HD_NET_UP = True
+            threading.Thread(target=_hd_net_loop, daemon=True,
+                             name="hive-hd-net").start()
+    job = (gid, mid, phase, delta, task, seq_in, full)
+    # ⚠️ 这里**一律非阻塞**：取消接口也会调 _hd_emit，若在队列满时等 3 秒，
+    #    「终止」自己又变成卡的那一个。结束帧满时同样丢最旧，保证它能进去。
+    try:
+        _HD_NET_Q.put_nowait(job)
+    except queue.Full:
+        try:
+            _HD_NET_Q.get_nowait()      # 丢最旧的，保证最新状态能出去
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+        try:
+            _HD_NET_Q.put_nowait(job)
+        except Exception:
+            logger.debug("silent-except", exc_info=True)
+
+
 def _hd_emit(gid: str, mid: str, phase: str, delta: str = "",
              task: dict | None = None, seq_in: int = 0,
              full: str = "") -> None:
@@ -17233,9 +17304,10 @@ def _hd_emit(gid: str, mid: str, phase: str, delta: str = "",
         _broadcast_hive({"type": "hd_stream", "gid": gid, "frame": frame})
     except Exception:
         logger.debug("silent-except", exc_info=True)
+    # ⚠️ 跨机广播**不能**在这里同步做（见 _HD_NET_Q 的说明）：
+    #    这一步以前会把模型的流式读取卡在网络发送上。
     try:
-        hive_client.client().send_stream(gid, mid, phase, delta, task or {},
-                                         seq_in, full=full)
+        _hd_net_send(gid, mid, phase, delta, task or {}, seq_in, full)
     except Exception:
         logger.debug("silent-except", exc_info=True)
 
@@ -17874,6 +17946,12 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             ⚠️ 这里**必须真的执行**并回填结果 —— 群里的人看得见「它在动哪个工具」，
             但真正决定它有没有干活的是这一段（用户报过"嘴上说改好了、一行没动"）。
             """
+            # ★ 2026-11-25：用户点了「终止」之后，**不要再启动新的工具**。
+            #   原来只有流式循环里检查取消，模型一次工具调用跑几十秒时，
+            #   点了终止也要等它跑完才有反应 —— 看起来就是"按了没反应"。
+            if ev.is_set():
+                return ("[已取消] 用户点了终止，这个工具没有执行。"
+                        "已完成的成果都在群产物文件夹里。")
             _t_round[0] += 1
             if _budget_s and (time.time() - t0) > _budget_s:
                 # 到点了就把剩下的活交回给人：明确说清"不是失败了，是时间到了"，

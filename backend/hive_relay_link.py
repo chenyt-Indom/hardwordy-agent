@@ -30,6 +30,7 @@ import hmac
 import json
 import os
 import random
+import select
 import socket
 import struct
 import threading
@@ -105,12 +106,58 @@ def _recv_pkt(sock: socket.socket):
     return kind, body
 
 
-def _send_pkt(sock: socket.socket, kind: int, payload: bytes) -> bool:
+def _send_pkt(sock: socket.socket, kind: int, payload: bytes,
+              timeout: Optional[float] = None) -> bool:
+    """发一个包。
+
+    ⚠️ 2026-11-25 修「群聊发消息会卡、按终止没反应」的真根因：
+      中继握手完成后 socket 是 `settimeout(None)`（永久阻塞）。一旦对端不读
+      （中继慢、网络抖动、对方进程卡住），`sendall` 会**无限**卡住；而
+      `RelayLink.send()` 是**持着 `_send_lock`** 调的 —— 于是取消、心跳、
+      后面所有帧全排在锁上：界面表现就是「消息发不出去，终止也停不下来」。
+
+      这里给发送单独加一个**可写超时**：用 select 等可写 + 分片 send，
+      不修改 socket 自身的超时（改了会打断收包线程的 recv），超时即当丢包
+      返回 False —— T_MSG 会进 outbox 补发、T_STREAM 下一帧带 full 兜底，
+      两种情况都不会真丢数据。
+    """
+    data = HDR.pack(len(payload), kind) + payload
+    if timeout is None:
+        try:
+            sock.sendall(data)
+            return True
+        except Exception:
+            return False
     try:
-        sock.sendall(HDR.pack(len(payload), kind) + payload)
+        sent = 0
+        total = len(data)
+        deadline = time.time() + float(timeout)
+        while sent < total:
+            left = deadline - time.time()
+            if left <= 0:
+                return False
+            try:
+                _, w, _ = select.select([], [sock], [], left)
+            except Exception:
+                return False
+            if not w:
+                return False
+            try:
+                n = sock.send(data[sent:sent + 262144])
+            except Exception:
+                return False
+            if n <= 0:
+                return False
+            sent += n
         return True
     except Exception:
         return False
+
+
+# 单帧发送最多等这么久（秒）。流式帧本来就是可丢的，宁可丢一帧也不能卡住模型。
+SEND_TIMEOUT = 2.0
+# 取发送锁最多等这么久：另一个线程正卡在慢发送上时，取消/心跳不能被它拖住。
+SEND_LOCK_TIMEOUT = 0.5
 
 
 def _frame_bytes(typ: int, rk: bytes, key: bytes, obj: Any) -> Optional[bytes]:
@@ -1144,10 +1191,20 @@ class RelayLink:
         frame = _frame_bytes(typ, MESH._rk(self.gid), key, obj)
         if not frame:
             return False
-        with self._send_lock:
-            if not _send_pkt(sock, K_FRAME, frame):
-                self.dropped += 1
-                return False
+        # ⚠️ 取锁 + 发送都必须有上限（2026-11-25）：
+        #    原来 `with self._send_lock: sendall(...)` 一旦某个帧卡在中继上，
+        #    取消（send_cancel）、心跳、后续所有帧全部排队 —— 用户点了「终止」
+        #    就是这个表现：请求发出去了，却永远等不到响应。
+        if not self._send_lock.acquire(timeout=SEND_LOCK_TIMEOUT):
+            self.dropped += 1
+            return False
+        try:
+            ok = _send_pkt(sock, K_FRAME, frame, timeout=SEND_TIMEOUT)
+        finally:
+            self._send_lock.release()
+        if not ok:
+            self.dropped += 1
+            return False
         self.frames_out += 1
         return True
 
@@ -1155,9 +1212,14 @@ class RelayLink:
         sock = self.sock
         if sock is None:
             return False
-        with self._send_lock:
+        if not self._send_lock.acquire(timeout=SEND_LOCK_TIMEOUT):
+            return False
+        try:
             return _send_pkt(sock, K_CTRL,
-                             json.dumps({"op": "ping", "t": time.time()}).encode("utf-8"))
+                             json.dumps({"op": "ping", "t": time.time()}).encode("utf-8"),
+                             timeout=SEND_TIMEOUT)
+        finally:
+            self._send_lock.release()
 
     # -------------------------------------------------- 状态
 
