@@ -256,6 +256,16 @@ def record_lessons(lessons, plan_id: str = "") -> dict:
                 k = str(x.get("kind") or "").strip()[:60]
                 if not k:
                     continue
+                # ★★ 2026-11-25 修（用户要求「解决所有问题」时查出的真 bug）：
+                #   原来每条重记都把 ts 刷成当前时间，而 lessonloop.judge 拿 ts
+                #   当「教训时间」算观察窗起点 → 每次反思都把进度清零。
+                #   实测：4 条教训 edited_at 是 11-22~11-24，却一直显示「已过 9%」，
+                #   教训落地率被钉在 0.33 上下（0.453 → 0.334 就是这么来的），
+                #   RSI 跟着忽高忽低 —— 不是波动，是计时器被反复归零。
+                #   现在保留 first_ts（首次记录），ts 只表示「最近一次重记」。
+                _prev = old.get(k) or {}
+                _first = (_prev.get("first_ts") or _prev.get("ts")
+                          or time.time())
                 old[k] = {
                     "kind": k,
                     "count": x.get("count"),
@@ -264,6 +274,7 @@ def record_lessons(lessons, plan_id: str = "") -> dict:
                     "verify": str(x.get("verify") or "")[:400],
                     "will_fix": bool(x.get("will_fix", True)),
                     "plan_id": str(plan_id or ""),
+                    "first_ts": _first,
                     "iso": _now(),
                     "ts": time.time(),
                 }

@@ -468,7 +468,12 @@ def judge(it: dict) -> dict:
        RSI 的「教训落地率」项恒为 0，auto_fix 还会反复去修已经修好的东西。
     """
     kind = str(it.get("kind") or "").strip()
-    t0 = _num_ts(it.get("ts") or it.get("iso"))
+    # ★★ 2026-11-25 修（真 bug：观察窗被反复归零）：
+    #   取 first_ts（首次记录）而不是 ts（最近一次重记）。
+    #   failattr.record_lessons 每次反思都会覆盖同 kind 并刷新 ts，
+    #   用 ts 当起点等于「每小时把计时器归零」—— 实测 4 条教训 edited_at
+    #   是 11-22~11-24，progress 却一直停在 9%，落地率 0.453 → 0.334。
+    t0 = _num_ts(it.get("first_ts") or it.get("ts") or it.get("iso"))
     pr = PROBES.get(kind)
     if not pr:
         return {"kind": kind, "status": "unprobed", "recur": 0,
@@ -476,7 +481,11 @@ def judge(it: dict) -> dict:
     rel, needle = pr
     edited = _last_ok_edit(rel)
     hit = _probe_hit(rel, needle)
-    recur = _recur_after(kind, t0)
+    # ★★ 2026-11-25 修：复发只从「修复落地之后」算起。
+    #   修复之前的复发正是这条教训的来源，算进去会把每条教训永久钉成 pending
+    #   （实测「跑分退步」17 次全是修复前的旧账）。起点与观察窗保持一致。
+    _since = (max(_first_hit_ts(kind, max(edited, t0)), t0) if hit else t0)
+    recur = _recur_after(kind, _since)
     # 探针文件读不到（被占用 / 权限 / 路径变动）＝ **观测失败**，不是「没修」。
     # 单列 unprobed，既不算落地也不算没落地，绝不污染落地率。
     if hit is None:
@@ -517,9 +526,9 @@ def judge(it: dict) -> dict:
     #    该条件为假 → 跳过观察窗直接判 fixed。实测 12:32 记的教训 12:33 就
     #    判成「已修」，而「未复发」此时只代表「才过了一分钟」—— 假阳性，
     #    会把 RSI 的教训落地率抬虚高。取 max 后，刚记的教训一律先进观察窗。
-    # 起点 = 「探针第一次命中」与「教训记录时间」的晚者。
+    # 起点 = 「探针第一次命中」与「教训记录时间」的晚者（_since 已算好）。
     # 不再直接用文件 mtime：否则改这个文件里任何别的地方都会把进度清零。
-    base = max(_first_hit_ts(kind, max(edited, t0)), t0)
+    base = _since
     elapsed = max(0.0, time.time() - base)
     h1 = OBSERVE_PENDING_HOURS * 3600.0
     h24 = OBSERVE_CONFIRM_HOURS * 3600.0

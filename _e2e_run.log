@@ -1,0 +1,49 @@
+======================================================================
+跑 33 个测试文件（逐个串行，单个上限 420 秒）
+======================================================================
+
+[ 1/33] test_ask_modes.py                  PASS       1.3s  通过 45 项，失败 0 项
+
+[ 2/33] test_ask_user.py                   PASS       0.9s  通过 47 项，失败 0 项
+
+[ 3/33] test_code_continue.py              PASS       3.2s  通过 15 项，失败 0 项
+
+[ 4/33] test_code_routing.py               PASS       0.9s  通过 81 项，失败 0 项
+
+[ 5/33] test_context_and_image_flow.py     PASS       1.2s  通过 59 项，失败 0 项
+
+[ 6/33] test_cross_turn.py                 PASS       0.9s  通过 33 项，失败 0 项
+
+[ 7/33] test_cutout_composite.py           PASS       0.3s  通过 51 项，失败 0 项
+
+[ 8/33] test_fake_artifact.py              PASS       1.2s  通过 22 项，失败 0 项
+
+[ 9/33] test_first_token.py                PASS       1.1s  通过 37 项，失败 0 项
+
+[10/33] test_gen_matrix.py                 PASS       8.2s  通过 48 项，失败 0 项
+
+[11/33] test_image_ask_and_abort.py        PASS       1.1s  通过 25 项，失败 0 项
+
+[12/33] test_image_compose.py              PASS       6.2s  通过 29 项，失败 0 项
+
+[13/33] test_image_inpaint.py              TIMEOUT  421.4s  超时
+        最后几行输出：
+          超时
+
+[14/33] test_image_quality_and_ask.py      PASS       1.6s  通过 84 项，失败 0 项
+
+[15/33] test_image_search.py               PASS       4.6s  通过 25 项，失败 0 项
+
+[16/33] test_loop.py                       PASS      59.5s  通过 25 项，失败 0 项
+
+[17/33] test_map_offline.py                PASS      43.2s  ================================================================
+
+[18/33] test_memory_extract.py             PASS     371.9s  ==================================================================
+
+[19/33] test_mode_switch.py                PASS      16.3s  ==============================================================
+
+[20/33] test_model_info_display.py         PASS       0.3s  通过 25 项，失败 0 项
+
+[21/33] test_ollama_err.py                 PASS       1.2s  通过 13 项，失败 0 项
+
+[22/33] test_ollama_error.py               PASS       4.2s  通过 40 项，失败 0 项
