@@ -47,9 +47,27 @@ from . import (config, ollama_client, deepseek_client, cloud_image, image_models
                t2i, tools, sessions, image_library, doclib, docx_write, tts,
                workspace, actlog, chatimg, hive, hive_client, hive_p2p,
                hive_mesh, hive_relay_link, avatar2, deploy_keys, reply_gate,
-               bootaudit, task_similarity)
+               bootaudit, task_similarity, livecard_meta)
 
 app = FastAPI(title="hardwordy", version="1.0.0")
+
+
+# ★ 2026-11-24（用户报「卡片功能重启后看不出变化」）：
+#   结果卡片（天气/地图/文档/图片）的合并去重。口径与前端
+#   LiveCard.mergeLiveCards 完全一致：同 type + 同 title 只留一张，上限 12 张。
+#   后端分批下发、前端再 merge 一次，两边都不会叠出重复卡。
+def _merge_live_cards(base, more):
+    out = [c for c in (base or []) if isinstance(c, dict)]
+    seen = {(c.get("type"), c.get("title")) for c in out}
+    for c in (more or []):
+        if not isinstance(c, dict):
+            continue
+        k = (c.get("type"), c.get("title"))
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(c)
+    return out[:12]
 
 # ⚠️ 本机地址一律不走系统代理（2026-11-11）。
 #   开发机上经常挂着 http_proxy（抓包 / 科学上网 / 各种客户端自带），
@@ -9765,6 +9783,8 @@ async def chat(req: ChatRequest,
             while not live_ui.empty():      # 收尾：把队列里剩下的也吐出去
                 yield json.dumps({"ui": live_ui.get_nowait()}) + "\n"
             text_results = []
+            # ★ 2026-11-24：本轮的结果卡（天气/地图/文档/图片），随流分批下发
+            _round_cards = []
             for _idx, name, result, ev in sorted(gathered, key=lambda x: x[0]):
                 used_tools.add(name)
                 # 记进「工具动作账本」：这是"刚才改了什么"唯一的可靠来源
@@ -9789,6 +9809,20 @@ async def chat(req: ChatRequest,
                         if e.get("b64") and e.get("origin") in ("gen", "edit"):
                             _remember_image([e["b64"]])
                 ui_events.extend(ev)
+                # ★★ 2026-11-24 接线：前端 mountResultCards 一直在等 {"cards":[...]}，
+                #    但后端从来没人调用 livecard_meta.cards_for_tool —— 结果卡永远是空的，
+                #    用户重启后"看不出和原来有什么区别"就是这么来的。
+                #    这里在工具跑完后立刻算一次，累积后随流下发（前端按 type+title 去重）。
+                try:
+                    _c_new = livecard_meta.cards_for_tool(
+                        name,
+                        calls[_idx][1] if 0 <= _idx < len(calls) else {},
+                        result, ev)
+                    if _c_new:
+                        _round_cards = _merge_live_cards(_round_cards, _c_new)
+                        yield json.dumps({"cards": _round_cards}, ensure_ascii=False) + "\n"
+                except Exception:                       # noqa: BLE001
+                    logger.debug("结果卡片生成失败（不影响正文）", exc_info=True)
                 if text_protocol:
                     # 文本协议没有 tool_call_id 可关联。实测用 user 消息 +
                     # 「工具结果：」前缀，模型能正确接着改（探针里全部收敛）。
@@ -11641,6 +11675,8 @@ async def chat_deepseek(req: ChatRequest,
         threading.Thread(target=worker, daemon=True).start()
 
         yield json.dumps({"note": f"正在调用 {model}…"}) + "\n"
+        # ★ 2026-11-24：云端通道的结果卡（与本地通道同一套口径）
+        _cloud_cards = []
 
         # 单队列顺序消费：内容 / 思考 / 工具事件 / UI 事件 / 错误 都走这里。
         # 不用超时轮询（会泄漏 run_in_executor 任务、导致消息丢失），
@@ -11682,6 +11718,17 @@ async def chat_deepseek(req: ChatRequest,
                         _TOOL_EV.append((val[0], val[1], val[2]))
                     elif isinstance(val, dict):
                         _TOOL_EV.append(val)
+                    # ★★ 2026-11-24：云端这条流也要下发 cards，否则走 DeepSeek 时
+                    #    结果卡同样永远不出现（用户分不清两条通道，只会觉得"没生效"）。
+                    try:
+                        _n0 = str(val[0]) if isinstance(val, (tuple, list)) and val else ""
+                        _r0 = val[2] if isinstance(val, (tuple, list)) and len(val) >= 3 else ""
+                        _c_new = livecard_meta.cards_for_tool(_n0, None, _r0, None)
+                        if _c_new:
+                            _cloud_cards = _merge_live_cards(_cloud_cards, _c_new)
+                            yield json.dumps({"cards": _cloud_cards}, ensure_ascii=False) + "\n"
+                    except Exception:                   # noqa: BLE001
+                        logger.debug("云端结果卡片生成失败（不影响正文）", exc_info=True)
                 except Exception:                       # noqa: BLE001
                     logger.debug("tool_result 收集失败", exc_info=True)
             elif kind == "note":
@@ -14993,6 +15040,16 @@ def avatar2_narration_delete(body: dict):
 _NO_CACHE = "no-store, no-cache, must-revalidate, max-age=0"
 
 
+# 最后一次「真正的业务请求」的时间戳（2026-11-24 新增）。
+# 用途：codesync 判断「现在能不能安全自动重启」—— 用户正在用的时候绝不重启。
+# ⚠️ 必须排除前端每 3 秒一次的自更新轮询（/api/frontend/version）和静态资源，
+#   否则这个时间戳永远在变，「空闲」永远等不到。
+# 另外 codesync 还会看 _chat_busy（正在生成回复的条数），那个才是硬闸。
+_LAST_REQUEST_TS = 0.0
+_ACTIVITY_SKIP = ("/static/", "/api/frontend/version", "/api/codesync",
+                  "/favicon", "/api/health")
+
+
 @app.middleware("http")
 async def _no_cache_pages(request, call_next):
     """让前端文件**彻底不缓存**。
@@ -15006,8 +15063,11 @@ async def _no_cache_pages(request, call_next):
     本地应用的静态资源重新拉一次的开销可以忽略，**正确性远比那几毫秒重要**，
     所以直接 `no-store`：不存、不问、每次重新拿。
     """
-    resp = await call_next(request)
+    global _LAST_REQUEST_TS
     path = request.url.path
+    if not any(path.startswith(p) for p in _ACTIVITY_SKIP):
+        _LAST_REQUEST_TS = time.time()
+    resp = await call_next(request)
     if (path == "/" or path.startswith("/static/")
             or path.endswith((".js", ".css", ".html"))):
         resp.headers["Cache-Control"] = _NO_CACHE
@@ -15030,19 +15090,70 @@ def index():
 # 每次改完前端都要求用户"手动刷新才看到新界面"，等于把开发成本转嫁给用户
 # （实测就是这么被投诉的）。所以前端每隔几秒来问一次"界面文件变了没"。
 # 只看 mtime+size，不读文件内容，开销可以忽略。
-_FE_FILES = ("index.html", "app.js", "studio.js", "style.css")
+# ⚠️ 2026-11-24 修：原来写死 4 个文件（index.html / app.js / studio.js / style.css）。
+#   后来陆续加了 livecard.js、artifacts.js、featpanel.js、jobplan.js、
+#   iterjournal.js、taskcard.js…… 改了这些**不会**触发界面自动刷新 ——
+#   用户看到的还是旧界面，只能自己按 Ctrl+F5（正是「新功能好像没生效」的来源之一）。
+#   改成扫目录：前端根目录下所有 .js/.css/.html 都算界面版本。
+_FE_ROOT_EXT = (".js", ".css", ".html")
+
+
+def _fe_files():
+    """前端根目录下所有界面文件（跳过 .bak / 隐藏文件 / 第三方子目录）。"""
+    try:
+        out = [n for n in sorted(os.listdir(FRONTEND_DIR))
+               if n.endswith(_FE_ROOT_EXT) and not n.startswith(".")
+               and ".bak" not in n]
+    except OSError:
+        out = []
+    return out or ["index.html", "app.js", "style.css"]
 
 
 @app.get("/api/frontend/version")
 def frontend_version():
     parts = []
-    for name in _FE_FILES:
+    for name in _fe_files():
         try:
             st = os.stat(os.path.join(FRONTEND_DIR, name))
             parts.append("%s:%d:%d" % (name, int(st.st_mtime), st.st_size))
         except OSError:
             parts.append("%s:-" % name)
     return {"version": "|".join(parts)}
+
+
+# ---------- 代码指纹对齐：确保「改了」=「生效了」（2026-11-24）----------
+# 背景：用户报「新更新的功能没成功运行」。根因不是缓存，而是**没人核对**
+#   「磁盘上的代码」和「进程里跑着的代码」是不是同一份。这个模块把这件事变成
+#   可查、可自动收敛的：漂移 → 验证 → 空闲时自动重启 → 重启后再复核。
+# ⚠️ 这段必须在**模块级**（0 缩进）。上一次插入时缩进跟了上一行，
+#   结果整个块被缩进进 frontend_version() 函数体内 —— 语法合法、导入也过，
+#   但 `return` 之后的代码永远执行不到，路由根本没注册。静态自检才抓出来。
+@app.get("/api/codesync/status")
+def api_codesync_status():
+    """运行中代码 vs 磁盘代码：是否漂移、待处理动作、最近 20 条历史。"""
+    from . import codesync as _cs
+    return _cs.status()
+
+
+@app.post("/api/codesync/check")
+def api_codesync_check():
+    """手动触发一次巡检（不想等 30 秒轮询时用）。"""
+    from . import codesync as _cs
+    return _cs.check_now()
+
+
+@app.on_event("startup")
+def _codesync_watch():
+    """启动代码指纹巡检：改动落定 → 验证 → 空闲时自动重启。
+
+    用户 2026-11-24 要求「确保以后迭代都能完美生效」：
+    光靠「记得重启」不可靠，必须让进程自己知道磁盘上的代码比它新。
+    """
+    try:
+        from . import codesync as _cs
+        _cs.start_watch()
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("启动代码指纹巡检失败：%s", e)
 
 
 

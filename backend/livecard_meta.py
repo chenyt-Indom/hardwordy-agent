@@ -79,7 +79,18 @@ def _path_of(text):
     if not isinstance(text, str) or not text:
         return ""
     for m in _PATH_RE.finditer(text):
-        p = m.group(0).strip()
+        p = m.group(0).strip().strip("「」『』\"'“”")
+        # ★ 2026-11-24 修：工具返回值常写成「已生成文档：D:\out\报告.docx」，
+        #   而 _PATH_RE 不排除中文冒号 → 整句被当成路径，前端拿它打开必然失败。
+        #   这里只保留**路径本身**：有盘符就从盘符起，否则从最后一个冒号/逗号后起。
+        mm = re.search(r"[A-Za-z]:[\\/]", p)
+        if mm:
+            p = p[mm.start():]
+        else:
+            for sep in ("：", "，", ","):
+                if sep in p:
+                    p = p.rsplit(sep, 1)[-1]
+        p = p.strip()
         # 太短的（"a.md"）大概率是举例，不是真产物
         if len(p) >= 5:
             return p
