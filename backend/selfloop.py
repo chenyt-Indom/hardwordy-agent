@@ -460,6 +460,44 @@ def _skip_note(why, source=""):
 # 已排队的补跑：key → True。防止同一条需求反复排定时器。
 _CATCHUP = {}
 
+# 补跑已重排过几次：key → 次数。防止「排了又被挡 → 再排」变成无限循环。
+_CATCHUP_TRIES = {}
+
+
+def _gate_wait_left(d=None):
+    """算出「现在再触发一次」还要等多少秒（启动冷却 / 节流取较大者）。
+
+    ★ 2026-11-25 补的逻辑缺口：补跑延迟原来**只按 boot_gap 算**，没算 min_gap。
+      于是重启后的补跑（boot_gap+3 秒）必然落在 300 秒节流窗口里，被节流挡掉；
+      而节流分支原来**不重排**（只 return），这次补跑就此永久丢失 ——
+      实测 02:39:12 那次前端重推被节流挡下后，没有任何人再来跑，
+      曲线停在 01:55:27，看起来像「采样停了」。
+      现在把两道闸门的剩余时间统一在这里算，谁挡的都能自己算准。
+    """
+    now = time.time()
+    try:
+        d = d if d is not None else cfg()
+    except Exception:                                   # noqa: BLE001
+        return 0.0
+    left = 0.0
+    try:
+        boot_gap = float(d.get("boot_gap_sec", 180) or 0)
+    except Exception:                                   # noqa: BLE001
+        boot_gap = 180.0
+    if boot_gap > 0:
+        left = max(left, boot_gap - (now - _BOOT_TS[0]))
+    try:
+        need = float(d.get("min_gap_sec") or DEFAULTS["min_gap_sec"])
+    except Exception:                                   # noqa: BLE001
+        need = float(DEFAULTS["min_gap_sec"])
+    try:
+        last = float(d.get("last_at") or 0)
+    except Exception:                                   # noqa: BLE001
+        last = 0.0
+    if need > 0 and last:
+        left = max(left, need - (now - last))
+    return max(0.0, left)
+
 
 def _schedule_catchup(delay, reason, focus_user="", source="chat", sig=""):
     """被「启动冷却」挡掉的那次触发，冷却结束后**自动补跑一次**（用户 2026-11-24 选 A）。
@@ -482,6 +520,18 @@ def _schedule_catchup(delay, reason, focus_user="", source="chat", sig=""):
         with _LOCK:
             _CATCHUP.pop(key, None)
         try:
+            # ★ 2026-11-25：到点了不等于**闸门**放行了。补跑延迟只算 boot_gap 时，
+            #   重启后这次补跑必然还在 300 秒节流窗口内 → 被节流挡掉且不重排 = 永久丢失。
+            #   这里先问一次真实剩余等待，没到就按剩余时间再排一次（最多 3 次）。
+            left = _gate_wait_left()
+            tries = _CATCHUP_TRIES.get(key, 0)
+            if left > 1.0 and tries < 3:
+                _CATCHUP_TRIES[key] = tries + 1
+                logger.info("[selfloop] 补跑到点但闸门还没开（还需 %.0f 秒），再排一次（第 %d 次）",
+                            left, tries + 1)
+                _schedule_catchup(left + 2.0, reason, focus_user, source, sig)
+                return
+            _CATCHUP_TRIES.pop(key, None)
             _maybe_think("补跑（冷却结束）：" + str(reason)[:140],
                          focus_user=focus_user, source=source, sig=sig)
         except Exception:                               # noqa: BLE001
@@ -599,6 +649,7 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     #   拆成两段 with 时，两个线程可能同时通过检查再各自置位 → 两轮反思并行，
     #   各自改代码、互相覆盖（这正是「改完又改回去」的典型来源）。
     _why = ""
+    _gap_left = 0.0
     with _LOCK:
         if _BUSY[0]:
             _why = "上一轮思考还没结束"
@@ -606,10 +657,22 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
             waited = now - _LAST_AT[0]
             if waited < need:
                 _why = "距上次只过了 %.0f 秒（需 %.0f）" % (waited, need)
+                _gap_left = need - waited
             else:
                 _BUSY[0] = True
                 _LAST_AT[0] = now
     if _why:
+        # ★ 2026-11-25 补的逻辑缺口（用户点名的那条）：被节流挡掉的触发**不丢弃**。
+        #   原来这里直接 return，节流窗口内的触发就此永久丢失 —— 而 boot_resume 安排的
+        #   补跑延迟只按 boot_gap 算，必然落在 300 秒节流里 → 被挡 → 没人再来跑，
+        #   曲线就停在原地（实测 02:39 那次，44 分钟没有新采样点）。
+        #   现在：算出还差多少秒，到点自动补跑一次（补跑自身也会复核闸门）。
+        if _gap_left > 1.0 and source != "manual":
+            wait_s = _gap_left + 2.0
+            ok_q = _schedule_catchup(wait_s, reason, focus_user, source, sig)
+            return _skip_note(
+                _why + ("，已安排 %.0f 秒后补跑" % wait_s if ok_q else "，补跑已在队列里"),
+                source)
         return _skip_note(_why, source)
 
     try:
@@ -716,6 +779,17 @@ def _cycle(reason, focus_user, source):
                 res["feat_titles"] = [x.get("title") for x in (fr.get("items") or [])]
         except Exception:                               # noqa: BLE001
             logger.debug("featradar tick failed", exc_info=True)
+        # ★ 2026-11-25 补的缺口（用户问「曲线是不是没更新」的真因）：
+        #   RSI 采样原来只有两处 —— ①「迭代验证通过后跑分」②「每轮对话（1 小时节流）」。
+        #   而自迭代一轮跑完（尤其是 report_only / 未落执行的轮次）**从不采样**：
+        #   实测 02:45:09 那轮 ok=True、actions=5 跑完，rsi_history 仍是 40 个点、
+        #   最后一个停在 01:55:27 —— 用户看到的就是「曲线一动不动」。
+        #   这里在每轮迭代收尾补采一次（10 分钟节流，不会把账本刷爆）。
+        try:
+            from . import lessonloop as _ll
+            _ll.rsi_sample_throttled(gap=600.0)
+        except Exception:                               # noqa: BLE001
+            logger.debug("迭代收尾 RSI 采样失败（不影响本轮）", exc_info=True)
         try:
             d = cfg()
             # ★ 2026-11-25 修口径（用户报「自动迭代是不是没在跑」的真实原因之一）：
@@ -881,7 +955,13 @@ def boot_resume():
         logger.warning("[selfloop] 读配置失败，重启后不自动拉起：%s", e)
         return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
 
-    delay = max(1.0, gap) + 3.0
+    # ★ 2026-11-25 补的缺口：延迟原来只按 boot_gap 算（180+3 秒），但重启后
+    #   last_at 往往就在几分钟前 → 补跑必然落在 300 秒节流窗口内，被节流挡掉。
+    #   现在把节流也算进去，取两者较大值，到点就能真跑起来。
+    try:
+        delay = max(1.0, _gate_wait_left(d)) + 3.0
+    except Exception:                                   # noqa: BLE001
+        delay = max(1.0, gap) + 3.0
 
     def _go():
         try:
