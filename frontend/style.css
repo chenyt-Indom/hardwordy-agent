@@ -92,6 +92,26 @@
   --res-card-accent: #5b7cfa;      /* 强调（悬停边框、可点提示） */
   --res-card-open: #eef2ff;        /* 展开态头部底 */
   --res-shadow: 0 1px 2px rgba(15, 20, 30, .18), 0 6px 16px rgba(15, 20, 30, .14);
+
+  /* —— 结果卡的专用渲染件（2026-11-24 第二版）——
+     livecard.js 的 render() 按类型分派：
+       renderTempBar（温度条）/ renderRouteThumb（路线缩略图）/
+       renderDocPreview（文档预览）/ renderImageCanvas（图片画布）。
+     这些图形件全部从这里取色，和上面的 --res-* 一起构成"一张白纸卡"的观感。 */
+  --lc-bar-track: #eef1f7;         /* 温度条底槽 */
+  --lc-bar-cold: #7ba7f0;          /* 低温端（区间条的起始色） */
+  --lc-bar-hot: #ef8a4a;           /* 高温端（区间条的结束色） */
+  --lc-bar-grad: linear-gradient(90deg, var(--lc-bar-cold), var(--lc-bar-hot));
+  --lc-route-bg: #f4f7ff;          /* 路线缩略图底 */
+  --lc-route-line: #b9c8f2;        /* 途经连线 */
+  --lc-dot: #5b7cfa;               /* 途经点 */
+  --lc-dot-start: #2fa36b;         /* 起点 */
+  --lc-dot-end: #e2604a;           /* 终点 */
+  --lc-doc-bg: #ffffff;            /* 文档预览页纸 */
+  --lc-doc-ink: #dfe4ee;           /* "字迹"占位 */
+  --lc-doc-ink-strong: #cfd6e4;
+  --lc-canvas-bg: #f4f6fb;         /* 图片画布底 */
+  --lc-plain-fg: #2c3340;          /* 纯文本卡文字 */
 }
 
 /* ---------- 浅色模式 ---------- */
@@ -7499,6 +7519,112 @@ html[data-theme="light"] .iter-site:hover {
   display: block; width: 100%; max-height: 140px; object-fit: cover;
   border-bottom: 1px solid var(--res-card-line); background: var(--res-card-head);
 }
+
+/* ===== 结果卡专用渲染件（livecard.js 的 render 分派，2026-11-24 第二版）=====
+   天气 → 温度条 · 地图 → 路线缩略图 · 文档 → 可翻预览 · 图片 → 画布
+   颜色全部走上方的 --lc-* / --res-* 变量，不在选择器里写死。 */
+
+/* —— 温度条（renderTempBar）—— */
+.lc-bars {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 7px 10px 8px; background: var(--res-card-head);
+  border-bottom: 1px solid var(--res-card-line);
+}
+.lc-bar-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+.lc-bar-day {
+  flex: 0 0 auto; width: 44px; color: var(--res-card-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lc-bar {
+  position: relative; flex: 1 1 auto; height: 8px; min-width: 40px;
+  border-radius: 4px; background: var(--lc-bar-track); overflow: hidden;
+}
+.lc-bar-fill {
+  position: absolute; top: 0; height: 100%; border-radius: 4px;
+  background: var(--lc-bar-grad); min-width: 4px;
+}
+.lc-bar-val {
+  flex: 0 0 auto; min-width: 52px; text-align: right;
+  color: var(--res-card-fg); font-variant-numeric: tabular-nums;
+}
+
+/* —— 路线缩略图（renderRouteThumb）—— */
+.lc-route-thumb {
+  position: relative; height: 108px; margin: 0;
+  background: var(--lc-route-bg);
+  border-bottom: 1px solid var(--res-card-line);
+  /* 淡网格，暗示"这是一块地图"，比纯色块不空 */
+  background-image:
+    linear-gradient(var(--lc-route-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--lc-route-line) 1px, transparent 1px);
+  background-size: 26px 26px, 26px 26px;
+  background-position: -1px -1px, -1px -1px;
+}
+.lc-dot {
+  position: absolute; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px;
+  border-radius: 50%; background: var(--lc-dot);
+  box-shadow: 0 0 0 2px var(--lc-route-bg);
+}
+.lc-dot-start { background: var(--lc-dot-start); }
+.lc-dot-end { background: var(--lc-dot-end); }
+.lc-dot-label {
+  position: absolute; transform: translate(6px, -18px);
+  max-width: 90px; font-size: 10px; line-height: 1.2;
+  color: var(--res-card-fg); background: var(--res-card-bg);
+  border: 1px solid var(--res-card-line); border-radius: 4px;
+  padding: 0 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* —— 文档预览（renderDocPreview）—— */
+.lc-doc-pages {
+  display: flex; gap: 6px; padding: 8px 10px;
+  background: var(--res-card-head);
+  border-bottom: 1px solid var(--res-card-line);
+  overflow-x: auto;
+}
+.lc-doc-page {
+  position: relative; flex: 1 1 0; min-width: 62px; max-width: 96px;
+  padding: 6px 5px 8px; background: var(--lc-doc-bg);
+  border: 1px solid var(--res-card-line); border-radius: 5px;
+  box-shadow: 0 1px 2px rgba(15, 20, 30, .08);
+}
+.lc-doc-no {
+  display: block; font-size: 9.5px; color: var(--res-card-muted);
+  margin-bottom: 3px;
+}
+.lc-doc-ink { display: block; }
+.lc-doc-line {
+  display: block; font-size: 10px; line-height: 1.35; color: var(--res-card-fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lc-doc-ghost {
+  height: 3px; margin-top: 3px; border-radius: 2px;
+  background: var(--lc-doc-ink);
+}
+.lc-doc-ghost2 { width: 68%; }
+
+/* —— 图片画布（renderImageCanvas）—— */
+.lc-canvas {
+  background: var(--lc-canvas-bg);
+  border-bottom: 1px solid var(--res-card-line);
+}
+.lc-canvas .rc-thumb { border-bottom: 0; max-height: 160px; }
+.lc-canvas-ph {
+  display: block; padding: 16px 10px; text-align: center;
+  font-size: 11.5px; color: var(--res-card-muted);
+}
+
+/* —— 未知类型：纯文本卡（renderPlainCard）——
+   没有图形件，但保持同一套纸卡外观；文字可换行，不撑破气泡。 */
+.resultcard-plain .rc-hd { border-bottom: 0; }
+.resultcard-plain .lc-plain {
+  padding: 4px 10px 9px; font-size: 12px; line-height: 1.55;
+  color: var(--lc-plain-fg);
+  word-break: break-word; white-space: normal;
+  max-height: 132px; overflow: auto;
+}
+.resultcard-plain { cursor: default; }
+.resultcard-plain:hover { transform: none; }
 
 /* ★ 2026-11-20 用户报「任务正在跑，底部却挂着『继续跑』，不是遇阻才弹吗？」
    根因：`.if-paused { display: flex }` 的优先级高于浏览器默认的

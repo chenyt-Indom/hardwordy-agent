@@ -1724,6 +1724,365 @@ window.LiveCard = (function () {
   RESULT_META.doc.render = renderDocCard;
   RESULT_META.image.render = renderImageCard;
 
+  // ================================================================
+  // 结果卡分派（第二版，2026-11-24）：render(kind, payload) → 专用渲染器
+  // ----------------------------------------------------------------
+  // 和 renderCard 的分工（两个都留着，职责不同）：
+  //   renderCard → 通用「详情卡」：四类共用一个模子，摊 key/value。
+  //   render     → **按类型分派到专用渲染器**，把数据画成一眼能看懂的形状：
+  //     weather → renderTempBar     温度条（一天一条，高低温区间画成条）
+  //     map     → renderRouteThumb  路线缩略图（起终点按坐标摆放 + 连线位）
+  //     doc     → renderDocPreview  文档预览（前几页可翻，带"字迹"占位）
+  //     image   → renderImageCanvas 图片画布（缩略图 + 尺寸/提示词）
+  //   未知 type → renderPlainCard（纯文本卡，绝不裸奔）。
+  //
+  // 约定（与 renderCard 一致）：
+  //   · 返回节点的 class 里既有 `resultcard`、也有 `resultcard-<kind>` 和裸 kind；
+  //   · **永不抛异常**：payload 形状不认识 / 字段为空只影响卡片内容多少，
+  //     绝不影响正文（主流程这时正在收尾）；
+  //   · 不碰业务：不 fetch、不弹 toast、不知道 sessionId；
+  //   · 颜色一律走 style.css 的 --lc-* / --res-* 变量。
+  // ================================================================
+
+  // 数字容错：字符串 "25℃" / " 3.5 " 也要能画进条里；读不出就是 null
+  function lcNum(v) {
+    if (typeof v === "number") return isFinite(v) ? v : null;
+    if (v == null) return null;
+    const m = String(v).replace(/[，,\s]/g, "").match(/-?\d+(?:\.\d+)?/);
+    if (!m) return null;
+    const n = parseFloat(m[0]);
+    return isFinite(n) ? n : null;
+  }
+
+  function lcFirst(obj, keys) {
+    if (!obj || typeof obj !== "object") return "";
+    for (let i = 0; i < keys.length; i++) {
+      const v = obj[keys[i]];
+      if (v != null && v !== "" && typeof v !== "object") return v;
+    }
+    return "";
+  }
+
+  // 卡壳 + 主体，并允许在头部和主体之间插一块"图形"（温度条 / 路况图 / 预览 / 画布）
+  function lcShell(kind, title) {
+    const sh = rcShell(kind, title);
+    return { node: sh.node, body: sh.body };
+  }
+
+  function lcInsertArt(sh, art) {
+    if (!sh || !art) return sh;
+    try { sh.node.insertBefore(art, sh.body || null); } catch (e) {
+      try { sh.node.appendChild(art); } catch (e2) { /* 无 DOM 环境 */ }
+    }
+    return sh;
+  }
+
+  // —— 天气：温度条 ——
+  // 一天一条：左日期/天气，中间"区间条"表现低温→高温（相对这几天最低/最高算位置），
+  // 右边写 "19~28℃"。读不出温度就退回文字行，不画空条。
+  function renderTempBar(payload) {
+    const p = (payload && typeof payload === "object") ? payload : {};
+    const city = lcFirst(p, ["city", "place", "location"]);
+    const detail = lcFirst(p, ["detail", "desc", "text", "condition", "weather"]);
+    const now = lcFirst(p, ["temp", "temperature", "now"]);
+    const nowTxt = (now === "") ? "" : (String(now).indexOf("℃") >= 0 ? String(now) : now + "℃");
+    const head = [city, nowTxt, detail].filter(function (x) {
+      return x !== "" && x != null;
+    }).join(" · ");
+    const sh = lcShell("weather", head || "天气");
+
+    const days = rcArr(p.days, p.forecast, p.list, p.weekly);
+    const rows = [];
+    days.slice(0, 7).forEach(function (d) {
+      if (d == null) return;
+      if (typeof d !== "object") {
+        rows.push({ label: "预报", text: String(d), hi: null, lo: null });
+        return;
+      }
+      const label = lcFirst(d, ["date", "day", "week", "name"]) || "预报";
+      const txt = lcFirst(d, ["text", "desc", "weather", "condition"]);
+      const hi = lcNum(d.high != null ? d.high : (d.tempMax != null ? d.tempMax : d.max));
+      const lo = lcNum(d.low != null ? d.low : (d.tempMin != null ? d.tempMin : d.min));
+      rows.push({ label: String(label), text: String(txt), hi: hi, lo: lo });
+    });
+
+    // 这几天温度的整体范围（把条摆到 0~100% 的位置上要用）
+    let min = null, max = null;
+    rows.forEach(function (r) {
+      const lo = (r.lo != null ? r.lo : r.hi);
+      const hi = (r.hi != null ? r.hi : r.lo);
+      if (lo == null && hi == null) return;
+      const a = (lo == null ? hi : lo), b = (hi == null ? lo : hi);
+      if (min == null || a < min) min = a;
+      if (max == null || b > max) max = b;
+    });
+    const span = (min != null && max != null && max > min) ? (max - min) : 0;
+
+    if (rows.length) {
+      const box = lcNode("div", "lc-bars");
+      rows.forEach(function (r) {
+        const row = lcNode("div", "lc-bar-row");
+        row.appendChild(rcText("lc-bar-day", r.label));
+        const bar = lcNode("div", "lc-bar");
+        if (r.lo != null || r.hi != null) {
+          const lo = (r.lo != null ? r.lo : r.hi);
+          const hi = (r.hi != null ? r.hi : r.lo);
+          const left = span ? Math.round(((Math.min(lo, hi) - min) / span) * 100) : 0;
+          const width = span ? Math.max(4, Math.round((Math.abs(hi - lo)) / span * 100)) : 100;
+          const fill = lcNode("div", "lc-bar-fill");
+          fill.style = fill.style || {};
+          fill.style.left = left + "%";
+          fill.style.width = width + "%";
+          fill.title = String(lo) + "~" + String(hi) + "℃";
+          bar.appendChild(fill);
+        }
+        row.appendChild(bar);
+        row.appendChild(rcText("lc-bar-val",
+          (r.hi != null || r.lo != null)
+            ? ((r.lo != null ? r.lo : "") + (r.hi != null ? "~" + r.hi : "")) + "℃"
+            : (r.text || "")));
+        box.appendChild(row);
+      });
+      lcInsertArt(sh, box);
+    }
+
+    rcRow(sh.body, "城市", city);
+    rcRow(sh.body, "实况", detail);
+    rcRow(sh.body, "温度", nowTxt);
+    rcRow(sh.body, "湿度", p.humidity);
+    rcRow(sh.body, "风", p.wind || p.winddesc || p.wind_dir);
+    if (!sh.body.childNodes.length && !rows.length) rcDump(sh.body, p);
+    return sh.node;
+  }
+
+  // —— 地图：路线缩略图 ——
+  // 不拉瓦片（离线也要能画）：把 markers 按经纬度相对位置摆进一个小方块，
+  // 首尾点高亮，中间的点当途经。有 static_map / thumb 时优先用真图。
+  function renderRouteThumb(payload) {
+    const p = (payload && typeof payload === "object") ? payload : {};
+    const route = (p.route && typeof p.route === "object") ? p.route : {};
+    const frm = lcFirst(p, ["from", "origin", "start"]) || lcFirst(route, ["from", "origin"]);
+    const to = lcFirst(p, ["to", "dest", "destination", "end"]) || lcFirst(route, ["to", "dest"]);
+    const head = (frm || to)
+      ? String(frm || "") + (frm && to ? " → " : "") + String(to || "")
+      : (lcFirst(p, ["title", "name"]) || "地图");
+    const sh = lcShell("map", head);
+
+    const markers = rcArr(p.markers, p.points, p.places);
+    const pts = [];
+    markers.slice(0, 8).forEach(function (m) {
+      if (!m || typeof m !== "object") return;
+      const lat = lcNum(m.lat != null ? m.lat : m.latitude);
+      const lon = lcNum(m.lon != null ? m.lon : (m.lng != null ? m.lng : m.longitude));
+      if (lat == null && lon == null) return;
+      pts.push({ name: String(m.name || m.title || ""), lat: lat, lon: lon });
+    });
+
+    const img = lcFirst(p, ["thumb", "static_map", "map_url"]);
+    if (img) {
+      lcInsertArt(sh, rcThumb(img, head));
+    } else if (pts.length) {
+      let latMin = null, latMax = null, lonMin = null, lonMax = null;
+      pts.forEach(function (q) {
+        if (q.lat != null) {
+          if (latMin == null || q.lat < latMin) latMin = q.lat;
+          if (latMax == null || q.lat > latMax) latMax = q.lat;
+        }
+        if (q.lon != null) {
+          if (lonMin == null || q.lon < lonMin) lonMin = q.lon;
+          if (lonMax == null || q.lon > lonMax) lonMax = q.lon;
+        }
+      });
+      const thumb = lcNode("div", "lc-route-thumb");
+      const posOf = function (q) {
+        const x = (q.lon == null || lonMin == null || lonMax == null || lonMax === lonMin)
+          ? 50 : Math.round((q.lon - lonMin) / (lonMax - lonMin) * 76 + 12);
+        const y = (q.lat == null || latMin == null || latMax == null || latMax === latMin)
+          ? 50 : Math.round((1 - (q.lat - latMin) / (latMax - latMin)) * 76 + 12);
+        return { x: x, y: y };
+      };
+      pts.forEach(function (q, i) {
+        const xy = posOf(q);
+        const dot = lcNode("span", "lc-dot" +
+          (i === 0 ? " lc-dot-start" : (i === pts.length - 1 ? " lc-dot-end" : "")));
+        dot.style = dot.style || {};
+        dot.style.left = xy.x + "%";
+        dot.style.top = xy.y + "%";
+        dot.title = q.name || ("点 " + (i + 1));
+        thumb.appendChild(dot);
+        if (q.name) {
+          const lb = rcText("lc-dot-label", q.name);
+          lb.style = lb.style || {};
+          lb.style.left = xy.x + "%";
+          lb.style.top = xy.y + "%";
+          thumb.appendChild(lb);
+        }
+      });
+      lcInsertArt(sh, thumb);
+    }
+
+    rcRow(sh.body, "起点", frm);
+    rcRow(sh.body, "终点", to);
+    rcRow(sh.body, "距离", p.distance || p.dist || route.distance);
+    rcRow(sh.body, "耗时", p.duration || p.time || p.eta || route.duration);
+    rcRow(sh.body, "方式", p.mode || p.by || route.mode);
+    const nearby = (p.nearby && typeof p.nearby === "object") ? p.nearby : {};
+    const items = rcArr(p.steps, p.nearby_items, nearby.items);
+    if (items.length) rcRow(sh.body, "地点数", items.length);
+    items.slice(0, 5).forEach(function (s) {
+      if (s == null) return;
+      if (typeof s !== "object") { rcRow(sh.body, "途经", s); return; }
+      const line = [s.instruction || s.road || s.name || s.title || "",
+                    s.distance || s.dist || ""].filter(Boolean).join(" ");
+      if (line) rcRow(sh.body, "途经", line);
+    });
+    if (!sh.body.childNodes.length) rcDump(sh.body, p);
+    return sh.node;
+  }
+  // —— 文档：可翻页预览 ——
+  // 前 3 页画成小纸片（页码 + 一行标题 + 两道"字迹"占位），点卡片展开其余细节。
+  function renderDocPreview(payload) {
+    const p = (payload && typeof payload === "object") ? payload : {};
+    const path = lcFirst(p, ["path", "file", "filename"]);
+    const name = lcFirst(p, ["title", "name"]) ||
+      (path ? String(path).split(/[\\/]/).pop() : "") || "文档";
+    const sh = lcShell("doc", name);
+
+    const pages = rcArr(p.pages, p.outline, p.sections, p.preview);
+    const nPages = (typeof p.pages === "number") ? p.pages : pages.length;
+    const show = pages.slice(0, 3);
+    if (show.length) {
+      const strip = lcNode("div", "lc-doc-pages");
+      show.forEach(function (pg, i) {
+        const page = lcNode("div", "lc-doc-page");
+        page.appendChild(rcText("lc-doc-no", String(i + 1)));
+        const ink = lcNode("div", "lc-doc-ink");
+        const txt = (pg && typeof pg === "object")
+          ? String(pg.title || pg.name || pg.heading || pg.text || "")
+          : String(pg == null ? "" : pg);
+        ink.appendChild(rcText("lc-doc-line", txt || "（本页无标题）"));
+        ink.appendChild(lcNode("span", "lc-doc-line lc-doc-ghost"));
+        ink.appendChild(lcNode("span", "lc-doc-line lc-doc-ghost lc-doc-ghost2"));
+        page.appendChild(ink);
+        strip.appendChild(page);
+      });
+      lcInsertArt(sh, strip);
+    }
+
+    rcRow(sh.body, "文件", path);
+    rcRow(sh.body, "页数", nPages || "");
+    rcRow(sh.body, "格式", p.ext || p.format || (path ? String(path).split(".").pop() : ""));
+    rcRow(sh.body, "字数", p.chars || p.words);
+    rcRow(sh.body, "链接", p.url || p.link || p.download);
+    if (!sh.body.childNodes.length && !show.length) rcDump(sh.body, p);
+    return sh.node;
+  }
+
+  // —— 图片：画布 ——
+  function renderImageCanvas(payload) {
+    const p = (payload && typeof payload === "object") ? payload : {};
+    const src = lcFirst(p, ["thumb", "src", "url", "path", "saved_path", "image"]);
+    const name = lcFirst(p, ["title", "name", "prompt", "query"]) || "图片";
+    const sh = lcShell("image", name);
+
+    const cv = lcNode("div", "lc-canvas");
+    if (src && String(src).length <= 300) {
+      cv.appendChild(rcThumb(src, String(name)));
+    } else {
+      // 图片本体走 ui image 事件那条流（带 b64），卡片里只放提示
+      cv.appendChild(rcText("lc-canvas-ph", "（这张图不在卡片里，点开放大看）"));
+    }
+    lcInsertArt(sh, cv);
+
+    const w = lcNum(p.width), h = lcNum(p.height);
+    rcRow(sh.body, "尺寸", (w && h) ? (w + "×" + h) : (p.size || ""));
+    rcRow(sh.body, "格式", p.mime || p.ext || p.format);
+    rcRow(sh.body, "提示词", p.prompt || p.query);
+    rcRow(sh.body, "模型", p.model);
+    rcRow(sh.body, "文件", p.saved_path || p.path || p.file);
+    if (!sh.body.childNodes.length) rcDump(sh.body, p);
+    return sh.node;
+  }
+
+  // —— 未知类型：纯文本卡 ——
+  // 用户看不到"这是什么"，但至少要能读出内容；因此保留 resultcard 外观、
+  // 走纯文本排布，不画任何图形。
+  function renderPlainCard(kind, payload) {
+    const k = String(kind == null ? "" : kind).toLowerCase().trim();
+    const node = lcNode("div", "livecard resultcard resultcard-plain resultcard-text text plain");
+    try { node.setAttribute("data-kind", k || "text"); } catch (e) { /* 无 DOM 环境 */ }
+    const lines = lcPayloadLines(payload);
+    let body = "";
+    if (typeof payload === "string" && payload.trim()) body = payload.trim();
+    else if (lines.length) body = lines.join("；");
+    if (!body) body = "（这类结果暂时只有文字）";
+    node.title = k ? (k + " 结果") : "结果";
+
+    const hd = lcNode("div", "rc-hd");
+    hd.appendChild(rcText("rc-ico", "📝"));
+    hd.appendChild(rcText("rc-title", node.title));
+    hd.appendChild(rcText("rc-badge", "文本"));
+    node.appendChild(hd);
+
+    const txt = lcNode("div", "lc-plain");
+    txt.textContent = body;
+    node.appendChild(txt);
+    return node;
+  }
+
+  // kind → 渲染器（导出成 DISPATCH，方便断言/调试时确认分派到了谁）
+  const RESULT_DISPATCH = {
+    weather: renderTempBar,
+    map: renderRouteThumb,
+    doc: renderDocPreview,
+    image: renderImageCanvas,
+  };
+  const RESULT_RENDERER_NAME = {
+    weather: "renderTempBar",
+    map: "renderRouteThumb",
+    doc: "renderDocPreview",
+    image: "renderImageCanvas",
+  };
+
+  /**
+   * 结果卡分派入口：按类型选专用渲染器。
+   * @param {string} kind    weather | map | doc | image
+   * @param {object} payload 这一轮的结果（后端 livecard_meta.build 的 payload）
+   * @returns {Element} 永远是节点，永不 null、永不抛异常
+   */
+  function render(kind, payload, opts) {
+    const k = String(kind == null ? "" : kind).toLowerCase().trim();
+    const fn = RESULT_DISPATCH[k];
+    const name = fn ? RESULT_RENDERER_NAME[k] : "renderPlainCard";
+    let node = null;
+    try {
+      node = fn ? fn(payload, opts) : renderPlainCard(k, payload);
+    } catch (e) {
+      node = null;
+    }
+    if (!node) {
+      try { node = renderPlainCard(k, payload); } catch (e2) { node = null; }
+    }
+    if (!node) {
+      // 连兜底卡都建不出来（极端环境）→ 给最小节点，绝不让调用方拿到 null
+      node = lcNode("div", "livecard resultcard resultcard-plain resultcard-text text plain");
+      node.textContent = "（这类结果暂时画不出来）";
+    }
+    // 可观测：node 里跑断言 / 控制台里查"这张卡是谁画的"
+    try { node.__lcRenderer = name; } catch (e3) { /* 忽略 */ }
+    try { node.setAttribute("data-renderer", name); } catch (e4) { /* 忽略 */ }
+    return node;
+  }
+
+  /** 挂到容器上（append 语义，子节点数 +1）。@returns {Element|null} 卡片节点 */
+  function mountResult(host, kind, payload, opts) {
+    if (!host || typeof host.appendChild !== "function") return null;
+    const node = render(kind, payload, opts);
+    if (!node) return null;
+    host.appendChild(node);
+    return node;
+  }
+
   // 未知 kind 的兜底卡：不抛异常，把 payload 摊平成几行给人看
   function renderUnknownCard(kind, payload) {
     const sh = rcShell("unknown", (kind ? String(kind) + " 结果" : "结果"));
@@ -1803,5 +2162,16 @@ window.LiveCard = (function () {
     renderMapCard: renderMapCard,
     renderDocCard: renderDocCard,
     renderImageCard: renderImageCard,
+    // 结果卡分派（第二版）：render(type, payload) → 专用渲染器
+    //   weather→renderTempBar / map→renderRouteThumb / doc→renderDocPreview /
+    //   image→renderImageCanvas；未知 type→renderPlainCard（纯文本卡）。
+    RESULT_DISPATCH: RESULT_DISPATCH,
+    render: render,
+    mountResult: mountResult,
+    renderTempBar: renderTempBar,
+    renderRouteThumb: renderRouteThumb,
+    renderDocPreview: renderDocPreview,
+    renderImageCanvas: renderImageCanvas,
+    renderPlainCard: renderPlainCard,
   };
 })();

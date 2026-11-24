@@ -2299,7 +2299,14 @@
   function mountResultCards(bubble, cards) {
     if (!bubble || !cards || !cards.length) return null;
     const LC = window.LiveCard;
-    if (!LC || typeof LC.renderCard !== "function") return null;
+    if (!LC || typeof LC.render !== "function") {
+      // 老版本 livecard.js（只有 renderCard）也能用，别让卡片整个消失
+      if (!LC || typeof LC.renderCard !== "function") return null;
+    }
+    // 后端 livecard_meta.build 出的 payload 直接喂 LC.render：
+    // 它按 type 分派到 renderTempBar / renderRouteThumb / renderDocPreview /
+    // renderImageCanvas（未知 type 走纯文本卡）。降级用 renderCard。
+    const drawOne = (typeof LC.render === "function") ? LC.render : LC.renderCard;
     try {
       const host = document.createElement("div");
       host.className = "rescards";
@@ -2308,7 +2315,7 @@
         if (!c || typeof c !== "object") continue;
         const kind = resultKindOf(c);
         if (!kind) continue;
-        const node = LC.renderCard(kind, c.payload || c);
+        const node = drawOne(kind, c.payload || c);
         if (!node) continue;
         host.appendChild(node);
         n++;

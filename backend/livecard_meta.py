@@ -267,6 +267,118 @@ def cards_for_tool(name, args=None, result=None, events=None):
     return [c for c in out if c and c.get("type") in CARD_TYPES]
 
 
+def _as_kind(name):
+    """`name` 本身就是卡片类型名（weather/map/doc/image/ppt/video）时返回它。"""
+    k = str(name or "").strip().lower()
+    return k if k in CARD_TYPES else ""
+
+
+# 各类卡的默认标题（payload 里什么都读不出来时用）
+_KIND_LABEL = {
+    "weather": "天气", "map": "地图", "image": "图片",
+    "doc": "文档", "ppt": "演示", "video": "视频",
+}
+
+
+def _payload_title(kind, payload):
+    """从 payload 里挑一句话当卡片标题（按类型的字段优先级挑，读不到就给默认名）。"""
+    p = payload if isinstance(payload, dict) else {}
+
+    def first(*keys):
+        for k in keys:
+            v = p.get(k)
+            if isinstance(v, (str, int, float)) and str(v).strip():
+                return _s(v, 60)
+        return ""
+
+    if kind == "weather":
+        bits = [first("city", "place", "location"), first("detail", "desc", "text"),
+                first("temp", "temperature", "now")]
+        head = " ".join([b for b in bits if b]).strip()
+        return head or _KIND_LABEL[kind]
+    if kind == "map":
+        frm, to = first("from", "origin"), first("to", "dest", "destination")
+        if frm or to:
+            return (frm + " → " + to).strip(" →") or _KIND_LABEL[kind]
+        names = p.get("markers")
+        if isinstance(names, list) and names and isinstance(names[0], dict):
+            n0 = _s(names[0].get("name") or "", 40)
+            if n0:
+                return "地图：" + (n0 if len(names) == 1 else "%s 等 %d 处" % (n0, len(names)))
+        return _KIND_LABEL[kind]
+    name = first("title", "name", "filename", "file", "path")
+    if name:
+        base = os.path.basename(name)
+        return base or name
+    return _KIND_LABEL[kind]
+
+
+def _thumb_of(payload):
+    """payload 里的缩略图地址（只取短字符串，绝不把 base64/大图塞进卡片）。"""
+    if not isinstance(payload, dict):
+        return ""
+    for k in ("thumb", "thumbnail", "src", "url", "map_url", "static_map"):
+        v = payload.get(k)
+        if isinstance(v, str) and v and len(v) <= 300 and not v.startswith("data:"):
+            return v
+    return ""
+
+
+def build(name, args=None, result=None, events=None):
+    """工具跑完后该在回复末尾挂的**一张主卡**：``{type,title,thumb,payload}``。
+
+    为什么要有这一层（而不是调用方直接吃 cards_for_tool）
+    ----------------------------------------------------
+    调用方（main.py 的收尾逻辑 / 前端 app.js 的挂卡）只想知道「这一轮该画哪张卡」，
+    不想关心「这个工具有没有发 ui 事件」「有没有返回产物路径」这些细节。
+    这里把 ``cards_for_tool`` 的列表压成一张**最该露脸**的卡。
+
+    两种调用方式都支持（都返回 dict，没有可画的卡时返回 None）::
+
+        build("get_weather", {"city": "杭州"}, "【杭州 天气】\\n此刻实况：晴 25℃")
+        build("weather", {"city": "杭州", "days": [...]})   # 已按类型分好类时
+
+    第二种是「按卡片类型给原始 payload」：payload **原样保留**（前端
+    render 的 renderTempBar / renderRouteThumb / renderDocPreview /
+    renderImageCanvas 直接吃它），所以 days / markers / pages 这些数组不会丢。
+    """
+    kind = _as_kind(name)
+    if kind and result is None and events is None and (args is None or isinstance(args, dict)):
+        payload = dict(args) if isinstance(args, dict) else {}
+        return {
+            "type": kind,
+            "title": _payload_title(kind, payload) or _KIND_LABEL.get(kind, kind),
+            "thumb": _thumb_of(payload),
+            "payload": payload,
+        }
+    try:
+        cards = cards_for_tool(name, args, result, events)
+    except Exception:                                   # noqa: BLE001
+        return None
+    if not cards:
+        return None
+    # 有 ui 事件时会先出 map / image / doc 卡；主卡就是列表里的第一张
+    # （顺序在 cards_for_tool 里已经是「事件优先、工具兜底」）。
+    card = dict(cards[0])
+    card.setdefault("title", "")
+    card.setdefault("thumb", "")
+    if not isinstance(card.get("payload"), dict):
+        card["payload"] = {"value": card.get("payload")}
+    return card
+
+
+def build_all(name, args=None, result=None, events=None):
+    """同 ``build``，但返回**所有**卡（一轮可能要挂多张：地图 + 图片 + 文档）。"""
+    try:
+        return cards_for_tool(name, args, result, events)
+    except Exception:                                   # noqa: BLE001
+        return []
+
+
+# 兼容别名：早期调用方/断言用的是 build_card（同样是「按类型给 payload」的语义）。
+build_card = build
+
+
 def _slim_args(args):
     if not isinstance(args, dict):
         return {}

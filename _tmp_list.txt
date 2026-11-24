@@ -1,0 +1,4 @@
+backend/_feature_tests\_pending_答完给张卡（按产物类型自动渲染交互卡）.py
+backend/_feature_tests\_pending_答完给张卡：可交互小卡.py
+backend/_feature_tests\_pending_答完给张卡：天气_文档结果内联可交互卡.py
+backend/_feature_tests\_pending_答完给张卡：结果内联可交互卡.py
