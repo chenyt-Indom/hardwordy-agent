@@ -72,6 +72,10 @@ DEFAULTS = {
     #   积压 ≥ 这个数时**自动触发**直接跳过（手动点「立即反思」永远放行）。
     #   设 0 = 关闭闸门。
     "backlog_gate": 30,
+    # ★ 2026-11-24 死锁保险：积压超过阈值时，若距上次真正开跑已经 ≥ 这么多小时，
+    #   就**放行一次**（一天最多一次）。没有这道保险，闸门会把对话触发永久堵死 ——
+    #   实测 11-23/11-24 定时任务仍在生成 168 条待批准，而 chat 触发一条都进不来。
+    "backlog_free_hours": 24,
 }
 
 # ★ 2026-11-23：老默认值的一次性迁移。
@@ -404,6 +408,71 @@ def request_next(reason="上一个功能验证通过，接着推荐下一个功�
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+def _skip_note(why, source=""):
+    """记一笔「这轮为什么没跑」，落盘供面板/排查用，然后返回标准 skipped 结构。
+
+    ★ 2026-11-24 实测踩到的坑：跳过原因原来只是**内存里的返回值，从不落盘**。
+      所以「11-16 之后对话触发再没开跑」这件事，事后完全查不出是谁挡的 ——
+      上一轮我甚至把原因读错成「backlog=0」，真因是 backlog 168 条堵死闸门。
+      现在每次跳过都写一条（保留最近 40 条），谁挡的、挡了多少一眼可见。
+    """
+    try:
+        # ★ 读-改-写必须进锁：前端每 20 秒可能并发上报多条信号，
+        #   两个线程同时「读旧数组 → 各自 append → 各自写盘」会丢记录。
+        with _LOCK:
+            d = cfg()
+            arr = list(d.get("skip_log") or [])
+            arr.append({"at": _now(), "why": str(why or "")[:160],
+                        "source": str(source or "")[:40]})
+            d["skip_log"] = arr[-40:]
+            _save(d)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("skip_log 写入失败（不影响主流程）", exc_info=True)
+    return {"ok": True, "skipped": why}
+
+
+# 已排队的补跑：key → True。防止同一条需求反复排定时器。
+_CATCHUP = {}
+
+
+def _schedule_catchup(delay, reason, focus_user="", source="chat", sig=""):
+    """被「启动冷却」挡掉的那次触发，冷却结束后**自动补跑一次**（用户 2026-11-24 选 A）。
+
+    为什么必须补跑：冷却挡掉之后，这条真实需求只有等「用户再发一句话」才会被
+    前端重推（前端确实会撤回指纹）。用户不发消息，它就被永久丢弃了 ——
+    这正是「挡掉即丢弃」的问题，也是用户要求修的那一条。
+    """
+    key = sig or ("%s|%s" % (source, str(reason)[:60]))
+    with _LOCK:
+        if key in _CATCHUP:
+            return False
+        _CATCHUP[key] = True
+    try:
+        delay = max(1.0, float(delay))
+    except Exception:                                   # noqa: BLE001
+        delay = 5.0
+
+    def _fire():
+        with _LOCK:
+            _CATCHUP.pop(key, None)
+        try:
+            _maybe_think("补跑（冷却结束）：" + str(reason)[:140],
+                         focus_user=focus_user, source=source, sig=sig)
+        except Exception:                               # noqa: BLE001
+            logger.warning("冷却后补跑失败", exc_info=True)
+
+    try:
+        t = threading.Timer(delay, _fire)
+        t.daemon = True
+        t.start()
+    except Exception:                                   # noqa: BLE001
+        with _LOCK:
+            _CATCHUP.pop(key, None)
+        logger.warning("补跑定时器没排上", exc_info=True)
+        return False
+    return True
+
+
 def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     """三重检查都过了才真的开线程。"""
     d = cfg()
@@ -411,7 +480,7 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     #   也会被「今日计划数已满」挡掉，等于手动按钮失效。
     #   下面 backlog_gate 那道闸门本来就写了「手动永远放行」，这里保持一致。
     if _quota_left(d) <= 0 and source != "manual":
-        return {"ok": True, "skipped": "今日计划数已满（%d）" % d.get("daily_plans")}
+        return _skip_note("今日计划数已满（%d）" % d.get("daily_plans"), source)
     # ★ 2026-11-24 专家意见（L3 三缺之三：没有预算）：
     #   daily_plans 只管「计划数」，且数散在自己文件里。这里再过一道统一预算账本，
     #   让「计划 / 改动文件 / 自动重启」三类消耗进同一本账，面板和日志能一眼看到。
@@ -420,7 +489,7 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
         from . import evolve_budget as _eb
         _gb = _eb.gate("plans", 1, manual=(source == "manual"))
         if not _gb.get("ok"):
-            return {"ok": True, "skipped": _gb.get("why")}
+            return _skip_note(_gb.get("why"), source)
     except Exception:                                   # noqa: BLE001
         logger.debug("进化预算闸门失败（不拦，按原逻辑继续）", exc_info=True)
     # ★ 2026-11-17 用户问「为什么这么多条待批准」：根因就是**生成远快于处理**。
@@ -434,10 +503,33 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     if gate > 0 and source != "manual":
         backlog = _backlog()
         if backlog >= gate:
-            return {"ok": True,
-                    "skipped": "待批准已积压 %d 条（阈值 %d）：先把已有的批掉，"
-                               "再想新的（想立刻跑请点「立即反思」）"
-                               % (backlog, gate)}
+            # ★ 2026-11-24 死锁修复（实测数据）：闸门本意是「省 token」，但它把
+            #   **对话触发永久堵死** —— 11-23/11-24 定时任务照样生成了 168 条
+            #   待批准，而 chat 触发一条都进不来。积压只增不减 → 永远解不了封。
+            #   现在加一道保险：距上次真正开跑 ≥ backlog_free_hours（默认 24h）
+            #   就放行一次（一天最多一次，token 成本可忽略），并记进 skip_log。
+            try:
+                free_h = float(d.get("backlog_free_hours", 24) or 0)
+            except Exception:                           # noqa: BLE001
+                free_h = 24.0
+            _t = time.time()
+            try:
+                _last = float(d.get("last_at") or 0)
+            except Exception:                           # noqa: BLE001
+                _last = 0.0
+            stale_h = ((_t - _last) / 3600.0) if _last else 1e9
+            # ★ 2026-11-24 预演实测踩到的 bug：原来这里先把「今天已放行」写盘，
+            #   结果名额被**冷却期内**的那次触发白白吃掉（它后面才被 boot_gap 挡住），
+            #   等补跑真正到来时 freed_today 已经是 True → 补跑又被积压挡住。
+            #   修法：名额不提前占，直接用 last_at 限流 —— 放行并**真开跑**时
+            #   last_at 会更新，之后 free_h 小时内自然不再放行；没开跑就不消耗名额。
+            if free_h > 0 and stale_h >= free_h:
+                _skip_note("积压 %d 条、但已停摆 %.0f 小时：死锁保险放行一次"
+                           % (backlog, stale_h), source)
+            else:
+                return _skip_note(
+                    "待批准已积压 %d 条（阈值 %d）：先把已有的批掉，"
+                    "再想新的（想立刻跑请点「立即反思」）" % (backlog, gate), source)
     now = time.time()
     # ★ 2026-11-16 用户报「每次启动都要自动迭代一轮，134.9 秒」：
     #   进程刚起来时，前端可能还在重推历史、队列也可能在补跑，这时候自动开跑
@@ -452,9 +544,13 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
             boot_gap = 180.0
         since_boot = now - _BOOT_TS[0]
         if boot_gap > 0 and since_boot < boot_gap:
-            return {"ok": True, "skipped": "刚启动 %.0f 秒（冷却 %d 秒内不自动思考，"
-                                           "想立刻跑请点「立即反思」）"
-                    % (since_boot, int(boot_gap))}
+            # ★ 用户 2026-11-24 选 A：冷却挡掉的**不丢弃**，冷却一结束就自动补跑。
+            left = boot_gap - since_boot
+            ok_q = _schedule_catchup(left + 2.0, reason, focus_user, source, sig)
+            return _skip_note("刚启动 %.0f 秒（冷却 %d 秒，%s）"
+                              % (since_boot, int(boot_gap),
+                                 "已安排 %.0f 秒后补跑" % (left + 2.0) if ok_q
+                                 else "补跑已在队列里"), source)
     # ★ 节流跨重启有效：_LAST_AT 是内存变量，重启后归零 → waited 变成天文数字
     #   → 节流形同虚设（实测 03:55:16 跑完，03:56:10 重启后又跑了一轮）。
     #   所以第一次用到时从落盘的 last_at 恢复。
@@ -473,15 +569,22 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     else:
         need = float(gap if gap is not None
                      else (d.get("min_gap_sec") or DEFAULTS["min_gap_sec"]))
+    # ★ 2026-11-24：检查与占位必须在**同一把锁**里完成。
+    #   拆成两段 with 时，两个线程可能同时通过检查再各自置位 → 两轮反思并行，
+    #   各自改代码、互相覆盖（这正是「改完又改回去」的典型来源）。
+    _why = ""
     with _LOCK:
         if _BUSY[0]:
-            return {"ok": True, "skipped": "上一轮思考还没结束"}
-        waited = now - _LAST_AT[0]
-        if waited < need:
-            return {"ok": True, "skipped": "距上次只过了 %.0f 秒（需 %.0f）"
-                    % (waited, need)}
-        _BUSY[0] = True
-        _LAST_AT[0] = now
+            _why = "上一轮思考还没结束"
+        else:
+            waited = now - _LAST_AT[0]
+            if waited < need:
+                _why = "距上次只过了 %.0f 秒（需 %.0f）" % (waited, need)
+            else:
+                _BUSY[0] = True
+                _LAST_AT[0] = now
+    if _why:
+        return _skip_note(_why, source)
 
     try:
         d = cfg()
