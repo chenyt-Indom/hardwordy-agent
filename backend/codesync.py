@@ -347,6 +347,44 @@ def _do_restart(fp: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# ---------------------------------------------------------------- 重启闸门
+def _in_iteration() -> bool:
+    """当前是否有自动迭代任务正在跑。
+
+    只认 iter_runner 的「running」登记 —— 那是真正在改代码、用户正等结果的那条。
+    """
+    try:
+        from . import iter_runner
+        run = (iter_runner._STATE or {}).get("running") or {}
+        return bool(run.get("tid") or run.get("plan_id"))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return False
+
+
+def _auto_restart_allowed() -> tuple:
+    """(允许自动重启?, 原因)。
+
+    ★ 2026-11-25 用户要求（原话）：「为什么又是在非自动迭代任务时自动重启了？
+      不应该要有一个自动重启的按钮吗」。
+      原来本模块**无条件**自动重启：只要磁盘代码比运行进程新就重启，哪怕用户
+      正在聊天、刚问完一句话。现在改成两道口子，任一满足才自动重启：
+        · 自动迭代任务正在跑（那时重启是这一轮的正常收尾）；
+        · 用户在设置里显式打开 codesync_auto_restart。
+      其余情况只记「待重启」，等用户点按钮。
+    """
+    try:
+        from . import self_iterate as _si
+        s = _si.load_settings() or {}
+    except Exception:                                   # noqa: BLE001
+        s = {}
+    if bool(s.get("codesync_auto_restart", False)):
+        return True, "设置里开了「代码改动自动重启」"
+    if _in_iteration():
+        return True, "自动迭代任务正在跑"
+    return False, "非迭代任务：只记录待重启，等你点重启按钮"
+
+
 # ---------------------------------------------------------------- 主循环
 def _handle(fp: str, st: dict) -> dict:
     """改动已落定：验证 → 通过则排队重启 / 不通过则恢复。"""
@@ -365,7 +403,8 @@ def _handle(fp: str, st: dict) -> dict:
                        v.get("why"), rec)
         return {"action": "recover", "verify": v, "recover": rec}
 
-    # 通过 → 排队重启（真正执行在 _tick 里等空闲）
+    # 通过 → 先过「尝试次数上限」。这是安全护栏，必须排在闸门之前：
+    #   同一份改动绝不无限重启，哪怕闸门本来就不让自动重启。
     tries = int((st.get("attempts") or {}).get(fp) or 0)
     if tries >= MAX_ATTEMPTS:
         st["pending_restart"] = None
@@ -373,6 +412,18 @@ def _handle(fp: str, st: dict) -> dict:
         _record("give_up", fp=fp, why="同一份改动已自动重启 %d 次，停止重试" % tries)
         logger.warning("[codesync] 指纹 %s 已尝试重启 %d 次，停止自动重启", fp, tries)
         return {"action": "give_up", "verify": v}
+
+    # ★ 2026-11-25 闸门：非迭代任务不自动重启，只记「待重启」等用户点按钮。
+    _ok, _why = _auto_restart_allowed()
+    if not _ok:
+        st["pending_restart"] = {"fp": fp, "since": now, "why": v.get("why"),
+                                 "manual": True, "blocked": _why}
+        _save_state(st)
+        _record("manual_only", fp=fp, why=_why)
+        logger.info("[codesync] 改动验证通过，%s → 只记录待重启", _why)
+        return {"action": "manual_only", "verify": v, "need_manual_restart": True}
+
+    # 通过 → 排队重启（真正执行在 _tick 里等空闲）
 
     st["pending_restart"] = {"fp": fp, "since": now, "why": v.get("why")}
     st["attempts"] = dict(st.get("attempts") or {})
@@ -419,7 +470,9 @@ def _tick() -> dict:
 
         # ③ 有排队的重启 → 等空闲执行
         pr = st.get("pending_restart") or {}
-        if pr.get("fp") == fp:
+        # ★ 2026-11-25：manual=True 是「闸门拦下来的」待重启 —— 绝不自动执行，
+        #   只等用户在前端点按钮（否则闸门等于没加）。
+        if pr.get("fp") == fp and not pr.get("manual"):
             idle = _idle_sec()
             waited = time.time() - float(pr.get("since") or time.time())
             if idle < IDLE_NEED_SEC and waited < MAX_DEFER_SEC:
@@ -503,6 +556,11 @@ def status() -> dict:
         "changed_files": changed[:20],
         "candidate_n": int(st.get("candidate_n") or 0),
         "pending_restart": st.get("pending_restart"),
+        # ★ 2026-11-25：告诉前端「现在会不会自动重启、为什么」——
+        #   用户问过「为什么又自动重启了」，反过来也要能看见「为什么没重启」。
+        "auto_restart_allowed": (lambda t: {"ok": t[0], "why": t[1]})(
+            _auto_restart_allowed()),
+        "need_manual_restart": bool((st.get("pending_restart") or {}).get("manual")),
         "last_handle": st.get("last_handle"),
         "attempts": st.get("attempts") or {},
         "history": list(st.get("history") or [])[-HIST_MAX:],

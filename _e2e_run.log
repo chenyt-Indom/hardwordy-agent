@@ -47,3 +47,32 @@
 [21/33] test_ollama_err.py                 PASS       1.2s  通过 13 项，失败 0 项
 
 [22/33] test_ollama_error.py               PASS       4.2s  通过 40 项，失败 0 项
+
+[23/33] test_run_timeout.py                PASS      48.9s  通过 34 项，失败 0 项
+
+[24/33] test_sampling_params.py            PASS       0.2s  通过 17 项，失败 0 项
+
+[25/33] test_slow_feedback.py              PASS       1.0s  通过 16 项，失败 0 项
+
+[26/33] test_smoke.py                      PASS      50.5s  ==============================================================
+
+[27/33] test_text_tool_leak.py             PASS       3.4s  通过 78 项，失败 0 项
+
+[28/33] test_thinking_budget.py            PASS       1.3s  通过 17 项，失败 0 项
+
+[29/33] test_thinking_retry.py             PASS       1.2s  通过 8 项，失败 0 项
+
+[30/33] test_tool_leak_e2e.py              PASS       8.9s  通过 13 项，失败 0 项
+
+[31/33] test_voice.py                      PASS      11.0s  通过 66 项，失败 0 项
+
+[32/33] test_weather.py                    PASS      14.3s  ================================================================
+
+[33/33] test_web_intent.py                 PASS       1.0s  通过 62 项，失败 0 项
+
+======================================================================
+汇总
+======================================================================
+  TIMEOUT  test_image_inpaint.py              超时
+
+  通过 32 / 33 ，未通过 1

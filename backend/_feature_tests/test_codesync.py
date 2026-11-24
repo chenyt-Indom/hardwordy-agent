@@ -149,10 +149,12 @@ def test_no_drift_noop():
 
 
 def test_verify_ok_queues_restart():
-    """验证通过 → 排队重启，并记一次尝试。"""
+    """验证通过 + 自动迭代任务在跑 → 排队重启，并记一次尝试。"""
     with _Iso():
         st = cs._blank_state()
         with mock.patch.object(cs, "verify", lambda: {"ok": True, "why": "ok"}), \
+             mock.patch.object(cs, "_auto_restart_allowed",
+                               lambda: (True, "自动迭代任务正在跑")), \
              mock.patch.object(cs, "_save_state", lambda d: None):
             r = cs._handle("fp_ok", st)
         check("通过后排队重启", r.get("action") == "queued", r)
@@ -160,6 +162,31 @@ def test_verify_ok_queues_restart():
               st.get("pending_restart"))
         check("尝试次数 +1", (st.get("attempts") or {}).get("fp_ok") == 1,
               st.get("attempts"))
+
+
+def test_non_iteration_only_records():
+    """★ 2026-11-25 用户要求：非迭代任务不自动重启，只记待重启等用户点按钮。
+
+    用户原话：「为什么又是在非自动迭代任务时自动重启了？不应该要有一个
+    自动重启的按钮吗」。所以这里断言：闸门关着时
+      · 动作是 manual_only（不是 queued）；
+      · 待重启带 manual 标记（_tick 不会自动执行它）；
+      · 尝试次数**不增加**（没真的重启过，不该消耗配额）。
+    """
+    with _Iso():
+        st = cs._blank_state()
+        with mock.patch.object(cs, "verify", lambda: {"ok": True, "why": "ok"}), \
+             mock.patch.object(cs, "_auto_restart_allowed",
+                               lambda: (False, "非迭代任务：只记录待重启")), \
+             mock.patch.object(cs, "_save_state", lambda d: None):
+            r = cs._handle("fp_manual", st)
+        check("非迭代不排队自动重启", r.get("action") == "manual_only", r)
+        check("待重启带 manual 标记",
+              (st.get("pending_restart") or {}).get("manual") is True,
+              st.get("pending_restart"))
+        check("不消耗重启配额", not (st.get("attempts") or {}).get("fp_manual"),
+              st.get("attempts"))
+        check("告诉前端需要手动重启", r.get("need_manual_restart") is True, r)
 
 
 def test_attempt_cap():

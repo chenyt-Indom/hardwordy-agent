@@ -428,6 +428,13 @@ _CHANGED_FILES_MARKERS = ("已改文件", "已修改文件", "改动文件", "�
 # 回复以这些「只诊断不修复」的口头禅结尾时，补一句结论
 _DIAGNOSE_TAIL_MARKERS = ("我看一下", "我看下", "我看看", "我先看看", "我先看一下")
 
+# ★ 2026-11-25 结论自洽闸门用的词表（治「假完成」）
+#   用户反复踩的坑：回复首段说「已解决 / 全部通过」，而同一轮里动作有 failed。
+_FAIL_STATUS_MARKERS = ("fail", "failed", "error", "失败", "错误")
+_SUCCESS_CLAIM_MARKERS = ("已解决", "全部通过", "全绿", "都通过", "搞定了", "已完成",
+                          "没有问题", "没问题", "正常了", "已经好了")
+_HONEST_MARKERS = ("失败", "未通过", "没通过", "未完成", "没搞定", "不通过")
+
 
 def _has_patch_action(actions) -> bool:
     """判断本轮动作里是否包含 selfdev_patch 类动作。
@@ -554,6 +561,65 @@ def _structure_check(text: str, actions=None, todos=None) -> str:
         out = out.rstrip() + "\n\n结论：本轮先定位问题，下一步直接给出修复 patch（不只诊断）。"
 
     return out
+
+
+def _collect_failed_actions(actions) -> list:
+    """从本轮动作里抽出**失败**的动作标题（去重、保序）。"""
+    out, seen = [], set()
+    if not actions or isinstance(actions, str):
+        return out
+    if isinstance(actions, dict):
+        actions = [actions]
+    try:
+        for a in actions:
+            if not isinstance(a, dict):
+                continue
+            st = str(a.get("status") or a.get("result") or a.get("state") or "").lower()
+            if not any(m in st for m in _FAIL_STATUS_MARKERS):
+                continue
+            t = str(a.get("title") or a.get("name") or a.get("action")
+                    or a.get("tool") or "未命名动作")[:80]
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    except Exception:                                   # noqa: BLE001
+        return out
+    return out
+
+
+def _conclusion_consistency(text: str, actions=None) -> str:
+    """结论行自洽闸门：结论必须与真实执行结果对得上。
+
+    ★ 2026-11-25 用户反复踩的坑（原话）：「搞定了吗 / 刚刚的任务完成了吗」——
+      助手说「已经解决 / 全部通过 / RSI 80.4」，而同一轮里动作有 failed、
+      测试有失败项。用户只能一遍遍追问，这是最伤信任的一类错。
+
+    这里在收尾前对账，**只追加不改写**（改写会把原意弄歪）：
+      · 本轮没有失败动作 → 原样返回（绝不无中生有）；
+      · 结论段没声称成功 → 原样返回（它本来就在如实说问题）；
+      · 结论段已经提到失败/未通过 → 原样返回（不重复提醒）。
+
+    任何异常都退回原文 —— 对账是护栏，绝不能因为它把回复搞坏。
+    """
+    try:
+        if not text:
+            return text
+        fails = _collect_failed_actions(actions)
+        if not fails:
+            return text
+        head = text.split("\n\n", 1)[0].strip()
+        if not head:
+            return text
+        if not any(w in head for w in _SUCCESS_CLAIM_MARKERS):
+            return text
+        if any(w in head for w in _HONEST_MARKERS):
+            return text
+        shown = "、".join(fails[:3]) + ("…" if len(fails) > 3 else "")
+        return text.rstrip() + (
+            "\n\n⚠️ **真实结果对账**：本轮有 %d 个动作失败（%s），"
+            "上面那句结论不成立，按这条看。" % (len(fails), shown))
+    except Exception:                                   # noqa: BLE001
+        return text
 
 
 def _ensure_conclusion_label(conclusion: str) -> str:
@@ -1338,6 +1404,10 @@ def enforce(text, user_input=None, suggested_action=None, actions=None, todos=No
 
         # 结构小结：有 patch 动作但没交代改了哪些文件 → 补「已改文件 / 待办」
         out = _structure_check(out, actions, todos)
+
+        # ★ 2026-11-25 结论自洽闸门：声称「已解决 / 全部通过」但本轮有失败动作
+        #   → 追加真实结果对账。这是治「假完成」的机器护栏，不靠模型自觉。
+        out = _conclusion_consistency(out, actions)
 
         # 长度上限：结论不动，只砍过程尾部
         try:
