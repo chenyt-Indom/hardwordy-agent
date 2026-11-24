@@ -123,10 +123,16 @@ def main():
     tmp = tempfile.mkdtemp(prefix="hwa_bench_test_")
     p_scores = os.path.join(tmp, "scores.jsonl")
     p_hist = os.path.join(tmp, "history.jsonl")
+    # ⚠️ 时间必须相对「现在」生成：bench_verdict 会用读数年龄判断读数是否过期
+    #    （>24h 就不下刷分结论）。写死日期会让这条用例在第二天起永远失败。
+    import datetime as _dt
+    _t_now = _dt.datetime.now()
+    _iso_a = (_t_now - _dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    _iso_b = (_t_now - _dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
     rows = [
-        {"iso": "2026-11-24T10:00:00", "pass": 14.0, "total": 15.0, "pct": 93.3,
+        {"iso": _iso_a, "pass": 14.0, "total": 15.0, "pct": 93.3,
          "detail": {"a": {"ok": True}}},
-        {"iso": "2026-11-24T11:00:00", "pass": 12.0, "total": 15.0, "pct": 80.0,
+        {"iso": _iso_b, "pass": 12.0, "total": 15.0, "pct": 80.0,
          "detail": {
              "tool-02": {"ok": False, "why": "没通过（要 contains='400'）实得：391"},
              "bnd-01": {"ok": False, "why": "没通过（要 not_contains）实得：我先看下项目"},

@@ -922,11 +922,49 @@ def explain_delta(before, after, actions=None):
         va = ((after or {}).get(k) or {}).get("score")
         per[k] = None if (vb is None or va is None) else round(float(va) - float(vb), 2)
 
+    # ★ 2026-11-24 修：total = quality(static/regress/func) + ability(无上限)。
+    #   原来 per 只比 quality 三项，能力分涨了时三项全是 0，summary 就写成
+    #   「没有可归因的变化」—— 账本 delta≠0 却查不到原因。实测账本 17:30 +8.00、
+    #   17:42 +4.00、18:11 +3.00 连续三条都是这个形态（涨的全是 ability 里的
+    #   fix_landed / lesson_fixed 计数）。这里把 ability 逐项 diff 补进来，
+    #   归因才闭合：涨在哪一项、从几条到几条，一眼能读出来。
+    ab_b = ((before or {}).get("ability") or {})
+    ab_a = ((after or {}).get("ability") or {})
+    ab_map = {}
+    for _side, _src in (("b", ab_b), ("a", ab_a)):
+        for _r in (_src.get("rows") or []):
+            if isinstance(_r, dict) and _r.get("key"):
+                _cell = ab_map.setdefault(str(_r["key"]),
+                                          {"label": str(_r.get("label") or _r["key"]),
+                                           "unit": _r.get("unit")})
+                _cell[_side] = _r
+    ab_diff = []
+    for _k, _v in ab_map.items():
+        _rb, _ra = (_v.get("b") or {}), (_v.get("a") or {})
+        _sb, _sa = float(_rb.get("score") or 0.0), float(_ra.get("score") or 0.0)
+        _d = round(_sa - _sb, 2)
+        if _d:
+            ab_diff.append({"key": _k, "label": _v.get("label"), "delta": _d,
+                            "count_before": _rb.get("count"),
+                            "count_after": _ra.get("count"),
+                            "score_before": _sb, "score_after": _sa,
+                            "unit": _v.get("unit")})
+    ab_diff.sort(key=lambda x: -abs(float(x["delta"])))
+
     bits = []
     for k, label in (("static", "静态"), ("regress", "回归"), ("func", "功能")):
         d = per.get(k)
         if d:
             bits.append("%s%+.2f" % (label, float(d)))
+    for x in ab_diff[:4]:
+        bits.append("能力·%s%+.2f（%s→%s）"
+                    % (x["label"], x["delta"],
+                       x["count_before"], x["count_after"]))
+    # 兜底：ability 合计变了但逐项没差（老记录缺 rows 时）—— 也不能说「没变化」
+    if not ab_diff:
+        _ab_d = round(float(ab_a.get("score") or 0.0) - float(ab_b.get("score") or 0.0), 2)
+        if _ab_d:
+            bits.append("能力合计%+.2f" % _ab_d)
     if new_codes:
         top = suspects[0] if suspects else None
         if top:
@@ -945,7 +983,8 @@ def explain_delta(before, after, actions=None):
         bits.append("接口不通：" + "、".join(str(x)[:30] for x in smoke_bad[:4]))
     summary = "；".join(bits) if bits else "没有可归因的变化"
 
-    return {"per_part": per, "new_codes": new_codes[:40],
+    return {"per_part": per, "ability_diff": ab_diff[:8],
+            "new_codes": new_codes[:40],
             "fixed_codes": fixed_codes[:40], "suspects": suspects,
             "changed_files": changed[:20], "regress_added": rg_added[:8],
             "regress_fixed": rg_fixed[:8], "func_added": fn_added[:8],
@@ -1109,6 +1148,25 @@ def bench_verdict(window=6):
         out["grind"] = bool(s > 1.0 and (out["delta"] is None or out["delta"] <= 0))
     except Exception:                                    # noqa: BLE001
         pass
+    # ★ 2026-11-24 修：尺子读数会「过期」。上一次跑分可能是几小时前甚至几天前，
+    #   拿它判「这一轮有没有进步」等于用旧体检报告开今天的药。
+    #   这里标出年龄；超过 6 小时就不下 grind 结论（宁可不下，也不下错的）。
+    try:
+        _iso = str((out.get("last") or {}).get("iso") or "")
+        if _iso:
+            _t = time.mktime(time.strptime(_iso[:19].replace("T", " "),
+                                           "%Y-%m-%d %H:%M:%S"))
+            out["age_h"] = round((time.time() - _t) / 3600.0, 2)
+    except Exception:                                    # noqa: BLE001
+        out["age_h"] = None
+    _age = out.get("age_h")
+    # 阈值取 24 小时：尺子不是每轮都跑（手动/定时），6 小时会把「上午跑过、
+    # 下午干活」的正常情形误判成过期。超过一天才认定「这份读数不能拿来下结论」。
+    out["stale"] = bool(_age is None or _age > 24)
+    if out["stale"] and out["grind"]:
+        out["grind"] = False
+        out["grind_why"] = "尺子读数已过期（%s 小时前），不据此下刷分结论" % (
+            ("%.1f" % _age) if isinstance(_age, (int, float)) else "未知")
     return out
 
 
@@ -1226,6 +1284,11 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
                          "rebased": bool(rebased)}
     rec = {
         "iso": _now(), "ts": time.time(), "plan_id": str(pid or ""),
+        # ★ 2026-11-24：补 kind 字段。之前 ledger.jsonl 里的行**没有 kind**，
+        #   而所有按 `kind == "score_round"` 过滤的读取方（曲线序列、刷分对照）
+        #   都会把整份账本当成「没有一条有效轮次」。history.jsonl 有 kind、
+        #   ledger.jsonl 没有 —— 同一件事两套格式，迟早出事，这里对齐。
+        "kind": "score_round",
         # ⚠️ 施工单 8.4：字段名从 total 改成 ledger 不是为了好看 ——
         #   叫「分」就会拿来跟尺子比，叫「账」就不会。两个数并排存，永不相加。
         "ledger": cum,
@@ -1254,12 +1317,34 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
         }
     except Exception:                                   # noqa: BLE001
         logger.debug("尺子口径计算失败", exc_info=True)
+    # ★ 2026-11-24：账本涨、尺子不涨 = 刷分形态（专家口径，用户认可）。
+    #   账本照加（活确实干了，累计分是「干活量」计数器），但 verdict **不能写进步** ——
+    #   否则日志 / 卡片 / 反思都会把「刷分」读成「变好了」，这正是之前
+    #   17:30 +8.00、17:42 +4.00、18:11 +3.00 三条全被判 improved 的原因。
+    try:
+        _bvj = _bv if isinstance(_bv, dict) else {}
+    except Exception:                                   # noqa: BLE001
+        _bvj = {}
+    if bool(_bvj.get("grind")) and verdict == "improved":
+        _gn = ("账本 %+.2f 但尺子未涨（近 6 轮账本合计 %+.2f，尺子 %s/%s）"
+               % (float(delta or 0), float(_bvj.get("ledger_sum") or 0),
+                  ((_bvj.get("last") or {}).get("pass")),
+                  ((_bvj.get("last") or {}).get("total"))))
+        verdict = "grind"
+        rec["verdict"] = "grind"
+        rec["grind"] = True
+        rec["grind_note"] = _gn
+        try:
+            rec["explain"]["summary"] = (_gn + "；" + str(rec["explain"].get("summary") or ""))[:1200]
+        except Exception:                               # noqa: BLE001
+            pass
+        ex["summary"] = rec["explain"].get("summary") if isinstance(rec.get("explain"), dict) else _gn
     d["cum"] = cum
     d["rounds"] = int(d.get("rounds") or 0) + 1
     d["last"] = rec
     evs = list(d.get("events") or [])
     evs.append({"iso": rec["iso"], "cum": cum, "delta": delta,
-                "verdict": verdict, "summary": ex["summary"][:300]})
+                "verdict": verdict, "summary": str(ex["summary"])[:300]})
     d["events"] = evs[-50:]
     _save_ledger(d)
     try:
@@ -1274,7 +1359,8 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
              % (rec["iso"], cum_before, cum, arrow,
                 ("%+.2f" % float(delta)) if delta is not None else "?",
                 {"improved": "进步", "regressed": "退步",
-                 "flat": "持平"}.get(verdict, "未知"),
+                 "flat": "持平",
+                 "grind": "账本涨但尺子没涨（不算进步）"}.get(verdict, "未知"),
                 (" 计划 " + str(pid)) if pid else "")]
     lines.append("    原因：" + ex["summary"])
     # ★ 2026-11-24：账本日志里**永远跟一行尺子**。理由很简单 —— 只看账本
@@ -1358,7 +1444,12 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
     except Exception:                                   # noqa: BLE001
         logger.debug("写进退历史失败", exc_info=True)
     return {"cum": cum, "delta": delta, "verdict": verdict,
-            "cum_before": cum_before, "explain": ex}
+            "cum_before": cum_before, "explain": ex,
+            # ★ 2026-11-24：把刷分判定带出返回值 —— 调用方（迭代汇报 / 卡片 /
+            #   反思）要能显示「账本 +3 但尺子没涨」，而不是只看到一个字符串。
+            "grind": bool(rec.get("grind")),
+            "grind_note": str(rec.get("grind_note") or ""),
+            "kind": "score_round"}
 
 
 def cumulative():
@@ -1456,9 +1547,17 @@ def run_post_verify(pid=""):
                "kind": "post_restart", "total": total, "prev": prev,
                "delta": delta, "verdict": verdict}
         evs = list(d.get("events") or [])
-        evs.append({"iso": rec["iso"], "cum": d.get("cum"), "delta": delta,
-                    "verdict": verdict,
-                    "summary": "重启后复核 %s（重启前 %s）" % (total, prev)})
+        # ★ 2026-11-24 修：这条复核**不累加累计分**（同一状态重测），原来却把
+        #   delta 原样塞进 events —— 于是曲线图旁边出现「delta +6.00、cum 却没动」
+        #   的矛盾点，而且它不写 ledger.jsonl，前端按 jsonl 画线时这一段时间
+        #   完全没有点（实测 13:15 与 17:14 两条就是这样，看着像「曲线好久不动」）。
+        #   现在 delta 置 None、标 kind=post_restart，真实差值只写在 summary 里。
+        evs.append({"iso": rec["iso"], "cum": d.get("cum"), "delta": None,
+                    "verdict": verdict, "kind": "post_restart",
+                    "note_delta": delta,
+                    "summary": "重启后复核 %s（重启前 %s，差 %s）"
+                               % (total, prev,
+                                  ("%+.2f" % delta) if delta is not None else "无基线")})
         d["events"] = evs[-50:]
         d["post_verify"] = rec
         _save_ledger(d)
@@ -2022,6 +2121,8 @@ def stats():
         "improved": imp,
         "regressed": reg,
         "flat": sum(1 for h in hs if h.get("verdict") == "flat"),
+        # ★ 2026-11-24：账本涨、尺子没涨的轮次单列，不混进「进步」里凑数
+        "grind": sum(1 for h in hs if h.get("verdict") == "grind"),
         "rollbacks": rb,
         "avg_delta": round(sum(ds) / len(ds), 2) if ds else None,
         "best": max(ds) if ds else None,

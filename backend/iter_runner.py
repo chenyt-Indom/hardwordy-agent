@@ -133,6 +133,7 @@ _VERIFY_CONFIRM = 2
 
 # 评分结论的中文说法（跑分汇报用）
 _VERDICT_CN = {"improved": "进步", "regressed": "退步", "flat": "持平",
+               "grind": "账本涨但尺子没涨（不算进步）",
                "rebased": "重建基准", "unknown": "无可比", "skip": "跳过",
                "busy": "上一次还在评", "error": "评分出错"}
 
