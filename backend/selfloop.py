@@ -272,6 +272,7 @@ def _roll(d):
         d["plans"] = 0
         d["triggers"] = 0
         d["runs"] = 0
+        d["submitted_runs"] = 0
         d["slow_hits"] = 0
     return d
 
@@ -717,8 +718,16 @@ def _cycle(reason, focus_user, source):
             logger.debug("featradar tick failed", exc_info=True)
         try:
             d = cfg()
-            if res.get("executed"):
+            # ★ 2026-11-25 修口径（用户报「自动迭代是不是没在跑」的真实原因之一）：
+            #   原来 runs 只在「已提交到执行队列」时 +1，而信任模式关闭时
+            #   （settings.trust_mode=false）自动迭代只生成计划、不提交执行，
+            #   于是 runs_today **永远是 0** —— 面板上写着「今天跑了 0 轮」，
+            #   而账本里 4 条 recent 全是 ok=True、actions 5~7 次。
+            #   现在拆成两个数：runs = 真的跑完的轮数；submitted_runs = 真正落到执行。
+            if res.get("ok"):
                 d["runs"] = int(d.get("runs") or 0) + 1
+            if res.get("executed"):
+                d["submitted_runs"] = int(d.get("submitted_runs") or 0) + 1
             d["last_result"] = res
             rec = list(d.get("recent") or [])
             rec.insert(0, res)
@@ -803,6 +812,9 @@ def stats():
             "left": _quota_left(d),
             "triggers_today": int(d.get("triggers") or 0),
             "runs_today": int(d.get("runs") or 0),
+            # ★ 2026-11-25：runs_today 现在是「真的跑完几轮」，这一项是其中
+            #   「真正提交到执行队列」的轮数（信任模式关时为 0，属正常）。
+            "submitted_runs_today": int(d.get("submitted_runs") or 0),
             "busy": bool(_BUSY[0]),
             "last_trigger": d.get("last_trigger") or {},
             "last_result": d.get("last_result") or {},
@@ -838,3 +850,51 @@ def think_now(focus=""):
     except Exception as e:                              # noqa: BLE001
         _BUSY[0] = False
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+# ------------------------------------------------------------ 重启自愈（自动拉起）
+def boot_resume():
+    """进程启动后把「自动迭代」自己拉起来。
+
+    ★ 2026-11-25 用户要求：「那些自动迭代的东西也要确保可以重启然后自动拉起」。
+
+    为什么以前做不到（真实原因，不是没写对参数）：
+      自动迭代**只**由「对话结束 / 任务结束 / 链式接力」这三处触发，
+      而「重启前安排的补跑」是内存里的 threading.Timer —— 进程一重启就没了。
+      于是「重启之后不发消息 = 自动迭代永远不动」，看起来就像它自己停了。
+
+    这里的做法与边界：
+      · 延迟 boot_gap_sec + 3 秒再触发 —— 启动冷却期内触发会被 boot_gap 挡掉，
+        等过去再触发才真的跑得起来；
+      · source="boot" → 走**全部**正常闸门（每日配额 / 节流 / 积压 / 冷却），
+        多了这个钩子**不会**多烧 token，该让路照样让路；
+      · enabled=False 或当日配额用尽 → 直接不拉起（用户关掉就是关掉）；
+      · 任何失败只记日志，绝不把启动流程带走。
+    """
+    try:
+        d = cfg()
+        if not d.get("enabled"):
+            logger.info("[selfloop] 自动迭代总开关关着（enabled=false），重启后不拉起")
+            return {"ok": False, "why": "enabled=false"}
+        gap = float(d.get("boot_gap_sec") or 180)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("[selfloop] 读配置失败，重启后不自动拉起：%s", e)
+        return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+
+    delay = max(1.0, gap) + 3.0
+
+    def _go():
+        try:
+            time.sleep(delay)
+            r = _maybe_think("重启后自动续跑（自动迭代自愈）", "", "boot")
+            logger.info("[selfloop] 重启后自动拉起结果：%s", r)
+        except Exception:                               # noqa: BLE001
+            logger.warning("[selfloop] 重启后自动拉起失败", exc_info=True)
+
+    try:
+        threading.Thread(target=_go, name="selfloop-boot", daemon=True).start()
+        logger.info("[selfloop] 已安排重启后自动拉起（%.0f 秒后，受全部闸门约束）", delay)
+        return {"ok": True, "scheduled_in": delay}
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("[selfloop] 起自动拉起线程失败：%s", e)
+        return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}

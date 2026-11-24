@@ -1,0 +1,71 @@
+C:\Users\19853\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\jit\_script.py:1485: FutureWarning: `torch.jit.script` is not supported in Python 3.14+ and may break. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[transformers] `Siglip2ImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Siglip2ImageProcessor` instead.
+C:\Users\19853\AppData\Local\Programs\Python\Python314\Lib\site-packages\diffusers\utils\deprecation_utils.py:23: FutureWarning: `torch_dtype` is deprecated and will be removed in version 1.0.0. Please use `dtype` instead.
+  deprecate("torch_dtype", "1.0.0", _TORCH_DTYPE_DEPRECATION_MESSAGE)
+==================================================================
+【1】蒙版构造：区域 / 预设 / 羽化
+==================================================================
+  [OK] 归一化区域能造出蒙版（torso 约占 0.2~0.35）  占比 0.28
+  [OK] 白=要改（区域中心是白的）  255
+  [OK] 黑=保留（左上角没被圈到）  0
+  [OK] 像素坐标也认（与归一化等价）  0.28 vs 0.28
+  [OK] 多个区域会叠加  
+  [OK] 边沿做了羽化（不会留生硬接缝）  边缘灰度 195
+  [OK] 不羽化时边缘是硬的（对照）  0
+  [OK] 区域预设 face 可用  
+  [OK] 区域预设 torso 可用  
+  [OK] 区域预设 lower-third 可用  
+  [OK] 区域预设 center 可用  
+  [OK] 区域预设 whole 可用  
+  [OK] 区域预设 upper 可用  
+  [OK] 认不出的区域名 → 返回 None（让上层报错，而不是默默整图重绘）  
+
+==================================================================
+【2】装好了没：必须真的看到权重文件（下载中途不能算装好）
+==================================================================
+  [OK] 只有 model_index.json → **不算装好**  
+  [OK] 权重齐了 → 算装好  
+  [OK] 还有 .incomplete 残留 → 仍不算装好（避免加载到一半报错）  
+
+==================================================================
+【3】工具路径：给了区域就必须走重绘（而不是退回整图 img2img）
+==================================================================
+  [OK] ★ 给了 regions → 调的是 t2i.inpaint（不是 img2img）  ['prompt', 'mask', 'regions', 'area', 'strength', 'steps', '
+  [OK] 区域原样传进去了  [[0.2, 0.4, 0.8, 0.85]]
+  [OK] 重绘的幅度按 inpainting 的档（≥0.75，不然改不动）  0.85
+  [OK] 提示里补了「圈外保持不变」的约束  change the lab coat to navy blue, only change the masked are
+  [OK] 返回里说清是「指定区域」重绘  已按指定区域重绘（圈外不动）（本地，0.0 秒），已展示给用户。
+  [OK] 给前端标的是微改（origin=edit）  edit
+  [OK] 用 area 预设也走重绘  face
+  [OK] ★ 用户涂抹的蒙版（在上下文里）会被自动用上  ZmFrZU1hc2s=
+Loading pipeline components...:   0%|          | 0/7 [00:00<?, ?it/s]
+Loading weights:   0%|          | 0/517 [00:00<?, ?it/s][ALoading weights: 100%|██████████| 517/517 [00:00<00:00, 6232.75it/s]
+Loading pipeline components...:  14%|█▍        | 1/7 [00:00<00:01,  3.50it/s]Loading pipeline components...:  57%|█████▋    | 4/7 [00:00<00:00,  6.65it/s]
+Loading weights:   0%|          | 0/196 [00:00<?, ?it/s][ALoading weights: 100%|██████████| 196/196 [00:00<00:00, 6473.40it/s]
+Loading pipeline components...: 100%|██████████| 7/7 [00:00<00:00, 11.18it/s]Loading pipeline components...: 100%|██████████| 7/7 [00:00<00:00,  9.30it/s]
+There are modules in AutoencoderKL that should be kept in float32: []. Casting directly with `to()` can lead to inconsistent results; set `torch_dtype` in `from_pretrained()` instead to keep these modules in float32.
+There are modules in AutoencoderKL that should be kept in float32: []. Casting directly with `to()` can lead to inconsistent results; set `torch_dtype` in `from_pretrained()` instead to keep these modules in float32.
+  0%|          | 0/28 [00:00<?, ?it/s]  4%|▎         | 1/28 [00:00<00:04,  5.66it/s] 11%|█         | 3/28 [00:00<00:02,  8.74it/s] 14%|█▍        | 4/28 [00:00<00:02,  8.86it/s] 18%|█▊        | 5/28 [00:00<00:02,  8.67it/s] 21%|██▏       | 6/28 [00:00<00:02,  8.11it/s] 25%|██▌       | 7/28 [00:00<00:02,  7.47it/s] 29%|██▊       | 8/28 [00:01<00:02,  7.52it/s] 32%|███▏      | 9/28 [00:01<00:02,  7.68it/s] 36%|███▌      | 10/28 [00:01<00:02,  7.87it/s] 39%|███▉      | 11/28 [00:01<00:02,  8.22it/s] 43%|████▎     | 12/28 [00:01<00:01,  8.36it/s] 46%|████▋     | 13/28 [00:01<00:01,  8.09it/s] 50%|█████     | 14/28 [00:01<00:01,  8.00it/s] 54%|█████▎    | 15/28 [00:01<00:01,  7.71it/s] 57%|█████▋    | 16/28 [00:02<00:01,  7.63it/s] 61%|██████    | 17/28 [00:02<00:01,  7.76it/s] 64%|██████▍   | 18/28 [00:02<00:01,  8.10it/s] 68%|██████▊   | 19/28 [00:02<00:01,  8.14it/s] 71%|███████▏  | 20/28 [00:02<00:00,  8.35it/s] 75%|███████▌  | 21/28 [00:02<00:00,  8.21it/s] 79%|███████▊  | 22/28 [00:02<00:00,  7.89it/s] 82%|████████▏ | 23/28 [00:02<00:00,  7.71it/s] 86%|████████▌ | 24/28 [00:03<00:00,  7.72it/s] 89%|████████▉ | 25/28 [00:03<00:00,  7.84it/s] 93%|█████████▎| 26/28 [00:03<00:00,  8.02it/s] 96%|█████████▋| 27/28 [00:03<00:00,  8.13it/s]100%|██████████| 28/28 [00:03<00:00,  8.18it/s]100%|██████████| 28/28 [00:03<00:00,  7.99it/s]
+C:\Users\19853\AppData\Local\Programs\Python\Python314\Lib\site-packages\diffusers\pipelines\stable_diffusion_xl\pipeline_stable_diffusion_xl_img2img.py:896: FutureWarning: `upcast_vae` is deprecated and will be removed in version 1.0.0. `upcast_vae` is deprecated. Please use `pipe.vae.to(torch.float32)`. For more details, please refer to: https://github.com/huggingface/diffusers/pull/12619#issue-3606633695.
+  deprecate(
+There are modules in AutoencoderKL that should be kept in float32: []. Casting directly with `to()` can lead to inconsistent results; set `torch_dtype` in `from_pretrained()` instead to keep these modules in float32.
+There are modules in AutoencoderKL that should be kept in float32: []. Casting directly with `to()` can lead to inconsistent results; set `torch_dtype` in `from_pretrained()` instead to keep these modules in float32.
+  [OK] 没给区域 → **不**走重绘（退回整图 img2img，且不再多花时间）  {}
+  [OK] ★ 没装重绘模型 → 明确报「需要局部重绘模型」，不假装成功  错误：本地没装「局部重绘」模型（E:/本地多模态助手-Docker/models/sd_inpaint）。请让用户去 🎨 里下载 SDXL Inpaint，或切
+
+==================================================================
+【4】前后端接线都在（防「改了后端忘了前端」）
+==================================================================
+  [OK] 请求体支持 mask_b64  
+  [OK] 蒙版进了工具上下文  
+  [OK] 工具 schema 里有 mask / regions / area 三个参数  
+  [OK] 系统提示教了「要精确改就给区域」  
+  [OK] t2i 里有 inpaint / 蒙版构造 / 区域预设  
+  [OK] 前端有选区条（index.html）  
+  [OK] 前端有涂抹编辑器与发送接线（app.js）  
+  [OK] 图片卡片上有「涂抹选区」入口  
+
+==================================================================
+通过 35 项，失败 0 项
+==================================================================

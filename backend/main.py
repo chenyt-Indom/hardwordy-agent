@@ -12593,6 +12593,25 @@ def _resume_iter_queue():
 
 
 @app.on_event("startup")
+def _selfloop_boot_resume():
+    """启动后把「自动迭代」自己拉起来 —— 重启不再等于「自动迭代停摆」。
+
+    ★ 2026-11-25 用户要求：「那些自动迭代的东西也要确保可以重启然后自动拉起」。
+
+    改动前的事实：自动迭代只由「对话结束 / 任务结束 / 链式接力」触发，
+    重启前安排的补跑是内存 Timer，随进程一起消失 —— 所以「重启后不发消息」
+    就等于自动迭代永远不动。这里补上启动钩子，并且照旧受全部闸门约束
+    （每日配额 / 节流 / 积压 / 启动冷却），不会因此多烧 token。
+    """
+    try:
+        from . import selfloop as _sl
+        r = _sl.boot_resume()
+        logger.info("自动迭代重启自愈：%s", r)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("自动迭代重启自愈没起来（不影响启动）：%s", e)
+
+
+@app.on_event("startup")
 def _brand_seal_on_boot():
     """启动时校验品牌盖章 —— 应用名/开发者一旦被改，日志里立刻报警。
 

@@ -563,11 +563,30 @@ def judge(it: dict) -> dict:
                 "evidence": "修复逻辑不在代码里，该文件也没改过（只说不做）", "detail": ev}
     # ② 修复逻辑在，但教训之后又复发 —— 改得不够，继续 pending
     if recur > 0:
-        _clear_hit_ts(kind)
-        return {"kind": kind, "status": "pending", "recur": recur,
-                "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
-                "progress": 0.0,
-                "evidence": "修复逻辑已在代码里，但之后又复发 %d 次" % recur, "detail": ev}
+        # ★★ 2026-11-25 修（真 bug：历史复发把教训**永久**钉在 pending）：
+        #   原逻辑「从修复落地起复发过（recur>0）→ 永远 pending、progress=0」，
+        #   但 recur 数的是 _since 之后的**全部**历史复发，而 _since 不会再推进。
+        #   于是只要复发过一次，这条教训就再也进不了观察窗 ——
+        #   实测「跑分退步（低于上一版）」recur=11 恒 pending，而 score_drops
+        #   里最后一次退步是 11-24 18:17，之后 8 小时一次都没再退；
+        #   「模型输出不可用」recur=2 同理。教训落地率因此被永久压在 0.667，
+        #   而且 auto_fix 会反复去「修」一个其实已经修好的东西。
+        #   正确口径：复发要看**距今多久** —— 超过确认窗（24h）没再复发，
+        #   就与「从未复发」等价，交给下面的观察窗计时（它的起点本来就是
+        #   最近一次复发，所以不会放宽判定：fixed 仍要求满 24h 干净）。
+        _last_r = _last_recur_ts(kind)
+        _quiet_h = ((time.time() - _last_r) / 3600.0) if _last_r else 1e9
+        if _quiet_h < OBSERVE_CONFIRM_HOURS:
+            _clear_hit_ts(kind)
+            return {"kind": kind, "status": "pending", "recur": recur,
+                    "edited_at": edited, "probe": "%s 含 %r" % (rel, needle),
+                    "progress": 0.0,
+                    "evidence": ("修复逻辑已在代码里，但最近一次复发只过了 %.1f 小时"
+                                 "（共复发 %d 次；要满 %.0f 小时不再复发才算修好）"
+                                 % (_quiet_h, recur, OBSERVE_CONFIRM_HOURS)),
+                    "detail": ev}
+        logger.info("教训「%s」历史复发 %d 次，但已 %.1f 小时没再复发 → 转入观察窗判定",
+                    kind, recur, _quiet_h)
     # ③ 修复逻辑在、没复发。观察窗从「改动时间 / 教训时间」的**晚者**算起。
     #    ⚠️ 原来写 `if edited > t0`：教训若比改动更新（同一 kind 被反复重记），
     #    该条件为假 → 跳过观察窗直接判 fixed。实测 12:32 记的教训 12:33 就
