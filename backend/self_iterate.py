@@ -4439,7 +4439,7 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
     try:
         feat_actions = _features_to_actions(
             feats, start=len(actions), limit=4,
-            existing=[a.get("title") for a in actions])
+            existing=[a.get("title") for a in actions] + _open_action_titles())
     except Exception as e:                              # noqa: BLE001
         logger.warning("features 转动作失败：%s: %s", type(e).__name__, e)
     if feat_actions:
@@ -8304,6 +8304,49 @@ def _sc10(v) -> int:
     return max(1, min(10, n))
 
 
+def _drop_noop_actions(actions):
+    """把复核明确判「无需修复」的动作从待办里剔掉，返回 (保留, 剔除)。
+
+    为什么：这类条目的结论就是「不用改」，但原来照样作为 pending 动作入队，
+    用户界面上就成了永远处理不完的「还有 N 条待批准」，而且会稀释
+    待办列表、让真正要修的东西排不到前面。
+    """
+    keep, drop = [], []
+    for a in (actions or []):
+        if isinstance(a, dict) and str(a.get("title") or "").strip().startswith("无需修复"):
+            drop.append(a)
+        else:
+            keep.append(a)
+    return keep, drop
+
+
+def _open_action_titles():
+    """所有计划里**还没执行**（pending / approved / need_review）的动作标题。
+
+    为什么需要（2026-11-24 实测）：_features_to_actions 原来只拿「当前计划」的
+    动作去重，跨计划完全不去重 —— 同一个功能想法（如「回复形态闸门：结论前置 +
+    过程折叠」）在 180 个计划里被排了 14 次，待批准堆到 561 条，用户点「拉起」
+    满屏重复项、统计也被污染。这里把未执行的标题汇总出来做跨计划去重；
+    **只看未执行的**：done / failed 的允许重新排队（可能确实要再做一次）。
+    """
+    out = []
+    try:
+        for p in (load_plans().get("items") or []):
+            if not isinstance(p, dict):
+                continue
+            for a in (p.get("actions") or []):
+                if not isinstance(a, dict):
+                    continue
+                st = str(a.get("status") or a.get("state") or "")
+                if st in ("pending", "approved", "need_review"):
+                    t = str(a.get("title") or "").strip()
+                    if t:
+                        out.append(t)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return out
+
+
 def _features_to_actions(features, start=0, limit=4, existing=None):
     """把「可增加的功能」转成**可执行动作** —— 用户要求主动迭代落地新技术。
 
@@ -8760,6 +8803,12 @@ def _run_audit_impl(deep=False, source="manual", create_plan=True, auto_fix=None
         actions, llm_summary = _llm_deep_review({**res, "findings": confirmed})
     if not actions:
         actions = _actions_from_findings(confirmed)
+    # ★ 2026-11-24：复核明确判「无需修复」的条目**不进待批准队列**。
+    #   原来它作为一条 pending 动作挂着，用户看到「还有 N 条待批准」，
+    #   点进去却没有可执行的事（实测 17:56 那条就是这么堆进去的）。
+    actions, _noop = _drop_noop_actions(actions)
+    if _noop:
+        res["noop_skipped"] = [str(a.get("title") or "")[:100] for a in _noop]
     # ★ 2026-11-23 需求：「新增扣分点优先修」—— 调用方（iter_runner 的评分前
     #   静态预检）把「这一轮新引入、又没法安全自动修掉」的扣分点传进来，
     #   这里**插到动作列表最前面**，于是修复链的 prompt 第一件事就是修它们。
@@ -9380,9 +9429,13 @@ def list_plans(limit=60, q=""):
             row = {k: p.get(k) for k in _PLAN_LIST_KEEP}
             acts = [a for a in (p.get("actions") or []) if isinstance(a, dict)]
             row["actions_total"] = len(acts)
-            row["actions_done"] = sum(1 for a in acts if a.get("state") == "done")
+            # ★ 2026-11-24 修：动作状态全系统写的是 status，这里却只读 state，
+            #   于是列表接口的「已完成 / 待复核」永远是 0（统计口径错，前端看板失真）。
+            row["actions_done"] = sum(
+                1 for a in acts if (a.get("status") or a.get("state")) == "done")
             row["actions_need_review"] = sum(
-                1 for a in acts if a.get("state") == "need_review")
+                1 for a in acts
+                if (a.get("status") or a.get("state")) == "need_review")
             row["features"] = len(p.get("features") or [])
             row["weaknesses"] = len(p.get("weaknesses") or [])
             out.append(row)
@@ -9600,11 +9653,16 @@ def create_plan(summary, actions=None, trigger="manual_added"):
         for i, a in enumerate(actions or []):
             if isinstance(a, str):
                 acts.append({"id": "a%d" % (i + 1), "title": a[:120],
-                             "detail": "", "state": "pending", "risk": "low"})
+                             "detail": "", "status": "pending", "risk": "low"})
             elif isinstance(a, dict):
                 b = dict(a)
                 b.setdefault("id", "a%d" % (i + 1))
-                b.setdefault("state", "pending")
+                # ★ 2026-11-24 修：原来这里写的是 state，而全系统读的是 status。
+                #   后果：这类动作在统计里成 '?'，既不进「待批准」也不算「已完成」，
+                #   实测教训「跑分退步」的修复任务就这样卡了几天没被执行。
+                if not b.get("status"):
+                    b["status"] = b.get("state") or "pending"
+                b.pop("state", None)
                 b.setdefault("risk", "low")
                 acts.append(b)
         plan = {

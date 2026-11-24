@@ -60,6 +60,12 @@ def _py_files():
         #   而且会让静态分被永久压着 0.5 分/条（实测 2 条虚压 1.0 分）。
         if "_pending_" in p.name or "_quarantine" in p.parts:
             continue
+        # ★ 2026-11-24 补：验证用的临时探针（_tmp_* / _probe_*）不是产品代码。
+        #   教训「跑分退步（低于上一版）」里早就写明要跳过这两类前缀，
+        #   但代码里只跳了 _pending_，于是 backend/_tmp_build_check.py 这类残留
+        #   一直被算进静态分（改它没意义，还永久压分）。
+        if p.name.startswith(("_tmp_", "_probe_")):
+            continue
         try:
             if p.stat().st_size > _MAX_BYTES:
                 continue
@@ -85,6 +91,8 @@ def _ref_files():
                  "sessions", "image_library", "dist", "vendor", "_internal"}
     try:
         for p in sorted(_ROOT.glob("*.py")):
+            if p.name.startswith(("_tmp_", "_probe_")):
+                continue
             try:
                 if p.stat().st_size <= _MAX_BYTES:
                     out.append(p)
