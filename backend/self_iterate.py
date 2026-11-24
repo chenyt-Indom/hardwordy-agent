@@ -3953,6 +3953,24 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
                 _prompt = _prompt + "\n\n" + _seal
     except Exception:                                   # noqa: BLE001
         pass
+    # ★★ 2026-11-24 用户认可的口径（专家意见）：**尺子当主指标，账本降级成计数器**。
+    #   · 尺子涨 → 真的在变好
+    #   · 账本涨、尺子不动 → 在刷分
+    #   原来反思提示词里**完全没有尺子**（只有内部自评分、压分点、低分日志）——
+    #   于是 RSI 一直在优化「自己给自己打的分」，实测出现过账本 +4.00 而尺子
+    #   从 14/15 掉到 12/15 的情况。这里把外部基准的读数、失分题、刷分警示
+    #   一起塞进提示词，并放在「创意发散」之前：先修真实失分，再谈新功能。
+    try:
+        from . import iterloop as _IL
+        _bench_txt = _IL.bench_brief()
+        if _bench_txt:
+            if "## 🎨 创意发散" in _prompt:
+                _prompt = _prompt.replace(
+                    "## 🎨 创意发散", _bench_txt + "\n\n## 🎨 创意发散", 1)
+            else:
+                _prompt = _prompt + "\n\n" + _bench_txt
+    except Exception:                                   # noqa: BLE001
+        logger.debug("注入尺子读数失败", exc_info=True)
     return _prompt
 
 

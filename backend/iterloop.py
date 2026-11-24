@@ -1011,6 +1011,158 @@ def read_bench_series(limit=120):
     return out[-int(limit or 120):]
 
 
+def _bench_rows():
+    """读尺子的**全部**记录（只读；坏行跳过，不猜、不补）。"""
+    out = []
+    try:
+        with open(BENCH_SCORES, encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except Exception:                        # noqa: BLE001
+                    continue
+                if isinstance(r, dict) and r.get("pct") is not None:
+                    out.append(r)
+    except Exception:                                    # noqa: BLE001
+        return []
+    return out
+
+
+def bench_verdict(window=6):
+    """**以尺子为准**的进退判定（施工单第 8 章的落地版）。
+
+    为什么必须有它：账本记的是「我干了多少活」，尺子量的是「我变成了什么」。
+    2026-11-24 实测出现过典型形态 —— 账本一轮 +4.00，尺子却从 14/15 掉到
+    12/15。只看账本会得出「在进步」的结论，那等于自己给自己打分。
+
+    所以这里把「尺子有没有涨」算成**独立结论**，并显式标出「账本涨、尺子
+    没动」这种刷分形态（grind），供反思 / 面板 / 卡片直接引用。
+
+    返回字段：
+      ok        读到尺子了吗
+      last/prev 最近两次的 {iso, pass, total, pct}
+      delta     最近一次相对上一次的百分点变化（没有上一次 = None）
+      trend     up / down / flat / unknown（±5 个百分点以内算 flat，抗抖动）
+      failing   最近一次**真实失分**的题（id + 原因）—— 这才是下一步该修的
+      infra     其中属于「请求层失败」（断网 / 超时）的题，不算能力问题
+      grind     账本在最近 window 轮累加为正、而尺子没涨 → 疑似刷分
+      ledger_sum 同一窗口内账本 delta 的累加（只用于对照，不与尺子相加）
+    """
+    rows = _bench_rows()
+    out = {"ok": False, "why": "", "last": None, "prev": None, "delta": None,
+           "trend": "unknown", "failing": [], "infra": [], "grind": False,
+           "ledger_sum": 0.0}
+    if not rows:
+        out["why"] = "读不到尺子（%s）" % BENCH_SCORES
+        return out
+    last = rows[-1]
+    prev = rows[-2] if len(rows) >= 2 else None
+    out["ok"] = True
+    out["last"] = {"iso": str(last.get("iso") or ""), "pass": last.get("pass"),
+                   "total": last.get("total"), "pct": last.get("pct")}
+    if prev:
+        out["prev"] = {"iso": str(prev.get("iso") or ""), "pass": prev.get("pass"),
+                       "total": prev.get("total"), "pct": prev.get("pct")}
+        try:
+            d = round(float(last.get("pct")) - float(prev.get("pct")), 1)
+            out["delta"] = d
+            out["trend"] = "up" if d >= 5 else ("down" if d <= -5 else "flat")
+        except Exception:                                # noqa: BLE001
+            pass
+
+    detail = last.get("detail") or {}
+    if isinstance(detail, dict):
+        for cid, v in detail.items():
+            if not isinstance(v, dict) or v.get("ok"):
+                continue
+            why = str(v.get("why") or "")[:160]
+            item = {"id": str(cid), "why": why}
+            # 请求层失败（连接被重置 / 超时）不是能力问题 —— 单列出来，
+            # 免得把「网断了」当成「变笨了」，也免得被拿来当借口。
+            if why.startswith("请求失败") or "ConnectionReset" in why or "timed out" in why:
+                out["infra"].append(item)
+            else:
+                out["failing"].append(item)
+
+    # 账本对照：只用来判断「是不是在刷分」，**绝不与尺子相加**
+    try:
+        led = []
+        with open(_hist_path(), encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except Exception:                        # noqa: BLE001
+                    continue
+                if isinstance(r, dict) and r.get("kind") == "score_round":
+                    try:
+                        led.append(float(r.get("delta") or 0.0))
+                    except Exception:                    # noqa: BLE001
+                        pass
+        s = round(sum(led[-int(window or 6):]), 2)
+        out["ledger_sum"] = s
+        out["grind"] = bool(s > 1.0 and (out["delta"] is None or out["delta"] <= 0))
+    except Exception:                                    # noqa: BLE001
+        pass
+    return out
+
+
+def bench_brief(window=6, max_items=4):
+    """把 bench_verdict 压成一段给反思提示词用的中文（读不到就返回空串）。
+
+    ⚠️ 口径写死在文字里：**尺子涨才算真的变好**。这不是修辞，是用户
+    2026-11-24 明确认可的判定标准（专家意见那张图）。
+    """
+    v = bench_verdict(window=window)
+    if not v.get("ok"):
+        return ""
+    last, prev = v.get("last") or {}, v.get("prev") or {}
+    lines = ["## 📏 尺子（项目外固定基准）最新读数 —— **这是主指标**"]
+    lines.append("- 最近一次：%s/%s（%.1f%%）%s" % (
+        _fmt_num(last.get("pass")), _fmt_num(last.get("total")),
+        float(last.get("pct") or 0), ("  " + str(last.get("iso") or ""))[:19]))
+    if prev:
+        d = v.get("delta")
+        lines.append("- 上一次：%s/%s（%.1f%%）→ 变化 %s 个百分点（%s）" % (
+            _fmt_num(prev.get("pass")), _fmt_num(prev.get("total")),
+            float(prev.get("pct") or 0),
+            ("%+.1f" % d) if d is not None else "?",
+            {"up": "涨", "down": "跌", "flat": "基本没动"}.get(
+                v.get("trend") or "", "未知")))
+    if v.get("grind"):
+        lines.append("- ⚠️ **账本近 %d 轮累计 %+.2f，而尺子没涨** —— 这是刷分形态："
+                     "干了很多活，但外部基准没变好。下一步必须去修尺子的失分点，"
+                     "不要再提「内部重构/加日志/补测试」这类不会让尺子动的东西。"
+                     % (int(window), float(v.get("ledger_sum") or 0)))
+    fail = v.get("failing") or []
+    if fail:
+        lines.append("- 真实失分（这些是**能力/边界缺陷**，优先修）：")
+        for it in fail[:max_items]:
+            lines.append("  · %s —— %s" % (it.get("id"), (it.get("why") or "")[:140]))
+    infra = v.get("infra") or []
+    if infra:
+        lines.append("- 请求层失败（断网/超时，不是能力问题，别当成缺陷去改代码）：")
+        for it in infra[:max_items]:
+            lines.append("  · %s —— %s" % (it.get("id"), (it.get("why") or "")[:120]))
+    lines.append("⚠️ 判定口径：**尺子涨 = 真的在变好；账本涨而尺子不动 = 在刷分**。"
+                 "账本只是施工计数器，不许拿它当成绩。")
+    return "\n".join(lines)
+
+
+def _fmt_num(x):
+    """1.0 → 1，1.5 → 1.5（尺子的 pass/total 是 float，直接显示会很难看）。"""
+    try:
+        f = float(x)
+        return str(int(f)) if abs(f - round(f)) < 1e-9 else ("%g" % f)
+    except Exception:                                    # noqa: BLE001
+        return "?"
+
+
 def read_ledger_series(limit=120):
     """账本**序列**（只读）：history.jsonl 里 kind=score_round 的综合分轮。
 
@@ -1088,6 +1240,20 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
                     "fixed_codes": ex["fixed_codes"][:20],
                     "changed_files": ex["changed_files"][:20]},
     }
+    # ★ 2026-11-24：每轮都记下**尺子口径**的结论，账本从此只是计数器。
+    #   放在 rec 里而不是只打日志：面板 / 卡片 / 反思都能直接引用同一个判定，
+    #   不用各自去读 scores.jsonl（也就不会各算一套）。
+    try:
+        _bv = bench_verdict()
+        rec["bench_verdict"] = {
+            "ok": bool(_bv.get("ok")), "trend": _bv.get("trend"),
+            "delta": _bv.get("delta"), "grind": bool(_bv.get("grind")),
+            "ledger_sum": _bv.get("ledger_sum"),
+            "failing": [x.get("id") for x in (_bv.get("failing") or [])][:8],
+            "infra": [x.get("id") for x in (_bv.get("infra") or [])][:8],
+        }
+    except Exception:                                   # noqa: BLE001
+        logger.debug("尺子口径计算失败", exc_info=True)
     d["cum"] = cum
     d["rounds"] = int(d.get("rounds") or 0) + 1
     d["last"] = rec
@@ -1111,6 +1277,26 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
                  "flat": "持平"}.get(verdict, "未知"),
                 (" 计划 " + str(pid)) if pid else "")]
     lines.append("    原因：" + ex["summary"])
+    # ★ 2026-11-24：账本日志里**永远跟一行尺子**。理由很简单 —— 只看账本
+    #   会得出「+4.00 在进步」的错觉，而同一时刻外部基准可能从 14/15 掉到
+    #   12/15。两个数必须并排出现，人（和反思）才不会看错。
+    try:
+        _bv2 = bench_verdict()
+        if _bv2.get("ok"):
+            _l2, _p2 = (_bv2.get("last") or {}), (_bv2.get("prev") or {})
+            _s2 = "    尺子：%s/%s（%.1f%%）" % (
+                _fmt_num(_l2.get("pass")), _fmt_num(_l2.get("total")),
+                float(_l2.get("pct") or 0))
+            if _p2:
+                _s2 += "，上轮 %.1f%% → %s" % (
+                    float(_p2.get("pct") or 0),
+                    {"up": "涨", "down": "跌", "flat": "没动"}.get(
+                        _bv2.get("trend") or "", "未知"))
+            if _bv2.get("grind"):
+                _s2 += "  ⚠️ 账本在涨、尺子没涨（刷分嫌疑）"
+            lines.append(_s2)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("日志追加尺子读数失败", exc_info=True)
     for s in ex["suspects"][:3]:
         lines.append("    可疑代码：%s 共 %d 处，行 %s（%s）%s"
                      % (s["file"], s["count"],
