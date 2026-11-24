@@ -18,8 +18,10 @@
     绝不中途打断 patch —— 半途停会留下改了一半的文件。
 """
 
+import hashlib
 import json
 import os
+import re
 import threading
 import time
 import traceback
@@ -90,6 +92,11 @@ _STATE = {
     "regress": None,
     "regress_round_at": 0.0,
     "last_closeout": None,
+    # ★ 2026-11-24 无进展检测（迭代侧）：{fp, n, why}
+    #   fail_chain 只数「连续失败了几次」，**不看每轮做的事是不是同一件** ——
+    #   5 轮都在改同一批文件、报同一条错，和 5 轮各修各的，在它眼里没区别。
+    #   这里记「本轮指纹」（问题文本 + 改动文件集），连续 N 轮分毫不差才判原地打转。
+    "no_prog": {"fp": "", "n": 0, "why": ""},
 }
 _FILE = _si._DATA / "task.json"
 
@@ -166,6 +173,72 @@ _MAX_LOCK_RETRY = 3
 #   做语法/自检（见 _verify_once），但会被明确记成「超上限，留给下一轮」，
 #   写进事件与遗留清单 —— 绝不静默丢掉（静默丢文件正是本项目反复踩的坑）。
 _MAX_CHANGE_FILES = 3
+
+# ★ 2026-11-24 用户要求：把「无进展检测」也接到自动迭代这条循环上。
+#   fail_chain（上面那个）只数「连续失败了几次」，**不看每轮做的事是否相同** ——
+#   于是「改同一批文件、报同一条错」能一路烧到第 5 轮才停，而且停下时的说法是
+#   「连续 5 次未通过」，看不出其实从第 1 轮起就毫无进展（只是把同一件事重做 5 遍）。
+#   这里补一层：把每轮的（问题文本 + 改动文件集）压成指纹，连续
+#   _NO_PROGRESS_LIMIT 轮分毫不差 ⇒ 判定原地打转，立刻按「停手」处理。
+#   阈值取 3（比对话侧的 4 低）：迭代每一轮都是真改代码 + 重启 + 全量回归，
+#   一轮成本是分钟级，同一件事重复三次已经足够证明这条路走不通。
+_NO_PROGRESS_LIMIT = 3
+
+# 归一化时要抹掉的「每轮都会变、但不代表有进展」的东西：
+#   · 第 N 次 / 第 N 轮 / 连续 N/M —— 计数本身每轮都变，不抹掉永远比不中
+#   · 耗时 12.3s / 320 毫秒 / 3 分钟
+#   · traceback 地址 0x7ff…、行号 :123、时间戳 2026-11-24 18:33:07
+_NO_PROG_STRIP = (
+    (re.compile(r"第\s*\d+\s*[次轮]"), "第N次"),
+    (re.compile(r"连续\s*\d+\s*/\s*\d+"), "连续N/M"),
+    (re.compile(r"\d+\.\d+\s*s(?:ec)?\b", re.I), "Ts"),
+    (re.compile(r"\b\d+\s*(?:ms|毫秒|秒|分钟|min)\b", re.I), "T"),
+    (re.compile(r"\b0x[0-9a-f]{6,}\b", re.I), "0xADDR"),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\b"), "TS"),
+    (re.compile(r":\d{2,5}\b"), ":LINE"),
+    (re.compile(r"\s+"), " "),
+)
+
+
+def _norm_issue(text):
+    """把一条问题/报错归一化成「实质内容」，抹掉每轮都会变的计数与地址。"""
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    for pat, rep in _NO_PROG_STRIP:
+        s = pat.sub(rep, s)
+    return s[:400]
+
+
+def _round_fingerprint(title, files, problems):
+    """一轮迭代的指纹：标题 + 改动文件集（排序去重）+ 归一化后的问题列表。
+
+    指纹相同 = 这一轮改的东西、撞的墙，跟上一轮一模一样。
+    """
+    fs = sorted({str(f).replace("\\", "/").strip()
+                 for f in (files or []) if str(f).strip()})
+    ps = sorted({_norm_issue(p) for p in (problems or []) if str(p).strip()})
+    raw = "\n".join([str(title or "").strip(), "|".join(fs), "||".join(ps)])
+    return hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def _note_round(title, files, problems):
+    """记一轮，返回 (连续相同轮数, 是否判定原地打转)。"""
+    fp = _round_fingerprint(title, files, problems)
+    with _LOCK:
+        st = _STATE.get("no_prog") or {}
+        if fp and str(st.get("fp") or "") == fp:
+            n = int(st.get("n") or 0) + 1
+        else:
+            n = 1
+        _STATE["no_prog"] = {"fp": fp, "n": n, "why": ""}
+    return n, n >= _NO_PROGRESS_LIMIT
+
+
+def _reset_round():
+    """有实质进展（验证通过）就把「原地打转」计数清零。"""
+    with _LOCK:
+        _STATE["no_prog"] = {"fp": "", "n": 0, "why": ""}
 
 # ★ 2026-11-20 修（用户报「卡住不动了」）：
 #   重启后 _STATE["running"] 会从 task.json 恢复出来，但那条的 worker 线程
@@ -404,6 +477,12 @@ def _load():
                 # ★ 连续失败链必须跨重启保留：否则「改→重启→验证不过」每重启一次
                 #   计数就归零，护栏又失效了 —— 这正是无限重启的入口。
                 _STATE["fail_chain"] = int(d.get("fail_chain") or 0)
+                # ★ 无进展计数也必须跨重启保留：迭代每轮都重启一次，
+                #   若只存内存，「改→重启→还是那条错」每重启就归零，等于没有护栏。
+                _np0 = d.get("no_prog") or {}
+                if isinstance(_np0, dict) and _np0.get("fp"):
+                    _STATE["no_prog"] = {"fp": str(_np0.get("fp") or ""),
+                                         "n": int(_np0.get("n") or 0), "why": ""}
                 # 队列恢复：把上次「正在跑」的那个放回队首（它没跑完）
                 q = list(d.get("queue") or [])
                 run = d.get("running")
@@ -475,6 +554,7 @@ def _save():
                  "running": _STATE["running"],
                  "verify": _STATE.get("verify"),
                  "fail_chain": int(_STATE.get("fail_chain") or 0),
+                 "no_prog": _STATE.get("no_prog") or {},
                  "reports": _STATE.get("reports") or [],
                  "budget": _STATE.get("budget") or 0,
                  "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -2662,6 +2742,11 @@ def _verify_worker():
                 extra=["跑分退步 %+.2f（%s → %s）：分数没涨回去就不算闭环" % (
                     float(_sc.get("delta") or 0), _sc.get("prev"),
                     _sc.get("total"))])
+            # ★ 无进展检测：这一轮的「改动文件 + 问题 + 退步幅度」是不是和上一轮一样
+            _npn, _npt = _note_round(
+                v.get("title") or "", v.get("files") or [],
+                list(problems or []) + ["分数退步 %s → %s"
+                                        % (_sc.get("prev"), _sc.get("total"))])
             with _LOCK:
                 _STATE["verify"] = None
                 _STATE["fail_chain"] = int(_STATE.get("fail_chain") or 0) + 1
@@ -2677,6 +2762,12 @@ def _verify_worker():
                   state="error")
             _emit(tid, "report", text=md, title=v.get("title") or "")
             _save()
+            if _npt and _fc < _MAX_FAIL_CHAIN:
+                _fc = _MAX_FAIL_CHAIN
+                _emit(tid, "status",
+                      text="⚠️ 连续 %d 轮在做完全相同的事（同一批文件、同一条问题），"
+                           "判定原地打转，不再重复第 %d 遍" % (_npn, _npn + 1),
+                      state="error")
             if _fc >= _MAX_FAIL_CHAIN:
                 with _LOCK:
                     _STATE["fail_chain"] = 0
@@ -2713,6 +2804,8 @@ def _verify_worker():
         # ★ 2026-11-23 收尾强制证据检查：这一轮算「通过」之前，先把
         #   回归通过数 + 遗留清单写进最终回复；不满足就带上「未闭环」标记。
         md, _ev = _closeout_md(tid, md, v, problems)
+        # ★ 验证通过 = 真有进展，原地打转计数清零（否则历史相同指纹会误伤下一轮）
+        _reset_round()
         with _LOCK:
             _STATE["verify"] = None
             # ★ 验证通过 ⇒ 连续失败链清零，护栏重新计数
@@ -2778,9 +2871,17 @@ def _verify_worker():
             _emit_sys("✅ 队列已空 + 全局终检通过，本次迭代结束", state="done")
             return
         # 终检没过 → 不能说「一切正常」，生成修复任务接着跑（队列因此不空）
+        # ★ 无进展检测：连续几次终检卡在**完全同一批问题**上，就不是「运气差」，是修不动
+        _npn2, _npt2 = _note_round("全局终检", [], _probs_all or [])
         with _LOCK:
             _STATE["fail_chain"] = int(_STATE.get("fail_chain") or 0) + 1
             _fc2 = _STATE["fail_chain"]
+        if _npt2 and _fc2 < _MAX_FAIL_CHAIN:
+            _fc2 = _MAX_FAIL_CHAIN
+            _emit_sys("连续 %d 次全局终检卡在完全相同的问题上（%s），"
+                      "判定原地打转，不再重复第 %d 遍"
+                      % (_npn2, "；".join(_probs_all[:2]), _npn2 + 1),
+                      state="error")
         _emit_sys("⚠️ 全局终检没过（%d 项）：%s（连续 %d/%d）"
                   % (len(_probs_all), "；".join(_probs_all[:3]),
                      _fc2, _MAX_FAIL_CHAIN), state="error")
@@ -2805,11 +2906,20 @@ def _verify_worker():
 
     # 没过 —— 先累加「跨计划连续失败链」（每轮修复都是新 plan_id，
     # v["tries"] 会归零，只有这个计数能兜住无限重启）
+    # ★ 无进展检测：连续几轮改的还是那几个文件、报的还是那几条问题 ⇒ 原地打转
+    _npn3, _npt3 = _note_round(v.get("title") or "", v.get("files") or [],
+                               problems or [])
     with _LOCK:
         _STATE["fail_chain"] = int(_STATE.get("fail_chain") or 0) + 1
         _fc = _STATE["fail_chain"]
         _STATE["verify"] = None
     _save()
+    if _npt3 and _fc < _MAX_FAIL_CHAIN:
+        _fc = _MAX_FAIL_CHAIN
+        _emit(tid, "status",
+              text="⚠️ 连续 %d 轮验证卡在完全相同的问题上（同一批文件、同一条问题），"
+                   "判定原地打转，不再重复第 %d 遍" % (_npn3, _npn3 + 1),
+              state="error")
     _log_verify("verify_fail", ok=False,
                 summary="%s 第 %d 轮验证没过（连续失败 %d/%d）：%s" % (
                     v.get("title") or "", int(v.get("tries") or 0), _fc,

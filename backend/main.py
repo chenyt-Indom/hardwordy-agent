@@ -6745,6 +6745,45 @@ def _code_text_tools(cfg: dict) -> dict:
     return out
 
 
+# ---------------- 无进展检测（纯函数，便于离线回归） ----------------
+# 连续这么多轮「工具 + 参数 + 返回」完全一样 → 判定原地打转。
+# 为什么是 4：3 轮太容易误伤（读文件→改→再读，节奏快的任务能撞上），
+# 而真正的死循环空转到第 4 轮也就几秒，代价很小。
+NO_PROGRESS_LIMIT = 4
+# 背景（2026-11-24 用户要求）：轮次上限只是安全阀，真在原地打转时要空烧很久。
+# 这里把「这一轮的工具调用 + 返回」压成指纹，连续几轮完全相同就说明没有新信息。
+def _noprog_signature(gathered, calls, head: int = 4000) -> str:
+    """一轮的指纹：工具名 + 参数 + 返回（前 head 字 + 全长）。
+
+    gathered: [(idx, name, result, events), ...]
+    calls:    [(name, args), ...]，按模型给出的顺序（args 用 idx 取回）
+    """
+    parts = []
+    for _it in sorted(gathered, key=lambda x: x[0]):
+        _idx, _name = _it[0], _it[1]
+        _res = _it[2]
+        _args = calls[_idx][1] if 0 <= _idx < len(calls) else {}
+        try:
+            _aj = json.dumps(_args, ensure_ascii=False, sort_keys=True, default=str)
+        except Exception:                       # noqa: BLE001
+            _aj = str(_args)
+        _rs = str(_res)
+        parts.append("%s|%s|%d|%s" % (_name, _aj, len(_rs), _rs[:head]))
+    return "\n".join(parts)
+
+
+def _noprog_next(sig: str, prev_sig, streak: int):
+    """推进连续计数：与上一轮相同则 +1，否则重置为 1。返回 (streak, sig)。"""
+    if sig and sig == prev_sig:
+        return streak + 1, prev_sig
+    return 1, sig
+
+
+def _noprog_tools(gathered) -> str:
+    """这一轮涉及哪些工具（给用户看"卡在什么上面"）。"""
+    return ",".join(sorted({str(_it[1]) for _it in gathered}))
+
+
 def _map_text_tool_args(name: str, args: dict):
     """把文本工具的参数翻译成真实工具 schema 认识的形状。"""
     if name == "save_file":
@@ -9132,6 +9171,17 @@ async def chat(req: ChatRequest,
         _t_start = time.time()
         gen_params = dict(cfg)
 
+        # ★ 2026-11-24：【无进展检测】（用户要求）。
+        #   轮次上限 500 是**安全阀**，但它管不住"原地打转"——真死循环时要空烧很久
+        #   才触发（实测一次卡住十几分钟）。这里做精准判断：
+        #   连续若干轮的「工具名 + 参数 + 返回内容」**完全一样**，说明再跑也不会有新信息。
+        #   只看整轮指纹完全相同，所以正常的「查A → 改B → 再查A」不会被误判；
+        #   返回内容一变（例如轮询等到文件更新）也不算，因此不会误伤等待类任务。
+        _noprog_sig = None      # 上一轮的整轮指纹
+        _noprog_streak = 0      # 当前已经连续相同几轮
+        _noprog_where = ""      # 卡住时在重复哪些工具（给用户看的）
+        # 阈值见模块级常量 NO_PROGRESS_LIMIT（测试与运行共用同一份数值）
+
         # 【完整性兜底】整次生成共用一份"预览过哪些文件、当时写进了哪个项目"的记录。
         # 必须放在轮次循环**外面**：模型常常第 1 轮建项目+预览、第 2 轮才正式写入，
         # 每轮清空就看不出"预览写到 A 项目、正式写入落在 B 项目"，孤儿文件清不掉。
@@ -9867,6 +9917,34 @@ async def chat(req: ChatRequest,
             if text_protocol and text_results:
                 working.append({"role": "user",
                                 "content": "工具结果：\n" + "\n\n".join(text_results)})
+            # 2.4) 【无进展检测】连续若干轮「工具 + 参数 + 返回」一模一样 → 在原地打转。
+            #   为什么放在这里：这一轮的工具结果已经全部追加进 working 了，
+            #   此刻判断最准（拿得到真实返回，而不是猜）。
+            #   为什么只比"整轮完全相同"：单看某个工具名重复太容易误伤 ——
+            #   正常干活时"读同一个文件两遍"很常见；但**整轮**连参数带返回
+            #   连续 4 轮分毫不差，就只能是空转。
+            try:
+                # 指纹/计数都走纯函数（backend/main.py 顶部那几个 _noprog_*），
+                # 这样离线回归测的就是**真正在跑的那份逻辑**，不会两套实现脱节。
+                _sig = _noprog_signature(gathered, calls)
+                _noprog_streak, _noprog_sig = _noprog_next(
+                    _sig, _noprog_sig, _noprog_streak)
+                _noprog_where = _noprog_tools(gathered)
+                if _noprog_streak >= NO_PROGRESS_LIMIT:
+                    logger.warning(
+                        "[no-progress] 连续 %d 轮工具调用与返回完全相同（%s），提前收手",
+                        _noprog_streak, _noprog_where)
+                    yield json.dumps({"note": (
+                        "我发现自己连续 %d 轮在做**完全相同的事**（%s：参数和返回都没变），"
+                        "再跑下去不会有新结果，所以先停在这里。"
+                        "如果你要的是另一种做法，直接说一句；想让它再试一次就回「继续」。"
+                        % (_noprog_streak, _noprog_where or "同一批工具"))
+                    }, ensure_ascii=False) + "\n"
+                    break
+            except Exception:                       # noqa: BLE001
+                # 检测本身绝不能影响正常对话：出错就当没检测，照常往下跑。
+                logger.debug("无进展检测失败（不影响正文）", exc_info=True)
+
             # 2.5) 【完整性兜底】把"只被预览过、没被正式写入"的残file撤掉。
             #
             # 为什么必须有这一步：流式落盘是**边生成边写**的预览，模型输出一旦
