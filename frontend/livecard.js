@@ -1396,6 +1396,14 @@ window.LiveCard = (function () {
       setAttribute: function () {}, appendChild: function (c) {
         this.childNodes.push(c); this.children.push(c); return c;
       },
+      // 2026-11-24 补：结果卡片（renderCard）会把缩略图插到头部前面，
+      // 没有 insertBefore 的话 node 里跑断言会抛「不是函数」，卡片直接走兜底。
+      insertBefore: function (c, ref) {
+        const i = ref ? this.childNodes.indexOf(ref) : -1;
+        if (i < 0) { this.childNodes.push(c); this.children.push(c); }
+        else { this.childNodes.splice(i, 0, c); this.children.splice(i, 0, c); }
+        return c;
+      },
       addEventListener: function () {}, remove: function () {},
       classList: { add: function () {}, remove: function () {}, contains: function () { return false; } },
     };
@@ -1517,6 +1525,243 @@ window.LiveCard = (function () {
     return out.slice(0, 12);
   }
 
+  // ================================================================
+  // 答完给张卡：结果卡片化（2026-11-24）—— renderCard(kind, payload)
+  // ----------------------------------------------------------------
+  // 用户长期偏好：「知识点用图表或知识卡呈现」。但答完的结果现在还是一屏文字
+  // 流：天气是一句话、路线是一段话、文档/图片散在下面。
+  // 这个分发器把「一类结果 + 一份 payload」直接渲染成**一张可交互小卡**：
+  //   renderCard("weather"|"map"|"doc"|"image", payload) → 节点
+  //   mountCard(host, kind, payload)                    → 挂到容器上（子节点 +1）
+  //
+  // 约定：
+  //   · 返回节点的 class 里带 kind（`resultcard-weather` 也有裸 `weather`），
+  //     按 class 就能找到卡；
+  //   · 只认上面四类；未知 kind / payload 形状不认识 → 走兜底卡，**绝不抛异常**
+  //     （渲染主流程正在收尾，宁可少一张卡也不能把正文搞崩）；
+  //   · 不碰业务：不 fetch、不弹 toast、不知道 sessionId；样式一律走
+  //     style.css 里的 `.resultcard` 与 CSS 变量（白底低饱和）。
+  // ================================================================
+  const RESULT_META = {
+    weather: { ico: "🌤", label: "天气" },
+    map: { ico: "🗺", label: "地图" },
+    doc: { ico: "📄", label: "文档" },
+    image: { ico: "🖼", label: "图片" },
+    unknown: { ico: "🧩", label: "结果" },
+  };
+
+  function rcText(cls, text) {
+    const el = lcNode("span", cls);
+    el.textContent = String(text == null ? "" : text);
+    return el;
+  }
+
+  // 卡壳：头部（图标 + 标题 + 类型角标）+ 主体。点一下展开/收起。
+  function rcShell(kind, title) {
+    const meta = RESULT_META[kind] || RESULT_META.unknown;
+    const node = lcNode("div", "livecard resultcard resultcard-" + kind + " " + kind);
+    try { node.setAttribute("data-kind", kind); } catch (e) { /* 无 DOM 环境 */ }
+    node.title = String(title == null ? "" : title) || meta.label;
+
+    const hd = lcNode("div", "rc-hd");
+    hd.appendChild(rcText("rc-ico", meta.ico));
+    hd.appendChild(rcText("rc-title", node.title));
+    hd.appendChild(rcText("rc-badge", meta.label));
+    node.appendChild(hd);
+
+    const body = lcNode("div", "rc-body");
+    node.appendChild(body);
+
+    const click = function (e) {
+      try { if (e && e.stopPropagation) e.stopPropagation(); } catch (err) { /* 忽略 */ }
+      try { if (node.classList && node.classList.toggle) node.classList.toggle("open"); } catch (err) { /* 忽略 */ }
+    };
+    if (typeof node.addEventListener === "function") node.addEventListener("click", click);
+    else node.onclick = click;
+
+    return { node: node, body: body };
+  }
+
+  // 一行「标签：值」，空值直接不画（避免出现半行空白）
+  function rcRow(body, label, value) {
+    if (!body) return;
+    if (value == null || value === "" || value === false) return;
+    const row = lcNode("div", "rc-row");
+    row.appendChild(rcText("rc-k", label));
+    row.appendChild(rcText("rc-v", value));
+    body.appendChild(row);
+  }
+
+  // payload 形状不认识时的兜底：把能读出来的 key/value 摊平（不会空白，也不抛）
+  function rcDump(body, payload) {
+    if (!body) return;
+    const lines = lcPayloadLines(payload);
+    if (!lines.length) { rcRow(body, "内容", "（这类结果暂时没有可展示的细节）"); return; }
+    lines.forEach(function (line) {
+      const i = line.indexOf("：");
+      if (i > 0) rcRow(body, line.slice(0, i), line.slice(i + 1));
+      else rcRow(body, "内容", line);
+    });
+  }
+
+  function rcArr() {
+    for (let i = 0; i < arguments.length; i++) {
+      if (Array.isArray(arguments[i])) return arguments[i];
+    }
+    return [];
+  }
+
+  function rcThumb(src, alt) {
+    const img = lcNode("img", "rc-thumb");
+    try {
+      img.setAttribute("src", String(src));
+      img.setAttribute("alt", String(alt || ""));
+      img.setAttribute("loading", "lazy");
+    } catch (e) { /* 无 DOM 环境 */ }
+    return img;
+  }
+
+  // —— 天气 ——
+  function renderWeatherCard(payload) {
+    const p = (payload && typeof payload === "object") ? payload : {};
+    const city = p.city || p.place || p.location || "";
+    const temp = (p.temp != null ? p.temp : (p.temperature != null ? p.temperature : ""));
+    const desc = p.desc || p.weather || p.text || p.condition || "";
+    const head = [city, temp, desc].filter(function (x) { return x !== "" && x != null; }).join(" · ");
+    const sh = rcShell("weather", head || "天气");
+    rcRow(sh.body, "城市", city);
+    rcRow(sh.body, "温度", temp);
+    rcRow(sh.body, "天气", desc);
+    rcRow(sh.body, "湿度", p.humidity);
+    rcRow(sh.body, "风", p.wind || p.winddesc || p.wind_dir);
+    const days = rcArr(p.days, p.forecast, p.list, p.weekly);
+    days.slice(0, 5).forEach(function (d) {
+      if (d == null) return;
+      if (typeof d !== "object") { rcRow(sh.body, "预报", d); return; }
+      const day = d.date || d.day || d.week || d.name || "预报";
+      const txt = d.text || d.desc || d.weather || d.condition || "";
+      const hi = (d.high != null ? d.high : (d.tempMax != null ? d.tempMax : d.max));
+      const lo = (d.low != null ? d.low : (d.tempMin != null ? d.tempMin : d.min));
+      const t = (hi != null || lo != null)
+        ? String(hi != null ? hi : "") + (lo != null ? "~" + lo : "") : "";
+      rcRow(sh.body, day, [txt, t].filter(Boolean).join(" "));
+    });
+    if (!sh.body.childNodes.length) rcDump(sh.body, p);
+    return sh.node;
+  }
+
+  // —— 地图 / 路线 ——
+  function renderMapCard(payload) {
+    const p = (payload && typeof payload === "object") ? payload : {};
+    const from = p.from || p.origin || p.start || "";
+    const to = p.to || p.dest || p.destination || p.end || "";
+    const head = (from || to)
+      ? String(from || "") + (from && to ? " → " : "") + String(to || "")
+      : (p.title || p.name || "路线");
+    const sh = rcShell("map", head);
+    const thumb = p.thumb || p.static_map || p.map_url || "";
+    if (thumb) sh.node.insertBefore(rcThumb(thumb, head), sh.body);
+    rcRow(sh.body, "起点", from);
+    rcRow(sh.body, "终点", to);
+    rcRow(sh.body, "距离", p.distance || p.dist);
+    rcRow(sh.body, "耗时", p.duration || p.time || p.eta);
+    rcRow(sh.body, "方式", p.mode || p.by);
+    const steps = rcArr(p.steps, p.route, p.paths, p.points);
+    steps.slice(0, 6).forEach(function (s) {
+      if (s == null) return;
+      if (typeof s !== "object") { rcRow(sh.body, "步骤", s); return; }
+      const name = s.instruction || s.road || s.name || s.title || s.desc || "";
+      const dist = s.distance || s.dist || "";
+      const line = [name, dist].filter(Boolean).join(" ");
+      if (line) rcRow(sh.body, "步骤", line);
+    });
+    if (!sh.body.childNodes.length) rcDump(sh.body, p);
+    return sh.node;
+  }
+
+  // —— 文档 ——
+  function renderDocCard(payload) {
+    const p = (payload && typeof payload === "object") ? payload : {};
+    const name = p.title || p.name || p.file || p.filename || p.path || "文档";
+    const sh = rcShell("doc", name);
+    rcRow(sh.body, "文件", p.path || p.file || p.filename || name);
+    rcRow(sh.body, "格式", p.ext || p.format || p.type_ext);
+    rcRow(sh.body, "页数", Array.isArray(p.pages) ? p.pages.length : p.pages);
+    rcRow(sh.body, "字数", p.chars || p.words || p.length);
+    rcRow(sh.body, "大小", p.size || p.bytes);
+    rcRow(sh.body, "链接", p.url || p.link || p.download || "");
+    const pages = rcArr(p.pages, p.outline, p.sections);
+    pages.slice(0, 5).forEach(function (pg, i) {
+      if (pg == null) return;
+      if (typeof pg === "object") {
+        rcRow(sh.body, "第 " + (i + 1) + " 页", pg.title || pg.name || pg.heading || pg.text || "");
+      } else {
+        rcRow(sh.body, "第 " + (i + 1) + " 页", pg);
+      }
+    });
+    if (!sh.body.childNodes.length) rcDump(sh.body, p);
+    return sh.node;
+  }
+
+  // —— 图片 ——
+  function renderImageCard(payload) {
+    const p = (payload && typeof payload === "object") ? payload : {};
+    const src = p.thumb || p.src || p.url || p.path || p.image || "";
+    const name = p.title || p.name || p.filename || p.prompt || "图片";
+    const sh = rcShell("image", name);
+    if (src) sh.node.insertBefore(rcThumb(src, name), sh.body);
+    rcRow(sh.body, "尺寸", (p.width && p.height) ? (p.width + "×" + p.height) : (p.size_px || ""));
+    rcRow(sh.body, "格式", p.ext || p.format || p.mime);
+    rcRow(sh.body, "文件", p.path || p.file || p.filename || "");
+    rcRow(sh.body, "提示词", p.prompt || p.query || "");
+    rcRow(sh.body, "来源", p.source || p.from || "");
+    if (!sh.body.childNodes.length) rcDump(sh.body, p);
+    return sh.node;
+  }
+
+  RESULT_META.weather.render = renderWeatherCard;
+  RESULT_META.map.render = renderMapCard;
+  RESULT_META.doc.render = renderDocCard;
+  RESULT_META.image.render = renderImageCard;
+
+  // 未知 kind 的兜底卡：不抛异常，把 payload 摊平成几行给人看
+  function renderUnknownCard(kind, payload) {
+    const sh = rcShell("unknown", (kind ? String(kind) + " 结果" : "结果"));
+    try { sh.node.setAttribute("data-kind", String(kind == null ? "" : kind)); } catch (e) { /* 忽略 */ }
+    rcRow(sh.body, "类型", String(kind == null ? "" : kind) || "（未知）");
+    rcDump(sh.body, payload);
+    return sh.node;
+  }
+
+  /**
+   * 结果卡片分发器。
+   * @param {string} kind    weather | map | doc | image
+   * @param {object} payload 这一轮的工具结果（形状不认识也不会抛）
+   * @returns {Element} 带 kind class 的卡片节点（永远是节点，永不 null）
+   */
+  function renderCard(kind, payload) {
+    try {
+      const k = String(kind == null ? "" : kind).toLowerCase().trim();
+      const meta = RESULT_META[k];
+      if (meta && typeof meta.render === "function") return meta.render(payload);
+      return renderUnknownCard(k, payload);
+    } catch (e) {
+      // 兜底也炸了 → 给一张最小的提示卡，绝不让渲染主流程收到异常
+      const node = lcNode("div", "livecard resultcard resultcard-unknown unknown");
+      node.textContent = "（这类结果暂时画不出来）";
+      return node;
+    }
+  }
+
+  /** 挂到容器上（append 语义，子节点数 +1）。@returns {Element|null} 卡片节点 */
+  function mountCard(host, kind, payload) {
+    if (!host || typeof host.appendChild !== "function") return null;
+    const node = renderCard(kind, payload);
+    if (!node) return null;
+    host.appendChild(node);
+    return node;
+  }
+
   return {
     esc: esc,
     escAttr: escAttr,
@@ -1550,5 +1795,13 @@ window.LiveCard = (function () {
     renderLiveCardItem: renderOneCard,
     mountLiveCard: mountCards,
     mergeLiveCards: mergeCards,
+    // 答完给张卡（结果卡片化）：renderCard 是分发入口，mountCard 顺手挂上容器。
+    RESULT_META: RESULT_META,
+    renderCard: renderCard,
+    mountCard: mountCard,
+    renderWeatherCard: renderWeatherCard,
+    renderMapCard: renderMapCard,
+    renderDocCard: renderDocCard,
+    renderImageCard: renderImageCard,
   };
 })();

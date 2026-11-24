@@ -2279,6 +2279,48 @@
     }
   }
 
+  // ============================================================
+  // 答完给张卡（结果卡片化，2026-11-24）
+  // ------------------------------------------------------------
+  // 用户偏好：「知识点用图表或知识卡呈现」。可答完之后结果还是一屏文字流：
+  // 天气是一行字、路线是一段话、文档和图片要往下翻。
+  // 做法：正文渲染完，在气泡**末尾**按结果类型（weather/map/doc/image）挂一张
+  //      可交互小卡（livecard.js 的 renderCard 分发器）。
+  // 与顶部那排的区别：顶部是「过程中」的进度小卡，这里是「答完」的成品卡。
+  // 没有这四类产出 → 一次都不会调用，纯文字回复观感完全不变。
+  // ============================================================
+  const RESULT_CARD_KINDS = ["weather", "map", "doc", "image"];
+
+  function resultKindOf(card) {
+    const t = String((card && card.type) || "").toLowerCase();
+    return RESULT_CARD_KINDS.indexOf(t) >= 0 ? t : "";
+  }
+
+  function mountResultCards(bubble, cards) {
+    if (!bubble || !cards || !cards.length) return null;
+    const LC = window.LiveCard;
+    if (!LC || typeof LC.renderCard !== "function") return null;
+    try {
+      const host = document.createElement("div");
+      host.className = "rescards";
+      let n = 0;
+      for (const c of cards) {
+        if (!c || typeof c !== "object") continue;
+        const kind = resultKindOf(c);
+        if (!kind) continue;
+        const node = LC.renderCard(kind, c.payload || c);
+        if (!node) continue;
+        host.appendChild(node);
+        n++;
+      }
+      if (!n) return null;
+      bubble.appendChild(host);     // 挂在回复末尾：先读结论，再上手点卡
+      return host;
+    } catch (e) {
+      return null;                  // 卡片出错绝不影响正文
+    }
+  }
+
   // ---------- 左侧「🎨 画布」按钮：把画布拎出来看（2026-11-18）----------
   // 画布原来只长在某条回复的气泡里，消息一多就得往回翻着找。
   // 这个浮层显示「最近一次画布」；一次都还没有时，退回显示图库最近 6 张图当卡片
@@ -9495,6 +9537,13 @@
           mountLiveCards(answerBubble, liveCards);
         }
       } catch (e) { /* 卡片失败不影响正文 */ }
+      // 答完给张卡：正文都渲染完了，把天气/地图/文档/图片这几类结果做成
+      // 可交互小卡挂在**回复末尾**（没有这几类产出就什么都不做）。
+      try {
+        if (liveCards.length && !answerBubble.querySelector(".rescards")) {
+          mountResultCards(answerBubble, liveCards);
+        }
+      } catch (e) { /* 卡片失败不影响正文 */ }
       try { localStorage.setItem("__last_answer", String(answer || "")); } catch (e) {}
       if (!answer) {
         answerBubble.textContent = notes.length
@@ -9541,6 +9590,9 @@
             // 重绘会把气泡洗掉 → 卡片要跟着补回来（否则回读一次卡片就没了）
             try {
               if (liveCards.length) mountLiveCards(answerBubble, liveCards);
+            } catch (e) { /* 卡片失败不影响正文 */ }
+            try {
+              if (liveCards.length) mountResultCards(answerBubble, liveCards);
             } catch (e) { /* 卡片失败不影响正文 */ }
             for (let i = history.length - 1; i >= 0; i--) {
               if (history[i] && history[i].role === "assistant") { history[i].content = srv; break; }

@@ -78,6 +78,20 @@
   --space-md: 10px;
   --space-lg: 14px;
   --space-xl: 18px;
+
+  /* —— 结果卡片（答完给张卡，2026-11-24）——
+     用户偏好「知识点用图表/知识卡呈现」，但整个界面是深色的。
+     结果卡刻意做成**白底低饱和**：像一张贴在上面的纸卡，正文仍然在深色气泡里，
+     一眼就能分出「这是结果，不是又一段解释」。
+     颜色全部从这里取值，改主题只改这一处（不要在 .resultcard 里写死颜色）。 */
+  --res-card-bg: #ffffff;
+  --res-card-fg: #2c3340;          /* 正文文字（白底上的深灰，不用纯黑） */
+  --res-card-muted: #7d8798;       /* 标签 / 次级说明 */
+  --res-card-line: #e8ecf2;        /* 分隔线 / 边框（低饱和） */
+  --res-card-head: #f7f9fc;        /* 卡片头部底 */
+  --res-card-accent: #5b7cfa;      /* 强调（悬停边框、可点提示） */
+  --res-card-open: #eef2ff;        /* 展开态头部底 */
+  --res-shadow: 0 1px 2px rgba(15, 20, 30, .18), 0 6px 16px rgba(15, 20, 30, .14);
 }
 
 /* ---------- 浅色模式 ---------- */
@@ -7429,6 +7443,62 @@ html[data-theme="light"] .iter-site:hover {
   color: var(--muted, #8a93a6); font-size: 11px; white-space: pre-wrap; }
 .livecard.open .lc-detail { display: block; }
 .livecard[hidden] { display: none; }
+
+/* ===== 答完给张卡：结果卡片化（livecard.js renderCard 渲染）=====
+   2026-11-24：回答末尾按结果类型挂一张可交互小卡（天气 / 地图 / 文档 / 图片）。
+   样式全部走 :root 里的 --res-* 变量（白底低饱和），不在这里写死颜色。
+   · 头部一行：图标 + 标题 + 类型角标；点一下展开主体（细节/步骤/尺寸）。
+   · 图片类有缩略图，卡片会变成竖排，缩略图通栏。
+   · 兜底：任何未知类型也给同一个外观（.resultcard-unknown），不会裸奔。 */
+.rescards { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 2px; }
+.rescards:empty { display: none; }
+.resultcard {
+  /* 覆盖 .livecard 的小 chip 观感：结果卡是竖排的纸卡，不是横条 */
+  display: flex; flex-direction: column; align-items: stretch;
+  gap: 0; min-width: 200px; max-width: 340px; min-height: 0;
+  padding: 0; overflow: hidden; cursor: pointer; user-select: none;
+  border: 1px solid var(--res-card-line);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--res-card-bg);
+  color: var(--res-card-fg);
+  box-shadow: var(--res-shadow);
+  transition: border-color .12s, box-shadow .12s, transform .12s;
+}
+.resultcard:hover { border-color: var(--res-card-accent); transform: translateY(-1px); }
+.resultcard.open { border-color: var(--res-card-accent); }
+.rc-hd {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 10px; background: var(--res-card-head);
+  border-bottom: 1px solid var(--res-card-line);
+  font-size: 12.5px; line-height: 1.35;
+}
+.resultcard.open .rc-hd { background: var(--res-card-open); }
+.rc-ico { flex: 0 0 auto; font-size: 14px; }
+.rc-title {
+  flex: 1 1 auto; min-width: 0; font-weight: 600;
+  color: var(--res-card-fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rc-badge {
+  flex: 0 0 auto; font-size: 10px; color: var(--res-card-muted);
+  border: 1px solid var(--res-card-line); border-radius: 5px;
+  padding: 0 4px; background: var(--res-card-bg);
+}
+/* 主体：默认收起（卡片保持一行高），点一下才展开细节 */
+.rc-body { display: none; padding: 8px 10px 9px; }
+.resultcard.open .rc-body { display: block; }
+.rc-row { display: flex; gap: 8px; font-size: 12px; line-height: 1.55; }
+.rc-row + .rc-row { margin-top: 2px; }
+.rc-k { flex: 0 0 auto; min-width: 44px; color: var(--res-card-muted); }
+.rc-v {
+  flex: 1 1 auto; min-width: 0; color: var(--res-card-fg);
+  word-break: break-word; white-space: normal;
+}
+/* 缩略图（图片 / 地图静态图）：放在头部下面，通栏，不撑破卡片 */
+.rc-thumb {
+  display: block; width: 100%; max-height: 140px; object-fit: cover;
+  border-bottom: 1px solid var(--res-card-line); background: var(--res-card-head);
+}
 
 /* ★ 2026-11-20 用户报「任务正在跑，底部却挂着『继续跑』，不是遇阻才弹吗？」
    根因：`.if-paused { display: flex }` 的优先级高于浏览器默认的
