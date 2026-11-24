@@ -17764,6 +17764,37 @@ def _push_one_artifact(gid: str, meta: dict) -> None:
         logger.debug("silent-except", exc_info=True)
 
 
+# ★★ 2026-11-25 用户要求：「群聊一律采用云端 LLM 进行」。
+#   实测根因（不是猜）：群聊 @hd 原来只读 `default_model`，而本机配置里它是
+#   `qwen3-vl:8b`（本地 Ollama）。于是群里每一条 @ 都跑在本地 8B 上：
+#   `num_ctx_override=362496`（35 万上下文）+ 12GB 显存 ⇒ 大部分层落 CPU，
+#   首字几十秒、一轮几分钟 —— 用户看到的「发消息卡、点终止没反应」主要是它。
+#   而单人模式走的是云端 DeepSeek（首字 1~2 秒），所以只有群聊特别慢。
+#   优先级：hive_model（显式配置，可填本地）> 云端默认 > default_model（无 Key 才退）。
+def _hive_pick_model(cfg: dict):
+    """群聊该用哪个模型 —— 返回 (model, source)。
+
+    source：`cloud` / `config:cloud` / `config:local` / `local:no-key`。
+    只在**没配云端 Key**时才退回 default_model，并且调用方会在群里明说，
+    否则又会变成「群里很慢但不知道为什么」。
+    """
+    cfg = cfg or {}
+    want = str(cfg.get("hive_model") or "").strip()
+    if want:
+        src = "cloud" if want.lower().startswith("deepseek") else "local"
+        return want, "config:" + src
+    cloud = (str(cfg.get("hive_cloud_model") or "").strip()
+             or str(cfg.get("code_model_ds") or "").strip()
+             or "deepseek-flash")
+    try:
+        has_key = bool(_ds_key(""))
+    except Exception:
+        has_key = False
+    if has_key:
+        return cloud, "cloud"
+    return str(cfg.get("default_model") or ""), "local:no-key"
+
+
 def _hive_run_model_now(gid: str, instruction: str, body: dict,
                         mid: str, asker: str, asker_id: str = "") -> None:
     """真正跑一次模型，全程流式推送思考和正文。
@@ -17839,9 +17870,17 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
             msgs[-1]["content"] += ("\n\n【群里的附件（含本次指令与之前聊天里发过的）】"
                                     + attach_note)
 
-        model = cfg.get("default_model") or ""
+        # ★ 2026-11-25：群聊**默认走云端**（见 _hive_pick_model 的说明）。
+        #   原来这里直接读 default_model，本机是本地 qwen3-vl:8b，
+        #   于是群里每条 @ 都在本地慢慢跑 —— 这正是「群聊卡」的主因。
+        model, _model_src = _hive_pick_model(cfg)
         if not model:
             raise RuntimeError("没有配置默认模型（先在设置里选一个）")
+        if _model_src == "local:no-key":
+            # 没配云端 Key 才退本地：必须在群里说清，别让人以为「群里就该这么慢」。
+            _hd_emit(gid, mid, "note",
+                     "没配置 DeepSeek Key，这次只能用本地模型 %s（比云端慢很多）。"
+                     "在设置里填一个 Key，群聊就会自动走云端。" % model)
         # 输出额度：默认**跟随单人配置**（用户要求能力一致），
         # hive_max_tokens 只在显式配置时才覆盖。
         try:
@@ -17858,7 +17897,8 @@ def _hive_run_model_now(gid: str, instruction: str, body: dict,
         # 「工作全过程」的起点：把这次任务的输入条件也播出去
         # （注入了多少条历史、提示词多长），让人看得出模型是基于什么在干。
         _hd_emit(gid, mid, "start",
-                 task={"asker": asker, "model": model, "hist": len(hist),
+                 task={"asker": asker, "model": model, "model_source": _model_src,
+                       "hist": len(hist),
                        "prompt_chars": (len(sys_prompt) + sum(
                            len(str(m.get("content") or "")) for m in msgs)),
                        "images": len(images),
