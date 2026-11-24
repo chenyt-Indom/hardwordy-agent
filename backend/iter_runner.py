@@ -648,17 +648,38 @@ def _plan_title(plan_id):
 
     ★ 2026-11-20 用户要求「自迭代卡片上说明正在迭代什么功能」——
       但入队时前端只传 plan_id，不传标题，于是卡片一直显示「正在迭代中…」。
-      这里退一步自己推断：优先第一条动作标题（那就是实际要做的事），
+      这里退一步自己推断：优先「这次真正要执行的动作」（approved → pending → 第一条），
       其次用计划的 summary（诊断结论，稍抽象但能看懂）。
     """
     try:
         r = _si.get_plan(plan_id)
         p = (r or {}).get("plan") or {}
-        for a in (p.get("actions") or []):
-            if isinstance(a, dict):
+        acts = [a for a in (p.get("actions") or []) if isinstance(a, dict)]
+        # ★ 2026-11-24 用户报「迭代时任务显示的名称和我批准的不是同一个」：
+        #   原来这里取的是**第一条**动作，但用户批准的很可能是第 5 条 ——
+        #   于是一份 8 条动作的计划，卡片永远显示 a1 的名字，实际执行的却是
+        #   他批的那条。名字必须跟着「这次真正要执行的动作」走：
+        #   approved（已批准待执行）→ pending（待批准）→ 最后才退回第一条。
+        # 一次批准了多条时，标题要说明「这是一批」，否则用户看到 a1 的名字
+        # 会以为只做了 a1（实际他批的是 f5 那一批）。
+        _appr = [a for a in acts if str(a.get("status") or "") == "approved"]
+        if _appr:
+            t = str(_appr[0].get("title") or "").strip()
+            if t:
+                if len(_appr) > 1:
+                    return t[:46] + "（等 %d 条）" % len(_appr)
+                return t[:60]
+        for _want in ("pending", "need_review"):
+            for a in acts:
+                if str(a.get("status") or "") != _want:
+                    continue
                 t = str(a.get("title") or "").strip()
                 if t:
                     return t[:60]
+        for a in acts:
+            t = str(a.get("title") or "").strip()
+            if t:
+                return t[:60]
         s = str(p.get("summary") or "").strip()
         if s:
             return s[:60]
@@ -773,10 +794,12 @@ def submit(plan_id, source="auto", title="", max_n=0):
         # 立刻失败（「没有已批准的动作」），白占一个队列位、还让用户以为出了问题。
         if run and run.get("plan_id") == plan_id:
             return {"ok": True, "state": "running", "tid": run["tid"],
+                    "title": str(run.get("title") or _ttl),
                     "ahead": 0, "dup": True}
         for _x in _STATE["queue"]:
             if _x.get("plan_id") == plan_id:
                 return {"ok": True, "state": "waiting", "tid": _x["tid"],
+                        "title": str(_x.get("title") or _ttl),
                         "ahead": len(_STATE["queue"]), "dup": True}
         # ★ 2026-11-20 用户：「队列里不能超过十个等待的任务」——
         #   满了就直接拒绝并说清楚，不要静默排进去让用户以为接住了。
@@ -795,7 +818,7 @@ def submit(plan_id, source="auto", title="", max_n=0):
                   state="waiting", ahead=ahead)
             _save()
             return {"ok": True, "state": "waiting", "tid": tid,
-                    "ahead": ahead, "queue_len": ahead}
+                    "title": _ttl, "ahead": ahead, "queue_len": ahead}
 
         _STATE["running"] = {"tid": tid, "plan_id": plan_id,
                              "source": item["source"], "title": item["title"],
@@ -3102,6 +3125,35 @@ def revive_candidates(limit=40):
         verify = dict(_STATE.get("verify") or {}) or None
         budget = int(_STATE.get("budget") or 0)
 
+    # ★ 2026-11-24 用户报「任务显示名称和我批准的不是同一个」：
+    #   候选卡原来直接显示 history 里存的旧 title，而拉起后实际执行的是
+    #   计划里**现在**那条动作 —— 两者可能早就不是一回事（计划被合并/改写、
+    #   或当初记的是 a1 而用户批的是 f5）。这里按计划当前状态校准一次，
+    #   保证「卡片上写的」＝「拉起后跑的」。
+    #   只读一次 plans：14 个候选各读一遍 5MB 的 plans.json 会卡住接口。
+    _pmap = {}
+    try:
+        for _p in (_si.load_plans().get("items") or []):
+            if isinstance(_p, dict) and _p.get("id"):
+                _pmap[str(_p.get("id"))] = _p
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读 plans 校准标题失败（退回旧标题）", exc_info=True)
+
+    def _title_of(pid, fallback=""):
+        """卡片标题：已批准的动作 → 待批准动作 → 计划第一条，最后才退回旧标题。"""
+        p = _pmap.get(str(pid or "")) or {}
+        acts = [a for a in (p.get("actions") or []) if isinstance(a, dict)]
+        appr = [a for a in acts if str(a.get("status") or "") == "approved"]
+        pool = appr or [a for a in acts
+                        if str(a.get("status") or "") in ("pending", "need_review")] or acts
+        for a in pool:
+            t = str(a.get("title") or "").strip()
+            if t:
+                if appr and len(appr) > 1:
+                    return (t[:46] + "（等 %d 条）" % len(appr))[:120]
+                return t[:120]
+        return str(fallback or "")[:120]
+
     out = []
     seen_plan = set()
     for h in hist:
@@ -3119,7 +3171,7 @@ def revive_candidates(limit=40):
                           "cancelled": "被终止"}.get(st, st),
             "tid": str(h.get("tid") or ""),
             "plan_id": pid,
-            "title": str(h.get("title") or "")[:120],
+            "title": _title_of(pid, h.get("title")),
             "at": str(h.get("at") or ""),
             "done": h.get("done"), "failed": h.get("failed"),
             "error": str(h.get("error") or "")[:200],
@@ -3132,7 +3184,8 @@ def revive_candidates(limit=40):
             "kind_text": "改完还没验证",
             "tid": str(verify.get("tid") or ""),
             "plan_id": str(verify.get("plan_id") or ""),
-            "title": str(verify.get("title") or "")[:120],
+            "title": _title_of(str(verify.get("plan_id") or ""),
+                                verify.get("title")),
             "at": (time.strftime("%m-%d %H:%M:%S",
                                  time.localtime(float(verify.get("at") or 0)))
                    if verify.get("at") else ""),
@@ -3148,7 +3201,8 @@ def revive_candidates(limit=40):
                 "kind_text": "排队中但没在跑",
                 "tid": str(x.get("tid") or ""),
                 "plan_id": str(x.get("plan_id") or ""),
-                "title": str(x.get("title") or "")[:120],
+                "title": _title_of(str(x.get("plan_id") or ""),
+                                   x.get("title")),
                 "at": "",
                 "can_revive": True,
                 "why": "",
@@ -3201,13 +3255,50 @@ def revive(kind="", tid="", plan_id="", limit=0):
     if not pid:
         return {"ok": False, "error": "缺少计划 id，没法重新拉起"}
 
+    # ★ 2026-11-24 用户报「点拉起一直说还有待批准，而且拉起必失败」：
+    #   候选卡上的任务大多是**从没被批准过**的老计划（动作全 pending），
+    #   而「批准」按钮在另一个抽屉里、这条老计划往往已经不在那儿了 ——
+    #   于是形成死循环：拉起 → 回你「先点批准」→ 找不到批准入口 → 再拉起。
+    #   用户点「拉起」本身就是「我要它再跑一次」的明确授权，所以这里代他
+    #   批准 pending 动作；但 **绝不**自动放行 need_review（熔断）动作 ——
+    #   那是护栏拦下的高风险改动，必须人工看一眼。
+    auto_approved = 0
+    try:
+        _r0 = _si.get_plan(pid)
+        _p0 = (_r0 or {}).get("plan") or {}
+        _acts0 = [a for a in (_p0.get("actions") or []) if isinstance(a, dict)]
+        _has_appr = any(str(a.get("status") or "") == "approved" for a in _acts0)
+        _pend = [str(a.get("id")) for a in _acts0
+                 if str(a.get("status") or "") == "pending" and a.get("id")]
+        _need = [a for a in _acts0 if str(a.get("status") or "") == "need_review"]
+        if _acts0 and not _has_appr:
+            if _pend:
+                _ap = _si.approve(
+                    pid, action_ids=_pend,
+                    note="一键拉起：用户主动重新拉起这条任务，代批待批准动作")
+                auto_approved = int((_ap or {}).get("approved") or 0)
+            elif _need:
+                return {"ok": False,
+                        "error": ("这个计划有 %d 条动作被熔断拦下（待人工复核），"
+                                  "不能自动执行 —— 请先在「待批准」里复核放行"
+                                  % len(_need))}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("拉起时代批待批准动作失败（交给 submit 判断）", exc_info=True)
+
     # 重新提交：会检查计划里还有没有可执行的动作，没有就明确报错
     r = submit(pid, source="approved", title="", max_n=0)
     if not isinstance(r, dict):
         r = {"ok": bool(r)}
     if r.get("ok"):
         r.setdefault("mode", "submit")
-        r.setdefault("message", "已重新提交进队列（source=approved，跑完自动重启并验证）")
+        _msg = "已重新提交进队列（source=approved，跑完自动重启并验证）"
+        if auto_approved:
+            _msg = ("已代你批准 %d 条待批准动作，并重新提交进队列"
+                    "（跑完自动重启并验证）" % auto_approved)
+        r.setdefault("message", _msg)
+        r["auto_approved"] = auto_approved
+        # 真实任务名以「这次要执行的动作」为准，别让前端 toast 继续用旧卡片的标题
+        r["title"] = str(r.get("title") or _plan_title(pid) or "")
     return r
 
 

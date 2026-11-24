@@ -201,7 +201,11 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
       jpost(API_R, { kind: c.kind, tid: c.tid, plan_id: c.plan_id })
         .then(function (d) {
           if (d && d.ok === false) { throw new Error(d.error || "拉起失败"); }
-          toast("已拉起：" + String(c.title || "").slice(0, 20), "ok");
+          // ★ 2026-11-24：用后端返回的真实任务名，别再用卡片上的旧标题 ——
+          //   否则「拉起的是 A，跑起来变成 B」，用户会以为拉错了任务。
+          var nm = String((d && d.title) || c.title || "").slice(0, 20);
+          var extra = (d && d.auto_approved) ? ("（已代批 " + d.auto_approved + " 条待批准）") : "";
+          toast("已拉起：" + nm + extra, "ok");
           load();
         })
         .catch(function (e) {
