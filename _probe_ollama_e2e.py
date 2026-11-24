@@ -85,28 +85,34 @@ class Stub(BaseHTTPRequestHandler):
 
 
 def chat(prompt, timeout=150):
+    """每次都用**全新连接**、一次性读完 —— 避免 keep-alive 读到上一个响应的残留。"""
+    import http.client
     body = json.dumps({"messages": [{"role": "user", "content": prompt}],
                        "stream": True, "session_id": "probe-" + prompt[:6]},
                       ensure_ascii=False).encode("utf-8")
-    r = urllib.request.Request("http://127.0.0.1:%d/api/chat" % PORT_APP, data=body,
-                               headers={"Content-Type": "application/json"})
+    conn = http.client.HTTPConnection("127.0.0.1", PORT_APP, timeout=timeout)
+    conn.request("POST", "/api/chat", body,
+                 {"Content-Type": "application/json", "Connection": "close"})
+    resp = conn.getresponse()
+    raw_all = resp.read()
+    conn.close()
     evs, text, errs, notes = [], [], [], []
-    with urllib.request.urlopen(r, timeout=timeout) as resp:
-        for raw in resp:
-            s = raw.decode("utf-8", "ignore").strip()
-            if not s:
-                continue
-            try:
-                ev = json.loads(s)
-            except Exception:
-                continue
-            evs.append(ev)
-            if "error" in ev:
-                errs.append(ev)
-            if ev.get("note"):
-                notes.append(ev["note"])
-            m = ev.get("message")
-            if isinstance(m, dict) and isinstance(m.get("content"), str):
+    for raw in raw_all.split(b"\n"):
+        s_ = raw.decode("utf-8", "ignore").strip()
+        if not s_:
+            continue
+        try:
+            ev = json.loads(s_)
+        except Exception:
+            continue
+        evs.append(ev)
+        if "error" in ev:
+            errs.append(ev)
+        if ev.get("note"):
+            notes.append(ev["note"])
+        m = ev.get("message")
+        if isinstance(m, dict):
+            if isinstance(m.get("content"), str):
                 text.append(m["content"])
     return evs, "".join(text), errs, notes
 
@@ -142,12 +148,29 @@ def main():
                             ("5", "【模型不存在】帮我看看这个"),
                             ("6", "【普通提问】你好")):
             STUB_ROUNDS.clear()
+            time.sleep(2.0)   # 让上一个请求在服务端彻底结束
             print("=== 第 %s 节：%s" % (sec, prompt))
             t0 = time.time()
             try:
                 evs, text, errs, notes = chat(prompt)
                 print("  用时 %.1fs｜事件 %d｜正文 %r" % (time.time() - t0, len(evs), text[:70]))
                 print("  错误事件: %s" % [str(e)[:90] for e in errs])
+                for _e in evs:
+                    _k = list(_e.keys())[0] if _e else "?"
+                    _m = _e.get("message") or {}
+                    if _k == "message":
+                        if _m.get("content_reset"):
+                            print("    [ev] message.content_reset")
+                        elif _m.get("content"):
+                            print("    [ev] message.content=%r" % _m["content"][:50])
+                        else:
+                            print("    [ev] message=%s" % str(_m)[:60])
+                    elif _k == "note":
+                        print("    [ev] note=%r" % str(_e["note"])[:50])
+                    elif _k == "done":
+                        print("    [ev] done.text=%r" % str(_e.get("text"))[:60])
+                    else:
+                        print("    [ev] %s" % _k)
                 print("  备注: %s" % [n[:50] for n in notes])
             except Exception as e:
                 print("  请求异常: %s: %s" % (type(e).__name__, e))

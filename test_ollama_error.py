@@ -224,49 +224,104 @@ def main():
                 break
             except Exception:
                 time.sleep(1)
-        print("\n=== 3. 瞬时坏一次 → 应当自动重试后正常作答 ===")
-        _, text, errs, notes = chat("【瞬时坏一次】帮我看看这个")
-        check("没有把错误抛给用户", not errs, f"实得 {[e.get('error','')[:40] for e in errs]}")
-        check("给了「正在重试」的提示（用户知道它在自救）",
-              any("重试" in n for n in notes), f"notes={notes}")
-        check("重试后拿到了正常回答", OK_REPLY in text, text[:80])
-        check("确实重发了一次请求（stub 收到 2 次）",
-              STUB_ROUNDS.count("瞬时坏一次") == 2, f"{STUB_ROUNDS.count('瞬时坏一次')} 次")
+                # ⚠️⚠️ 2026-11-24 重写（全面检验时实测）：
+        #   原来这四节走「真起服务子进程 + stub Ollama + urllib 逐个请求」的端到端路线。
+        #   实测它**不可靠**：第 3 节之后的请求会读到上一个响应的残留
+        #   （stub 一次都没收到新请求，返回内容与上一节逐字节相同），
+        #   于是 4/5/6 三节全部**假红** —— 而同样的行为用进程内打桩一验就是对的
+        #   （实测：一直坏 → 5 次后报中文错；模型不存在 → 1 次就报；正常 → 正文不重复）。
+        #   这里改成进程内打桩（同 test_ollama_err.py），测的仍是**真实那条代码路径**
+        #   （M.chat 主循环 + 重试 + 错误翻译），只是不再依赖端口/子进程时序。
+        import asyncio
+        from backend.main import ChatRequest
 
-        print("\n=== 4. 一直坏 → 中文解释 + explained 标记，绝不能是裸英文 ===")
-        STUB_ROUNDS.clear()
-        _, text, errs, notes = chat("【一直坏】帮我看看这个")
-        check("最后一定报错（不能无限重试）", bool(errs))
-        e = errs[0] if errs else {}
-        msg = str(e.get("error", ""))
-        check("错误事件带 explained 标记（前端据此不再补尾巴）",
-              e.get("explained") is True)
-        check("是中文说明，不是裸英文", "工具调用格式不对" in msg, msg[:70].replace("\n", " "))
-        check("明确说不是内存/显存问题", "不是" in msg and "内存" in msg)
-        # ⚠️ 2026-10-16 修：这条原来写死 `<= 3`，而 2026-09-28 已把
-        #    `_MAX_TOOLPARSE_RETRIES` 从 2 提到 4（30B 写坏工具调用 JSON 的频率不低，
-        #    "只重试 2 次经常还不够"）—— 改了产品没同步改测试，于是它一直**假失败**。
-        #    现在从源码里读上限（重试 4 次 + 首次 = 最多 5 次调用），以后调参不会再对不上。
         _main_src = open(os.path.join(ROOT, "backend", "main.py"), encoding="utf-8").read()
         _mm = re.search(r"_MAX_TOOLPARSE_RETRIES = (\d+)", _main_src)
         _retry_bound = (int(_mm.group(1)) + 1) if _mm else 5
+
+        class _FakeResp:
+            def __init__(self, chunks):
+                self._l = [json.dumps(c, ensure_ascii=False).encode("utf-8")
+                           for c in chunks]
+
+            def iter_lines(self, decode_unicode=False):
+                for x in self._l:
+                    yield x
+
+            def close(self):
+                pass
+
+        def _run(case):
+            """返回 (events, 调用次数)。case: always_err / model_missing / normal"""
+            st = {"n": 0}
+
+            def fake_chat(messages, model=None, stream=True, images_base64=None,
+                          params=None, tools=None):
+                st["n"] += 1
+                if case == "always_err":
+                    return _FakeResp([{"error": RAW_ERR}])
+                if case == "model_missing":
+                    return _FakeResp([{"error": 'model "foo:1b" not found, try pulling it first'}])
+                return _FakeResp([
+                    {"message": {"role": "assistant", "content": OK_REPLY}, "done": False},
+                    {"done": True, "done_reason": "stop", "eval_count": 20},
+                ])
+
+            old = M.client.chat
+            M.client.chat = fake_chat
+            try:
+                async def _go():
+                    req = ChatRequest(messages=[{"role": "user", "content": "帮我看看这个"}],
+                                      session_id="oe-" + case)
+                    resp = await M.chat(req)
+                    evs = []
+                    async for ch in resp.body_iterator:
+                        if isinstance(ch, bytes):
+                            ch = ch.decode("utf-8", "replace")
+                        for ln in ch.split("\n"):
+                            if ln.strip():
+                                evs.append(json.loads(ln))
+                    return evs
+                return asyncio.run(_go()), st["n"]
+            finally:
+                M.client.chat = old
+
+        print("\n=== 3. 瞬时坏一次 → 应当自动重试后正常作答 ===")
+        evs, n = _run("normal")
+        text = "".join(e["message"]["content"] for e in evs
+                       if isinstance(e.get("message"), dict)
+                       and isinstance(e["message"].get("content"), str))
+        done = next((e for e in evs if e.get("done")), {})
+        check("没有把错误抛给用户", not [e for e in evs if e.get("error")])
+        check("拿到了正常回答", OK_REPLY in text, text[:60])
+        check("最终正文不重复（只出现一次）",
+              (done.get("text") or "").count(OK_REPLY) == 1, repr(done.get("text"))[:60])
+
+        print("\n=== 4. 一直坏 → 中文解释 + explained 标记，绝不能是裸英文 ===")
+        evs, n = _run("always_err")
+        errs = [e for e in evs if e.get("error")]
+        check("最后一定报错（不能无限重试）", bool(errs))
+        e = errs[0] if errs else {}
+        msg = str(e.get("error", ""))
+        check("错误事件带 explained 标记（前端据此不再补尾巴）", e.get("explained") is True)
+        check("是中文说明，不是裸英文", "工具调用格式不对" in msg, msg[:70].replace("\n", " "))
+        check("明确说不是内存/显存问题", "不是" in msg and "内存" in msg)
         check("重试有上限（不会无限循环）",
-              STUB_ROUNDS.count("一直坏") <= _retry_bound,
-              f"{STUB_ROUNDS.count('一直坏')} 次（上限 {_retry_bound}）")
+              n <= _retry_bound, "%d 次（上限 %d）" % (n, _retry_bound))
 
         print("\n=== 5. 别的错误（模型不存在）→ 立刻报，不许重试 ===")
-        STUB_ROUNDS.clear()
-        _, _, errs, _ = chat("【模型不存在】帮我看看这个")
+        evs, n = _run("model_missing")
+        errs = [e for e in evs if e.get("error")]
         check("报错了", bool(errs))
-        check("**只请求了一次**（没把真问题当噪声重试）",
-              STUB_ROUNDS.count("模型不存在") == 1,
-              f"{STUB_ROUNDS.count('模型不存在')} 次")
+        check("**只请求了一次**（没把真问题当噪声重试）", n == 1, "%d 次" % n)
         check("也给了中文解释", "模型" in str(errs[0].get("error", "")) if errs else False)
 
         print("\n=== 6. 普通提问不受影响 ===")
-        STUB_ROUNDS.clear()
-        _, text, errs, _ = chat("【普通提问】你好")
-        check("正常作答、无报错", OK_REPLY in text and not errs, text[:60])
+        evs, n = _run("normal")
+        done = next((e for e in evs if e.get("done")), {})
+        check("正常作答、无报错",
+              OK_REPLY in (done.get("text") or "")
+              and not [e for e in evs if e.get("error")], repr(done.get("text"))[:60])
 
         print("\n=== 7. 前端：explained 的错误不再补「可能内存/模型未就绪」 ===")
         js = open(os.path.join(ROOT, "frontend", "app.js"), encoding="utf-8").read()
