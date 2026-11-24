@@ -126,8 +126,15 @@ print("\n【三】端到端：报了这个错，应用要自动重试并最终�
 events, state = asyncio.run(run_once())
 notes = [e["note"] for e in events if e.get("note")]
 done = next((e for e in events if e.get("done")), {})
-check("自动重试了（第 1 次失败 → 第 2 次成功）", state["n"] == 2,
+# ⚠️ 2026-11-24 修（全面检验时实测）：调用次数**不一定**是 2 ——
+#   若开着「深度询问」，模型这一轮没调 ask_user 时还会**退回一轮**让它先问问题
+#   （代码层兜底），实测就是 3 次。这条守的是「报错后确实自动重试、并最终拿到正文」，
+#   不是死抠次数。同时新增一条：退回一轮不许让正文重复（那是真 bug，已修）。
+check("自动重试了（第 1 次失败后确实又调了一次）", state["n"] >= 2,
       "调用次数=%d" % state["n"])
+check("退回一轮时正文不重复（撤回上一轮）",
+      (done.get("text") or "").count("这是重试后的正常回答。") == 1,
+      "正文=%r" % done.get("text"))
 check("给用户的中途提示是中文且不吓人",
       any("自动重试" in n for n in notes), notes[:2])
 check("没有把英文原文直接丢给用户",

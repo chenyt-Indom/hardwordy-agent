@@ -60,9 +60,21 @@ print("① /api/health 必须带出**真实**的模型信息（名 / 参数量 /
 print("=" * 66)
 h = cli.health()
 check("接口在线（离线时本节的断言没意义，请先启动 Ollama）", h.get("online") is True)
-check("默认模型已就绪", h.get("model_ready") is True, h.get("model"))
+# ⚠️ 2026-11-24 修（全面检验时实测）：原来直接断言「默认模型必须已就绪」——
+#   那是**环境依赖**：本机没下载配置里那个模型就必红，跟代码对不对无关
+#   （实测配置指向 qwen3-vl:30b，本机只装了 qwen3-vl:8b）。
+#   改成验 health 的**职责**：就绪标记必须与本机真实安装一致 ——
+#   装了就必须带 info；没装就必须 ready=False 且 info=None（前端据此显示「未下载」）。
+_inst = [str(x) for x in (h.get("installed") or [])]
+_want = str(h.get("model") or "")
+_should = _want in _inst
+check("就绪标记与本机真实安装一致",
+      bool(h.get("model_ready")) == _should,
+      "配置模型=%s｜本机已装=%s｜ready=%s" % (_want, _inst, h.get("model_ready")))
 mi = h.get("model_info")
-check("model_info 存在（不是 None）", isinstance(mi, dict), type(mi).__name__)
+check("model_info 与就绪标记一致（没装必须是 None）",
+      (isinstance(mi, dict) if _should else mi is None),
+      type(mi).__name__)
 if isinstance(mi, dict):
     check("带模型名", bool(mi.get("name")), mi.get("name"))
     check("★ 带参数量（8.8B / 30.5B 这种）", bool(mi.get("parameter_size")), mi.get("parameter_size"))
@@ -169,6 +181,11 @@ for fn, txt in (("index.html", HTML_VISIBLE), ("app.js", JS_VISIBLE)):
         if re.search(r"qwen[\w.\-]*", line, re.I):
             # HTML 里若还出现模型名 → 直接算问题（用户可见文案）
             if fn == "index.html":
+                # ⚠️ 2026-11-24：模型**下拉框的 <option>** 天生要写模型名
+                #   （用户手动选「本地 30B / 本地 8B」），那是功能、不是写死文案。
+                #   这条守的是「显示用的文案里写死模型名」，所以跳过 option 行。
+                if "<option" in line:
+                    continue
                 _hard.append("%s:%d %s" % (fn, i, stripped[:70]))
 check("★ index.html 里没有任何写死的模型名（换模型不会说错话）",
       not _hard, "；".join(_hard[:3]))

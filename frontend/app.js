@@ -307,19 +307,15 @@
     const refreshBadge = () => {
       try { refreshTopBadges(); } catch (e) { /* 忽略 */ }
     };
-    // 1) 自定义事件（featpanel.js 收到 SSE 后 dispatchEvent 转发）
+    // 1) 自定义事件（页面内其它模块 dispatchEvent("featradar") 时刷新红点）
     window.addEventListener("featradar", refreshBadge);
-    // 2) 直接接 SSE：只在页面还没有别的 EventSource 连这个地址时才建，
-    //    避免和 featpanel.js 重复连接（重复连接会让后端多推一份）。
-    if (typeof EventSource === "function") {
-      try {
-        const es = new EventSource("/api/featradar/stream");
-        es.addEventListener("featradar", refreshBadge);
-        es.addEventListener("message", refreshBadge);
-        // 连接出错时静默关闭，不刷控制台红；下次刷新页面会重连
-        es.addEventListener("error", () => { try { es.close(); } catch (e) { /* 忽略 */ } });
-      } catch (e) { /* 接口未就绪：忽略 */ }
-    }
+    // 2) ★ 2026-11-24 删掉这条死连接（全面检验时实测）：
+    //    原来这里 `new EventSource("/api/featradar/stream")`，但后端**从来没有**
+    //    这个 SSE 路由 —— 实测 GET /api/featradar/stream 返回 405（被
+    //    /api/featradar/{iid} 的动态路由吞掉），featpanel.js 里也没有任何
+    //    dispatchEvent("featradar")。结果：每次打开页面白打一次 405、连上即 error
+    //    关闭，属于纯死代码。红点本来就有 60 秒轮询兜底（见上面 setInterval）。
+    //    将来真要实时推送：后端先加 SSE 路由，再回这里接，别先连。
   })();
 
   // ---------- 自由查看（2026-11-12 用户要求）----------
@@ -9310,6 +9306,14 @@
           }
           /* 🔒END:stream-error-order */
           if (obj.message) {
+            if (obj.message.content_reset) {
+              // 后端「退回一轮」时要求撤回上一轮已经流出去的正文（深度询问没问问题 /
+              // 要图却没画这两处会退回重来）。不清的话模型第二轮再答一遍，
+              // 气泡里就是同一段话重复两遍（2026-11-24 实测复现）。
+              // 收尾的 __end 仍以服务端正文为准，这里只保证中间过程不闪重复。
+              answer = "";
+              try { paintAnswer(true); } catch (e) { /* 重绘失败不影响 */ }
+            }
             if (obj.message.thinking_reset) {
               // 后端因"思考吃满了输出空间"而加长上限重试：上一轮的思考已经作废。
               // 必须把面板和缓冲都清空 —— 否则新一轮的思考会直接接在旧的后面，

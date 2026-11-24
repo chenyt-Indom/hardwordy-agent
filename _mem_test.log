@@ -1,0 +1,48 @@
+记忆提炼调用失败（model=qwen3-vl:8b, budget=8000）
+Traceback (most recent call last):
+  File "D:\local-multimodal-src\backend\main.py", line 2231, in _llm_extract
+    resp = client.chat([{"role": "user", "content": prompt}], model=model,
+                       stream=False, params=params)
+  File "D:\local-multimodal-src\backend\ollama_client.py", line 220, in chat
+    return self._req("POST", "/api/chat", json=payload)
+           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\local-multimodal-src\backend\ollama_client.py", line 29, in _req
+    raise OllamaError(f"Ollama 返回错误 {resp.status_code}: {detail}")
+backend.ollama_client.OllamaError: Ollama 返回错误 500: {"error":"an error was encountered while running the model: read tcp 127.0.0.1:50427-\u003e127.0.0.1:57334: wsarecv: An existing connection was forcibly closed by the remote host."}
+==================================================================
+长期记忆提炼口径验证（临时数据目录：C:\Users\19853\AppData\Local\Temp\mm_mem_test_lyasgrb5）
+==================================================================
+
+合成对话里放了：
+  A 餐厅评分（一次性查询结果）  ← 不该记
+  B edit_office 用法（本应用操作说明）← 不该记
+  C 妹妹明年高考 + 寒假想学 Rust  ← 该记
+  D 回答要先结论后理由            ← 该记
+
+正在跑提炼（模型 qwen3-vl:8b，可能要 1~4 分钟）…
+
+==================================================================
+模型提炼出的内容：
+==================================================================
+（空 —— 说明提炼被截断，是另一个问题）
+
+==================================================================
+逐项判定
+==================================================================
+  [OK] 没有记入「4.7」（餐厅评分数字）
+  [OK] 没有记入「人均」（人均消费）
+  [OK] 没有记入「第二、三饭堂」（一次性查到的店名）
+  [OK] 没有记入「西苑食堂」（一次性查到的店名）
+  [OK] 没有记入「edit_office」（本应用的操作说明）
+  [OK] 没有记入「生成文库」（本应用的操作说明）
+  [OK] 没有记入「步行」（一次性路线信息）
+  [!!] 记下了「妹妹」（身边的人）  相关行：（没找到相关行）
+  [!!] 记下了「寒假 / Rust」（未来意图）  相关行：（没找到相关行）
+  [!!] 记下了回答格式偏好  相关行：（没找到相关行）
+
+==================================================================
+失败 3 项：
+   - 记下了「妹妹」（身边的人）
+   - 记下了「寒假 / Rust」（未来意图）
+   - 记下了回答格式偏好
+==================================================================

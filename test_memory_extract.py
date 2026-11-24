@@ -66,6 +66,20 @@ def main():
     print("=" * 66)
     cfg = config.load_config()
     model = cfg.get("default_model") or "qwen3-vl:8b"
+    # ⚠️ 2026-11-24 修（全面检验时实测）：配置里的 default_model 指向本机**没装**的
+    #   模型时，这个测试会一直等下去（实测 >170 秒既不出结果也不报错）。
+    #   这里退到**已装**的模型 —— 本测试验的是「提炼口径」，用哪个模型不影响结论。
+    try:
+        from backend import ollama_client as _OC
+        _h = _OC.OllamaClient().health()
+        _inst = [str(x) for x in (_h.get("installed") or [])]
+        if _inst and model not in _inst:
+            _cand = [x for x in _inst if "embed" not in x.lower()]
+            if _cand:
+                print("（提示：配置的 %s 本机没装，改用已装的 %s）" % (model, _cand[0]))
+                model = _cand[0]
+    except Exception as _e:                                  # noqa: BLE001
+        print("（提示：查本机已装模型失败，按配置继续：%s）" % _e)
     prompt = M._EXTRACT_PROMPT.format(long=known_long, short="（暂无）", convo=CONVO)
 
     print()

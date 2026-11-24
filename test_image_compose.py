@@ -149,29 +149,37 @@ print()
 print("=" * 66)
 print("【6】★ harmonize 的幅度必须有硬上限（否则就不是「统一风格」而是「整张重画」）")
 print("=" * 66)
+# ⚠️ 2026-11-24 修（全面检验时实测）：这里原来打桩的是**本地** t2i.edit_image，
+#   但 2026-11-08 起「统一风格」已改走**云端** cloud_image.edit（本地 SD 下线），
+#   桩根本没被调用 → 3 条断言全部落空（实测报「实际传给图生图的是 -1.00」）。
+#   现在打桩真实调用点；云端接口没有 strength 参数，夹紧结果只体现在
+#   返回文本的 note 里（「已按 harmonize=0.45 统一风格」），就从那里核对。
+from backend import cloud_image as _ci                      # noqa: E402
 _called = {}
-_orig_edit = t2i.edit_image
+_orig_cloud_edit = _ci.edit
+
+_buf0 = io.BytesIO()
+Image.open(IMGS[0]).save(_buf0, format="PNG")
+import base64 as _b64mod                                    # noqa: E402
+_B64_PNG = _b64mod.b64encode(_buf0.getvalue()).decode("ascii")
 
 
-def _fake_edit(img, prompt, negative_prompt="", steps=None, strength=0.6):
-    _called["strength"] = strength
+def _fake_cloud_edit(prompt, key, image_b64, **kw):
     _called["prompt"] = prompt
-    buf = io.BytesIO()
-    (img if isinstance(img, Image.Image) else Image.open(img)).save(buf, format="PNG")
-    import base64
-    return {"ok": True, "b64": base64.b64encode(buf.getvalue()).decode("ascii")}
+    _called["hit"] = True
+    return [_B64_PNG]
 
 
-t2i.edit_image = _fake_edit
+_ci.edit = _fake_cloud_edit
 try:
     _evh = []
-    T.dispatch("compose_images", {"sources": IMGS[:2], "harmonize": 0.9}, _evh, {})
-    check("harmonize 给 0.9 会被夹到 0.45 以内", _called.get("strength", 9) <= 0.45,
-          "实际传给图生图的是 %.2f" % (_called.get("strength") or -1))
+    _r1 = T.dispatch("compose_images", {"sources": IMGS[:2], "harmonize": 0.9}, _evh, {})
+    check("harmonize 给 0.9 会被夹到 0.45",
+          "harmonize=0.45" in str(_r1), str(_r1)[-90:])
     _called.clear()
-    T.dispatch("compose_images", {"sources": IMGS[:2], "harmonize": 0.3}, _evh, {})
+    _r2 = T.dispatch("compose_images", {"sources": IMGS[:2], "harmonize": 0.3}, _evh, {})
     check("给 0.3 就按 0.3 用（不擅自放大）",
-          abs((_called.get("strength") or 0) - 0.3) < 1e-6, str(_called.get("strength")))
+          "harmonize=0.30" in str(_r2), str(_r2)[-90:])
     check("没给 prompt 时用默认的「统一光线/色调」提示",
           "consistent lighting" in (_called.get("prompt") or ""),
           (_called.get("prompt") or "")[:60])
@@ -179,9 +187,9 @@ try:
     _evn = []
     T.dispatch("compose_images", {"sources": IMGS[:2]}, _evn, {})
     check("★ 默认 harmonize=0 → **完全不重绘**（用户没要求就别动画面）",
-          "strength" not in _called, str(_called))
+          not _called.get("hit"), str(_called))
 finally:
-    t2i.edit_image = _orig_edit
+    _ci.edit = _orig_cloud_edit
 
 print()
 print("=" * 66)

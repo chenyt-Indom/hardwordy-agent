@@ -25,6 +25,21 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 TMP = tempfile.mkdtemp(prefix="mm_inpaint_")
 shutil.copy(os.path.join(ROOT, "config.json"), os.path.join(TMP, "config.json"))
 os.environ["MM_DATA_DIR"] = TMP
+
+# ⚠️ 2026-11-24 修（全面检验时实测）：本文件测的是**本地** inpainting 链路
+#   （打桩 t2i.inpaint / t2i.inpaint_ready），但 config 里 image_backend 默认是
+#   cloud —— _do_edit_image 直接走云端 edits，桩一次都没被调用，
+#   9 条断言全部落空（实测报「没有配置图片 API Key」）。
+#   这里把后端固定成 local，测的才是它声称要测的那条路。
+try:
+    _cfg_p = os.path.join(TMP, "config.json")
+    with open(_cfg_p, encoding="utf-8") as _f:
+        _c = json.load(_f)
+    _c["image_backend"] = "local"
+    with open(_cfg_p, "w", encoding="utf-8") as _f:
+        json.dump(_c, _f, ensure_ascii=False)
+except Exception as _e:                                     # noqa: BLE001
+    print("（提示：没能把 image_backend 改成 local：%s）" % _e)
 sys.path.insert(0, ROOT)
 
 from backend import t2i                    # noqa: E402
@@ -160,8 +175,11 @@ try:
     t2i.inpaint_ready = lambda: False
     out2 = T.dispatch("edit_image", {"prompt": "换蓝", "regions": [[.2, .4, .8, .8]],
                                       "source": fake_png()}, [], {})
+    # ⚠️ 2026-11-24：措辞已改成「本地没装「局部重绘」模型」，断言跟着真实文案走
+    #   （原来卡的是「还没装」三个字，语义其实一样）。
     check("★ 没装重绘模型 → 明确报「需要局部重绘模型」，不假装成功",
-          "局部重绘" in str(out2) and "还没装" in str(out2), str(out2)[:80])
+          "局部重绘" in str(out2) and "模型" in str(out2) and "没装" in str(out2),
+          str(out2)[:80])
 finally:
     t2i.inpaint, t2i.inpaint_ready = _orig_inpaint, _orig_ready
 

@@ -95,8 +95,10 @@ check("edit_image 里真的用了它", "_fit_working_size(" in SRC_T2I
       and "work_w, work_h = _fit_working_size" in SRC_T2I)
 check("改完会**还原成用户原来的尺寸**（不该顺手把人家照片改小）",
       "result = result.resize(orig_size" in SRC_T2I)
+# ⚠️ 2026-11-24：真实写法是 _edit_local 里的 `st = strength or 0.5`，
+#   原来卡的是旧写法字面量。行为不变（默认 0.5）。
 check("默认改动幅度是 0.5（不再是 0.6）",
-      "arguments.get(\"strength\") or 0.5" in SRC_TOOLS)
+      "strength or 0.5" in SRC_TOOLS)
 
 print()
 print("=" * 68)
@@ -124,7 +126,10 @@ check("⚠️ 超分前 unload（实测同时占显存会 OOM → 380 秒）",
       "unload()\n            result, up = upscale_image(result)" in SRC_T2I)
 check("交付尺寸有上限（4096 太大没必要）",
       getattr(t2i, "HD_TARGET_MAX", 0) == 2048, getattr(t2i, "HD_TARGET_MAX", None))
-check("生成工具描述里的耗时说明已按实测更新（≈30 秒）", "实测 37.9s" in SRC_TOOLS)
+# ⚠️ 2026-11-24：改走云端生成后，描述里的耗时口径已从「实测 37.9s」
+#   改成「画一次要几十秒」—— 断言跟着真实文案走，别锁死一个旧数字。
+check("生成工具描述里的耗时说明已按实测更新（画一次要几十秒）",
+      "画一次要几十秒" in SRC_TOOLS)
 
 print()
 print("=" * 68)
@@ -217,16 +222,21 @@ check("⚠️ 弹框之后，工具返回值里有「该不该再问一轮」的
 ui, out = ask(2, "quick")
 check("快速模式问 2 个 → 照样弹框（不设下限，别打扰）", len(ui.calls) == 1)
 
-# 驳回最多 2 次，之后必须放行（否则会死循环）
+# 问不够下限时**最多驳 1 次**，第 2 次必须放行（否则会死循环）
+# ⚠️ 2026-11-24 修（全面检验时实测）：实现已从「驳 2 次」改成「只驳 1 次」——
+#   原因写在 tools.py 里：原来模型问 3 个也被驳两次，两轮下来它干脆放弃 ask_user，
+#   那一轮什么都没问出来（越修越糟）。这里跟着真实设计断言；
+#   且每轮换话题 —— 同一个问题会触发另一条「复问去重」规则（那是另一条断言管的），
+#   实测用同一个问题问 3 次，第 3 次会被去重规则驳掉，看起来像「又驳回来了」。
 T.ask_guard_reset("t-cap")
 outs = []
-for _ in range(3):
+for _q in ("只问一个 A？", "只问一个 B？", "只问一个 C？"):
     ui = _FakeUI()
     outs.append(T._do_ask_user(
-        {"questions": [{"question": "只问一个？"}]},
+        {"questions": [{"question": _q}]},
         {"ask": ui, "ask_mode": "deep", "session": "t-cap"}))
-check("⚠️ 连续驳回最多 2 次，第 3 次必须放行（不会死循环）",
-      outs[0].startswith("⚠️") and outs[1].startswith("⚠️") and not outs[2].startswith("⚠️"),
+check("⚠️ 问不够下限最多驳 1 次，第 2 次必须放行（不会死循环）",
+      outs[0].startswith("⚠️") and not outs[1].startswith("⚠️"),
       [o[:12] for o in outs])
 check("下限常量与目标一致（5）", getattr(T, "ASK_DEEP_MIN", 0) == 5,
       getattr(T, "ASK_DEEP_MIN", None))
@@ -310,8 +320,11 @@ check("t2i 里有 free_ollama_vram()", "def free_ollama_vram" in _src_t2i)
 check("文生图加载前会调用它", _src_t2i.count("free_ollama_vram()") >= 3,
       "共 %d 处（定义 1 + 文生图 1 + 图生图 1）" % _src_t2i.count("free_ollama_vram()"))
 check("它按 keep_alive=0 让 Ollama 卸载", '"keep_alive": 0' in _src_t2i)
+# ⚠️ 2026-11-24：兜底从 `pass # Ollama 没开 / 模型没装` 改成
+#   `logger.debug(...)  # Ollama 没开 / 模型没装：忽略，别把画图搞挂`，
+#   行为等价（都不往上抛），断言跟着真实文本走。
 check("卸载失败不会把画图搞挂（有 except 兜底）",
-      _src_t2i.count("pass                      # Ollama 没开 / 模型没装") >= 1)
+      "Ollama 没开 / 模型没装" in _src_t2i)
 
 print()
 print("⑩ ★ 不许再对「微改能精确改元素」做没验证过的承诺")
@@ -390,8 +403,10 @@ check("落盘是原子写（先写 .tmp 再 os.replace）",
 check("ctx 里透出未受指代判断约束的 last_image",
       '"last_image":' in _src_main)
 _src_tools2 = open(os.path.join(ROOT, "backend", "tools.py"), encoding="utf-8").read()
+# ⚠️ 2026-11-24：实现里先把 context 存成 ctx（`ctx = context or {}`），
+#   再用 `ctx.get("last_image")` —— 行为不变，只是不再出现 `context or {}).get(...)` 字面量。
 check("微改工具在本轮无附件时会退一步用 last_image",
-      'context or {}).get("last_image")' in _src_tools2)
+      'ctx.get("last_image")' in _src_tools2)
 check("彻底没图时仍明确报错（不静默降级）",
       "无法确定要修改的图片" in _src_tools2)
 

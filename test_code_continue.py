@@ -217,9 +217,16 @@ def make_rounds_chat():
                 {"message": {"content": WRAP}, "done": False},
                 {"done": True, "done_reason": "stop", "eval_count": 20},
             ])
+        # ⚠️ 2026-11-24 修（全面检验时实测）：原来每轮都返回**完全相同**的
+        #   get_time 调用，结果第 4 轮就撞上 no-progress 提前收手 ——
+        #   那是另一个更早的出口（已由 test_no_progress.py 单独覆盖），
+        #   于是根本走不到「轮次用满」这条分支，本组 4 条断言全部落空
+        #   （实测「收尾轮 0 次」）。这里让每轮交替两个无参工具，
+        #   指纹不再连续相同，才能真正把轮次跑满、测到收尾轮。
+        _name = "get_time" if state["n"] % 2 else "workspace_list"
         return FakeResp([
             {"message": {"content": "", "tool_calls": [
-                {"function": {"name": "get_time", "arguments": {}}}]}, "done": False},
+                {"function": {"name": _name, "arguments": {}}}]}, "done": False},
             {"done": True, "done_reason": "stop", "eval_count": 5},
         ])
 

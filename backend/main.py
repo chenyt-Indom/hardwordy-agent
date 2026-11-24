@@ -817,15 +817,27 @@ def _empty_reply_fallback(text: str, session: str = "", model: str = "") -> str:
         #    原来写 `actlog.log(...)` 会抛 AttributeError，被下面的 except 吞掉 →
         #    空回复兜底**从来没被记录过**，排查时看不到任何痕迹。
         #    这里做兼容：优先用 `record`，没有就退回 `add`，再没有就写日志。
-        _rec = getattr(actlog, "record", None) or getattr(actlog, "add", None)
+        # ⚠️⚠️ 2026-11-24 修（全面检验时实测抓到）：
+        #   actlog.record 的真实签名是
+        #     record(session, name, args=None, ok=True, result="", note="", evidence=None)
+        #   而这里原来写的是
+        #     _rec("empty_reply_fallback", detail=..., session=..., model=..., result="fail")
+        #   —— 第一个位置参数其实是 **session**，`detail` / `model` 两个关键字根本不存在，
+        #   于是**每次**都抛 TypeError，被下面的 except 吞成一句 warning：
+        #   「记录空回复兜底到 actlog 失败（不影响回复）」。
+        #   后果：空回复兜底这条路径**从来没进过账本**，自我反思/无幽灵率都看不到它。
+        #   现在按真实签名调用，并只放真实存在的字段。
+        _rec = getattr(actlog, "record", None)
         if callable(_rec):
             _rec(
+                session or "default",
                 "empty_reply_fallback",
-                detail=("模型返回空回复（strip 后无实质内容），已替换为占位回复。"
-                        "原始内容=%r 长度=%d" % (str(text or ""), len(str(text or "")))),
-                session=session or "",
-                model=model or "",
+                {"model": model or "", "chars": len(str(text or ""))},
+                ok=False,
                 result="fail",
+                note=("模型返回空回复（strip 后无实质内容），已替换为占位回复。"
+                      "原始内容=%r 长度=%d"
+                      % (str(text or ""), len(str(text or "")))),
             )
         else:
             logger.warning(
@@ -9244,6 +9256,12 @@ async def chat(req: ChatRequest,
                 break
             # 工具调用中间轮不再重复附图片
             attach_images = model_images if _round == 0 else None
+            # ★ 2026-11-24：记下本轮开始前正文有多长。
+            #   「深度询问没调 ask_user」/「要图却没画」这两处会**退回一轮**重来，
+            #   而上一轮的正文已经流式发给前端了 —— 不撤回的话，模型第二轮再答一遍，
+            #   用户看到的就是同一段话**重复两遍**（实测 test_ollama_err 端到端复现：
+            #   最终正文='这是重试后的正常回答。这是重试后的正常回答。'）。
+            _round_text0 = len(final_text)
             # ⚠️ 每轮发请求前**再核一次预算**：整轮开始前只裁过一次历史，
             #    但工具轮是"越跑越长"的 —— 每轮都会把工具结果追加进 working
             #    （网页正文一条就 9000 字 ≈ 6700 token），多跑两轮必然顶爆窗口。
@@ -9709,6 +9727,11 @@ async def chat(req: ChatRequest,
                         and _round + 1 < _max_rounds):
                     _ask_nudge_done = True
                     logger.warning("[ask] 深度模式但本轮没调用 ask_user，退回一轮")
+                    # ★ 2026-11-24：先撤回这一轮已经流给用户的正文（见 _round_text0 处的说明）
+                    if len(final_text) > _round_text0:
+                        final_text = final_text[:_round_text0]
+                        yield json.dumps({"message": {"content_reset": True}},
+                                         ensure_ascii=False) + "\n"
                     yield json.dumps({"note": (
                         "现在是深度询问模式，我让它先把关键问题问清楚。")}) + "\n"
                     working.append({"role": "user", "content": (
@@ -9732,6 +9755,11 @@ async def chat(req: ChatRequest,
                     _img_nudge_done = True
                     logger.warning("[image] 本轮未产出图片（已用工具=%s），退回一轮",
                                    sorted(used_tools))
+                    # ★ 2026-11-24：同样撤回上一轮正文，避免同一段话重复两遍
+                    if len(final_text) > _round_text0:
+                        final_text = final_text[:_round_text0]
+                        yield json.dumps({"message": {"content_reset": True}},
+                                         ensure_ascii=False) + "\n"
                     yield json.dumps({"note": "还没看到图片，我让它真正画出来。"}) + "\n"
                     working.append({"role": "user", "content": (
                         "（系统提示）用户要的是**看得见的图片**，你刚才只写了文字描述。"

@@ -1,0 +1,58 @@
+  [stub] key='' 第1次
+服务已就绪
+
+=== 第 3 节：【瞬时坏一次】帮我看看这个
+  [stub] key='瞬时坏一次' 第1次
+  [stub] key='瞬时坏一次' 第2次
+  [stub] key='瞬时坏一次' 第3次
+  用时 4.0s｜事件 8｜正文 '我来看一下。好的，这是重试之后正常给出的回答。好的，这是重试之后正常给出的回答。'
+  错误事件: []
+  备注: ['模型这次把调用格式写错了，正在自动重试（第 1 次）…', '现在是深度询问模式，我让它先把关键问题问清楚。']
+  stub 收到: ['瞬时坏一次', '瞬时坏一次', '瞬时坏一次']
+
+=== 第 4 节：【一直坏】帮我看看这个
+  [stub] key='瞬时坏一次' 第1次
+  [stub] key='瞬时坏一次' 第2次
+  [stub] key='瞬时坏一次' 第3次
+  用时 0.1s｜事件 8｜正文 '我来看一下。好的，这是重试之后正常给出的回答。好的，这是重试之后正常给出的回答。'
+  错误事件: []
+  备注: ['模型这次把调用格式写错了，正在自动重试（第 1 次）…', '现在是深度询问模式，我让它先把关键问题问清楚。']
+  stub 收到: ['瞬时坏一次', '瞬时坏一次', '瞬时坏一次']
+
+=== 第 5 节：【模型不存在】帮我看看这个
+  [stub] key='一直坏' 第1次
+  [stub] key='一直坏' 第2次
+  [stub] key='一直坏' 第3次
+  [stub] key='一直坏' 第4次
+  [stub] key='一直坏' 第5次
+  用时 0.1s｜事件 6｜正文 ''
+  错误事件: ['{\'error\': "模型这一次生成的**工具调用格式不对**（JSON 里的引号或换行没写对），所以这一轮没执行成功。\\n**这不是你的操作问题，也不是内存/显存不够** —— ']
+  备注: ['模型这次把调用格式写错了，正在自动重试（第 1 次）…', '模型这次把调用格式写错了，正在自动重试（第 2 次）…', '模型这次把调用格式写错了，正在自动重试（第 3 次）…', '模型这次把调用格式写错了，正在自动重试（第 4 次）…']
+  stub 收到: ['一直坏', '一直坏', '一直坏', '一直坏', '一直坏']
+
+=== 第 6 节：【普通提问】你好
+  [stub] key='一直坏' 第1次
+  [stub] key='一直坏' 第2次
+  [stub] key='一直坏' 第3次
+  [stub] key='一直坏' 第4次
+  [stub] key='一直坏' 第5次
+  用时 0.3s｜事件 6｜正文 ''
+  错误事件: ['{\'error\': "模型这一次生成的**工具调用格式不对**（JSON 里的引号或换行没写对），所以这一轮没执行成功。\\n**这不是你的操作问题，也不是内存/显存不够** —— ']
+  备注: ['模型这次把调用格式写错了，正在自动重试（第 1 次）…', '模型这次把调用格式写错了，正在自动重试（第 2 次）…', '模型这次把调用格式写错了，正在自动重试（第 3 次）…', '模型这次把调用格式写错了，正在自动重试（第 4 次）…']
+  stub 收到: ['一直坏', '一直坏', '一直坏', '一直坏', '一直坏']
+
+===== 服务日志（最后 40 行）=====
+  WARNING:  [tool-parse] 模型工具调用 JSON 写坏，自动重试 1/4：invalid character '\n' in string literal
+  WARNING:  [ask] 深度模式但本轮没调用 ask_user，退回一轮
+  WARNING:  [tool-parse] 模型工具调用 JSON 写坏，自动重试 1/4：invalid character '\n' in string literal
+  WARNING:  [ask] 深度模式但本轮没调用 ask_user，退回一轮
+  WARNING:  [tool-parse] 模型工具调用 JSON 写坏，自动重试 1/4：invalid character '\n' in string literal
+  WARNING:  [tool-parse] 模型工具调用 JSON 写坏，自动重试 2/4：invalid character '\n' in string literal
+  WARNING:  [tool-parse] 模型工具调用 JSON 写坏，自动重试 3/4：invalid character '\n' in string literal
+  WARNING:  [tool-parse] 模型工具调用 JSON 写坏，自动重试 4/4：invalid character '\n' in string literal
+  WARNING:  [ollama-error] invalid character '\n' in string literal
+  WARNING:  [tool-parse] 模型工具调用 JSON 写坏，自动重试 1/4：invalid character '\n' in string literal
+  WARNING:  [tool-parse] 模型工具调用 JSON 写坏，自动重试 2/4：invalid character '\n' in string literal
+  WARNING:  [tool-parse] 模型工具调用 JSON 写坏，自动重试 3/4：invalid character '\n' in string literal
+  WARNING:  [tool-parse] 模型工具调用 JSON 写坏，自动重试 4/4：invalid character '\n' in string literal
+  WARNING:  [ollama-error] invalid character '\n' in string literal

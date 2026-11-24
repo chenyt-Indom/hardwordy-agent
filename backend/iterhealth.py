@@ -109,21 +109,33 @@ def _c_failattr(days=30):
                          "近 %d 天没有失败记录" % int(days),
                          "跑一轮自迭代后开始积累；一直为 0 说明失败路径没被记到")
         n = len(rows)
-        tb = sum(1 for r in rows if str(r.get("traceback") or "").strip())
+        # ⚠️ 2026-11-24 修（实测误报，用户要求「全面检验」时查出）：
+        #   原来分母是**全部**失败记录，可 score_regress / loop_regress 是
+        #   「评分退步」——它们不是异常，天然没有 traceback。
+        #   实测 31 条里 18 条 score_regress + 1 条 loop_regress，
+        #   把堆栈覆盖率从真实的 11/12（92%）压到 11/31（35%），
+        #   于是「失败归因表」长期挂 DEGRADE，用户看到「1 项需要关注」
+        #   却没有任何毛病可修 —— 属于尺子本身量错。
+        #   现在分母只算**异常/解析类**（真会抛堆栈的那些）。
+        _NO_TB = ("score_regress", "loop_regress")
+        _tb_rows = [r for r in rows if str(r.get("kind") or "") not in _NO_TB]
+        n_tb_base = len(_tb_rows)
+        tb = sum(1 for r in _tb_rows if str(r.get("traceback") or "").strip())
         ctx = sum(1 for r in rows if str(r.get("context") or "").strip())
         vague = sum(1 for r in rows if r.get("too_vague"))
         rb = sum(1 for r in rows if str(r.get("why_rollback") or "").strip())
         lesson = sum(1 for r in rows if str(r.get("lesson") or "").strip())
-        tb_rate = tb / float(n) if n else 0.0
+        tb_rate = tb / float(n_tb_base) if n_tb_base else 1.0
         vague_rate = vague / float(n) if n else 0.0
-        detail = ("%d 条｜堆栈 %d｜上下文 %d｜回滚原因 %d｜教训 %d"
-                  % (n, tb, ctx, rb, lesson))
-        # 判定：一半以上带堆栈、且写得笼统的不超过 3 成，才算「详细」
+        detail = ("%d 条｜堆栈 %d/%d（异常类）｜上下文 %d｜回滚原因 %d｜教训 %d"
+                  % (n, tb, n_tb_base, ctx, rb, lesson))
+        # 判定：异常类里一半以上带堆栈、且写得笼统的不超过 3 成，才算「详细」
         if tb_rate < 0.5 or vague_rate > 0.3:
             return _item("failattr", "失败归因表", DEGRADE, detail,
-                         "详细度不足：堆栈覆盖 %.0f%%，笼统原因占 %.0f%%"
-                         % (tb_rate * 100, vague_rate * 100),
-                         "检查调用处有没有传 traceback_text / why_failed 写太短")
+                         "详细度不足：堆栈覆盖 %.0f%%（异常类 %d 条中 %d 条有堆栈），"
+                         "笼统原因占 %.0f%%"
+                         % (tb_rate * 100, n_tb_base, tb, vague_rate * 100),
+                         "检查调用处有没有传 traceback / why_failed 写太短")
         return _item("failattr", "失败归因表", OK, detail,
                      "高频坑：%s"
                      % ("、".join("%s×%d" % (x.get("kind_zh"), x.get("count"))

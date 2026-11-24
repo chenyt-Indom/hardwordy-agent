@@ -2116,6 +2116,20 @@ def _line_anchor_span(text: str, find: str, replace: str = ""):
     end = offs[j + 1] if j + 1 < len(offs) else len(text)
     seg = text[start:end]
     new_seg = str(replace or "")
+    # ★ 2026-11-24 修（实测：降级路径**必然**失败）：
+    #   模型给的 replace 常常不带缩进，而锚点段本身在函数体内、带 4 空格缩进 ——
+    #   整段替换后缩进就丢了，写盘前语法校验直接判
+    #   「expected an indented block」→ 降级虽然定位成功却写不进去，
+    #   等于「锚点没命中的兜底」这条路径白做（实测复现：find 少缩进时必失败）。
+    #   只在**明确安全**时补：replace 所有非空行都没有前导空白，且锚点首行有缩进
+    #   → 统一加上同样的缩进。只要 replace 里任一行本来带缩进就一律不动（不猜）。
+    if new_seg.strip():
+        _seg_lines = seg.split("\n")
+        _first = _seg_lines[0] if _seg_lines else ""
+        _ind = _first[:len(_first) - len(_first.lstrip())]
+        _rl = new_seg.split("\n")
+        if _ind and all((ln == ln.lstrip()) for ln in _rl if ln.strip()):
+            new_seg = "\n".join((_ind + ln) if ln.strip() else ln for ln in _rl)
     # 段尾带换行时，替换内容也得带 —— 否则会把下一行粘到同一行上。
     if seg.endswith("\n") and not new_seg.endswith("\n"):
         new_seg += "\n"
@@ -4979,7 +4993,14 @@ def _edit_local(arguments, ui_events, context):
             return ("错误：本地没装「局部重绘」模型（%s）。请让用户去 🎨 里下载 "
                     "SDXL Inpaint，或切到云端微改。" % t2i.inpaint_model_dir())
         st = strength if strength >= 0.5 else 0.85
-        r = t2i.inpaint(init, ", ".join([prompt_en, style_pos]).strip(", "),
+        # ⚠️ 2026-11-24 修（全面检验时实测）：局部重绘时**没告诉模型「圈外不动」**。
+        #   云端那条路有这句（only change the masked area, keep everything outside
+        #   the mask pixel-identical），本地这条路漏了 —— 同一个需求走本地/云端，
+        #   本地更容易把圈外也一起改掉。这里补齐，两边口径一致。
+        _keep_mask = ("only change the masked area, keep everything outside the mask "
+                      "pixel-identical, everything else unchanged")
+        _pro_in = ", ".join(x for x in (prompt_en, _keep_mask, style_pos) if x)
+        r = t2i.inpaint(init, _pro_in,
                         mask=(mask or None), regions=(regions or None), area=area,
                         negative_prompt=negative, steps=t2i.base_steps(), strength=st)
         how = "按指定区域重绘（圈外不动）"
