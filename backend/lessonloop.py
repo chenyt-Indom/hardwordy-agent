@@ -444,6 +444,32 @@ def _first_hit_ts(kind: str, fallback: float) -> float:
     return float(fallback)
 
 
+def _last_recur_ts(kind_zh: str) -> float:
+    """该 kind **最近一次复发**的时间（没有则 0）。
+
+    ⚠️⚠️ 2026-11-25 实测缺陷（观察窗被「无关编辑」清零）：
+    `lesson_hit.json` 里两条教训的首次命中时间被写成了 11-25 01:30:57 ——
+    正是上一次改 lessonloop.py（只是加注释）的文件 mtime，而它们的 first_ts
+    是 11-22。于是 progress 从 62 小时应有的 1.0 掉到 0.158，教训落地率
+    0.397 → 0.311，RSI 79.0 → 76.8。
+    根因：`_first_hit_ts` 的 fallback 用了 `max(edited, t0)`，而 edited 是
+    文件 mtime —— 自迭代每次动这些文件，观察窗就归零，进度永远攒不起来。
+    正确起点应取「最后一次坏事发生之后」：教训记录、最近一次复发、
+    探针首次命中，三者的晚者；**不掺文件 mtime**。
+    """
+    k = str(kind_zh or "").strip()
+    if not k:
+        return 0.0
+    best = 0.0
+    for r in _read_jsonl(_fail_attr_path()):
+        kz = str(r.get("kind_zh") or "").strip()
+        kk = str(r.get("kind") or "").strip()
+        if k not in (kz, kk):
+            continue
+        best = max(best, _num_ts(r.get("ts") or r.get("iso")))
+    return best
+
+
 def _clear_hit_ts(kind: str) -> None:
     """修复消失 / 复发 → 丢掉首次命中时间，下次重新计时（不能拿旧进度冒充）。"""
     st = _hit_state()
@@ -484,7 +510,28 @@ def judge(it: dict) -> dict:
     # ★★ 2026-11-25 修：复发只从「修复落地之后」算起。
     #   修复之前的复发正是这条教训的来源，算进去会把每条教训永久钉成 pending
     #   （实测「跑分退步」17 次全是修复前的旧账）。起点与观察窗保持一致。
-    _since = (max(_first_hit_ts(kind, max(edited, t0)), t0) if hit else t0)
+    #   ⚠️ 复发起点仍保留 edited（保守：宁可少算复发），但**观察窗起点不用它** ——
+    #   见下面 base 的取法。两者混用一个变量正是本轮的 bug 源。
+    #    ⚠️ 2026-11-25 二次修正：原来这行写
+    #    `_first_hit_ts(kind, max(edited, t0))` —— fallback 里带 mtime，
+    #    会**先把 mtime 持久化进 lesson_hit.json**，后面 base 再读就是脏值。
+    #    现在 _first_hit_ts 只以 t0 兜底（稳定锚点），recur 起点另外用 max 补 edited。
+    _hit0 = _first_hit_ts(kind, t0)
+    # ★★ 2026-11-25 自愈：账本里可能存着**旧代码用 mtime 兜底写入**的假起点。
+    #   判据：该值几乎等于探针文件的最后编辑时间，且明显晚于教训记录时间。
+    #   旧代码正是 `_first_hit_ts(kind, max(edited, t0))`，所以假起点必然 == edited。
+    #   丢掉它改用 t0 是安全的：base 仍取 max(t0, 最近复发)，只要「24 小时未复发」
+    #   才判 fixed —— 那本来就是真 fixed，不存在放宽。
+    #   ⚠️ 必须自愈，否则重启后旧进程写脏的值会被新代码原样沿用（实测反复出现）。
+    if hit and t0 > 0 and abs(_hit0 - edited) < 2.0 and _hit0 > t0 + 2.0:
+        logger.info("观察窗自愈：%s 的首次命中时间 %s 是 mtime 兜底值，改回教训记录时间 %s",
+                    kind, time.strftime("%m-%d %H:%M:%S", time.localtime(_hit0)),
+                    time.strftime("%m-%d %H:%M:%S", time.localtime(t0)))
+        _hit0 = t0
+        _st = _hit_state()
+        _st[kind] = float(t0)
+        _hit_state_save(_st)
+    _since = max(_hit0, t0, edited) if hit else t0
     recur = _recur_after(kind, _since)
     # 探针文件读不到（被占用 / 权限 / 路径变动）＝ **观测失败**，不是「没修」。
     # 单列 unprobed，既不算落地也不算没落地，绝不污染落地率。
@@ -526,9 +573,24 @@ def judge(it: dict) -> dict:
     #    该条件为假 → 跳过观察窗直接判 fixed。实测 12:32 记的教训 12:33 就
     #    判成「已修」，而「未复发」此时只代表「才过了一分钟」—— 假阳性，
     #    会把 RSI 的教训落地率抬虚高。取 max 后，刚记的教训一律先进观察窗。
-    # 起点 = 「探针第一次命中」与「教训记录时间」的晚者（_since 已算好）。
-    # 不再直接用文件 mtime：否则改这个文件里任何别的地方都会把进度清零。
-    base = _since
+    # 起点 = 「教训首次记录」「最近一次复发」「探针首次命中」三者的**晚者**。
+    # ⚠️⚠️ 2026-11-25 实测修正：原来 `base = _since`，而 _since 里含
+    #    `max(edited, t0)` —— edited 是文件 mtime。自迭代每次动这些文件
+    #    （哪怕只是加一行注释），观察窗就被清零：实测两条教训 first_ts 是
+    #    11-22，progress 却只有 0.158，落地率 0.397 → 0.311，RSI 79.0 → 76.8。
+    #    现在完全不掺 mtime：
+    #      · t0        —— 教训首次记录，稳定
+    #      · 最近复发  —— 「最后一次坏事之后」才开始算好
+    #      · hit_ts    —— 探针首次命中（fallback 也改成 t0，不再用 mtime）
+    # ★★ 2026-11-25 终版：**完全不依赖任何命中时间戳**。
+    #   走到这里说明两件事都已成立：探针命中（修复逻辑在代码里）、recur == 0
+    #   （从 _since 起没再复发）。既然如此，「从最后一次坏事之后到现在」这段
+    #   干净的时间就是观察窗，起点 = max(教训记录, 最近一次复发)。
+    #   为什么不用 hit_ts：它只能靠 mtime 兜底写入，而自迭代每次都在改这些
+    #   文件 —— 实测被写成「上一次加注释的时间」，progress 从 1.0 掉到 0.158。
+    #   语义上也不该用它：期间既然没复发，就说明这条失败从记录起就没再出现，
+    #   早一点开始计时并不放宽判定（fixed 仍要求满 24 小时未复发）。
+    base = max(t0, _last_recur_ts(kind))
     elapsed = max(0.0, time.time() - base)
     h1 = OBSERVE_PENDING_HOURS * 3600.0
     h24 = OBSERVE_CONFIRM_HOURS * 3600.0
