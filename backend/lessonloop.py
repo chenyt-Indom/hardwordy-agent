@@ -607,6 +607,42 @@ def _is_probe_row(row: dict) -> bool:
 _RSI_CACHE: dict = {"ts": 0.0, "val": None}
 
 
+# ★★ 2026-11-24 修（用户问「曲线好久没动了，是不是我看错了」的真正根因）：
+#   原来动作成功率只取「最近 400 条」actlog。实测这 400 条横跨 8 天
+#   （11-16 ~ 11-24），而 **11-16 那一天就贡献了 59 条真失败**（当时在批量
+#   跑自动迭代，一天 66 条失败里的 59 条都是那天的）。这堆旧事故永久留在
+#   分母里 → 之后无论怎么改好，成功率都被钉在 0.72~0.73 动不了
+#   （实测 8 天只从 0.725 爬到 0.733，曲线自然是一条平线）。
+#   指标问的是「现在改得动不动」，8 天前的一次批量事故不是当前能力。
+#   改成按**时间**取窗口：默认最近 7 天；样本不足 _RSI_MIN_SAMPLE 条时
+#   回退到最近 400 条 —— 宁可用旧数据，也不能让 3 条样本决定分数。
+#   ⚠️ 这不是为了抬分而藏数据：旧口径的数字照样算出来写进 legacy_400，
+#      samples 里两个口径都能核对。
+_RSI_WINDOW_DAYS = 7
+_RSI_MIN_SAMPLE = 40
+
+
+def _pick_window(all_rows, limit: int = 400):
+    """按时间窗口挑样本；样本太少时回退「最近 N 条」。返回 (rows, 说明)。"""
+    if not all_rows:
+        return [], "空账本"
+    cut = time.time() - _RSI_WINDOW_DAYS * 86400
+    recent = []
+    for r in all_rows:
+        try:
+            t = time.mktime(time.strptime(str(r.get("ts") or ""),
+                                          "%Y-%m-%d %H:%M:%S"))
+        except Exception:                               # noqa: BLE001
+            continue
+        if t >= cut:
+            recent.append(r)
+    if len(recent) >= _RSI_MIN_SAMPLE:
+        return recent, "最近%d天" % _RSI_WINDOW_DAYS
+    return (all_rows[-max(20, limit):],
+            "最近%d条（%d 天内仅 %d 条，样本不足回退）"
+            % (max(20, limit), _RSI_WINDOW_DAYS, len(recent)))
+
+
 def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
     """客观 RSI 指数（0~100）—— 只用可复现账本，**不含 LLM 自评**。
 
@@ -623,7 +659,8 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
     if (cache_sec > 0 and _RSI_CACHE["val"] is not None
             and _now - _RSI_CACHE["ts"] < cache_sec):
         return _RSI_CACHE["val"]
-    rows = _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))[-max(20, limit):]
+    _all_rows = _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))
+    rows, _window = _pick_window(_all_rows, limit)
     # ★ 2026-11-24 修（用户要求：统计不许被测试 / 探针污染）
     #   探针与临时诊断脚本的记录整条排除，并显式报出条数 —— 不静默丢弃。
     # ⚠️ 2026-11-24 修：review_approve 是「用户批准动作」的**审批事件**，
@@ -679,8 +716,10 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
     insufficient = []
     if ok + bad:
         parts.append(("动作成功率", ok / (ok + bad), 0.40,
-                      "%d/%d%s" % (ok, ok + bad,
-                                   ("（另 %d 次护栏拦截，不计入分母）" % gate) if gate else "")))
+                      "%d/%d%s｜口径：%s" % (
+                          ok, ok + bad,
+                          ("（另 %d 次护栏拦截，不计入分母）" % gate) if gate else "",
+                          _window)))
     else:
         insufficient.append("动作成功率")
     if marked:
@@ -705,7 +744,21 @@ def rsi_index(limit: int = 400, cache_sec: float = 60.0) -> dict:
     score = round(100 * sum(p[1] * p[2] for p in parts), 1)
     # 覆盖率：可判定动作 / 全部动作 —— 让「这个分数覆盖了多少记录」可见。
     coverage = round((ok + bad) / float(len(judged) or 1), 3) if judged else 0.0
-    res = {"ok": True, "score": score,
+    # 旧口径（最近 N 条，不分时间）同时算一遍：口径变更前后可核对，
+    # 不让「换了窗口」变成看不见的抬分。
+    _lg_rows = _all_rows[-max(20, limit):]
+    _lg_judged = [r for r in _lg_rows
+                  if not _is_probe_row(r) and r.get("kind") != "review_approve"]
+    _lg_ok = sum(1 for r in _lg_judged
+                 if str(r.get("result") or "").lower() == "ok")
+    _lg_fail = [r for r in _lg_judged
+                if str(r.get("result") or "").lower()
+                in ("fail", "failed", "error")]
+    _lg_bad = len([r for r in _lg_fail if not _is_gate_block(r)])
+    _lg_tot = _lg_ok + _lg_bad
+    legacy = {"ok": _lg_ok, "bad": _lg_bad,
+              "rate": round(_lg_ok / float(_lg_tot), 3) if _lg_tot else None}
+    res = {"ok": True, "score": score, "window": _window, "legacy_400": legacy,
            "parts": [{"name": n, "value": round(v, 3), "weight": w, "detail": d,
                       "insufficient": n in insufficient}
                      for n, v, w, d in parts],
@@ -1486,13 +1539,25 @@ _FAIL_KINDS = (
     ("护栏拦截", ("护栏文件被修改", "熔断", "禁止模型改写", "篡改分类器",
                   "占位式修补", "待人工复核")),
     ("越界写入", ("不在允许范围", "不允许写入", "越界")),
+    # ★ 2026-11-24 实测（归因失效）：最近 7 天 7 条真失败里 6 条被归成
+    #   「回滚（原因未分类）」，于是 rsi_weakest 给出的建议是「先修占比最高的
+    #   那一类」—— 而最高那类就叫「未分类」，等于什么都没说。
+    #   逐条看原文后补齐三类真实存在、但词表里没有的失败：
+    #   · 「LLM 评审拒绝（针对真实 diff）：需求与代码完全对不上」
+    #   · 「【回归】新增失败 1 条」—— 注意中间隔着 】，旧的 '回归新增失败' 命不中
+    #   · 「模型没有改动任何文件（它可能只是说了说）」
+    #   ⚠️ 评审拒绝必须排在「锚点没命中」**前面**：它的原文里会提到
+    #     「apply_patch 加锚点降级」，先判锚点就会把评审拒绝误归成锚点问题。
+    ("评审拒绝（diff 与需求不符）", ("LLM 评审拒绝", "评审拒绝")),
     ("锚点没命中", ("find 在文件里找不到", "find 找不到", "锚点", "不唯一",
                     "未命中", "找不到待替换")),
     ("语法校验失败", ("语法校验失败", "SyntaxError", "语法错误")),
-    ("行为回归失败", ("回归新增失败", "行为回归")),
+    ("行为回归失败", ("回归新增失败", "【回归】新增失败", "行为回归", "回归新增")),
+    ("功能验收失败", ("功能验收", "断言没过", "断言失败")),
     ("模型没给出补丁", ("没有给出任何 patch", "没有给出 patch", "未给出合法 JSON",
                         "仍未给出合法 JSON", "patch 为空", "空 patch")),
-    ("无实际改动", ("no_change", "没有实际改动", "diff 为空", "未产生改动")),
+    ("无实际改动", ("no_change", "没有实际改动", "没有改动任何文件",
+                    "diff 为空", "未产生改动")),
     ("JSON 不合法", ("不是合法 JSON", "JSON 解析", "json 解析", "JSONDecode")),
     ("超时", ("超时", "timeout", "Timeout")),
     ("模型输出不可用", ("截断", "为空", "不可用")),
@@ -1518,10 +1583,15 @@ def failure_breakdown(limit: int = 400, top: int = 3) -> dict:
     """
     import collections
     try:
-        rows = _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))[-max(20, limit):]
+        _all = _read_jsonl(os.path.join(_data_dir(), "actlog.jsonl"))
     except Exception:                                   # noqa: BLE001
         logger.debug("读 actlog 失败", exc_info=True)
         return {"ok": False, "error": "读不到 actlog"}
+    # ★ 2026-11-24 修（口径不一致）：rsi_index 已改成「最近 7 天」窗口，
+    #   这里还在取「最近 400 条」—— 实测同一屏上出现
+    #   「动作成功率 85%（40/47）」配「真失败 66 次」，两个数字对不上，
+    #   用户没法判断该信哪个。归因必须和打分用同一个窗口。
+    rows, _win = _pick_window(_all, limit)
     judged = [r for r in rows
               if not _is_probe_row(r) and r.get("kind") != "review_approve"]
     real = [r for r in judged
@@ -1607,9 +1677,29 @@ def rsi_weakest() -> dict:
                           "修完用探针复核。" % fb["hint"])
         except Exception:                               # noqa: BLE001
             logger.debug("失败归因失败", exc_info=True)
+    # ★ 2026-11-24 实测（会指错方向）：候选里排除了「等观察窗」的教训落地率，
+    #   于是输出「最该修：动作成功率（85%，拖 0.06）」—— 而落地率实际拖 0.17，
+    #   是它的 3 倍。85% 的项被叫「最该修」，真正拖分的项一声不响，
+    #   人和模型都会去修错的地方。所以把被排除项的拖分**也报出来**。
+    _cand_names = {p["name"] for p in cands}
+    _blocked = []
+    for p in parts:
+        if p["name"] in _cand_names:
+            continue
+        if p.get("insufficient"):
+            _why = "缺样本，按 0 计，不是能力差"
+        elif p["name"] == "教训落地率":
+            _why = "没有 pending 教训，只能等观察窗"
+        else:
+            _why = "已满分"
+        _blocked.append({"name": p["name"], "value": p["value"],
+                         "drag": round(p["weight"] * (1 - p["value"]), 3),
+                         "why": _why})
+    _blocked.sort(key=lambda x: -x["drag"])
     return {"ok": True, "name": worst["name"], "value": worst["value"],
             "weight": worst["weight"], "detail": worst.get("detail"),
             "drag": round(worst["weight"] * (1 - worst["value"]), 3),
+            "blocked": _blocked[:2],
             "advice": advice, "score": cur.get("score")}
 
 
@@ -1627,6 +1717,10 @@ def rsi_line() -> str:
     if w.get("ok"):
         s += "；最该修：%s（%.0f%%，拖 %s）" % (
             w["name"], (w.get("value") or 0) * 100, w.get("drag"))
+        _b = w.get("blocked") or []
+        if _b and (_b[0].get("drag") or 0) > (w.get("drag") or 0):
+            s += "；注：%s拖 %s（%s）" % (
+                _b[0]["name"], _b[0]["drag"], _b[0]["why"])
     return s
 
 

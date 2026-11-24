@@ -5181,6 +5181,31 @@ def _atomic_write_text(path, text):
         raise
 
 
+def _py_syntax_error(text, rel):
+    """写盘**前**在内存里编译一遍。通过返回 None，否则返回「第 N 行：原因」。
+
+    ★ 2026-11-24 实测（最近 400 条 actlog 里有 14 条「语法校验失败」）：
+      原来是先写盘、再跑 py_compile、失败再回滚。那个窗口期里磁盘上躺着一份
+      坏 .py —— 进程若在这几毫秒里崩掉或被重启，坏文件就留在源码里，应用
+      直接起不来（_atomic_write_text 只解决了「写一半」，没解决「写完整但
+      内容错」）。
+      而且报错要绕一圈才回到模型：写盘 → subprocess 编译 → 回滚 → 拼字符串，
+      模型拿到的是带绝对路径的长文，行号还得自己数。
+      现在在写盘前用 compile() 验一遍，不通过就直接拒绝并给出精确行号，
+      文件一个字节都没动。
+    """
+    if not str(rel or "").endswith(".py"):
+        return None
+    try:
+        compile(text, str(rel), "exec")
+        return None
+    except SyntaxError as e:
+        return "第 %s 行：%s" % (e.lineno if e.lineno is not None else "?",
+                                e.msg or "语法错误")
+    except ValueError as e:                             # 例如源码里混进 NUL
+        return "内容非法：%s" % e
+
+
 def _apply_find_replace(rel, find, replace):
     """精确替换（必须恰好命中 1 处），与 selfdev_patch 同一套语义。
 
@@ -5192,6 +5217,10 @@ def _apply_find_replace(rel, find, replace):
                        "写进去会导致语法错误。请重新输出，确保中文正常。")
     path = _ROOT / rel
     if not find and not path.is_file():
+        _se = _py_syntax_error(replace or "", rel)
+        if _se:
+            return False, ("补丁内容本身语法不通过（%s），已在写盘前拒绝，"
+                           "没有创建文件" % _se)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write_text(path, replace or "")
@@ -5209,6 +5238,13 @@ def _apply_find_replace(rel, find, replace):
     if n > 1:
         return False, "find 命中 %d 处，不唯一" % n
     new = txt.replace(find, replace, 1)
+    # 只有「原文件本来能编译」时才校验结果 —— 原文件本身就是坏的（历史遗留）
+    # 不该让任何补丁都改不动它。
+    if _py_syntax_error(txt, rel) is None:
+        _se = _py_syntax_error(new, rel)
+        if _se:
+            return False, ("补丁应用后语法不通过（%s），已在写盘前拒绝，"
+                           "文件未改动" % _se)
     try:
         _atomic_write_text(_ROOT / rel, new)
         return True, ""
