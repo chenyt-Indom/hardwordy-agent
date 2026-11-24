@@ -64,6 +64,12 @@ def _py_files():
         #   教训「跑分退步（低于上一版）」里早就写明要跳过这两类前缀，
         #   但代码里只跳了 _pending_，于是 backend/_tmp_build_check.py 这类残留
         #   一直被算进静态分（改它没意义，还永久压分）。
+        # ★ 2026-11-24 收尾：`backend/_tmp_regress_probe.py` /
+        #   `_tmp_regress_probe2.py` / `_tmp_regress_probe3.py` 这三个探针产物
+        #   （手搓来跑 regress 的临时脚本，全项目零引用）已经从 backend/ 删除。
+        #   删之前它们各被算一条 info 级 silent-except（-0.5 分/条，合计 -1.5），
+        #   是当时总分一直卡在 193.05 的直接原因；删掉后计分口径里就没有这三条了。
+        #   下面这行前缀跳过仍然保留 —— 万一以后又有人手搓探针，也不会再进静态分。
         if p.name.startswith(("_tmp_", "_probe_")):
             continue
         try:

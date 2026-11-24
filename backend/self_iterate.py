@@ -6237,6 +6237,91 @@ def _iter_snapshot(plan, pid, ev=None):
     return ""
 
 
+# ---- 本轮临时脚本自动清理（2026-11-24 用户要求）----
+# 用户原话要点：「改动流程末尾自动清理本轮 _tmp_*.py」—— 记下本轮开始时间，
+# 收尾时把 backend/ 下**本轮新产生**的临时/探针脚本删掉，删除记录写进 actlog。
+# 为什么必须清：LLM 直接操作、探针调试都会在 backend/ 根目录留下 _tmp_xxx.py /
+# _probe_xxx.py，跑一轮多几个，几十轮之后目录里全是垃圾（实测 _debug_archive
+# 里已经积了 7 个，得靠人工搬走才干净）。
+_ROUND_SCRATCH_PREFIXES = ("_tmp_", "_probe_")
+
+
+def _round_scratch_files(started, backend_dir=None):
+    """列出「本轮新产生」的临时脚本：mtime 晚于 started 且 basename 是 _tmp_/_probe_ 的 .py。
+
+    只扫 backend/ **这一层**（不递归）：`backend/_feature_tests/` 下也有 _tmp_/_probe_
+    夹具（如 test_anchor_diagnose.py 的 _tmp_anchor_demo_<pid>.py、_probe_audit_now.py），
+    那是**别的用例正在用**的文件，递归删会把并行回归/正在跑的断言打坏；而模型和探针
+    实际都把自己的临时脚本落在 backend/ 根目录，这一层就够了。
+    """
+    out = []
+    try:
+        started = float(started or 0.0)
+    except (TypeError, ValueError):
+        started = 0.0
+    try:
+        d = Path(backend_dir) if backend_dir else (_ROOT / "backend")
+        cand = sorted(d.glob("*.py"))
+    except Exception:                                   # noqa: BLE001
+        logger.warning("扫描本轮临时脚本失败", exc_info=True)
+        return out
+    for p in cand:
+        if not p.name.startswith(_ROUND_SCRATCH_PREFIXES):
+            continue
+        try:
+            # 严格「晚于」本轮开始时间：本轮之前就存在的探针一律不碰
+            if p.stat().st_mtime > started:
+                out.append(p)
+        except OSError:
+            continue
+    return out
+
+
+def _cleanup_round_scratch(started, backend_dir=None):
+    """删掉本轮新产生的 _tmp_/_probe_ 脚本，并把「删了哪些」写进 actlog。
+
+    返回 {"removed": [...], "failed": [{"file","error"}], "checked": n}。
+    删不掉（被占用 / 无权限）**不抛异常** —— 清理是收尾的便利动作，绝不能因为它
+    把已经做完的一轮改动判成失败；但会记进 failed 并写进 actlog 供人排查。
+
+    账本行带 kind/event="cleanup"：`lessonloop.rsi_index` 与 `runtime_metrics`
+    都按 result=ok/fail 统计成功率，这条没有 result 字段，所以不会被算成
+    「一次成功的代码改动」；它的 files 又全是 _tmp_/_probe_ 临时文件，
+    `lessonloop._is_probe_row` 会把它整条排除出能力统计（不污染 RSI）。
+    """
+    removed, failed = [], []
+    files = _round_scratch_files(started, backend_dir)
+    for p in files:
+        try:
+            rel = str(p.relative_to(_ROOT)).replace("\\", "/")
+        except Exception:                               # noqa: BLE001
+            rel = str(p).replace("\\", "/")
+        try:
+            p.unlink()
+            removed.append(rel)
+        except OSError as e:                            # noqa: PERF203
+            failed.append({"file": rel, "error": "%s: %s" % (type(e).__name__, e)})
+    out = {"removed": removed, "failed": failed, "checked": len(files)}
+    if removed or failed:
+        # 只有真删了东西（或删失败）才写账本 —— 每轮都写一条「清理 0 个」
+        # 会把 actlog 冲成噪音，真实改动反而被埋掉。
+        try:
+            _actlog({"ts": _now(),
+                     "kind": "cleanup",
+                     "event": "cleanup",
+                     "title": "清理本轮临时脚本 %d 个" % len(removed),
+                     "files": removed,
+                     "detail": ("删除 %d 个；失败 %d 个%s" % (
+                         len(removed), len(failed),
+                         ("：" + "；".join(x["file"] for x in failed[:3]))
+                         if failed else "")),
+                     "failed": failed,
+                     "window_start": float(started or 0.0)})
+        except Exception:                               # noqa: BLE001
+            logger.warning("清理记录写 actlog 失败", exc_info=True)
+    return out
+
+
 @_exec_guard
 def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=None,
                      origin="manual"):
@@ -6274,9 +6359,28 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
         except Exception:                               # noqa: BLE001
             return False
 
+    # ★ 2026-11-24 用户要求「改动流程末尾自动清理本轮 _tmp_*.py」：
+    #   这里记下本轮开始时间，收尾时只删 mtime 晚于它的 _tmp_/_probe_ 脚本 ——
+    #   本轮之前就存在的探针不碰，别处正在用的文件也不会被顺手删掉。
+    _round_started = time.time()
+
+    def _finish(_out):
+        """统一收尾：清理本轮临时脚本（删了哪些写进 actlog），再原样返回结果。
+
+        每个 return 都走这里（包括「没有可执行动作」的早退）：一轮只要开跑了，
+        它留下的临时脚本就该被清掉，否则攒在 backend/ 里越堆越多。
+        """
+        try:
+            _out["cleanup"] = _cleanup_round_scratch(_round_started)
+        except Exception as _e:                         # noqa: BLE001
+            # 清理是收尾的便利动作，不能因为它把已经做完的一轮改动判成失败
+            logger.warning("清理本轮临时脚本失败", exc_info=True)
+            _out["cleanup"] = {"error": "%s: %s" % (type(_e).__name__, _e)}
+        return _out
+
     d, plan = _find_plan(pid)
     if not plan:
-        return {"ok": False, "error": "找不到这次反思"}
+        return _finish({"ok": False, "error": "找不到这次反思"})
     todo = [a for a in (plan.get("actions") or []) if a.get("status") == "approved"]
     if not todo:
         # ★ 2026-11-20：原来只回一句「没有已批准的动作」，用户完全看不出为什么
@@ -6286,7 +6390,7 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
         _msg = "这次反思没有已批准的动作"
         if _pend:
             _msg += "（还有 %d 条是待批准状态 —— 批准被取消或被并发写覆盖了，重新批准即可）" % _pend
-        return {"ok": False, "error": _msg}
+        return _finish({"ok": False, "error": _msg})
     # 人工复核放行名单：本次调用传进来的 + 计划里持久化的（重启后仍然有效）
     _force = set(str(x) for x in (force or []))
     _force |= set(str(x) for x in (plan.get("_force") or []))
@@ -6325,9 +6429,10 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
         except Exception:                               # noqa: BLE001
             logger.debug("silent-except", exc_info=True)
         if not todo:
-            return {"ok": False, "done": 0, "total": 0, "results": [],
-                    "error": "全部动作都是幽灵修复（近 7 天无真实失败记录），已拒绝执行",
-                    "phantom_rejected": _phantom_rejected}
+            return _finish({
+                "ok": False, "done": 0, "total": 0, "results": [],
+                "error": "全部动作都是幽灵修复（近 7 天无真实失败记录），已拒绝执行",
+                "phantom_rejected": _phantom_rejected})
 
     # ★ 2026-11-22 用户要求「评判每次迭代是进步了还是退步了，进退多少都得呈现」：
     #   动手前先量一次综合分（静态自检 40 + 回归通过率 30 + 功能冒烟 30），
@@ -7376,7 +7481,11 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     except Exception:                                   # noqa: BLE001
         logger.debug("推任务结束卡片失败", exc_info=True)
 
-    return out
+    # ★ 2026-11-24 用户要求「改动流程末尾自动清理本轮 _tmp_*.py」：
+    #   放在**最后一步**（分数算完、结束卡片推完）：此时本轮所有动作都跑完了，
+    #   再扫一遍 backend/ 下 mtime 晚于 _round_started 的 _tmp_/_probe_ 脚本删掉，
+    #   删除记录由 _cleanup_round_scratch 写进 actlog（kind=cleanup）。
+    return _finish(out)
 
 
 def _restore(tag):
