@@ -394,6 +394,21 @@ def _run_selfiter(job: dict) -> dict:
     所以做成内置分支，到点必定执行；产出的计划仍然**要用户批准**才动手。
     """
     from . import self_iterate as _si
+    # ★ 2026-11-24 专家意见（L3 三缺之三：没有预算）：
+    #   定时任务是**最容易被忽略的绕过路径** —— 一天定时跑十次，
+    #   预算账本上一次都不会记。所以在这里也过一道闸门。
+    #   注意：paused 只挡「自动改代码」，不挡「生成计划」（见 _reflect_impl 的口径），
+    #   所以这里查的是预算，不是 paused。
+    try:
+        from . import evolve_budget as _eb
+        _g = _eb.gate("plans", 1)
+        if not _g.get("ok"):
+            _msg = "【每日自我反思】今天先不跑了：%s" % (_g.get("why") or "")
+            logger.info("定时反思被预算挡下：%s", _msg)
+            return {"answer": _msg, "model": "selfiter", "channel": "builtin",
+                    "session": str(job.get("session") or ""), "skipped": True}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("预算闸门失败（不拦，按原逻辑继续）", exc_info=True)
     try:
         r = _si.reflect(trigger="daily", use_web=True,
                         focus=str(job.get("focus") or ""))
@@ -402,6 +417,12 @@ def _run_selfiter(job: dict) -> dict:
     if not r.get("ok"):
         raise RuntimeError("自我反思失败：%s" % r.get("error"))
 
+    # ★ 2026-11-24：跑成功才记 —— 失败/异常不该占额度。
+    try:
+        from . import evolve_budget as _eb2
+        _eb2.spend("plans", 1, why="定时反思：%s" % (job.get("name") or ""))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("记定时反思预算失败（不影响结果）", exc_info=True)
     p = r.get("plan") or {}
     answer = ("【每日自我反思】%s\n\n"
               "- 自我反思：%d 条\n- 对你的观察：%d 条\n- 可加功能：%d 条\n"

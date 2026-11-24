@@ -853,6 +853,27 @@ def submit(plan_id, source="auto", title="", max_n=0):
     #   auto 来源没事（worker 会先 auto_approve_only 自动批准），
     #   而 manual / featradar 等来源没人批准 → 必然白跑一趟，还让人以为卡住了。
     #   所以这里先查一遍：没有已批准动作就**不许进队列**，并说清该怎么办。
+    # ★ 2026-11-24 用户问「为什么失败没有重试」时查出的真问题：
+    #   11-24 20:25:28 那条 failed（耗时 25.9s，错误「这次反思没有已批准的动作」）
+    #   对应的计划 8 条动作早已 7 done + 1 rejected —— 一条待办都没有。
+    #   这种「计划已经跑完」的提交必须在**入队前**挡掉：排进去只会 0 秒空跑、
+    #   白占一个队列位，还在时间线上留一张红卡，让人以为整套功能坏了。
+    #   注意要放在 auto/manual 分流**之前** —— auto 来源同样会踩（它先自动批准，
+    #   可全 done 的计划没有 pending 可批，照样空跑）。
+    try:
+        _r0 = _si.get_plan(plan_id)
+        _a0 = [a for a in (((_r0 or {}).get("plan") or {}).get("actions") or [])
+               if isinstance(a, dict)]
+        if _a0 and not any(str(a.get("status") or "") in ("pending", "approved")
+                           for a in _a0):
+            _done = sum(1 for a in _a0 if str(a.get("status") or "") == "done")
+            return {"ok": False, "state": "finished", "plan_id": plan_id,
+                    "error": ("这个计划已经执行完了（%d 条已完成 / 共 %d 条），"
+                              "没有待办动作，不用再提交" % (_done, len(_a0)))}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("检查计划是否已跑完失败（不拦，交给执行器判断）",
+                     exc_info=True)
+
     if str(source or "auto") != "auto":
         try:
             _r = _si.get_plan(plan_id)
@@ -1438,6 +1459,15 @@ def _finish(tid, state, ok_n, fail_n, skip_n, changed, err):
         if (_STATE.get("running") or {}).get("tid") == tid:
             _STATE["running"] = None
     _save()
+    # ★ 2026-11-24 专家意见（L3 三缺之三）：改动文件数进「进化预算」账本。
+    #   原来只有单轮「最多改 3 个文件」的限制，**一天总共改多少没人管** ——
+    #   现在一本账能回答「今天这套自动进化动了多少东西」。
+    try:
+        from . import evolve_budget as _eb
+        if changed:
+            _eb.spend("files", len(changed), why=item.get("title") or "")
+    except Exception:                                   # noqa: BLE001
+        logger.debug("记改动文件预算失败（不影响收尾）", exc_info=True)
     # ★ 2026-11-16：把「任务失败」告诉活跃迭代引擎，让它反思为什么改失败了。
     #   只在失败时回调（selfloop 内部判断），成功也触发会变成
     #   「改代码 → 成功 → 再反思 → 再改代码」的自我循环。
@@ -2844,6 +2874,13 @@ def _auto_restart(reason="", tid=""):
             _bg.mark_restart("自动迭代：%s" % (reason or ""), force="skip")
         except Exception:                               # noqa: BLE001
             logger.debug("silent-except", exc_info=True)
+        # ★ 2026-11-24：自动重启进预算账本 —— 重启会打断用户，是最该有上限的一项。
+        #   记在「导入自检已通过、确定要重启」之后：被拦下的那次不该占额度。
+        try:
+            from . import evolve_budget as _eb2
+            _eb2.spend("restarts", 1, why=reason or "")
+        except Exception:                               # noqa: BLE001
+            logger.debug("记自动重启预算失败（不影响重启）", exc_info=True)
         _emit_sys("正在自动重启以让改动生效（页面会断几秒后自动重连）…",
                   state="restarting")
         time.sleep(0.4)

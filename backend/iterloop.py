@@ -1113,6 +1113,9 @@ def bench_verdict(window=6):
             pass
 
     detail = last.get("detail") or {}
+    # ★ 2026-11-24：把原始明细带出去 —— 留出集要按题号分组算分，
+    #   只留 failing 列表是不够的（通过的题也得算进分母）。
+    out["detail"] = detail if isinstance(detail, dict) else {}
     if isinstance(detail, dict):
         for cid, v in detail.items():
             if not isinstance(v, dict) or v.get("ok"):
@@ -1197,16 +1200,43 @@ def bench_brief(window=6, max_items=4):
                      "干了很多活，但外部基准没变好。下一步必须去修尺子的失分点，"
                      "不要再提「内部重构/加日志/补测试」这类不会让尺子动的东西。"
                      % (int(window), float(v.get("ledger_sum") or 0)))
-    fail = v.get("failing") or []
+    # ★ 2026-11-24 专家意见（L3 三缺之二：没有留出集）：
+    #   原来把每一道失分题（连题号带原因）原样喂给模型 —— 等于把考卷答案
+    #   一起递过去，下次当然更容易过，但那叫背题，不叫变强。
+    #   现在：只列可见集失分；留出集只报**数量**，题号和原因一律不给。
+    try:
+        from . import holdout as _HO
+        _fail_all = v.get("failing") or []
+        fail = _HO.visible_failures(_fail_all)
+        _hidden_n = _HO.hidden_failure_count(_fail_all)
+    except Exception:                                    # noqa: BLE001
+        logger.debug("留出集过滤失败（退回全量失分）", exc_info=True)
+        fail, _hidden_n = (v.get("failing") or []), 0
     if fail:
         lines.append("- 真实失分（这些是**能力/边界缺陷**，优先修）：")
         for it in fail[:max_items]:
             lines.append("  · %s —— %s" % (it.get("id"), (it.get("why") or "")[:140]))
-    infra = v.get("infra") or []
+    if _hidden_n:
+        lines.append("- 另有 %d 题在**留出集**里失分（具体是哪几题不告诉你 ——"
+                     " 这部分只用来验泛化，针对性打补丁没有意义）。" % _hidden_n)
+    try:
+        from . import holdout as _HO2
+        infra = _HO2.visible_failures(v.get("infra") or [])
+    except Exception:                                    # noqa: BLE001
+        infra = v.get("infra") or []
     if infra:
         lines.append("- 请求层失败（断网/超时，不是能力问题，别当成缺陷去改代码）：")
         for it in infra[:max_items]:
             lines.append("  · %s —— %s" % (it.get("id"), (it.get("why") or "")[:120]))
+    # ★ 2026-11-24：留出集分数（只给汇总，不给题号）—— 用来让模型自己看到
+    #   「可见集满分、留出集没满」，从而去修通用能力而不是背题。
+    try:
+        from . import holdout as _HO3
+        _ho_txt = _HO3.brief(_HO3.score_split(v.get("detail")))
+        if _ho_txt:
+            lines.append(_ho_txt)
+    except Exception:                                    # noqa: BLE001
+        logger.debug("注入留出集分数失败", exc_info=True)
     lines.append("⚠️ 判定口径：**尺子涨 = 真的在变好；账本涨而尺子不动 = 在刷分**。"
                  "账本只是施工计数器，不许拿它当成绩。")
     return "\n".join(lines)

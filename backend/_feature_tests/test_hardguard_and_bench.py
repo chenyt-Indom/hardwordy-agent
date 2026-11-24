@@ -136,7 +136,9 @@ def main():
          "detail": {
              "tool-02": {"ok": False, "why": "没通过（要 contains='400'）实得：391"},
              "bnd-01": {"ok": False, "why": "没通过（要 not_contains）实得：我先看下项目"},
-             "fail-02": {"ok": False, "why": "请求失败：ConnectionResetError: [WinError 10054]"},
+              # ★ 2026-11-24：断网样例改用 fail-01 —— fail-02 已划入**留出集**，
+              #   它被 bench_brief 正确过滤掉了，用它验「断网单列」会假失败。
+              "fail-01": {"ok": False, "why": "请求失败：ConnectionResetError: [WinError 10054]"},
              "mem-01": {"ok": True, "why": ""},
          }},
     ]
@@ -163,15 +165,15 @@ def main():
         check("账本涨+尺子跌 → grind=True", v.get("grind") is True)
         check("能力失分 2 条", len(v.get("failing") or []) == 2,
               "实得 %r" % [x.get("id") for x in (v.get("failing") or [])])
-        check("请求层失败单列（fail-02）",
-              [x.get("id") for x in (v.get("infra") or [])] == ["fail-02"])
+        check("请求层失败单列（fail-01）",
+              [x.get("id") for x in (v.get("infra") or [])] == ["fail-01"])
         brief = IL.bench_brief()
         check("简报标明「主指标」", "主指标" in brief)
         check("简报点出刷分", "刷分" in brief)
         check("简报列出失分题", "tool-02" in brief and "bnd-01" in brief)
         check("简报把断网单列", "请求层失败" in brief)
         check("简报**不**把断网算成能力缺陷",
-              "fail-02" not in brief.split("请求层失败")[0])
+              "fail-01" not in brief.split("请求层失败")[0])
     finally:
         IL.BENCH_SCORES, IL._hist_path = old_scores, old_hist
 

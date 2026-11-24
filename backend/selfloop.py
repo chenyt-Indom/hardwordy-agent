@@ -412,6 +412,17 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
     #   下面 backlog_gate 那道闸门本来就写了「手动永远放行」，这里保持一致。
     if _quota_left(d) <= 0 and source != "manual":
         return {"ok": True, "skipped": "今日计划数已满（%d）" % d.get("daily_plans")}
+    # ★ 2026-11-24 专家意见（L3 三缺之三：没有预算）：
+    #   daily_plans 只管「计划数」，且数散在自己文件里。这里再过一道统一预算账本，
+    #   让「计划 / 改动文件 / 自动重启」三类消耗进同一本账，面板和日志能一眼看到。
+    #   手动触发（source="manual"）永远放行，和上面几道闸门口径一致。
+    try:
+        from . import evolve_budget as _eb
+        _gb = _eb.gate("plans", 1, manual=(source == "manual"))
+        if not _gb.get("ok"):
+            return {"ok": True, "skipped": _gb.get("why")}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("进化预算闸门失败（不拦，按原逻辑继续）", exc_info=True)
     # ★ 2026-11-17 用户问「为什么这么多条待批准」：根因就是**生成远快于处理**。
     #   一次反思产 5~10 条动作 + 2~3 个新功能，而用户一天批不了几条。
     #   队列已经很深时继续想新的，token 是纯浪费（这些计划只会越堆越多）。
@@ -477,6 +488,13 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
         d["triggers"] = int(d.get("triggers") or 0) + 1
         d["last_trigger"] = {"at": _now(), "reason": reason[:200], "source": source}
         d["last_at"] = now          # ★ 落盘，重启后节流还能接上
+        # ★ 2026-11-24：记一笔「计划」消耗 —— 只在**真的开跑**时记，
+        #   被节流 / 积压 / 冷却挡掉的都不算（和 last_at / 指纹同口径）。
+        try:
+            from . import evolve_budget as _eb2
+            _eb2.spend("plans", 1, why=reason, manual=(source == "manual"))
+        except Exception:                                # noqa: BLE001
+            logger.debug("记计划预算失败（不影响本轮）", exc_info=True)
         # ★ 只在**真正开跑**时记指纹：被节流挡掉的那次不算思考过，
         #   下一轮重推还应该有机会。这样既不重复烧钱，也不会漏掉真实需求。
         _seen_add(d, sig)
