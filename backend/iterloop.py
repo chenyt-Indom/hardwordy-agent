@@ -238,8 +238,35 @@ def regress_part(timeout=180):
         passed = int(r.get("passed") or 0)
         failed = int(r.get("failed") or 0)
         rate = float(passed) / float(max(1, passed + failed))
+        # ★ 2026-11-24 专家意见（L3 三缺之一：没有行为基线 parity）：
+        #   回归只验「写过断言的」行为 —— 没写断言的地方被改坏了，它一声不吭。
+        #   这里每次评分都顺带跑一遍 parity（纯函数、不联网，约 0.1~0.3 秒）：
+        #   · 一条都没变 → 不影响分数；
+        #   · 有漂移     → 回归分打 7 折，并把「哪个函数、哪条输入、改前改后」写进明细，
+        #                  强制「改行为要留痕」（确属预期改动就 python -m backend.parity capture）；
+        #   · 还没钉基线 → 不扣分，只提示去 capture（不能因为没基线就把分扣光）。
+        par = None
+        try:
+            from . import parity as _PA
+            _pres = _PA.compare()
+            if not _pres.get("missing_baseline"):
+                par = {
+                    "ok": bool(_pres.get("ok")),
+                    "checked": int(_pres.get("checked") or 0),
+                    "targets": int(_pres.get("targets") or 0),
+                    "changed": len(_pres.get("changed") or []),
+                    "added": len(_pres.get("added") or []),
+                    "missing": len(_pres.get("missing") or []),
+                    "text": _PA.as_text(_pres),
+                }
+        except Exception:                                   # noqa: BLE001
+            logger.debug("行为基线比对失败（不影响回归分）", exc_info=True)
+        _score = rate * W_REGRESS
+        if par and not par["ok"]:
+            _score *= 0.7
         return {
-            "score": round(rate * W_REGRESS, 2),
+            "score": round(_score, 2),
+            "parity": par,
             "max": W_REGRESS,
             "rate": round(rate, 4),
             "total": total, "passed": passed, "failed": failed,

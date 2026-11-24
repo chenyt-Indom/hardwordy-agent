@@ -831,6 +831,42 @@ def build_report(model: str = "", scope: str = "quick", fresh: bool = True,
                                  "再看 %s" % (sc, entry["evidence"]))
                 failed.append(entry)
 
+    # ---- 3) 行为基线 parity（专家 2026-11-24 指出的 L3 三缺之一）----
+    #   回归验「写过断言的对错」，parity 验「没人写断言的地方有没有悄悄变」。
+    #   两者都跑才算既有方向感又有安全带；没钉基线时只提示、不判失败。
+    par: dict = {}
+    if include_regress:
+        try:
+            from . import parity as _PA
+            _pres = _PA.compare()
+            _txt = _PA.as_text(_pres)
+            par = {
+                "ran": True,
+                "missing_baseline": bool(_pres.get("missing_baseline")),
+                "ok": bool(_pres.get("ok")),
+                "checked": int(_pres.get("checked") or 0),
+                "changed": len(_pres.get("changed") or []),
+                "added": len(_pres.get("added") or []),
+                "missing": len(_pres.get("missing") or []),
+                "text": _txt,
+            }
+            if not par["missing_baseline"]:
+                entry = {
+                    "name": "行为基线·parity",
+                    "evidence": "backend/parity.py",
+                    "detail": _txt,
+                    "source": "parity",
+                }
+                if par["ok"]:
+                    passed.append(entry)
+                else:
+                    entry["severity"] = "error"
+                    entry["hint"] = ("确认是预期改动就 `python -m backend.parity capture` "
+                                     "重新钉基线，否则说明有函数被改坏了")
+                    failed.append(entry)
+        except Exception:                                # noqa: BLE001
+            logger.debug("行为基线比对失败（不影响自检结论）", exc_info=True)
+
     ts = time.time()
     errs = [x for x in failed if (x.get("severity") or "error") == "error"]
     warns = [x for x in failed if (x.get("severity") or "error") != "error"]
@@ -865,4 +901,5 @@ def build_report(model: str = "", scope: str = "quick", fresh: bool = True,
         },
         "seconds": round(ts - t0, 2),
         "summary": head,
+        "parity": par,
     }

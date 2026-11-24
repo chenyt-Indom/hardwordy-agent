@@ -138,6 +138,27 @@ def main():
     txt2 = P.as_text(r)
     check("漂移报告点出是哪个函数", victim in txt2, txt2[:120])
 
+    # ---- 7. 真接线：建了不接等于没建（专家原话）----
+    #   不在这里真跑 regress（要 20 秒），而是查两个真实入口的源码里有没有这段调用：
+    #   · backend/iterloop.py  regress_part() —— 每轮评分时跑；
+    #   · backend/selftest.py  build_report() —— 自检报告卡里出条目。
+    import io
+    import os as _os
+    _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
+    def _src(rel):
+        with io.open(_os.path.join(_root, rel), encoding="utf-8") as f:
+            return f.read()
+
+    it_src = _src(_os.path.join("backend", "iterloop.py"))
+    st_src = _src(_os.path.join("backend", "selftest.py"))
+    check("每轮评分真的跑 parity（iterloop.regress_part 接线）",
+          "from . import parity as _PA" in it_src and '"parity": par' in it_src)
+    check("自检报告卡真的出 parity 条目（selftest.build_report 接线）",
+          "行为基线·parity" in st_src and '"parity": par' in st_src)
+    check("基线落在 data/ 而不是代码目录",
+          _os.path.join("data", "parity") in P.BASELINE_PATH.replace("/", _os.sep))
+
     print("\n" + "=" * 62)
     print("通过 %d / 失败 %d" % (len(PASS), len(FAIL)))
     if FAIL:
