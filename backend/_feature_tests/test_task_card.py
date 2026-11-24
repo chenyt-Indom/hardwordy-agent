@@ -51,6 +51,17 @@ def main():
         return {"ok": True, "scheduled": True, "in_seconds": 6}
 
     SI._schedule_replan = _fake_replan
+    # ★ 2026-11-24：绿色判定改成「计划动作全部做完」，这里给假计划，
+    #   绝不读用户真实的 plans.json。
+    _real_load_plans = SI.load_plans
+    SI.load_plans = lambda: {"items": [
+        {"id": "p_ok", "actions": [{"id": "a1", "state": "done"},
+                                   {"id": "a2", "state": "done"}]},
+        {"id": "p_bad", "actions": [{"id": "a1", "state": "done"},
+                                    {"id": "a2", "state": "done"}]},
+        {"id": "p_half", "actions": [{"id": "a1", "state": "done"},
+                                     {"id": "a2", "state": "pending"}]},
+    ]}
     # ★ 2026-11-24 并发实测：原来全程读写**真实**的 pending_cards.jsonl，
     #   两套测试同时跑时 A 的 ack_cards([]) 会把 B 刚推的卡清掉 →
     #   「pending_cards 拿得到刚推的卡」随机失败（单跑永远绿）。
@@ -93,7 +104,8 @@ def main():
                                    "plan_id": "p_bad"})
         card = (IL.pending_cards() or [{}])[-1]
         check("退步 → state=failed", card.get("state") == "failed", str(card)[:200])
-        check("退步 → 徽标是「复核未通过」", card.get("badge") == "复核未通过")
+        check("退步 → 徽标是「迭代失败 · 即将修复」",
+              card.get("badge") == "迭代失败 · 即将修复", str(card.get("badge")))
         check("退步 → 原因写清退了几分", "退步 5.00" in str(card.get("why")),
               str(card.get("why")))
         check("退步 → 自动重排了一次修复计划", called["n"] == 1, "called=%d" % called["n"])
@@ -104,6 +116,23 @@ def main():
         check("退步 → 卡片上标了重排结果",
               isinstance(card.get("replan"), dict) and card["replan"].get("ok") is True,
               str(card.get("replan")))
+
+        # ---- 3b 分数没退步、但任务没做完 → 必须红（用户 2026-11-24 报的误报）
+        IL.ack_cards([])
+        called["n"] = 0
+        IL._push_post_verify_card({"verdict": "ok", "total": 157.15,
+                                   "prev": 155.09, "delta": 2.06,
+                                   "plan_id": "p_half"})
+        card = (IL.pending_cards() or [{}])[-1]
+        check("没做完 → 不许绿", card.get("state") != "verified",
+              str(card.get("state")))
+        check("没做完 → 徽标是「迭代失败 · 即将修复」",
+              card.get("badge") == "迭代失败 · 即将修复", str(card.get("badge")))
+        check("没做完 → 原因写清还剩几条", "1" in str(card.get("why")),
+              str(card.get("why")))
+        check("没做完 → 纯待批准不重复造修复计划",
+              (card.get("replan") or {}).get("skipped") is True
+              and called["n"] == 0, str(card.get("replan")))
 
         # ---- 4 量不到分
         IL.ack_cards([])
@@ -143,6 +172,7 @@ def main():
               "/static/taskcard.js" in _rd("frontend/index.html"))
     finally:
         SI._schedule_replan = orig
+        SI.load_plans = _real_load_plans
         IL.ack_cards([])                     # 清的是临时队列，不碰真实数据
         IL._cards_path = _orig_cards_path    # 还原真实路径
 

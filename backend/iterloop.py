@@ -1398,6 +1398,72 @@ def _rsi_snapshot():
         return None
 
 
+def _judge_task(pid):
+    """本轮任务到底成没成 —— 决定结束卡片是绿还是红。
+
+    ★ 2026-11-24 用户原话：
+      「绿色已验证是验证到完全没问题且功能已经能够完全正常运转才显示的啊，
+        标示着任务成功结束；如果不能正常运作显示红色字迭代失败即将修复，
+        然后重新反复验证修复直到完全正常为止。」
+
+    所以判据**不能只看「重启后分数没退步」** —— 那只证明程序起得来，
+    证明不了这一轮要做的事做完了。必须同时满足：
+      ① 计划里每一条动作都真的 done（没有 pending / approved 等没执行的）；
+      ② 一条 failed / need_review 都没有。
+
+    返回 {"ok": True|False|None, "verdict": "success|failed|none",
+          "done"/"total"/"pending"/"failed": int, "why": str}
+    ok=None 表示「这次重启没有任务上下文」，由调用方退回按分数判定。
+    """
+    pid = str(pid or "").strip()
+    if not pid:
+        return {"ok": None, "verdict": "none", "done": 0, "total": 0,
+                "pending": 0, "failed": 0,
+                "why": "这次重启没有关联的迭代计划，只能按重启后评分判定"}
+    try:
+        from . import self_iterate as _SI
+        d = _SI.load_plans()
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("判任务成败时读计划失败", exc_info=True)
+        return {"ok": False, "verdict": "failed", "done": 0, "total": 0,
+                "pending": 0, "failed": 0,
+                "why": "读计划失败，无法确认任务完成：%s: %s"
+                       % (type(e).__name__, e)}
+    p = None
+    for x in (d.get("items") or []):
+        if isinstance(x, dict) and str(x.get("id") or "") == pid:
+            p = x
+            break
+    if p is None:
+        return {"ok": False, "verdict": "failed", "done": 0, "total": 0,
+                "pending": 0, "failed": 0,
+                "why": "找不到计划 %s（可能已被删除），无法确认任务完成" % pid}
+    acts = [a for a in (p.get("actions") or []) if isinstance(a, dict)]
+
+    def _st(a):
+        return str(a.get("state") or a.get("status") or "pending").strip().lower()
+
+    total = len(acts)
+    done = sum(1 for a in acts if _st(a) == "done")
+    bad = sum(1 for a in acts if _st(a) in ("failed", "need_review"))
+    wait = max(0, total - done - bad)
+    ok = bool(total > 0 and done == total and bad == 0)
+    if ok:
+        why = "计划 %d 条动作全部完成，没有失败" % total
+    elif total == 0:
+        why = "计划里一条动作都没有，等于什么都没做"
+    else:
+        bits = []
+        if bad:
+            bits.append("%d 条失败/待复核" % bad)
+        if wait:
+            bits.append("%d 条还没执行（待批准或未开始）" % wait)
+        why = "计划 %d 条动作里只完成 %d 条，%s" % (total, done, "，".join(bits))
+    return {"ok": ok, "verdict": "success" if ok else "failed",
+            "done": done, "total": total, "pending": wait, "failed": bad,
+            "why": why}
+
+
 def _push_post_verify_card(rec):
     """把一次重启后复核的结果变成「任务结束卡」，并推给前端。
 
@@ -1410,27 +1476,44 @@ def _push_post_verify_card(rec):
     rec = dict(rec or {})
     verdict = str(rec.get("verdict") or "")
     err = str(rec.get("error") or "")
-    ok = (verdict == "ok") and not err
     total = rec.get("total")
     prev = rec.get("prev")
     delta = rec.get("delta")
 
+    # ★ 绿色 = 真的验收通过。只有「重启后能起来、分没退步」是不够的 ——
+    #   那证明不了这一轮要做的事做完了（实测：8 条动作只做完 1 条，
+    #   其余 7 条还待批准，旧判定照样给绿「已验证」，属于误报）。
+    task = _judge_task(rec.get("plan_id"))
+    task_ok = task.get("ok")                     # None = 无任务上下文
+    score_ok = (verdict == "ok") and not err
+    ok = bool(score_ok and task_ok is not False)
+
     if ok:
         state, badge = "verified", "已验证"
-        title = "任务结束 · 重启后复核已验证"
-        why = ("重启后程序正常起来，评分没有退步"
-               + ("（%s → %s，%+.2f）" % (prev, total, float(delta))
-                  if (prev is not None and total is not None
-                      and isinstance(delta, (int, float))) else ""))
-    else:
-        state, badge = "failed", "复核未通过"
-        title = "任务结束 · 重启后复核未通过"
-        if err:
-            why = "重启后没量到分：%s" % err[:200]
-        elif isinstance(delta, (int, float)) and delta < 0:
-            why = "重启后评分退步 %.2f 分（%s → %s）" % (abs(delta), prev, total)
+        title = "任务结束 · 已验收通过"
+        parts = []
+        if (prev is not None and total is not None
+                and isinstance(delta, (int, float))):
+            parts.append("重启后程序正常起来，评分没有退步（%s → %s，%+.2f）"
+                         % (prev, total, float(delta)))
         else:
-            why = "重启后复核没通过"
+            parts.append("重启后程序正常起来，评分正常")
+        if task_ok is True:
+            parts.append("本轮任务 %d 条动作全部完成、没有失败"
+                         % int(task.get("total") or 0))
+        why = "；".join(parts)
+    else:
+        state, badge = "failed", "迭代失败 · 即将修复"
+        title = "任务结束 · 未通过验收，已排入修复"
+        reasons = []
+        if err:
+            reasons.append("重启后没量到分：%s" % err[:200])
+        elif isinstance(delta, (int, float)) and delta < 0:
+            reasons.append("重启后评分退步 %.2f 分（%s → %s）"
+                           % (abs(delta), prev, total))
+        if task_ok is False:
+            reasons.append(str(task.get("why") or "本轮任务没有全部完成"))
+        why = "；".join(reasons) or "重启后复核没通过"
 
     card = {
         "kind": "post_restart",
@@ -1443,24 +1526,39 @@ def _push_post_verify_card(rec):
         "prev": prev,
         "delta": delta,
         "rsi": _rsi_snapshot(),
+        "task": task,
         "replan": None,
     }
 
     if not ok:
-        try:
-            from . import self_iterate as _SI
-            r = _SI._schedule_replan(
-                pid=card["pid"],
-                reason=why,
-                before=prev, after=total,
-                context="重启后复核失败（post_restart）：%s" % why[:300],
-            )
-            card["replan"] = {"ok": bool(r.get("ok")),
-                              "skipped": bool(r.get("skipped")),
-                              "why": r.get("why") or r.get("error") or ""}
-        except Exception as e:                          # noqa: BLE001
-            logger.warning("复核失败后重排修复计划失败", exc_info=True)
-            card["replan"] = {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+        # 什么情况才真去重排修复计划（= 用户要的「即将修复」）：
+        #   · 起不来 / 量不到分 / 评分退步 → 代码真坏了，必须修；
+        #   · 有动作 failed / need_review   → 有活干砸了，必须修。
+        # 只是「还有动作没执行（待批准）」不算坏：不重复造计划，
+        # 否则每次复核都造一份新计划，待批准队列会爆炸。
+        need_fix = bool(err) or (isinstance(delta, (int, float)) and delta < 0) \
+            or int(task.get("failed") or 0) > 0
+        if not need_fix:
+            card["replan"] = {
+                "ok": True, "skipped": True,
+                "why": "还有 %d 条动作没执行（待批准），不重复造修复计划；"
+                       "批准后接着跑" % int(task.get("pending") or 0)}
+        else:
+            try:
+                from . import self_iterate as _SI
+                r = _SI._schedule_replan(
+                    pid=card["pid"],
+                    reason=why,
+                    before=prev, after=total,
+                    context="重启后复核失败（post_restart）：%s" % why[:300],
+                )
+                card["replan"] = {"ok": bool(r.get("ok")),
+                                  "skipped": bool(r.get("skipped")),
+                                  "why": r.get("why") or r.get("error") or ""}
+            except Exception as e:                      # noqa: BLE001
+                logger.warning("复核失败后重排修复计划失败", exc_info=True)
+                card["replan"] = {"ok": False,
+                                  "why": "%s: %s" % (type(e).__name__, e)}
 
     r = push_card(card)
     logger.info("[loop] 任务结束卡片已推送：%s（%s）", badge, r)

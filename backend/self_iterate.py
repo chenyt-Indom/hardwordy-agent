@@ -7332,10 +7332,16 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 _state, _badge = "failed", "已回滚"
                 _title = "任务结束 · 本轮改动已回滚"
                 _why = "评分退步，已回滚：%s" % str(_rb2.get("reason") or "")[:200]
-            elif _done2 > 0:
+            elif _done2 > 0 and _bad2 == 0:
                 _state, _badge = "verified", "已完成"
                 _title = "任务结束 · 本轮迭代已完成"
-                _why = "成功 %d 条 / 失败 %d 条" % (_done2, _bad2)
+                _why = "成功 %d 条 / 失败 0 条（全部做完）" % _done2
+            elif _done2 > 0:
+                # ★ 2026-11-24：只做成一部分不能给绿。用户要求绿色=完全正常运转。
+                _state, _badge = "failed", "迭代失败 · 即将修复"
+                _title = "任务结束 · 本轮没做完"
+                _why = "成功 %d 条 / 失败 %d 条 —— 没全部完成，不算通过" % (
+                    _done2, _bad2)
             else:
                 _state, _badge = "done", "无改动"
                 _title = "任务结束 · 本轮没有可执行的改动"
