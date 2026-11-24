@@ -6162,20 +6162,90 @@ def _check_phantom(action):
     fk = str(a.get("fail_kind") or "").strip()
     if not fk:
         return {"ok": True, "phantom": False}
+    # ★ 2026-11-24：闸门逻辑统一收到 actlog.propose_patch（提案入口），
+    #   这里只做形状转换 —— 原来本函数自己再查一遍账本，于是同一个 fail_kind
+    #   在「提案」和「执行」两处能得到两个数，谁拦了谁放行说不清。
     try:
         from . import actlog as _AL
-        n, ok = _AL.count_fail_kind_ex(fk, days=7)
+        _prop = _AL.propose_patch(
+            fk, rel=str(a.get("rel") or (a.get("files") or [""])[0] or ""),
+            find=str(a.get("anchor") or ""), note=str(a.get("note") or ""),
+            session=str(a.get("session") or ""), days=7)
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
         return {"ok": True, "phantom": False}
-    if not ok:
-        # 账本读不出来 → 放行，不判幽灵
-        return {"ok": True, "phantom": False}
-    if n <= 0:
+    if not _prop.get("accepted"):
         return {"ok": True, "phantom": True, "fail_kind": fk,
-                "reason": "幽灵修复：fail_kind=%s 近 7 天真实出现 0 次，拒绝执行" % fk}
+                "count": 0,
+                "reason": _prop.get("error") or (
+                    "幽灵修复：fail_kind=%s 近 7 天真实出现 0 次，拒绝执行" % fk)}
+    n = int(_prop.get("count") or 0)
     return {"ok": True, "phantom": False,
+            "count": n,
             "evidence": {"fail_kind": fk, "count": n}}
+
+
+def _gate_proposals(actions, days=7):
+    """**提案入口**的真实失败证据校验：计数为 0 的提案当场拒绝。
+
+    用户要求（2026-11-24）：「从 actlog 取该 fail_kind 的真实计数，计数为 0 则
+    拒绝提案并记 phantom 事件（含 fail_kind 名）；计数 >0 则把计数写进提案
+    元数据，后续改动结果卡片展示。」
+
+    为什么放在这里：`_make_plan` 是反思 / 自检 / 诊断 / 手动立项**唯一的**建计划
+    入口 —— 提案在进 plans.json、进待批准面板之前就先过闸门，比等到「点批准后
+    执行」才拦早一步（被拒的提案不会占批准按钮，也不会白占一次全栈快照）。
+    真正的判定在 `actlog.propose_patch`（唯一取数口径），这里只做落字段：
+      · 被拒 → status=rejected + phantom=True + error（用户能看见为什么被拒）；
+      · 通过 → proposal_meta / count / evidence 带上真实计数。
+
+    账本不可读时按「计数 0」处理并在 error 里说明 —— 查不到不等于发生过。
+    """
+    out = []
+    for a in (actions or []):
+        if not isinstance(a, dict):
+            out.append(a)
+            continue
+        fk = str(a.get("fail_kind") or "").strip()
+        if not fk:
+            # 不是「针对某个失败分类的修复」，无需证据（新增功能/改流程类）。
+            out.append(a)
+            continue
+        try:
+            from . import actlog as _AL
+            _rel = str(a.get("rel") or "")
+            if not _rel:
+                _files = [f for f in (a.get("files") or []) if f]
+                _rel = str(_files[0]) if _files else ""
+            _prop = _AL.propose_patch(
+                fk, rel=_rel, find=str(a.get("anchor") or ""),
+                note=str(a.get("note") or ""), session=str(a.get("session") or ""),
+                days=days)
+        except Exception:                               # noqa: BLE001
+            logger.debug("提案证据闸门异常，按原样放行", exc_info=True)
+            out.append(a)
+            continue
+        _meta = _prop.get("meta") or {"fail_kind": fk,
+                                      "count": int(_prop.get("count") or 0),
+                                      "days": days}
+        a["proposal_meta"] = _meta
+        if not _prop.get("accepted"):
+            a["status"] = "rejected"
+            a["phantom"] = True
+            a["error"] = _prop.get("error") or (
+                "幽灵修复：fail_kind=%s 近 %d 天真实失败计数为 0，提案被拒" % (fk, days))
+            a["evidence"] = _prop.get("evidence") or {"fail_kind": fk, "count": 0,
+                                                      "phantom": True}
+            out.append(a)
+            continue
+        _n = int(_prop.get("count") or 0)
+        a["count"] = _n
+        a["evidence"] = {"fail_kind": fk, "count": _n}
+        _txt = str(_prop.get("evidence_text") or "")
+        if _txt:
+            a["evidence_text"] = _txt
+        out.append(a)
+    return out
 
 
 def _rescue_mod():
@@ -6371,7 +6441,16 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
         它留下的临时脚本就该被清掉，否则攒在 backend/ 里越堆越多。
         """
         try:
-            _out["cleanup"] = _cleanup_round_scratch(_round_started)
+            _cl = _cleanup_round_scratch(_round_started)
+            _out["cleanup"] = _cl
+            # 清理结果也发一条进度事件：用户在聊天界面里就能看到「收尾清掉了哪几个
+            # 临时脚本」，不用跑去翻 actlog。真删到东西（或删失败）才发 ——
+            # 每轮都发一条「清理 0 个」等于给事件流刷噪音。
+            if isinstance(_cl, dict) and (_cl.get("removed") or _cl.get("failed")):
+                _ev("step", text="收尾清理本轮临时脚本：删除 %d 个%s"
+                    % (len(_cl.get("removed") or []),
+                       ("，失败 %d 个" % len(_cl.get("failed") or []))
+                       if _cl.get("failed") else ""))
         except Exception as _e:                         # noqa: BLE001
             # 清理是收尾的便利动作，不能因为它把已经做完的一轮改动判成失败
             logger.warning("清理本轮临时脚本失败", exc_info=True)
@@ -7949,6 +8028,14 @@ def _make_plan(trigger, summary, actions, extra=None):
         a.setdefault("detail", "")
         a.setdefault("title", "（未命名动作）")
         norm.append(a)
+    # 🧾 提案入口的真实失败证据校验（2026-11-24 用户要求）：
+    #   带 fail_kind 的提案在**进计划之前**查一次账本 —— 计数为 0 直接判 rejected
+    #   并记 phantom 事件（含 fail_kind 名）；计数 >0 把计数写进 proposal_meta /
+    #   evidence，前端改动结果卡片显示「针对 XX 失败 N 次」。
+    try:
+        norm = _gate_proposals(norm)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("提案证据闸门失败，按原样建计划", exc_info=True)
     plan = {"id": _pid(), "ts": _now(), "trigger": trigger,
             "summary": str(summary or "")[:200],
             "weaknesses": [], "user_insights": [], "features": [],

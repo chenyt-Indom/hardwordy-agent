@@ -41,10 +41,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import tempfile
 import time
+
+logger = logging.getLogger(__name__)
 
 _B = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ROOT = os.path.dirname(_B)
@@ -156,8 +159,10 @@ def _check_helper(SI):
         if os.path.isfile(p):
             try:
                 os.remove(p)
-            except OSError:
-                pass
+            except OSError as e:
+                # 不写 `pass`：静默吞异常会被 code_audit 记成 silent-except 扣分点
+                # （info，0.5 分/轮），而且真删不掉时现场一点线索都没有。
+                logger.debug("清理夹具 %s 失败：%s", rel, e)
         if rel in _FIXES:
             _FIXES.remove(rel)
 
@@ -204,8 +209,14 @@ def _check_flow(SI):
     # 静态自检跑一遍要 9 秒，且与本条断言无关（别的用例已覆盖），一并略过
     SI._precheck_actions = lambda acts: ({}, "", 0)
     _FIXES.append(rel_probe)
+    # 收集进度事件：清理结果要能在聊天界面的步骤流里看到（不只写 actlog）
+    _events = []
+
+    def _on_event(kind, **kw):
+        _events.append((str(kind), kw))
+
     try:
-        out = SI.execute_approved(plan_id, origin="manual")
+        out = SI.execute_approved(plan_id, on_event=_on_event, origin="manual")
     finally:
         (SI._plan_patch_for_action, SI._iter_snapshot,
          SI._precheck_actions) = (old_plan, old_snap, old_pre)
@@ -227,6 +238,12 @@ def _check_flow(SI):
         any(any(str(f).replace("\\", "/").endswith("_probe_flow_%d.py" % pid)
                 for f in (r.get("files") or [])) for r in rows),
         [r.get("files") for r in rows[:3]])
+
+    # 收尾清理要发一条进度事件（kind=step，文案带「清理」），否则用户只能翻 actlog
+    _txts = [str(kw.get("text") or "") for (k, kw) in _events if k == "step"]
+    chk("步骤流里有「收尾清理临时脚本」这一条",
+        any("清理" in t and "_probe_flow_%d.py" not in t for t in _txts),
+        [t for t in _txts if "清理" in t][:3])
 
 
 def run():
@@ -254,7 +271,8 @@ if __name__ == "__main__":
                 p = _rel(rel)
                 if os.path.isfile(p):
                     os.remove(p)
-            except OSError:
-                pass
+            except OSError as e:
+                # 同上：不吞异常，也不留 `pass` 的 silent-except 扣分点。
+                logger.debug("收尾删除夹具 %s 失败：%s", rel, e)
     print("临时脚本清理验收 %s" % ("OK" if not code else "FAILED：%s" % (_FAILS,)))
     sys.exit(code)

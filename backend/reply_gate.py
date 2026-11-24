@@ -903,14 +903,20 @@ _SPLIT_NOTICE = "\n\n…（内容较长，已拆为多段，回复『继续』�
 # ── postprocess：出口后处理层（结论前置 + 过程折叠 + 长度上限）──────
 # 说明：这是叠加在现有闸门之上的「最后一层」后处理，不改动任何现有闸门逻辑。
 # 对应历史失败 3 次：回复形态不稳定 —— 结论不在最前、过程太长、单轮超长。
-# 三个动作按顺序执行：
+# 三道闸门按顺序执行：
 #   ① 结论前置：首段不是结论句时，把最后一段结论提到最前；
-#   ② 过程折叠：超过 4000 字的思考块折叠成「▸ 展开」；
-#   ③ 长度上限：单轮硬上限 8000 字，超出截断并提示「继续请说下一轮」。
+#   ② 过程折叠：超过 2000 字的思考过程折叠成「摘要 + 预览」的折叠块；
+#   ③ 长度上限：单段超过 8000 字就按段落**切分**（不是截断），每段以完整结论收尾，
+#      由前端分段渲染 —— 内容不丢，只是不再挤成一坨把结论淹没。
+# 另外：长回复出口前把问句整句移除 —— 给用户的是结论与交付，不是反问。
 
-# 思考块折叠阈值：单个思考块超过这个字数就折叠
-POSTPROCESS_THINK_FOLD_THRESHOLD = 4000
-# 单轮硬上限：postprocess 出口处最终文本绝不超过这个字数
+# 思考过程折叠阈值：单个思考过程超过这个字数就折叠成摘要
+POSTPROCESS_THINK_FOLD_THRESHOLD = 2000
+# 语义别名：外部按「过程折叠」找阈值时用这个名字
+PROCESS_FOLD_THRESHOLD = POSTPROCESS_THINK_FOLD_THRESHOLD
+# 折叠成摘要时保留的过程预览长度（剩下的收进「完整过程见 actlog」）
+POSTPROCESS_SUMMARY_KEEP = 200
+# 单段硬上限：postprocess 出口处**单段**不超过这个字数，超出按段落切分
 POSTPROCESS_HARD_CAP = 8000
 # 结论句关键词：首段命中任一即视为「已经是结论句」
 _CONCLUSION_KEYWORDS = ("结论", "已", "完成", "通过", "失败")
@@ -918,6 +924,15 @@ _CONCLUSION_KEYWORDS = ("结论", "已", "完成", "通过", "失败")
 _THINK_OPEN_MARKERS = ("<details>", "<details ", "🧠", "思考块", "思考内容")
 # 折叠后的思考块提示（用户点开才看）
 _THINK_FOLDED_NOTICE = "▸ 展开"
+# 超长思考过程折叠成摘要的模板：标题里写明原字数，正文只留预览 +「其余已折叠」
+_THINK_SUMMARY_TPL = (
+    "<details><summary>🧠 思考过程（共 %d 字，已折叠成摘要）</summary>\n\n"
+    "%s\n\n…（其余 %d 字已折叠，完整过程见 actlog）\n\n</details>"
+)
+# 问句标点：整句以这些标点结尾即视为「问句」，出口处移除
+_QUESTION_ENDS = ("？", "?")
+# 句子切分点：句末标点后断开（用于逐句剔掉问句）
+_SENT_SPLIT_PATTERN = r"(?<=[。！？!?；;])"
 # 截断提示（postprocess 专用，与 _TRUNCATE_NOTICE 区分）
 _POSTPROCESS_TRUNCATE_NOTICE = "…（已截断，继续请说「下一轮」）"
 
@@ -978,29 +993,48 @@ def _promote_conclusion(text: str) -> str:
     return last + "\n\n" + body
 
 
+def _summarize_think_block(block: str) -> str:
+    """把超长思考过程折叠成「摘要 + 预览」的折叠块。
+
+    与「截断」的区别：折叠块里留着过程开头（预览）+ 原字数 + 去看完整过程的
+    去处，用户点开就能确认「这不是空白，是过程被收起来了」。
+    """
+    s = (block or "").strip()
+    if not s:
+        return ""
+    n = len(s)
+    keep = min(POSTPROCESS_SUMMARY_KEEP, n)
+    preview = s[:keep].strip()
+    if not preview:                          # 极端情况：过程全是标记/空白
+        return _THINK_FOLDED_NOTICE
+    return _THINK_SUMMARY_TPL % (n, preview, max(0, n - keep))
+
+
 def _fold_think_blocks(text: str) -> str:
-    """② 过程折叠：超过 4000 字的思考块折叠成「▸ 展开」。
+    """② 过程折叠：超过 2000 字的思考过程折叠成摘要。
 
     识别两类思考块：
-      · <details>…</details> 块：整块超过阈值就折叠；
-      · 以 🧠 / 思考块 / 思考内容 开头的段落：超过阈值就折叠。
-    折叠后只留一行「▸ 展开」，不丢内容（原文仍在，只是收进提示）。
+      · <details>…</details> 块：整块超过阈值就折成摘要块；
+      · 以 🧠 / 思考块 / 思考内容 开头的段落：超过阈值就折成摘要块。
+    没超阈值的思考块原样保留（短过程不该被切碎）。
     """
     if not text:
         return text
     out = text
-    # 处理 <details> 块：逐个匹配，超阈值折叠
+    # 处理 <details> 块：逐个匹配，超阈值折成摘要
     try:
         import re as _re
+
         def _fold_details(m):
             block = m.group(0)
             if len(block) <= POSTPROCESS_THINK_FOLD_THRESHOLD:
                 return block
-            return _THINK_FOLDED_NOTICE
+            return _summarize_think_block(block)
+
         out = _re.sub(r"<details[^>]*>.*?</details>", _fold_details, out, flags=_re.S)
     except Exception:                                   # noqa: BLE001
         pass
-    # 处理以思考标记开头的段落：按空行切段，超阈值折叠
+    # 处理以思考标记开头的段落：按空行切段，超阈值折成摘要
     paras = out.split("\n\n")
     new_paras = []
     for p in paras:
@@ -1010,10 +1044,115 @@ def _fold_think_blocks(text: str) -> str:
             continue
         is_think = any(stripped.startswith(m) for m in _THINK_OPEN_MARKERS)
         if is_think and len(stripped) > POSTPROCESS_THINK_FOLD_THRESHOLD:
-            new_paras.append(_THINK_FOLDED_NOTICE)
+            new_paras.append(_summarize_think_block(stripped))
         else:
             new_paras.append(p)
     return "\n\n".join(new_paras)
+
+
+def _strip_question_sentences(line: str) -> str:
+    """剔掉一行里以「？」/「?」结尾的整句；非问句原样保留。"""
+    if not line or not any(m in line for m in _QUESTION_ENDS):
+        return line
+    import re as _re
+    pieces = _re.split(_SENT_SPLIT_PATTERN, line)
+    kept = [p for p in pieces
+            if p.strip() and not p.strip().endswith(_QUESTION_ENDS)]
+    return "".join(kept)
+
+
+def _strip_questions(text: str) -> str:
+    """移除长回复里的问句（逐句剔除，代码围栏内不动）。
+
+    对应摩擦点：出口回复该给「结论 + 交付」，不该用反问句把问题丢回给用户
+    （「要不要我继续？」「还需要我做什么？」这类尾巴既占长度又不给信息）。
+    只处理问句本身，陈述句与代码块一个字都不动；整段都被删空时连空行一起收掉。
+    """
+    if not text:
+        return text
+    out_lines, in_fence = [], False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out_lines.append(line)
+            continue
+        out_lines.append(line if in_fence else _strip_question_sentences(line))
+    paras = [p.strip() for p in "\n".join(out_lines).split("\n\n")]
+    return "\n\n".join([p for p in paras if p])
+
+
+def _with_conclusion_tail(part: str, conclusion: str) -> str:
+    """给切分后的段补「完整结论收尾」：每段末尾都带着结论段。
+
+    用户点开任意一段都能立刻看到「这段的结论是什么」，不必回翻第一段。
+    段里已经有结论，或者结论段本身长得离谱（超过半段预算）时，不硬塞。
+    """
+    p = (part or "").strip()
+    c = (conclusion or "").strip()
+    if not p or not c:
+        return p
+    if p.endswith(c) or ("\n\n" + c) in p:
+        return p
+    if len(c) > POSTPROCESS_HARD_CAP // 8:
+        c = c[:POSTPROCESS_HARD_CAP // 8].rstrip() + "…"
+    return p + "\n\n" + c
+
+
+def _split_long_segments(text: str, limit: int = POSTPROCESS_HARD_CAP) -> list:
+    """③ 长度上限：单段超过 limit 就按段落切分，每段以完整结论收尾。
+
+    与 _cap_length（直接截断、会丢内容）的分工：
+      · _cap_length 是「实在放不下就砍」的最后兜底；
+      · 这里优先**切分**：按空行切段后重新打包成每段不超过 limit 的多段，
+        每段末尾补回结论段，内容一个字都不丢，由前端分段渲染。
+    单段内部若有一个超长巨无霸段落，退化成按字符硬切，保证每段都受控。
+    """
+    s = (text or "").strip()
+    if not s:
+        return []
+    try:
+        limit = int(limit)
+    except Exception:                                   # noqa: BLE001
+        limit = POSTPROCESS_HARD_CAP
+    if limit <= 0:
+        limit = POSTPROCESS_HARD_CAP
+
+    conclusion = _first_para(s)
+    if not _is_conclusion_para(conclusion) or len(conclusion) > limit // 4:
+        conclusion = ""
+    tail = ("\n\n" + conclusion) if conclusion else ""
+    budget = max(200, limit - len(tail))
+
+    # 先按空行切段；单个巨无霸段落再按字符硬切（保证每块都 <= budget）
+    pieces = []
+    for p in s.split("\n\n"):
+        p = p.strip()
+        if not p:
+            continue
+        if len(p) <= budget:
+            pieces.append(p)
+            continue
+        for i in range(0, len(p), budget):
+            pieces.append(p[i:i + budget])
+
+    parts, buf, size = [], [], 0
+    for p in pieces:
+        if buf and size + len(p) + 2 > budget:
+            parts.append("\n\n".join(buf))
+            buf, size = [], 0
+        buf.append(p)
+        size += len(p) + 2
+    if buf:
+        parts.append("\n\n".join(buf))
+
+    out = []
+    for part in parts:
+        if tail:
+            part = _with_conclusion_tail(part, conclusion)
+        if len(part) > limit:
+            part = _cap_length(part, limit)             # 兜底：保证单段受控
+        out.append(part)
+    return [p for p in out if p.strip()]
 
 
 def _cap_length(text: str, limit: int = POSTPROCESS_HARD_CAP) -> str:
@@ -1044,15 +1183,23 @@ def _cap_length(text: str, limit: int = POSTPROCESS_HARD_CAP) -> str:
     return cut.rstrip() + notice
 
 
-def postprocess(text) -> str:
-    """回复出口后处理：结论前置 + 过程折叠 + 长度上限。
+def postprocess(text):
+    """回复出口后处理：结论前置 + 过程折叠 + 长度上限（三道闸门）。
 
     这是叠加在现有闸门之上的最后一层，不改动任何现有闸门逻辑。
-    三个动作按顺序执行：
+    三道闸门按顺序执行：
       ① 结论前置：首段不是结论句（不含「结论/已/完成/通过/失败」等词）时，
          把最后一段结论提到最前；
-      ② 过程折叠：超过 4000 字的思考块折叠成「▸ 展开」；
-      ③ 长度上限：单轮硬上限 8000 字，超出截断并加「…（已截断，继续请说「下一轮」）」。
+      ② 过程折叠：超过 2000 字的思考过程折叠成「摘要 + 预览」的折叠块；
+      ③ 长度上限：单段超过 8000 字时按段落**切分**，每段以完整结论收尾
+         （不截断、不丢内容，由前端分段渲染）。
+    长回复（> 过程折叠阈值）出口前还会把问句整句移除 —— 回复只给结论与交付，
+    不把问题反问回给用户。
+
+    返回
+    ----
+    · str        —— 三道闸门都放得下（常规回复）；
+    · list[str]  —— 长度上限被触发时的分段结果（首段必定是结论，每段以结论收尾）。
 
     任何异常都退回原文本，绝不影响主回复。
     """
@@ -1060,10 +1207,23 @@ def postprocess(text) -> str:
         s = _as_text(text)
         if not s or not s.strip():
             return s
+        # ① 结论前置
         s = _promote_conclusion(s)
+        # ② 过程折叠：超过 2000 字的思考过程折叠成摘要
         s = _fold_think_blocks(s)
-        s = _cap_length(s)
-        return s
+        # 长回复里的问句整句移除（短回复不动，闲聊不受影响）
+        if len(s) > POSTPROCESS_THINK_FOLD_THRESHOLD:
+            s = _strip_questions(s)
+        # ③ 长度上限：单段超过 8000 字 → 按段落切分，每段以完整结论收尾
+        if len(s) <= POSTPROCESS_HARD_CAP:
+            return s
+        parts = _split_long_segments(s)
+        if len(parts) > 1:
+            return parts
+        if parts:
+            return parts[0]
+        # 兜底：理论上到不了，再走一道截断保证长度受控
+        return _cap_length(s)
     except Exception:                                   # noqa: BLE001
         return _as_text(text)
 # 结尾「下一步 / 验证方式」缺失时补的兜底文案
@@ -1531,6 +1691,10 @@ def finalize(text):
         s = raw.strip()
         if not s:
             return raw
+        # 长回复里的问句整句移除（出口只给结论与交付，不反问用户）；
+        # 短回复不动，闲聊「要不要我继续？」这类正常互动不受影响。
+        if len(s) > POSTPROCESS_THINK_FOLD_THRESHOLD:
+            s = _strip_questions(s)
         paras = _finalize_split_paras(s)
         if not paras:
             return raw
@@ -1564,10 +1728,16 @@ def finalize(text):
         if rest:
             blocks.append(rest[0])          # 结论段：永远排第一
             blocks.extend(rest[1:])         # 详情/正文
-        # ② 过程折叠：思考段整块收进 <details>，放在正文之后当附录
+        # ② 过程折叠：思考段整块收进 <details>，放在正文之后当附录；
+        #    超过 2000 字的过程不再整段塞进折叠块，而是折成「摘要 + 预览」
+        #    （否则折叠块本身就成了新的巨无霸，把长度上限顶爆）。
         blocks.extend(already)
         if think:
-            blocks.append(_finalize_wrap_details("\n\n".join(think)))
+            think_body = "\n\n".join(think)
+            if len(think_body) > POSTPROCESS_THINK_FOLD_THRESHOLD:
+                blocks.append(_summarize_think_block(think_body))
+            else:
+                blocks.append(_finalize_wrap_details(think_body))
         if not blocks:
             return s
 
@@ -1575,7 +1745,9 @@ def finalize(text):
         full = "\n\n".join(b for b in blocks if b)
         if len(full) <= FINALIZE_SPLIT_THRESHOLD:
             return full
-        parts = _finalize_pack(blocks, FINALIZE_PART_MAX)
+        conclusion = rest[0] if rest else ""
+        parts = [_with_conclusion_tail(p, conclusion)
+                 for p in _finalize_pack(blocks, FINALIZE_PART_MAX)]
         if len(parts) <= 1:
             return parts[0] if parts else full
         return parts
@@ -2141,3 +2313,62 @@ def __getattr__(name):
     if "checklist" in low or ("delivery" in low and "report" not in low):
         return build_delivery_checklist
     raise AttributeError("module %r has no attribute %r" % (__name__, name))
+
+
+# ── 形态闸门自检：15000 字 + 5 个问句 ──────────────────────────────
+# 直接构造一条「结论被过程淹没、里面还夹着 5 个反问」的超长回复，验证三道闸门：
+#   ① 输出被切分（不再是一坨 15000 字）；
+#   ② 5 个问句一个不剩；
+#   ③ 首段就是结论；
+#   ④ 思考过程折叠成 <details> 摘要块且标签配平、单段不超 8000 字。
+# 跑法：`python -m backend.reply_gate`（或 `python backend/reply_gate.py`）。
+_SELFTEST_QUESTIONS = (
+    "要不要我现在就上线？",
+    "需要我再压测一轮吗？",
+    "日志要不要一起清掉？",
+    "你希望我把超时改成 5 秒吗？",
+    "还需要我通知下游吗？",
+)
+
+
+def _selftest_shape_gates() -> bool:
+    """构造 15000 字含 5 个问句的回复，断言三道闸门的真实行为。"""
+    conclusion = "结论：接口已修复并通过自检，剩余风险是并发下偶发超时。"
+    body = []
+    for i in range(320):
+        line = ("第 %d 段：改动点与验证记录如下，包含文件、命令、结果与剩余风险说明。"
+                % (i + 1))
+        if i % 64 == 0:
+            line += _SELFTEST_QUESTIONS[(i // 64) % len(_SELFTEST_QUESTIONS)]
+        body.append(line)
+    think = "🧠 思考过程\n" + ("先查日志再定位问题，然后改闸门再回归。" * 145)
+    sample = conclusion + "\n\n" + think + "\n\n" + "\n\n".join(body)
+    assert len(sample) >= 15000, "构造样本不足 15000 字：%d" % len(sample)
+
+    out = postprocess(sample)
+    parts = out if isinstance(out, list) else [out]
+    assert len(parts) > 1, "15000 字回复没有被切分"
+    text = "".join(parts)
+    for q in _SELFTEST_QUESTIONS:
+        assert q not in text, "问句没被移除：%s" % q
+    assert "？" not in text and "?" not in text, "还有问句残留"
+    assert parts[0].strip().startswith("结论"), "首段不是结论：%r" % parts[0][:40]
+    assert "<details>" in text and "</details>" in text, "思考过程没有折叠成摘要"
+    assert text.count("<details") == text.count("</details>"), "details 标签没配平"
+    for p in parts:
+        assert len(p) <= POSTPROCESS_HARD_CAP, "单段超上限：%d" % len(p)
+
+    # 出口另一条路径（main.py 接线的 finalize）也要过同样的三道闸门
+    fout = finalize(sample)
+    fparts = fout if isinstance(fout, list) else [fout]
+    ftext = "".join(fparts)
+    for q in _SELFTEST_QUESTIONS:
+        assert q not in ftext, "finalize 问句没被移除：%s" % q
+    assert fparts[0].strip().startswith("结论"), "finalize 首段不是结论"
+    assert "<details>" in ftext and "</details>" in ftext, "finalize 思考过程没折叠"
+    return True
+
+
+if __name__ == "__main__":
+    _selftest_shape_gates()
+    print("reply_gate shape gates: ok")

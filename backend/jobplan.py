@@ -415,6 +415,57 @@ def _rule_steps(goal: str) -> list:
     return out
 
 
+# ---------------------------------------------------------------- 待办（说完就开工）
+# 用户原话：「少打字，说完就看到它在动」。按住首页悬浮球说一句 → **先把这句话
+# 拆成几张可勾选的待办卡片**，边做边勾 —— 用户不必等一大段回复才知道做了什么。
+#
+# 和 plan_steps 的分工（刻意不合并）
+# --------------------------------
+#   plan_steps 排的是「工具」：只认那四个工具，拆出来必须能跑；
+#   split_todos 排的是「人话」：用户视角的几件事，不限定用哪个工具。
+# 所以这里**不调模型也不做意图识别**：一句话按连接词切成几个动宾短语就够了。
+# 理由很实在 —— 语音刚转完就要出卡片，等一次 LLM 就把"说完就看到它在动"等没了；
+# 而且离线是本产品常态，规则版永远跑得动。
+#
+# 注意 `并` 前面若是「合/兼/吞」（合并、兼并与吞并），那是词内字不是连接词，不能切。
+_TODO_SPLIT = re.compile(
+    r"(?:然后|接着|顺便|之后|(?<![合兼吞])并(?:且)?|(?<![不])再|，|,|；|;|。|！|!|\n|、)+")
+_TODO_MIN_LEN = 2          # 切出来的单字碎片（"的""了"）不是待办，丢掉
+
+
+def split_todos(text, max_items: int = 5) -> list:
+    """一句话 → 待办数组 `[{id, title, done, deps, status}]`。**永不抛异常**。
+
+    口径（前端的卡片直接按这个渲染，别在别处再猜一遍）：
+      · `done` 恒为 False —— 刚拆出来的待办一定还没做完，勾了才置 True；
+      · `deps` 恒为 [] —— 同一句话切出来的几件事互相独立，所以前端可以
+        **并行触发**（参考 GAP 的并行工具调用思路：没有依赖就别排成串行）；
+        真有先后依赖的（"先查天气再写行程"）由 plan_steps 的 depends_on 表达，
+        这里不猜 —— 猜成"依赖上一步"会让一次失败把后面的活全连带跳过；
+      · 最多 `max_items` 条 —— 卡片是给人看的，超过 5 条就不像待办像日志了。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    try:
+        limit = int(max_items)
+    except Exception:                                    # noqa: BLE001
+        limit = 5
+    limit = max(1, min(limit, 8))
+    parts = []
+    for piece in _TODO_SPLIT.split(raw):
+        p = str(piece or "").strip(" \t\r\n，,。；;、:：-—·")
+        if len(p) >= _TODO_MIN_LEN:
+            parts.append(p)
+    if not parts:                       # 整句话被当成碎片丢掉时，至少留一条
+        parts = [raw]
+    out = []
+    for i, p in enumerate(parts[:limit]):
+        out.append({"id": i + 1, "title": p[:60], "done": False,
+                    "deps": [], "status": PENDING})
+    return out
+
+
 def plan_steps(goal: str, llm=None, steps=None) -> list:
     """把一句话拆成步骤。返回的每一步都已规范化（tool/args/status 齐备）。
 

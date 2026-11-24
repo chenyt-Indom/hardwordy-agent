@@ -526,21 +526,47 @@ def _recent_session_rows(window: int = COUNT_WINDOW) -> list:
 
 
 def record_act(name: str, ok: bool = True, summary: str = "",
-               session: str = "brand") -> None:
+               session: str = "brand", result: str = "", detail: str = "",
+               files=None, **extra) -> None:
     """兼容封装：把 record_act(name, ok=, summary=) 转成 record(session, name, ...)。
 
     2026-11-22：brand.py 的品牌解锁 / 写入留痕调用的是 `record_act`，而 actlog
     只暴露 `record(session, name, ...)` —— 静态检查因此报 high（调用了不存在的
     函数）。brand.py 受品牌密码保护、不适合为这点小事去解锁，所以在账本这边补
     一层薄封装。任何异常都吞掉：账本坏了绝不能拦住写入本身。
+
+    ★ 2026-11-24「改动证据卡 · 补齐到 selfdev 提案入口」：
+      `selfdev.patch` 的幽灵修复闸门是用
+      `record_act("selfdev_phantom", summary=…, result=…, detail=…, files=…,
+                  phantom=True, fail_kind=…, count=0)` 留痕的 —— 而老签名
+      只认 (name, ok, summary, session)，多出来的 phantom / fail_kind / count
+      会抛 TypeError 被外层 except 吞掉，**一条 phantom 事件都没落盘**，
+      事后谁也查不出「拦了没有、拦了谁」（见 record_phantom 的注释）。
+      所以这里把 evidence 通道打开：detail/files/phantom/fail_kind/count/…
+      都转成 record() 的 evidence，真写进账本的 ev 字段。
     """
     try:
+        ev = {}
+        for k in ("fail_kind", "count", "regression", "phantom", "rel",
+                  "history", "line", "lines", "root_cause", "days",
+                  "anchor_miss", "fallback"):
+            if k in extra and extra[k] is not None:
+                ev[k] = extra[k]
+        if ev.get("phantom"):
+            ev["phantom"] = True
+        args = {}
+        rels = [f for f in (files or []) if isinstance(f, str) and f]
+        if rels:
+            args["rel"] = rels[0]
+            ev.setdefault("rel", rels[0])
         # ★ 2026-11-23：record() 只在 note 有值或 ok=False 时才写摘要字段 m，
         #   而这里原来只传了 result —— 于是「验证通过」「跑分 155.09」这类
         #   ok=True 的记录在账本里只剩 {"t","n","a","ok"}，看不到任何内容。
         #   摘要必须同时传 note，日志才看得出验了什么、分数多少。
-        record(session, name, {}, ok=bool(ok),
-               result=str(summary or ""), note=str(summary or ""))
+        msg = str(summary or "") or str(detail or "") or str(result or "")
+        record(session, name, args, ok=bool(ok),
+               result=str(result or detail or summary or ""), note=msg,
+               evidence=ev or None)
     except Exception:                                     # noqa: BLE001
         logger.debug("record_act 兼容封装写账本失败", exc_info=True)
 
@@ -789,6 +815,328 @@ def count_fail_kind_ex(fail_kind: str, days: int = 7, path: str = "") -> tuple:
     if not path:
         hit += _count_fail_attr(fk, cutoff)
     return hit, True
+
+
+def _attr_counts(cutoff: float = 0.0) -> dict:
+    """把失败归因账本 fail_attribution.jsonl 按 kind 聚合成 {kind: count}。
+
+    与 _count_fail_attr 同源，只是这里要**一次拿到所有分类**的计数
+    （提案前的证据卡要显示「哪个失败、几次」，不是只查一个）。
+    任何异常都返回已读到的部分 —— 账本坏了不能影响主流程。
+    """
+    out = Counter()
+    try:
+        p = os.path.join(config.data_root(), "data", "self_iterate",
+                         "fail_attribution.jsonl")
+        if not os.path.isfile(p):
+            return {}
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except Exception:                       # noqa: BLE001
+                    continue
+                if not isinstance(r, dict):
+                    continue
+                k = r.get("kind") or r.get("fail_kind")
+                if not isinstance(k, str) or not k.strip():
+                    continue
+                if cutoff > 0:
+                    ts = _event_ts(r)
+                    if ts and ts < cutoff:
+                        continue
+                out[k.strip()] += 1
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return dict(out)
+
+
+def fail_kind_counts(days: int = 7, path: str = "") -> dict:
+    """按**时间窗**聚合所有 fail_kind 的真实计数，返回 {fail_kind: count}。
+
+    这是「改动证据卡 / 幽灵修复闸门」的统一数据源：
+      1) task.json 的 events 里带 fail_kind 的事件（按 days 天过滤）；
+      2) 失败归因账本 fail_attribution.jsonl 的 kind 字段
+         （生产里真实的失败分类几乎都在这里，events 里几乎没有 —— 见
+          _count_fail_attr 的说明）；
+      3) 会话账本行（data/actlog/*.jsonl）里带 fail_kind 的行。
+    三处合并求和，谁有数算谁，都没有就是空 dict（不编常量）。
+
+    参数：
+      days  时间窗（天），<=0 表示不限时间
+      path  显式指定 task.json 路径（测试用；给了就不读生产归因账本，
+            保证用例可重复）
+
+    任何异常都返回已读到的部分 —— 账本坏了不能影响主流程。
+    """
+    try:
+        d = int(days)
+    except (TypeError, ValueError):
+        d = 7
+    cutoff = (time.time() - d * 86400.0) if d > 0 else 0.0
+    out = Counter()
+    try:
+        for e in _load_events(path):
+            if not isinstance(e, dict):
+                continue
+            k = e.get("fail_kind")
+            if not isinstance(k, str) or not k.strip():
+                continue
+            if cutoff > 0:
+                ts = _event_ts(e)
+                if ts and ts < cutoff:
+                    continue
+            out[k.strip()] += 1
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    if not path:
+        try:
+            for k, n in _attr_counts(cutoff).items():
+                out[k] += int(n or 0)
+        except Exception:                               # noqa: BLE001
+            logger.debug("silent-except", exc_info=True)
+    try:
+        for r in _recent_session_rows(COUNT_WINDOW):
+            if not isinstance(r, dict):
+                continue
+            ev = r.get("ev") if isinstance(r.get("ev"), dict) else {}
+            k = str(ev.get("fail_kind") or r.get("fail_kind") or "")
+            if not k.strip():
+                continue
+            if ev.get("phantom"):
+                # 幽灵事件自己带 fail_kind，但它**不代表真实发生过** ——
+                # 数进去会让闸门自己把自己放行（自证循环）。
+                continue
+            out[k.strip()] += 1
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    return {k: int(v) for k, v in out.items() if v > 0}
+
+
+def record_phantom(fail_kind: str, rel: str = "", reason: str = "",
+                   session: str = "", days: int = 7, extra: dict = None) -> dict:
+    """记一条「幽灵修复被拒」事件到账本（含 fail_kind 名），供事后审计/断言。
+
+    为什么单独一个入口（2026-11-24「提案入口加真实失败证据校验」）：
+      拒绝幽灵提案时必须留下**可查证的证据**，否则「拦了没有、拦了谁」
+      谁也说不清。原来 selfdev 用的是 `record_act(... phantom=True ...)`
+      —— 而 record_act 只接受 (name, ok, summary, session)，多传的
+      phantom/fail_kind 会抛 TypeError 被外层 except 吞掉，事件**一条都没落盘**。
+      这里用 record() 的 evidence 通道落盘：ev={"fail_kind":…, "phantom":True}。
+    """
+    fk = str(fail_kind or "").strip()
+    msg = str(reason or "").strip() or ("幽灵修复被拒：fail_kind=%s" % (fk or "?"))
+    ev = {"fail_kind": fk, "phantom": True}
+    if rel:
+        ev["rel"] = str(rel)
+    try:
+        ev["count"] = int((extra or {}).get("count") or 0)
+    except (TypeError, ValueError):
+        ev["count"] = 0
+    if isinstance(extra, dict):
+        for k, v in extra.items():
+            if k not in ev and v is not None:
+                ev[k] = v
+    try:
+        record(str(session or "default"), "selfdev_phantom",
+               {"rel": str(rel or ""), "fail_kind": fk}, ok=False,
+               result=msg, note=msg, evidence=ev)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("record_phantom 写账本失败", exc_info=True)
+        return {}
+    return {"ok": True, "fail_kind": fk, "phantom": True,
+            "session": str(session or "default"), "summary": _first_line(msg, 90),
+            "evidence": {"fail_kind": fk, "phantom": True, "count": ev.get("count", 0)}}
+
+
+def phantom_events(session: str = "", limit: int = 50) -> list:
+    """读回「幽灵修复被拒」事件（phantom=true），供断言 / 面板查证。
+
+    参数：
+      session  非空 → 只查该会话账本；空 → 跨会话（按账本文件时间）
+      limit    最多返回多少条（最新的在后）
+
+    返回：[{"session","t","name","fail_kind","summary","rel"}, ...]
+    """
+    rows = []
+    try:
+        if session:
+            files = [(_path(session), session)]
+        else:
+            d = _dir()
+            names = [n for n in os.listdir(d) if n.endswith(".jsonl")]
+            names.sort(key=lambda n: os.path.getmtime(os.path.join(d, n)))
+            files = [(os.path.join(d, n), n[:-6]) for n in names]
+        for p, ses in files:
+            for r in _read(p):
+                if not isinstance(r, dict):
+                    continue
+                ev = r.get("ev") if isinstance(r.get("ev"), dict) else {}
+                if not ev.get("phantom"):
+                    continue
+                rows.append({"session": ses,
+                             "t": r.get("t", ""),
+                             "name": r.get("n", ""),
+                             "fail_kind": str(ev.get("fail_kind") or ""),
+                             "rel": str(ev.get("rel") or ""),
+                             "summary": r.get("m", "")})
+    except Exception:                                   # noqa: BLE001
+        logger.debug("phantom_events 读账本失败", exc_info=True)
+        return []
+    try:
+        k = int(limit)
+    except (TypeError, ValueError):
+        k = 50
+    if k > 0:
+        rows = rows[-k:]
+    return rows
+
+
+def _any_ledger_file(path: str = "") -> bool:
+    """账本到底有没有（task.json / 归因账本 / 会话账本 任一存在）。"""
+    try:
+        p = path or os.path.join(config.data_root(), "data", "self_iterate",
+                                 "task.json")
+        if os.path.isfile(p):
+            return True
+        if os.path.isfile(os.path.join(config.data_root(), "data", "self_iterate",
+                                       "fail_attribution.jsonl")):
+            return True
+        d = _dir()
+        return bool(os.path.isdir(d) and any(n.endswith(".jsonl")
+                                            for n in os.listdir(d)))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+        return False
+
+
+def propose_patch(fail_kind: str = "", rel: str = "", find: str = "",
+                  replace: str = "", note: str = "", description: str = "",
+                  session: str = "", days: int = 7, count=None,
+                  path: str = "", **extra) -> dict:
+    """**提案入口的证据闸门**：这个改动针对的失败，账本里真的发生过吗？
+
+    用户要求（2026-11-24，对应 weakness「幽灵修复 / Phantom Guardrails」）：
+      「从 actlog 取该 fail_kind 的真实计数，计数为 0 则拒绝提案并记 phantom
+        事件（含 fail_kind 名）；计数 >0 则把计数写进提案元数据，后续改动结果
+        卡片展示。」
+
+    为什么放在 actlog 而不是 selfdev（说明偏离计划的原因）：
+      `backend/selfdev.py` 是回撤机制自身，**写入工具硬性禁止改写**（改了就没法
+      回滚了，见 lessonloop.patch_with_fallback 的注释）。所以提案闸门落在账本
+      模块：它本来就是「真实失败计数」的唯一数据源，放在这里反而少一层跨模块
+      取数；selfdev / self_iterate 两边的提案与执行入口都调它，口径只有一份。
+
+    判定（单步可验证，没有隐藏分支）：
+      · fail_kind 为空      → 放行（不是针对某个失败分类的修复，无需证据）；
+      · 真实计数 > 0        → 放行，count / days / 来源写进 meta（结果卡片展示）；
+      · 真实计数 == 0       → 拒绝（reason=phantom），并记一条 phantom 事件到
+                              账本（含 fail_kind 名），供事后审计与断言查证。
+
+    参数：
+      fail_kind      本次改动针对的失败分类
+      rel/find/replace/note/description  提案本身（原样带回，便于执行与审计）
+      session        账本会话（phantom 事件记到这个会话；空 → "default"）
+      days           计数时间窗（天）
+      count          调用方已知的真实计数（离线回放/断言用；给了就不再查账本）
+      path           显式指定 task.json（测试用）
+
+    返回 dict（ok/accepted 双口径，避免各调用方约定不一致时互相误解）：
+      ok / accepted    True=提案通过；False=被拒
+      rejected/blocked True=被拒（与 accepted 互斥）
+      phantom          True=按幽灵修复拒绝
+      reason           "" / "phantom"
+      error            给模型看的中文拒绝原因
+      fail_kind/count/days  提案元数据
+      evidence        结构化证据 {fail_kind,count,days,phantom,source}
+      evidence_text   一句话证据，前端卡片可直接渲染
+      meta            提案元数据（计数就在这里，随提案一起落盘）
+      proposal        规范化后的提案本体（rel/find/replace/note/meta）
+    """
+    fk = str(fail_kind or "").strip()
+    rel = str(rel or "").strip()
+    try:
+        d = int(days)
+    except (TypeError, ValueError):
+        d = 7
+    # 别名兼容：不同调用方对「已知计数」的叫法不一样
+    if count is None:
+        for k in ("evidence_count", "real_count", "fail_count", "count_hint"):
+            if extra.get(k) is not None:
+                count = extra.get(k)
+                break
+    meta = {"fail_kind": fk, "count": 0, "days": d, "phantom": False,
+            "source": "given" if count is not None else "ledger"}
+    if not fk:
+        # 没带 fail_kind：不是「针对某个失败的修复」，跳过证据校验（不判幽灵）。
+        meta["note"] = "未指定 fail_kind，跳过真实失败证据校验"
+        return {"ok": True, "accepted": True, "approved": True,
+                "rejected": False, "blocked": False, "phantom": False,
+                "reason": "", "error": "", "fail_kind": "", "count": 0,
+                "days": d,
+                "evidence": {"fail_kind": "", "count": 0, "phantom": False,
+                             "days": d, "source": "none"},
+                "evidence_text": "", "meta": meta,
+                "proposal": {"rel": rel, "find": find, "replace": replace,
+                             "note": note, "description": description,
+                             "meta": meta}}
+    n = -1
+    if count is not None:
+        try:
+            n = int(count)
+        except (TypeError, ValueError):
+            n = -1
+    if n < 0:
+        try:
+            n = int(fail_kind_counts(days=d, path=path).get(fk) or 0)
+        except Exception:                               # noqa: BLE001
+            logger.debug("propose_patch 查账本失败", exc_info=True)
+            n = 0
+    n = max(0, int(n))
+    meta["count"] = n
+    readable = _any_ledger_file(path)
+    evidence_text = "针对 fail_kind: %s，近 %d 天 %d 次" % (fk, d, n)
+    if n <= 0:
+        # ---- 幽灵修复：拒绝提案 + 记 phantom 事件（含 fail_kind 名）----
+        reason = ("拒绝：提案 fail_kind「%s」近 %d 天真实失败计数为 0，属于幽灵修复。"
+                  "请先确认这个失败真的出现过（actlog / task.json / "
+                  "fail_attribution.jsonl 里有记录），再动手改代码。"
+                  % (fk, d))
+        if not readable:
+            reason += "（账本里查不到任何记录：可能账本还没生成，或该分类从未发生过）"
+        meta["phantom"] = True
+        meta["ledger_readable"] = bool(readable)
+        try:
+            record_phantom(fk, rel=rel, reason=reason, session=session, days=d,
+                           extra={"count": 0})
+        except Exception:                               # noqa: BLE001
+            logger.debug("记 phantom 事件失败", exc_info=True)
+        return {"ok": False, "accepted": False, "approved": False,
+                "rejected": True, "blocked": True, "phantom": True,
+                "reason": "phantom", "error": reason,
+                "fail_kind": fk, "count": 0, "days": d,
+                "evidence": {"fail_kind": fk, "count": 0, "phantom": True,
+                             "days": d, "source": "ledger"},
+                "evidence_text": evidence_text + ("（账本里查不到该分类）"
+                                                 if not readable else ""),
+                "meta": meta,
+                "proposal": {"rel": rel, "find": find, "replace": replace,
+                             "note": note, "description": description,
+                             "meta": meta}}
+    # ---- 计数 >0：放行，把计数写进提案元数据（结果卡片据此展示）----
+    meta["ledger_readable"] = True
+    return {"ok": True, "accepted": True, "approved": True,
+            "rejected": False, "blocked": False, "phantom": False,
+            "reason": "", "error": "", "fail_kind": fk, "count": n, "days": d,
+            "evidence": {"fail_kind": fk, "count": n, "phantom": False,
+                         "days": d, "source": "ledger"},
+            "evidence_text": evidence_text, "meta": meta,
+            "proposal": {"rel": rel, "find": find, "replace": replace,
+                         "note": note, "description": description,
+                         "meta": meta}}
 
 
 def append_watch_event(session: str, event: dict) -> None:

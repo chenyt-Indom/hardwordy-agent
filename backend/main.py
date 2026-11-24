@@ -18469,6 +18469,23 @@ def job_plan(body: dict):
     return {"ok": True, "job": job}
 
 
+@app.post("/api/job/todos")
+def job_todos(body: dict):
+    """一句话 → 待办数组（「说一句就开工」：按住悬浮球说完，先出可勾选的卡片）。
+
+    为什么不复用 /api/job/plan：那个接口会立刻开跑（拆步 + 调工具几十秒），
+    而这里要的是**毫秒级**回一版人话待办 —— 用户说完立刻要看到卡片在动。
+    真开跑由前端对无依赖的待办**并行**触发 /api/job/plan（见 taskcard.js）。
+    """
+    from . import jobplan
+    b = body or {}
+    text = str(b.get("text") or b.get("goal") or "").strip()
+    if not text:
+        return {"ok": False,
+                "error": "先说一句要办的事，例如：查明天北京天气并生成一张图"}
+    return {"ok": True, "text": text, "todos": jobplan.split_todos(text)}
+
+
 @app.get("/api/plan/status/{job_id}")
 def plan_status(job_id: str):
     """侧栏进度条轮询这个：返回每步状态、总体百分比、成品列表。"""

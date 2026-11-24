@@ -1043,7 +1043,10 @@ def _worker(item):
     try:
         # ★ 2026-11-23 回合收尾强制证据检查：新的一轮开始，上一轮跑过的回归
         #   结果不再算本轮的证据（否则收尾会拿旧数字充数）。
-        _round_begin("task:%s" % str(item.get("title") or plan_id or "")[:60])
+        # ★ 2026-11-24：baseline=True —— 动手前先钉住「改动前回归通过数」，
+        #   改动后 _verify_once 再跑同一条 quick 回归，证据卡就能给前后对比。
+        _round_begin("task:%s" % str(item.get("title") or plan_id or "")[:60],
+                     baseline=True)
         _stage("queued", "已提交执行，等待开始")
         _emit(tid, "step", text="读取计划并确定要执行的动作…")
         # 信任模式：先把 pending 全批准（高风险也批，但会在结果里点出来）
@@ -1744,8 +1747,172 @@ def _final_check(tid=""):
 _CLOSEOUT_TAG = "⚠️ 本轮未闭环："
 # 回归证据算不算「本轮的」：必须晚于本轮起点；再给半小时的宽容期
 _CLOSEOUT_TTL = 1800.0
+# 「改动前基线」能复用多久（秒）：超过 1 小时说明期间可能在别处改过代码，
+# 那份通过数就不再代表「这次改动前」的状态，改用当场重跑的基线（2026-11-24）。
+_REGRESS_BASE_TTL = 3600.0
 # 收尾回复里最多列几条遗留（完整清单还在任务详情里）
 _CLOSEOUT_MAX_LEFT = 5
+
+
+def _regress_brief(rec):
+    """把一条回归记录压成**卡片用的最小数字**；读不到返回 None。
+
+    为什么单独一个（2026-11-24 改动证据卡）：
+      证据卡要并排显示「改动前 passed/total → 改动后 passed/total」，
+      只需要四个数字 + 范围。**读不到就是 None，绝不补 0** —— 补 0 会把
+      「没跑」显示成「一条都没过」，比不显示更误导。
+    """
+    if not isinstance(rec, dict) or not rec:
+        return None
+    try:
+        total = int(rec.get("total") or 0)
+        passed = int(rec.get("passed") or 0)
+        failed = int(rec.get("failed") or 0)
+        skipped = int(rec.get("skipped") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    try:
+        at = float(rec.get("at") or 0)
+    except (TypeError, ValueError):
+        at = 0.0
+    return {"passed": passed, "total": total, "failed": failed,
+            "skipped": skipped, "at": at,
+            "scope": str(rec.get("scope") or "quick"),
+            "where": str(rec.get("where") or ""),
+            "ok": bool(rec.get("ok")) and failed == 0}
+
+
+def _run_regress_baseline(where=""):
+    """改动**前**跑一次 quick 回归，作为「改动前通过数」的基线（跑不成返回 {}）。
+
+    复用现成的回归执行器（regress.run_disk：子进程里从磁盘重新 import，
+    自带 cwd=项目根），不另造一套尺子。跑不成只记日志，绝不抛异常 ——
+    基线拿不到就不出对比结论，但不能因此拦住迭代。
+    """
+    try:
+        from . import regress as _rg
+        runner = getattr(_rg, "run_disk", None) or _rg.run
+        try:
+            rr = runner(scope="quick", timeout=300)
+        except TypeError:                                # 老签名兜底（没 timeout）
+            rr = runner(scope="quick")
+    except Exception as e:                               # noqa: BLE001
+        logger.warning("改动前回归基线没跑成：%s: %s", type(e).__name__, e)
+        return {}
+    b = _regress_brief(rr)
+    if not b:
+        return {}
+    b["where"] = "baseline"
+    b["at"] = time.time()
+    logger.debug("改动前回归基线：%s（%s）", "%d/%d" % (b["passed"], b["total"]),
+                 where or "-")
+    return b
+
+
+def regress_compare(before, after):
+    """回归**前后对比**：同一组 quick 用例，改动前通过数 vs 改动后通过数。
+
+    只比「过了几条」，不相加、不加权、不算综合分（施工单第 8 章：两个数并排看）。
+    任一侧读不到 → delta=None / verdict=unknown，卡片显示「—」，绝不补 0。
+    返回 {before, after, delta, verdict, text}：
+      verdict = improved（多过）/ flat（持平）/ regressed（少过）/ unknown（缺一侧）
+    """
+    b = _regress_brief(before)
+    a = _regress_brief(after)
+    if not a:
+        return {"before": b, "after": None, "delta": None, "verdict": "unknown",
+                "text": "回归：改动后还没跑（本轮没有回归证据）"}
+    if not b:
+        return {"before": None, "after": a, "delta": None, "verdict": "unknown",
+                "text": "回归 改动后 %d/%d（改动前没有基线，不出对比结论）"
+                        % (a["passed"], a["total"])}
+    d = a["passed"] - b["passed"]
+    if d > 0:
+        verdict, tail = "improved", "多过 %d 条" % d
+    elif d < 0:
+        verdict, tail = "regressed", "少过 %d 条" % (-d)
+    else:
+        verdict, tail = "flat", "持平"
+    return {"before": b, "after": a, "delta": d, "verdict": verdict,
+            "text": "回归 改动前 %d/%d → 改动后 %d/%d（%s）"
+                    % (b["passed"], b["total"], a["passed"], a["total"], tail)}
+
+
+def evidence_card(actions=None, reg=None):
+    """**改动证据卡**：这条改动针对哪个真实失败（几次）+ 回归前后对比。
+
+    用户要求（2026-11-24，对应痛点「幽灵修复」）：
+      「每条自动改动显示『针对哪个真实失败 + 计数 + 回归结果』，而不是模型凭印象改。」
+
+    数据来源（不造新数）：
+      · fail_kind / count / evidence_text / phantom —— 提案闸门
+        `actlog.propose_patch` 在提案时就写进动作里的那几个字段
+        （`self_iterate._gate_proposals` 落的 proposal_meta / evidence）；
+      · 回归前后 —— `_record_regress` 把「改动前基线」和「改动后通过数」
+        一起挂在回归记录上（见 `regress_compare`）。
+
+    返回 dict：
+      items       每个带证据的动作一张小卡（id/title/fail_kind/count/phantom/text）
+      fail_kind/count/phantom  第一条的摘要（卡片标题用）
+      regression  regress_compare 的结果（before/after/delta/verdict/text）
+      text        一句话证据（前端一行就能渲染）
+    任何异常都返回空卡片 —— 证据卡坏了不能影响日志接口。
+    """
+    try:
+        items = []
+        for a in (actions or []):
+            if not isinstance(a, dict):
+                continue
+            pm = a.get("proposal_meta")
+            pm = pm if isinstance(pm, dict) else {}
+            fk = str(a.get("fail_kind") or pm.get("fail_kind") or "").strip()
+            cnt = a.get("count", pm.get("count"))
+            try:
+                cnt = None if cnt is None else int(cnt)
+            except (TypeError, ValueError):
+                cnt = None
+            phantom = bool(a.get("phantom"))
+            status = str(a.get("status") or "")
+            txt = str(a.get("evidence_text") or "").strip()
+            if not txt and fk:
+                try:
+                    txt = "针对 fail_kind: %s，近 %d 天 %s 次" % (
+                        fk, int(pm.get("days") or 7),
+                        "?" if cnt is None else cnt)
+                except (TypeError, ValueError):
+                    txt = "针对 fail_kind: %s" % fk
+            if not fk and not phantom:
+                continue                     # 没有证据的动作不出卡（新增功能类）
+            items.append({"id": str(a.get("id") or ""),
+                          "title": str(a.get("title") or "")[:60],
+                          "fail_kind": fk, "count": cnt,
+                          "phantom": phantom, "status": status,
+                          "text": txt})
+        base = None
+        if isinstance(reg, dict) and isinstance(reg.get("before"), dict):
+            base = reg.get("before")
+        cmp = regress_compare(base, reg if isinstance(reg, dict) else None)
+        head = ""
+        if items:
+            f0 = items[0]
+            if f0["phantom"]:
+                head = "⛔ 幽灵修复：fail_kind=%s 计数 %s，提案已被拒" % (
+                    f0["fail_kind"] or "?", 0 if f0["count"] is None else f0["count"])
+            else:
+                head = "🎯 " + f0["text"]
+        parts = [x for x in (head, str(cmp.get("text") or "")) if x]
+        return {"ok": True, "items": items,
+                "fail_kind": (items[0]["fail_kind"] if items else ""),
+                "count": (items[0]["count"] if items else None),
+                "phantom": any(x["phantom"] for x in items),
+                "regression": cmp,
+                "text": "｜".join(parts)}
+    except Exception:                                    # noqa: BLE001
+        logger.debug("拼改动证据卡失败（不影响日志接口）", exc_info=True)
+        return {"ok": False, "items": [], "fail_kind": "", "count": None,
+                "phantom": False, "regression": {}, "text": ""}
 
 
 def _record_regress(rr, tid="", where="verify"):
@@ -1753,6 +1920,11 @@ def _record_regress(rr, tid="", where="verify"):
 
     只留结构化数字与失败用例名，不留 items 详情 —— task.json 已经很大，
     收尾要回答的只有「过了几条 / 共几条 / 谁没过」。
+
+    ★ 2026-11-24 改动证据卡：同时把**改动前的基线**（`_round_begin` 记的
+      `_STATE["regress_base"]`）并到这条记录上，算出 before/after/delta ——
+      「回归前 12/12 → 回归后 12/12（持平）」就是卡片里那一行。
+      基线读不到时 before=None、delta=None，卡片显示「—」，不补 0。
     """
     if not isinstance(rr, dict):
         return {}
@@ -1776,19 +1948,60 @@ def _record_regress(rr, tid="", where="verify"):
            "tid": str(tid or ""), "where": str(where or ""),
            "at": time.time()}
     with _LOCK:
+        base = dict(_STATE.get("regress_base") or {})
+    # ★ 2026-11-24 改动证据卡：把「改动前」的基线并到这条记录上，
+    #   卡片就能显示「回归 改动前 12/12 → 改动后 12/12（持平）」。
+    _cmp = regress_compare(base, rec)
+    rec["before"] = _cmp.get("before")
+    rec["after"] = _cmp.get("after")
+    rec["delta_passed"] = _cmp.get("delta")
+    rec["verdict"] = _cmp.get("verdict")
+    rec["card_text"] = _cmp.get("text")
+    with _LOCK:
         _STATE["regress"] = rec
+        # 只留最近 8 条，纯数字，供任务卡按 tid 找自己那条
+        hist = list(_STATE.get("regress_hist") or [])
+        hist.append(dict(rec))
+        _STATE["regress_hist"] = hist[-8:]
     return rec
 
 
-def _round_begin(where=""):
+def _round_begin(where="", baseline=False, keep_base=False):
     """标记「新一轮开始」：之前记的回归结果不再算本轮的证据。
 
     必须在新一轮动手之前调用，否则上一轮跑过的回归会被当成这一轮的通过率。
+
+    ★ 2026-11-24 改动证据卡要求「回归在改动前后各跑一次同一组用例、对比
+      通过数」，所以这里顺手把**改动前**的那次结果钉成基线（regress_base）：
+        · 之前跑过回归 → 那份结果测的就是**这次改动前的代码**（代码自上次回归
+          以来没被动过），直接当基线，不白花 10 秒重跑；
+        · 从没跑过（首次迭代）或基线太旧（>1 小时，可能在别处改过）→
+          baseline=True 时当场跑一次 quick 基线；跑不成也不拦路，卡片如实显示
+          「改动前没有基线」，绝不补 0。
+        · keep_base=True（验证轮）→ **不动**已有基线：验证轮开始时代码已经改完，
+          拿此时的结果当「改动前」会把对比抹平。
     """
+    now = time.time()
     with _LOCK:
-        _STATE["regress_round_at"] = time.time()
+        prev = dict(_STATE.get("regress") or {})
+        _STATE["regress_round_at"] = now
         _STATE["regress"] = None
-    logger.debug("回合开始：%s", where or "-")
+        old_base = dict(_STATE.get("regress_base") or {})
+    base = {}
+    if prev and _regress_brief(prev):
+        try:
+            if (now - float(prev.get("at") or 0)) <= _REGRESS_BASE_TTL:
+                base = prev
+        except (TypeError, ValueError):
+            base = {}
+    if not base and baseline:
+        base = _run_regress_baseline(where=where)
+    if keep_base and old_base:
+        base = old_base
+    with _LOCK:
+        _STATE["regress_base"] = base or {}
+    logger.debug("回合开始：%s（改动前基线：%s）", where or "-",
+                 ("%d/%d" % (base["passed"], base["total"])) if base else "无")
 
 
 def _regress_evidence(tid="", allow_run=True):
@@ -2664,7 +2877,9 @@ def _verify_worker():
     files = v.get("files") or []
     # ★ 2026-11-23 回合收尾强制证据检查：新的一轮验证开始，之前记的回归结果
     #   一律作废 —— 收尾要的是**这一轮真跑出来的**通过率，不是上一轮的。
-    _round_begin("verify:%s" % (v.get("title") or ""))
+    # ★ 2026-11-24：keep_base=True —— 验证轮开始时文件已经改完了，
+    #   拿此刻的回归结果当「改动前」会把前后对比抹平，所以保留动手前那份基线。
+    _round_begin("verify:%s" % (v.get("title") or ""), keep_base=True)
 
     _emit(tid, "status",
           text="重启完成，自动验证第 %d 轮：%s" % (v["tries"], v.get("title") or ""),
@@ -3212,6 +3427,16 @@ def _plan_actions(plan_id):
         for a in (p.get("actions") or []):
             if not isinstance(a, dict):
                 continue
+            # ★ 2026-11-24 改动证据卡：把提案闸门落的真实失败证据（fail_kind /
+            #   计数 / 是否幽灵）一起带出去 —— 前端卡片要显示「这次改动是因为
+            #   actlog 里 fail_kind=X 出现 N 次」，而不是只显示一句标题。
+            _pm = a.get("proposal_meta")
+            _pm = _pm if isinstance(_pm, dict) else {}
+            _cnt = a.get("count", _pm.get("count"))
+            try:
+                _cnt = None if _cnt is None else int(_cnt)
+            except (TypeError, ValueError):
+                _cnt = None
             out.append({
                 "id": str(a.get("id") or ""),
                 "title": str(a.get("title") or "")[:80],
@@ -3219,6 +3444,10 @@ def _plan_actions(plan_id):
                 "files": [f for f in (a.get("files") or []) if isinstance(f, str)][:6],
                 "risk": str(a.get("risk") or ""),
                 "error": str(a.get("error") or "")[:200],
+                "fail_kind": str(a.get("fail_kind") or _pm.get("fail_kind") or ""),
+                "count": _cnt,
+                "phantom": bool(a.get("phantom")),
+                "evidence_text": str(a.get("evidence_text") or "")[:160],
             })
     except Exception:                                    # noqa: BLE001
         logger.debug("抽动作清单失败（详情里就不显示动作表）", exc_info=True)
@@ -3261,6 +3490,10 @@ def journal(limit=40):
         seq = int(_STATE.get("seq") or 0)
         # ★ 2026-11-23 回合收尾证据检查的结果（回归通过数 / 遗留清单 / 未闭环原因）
         closeout = dict(_STATE.get("last_closeout") or {})
+        # ★ 2026-11-24 改动证据卡：最近一次回归（带 before/after 对比）+ 小历史
+        reg_last = dict(_STATE.get("regress") or {})
+        reg_hist = [dict(x) for x in (_STATE.get("regress_hist") or [])
+                    if isinstance(x, dict)]
 
     by_tid = {}
     for e in events:
@@ -3304,12 +3537,21 @@ def journal(limit=40):
                     _vz.get(str(e.get("verdict") or ""), "未知"))
         return ""
 
+    def _reg_of(tid):
+        """这条任务的回归记录：优先自己那条（按 tid 匹配），否则用最近一次。"""
+        for r in reversed(reg_hist):
+            if str(r.get("tid") or "") == str(tid or ""):
+                return r
+        return reg_last
+
     def _pack(t, state_hint=""):
         if not t:
             return None
         tid = str(t.get("tid") or "")
         acts = _plan_actions(t.get("plan_id"))
         evs = by_tid.get(tid, [])
+        # 🧾 改动证据卡（2026-11-24 用户要求）：针对哪个真实失败 + 计数 + 回归前后
+        card = evidence_card(acts, _reg_of(tid))
         return {
             "tid": tid,
             "plan_id": str(t.get("plan_id") or ""),
@@ -3329,6 +3571,9 @@ def journal(limit=40):
             "files": t.get("files") or [],
             "error": str(t.get("error") or "")[:300],
             "events": evs[-60:],
+            # 改动证据卡（fail_kind / 真实计数 / 回归前后对比），前端
+            # iterjournal.js 的 renderEvidenceCard 直接吃这个字段。
+            "evidence": card,
         }
 
     tasks = []

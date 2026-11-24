@@ -91,7 +91,17 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
     ".ij-dual svg{width:100%;height:96px;display:block;}" +
     ".ij-dual .lg{display:flex;gap:12px;font-size:10.5px;opacity:.7;margin-top:2px;}" +
     ".ij-dual .lg i{display:inline-block;width:10px;height:2px;margin-right:4px;" +
-    "vertical-align:middle;border-radius:1px;}";
+    "vertical-align:middle;border-radius:1px;}" +
+    // 🧾 改动证据卡（2026-11-24）：针对哪个真实失败 + 计数 + 回归前后对比
+    ".ij-evc{margin-top:5px;border:1px solid rgba(255,255,255,.12);border-radius:8px;" +
+    "padding:5px 8px;font-size:11px;line-height:1.6;background:rgba(255,255,255,.035);}" +
+    ".ij-evc .row{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
+    ".ij-evc .row.t{opacity:.72;font-size:10.5px;}" +
+    ".ij-evc .fk{color:#8ab4f8;font-weight:600;}" +
+    ".ij-evc .cnt{color:#e8b23a;font-weight:600;}" +
+    ".ij-evc .rg{color:#8fce9b;}.ij-evc .rg.bad{color:#e5534b;}" +
+    ".ij-evc .rg.na{color:#8a929e;}" +
+    ".ij-evc .ghost{color:#e5534b;font-weight:600;}";
 
   function injectCss() {
     if ($("ijCss")) { return; }
@@ -111,6 +121,83 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
     if (st === "done" || st === "verified") { return "ij-badge ok"; }
     if (st === "waiting") { return "ij-badge wait"; }
     return "ij-badge";
+  }
+
+  // 🧾 改动证据卡（2026-11-24 用户要求）
+  //
+  // 对应痛点：幽灵修复 —— 模型凭印象编一个「失败」，然后加护栏去修它，
+  // 结果是成功率 44.7%、回滚 27 次。用户要看到的不是「我改了什么」，
+  // 而是「**凭什么改**」：这次改动是因为账本里 fail_kind=X 真实出现 N 次，
+  // 以及改完之后回归通过数有没有掉。
+  //
+  // 数据全部来自后端，前端**不造数**：
+  //   t.evidence.items[]       每个带证据的动作（fail_kind / count / phantom / text）
+  //   t.evidence.regression    {before, after, delta, verdict, text}
+  // 读不到就不画那一行 —— 补 0 会把「没跑」显示成「一条都没过」。
+  function evidenceItems(t) {
+    var ev = (t && t.evidence) || {};
+    var items = (ev.items && ev.items.length) ? ev.items : [];
+    if (!items.length) {
+      // 后端没给（老版本 / 还没跑到提案闸门）→ 从动作清单里自己摘，
+      // 保证「有 fail_kind 的改动」不会因为接口字段缺了就静默不显示证据。
+      (t && t.actions ? t.actions : []).forEach(function (a) {
+        var fk = String((a && a.fail_kind) || "");
+        var ph = !!(a && a.phantom);
+        if (!fk && !ph) { return; }
+        items.push({
+          fail_kind: fk,
+          count: (a.count === undefined ? null : a.count),
+          phantom: ph,
+          title: String((a && a.title) || ""),
+          text: String((a && a.evidence_text) || "")
+        });
+      });
+    }
+    return items;
+  }
+
+  function _cntText(c) {
+    return (c === null || c === undefined) ? "—" : String(c);
+  }
+
+  function renderEvidenceCard(t) {
+    var items = evidenceItems(t);
+    var ev = (t && t.evidence) || {};
+    var reg = (ev && ev.regression) ? ev.regression : null;
+    if (!items.length && !reg) { return null; }
+
+    var box = mk("div", "ij-evc");
+    box.appendChild(mk("span", "row t", "改动证据（针对的真实失败 / 回归前后）"));
+    items.slice(0, 3).forEach(function (x) {
+      var row = mk("span", "row");
+      if (x.phantom) {
+        var g = mk("span", "ghost", "⛔ 幽灵修复 ");
+        row.appendChild(g);
+        row.appendChild(mk("span", "fk", x.fail_kind || "?"));
+        row.appendChild(mk("span", "cnt", " 计数 " + _cntText(x.count)));
+        row.appendChild(document.createTextNode("（提案已被拒，不执行）"));
+      } else {
+        row.appendChild(document.createTextNode("🎯 针对 "));
+        row.appendChild(mk("span", "fk", x.fail_kind || "?"));
+        row.appendChild(document.createTextNode(" · "));
+        row.appendChild(mk("span", "cnt", _cntText(x.count) + " 次"));
+        if (x.text) { row.title = x.text; }
+      }
+      box.appendChild(row);
+    });
+    if (items.length > 3) {
+      box.appendChild(mk("span", "row t", "…还有 " + (items.length - 3) + " 条带证据的动作"));
+    }
+    if (reg) {
+      var cls = "row rg";
+      if (reg.verdict === "regressed") { cls = "row rg bad"; }
+      if (reg.verdict === "unknown") { cls = "row rg na"; }
+      var r = mk("span", cls, "🧪 " + (reg.text || "回归：没有证据"));
+      r.title = "同一组 quick 回归用例，改动前后各跑一次，只比通过数；" +
+                "两个数并排看，不相加、不加权、不算综合分。";
+      box.appendChild(r);
+    }
+    return box;
   }
 
   function taskNode(t) {
@@ -143,6 +230,10 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
       er.textContent = "原因：" + String(t.error).slice(0, 160);
       box.appendChild(er);
     }
+
+    // 🧾 改动证据卡：不用展开详情就能看到「凭什么改 + 改完回归怎么样」
+    var evc = renderEvidenceCard(t);
+    if (evc) { box.appendChild(evc); }
 
     var open = !!expanded[t.tid];
     if (open) {
@@ -513,5 +604,6 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
     bind();
   }
 
-  window.IterJournal = { open: open, close: close, toggle: toggle, reload: load };
+  window.IterJournal = { open: open, close: close, toggle: toggle, reload: load,
+    renderEvidenceCard: renderEvidenceCard };
 })();
