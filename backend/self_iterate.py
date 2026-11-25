@@ -7538,6 +7538,10 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
 
     # ★ 2026-11-22 用户要求：每轮都要能看出进退多少，并自动查清是哪段代码
     #   导致加减分，详细记进日志，供反思重点参考。这里统一提交一次累计分。
+    # ★ 2026-11-25：commit_round 内部会采样（或按同轮去重跳过）。这里记下它有没有
+    #   处理过 —— 处理过就不再补采，否则一轮会落下两个同分点。
+    #   不用时间窗判断：explain_delta 可能调模型，耗时几十秒，3 秒窗会漏判。
+    _rsi_handled = False
     try:
         from . import iterloop as _IL2
         if _sc_before is not None and ok_n > 0:
@@ -7551,6 +7555,7 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
             _cm = _IL2.commit_round(before=_sc_before, after=_sc_after,
                                     actions=results, rollback=_rb_txt,
                                     note="本轮 %d 条动作成功" % ok_n, pid=pid)
+            _rsi_handled = bool(_cm.get("rsi_sample"))
             _ex = _cm.get("explain") or {}
             out["score"] = {
                 "before": _sc_before.get("total"),
@@ -7582,14 +7587,19 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     #   一轮全失败 / 被护栏拦下时账本不记，曲线也不动，用户看到的就是「没反应」。
     #   这里**无条件**补采一次：距上一条不足 3 秒会被 rsi_sample_iter 自己跳过，
     #   所以和 commit_round 里那次不会重复记账。
-    try:
-        from . import lessonloop as _LLsmp
-        _smp = _LLsmp.rsi_sample_iter()
-        if _smp.get("ok") and not _smp.get("skipped"):
-            _ev("step", text="RSI 曲线采样：%s（综合 %s，共 %s 点）"
-                % (_smp.get("iso"), _smp.get("score"), _smp.get("n")))
-    except Exception:                                   # noqa: BLE001
-        logger.debug("迭代收尾 RSI 采样失败（不影响本轮）", exc_info=True)
+    if _rsi_handled:
+        # commit_round 已经采过（或按同轮去重跳过）—— 本轮曲线已经处理，
+        # 再采一次只会多一个同分点，把时间轴撑密、斜率摊平。
+        pass
+    else:
+        try:
+            from . import lessonloop as _LLsmp
+            _smp = _LLsmp.rsi_sample_iter()
+            if _smp.get("ok") and not _smp.get("skipped"):
+                _ev("step", text="RSI 曲线采样：%s（综合 %s，共 %s 点）"
+                    % (_smp.get("iso"), _smp.get("score"), _smp.get("n")))
+        except Exception:                               # noqa: BLE001
+            logger.debug("迭代收尾 RSI 采样失败（不影响本轮）", exc_info=True)
 
     # ★★ 2026-11-23 用户原话：「结束任务时卡片必须有弹出来」。
     #   分工（保证「一个任务恰好一张结束卡」，不会两张，也不会一张都没有）：

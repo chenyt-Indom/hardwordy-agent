@@ -1511,8 +1511,17 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0,
         #   调试不再往趋势里堆点。
         #   2026-11-25：append_dense（每轮迭代）例外 —— 必须追加，不能替换，
         #   否则折线永远停在最后一个点上，用户看不到「这一轮之后」的变化。
+        #   2026-11-25 修（同秒双写）：append_dense 原来直接跳过 min_gap 检查，
+        #   导致 commit_round 与 execute_approved 在同一轮收尾各采一条、
+        #   实测落了 3 组「同秒双点」（12:33:31 / 12:35:02 / 12:35:47），
+        #   斜率虽被 rsi_trend 去重救回来，但 total 会虚高。这里让 min_gap
+        #   对 append_dense 同样生效：同一轮内的第二次采样直接跳过（下一轮照常追加）。
         if gap < min_gap:
-            replace_last = not append_dense
+            if append_dense:
+                return {"ok": True, "skipped": True, "score": cur.get("score"),
+                        "n": len(rows), "same_round": True,
+                        "why": "距上次采样不足 %.0f 秒（同轮去重）" % min_gap}
+            replace_last = True
     try:
         sp = rsi_speed().get("score")
     except Exception:                                   # noqa: BLE001

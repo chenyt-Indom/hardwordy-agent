@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
@@ -72,11 +73,24 @@ def run() -> int:
         r1 = LL.rsi_sample_iter(min_gap=0)
         ck("rsi_sample_iter 首次采样成功", bool(r1.get("ok")) and not r1.get("skipped"),
            str(r1))
-        # 紧接着再采一次（距上一条 < 3 秒）：必须**追加**，不能替换
+        # ★ 2026-11-25 修（同秒双写）：同一轮里 commit_round 与 execute_approved
+        #   各采一次，实测落了 3 组「同秒双点」。现在 append_dense 也遵守 min_gap：
+        #   同轮第二次调用必须**跳过**（不是追加、也不是替换）。
         r2 = LL.rsi_sample_iter()
         rows = _rows(hist)
-        ck("每轮迭代是追加而不是替换（2 次调用 = 2 个点）", len(rows) == 2,
+        ck("★ 同轮第二次采样被跳过（不再同秒双写）",
+           bool(r2.get("skipped")) and len(rows) == 1,
            "rows=%d r2=%s" % (len(rows), r2))
+        ck("跳过时给出原因（日志能看清为什么没记）",
+           "同轮去重" in str(r2.get("why")), str(r2.get("why")))
+        ck("跳过的那次不写盘（文件行数不变、mtime 不动）",
+           len(rows) == 1 and r2.get("n") == 1, "n=%s" % r2.get("n"))
+        # 明确放行（min_gap=0）时，仍然是**追加**而不是替换 —— 每轮迭代的本质不变
+        r3 = LL.rsi_sample_iter(min_gap=0)
+        rows = _rows(hist)
+        ck("放行后是追加而不是替换（2 个点都在）",
+           bool(r3.get("ok")) and not r3.get("skipped") and len(rows) == 2,
+           "rows=%d r3=%s" % (len(rows), r3))
         ck("追加的点带 iso 时间（前端要显示时间）",
            all(bool(r.get("iso")) and " " in str(r.get("iso")) for r in rows),
            str([r.get("iso") for r in rows]))
@@ -105,6 +119,23 @@ def run() -> int:
         ck("trend.points 带 iso 时间", bool(pts) and all(p.get("ts") for p in pts))
         ck("trend.points 上限 60 点", len(pts) <= 60, "n=%d" % len(pts))
         ck("trend 仍然给出形态判定", bool(tr.get("shape")), str(tr.get("shape")))
+
+        # ★ 历史文件里已经落下的「同秒双点」不能让斜率虚高（本次修的是不再产生新的，
+        #   老数据仍在）—— rsi_trend 必须把 1 秒内的重复合并成一个点。
+        with open(hist, "w", encoding="utf-8") as fh:
+            _base = 1700000000
+            _seq = [(_base, 60.0), (_base + 600, 61.0), (_base + 1200, 62.0),
+                    (_base + 1200.4, 62.0),          # ← 历史遗留的同秒双点
+                    (_base + 1800, 63.0), (_base + 2400, 64.0)]
+            for _i, (_ts, _sc) in enumerate(_seq):
+                fh.write(json.dumps({"ts": _ts,
+                                     "iso": "2026-11-25 08:%02d:00" % _i,
+                                     "score": _sc, "speed": 50.0},
+                                    ensure_ascii=False) + "\n")
+        _tr2 = LL.rsi_trend(limit=120)
+        ck("★ 同秒双点在 trend 里被去重（6 条 → 5 点）",
+           len(_tr2.get("points") or []) == 5,
+           "n=%s" % len(_tr2.get("points") or []))
     finally:
         LL._data_dir, LL.rsi_index, LL.rsi_speed = old
 
@@ -130,17 +161,28 @@ def run() -> int:
                               actions=[], note="回归：每轮采样")
         rows2 = _rows(os.path.join(tmp2, "rsi_history.jsonl"))
         ck("commit_round 跑通并返回累计分", bool(out) and out.get("delta") == 2.0, str(out))
+        ck("commit_round 带出本轮采样结果（调用方据此去重，不靠时间窗）",
+           isinstance(out.get("rsi_sample"), dict) and out["rsi_sample"].get("ok"),
+           str(out.get("rsi_sample")))
         ck("★ 一轮迭代结束 → rsi_history 多出 1 个采样点", len(rows2) == 1,
            "rows=%d" % len(rows2))
         ck("该采样点带本轮时间与分数",
            bool(rows2) and bool(rows2[0].get("iso")) and rows2[0].get("score") == 90.0,
            str(rows2[0] if rows2 else None))
-        # 再跑一轮：必须再追加一个（而不是替换）
+        # 紧接着跑第二轮（< 3 秒）：这属于**同一轮收尾的重复采样**
+        # （真实链路里就是 commit_round + execute_approved 补采），必须跳过
         IT.commit_round(before={"total": 82.0}, after={"total": 83.0},
-                        actions=[], note="回归：第二轮")
+                        actions=[], note="回归：紧接的第二轮")
         rows3 = _rows(os.path.join(tmp2, "rsi_history.jsonl"))
-        ck("★ 第二轮迭代再追加 1 个点（线持续往前长）", len(rows3) == 2,
+        ck("★ 3 秒内的重复收尾不记账（同轮去重端到端生效）", len(rows3) == 1,
            "rows=%d" % len(rows3))
+        # 真实迭代一轮要几分钟，远大于 min_gap；等过窗口再跑，验证**会**追加
+        time.sleep(3.2)
+        IT.commit_round(before={"total": 83.0}, after={"total": 84.0},
+                        actions=[], note="回归：第三轮（间隔已过 min_gap）")
+        rows4 = _rows(os.path.join(tmp2, "rsi_history.jsonl"))
+        ck("★ 过了 min_gap 就再追加 1 个点（线持续往前长）", len(rows4) == 2,
+           "rows=%d" % len(rows4))
     finally:
         (IT._data_dir, LL._data_dir, IT.read_bench_last, IT.bench_verdict,
          IT.explain_delta) = olds
@@ -167,6 +209,9 @@ def run() -> int:
        "_LLsmp.rsi_sample_iter()" in si)
     ck("补采在 commit_round 的 try/except 之外（不被它的异常跳过）",
        si.count("rsi_sample_iter()") == 1)
+    ck("★ 补采用 commit_round 的采样结果去重（不靠 3 秒时间窗猜）",
+       '_rsi_handled = bool(_cm.get("rsi_sample"))' in si
+       and "if _rsi_handled:" in si)
 
     print()
     if fails:

@@ -1455,6 +1455,7 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
     #   原来只在「评估收尾」（约 2 小时一次）和每轮对话 hint 时采样 ——
     #   用户看到的线常常半天不动，也分不清那些点是什么时候的。
     #   放在写日志之前，日志里就能同时留下这一轮的时间与分数。
+    _rsm = None
     try:
         from . import lessonloop as _ll_s
         _rsm = _ll_s.rsi_sample_iter()
@@ -1521,6 +1522,11 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
             #   反思）要能显示「账本 +3 但尺子没涨」，而不是只看到一个字符串。
             "grind": bool(rec.get("grind")),
             "grind_note": str(rec.get("grind_note") or ""),
+            # ★ 2026-11-25：把「这一轮曲线采样的结果」带出去。
+            #   调用方（self_iterate.execute_approved）拿它判断「本轮是否已采过」，
+            #   避免只靠 3 秒时间窗去猜 —— explain_delta 可能调模型耗时几十秒，
+            #   靠时间窗会漏判、多记一个同分点。
+            "rsi_sample": _rsm,
             "kind": "score_round"}
 
 
