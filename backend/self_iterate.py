@@ -3863,9 +3863,20 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
          assert isinstance(st, dict) and "count" in st, "status() 应返回含 count 的字典"
    ⚠️ 写不出可执行断言的 feature，宁可不提 —— 没有断言就无法验证新功能是否正常。
 
+   9. **图表（charts）**：把你这一轮的结论**画出来**，不要只堆文字。
+      给 0~3 张图，每张 2~6 个数据点，类型只能用 bar / column（比大小）、
+      line（趋势）、pie / donut（占比）。
+      ⚠️ **只能画上面材料里真实出现过的数字**：真实运行指标、动作统计、论文评估分、
+         对话样本数、失败次数、抓到的论文条数……**禁止推算、禁止编造、禁止为了好看凑数**。
+         服务端会拿本轮材料里的数字逐个核对，对不上的会被标成「未核实」显示出来。
+      ⚠️ 没有真实数据可画就**给空数组 `[]`** —— 空数组是正确答案，编一张图是错误答案。
+      ⚠️ 图和文字要说同一件事：图里最突出的那一项，必须就是你在 weaknesses / features
+         里最想强调的那个问题，不要画一张和结论无关的「好看图」。
+
 ## 输出格式（严格 JSON，不要任何额外文字）
 {
   "summary": "一句话总结这次反思（30字内）。⚠️禁止写成「先修X再谈创新」「先做Y再考虑新功能」这类把创新排到后面的总结；要体现本轮具体做了什么、加了什么用户能感知的新东西",
+  "charts": [{"title":"图标题","type":"bar|column|line|pie|donut","unit":"单位，可空","data":[{"label":"标签","value":数字}]}],
   "weaknesses": [{"title":"短标题","detail":"具体问题+证据","severity":"high|mid|low"}],
   "user_insights": [{"title":"短标题","detail":"观察+证据","suggestion":"可以怎么改进"}],
   "forecast": [{"biz":"用户未来可能处理的业务","evidence":"依据（原话/重复出现的模式）","confidence":"high|mid|low","prepare":"可以提前准备什么"}],
@@ -4485,6 +4496,9 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
         "ts": _now(),
         "trigger": trigger,
         "summary": str(data.get("summary") or "")[:200],
+        # ★ 2026-11-25 用户要求「自迭代加入图表」：模型画的图存进计划，
+        #   数字先用本轮材料核对一遍（见 _clean_charts），对不上的打未核实标记。
+        "charts": _clean_charts(data.get("charts"), prompt),
         "weaknesses": data.get("weaknesses") or [],
         "user_insights": data.get("user_insights") or [],
         "features": feats,
@@ -7563,6 +7577,20 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
         logger.warning("提交累计分失败", exc_info=True)
         out["score_error"] = "%s: %s" % (type(_e).__name__, _e)
 
+    # ★ 2026-11-25（用户要求「每次迭代之后折线都要刷新并显示新数据」）：
+    #   上面 commit_round 只在 `ok_n > 0`（本轮有动作成功）时才调用 ——
+    #   一轮全失败 / 被护栏拦下时账本不记，曲线也不动，用户看到的就是「没反应」。
+    #   这里**无条件**补采一次：距上一条不足 3 秒会被 rsi_sample_iter 自己跳过，
+    #   所以和 commit_round 里那次不会重复记账。
+    try:
+        from . import lessonloop as _LLsmp
+        _smp = _LLsmp.rsi_sample_iter()
+        if _smp.get("ok") and not _smp.get("skipped"):
+            _ev("step", text="RSI 曲线采样：%s（综合 %s，共 %s 点）"
+                % (_smp.get("iso"), _smp.get("score"), _smp.get("n")))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("迭代收尾 RSI 采样失败（不影响本轮）", exc_info=True)
+
     # ★★ 2026-11-23 用户原话：「结束任务时卡片必须有弹出来」。
     #   分工（保证「一个任务恰好一张结束卡」，不会两张，也不会一张都没有）：
     #     · 这一轮会**自动重启** → 不在这里推：重启后复核卡才是这个任务的结束卡
@@ -8090,6 +8118,7 @@ def _make_plan(trigger, summary, actions, extra=None):
         logger.debug("提案证据闸门失败，按原样建计划", exc_info=True)
     plan = {"id": _pid(), "ts": _now(), "trigger": trigger,
             "summary": str(summary or "")[:200],
+            "charts": [],
             "weaknesses": [], "user_insights": [], "features": [],
             "tech_takeaways": [], "actions": norm,
             "tech_raw": {}, "tech_total": 0, "signals_used": 0}
@@ -9425,6 +9454,73 @@ def diagnose(task, expected="", actual="", evidence="", auto_fix=None,
 
 # ---------------------------------------------------------------- 汇总
 
+_CHART_TYPES = ("bar", "column", "line", "pie", "donut")
+
+
+def _chart_nums(corpus):
+    """抽出本轮材料里出现过的所有数字（用于核对图表数值有没有编）。"""
+    nums = set()
+    for m in re.findall(r"-?\d+(?:\.\d+)?", str(corpus or "")):
+        try:
+            nums.add(round(float(m), 2))
+        except (TypeError, ValueError):
+            continue
+    return nums
+
+
+def _clean_charts(charts, corpus=""):
+    """清洗反思产出的 charts，并标出「数字在本轮材料里找不到」的图。
+
+    为什么必须清洗而不是把模型输出直接丢给前端：
+      · 前端 _vizHtml 遇到非法结构会渲染成报错块，一张脏图会让整块面板看起来像坏了；
+      · 模型很容易顺手编数字。这里拿本轮提示词里真实出现过的数字做核对，
+        对不上的**不删**（可能只是占比/差值这类合理推算），但打上 unverified 标记，
+        前端显示「未核实」—— 既不假装可信，也不因为一点偏差就丢掉整张图。
+    """
+    if not isinstance(charts, list):
+        return []
+    known = _chart_nums(corpus)
+    out = []
+    for c in charts[:3]:
+        if not isinstance(c, dict):
+            continue
+        typ = str(c.get("type") or "bar").strip().lower()
+        if typ not in _CHART_TYPES:
+            typ = "bar"
+        rows = c.get("data")
+        if not isinstance(rows, list):
+            continue
+        pts = []
+        for r in rows[:8]:
+            if not isinstance(r, dict):
+                continue
+            v = r.get("value")
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                try:
+                    v = float(str(v).strip())
+                except (TypeError, ValueError):
+                    continue
+            v = float(v)
+            if v != v or v == float("inf") or v == float("-inf"):
+                continue
+            pts.append({"label": str(r.get("label") or "")[:40], "value": v})
+        if len(pts) < 2:
+            continue                      # 一个点的「图」没有信息量，直接丢
+        miss = [p["label"] for p in pts
+                if round(p["value"], 2) not in known
+                and round(abs(p["value"]), 2) not in known]
+        out.append({
+            "title": str(c.get("title") or "")[:40],
+            "type": typ,
+            "unit": str(c.get("unit") or "")[:8],
+            "data": pts,
+            # known 为空说明这轮没拿到任何可核对材料 —— 那种情况不做判断，不冤枉模型
+            "unverified": bool(miss) and bool(known),
+            "miss": miss[:3],
+        })
+    return out
+
+
 def stats():
     d = load_plans()
     proposed = approved = done = rejected = failed = 0
@@ -9962,6 +10058,7 @@ def create_plan(summary, actions=None, trigger="manual_added"):
             "ts": time.strftime("%Y-%m-%d %H:%M:%S", now),
             "trigger": str(trigger or "manual_added")[:40],
             "summary": sm[:500],
+            "charts": [],
             "weaknesses": [], "user_insights": [], "features": [],
             "tech_takeaways": [], "tech_raw": {}, "tech_total": 0,
             "actions": acts, "signals_used": 0,

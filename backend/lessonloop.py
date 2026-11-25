@@ -1484,7 +1484,15 @@ def rsi_sample(force: bool = False, min_gap: float = 60.0) -> dict:
         return _rsi_sample_locked(force=force, min_gap=min_gap)
 
 
-def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0) -> dict:
+def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0,
+                       append_dense: bool = False) -> dict:
+    """append_dense=True：即使距上一条很近也**追加**一个新点（每轮迭代用）。
+
+    2026-11-25 用户要求「每次迭代之后折线都要刷新、线也要更新」：
+    原来 force=True 在 min_gap 内是**替换**最后一条（那是给调试用的，
+    防密集点污染等距斜率）。现在斜率已按真实时间算（_slope_ts），
+    追加不会压平趋势，所以给「每轮迭代」单独开一条追加的路。
+    """
     cur = rsi_index()
     p = _rsi_hist_path()
     rows = _read_jsonl(p)
@@ -1493,7 +1501,7 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0) -> dict:
     if rows:
         last = _num_ts(rows[-1].get("ts"))
         gap = now - last
-        if not force and gap < min_gap:
+        if not force and not append_dense and gap < min_gap:
             return {"ok": True, "skipped": True, "score": cur.get("score"),
                     "n": len(rows), "why": "距上次采样不足 %.0f 秒" % min_gap}
         # ★ 2026-11-24 修（统计污染）：force=True（调试 / 手动）原来无条件追加 ——
@@ -1501,8 +1509,10 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0) -> dict:
         #   而 _slope 是按索引等距算的 → 趋势斜率被这堆几乎相同的点主导、曲线失真。
         #   改成：距上一条不足 min_gap 时**替换**最后一条，历史点保持等距，
         #   调试不再往趋势里堆点。
+        #   2026-11-25：append_dense（每轮迭代）例外 —— 必须追加，不能替换，
+        #   否则折线永远停在最后一个点上，用户看不到「这一轮之后」的变化。
         if gap < min_gap:
-            replace_last = True
+            replace_last = not append_dense
     try:
         sp = rsi_speed().get("score")
     except Exception:                                   # noqa: BLE001
@@ -1529,6 +1539,17 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0) -> dict:
     return {"ok": True, "score": rec["score"],
             "n": len(rows) if replace_last else len(rows) + 1,
             "replaced": replace_last, "iso": rec["iso"]}
+
+
+def rsi_sample_iter(min_gap: float = 3.0) -> dict:
+    """**每轮迭代收尾**采一条样本（用户 2026-11-25 要求：折线每轮都要更新）。
+
+    与 rsi_sample(force=True) 的区别：force 在 min_gap 内是替换最后一条，
+    这里是**追加**。min_gap 只用来挡「同一瞬间并发写两条」（ts 差 < 3 秒），
+    正常迭代一轮几分钟，不会被挡。
+    """
+    with _RSI_SAMPLE_LOCK:
+        return _rsi_sample_locked(force=True, min_gap=min_gap, append_dense=True)
 
 
 # 节流采样：hint() 每轮对话都会调，但只有距上次超过 gap 秒才真写盘。
@@ -1607,8 +1628,12 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
         shape = "④ 锯齿下滑"
     else:
         shape = "① 平台（原地跑）"
-    return {"ok": True, "n": len(ys),
-            "points": [{k: v for k, v in p.items() if k != "t"} for p in pts[-40:]],
+    # ★ 2026-11-25（用户要求「显示时间」）：points 里必须留 t（秒级时间戳）。
+    #   原来把 t 过滤掉了，前端只能按索引等距铺点 —— 每轮迭代一个点后间隔
+    #   从几分钟到几小时不等，按索引画等于把时间轴画假，时间标签会误导。
+    #   同时 40 → 60 点：每轮迭代都追加，40 点很快滚满，窗口太短看不出趋势。
+    return {"ok": True, "n": len(ys), "total": len(ys),
+            "points": pts[-60:],
             "slope": round(sl, 3), "stdev": round(sd, 2),
             "segs": segs, "shape": shape,
             "first": ys[0], "last": ys[-1],

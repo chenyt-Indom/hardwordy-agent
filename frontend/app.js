@@ -16308,6 +16308,70 @@
            inner + '</div>';
   }
 
+  // 📊 图表（2026-11-25 用户要求「自迭代加入图表」）
+  // 分两类，**绝不混在一起**：
+  //   ① 固定图：全部来自后端真实统计（stats / fail_lessons.count），数字不可能编；
+  //   ② 模型图：反思时自己画的 charts，后端已用本轮材料核对过数字，
+  //      对不上的带 unverified 标记，这里如实标「未核实」，不假装可信。
+  function chartBlockHtml(d, p) {
+    const st = (d && d.stats) || {};
+    const viz = (spec) => {
+      try { return _vizHtml(JSON.stringify(spec)); } catch (e) {
+        return '<div class="viz viz-err">图表渲染失败：' +
+          esc(String((e && e.message) || e)) + "</div>";
+      }
+    };
+    let out = "";
+    const funnel = [
+      { label: "提出", value: Number(st.proposed) || 0 },
+      { label: "已批准", value: Number(st.approved) || 0 },
+      { label: "真做了", value: Number(st.done) || 0 },
+      { label: "失败", value: Number(st.failed) || 0 },
+      { label: "被拒", value: Number(st.rejected) || 0 }
+    ].filter((x) => x.value > 0);
+    if (funnel.length >= 2) {
+      out += '<div class="iter-chart">' + viz({
+        type: "bar", title: "动作漏斗（全部历史 · 后端真实统计）",
+        unit: "条", data: funnel
+      }) + "</div>";
+    }
+    const rate = Number(st.rate) || 0;
+    if (rate > 0) {
+      out += '<div class="iter-chart">' + viz({
+        type: "donut", title: "采纳率（真做了 ÷ 提出）", unit: "%",
+        data: [{ label: "已落地", value: rate },
+               { label: "未落地", value: Math.round((100 - rate) * 10) / 10 }]
+      }) + "</div>";
+    }
+    // 失败归因：只画后端真给了 count 的，没 count 的一条都不画
+    const fl = ((p && p.fail_lessons) || [])
+      .filter((x) => x && Number(x.count) > 0);
+    if (fl.length >= 2) {
+      out += '<div class="iter-chart">' + viz({
+        type: "bar", title: "本轮失败归因（真实次数）", unit: "次",
+        data: fl.slice(0, 6).map((x) => ({
+          label: String(x.kind || "其他"), value: Number(x.count)
+        }))
+      }) + "</div>";
+    }
+    // ② 模型自己画的图
+    ((p && p.charts) || []).forEach(function (c) {
+      if (!c || !Array.isArray(c.data) || c.data.length < 2) return;
+      out += '<div class="iter-chart">' + viz({
+        type: c.type || "bar",
+        title: (c.title || "本轮结论图") +
+          (c.unverified ? "（含未核实数字）" : "（数据来自本轮材料）"),
+        unit: c.unit || "", data: c.data
+      }) + (c.unverified
+        ? '<div class="iter-chart-warn">⚠ 这几项在本轮材料里找不到对应数字，可能是推算：' +
+          esc((c.miss || []).join("、")) + "</div>"
+        : "") + "</div>";
+    });
+    if (!out) return "";
+    return sec("📊 图表（真实统计 + 本轮结论）",
+               '<div class="iter-charts">' + out + "</div>");
+  }
+
   // 用户要求「两者都要：聊天区推一条摘要，详情在抽屉里」。
   // 抽屉和主聊天是两个独立作用域，拿不到 addMsg，所以直接往 .messages 插节点。
   // ⚠️ 用 textContent 不用 innerHTML —— 摘要里含用户原话，不能当 HTML 解析。
@@ -17407,20 +17471,64 @@
   // ---------- 分数曲线图（用户 2026-11-23 要求：肉眼可见的数据与图表） ----------
   // 双线的原因：综合指数看「现在多好」，加速指数看「修得多快」——
   // 只有后者出现斜率递增，才算真的在加速，光看一个分数永远看不出来。
+  // ★ 2026-11-25（用户要求「显示时间和新数据」）：x 轴按**真实时间**铺点。
+  //   每轮迭代追加一个采样点后，点与点的间隔从几分钟到几小时不等 ——
+  //   按索引等距画等于把时间轴画假，时间标签会误导。后端 rsi_trend 现在保留
+  //   t（秒级时间戳），这里用它算 x；没有 t 的老数据才退回按索引。
   function rsiSvgLine(pts, key, color) {
     const n = pts.length;
     if (!n) return "";
     const x0 = 34, x1 = 612, y0 = 10, y1 = 120;
-    let d = "", on = false;
+    const tv = pts.map(function (p) { return typeof p.t === "number" ? p.t : null; })
+                  .filter(function (v) { return v !== null; });
+    const t0 = tv.length ? Math.min.apply(null, tv) : 0;
+    const t1 = tv.length ? Math.max.apply(null, tv) : 0;
+    const span = t1 - t0;
+    // 后端最多返回 60 点，这里就画满 60 个点：每轮迭代都会新增一个点，
+    // 用户要「看到新的数据以及时间」—— 只有画出来才能悬停看具体时刻。
+    const dot = n <= 60;
+    let d = "", marks = "", on = false;
     for (let i = 0; i < n; i++) {
       const v = pts[i][key];
       if (typeof v !== "number") { on = false; continue; }
-      const x = n < 2 ? (x0 + x1) / 2 : x0 + (x1 - x0) * i / (n - 1);
+      const x = span > 0 && typeof pts[i].t === "number"
+        ? x0 + (x1 - x0) * (pts[i].t - t0) / span
+        : (n < 2 ? (x0 + x1) / 2 : x0 + (x1 - x0) * i / (n - 1));
       const y = y1 - (y1 - y0) * Math.max(0, Math.min(100, v)) / 100;
       d += (on ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1) + " ";
       on = true;
+      if (dot) {
+        marks += '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) +
+          '" r="2.2" fill="' + color + '"><title>' +
+          esc(String(pts[i].ts || "")) + " · " +
+          (key === "score" ? "综合" : "加速") + " " + v + "</title></circle>";
+      }
     }
-    return d ? '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2"/>' : "";
+    return d ? '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2"/>' +
+      marks : "";
+  }
+
+  // X 轴时间刻度：首点 / 中间点 / 末点各标一个 HH:MM，让「什么时候测的」可见。
+  function rsiTimeAxis(pts) {
+    if (!pts.length) return "";
+    const pick = pts.length === 1 ? [0] : [0, Math.floor((pts.length - 1) / 2), pts.length - 1];
+    const xs = [34, 323, 612], an = ["start", "middle", "end"];
+    // 跨天时首末刻度必须带日期：真实历史有 11-23 → 11-25 的跨度，
+    // 只写 HH:MM 会让人以为是同一天的两个时间点。
+    const d0 = String(pts[0].ts || "").slice(5, 10);
+    const dN = String(pts[pts.length - 1].ts || "").slice(5, 10);
+    const multiDay = !!(d0 && dN && d0 !== dN);
+    let out = "";
+    pick.forEach(function (i, k) {
+      const s = String(pts[i].ts || "");
+      const hm = s.slice(11, 16);
+      const md = s.slice(5, 10);
+      if (!hm) return;
+      const t = (multiDay && k !== 1 && md) ? (md + " " + hm) : hm;
+      out += '<text x="' + xs[k] + '" y="130" fill="#7b8496" font-size="9" text-anchor="' +
+        an[k] + '">' + esc(t) + "</text>";
+    });
+    return out;
   }
 
   // 2026-11-24（用户要求「教训要能被看见」）：教训正文挂在用户消息末尾（省缓存），
@@ -17455,12 +17563,15 @@
     const spTxt = (sp.parts || []).map(function (p) {
       return esc(p.name) + " " + Math.round((p.value || 0) * 100) + "%（" + esc(p.detail) + "）";
     }).join(" · ");
+    const lastTs = pts.length ? String(pts[pts.length - 1].ts || "") : "";
     box.innerHTML =
       '<div class="iter-rsi-top">综合 <b>' + (ix.score == null ? "—" : ix.score) +
       '</b> ｜ 加速 <b>' + (sp.score == null ? "—" : sp.score) + '</b> ｜ 采样 ' +
-      pts.length + ' 点</div>' +
+      ((d.trend && d.trend.total) || pts.length) + ' 点' +
+      (lastTs ? ' ｜ 最新 ' + esc(lastTs.slice(11, 16)) : "") + '</div>' +
       '<svg viewBox="0 0 620 132" class="iter-rsi-svg">' + grid +
-      rsiSvgLine(pts, "score", "#6ea8fe") + rsiSvgLine(pts, "speed", "#7bd88f") + "</svg>" +
+      rsiSvgLine(pts, "score", "#6ea8fe") + rsiSvgLine(pts, "speed", "#7bd88f") +
+      rsiTimeAxis(pts) + "</svg>" +
       '<div class="iter-rsi-legend"><i class="c1"></i>综合指数<i class="c2"></i>加速指数</div>' +
       '<div class="iter-rsi-line">' + esc(d.line || "") + "</div>" +
       '<div class="iter-rsi-bars">' + bars + "</div>" +
@@ -17468,16 +17579,39 @@
       injLine(d.last_injected);
   }
 
-  function rsiLoad() {
+  // 只拉曲线、不动加速开关（避免轮询把用户正在点的开关重绘掉）。
+  function rsiFetch() {
     if (!document.getElementById("iter-rsi")) return;
     fetch("/api/selfiter/rsi?limit=120")
       .then(function (r) { return r.json(); })
       .then(rsiPaint)
       .catch(function () {
         const box = document.getElementById("iter-rsi");
-        if (box) box.innerHTML = '<div class="iter-li">分数曲线取不到（后端还没准备好）</div>';
+        // 网络抖动时别把已经画好的图清空
+        if (box && !box.querySelector("svg")) {
+          box.innerHTML = '<div class="iter-li">分数曲线取不到（后端还没准备好）</div>';
+        }
       });
+  }
+
+  let _rsiTimer = null;
+  function rsiLoad() {
+    if (!document.getElementById("iter-rsi")) return;
+    rsiFetch();
     speedLoad();
+    // ★ 2026-11-25（用户要求「每次迭代之后都刷新」）：面板开着时每 20 秒重拉一次。
+    //   后端每轮迭代收尾都会追加一个采样点（rsi_sample_iter），
+    //   所以线会自己往前长，不用手动刷新页面。面板关掉就自动停表。
+    if (!_rsiTimer) {
+      _rsiTimer = setInterval(function () {
+        if (!document.getElementById("iter-rsi")) {
+          clearInterval(_rsiTimer);
+          _rsiTimer = null;
+          return;
+        }
+        rsiFetch();
+      }, 20000);
+    }
   }
 
   // ---- 加速模式开关（2026-11-23 用户要求「可以开启和关闭」）----
@@ -17572,6 +17706,7 @@
     }
     h += sec("⏳ 我打算做的改动（" + (p.actions || []).length + " 条，等你批准）",
              actionsHtml(p.actions));
+    h += chartBlockHtml(d, p);
     h += sec("🪞 我对自己的反思", listHtml(p.weaknesses, "w"));
     h += sec("👤 我对你的观察", listHtml(p.user_insights, "u"));
     if ((p.forecast || []).length) {

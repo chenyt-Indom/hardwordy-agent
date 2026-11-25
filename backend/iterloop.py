@@ -1450,6 +1450,21 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
         lines.append("    回滚：" + str(rollback)[:300])
     if note:
         lines.append("    说明：" + str(note)[:300])
+    # ★ 2026-11-25（用户要求「每次迭代之后折线都要刷新并显示新数据」）：
+    #   **每轮迭代收尾**给 RSI 曲线追加一个采样点。
+    #   原来只在「评估收尾」（约 2 小时一次）和每轮对话 hint 时采样 ——
+    #   用户看到的线常常半天不动，也分不清那些点是什么时候的。
+    #   放在写日志之前，日志里就能同时留下这一轮的时间与分数。
+    try:
+        from . import lessonloop as _ll_s
+        _rsm = _ll_s.rsi_sample_iter()
+        if _rsm.get("ok") and not _rsm.get("skipped"):
+            lines.append("    RSI 曲线采样：%s（综合 %s，共 %s 点）"
+                         % (_rsm.get("iso"), _rsm.get("score"), _rsm.get("n")))
+        elif _rsm.get("skipped"):
+            lines.append("    RSI 曲线采样跳过：%s" % _rsm.get("why"))
+    except Exception:                                   # noqa: BLE001
+        logger.debug("每轮 RSI 采样失败（不影响本轮跑分）", exc_info=True)
     _append_log(lines)
     # ══ 保护区段 · RSI 基准（施工单 T3 · 5.2）══════════════════════════
     # ⚠️⚠️ 这段**不许被自迭代改写或删除**。它一旦被「优化」掉，就永远不跑分了，

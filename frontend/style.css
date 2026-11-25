@@ -6633,6 +6633,24 @@ html[data-theme="light"] .composer {
 .iter-speed-txt { font-size: 12px; color: var(--muted, #7a8494); }
 .iter-speed-bl { flex-basis: 100%; font-size: 11.5px; color: #b7791f; line-height: 1.5; }
 
+/* 📊 自迭代图表区（2026-11-25 用户要求「自迭代加入图表」）：
+   auto-fit 自适应 —— 抽屉窄时自动单列，宽时并排；min-width:0 + overflow:hidden
+   是为了不让长标签把网格撑破（实测表格/长数字最容易横向溢出）。 */
+.iter-charts {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+.iter-chart {
+  border: 1px solid var(--border, #e6e9ee); border-radius: 10px;
+  padding: 8px 10px; background: var(--bg, #fff);
+  min-width: 0; overflow: hidden;
+}
+.iter-chart .viz { margin: 0; }
+.iter-chart-warn {
+  margin-top: 6px; font-size: 11.5px; line-height: 1.5; color: #975a16;
+  background: #fef3c7; border-radius: 6px; padding: 4px 6px;
+}
+
 .iter-sec { margin-bottom: 16px; }
 .iter-sec-t {
   font-size: 13px; font-weight: 600; color: var(--text, #2d3748);
