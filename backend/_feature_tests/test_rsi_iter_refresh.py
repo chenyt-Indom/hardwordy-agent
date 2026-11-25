@@ -85,12 +85,26 @@ def run() -> int:
            "同轮去重" in str(r2.get("why")), str(r2.get("why")))
         ck("跳过的那次不写盘（文件行数不变、mtime 不动）",
            len(rows) == 1 and r2.get("n") == 1, "n=%s" % r2.get("n"))
-        # 明确放行（min_gap=0）时，仍然是**追加**而不是替换 —— 每轮迭代的本质不变
+        # ★ 2026-11-25 修（同分平点）：分数没变时**合并** —— 只把最后一点的
+        #   时间往后延，不新增同分点。否则密集平点会把三段斜率拉平，
+        #   形态被误判成「② 直线上升」（实测 12:48~12:51 踩过，真的会）。
+        _ts_before = _rows(hist)[0]["ts"]
         r3 = LL.rsi_sample_iter(min_gap=0)
         rows = _rows(hist)
-        ck("放行后是追加而不是替换（2 个点都在）",
-           bool(r3.get("ok")) and not r3.get("skipped") and len(rows) == 2,
+        ck("★ 分数没变时合并（不新增同分点）",
+           bool(r3.get("ok")) and bool(r3.get("merged")) and len(rows) == 1,
            "rows=%d r3=%s" % (len(rows), r3))
+        ck("合并时最后一点的时间被往后延（线延到此刻，不是原地不动）",
+           len(rows) == 1 and float(rows[0]["ts"]) > float(_ts_before),
+           "%s → %s" % (_ts_before, rows[0]["ts"]))
+        # 分数**真的变了** → 必须追加（用户要求：每轮迭代后曲线都要刷新）
+        LL.rsi_index = lambda cache_sec=0: {
+            "score": 91.0, "parts": [{"name": "可改", "value": 0.95}]}
+        r4 = LL.rsi_sample_iter(min_gap=0)
+        rows = _rows(hist)
+        ck("★ 分数变了就追加（曲线每轮都刷新）",
+           bool(r4.get("ok")) and not r4.get("merged") and len(rows) == 2,
+           "rows=%d r4=%s" % (len(rows), r4))
         ck("追加的点带 iso 时间（前端要显示时间）",
            all(bool(r.get("iso")) and " " in str(r.get("iso")) for r in rows),
            str([r.get("iso") for r in rows]))
@@ -176,13 +190,38 @@ def run() -> int:
         rows3 = _rows(os.path.join(tmp2, "rsi_history.jsonl"))
         ck("★ 3 秒内的重复收尾不记账（同轮去重端到端生效）", len(rows3) == 1,
            "rows=%d" % len(rows3))
-        # 真实迭代一轮要几分钟，远大于 min_gap；等过窗口再跑，验证**会**追加
+        # 真实迭代一轮要几分钟，远大于 min_gap；等过窗口再跑。
+        # ★ 2026-11-25 修（同分平点）：分数**没变**时不再新增点（只把最后一点
+        #   的时间往后延），否则密集平点会把三段斜率拉平、形态被误判成②。
         time.sleep(3.2)
         IT.commit_round(before={"total": 83.0}, after={"total": 84.0},
-                        actions=[], note="回归：第三轮（间隔已过 min_gap）")
+                        actions=[], note="回归：第三轮（过了 min_gap，但分数没变）")
         rows4 = _rows(os.path.join(tmp2, "rsi_history.jsonl"))
-        ck("★ 过了 min_gap 就再追加 1 个点（线持续往前长）", len(rows4) == 2,
+        ck("★ 分数没变时合并（过了 min_gap 也不堆同分点）", len(rows4) == 1,
            "rows=%d" % len(rows4))
+        # 分数**真的涨了** → 必须追加，线要往前长
+        # （先过 3 秒窗口，否则会被「同轮去重」挡住 —— 那是另一条规则）
+        time.sleep(3.2)
+        LL.rsi_index = lambda cache_sec=0: {"score": 93.0,
+                                            "parts": [{"name": "可改", "value": 0.99}]}
+        IT.commit_round(before={"total": 84.0}, after={"total": 86.0},
+                        actions=[], note="回归：第四轮（分数变了）")
+        rows5 = _rows(os.path.join(tmp2, "rsi_history.jsonl"))
+        ck("★ 分数变了就追加 1 个点（线持续往前长）", len(rows5) == 2,
+           "rows=%d" % len(rows5))
+        # ★ 2026-11-25 修（对话采样吃掉迭代点）：rsi_sample_throttled 在文件
+        #   最新点不足 gap 时必须**跳过**，不能替换掉最后一条真实迭代点
+        #   （实测 12:58:53 把 12:51:32 那轮迭代的时间覆盖了）。
+        LL._RSI_LAST_SAMPLE["ts"] = 0.0
+        _n_before = len(rows5)
+        _last_iso = rows5[-1]["iso"]
+        _th = LL.rsi_sample_throttled(gap=3600.0)
+        _after = _rows(os.path.join(tmp2, "rsi_history.jsonl"))
+        ck("★ 对话采样在 gap 内跳过（不覆盖最后的迭代点）",
+           bool(_th.get("skipped")) and len(_after) == _n_before
+           and _after[-1]["iso"] == _last_iso,
+           "skipped=%s n=%d→%d last=%s"
+           % (_th.get("skipped"), _n_before, len(_after), _after[-1]["iso"]))
     finally:
         (IT._data_dir, LL._data_dir, IT.read_bench_last, IT.bench_verdict,
          IT.explain_delta) = olds

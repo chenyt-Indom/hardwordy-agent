@@ -1471,6 +1471,11 @@ def rsi_speed(days: float = 7.0, target_per_day: float = 20.0) -> dict:
 
 
 _RSI_SAMPLE_LOCK = threading.Lock()
+# ★ 2026-11-25：同分合并窗口（秒）。分数与上一条相同、且间隔小于它时，
+#   只把最后一点的时间往后延，不新增同分点 —— 否则密集平点会把
+#   三段斜率拉平，形态被误判成「② 直线上升」（实测 12:48~12:51 踩过）。
+#   分数真的变了就照常追加，所以曲线仍然每轮刷新。
+_RSI_MERGE_GAP = 600.0
 
 
 def rsi_sample(force: bool = False, min_gap: float = 60.0) -> dict:
@@ -1522,6 +1527,22 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0,
                         "n": len(rows), "same_round": True,
                         "why": "距上次采样不足 %.0f 秒（同轮去重）" % min_gap}
             replace_last = True
+        elif append_dense:
+            # ★ 2026-11-25 修（同分平点把时间轴撑密 → 形态被误判成「直线上升」）：
+            #   实测 12:48~12:51 三分钟内落了 5 个 89.9 的平点，其中 4 个来自
+            #   「本轮没有任何成功动作」时的无条件补采 —— 分数根本没变，
+            #   只是点变多了。结果后段斜率被拉平，形态从「③ 斜率递增」
+            #   掉成「② 直线上升」，看起来像退步，其实是**假退化**。
+            #   改法：分数与上一条相同、且距上一条不足 _RSI_MERGE_GAP 秒时，
+            #   **只把最后一点的时间往后延**（线延长到此刻），不新增同分点。
+            #   分数真变了、或隔了很久（真平台期）→ 照常追加，
+            #   所以「每轮迭代后曲线都刷新」这个要求仍然满足。
+            _ls = rows[-1].get("score")
+            _cs = cur.get("score")
+            if (_ls is not None and _cs is not None
+                    and abs(float(_ls) - float(_cs)) < 0.05
+                    and gap < _RSI_MERGE_GAP):
+                replace_last = True
     try:
         sp = rsi_speed().get("score")
     except Exception:                                   # noqa: BLE001
@@ -1547,7 +1568,11 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0,
         return {"ok": False, "error": "写 rsi_history 失败：%s" % e}
     return {"ok": True, "score": rec["score"],
             "n": len(rows) if replace_last else len(rows) + 1,
-            "replaced": replace_last, "iso": rec["iso"]}
+            "replaced": replace_last,
+            # merged=True 表示「分数没变，只把最后一点的时间延后了」——
+            # 点数不会涨，前端照样看到线延到此刻，日志也不会误报成新点。
+            "merged": bool(replace_last and append_dense),
+            "iso": rec["iso"]}
 
 
 def rsi_sample_iter(min_gap: float = 3.0) -> dict:
@@ -1574,6 +1599,21 @@ def rsi_sample_throttled(gap: float = 3600.0) -> dict:
     if now - float(_RSI_LAST_SAMPLE.get("ts") or 0.0) < gap:
         return {"ok": True, "skipped": True,
                 "why": "距上次采样不足 %.0f 秒" % gap}
+    # ★ 2026-11-25 修（对话采样吃掉迭代点）：rsi_sample(min_gap=gap) 在 gap 内
+    #   走的是**替换最后一条**，实测 12:58:53 那次对话采样把 12:51:32 的
+    #   真实迭代点直接覆盖了 —— 时间被改成「此刻」，那轮迭代的时刻就没了。
+    #   这里改成跨进程也看文件：距最后一条不足 gap 就**跳过**（反正迭代自己
+    #   在采样，曲线不缺点），绝不覆盖真实迭代点。
+    try:
+        _rows = _read_jsonl(_rsi_hist_path())
+        if _rows:
+            _last = _num_ts(_rows[-1].get("ts"))
+            if _last and now - _last < gap:
+                _RSI_LAST_SAMPLE["ts"] = now
+                return {"ok": True, "skipped": True,
+                        "why": "文件里最新点不足 %.0f 秒（不覆盖迭代点）" % gap}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("读 rsi_history 判节流失败", exc_info=True)
     _RSI_LAST_SAMPLE["ts"] = now
     try:
         return rsi_sample(min_gap=gap)
