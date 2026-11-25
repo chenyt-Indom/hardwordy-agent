@@ -1276,6 +1276,47 @@ def _actlog(entry):
                            line[:200], exc_info=True)
 
 
+def log_change(tool="", rels=None, ok=True, note="", detail="", src="manual",
+               plan_id="", action_id=""):
+    """★ 2026-11-25 用户要求：**只要是改过代码的都要记账**（主动要求的也算）。
+
+    背景（真实实测，不是推测）：11-25 这一天对话里用 selfdev_write / selfdev_patch
+    改了 11 个文件，而 `data/self_iterate/actlog.jsonl` **一条都没多**，最后一条还停在
+    11-24 20:23。原因是 selfdev 工具走的是 `actlog.record(session, ...)` →
+    `data/actlog/<session>.jsonl` 这个**会话账本**，而 RSI 的动作成功率读的是
+    **self_iterate 账本**。两本账不通，于是「用户主动要求的迭代」永远不进 RSI 样本，
+    曲线只能靠自动迭代那几个点，看着就像不动。
+
+    所以这里提供唯一入口：任何**真的改了源码**的动作（自动迭代 / 用户要求 /
+    自开发工具 / 开发工作区）都调它写一条。字段与 `_log_act` 对齐，额外带：
+      · src  —— manual（用户要求）/ auto（后台迭代）/ selfdev（自开发工具）
+      · tool —— 具体是哪个工具改的（selfdev_patch / selfdev_write / …）
+    这样 RSI 的样本 = 真实改动全量，成功率和曲线才反映真实情况。
+
+    任何异常都吞掉：账本坏了绝不能拦住改动本身。
+    """
+    try:
+        rels = [str(x) for x in (rels or []) if isinstance(x, str) and x]
+        _actlog({
+            "ts": _now(),
+            "kind": "code_change",
+            "src": str(src or "manual")[:16],
+            "tool": str(tool or "")[:40],
+            "plan_id": str(plan_id or ""),
+            "action": str(action_id or ""),
+            "title": ("%s %s" % (tool or "改动", "、".join(rels)))[:120].strip(),
+            "files": rels,
+            "result": "ok" if ok else "fail",
+            "detail": str(detail or note or "")[:500],
+            # 真实改动不是探针 —— 显式写 False，别让统计把它当验证用例排掉
+            "probe": False,
+        })
+        return True
+    except Exception:                                   # noqa: BLE001
+        logger.warning("log_change 写账本失败（这次改动没进样本）", exc_info=True)
+        return False
+
+
 # 2026-11-16 实测发现的问题：`runtime_metrics()` 的成功率被**验证用例污染**了。
 # 上一轮为了验证回滚能力，故意造了 4 条必然失败的改动（「语法错误补丁→应被拦下」
 # 「写 data/ 目录→应失败」…），它们全被算进「真实自动改动成功率」，把 65.5% 这个
@@ -1349,6 +1390,11 @@ def _log_act(plan, act, ok, detail=""):
              "files": (act or {}).get("files") or [],
              "result": "ok" if ok else "fail",
              "detail": str(detail or "")[:500],
+             # ★ 2026-11-25：标明这次改动是谁发起的 —— manual（用户要求）
+             #   还是 auto（后台迭代）。RSI 和面板都要能分开看，否则「我让你改的」
+             #   和「它自己改的」混成一锅，出问题分不清责任方。
+             "src": str((act or {}).get("src")
+                        or (plan or {}).get("_src") or "auto")[:16],
              # ★ 验证用例标记：runtime_metrics 统计成功率时会跳过它们，
              #   避免「测试故意制造的失败」被当成系统不靠谱的证据。
              "probe": _is_probe(plan, act),
@@ -6526,6 +6572,14 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     d, plan = _find_plan(pid)
     if not plan:
         return _finish({"ok": False, "error": "找不到这次反思"})
+    # ★ 2026-11-25 用户要求「主动要求的迭代也要记账」：把发起方落到 plan 上，
+    #   `_log_act` 会把它写进每条账本的 src 字段（manual=用户要求 / auto=后台）。
+    #   这样账本里两种来源都齐全，RSI 的样本才是全量，不再只数自动迭代。
+    try:
+        if isinstance(plan, dict):
+            plan["_src"] = str(origin or "manual")
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
     todo = [a for a in (plan.get("actions") or []) if a.get("status") == "approved"]
     if not todo:
         # ★ 2026-11-20：原来只回一句「没有已批准的动作」，用户完全看不出为什么
@@ -9551,6 +9605,148 @@ def stats():
     return {"proposed": proposed, "approved": approved, "done": done,
             "rejected": rejected, "failed": failed, "rate": rate,
             "plans": len(d["items"])}
+
+
+def _age_min(ts_text):
+    """把 "2026-11-25 13:11:39" 变成「距今多少分钟」；解析不了返回 None。"""
+    try:
+        t = time.mktime(time.strptime(str(ts_text)[:19], "%Y-%m-%d %H:%M:%S"))
+    except Exception:                                   # noqa: BLE001
+        return None
+    return round((time.time() - t) / 60.0, 1)
+
+
+def _within(ts_text, minutes):
+    """这条时间戳是不是在最近 minutes 分钟内。
+
+    ⚠️ 不能写 `(_age_min(t) or 1e9) <= 1440` —— age=0.0 是 falsy，
+    刚写进去的那条会被当成「很久以前」直接排除（实测踩过：测试里刚写 3 条，
+    24h 计数却是 0）。必须显式判 None。
+    """
+    a = _age_min(ts_text)
+    return a is not None and a <= float(minutes)
+
+
+def pipeline_health():
+    """★ 2026-11-25 用户要求：「反思以及日志还有跑分全面正常体系化运作」。
+
+    为什么要这个（真实背景）：这四个环节的数据分散在四个文件里 ——
+    反思在 plans.json、日志在 actlog.jsonl、采样在 rsi_history.jsonl、
+    跑分在 iterloop/scoregate.json。任何一环悄悄停了（比如今天账本一整天
+    0 条），从外面看只是「曲线不动」，根本分不清是哪一环断了。
+    这里聚成一张表：每环的**最近一次时间 / 距今多久 / 24h 次数 / 状态**。
+
+    只读，不改任何数据。阈值按各环节真实节奏定：
+      · 反思 360 分钟（后台约 2 小时一轮）
+      · 日志 1440 分钟（只要有代码改动就该有记录）
+      · 采样 360 分钟（每轮迭代都该落一个点）
+      · 跑分 720 分钟（改完代码就该重算）
+    state：ok（在阈值内）/ stale（超时）/ empty（从没发生过）。
+    """
+    out = {"ok": True, "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+           "items": {}, "all_ok": False, "summary": ""}
+
+    def _mk(name, zh, last_ts, n24, stale_min):
+        age = _age_min(last_ts)
+        if not last_ts:
+            st = "empty"
+        elif age is None:
+            st = "unknown"
+        else:
+            st = "ok" if age <= stale_min else "stale"
+        return {"name": name, "zh": zh, "last": str(last_ts or ""),
+                "age_min": age, "n24": int(n24),
+                "stale_after_min": int(stale_min), "state": st}
+
+    # 1) 反思：plans.json 里每次反思的 ts
+    try:
+        _ts = []
+        _p = _DATA / "plans.json"
+        if _p.is_file():
+            _j = json.loads(_p.read_text(encoding="utf-8")) or {}
+            _ts = [str(x.get("ts") or "") for x in (_j.get("items") or [])
+                   if x.get("ts")]
+        _n24 = sum(1 for t in _ts if _within(t, 1440))
+        out["items"]["reflect"] = _mk("reflect", "反思", max(_ts) if _ts else "",
+                                      _n24, 360)
+    except Exception as e:                              # noqa: BLE001
+        out["items"]["reflect"] = {"name": "reflect", "zh": "反思",
+                                   "last": "", "age_min": None, "n24": 0,
+                                   "state": "error", "error": str(e)[:120]}
+
+    # 2) 日志：self_iterate 账本（RSI 的唯一数据源）
+    try:
+        _rows = []
+        _p = _DATA / "actlog.jsonl"
+        if _p.is_file():
+            for _ln in _p.read_text(encoding="utf-8", errors="replace").splitlines():
+                _ln = _ln.strip()
+                if not _ln:
+                    continue
+                try:
+                    _rows.append(json.loads(_ln).get("ts") or "")
+                except Exception:                       # noqa: BLE001
+                    continue
+        _ts = [t for t in _rows if t]
+        _n24 = sum(1 for t in _ts if _within(t, 1440))
+        out["items"]["actlog"] = _mk("actlog", "日志", max(_ts) if _ts else "",
+                                     _n24, 1440)
+        out["items"]["actlog"]["total"] = len(_ts)
+    except Exception as e:                              # noqa: BLE001
+        out["items"]["actlog"] = {"name": "actlog", "zh": "日志",
+                                  "last": "", "age_min": None, "n24": 0,
+                                  "state": "error", "error": str(e)[:120]}
+
+    # 3) 采样：rsi_history.jsonl（折线图的点）
+    try:
+        _p = _DATA / "rsi_history.jsonl"
+        _pts = []
+        if _p.is_file():
+            for _ln in _p.read_text(encoding="utf-8", errors="replace").splitlines():
+                _ln = _ln.strip()
+                if not _ln:
+                    continue
+                try:
+                    _pts.append(json.loads(_ln))
+                except Exception:                       # noqa: BLE001
+                    continue
+        _iso = [str(x.get("iso") or "") for x in _pts if x.get("iso")]
+        _n24 = sum(1 for t in _iso if _within(t, 1440))
+        out["items"]["rsi"] = _mk("rsi", "采样", max(_iso) if _iso else "", _n24, 360)
+        out["items"]["rsi"]["total"] = len(_pts)
+        if _pts:
+            out["items"]["rsi"]["last_score"] = _pts[-1].get("score")
+    except Exception as e:                              # noqa: BLE001
+        out["items"]["rsi"] = {"name": "rsi", "zh": "采样", "last": "",
+                               "age_min": None, "n24": 0, "state": "error",
+                               "error": str(e)[:120]}
+
+    # 4) 跑分：scoregate 的自动评分记录（iterloop/scoregate.json）
+    try:
+        _iso, _total = "", None
+        try:
+            from . import scoregate as _sg
+            _st = _sg.auto_state() or {}
+            _iso = str(_st.get("iso") or "")
+            _total = _st.get("total")
+        except Exception:                               # noqa: BLE001
+            logger.debug("读 scoregate 失败", exc_info=True)
+        _age = _age_min(_iso)
+        out["items"]["score"] = _mk("score", "跑分", _iso,
+                                    1 if (_age is not None and _age <= 1440) else 0,
+                                    720)
+        out["items"]["score"]["total"] = _total
+    except Exception as e:                              # noqa: BLE001
+        out["items"]["score"] = {"name": "score", "zh": "跑分", "last": "",
+                                 "age_min": None, "n24": 0, "state": "error",
+                                 "error": str(e)[:120]}
+
+    _bad = [v["zh"] for v in out["items"].values()
+            if v.get("state") in ("stale", "empty", "error")]
+    out["all_ok"] = not _bad
+    out["summary"] = ("四个环节都在正常运转" if not _bad
+                      else "需要关注：" + "、".join(_bad))
+    return out
 
 
 def health_snapshot():

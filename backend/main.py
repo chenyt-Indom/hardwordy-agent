@@ -3622,6 +3622,20 @@ def selfiter_health():
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/selfiter/pipeline")
+def selfiter_pipeline():
+    """★ 2026-11-25 用户要求：反思 / 日志 / 采样 / 跑分四个环节要能一眼看出在不在转。
+
+    只读接口，返回每环的「最近一次时间 / 距今分钟 / 24h 次数 / 状态」。
+    哪一环停了（stale / empty）就从这里能直接看出来，不用再靠曲线不动去猜。
+    """
+    from . import self_iterate as _si
+    try:
+        return _si.pipeline_health()
+    except Exception as e:                              # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/selfiter/cards")
 def selfiter_cards():
     """待播报的「任务结束卡」—— 重启后复核跑完就落一张，前端轮询取走渲染。

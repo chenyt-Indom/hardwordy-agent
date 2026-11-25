@@ -2383,6 +2383,38 @@ def _sd_patch_fixed(rel: str, find: str, replace: str, note: str = "",
                        session=str(kw.get("session") or "default"))
 
 
+def _code_ledger(tool: str, r: dict, note: str = "", ok: bool = True,
+                 detail: str = "") -> None:
+    """★ 2026-11-25 用户要求：**只要是改过代码的都要记一笔**（主动要求的也算）。
+
+    为什么要单独这一层（实测依据，别删）：
+      · selfdev_write / selfdev_patch / selfdev_insert_after 成功后原来**什么账都不记**
+        （只有 patch 锚点未命中降级时记一条）；
+      · 即使记，走的也是 `actlog.record(session, ...)` → `data/actlog/<session>.jsonl`
+        这个**会话账本**，而 RSI 的动作成功率读的是
+        `data/self_iterate/actlog.jsonl`。两本账不通。
+      实测结果：11-25 这一天对话里改了 11 个文件，RSI 账本 0 条新增，
+      综合分卡在 89.9 六个点完全一样，曲线看着像死了。
+
+    所以这里统一转发给 `self_iterate.log_change()` —— 一个账本、一套字段，
+    src=selfdev 标明来源。任何异常都吞掉：记账失败绝不能拦住改代码本身。
+    """
+    try:
+        from . import self_iterate as _si
+        rel = str((r or {}).get("rel") or "")
+        d = (r or {}).get("diff") or {}
+        if not detail:
+            if ok:
+                detail = "%s：%s（+%s −%s 行）" % (
+                    tool, rel or "-", d.get("added", 0), d.get("removed", 0))
+            else:
+                detail = "%s 失败：%s" % (tool, str((r or {}).get("error") or "")[:200])
+        _si.log_change(tool=tool, rels=[rel] if rel else [], ok=bool(ok),
+                       note=str(note or "")[:120], detail=detail, src="selfdev")
+    except Exception:                                   # noqa: BLE001
+        logger.debug("记代码改动账本失败", exc_info=True)
+
+
 def _version_commit(act: str, r: dict, note: str = "") -> dict:
     """★ 用户要求（2026-11-15）：**一个任务只产出一个版本**。
 
@@ -2543,6 +2575,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             _kind, _pick = code_model_pick(cfg, context)
             who = ("DeepSeek " + _pick) if _kind == "cloud" else ("本地 " + (_pick or "默认"))
             _selfdev_ui(ui_events, "apply", r, who)
+            _code_ledger("selfdev_apply", r, str(a.get("note") or inst))
             _score_mark(str(r.get("rel") or ""), str(a.get("note") or ""))
             from . import handoff as _hd; _hd.record_from_tool(r, "apply", str(a.get("note") or ""))
             d = r.get("diff") or {}
@@ -2596,6 +2629,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             if not r.get("ok"):
                 return "写入被拒绝：%s" % r.get("error")
             _selfdev_ui(ui_events, "write", r)
+            _code_ledger("selfdev_write", r, str(a.get("note") or ""))
             _score_mark(str(r.get("rel") or ""), str(a.get("note") or ""))
             from . import handoff as _hd; _hd.record_from_tool(r, "write", str(a.get("note") or ""))
             d = r.get("diff") or {}
@@ -2617,6 +2651,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
             if not r.get("ok"):
                 return "插入失败：%s" % r.get("error")
             _selfdev_ui(ui_events, "insert", r)
+            _code_ledger("selfdev_insert_after", r, str(a.get("note") or ""))
             _score_mark(str(r.get("rel") or ""), str(a.get("note") or ""))
             from . import handoff as _hd; _hd.record_from_tool(r, "insert", str(a.get("note") or ""))
             d = r.get("diff") or {}
@@ -2643,6 +2678,7 @@ def _do_selfdev(name: str, arguments: dict, context: dict = None,
                 return "替换失败：%s%s" % (r.get("error"),
                                           ("\n" + _hint) if _hint else "")
             _selfdev_ui(ui_events, "patch", r)
+            _code_ledger("selfdev_patch", r, str(a.get("note") or ""))
             _score_mark(str(r.get("rel") or ""), str(a.get("note") or ""))
             from . import handoff as _hd; _hd.record_from_tool(r, "patch", str(a.get("note") or ""))
             d = r.get("diff") or {}
