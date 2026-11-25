@@ -1453,6 +1453,41 @@ def _est_tokens(text) -> int:
     return int(cn / 1.2) + int((len(s) - cn) / 3.5) + 1
 
 
+
+def _ctx_budget_cap(cfg: dict, ctx: int) -> int:
+    """把「窗口大小」压到「经济预算」以内。0/未配 = 不限制（保持旧行为）。
+
+    ★★ 2026-11-25（用户要求「在不影响任务质量的前提下，尽可能减少调用次数和开支」）。
+
+    根因（实测，不是猜）：
+      用户在设置里把 `num_ctx_override` 调到 362,496，`perf.get()` 于是把
+      `cfg["num_ctx"]` 也返回 362,496（见 perf.py:174）。而 `_trim_history_to_budget`
+      和 `_shrink_round_prompt` 都拿 `num_ctx` 当预算上限 —— room 恒等于 33 万，
+      **历史永远裁不到**，上下文一路涨到 22.9 万。
+      账本（11-24 + 11-25 共 6,566 次调用）：平均 prompt **7.3 万 token**，
+      chat 类平均 6.9 万，p90 = 11.9 万。而 p3% = 3.6 万 —— 那是"固定开销"
+      （系统提示 + 66 个工具定义），说明**大量调用的历史其实只有几百 token，
+      钱主要花在重复发送固定开销和不断膨胀的旧历史上**。
+
+    这里给单次提示词设一个独立上限（配置 `ctx_budget`，默认 65536）：
+      · 只影响"能带多少**历史**"，不影响用户本轮说的话、不影响本轮工具结果；
+      · 超出的部分按既有逻辑从**最旧的**丢，被丢的压成「较早对话摘要」注入
+        （`_history_digest`），最近 8 轮另有速览锚点（`_recent_turns_index`）；
+      · 用户要处理超长材料时，把 ctx_budget 调大或设 0 即可恢复。
+    """
+    try:
+        cap = int((cfg or {}).get("ctx_budget") or 0)
+    except Exception:
+        cap = 0
+    try:
+        ctx = int(ctx or 0)
+    except Exception:
+        ctx = 0
+    if cap > 0 and (ctx <= 0 or cap < ctx):
+        return cap
+    return ctx
+
+
 def _history_digest(dropped: list, per_msg: int = 90, cap: int = 1500) -> str:
     """把被裁掉的早期对话压成一段摘要，避免模型"完全不记得开头"。
 
@@ -1745,6 +1780,8 @@ def _trim_history_to_budget(messages: list, sys_prompt: str, tool_schemas: list,
         reserve_out_cfg = int(cfg.get("max_tokens") or 2048)
     except Exception:
         ctx_limit, reserve_out_cfg = 8192, 2048
+    # ★ 2026-11-25 省钱：窗口 36 万 ≠ 每次该发 36 万。按经济预算压一次（见 _ctx_budget_cap）。
+    ctx_limit = _ctx_budget_cap(cfg, ctx_limit)
 
     import json as _json
     overhead = (_est_tokens(sys_prompt)
@@ -1824,8 +1861,21 @@ def _round_msg_max(ctx: int) -> int:
     except Exception:
         ctx = 0
     if ctx <= 0:
-        return ROUND_MSG_MAX_TOKENS
-    return max(ROUND_MSG_MAX_TOKENS, min(12000, int(ctx * 0.25)))
+        base = ROUND_MSG_MAX_TOKENS
+    else:
+        base = max(ROUND_MSG_MAX_TOKENS, min(12000, int(ctx * 0.25)))
+    # ★ 2026-11-25 省钱：单条工具结果的上限。
+    #   工具返回动辄上万字（读 200 行源码 / 整目录列表 / 网页正文），
+    #   进 history 之后**每一轮都要重发**，是上下文膨胀最快的一条。
+    #   这里按配置 tool_result_max（默认 4000 token）封顶；0 = 不封顶。
+    #   ⚠️ 是"保头保尾"截断（见 _clamp_message_text），不是整条丢弃。
+    try:
+        cap = int((config.load_config() or {}).get("tool_result_max") or 0)
+    except Exception:
+        cap = 0
+    if cap > 0:
+        base = min(base, cap)
+    return max(1000, base)
 
 
 def _shrink_round_prompt(working: list, cfg: dict, tool_schemas: list) -> int:
@@ -1843,6 +1893,8 @@ def _shrink_round_prompt(working: list, cfg: dict, tool_schemas: list) -> int:
         ctx = int(cfg.get("num_ctx") or 8192)
     except Exception:
         ctx = 8192
+    # ★ 2026-11-25 省钱：工具轮**每轮都重发**整个上下文，这里同样按经济预算压。
+    ctx = _ctx_budget_cap(cfg, ctx)
     overhead = _est_tokens(_json.dumps(tool_schemas or [], ensure_ascii=False))
     room = ctx - overhead - DIGEST_RESERVE - 512
     _msg_max = _round_msg_max(ctx)
@@ -9983,6 +10035,26 @@ async def chat(req: ChatRequest,
             if text_protocol and text_results:
                 working.append({"role": "user",
                                 "content": "工具结果：\n" + "\n\n".join(text_results)})
+            # ★ 2026-11-25 省钱：本轮只调了 1 个工具 → 在本轮最后一条结果后面补一句提醒。
+            #   账本实测：6363 轮里 5450 轮是工具轮，其中 **3184 轮**是
+            #   「正文 0 字 + 只调 1 个工具」；每多跑一轮就要重付一次完整上下文
+            #   （瘦身后固定开销仍约 2 万 token）。这句话只占约 40 token。
+            #   ⚠️ 必须**追加到已有消息里**，不能新插一条 user 消息 ——
+            #      `_shrink_round_prompt` 的保护规则是"最近一条 user 永不丢"，
+            #      新插一条会把它挤成"用户诉求"，真正的诉求反而先被裁掉。
+            try:
+                if (bool(cfg.get("parallel_nudge", True)) and len(calls) == 1
+                        and _round + 1 < _max_rounds):
+                    for _m in reversed(working):
+                        if (_m.get("role") == "tool"
+                                and isinstance(_m.get("content"), str)):
+                            _m["content"] = _m["content"] + (
+                                "\n\n（提醒：如果还有彼此**不依赖**的下一步，"
+                                "请在这一条回复里**一次全部发出**多个工具调用，"
+                                "不要一轮只发一个 —— 每多一轮都要重发一遍全部上下文。）")
+                            break
+            except Exception:
+                logger.debug("并行提醒注入失败（忽略）", exc_info=True)
             # 2.4) 【无进展检测】连续若干轮「工具 + 参数 + 返回」一模一样 → 在原地打转。
             #   为什么放在这里：这一轮的工具结果已经全部追加进 working 了，
             #   此刻判断最准（拿得到真实返回，而不是猜）。

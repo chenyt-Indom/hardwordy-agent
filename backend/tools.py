@@ -1704,7 +1704,168 @@ def make_schemas(web_enabled: bool = False, kb_enabled: bool = False,
         schemas = [s for s in schemas
                    if (s.get("function", {}).get("name") not in _drop
                        and not s.get("function", {}).get("name", "").startswith("workspace_"))]
+    # ---------- 省钱：schema 描述瘦身（见 _lite_schemas） ----------
+    # 默认开（配置 tool_schema_lite）。关掉就原样返回完整描述。
+    try:
+        if (config.load_config() or {}).get("tool_schema_lite", True):
+            schemas = _lite_schemas(schemas)
+    except Exception:
+        logger.debug("schema 瘦身失败（按原样继续）", exc_info=True)
     return schemas
+
+
+# 工具描述 / 参数描述保留多少字（瘦身后）。
+# ⚠️ 只压**超过 800 字**的"巨无霸描述"（make_pptx 2342 字、edit_office 1700 字这类），
+#    短描述原样不动 —— 实测 66 个工具里只有 10 个超 800 字，却占了 11.5k token。
+_TOOL_DESC_KEEP = 420
+_TOOL_DESC_MIN = 800
+_ARG_DESC_KEEP = 70
+
+
+# 出现这些词的句子 = "硬约束"，瘦身时**一句都不许删**。
+# 它们正是防止模型用错工具（搜图顶替生图、微改去重拖图、编造数据）的规矩。
+_HARD_WORDS = ("⚠", "不许", "不能", "不要", "禁止", "必须", "务必", "绝不",
+               "一定要", "注意", "只用", "优先", "否则", "如实", "别用", "别再")
+
+
+_NUM_HEADS = tuple("①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳")
+
+
+def _is_list_head(s: str) -> bool:
+    """这一句是不是"列举项"的开头（①… / 1. / 1） / - / · / •）。"""
+    t = str(s or "").lstrip()
+    if not t:
+        return False
+    if t[0] in _NUM_HEADS:
+        return True
+    if t.startswith(("- ", "· ", "• ", "* ")):
+        return True
+    head = t[:4]
+    for i, ch in enumerate(head):
+        if ch.isdigit():
+            continue
+        return ch in ".、）)" and i > 0
+    return False
+
+
+def _blocks(segs: list) -> list:
+    """把"列举项"的连续句子归成一个块 —— **列举不能被拆开**。
+
+    ⚠️ 2026-11-25 实测踩到：generate_image 的描述是「必须凑齐这几样：①主体 ②场景
+      ③光线 ④镜头 ⑤风格词」，按单句删选之后只剩 ⑤，读起来变成
+      「必须凑齐这几样，缺哪样就按用户原话补：⑤ 风格词必须写」——
+      ①②③④ 全没了，模型反而更容易漏。列举型说明必须**整体留或整体丢**。
+    """
+    blocks, cur = [], []
+    for s in segs:
+        if _is_list_head(s) and cur:
+            cur.append(s)
+        else:
+            if cur:
+                blocks.append(cur)
+            cur = [s]
+    if cur:
+        blocks.append(cur)
+    return blocks
+
+
+def _clip_desc(text, keep: int, min_len: int = 0) -> str:
+    """把一段描述压到 keep 字以内 —— **硬约束不删、列举不拆**。
+
+    ⚠️ 2026-11-25 实测踩到两轮问题（都是回归测试当场报出来的）：
+      ① 最初"截前 N 字"→ 把「搜图不许抢活」「微改不用重拖」这些**防错约束**删了；
+      ② 改成按句筛之后 → 列举型说明被拆碎（「必须凑齐这几样：⑤…」），信息错位。
+    现在的做法：
+      · min_len > 0 时，短于它的描述**原样返回**（多数工具本来就短，没必要动）；
+      · 按句切 → 归成"块"（列举项连成一块）→ 块级做留/丢：
+        含首句或含硬约束词的块必留，其余按预算补；
+      · 输出**保持原文顺序**（不把硬约束句提前，否则步骤编号会错位）。
+    """
+    raw = str(text or "")
+    if not raw:
+        return ""
+    flat = " ".join(raw.split())
+    if len(flat) <= keep or (min_len and len(flat) < min_len):
+        return flat
+    import re as _re
+    segs = [x.strip() for x in _re.split(r"(?<=[。；！？])|\n+", raw) if x and x.strip()]
+    if not segs:
+        return flat[:keep] + "…"
+    blocks = _blocks(segs)
+    picked, used = [], 0
+    # ① 必留块：第一块（用途）+ 含硬约束词的块
+    for b in blocks:
+        txt = "".join(b)
+        if b is blocks[0] or any(w in txt for w in _HARD_WORDS):
+            picked.append(b)
+            used += len(txt)
+    # ② 余量按原顺序补整块（装不下的整块跳过，不拆）
+    for b in blocks:
+        if b in picked:
+            continue
+        txt = "".join(b)
+        if used + len(txt) > keep:
+            continue
+        picked.append(b)
+        used += len(txt)
+    order = {id(b): i for i, b in enumerate(blocks)}
+    picked.sort(key=lambda b: order[id(b)])
+    return "".join("".join(b) for b in picked)
+
+
+def _lite_params(p, depth: int = 0):
+    """递归瘦身参数树：**结构一个都不动**（名字/类型/required/enum/默认值全留），只截描述。"""
+    if not isinstance(p, dict):
+        return p
+    q = dict(p)
+    if "description" in q:
+        q["description"] = _clip_desc(q["description"],
+                                     _TOOL_DESC_KEEP if depth == 0 else _ARG_DESC_KEEP)
+    props = q.get("properties")
+    if isinstance(props, dict):
+        q["properties"] = {k: _lite_params(v, depth + 1) for k, v in props.items()}
+    for key in ("items", "anyOf", "oneOf", "allOf"):
+        v = q.get(key)
+        if isinstance(v, dict):
+            q[key] = _lite_params(v, depth + 1)
+        elif isinstance(v, list):
+            q[key] = [_lite_params(x, depth + 1) for x in v]
+    return q
+
+
+def _lite_schemas(schemas: list) -> list:
+    """工具定义瘦身：只截描述文字，**不动任何结构**。
+
+    为什么（2026-11-25，用户要求省钱）：
+      实测 66 个工具的 schema JSON = 57,389 字符 ≈ **24,622 token**，
+      而账本里 chat 类调用的 p3% 分位是 36,556 —— 也就是说固定开销里
+      **七成是工具定义**，而且每轮工具调用都要重发一遍。
+      描述里大量是"怎么用好这个工具"的长篇说明，对"要不要调它"有用，
+      对"参数怎么填"没必要几千字。
+    取舍（不改质量的关键）：
+      · name / 参数名 / 类型 / required / enum / default **一律原样保留** ——
+        模型仍然知道每个参数叫什么、必填哪些、可选值有哪些；
+      · 只把 description 截短（工具 220 字、参数 70 字），并且优先在句末断开，
+        保留"什么时候该用它"的开头部分。
+    实测效果（2026-11-25 复测，68 个工具全开）：25,272 → 21,023 token，每轮省约 4.2k。
+      再往下压阈值（keep 300 / arg 50）只多省约 1.4k，却会砍掉「怎么用好」的关键提示，
+      按「不影响任务质量」的前提不继续压。
+    """
+    out = []
+    for s in (schemas or []):
+        if not isinstance(s, dict):
+            continue
+        fn = s.get("function") or {}
+        if not isinstance(fn, dict):
+            out.append(s)
+            continue
+        nf = dict(fn)
+        nf["description"] = _clip_desc(fn.get("description"), _TOOL_DESC_KEEP,
+                                       min_len=_TOOL_DESC_MIN)
+        if "parameters" in fn:
+            nf["parameters"] = _lite_params(fn.get("parameters"))
+        out.append({"type": s.get("type") or "function", "function": nf})
+    return out
 
 
 # ---------- 「眼睛」：截图 / 看图 ----------
