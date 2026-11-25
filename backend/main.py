@@ -4933,6 +4933,34 @@ def selfiter_rsi(limit: int = 120):
     return out
 
 
+@app.get("/api/rsi/health")
+def rsi_health(tol: float = 2.0, max_age_sec: float = 1800.0):
+    """RSI 一键体检：**账本值 vs 实时重算值并列** + 一致性判定（只读）。
+
+    ★ 用户反复问「RSI 是不是完全正常」「曲线图是不是没更新」—— 之前只能临时跑
+      run_python 去对比，慢且不可复现。这里把两个值一次算出来并排给前端：
+        ledger_last —— 账本值：rsi_history.jsonl 最后一条采样（= 曲线图那个点）
+        live        —— 实时重算值：rsi_index(cache_sec=0)（= 现在这套代码）
+      两者差超过 tol 分 → consistent=false，前端卡片标黄并提示「账本落后，建议重算」。
+
+    三级一致性（借鉴 Three-Tier Verification，见 backend/rsihealth.py 文件头）：
+      ① 总分接近度 → consistent；② 分项接近度 → metrics.parts / part_drift；
+      ③ 新鲜度对齐 → metrics.stale / ledger_age_sec。
+
+    ⚠️ **只读**：不采样、不写 rsi_history、不动账本。体检不能改变被体检的对象。
+    """
+    from . import rsihealth as _RH
+    try:
+        return _RH.check(tol=tol, max_age_sec=max_age_sec)
+    except Exception as e:                              # noqa: BLE001
+        # 兜底也要把四个字段给全，否则前端读 undefined 会白屏
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                "ledger_last": {"exists": False, "ts": "", "score": None},
+                "live": {"ts": "", "score": None},
+                "metrics": {}, "consistent": False,
+                "verdict": "体检失败", "reasons": [str(e)]}
+
+
 @app.get("/api/selfiter/speed")
 def selfiter_speed_get():
     """加速模式状态：是否开启、当前档位、以及**阻碍加速的真实原因**。

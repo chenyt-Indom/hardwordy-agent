@@ -16276,6 +16276,9 @@
     stopPoll();
     if (el) { el.remove(); el = null; }
     noteFor = null;
+    // 🩺 体检结果是**当时的快照**（账本 / 代码都可能已经变了）：关面板就丢掉，
+    //   下次打开重新点一次，避免把旧结论当成当前状态。
+    _rsiHealthLast = null;
   }
 
   function show() {
@@ -17615,6 +17618,8 @@
     if (!document.getElementById("iter-rsi")) return;
     rsiFetch();
     speedLoad();
+    // 体检卡片：面板重绘过就把上次的结果按原样贴回来（不必再打一次接口）
+    if (_rsiHealthLast) rsiHealthPaint(_rsiHealthLast);
     // ★ 2026-11-25（用户要求「每次迭代之后都刷新」）：面板开着时每 20 秒重拉一次。
     //   后端每轮迭代收尾都会追加一个采样点（rsi_sample_iter），
     //   所以线会自己往前长，不用手动刷新页面。面板关掉就自动停表。
@@ -17673,6 +17678,96 @@
       .catch(function () {});
   }
 
+  // ---------- 🩺 RSI 一键体检（账本值 vs 实时重算值并列，2026-11-25） ----------
+  // 为什么要有这张卡：用户反复问「RSI 是不是完全正常」「曲线图是不是没更新」。
+  // 界面上原来只显示**当场重算**的那个数，而曲线上的点是**上次采样落盘的账本值** ——
+  // 两个数长得一模一样，却可能早就分叉了（代码改了、账本还没补点）。
+  // 现在一次拉两个值并排显示，差超过阈值就把卡片边框标黄 + 提示「账本落后，建议重算」。
+  // 后端：GET /api/rsi/health（只读，不采样、不写账本）。
+  let _rsiHealthLast = null;
+
+  function healthAgo(sec) {
+    if (sec === null || sec === undefined || isNaN(Number(sec))) return "时间未知";
+    const s = Number(sec);
+    if (s < 0) return "刚刚";
+    if (s < 90) return Math.round(s) + " 秒前";
+    if (s < 5400) return Math.round(s / 60) + " 分钟前";
+    if (s < 172800) return (s / 3600).toFixed(1) + " 小时前";
+    return (s / 86400).toFixed(1) + " 天前";
+  }
+
+  function healthNum(v, dig) {
+    if (v === null || v === undefined || v === "" || isNaN(Number(v))) return "—";
+    return dig ? Number(v).toFixed(dig) : String(v);
+  }
+
+  // 卡片正文（纯函数：给什么画什么，方便反复重绘 / 面板重开时恢复上次结果）
+  function rsiHealthHtml(d) {
+    if (!d || d.ok === false) {
+      const why = (d && (d.error || ((d.reasons || [])[0]))) || "后端没返回";
+      return '<div class="iter-li">体检失败：' + esc(why) + "</div>";
+    }
+    const L = d.ledger_last || {}, V = d.live || {}, m = d.metrics || {};
+    const same = d.consistent === true;
+    // 两个值并排：左边账本（曲线），右边实时（代码）
+    let out =
+      '<div class="iter-hh-row"><span class="iter-hh-k">账本值（曲线最后一点）</span>' +
+        '<b>' + healthNum(L.score, 1) + "</b>" +
+        '<span class="iter-hh-ts">' + esc(L.ts || (L.exists === false ? "无采样" : "—")) + "</span></div>" +
+      '<div class="iter-hh-row"><span class="iter-hh-k">实时重算（现在这套代码）</span>' +
+        '<b>' + healthNum(V.score, 1) + "</b>" +
+        '<span class="iter-hh-ts">' + esc(V.ts || "") + "</span></div>";
+    // 差值 / 阈值 / 采样点数 / 新鲜度
+    const diffTxt = (m.diff === null || m.diff === undefined)
+      ? "差值 —" : ("差值 " + (m.diff > 0 ? "+" : "") + Number(m.diff).toFixed(2));
+    out += '<div class="iter-hh-meta">' + esc(diffTxt) +
+      "（阈值 " + healthNum(m.tol, 1) + "）｜账本 " + (m.samples || 0) + " 点" +
+      (m.ledger_age_sec === null || m.ledger_age_sec === undefined
+        ? "" : ("｜最后一点 " + esc(healthAgo(m.ledger_age_sec)))) +
+      (m.stale ? "｜⚠️ 账本超时（新鲜度阈值 " + healthAgo(m.max_age_sec) + " 内）" : "") +
+      (m.window ? "｜窗口 " + esc(m.window) : "") + "</div>";
+    // 分项并列（三级校验的第②层：分项接近度；漂了只提示，不改判总分）
+    const parts = m.parts || [];
+    if (parts.length) {
+      out += '<div class="iter-hh-parts">' + parts.map(function (p) {
+        const lv = (p.ledger === null || p.ledger === undefined)
+          ? "—" : Math.round(Number(p.ledger) * 100) + "%";
+        const vv = (p.live === null || p.live === undefined)
+          ? "—" : Math.round(Number(p.live) * 100) + "%";
+        return '<div class="iter-hh-part' + (p.drift ? " drift" : "") + '">' +
+          "<span>" + esc(p.name) + "</span><i>" + lv + " → " + vv + "</i></div>";
+      }).join("") + "</div>";
+    }
+    out += '<div class="iter-hh-verdict">' + (same ? "✅ " : "⚠️ ") +
+      esc(d.verdict || (same ? "一致" : "账本落后")) + "：" + esc(d.hint || "") + "</div>";
+    return out;
+  }
+
+  function rsiHealthPaint(d) {
+    const card = document.getElementById("iter-health-card");
+    if (!card) return;
+    _rsiHealthLast = d;
+    card.hidden = false;
+    card.className = "iter-health-card" + ((d && d.consistent === false) ? " warn" : "");
+    card.innerHTML = rsiHealthHtml(d);
+  }
+
+  // 一键体检：只点才拉（不轮询 —— 实时重算要扫一遍账本，没必要每 20 秒跑一次）
+  function showRsiHealthCard() {
+    const card = document.getElementById("iter-health-card");
+    if (!card) return;
+    card.hidden = false;
+    card.className = "iter-health-card";
+    card.innerHTML = '<div class="iter-li">体检中…正在实时重算 RSI（只读，不改账本）</div>';
+    fetch("/api/rsi/health")
+      .then(function (r) { return r.json(); })
+      .then(rsiHealthPaint)
+      .catch(function () {
+        card.className = "iter-health-card";
+        card.innerHTML = '<div class="iter-li">体检取不到：后端没响应（改完代码要重启后端才生效）</div>';
+      });
+  }
+
   function render() {
     if (!el) return;
     const d = data || {};
@@ -17708,6 +17803,14 @@
     // ★ 常驻站点条放在最前面：用户要求「外面单独放一排、不进折叠、每次打开都在」
     let h = sec("📈 分数曲线（越陡 = 修得越快）",
       '<div class="iter-speed-bar" id="iter-speed-bar"><div class="iter-li">加速状态加载中…</div></div>' +
+      // 🩺 一键体检（用户反复问「RSI 是不是完全正常」「曲线图是不是没更新」）：
+      //   曲线上的点是**上次采样落盘的账本值**，实时重算是**现在这套代码**的值。
+      //   一个按钮把两个值并排拉出来，不一致时卡片边框标黄。
+      '<div class="iter-health" id="iter-health">' +
+        '<button class="iter-health-btn" type="button">🩺 体检</button>' +
+        '<span class="iter-health-hint">账本值 vs 实时重算值，点一下并列核对（不一致会标黄）</span>' +
+        '<div class="iter-health-card" id="iter-health-card" hidden></div>' +
+      '</div>' +
       '<div class="iter-rsi" id="iter-rsi"><div class="iter-li">加载中…</div></div>') +
       paperSitesBar() + expHtml() + sec("🛠️ 最近自动执行（信任模式）", actlogHtml());
     const p = d.latest;
@@ -18719,6 +18822,8 @@
         togglePickAll(false);
         return;
       }
+      // 🩺 RSI 一键体检（账本值 vs 实时重算值并列）—— 只在点的时候拉，不轮询
+      if (t.classList.contains("iter-health-btn")) { showRsiHealthCard(); return; }
       // ---- 计划缓存：搜 / 新建 / 改 / 删（用户 2026-11-16 要求可增删改查）
       if (t.classList.contains("iter-pc-search")) {
         const qb = layer() && layer().querySelector(".iter-pc-q");
