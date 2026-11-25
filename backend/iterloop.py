@@ -1313,7 +1313,7 @@ def read_ledger_series(limit=120):
 
 
 def commit_round(before=None, after=None, actions=None, rollback=None,
-                 note="", pid="", rebased=False):
+                 note="", pid="", rebased=False, sample="round"):
     """把这一轮进退**累加**到累计分，并把原因与代码位置写进日志。
 
     返回 {"cum": 累计分, "delta": 本轮进退, "verdict": ..., "explain": {...}}
@@ -1458,7 +1458,10 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
     _rsm = None
     try:
         from . import lessonloop as _ll_s
-        _rsm = _ll_s.rsi_sample_iter()
+        # ★ 2026-11-25：评分闸门每分钟跑一次，同分时只延后最后一点，不刷同分点；
+        #   真实迭代轮次（sample="round"）仍然每轮必追加一个点。
+        _rsm = (_ll_s.rsi_sample_score() if str(sample) == "score"
+                else _ll_s.rsi_sample_iter())
         if _rsm.get("ok") and not _rsm.get("skipped"):
             lines.append("    RSI 曲线采样：%s（综合 %s，共 %s 点）"
                          % (_rsm.get("iso"), _rsm.get("score"), _rsm.get("n")))

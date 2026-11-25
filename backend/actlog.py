@@ -705,6 +705,38 @@ def build_evidence(fail_kind: str = "", window: int = COUNT_WINDOW,
     return ev
 
 
+def _fk_norm(s) -> str:
+    """fail_kind 归一：去空白 + 全角括号/空格转半角，便于中英文与全半角互认。
+
+    ★ 2026-11-25 修（真实误拒，不是推测）：模型提案里的 fail_kind 常常写**中文**
+    分类名（实测 plans.json：fail_kind="跑分退步（低于上一版）"），而
+    fail_attribution.jsonl 里同一件事是 kind="score_regress" +
+    kind_zh="跑分退步（低于上一版）"。原来的聚合只认 kind 字段，
+    于是「按中文名查英文键」永远得 0 → 真实修复被当成幽灵拒绝。
+    实测 11-25 03:45 / 05:46 两轮自动迭代就是这样整轮失败。
+    """
+    t = str(s or "").strip()
+    if not t:
+        return ""
+    t = t.replace("（", "(").replace("）", ")").replace("　", " ")
+    return " ".join(t.split())
+
+
+def _fk_keys(rec) -> set:
+    """一条失败记录可能带的全部 fail_kind 别名（英文 kind / 中文 kind_zh）。
+
+    同一条记录里 kind 与 fail_kind 往往相同，用 set 去重，避免重复计数。
+    """
+    if not isinstance(rec, dict):
+        return set()
+    out = set()
+    for k in ("kind", "kind_zh", "fail_kind", "fail_kind_zh"):
+        v = _fk_norm(rec.get(k))
+        if v:
+            out.add(v)
+    return out
+
+
 def count_fail_kind(fail_kind: str, days: int = 7, path: str = "") -> int:
     """统计某个 fail_kind 在最近 days 天内的真实发生次数。
 
@@ -755,8 +787,8 @@ def _count_fail_attr(fail_kind: str, cutoff: float = 0.0) -> int:
                     continue
                 if not isinstance(r, dict):
                     continue
-                k = r.get("kind") or r.get("fail_kind")
-                if not isinstance(k, str) or k.strip() != fail_kind:
+                # ★ 2026-11-25：不再只比对 kind —— 模型写中文 kind_zh 也要能命中
+                if _fk_norm(fail_kind) not in _fk_keys(r):
                     continue
                 if cutoff > 0:
                     ts = _event_ts(r)
@@ -798,8 +830,8 @@ def count_fail_kind_ex(fail_kind: str, days: int = 7, path: str = "") -> tuple:
     for e in events:
         if not isinstance(e, dict):
             continue
-        k = e.get("fail_kind")
-        if not isinstance(k, str) or k.strip() != fk:
+        # ★ 2026-11-25：中文 kind_zh / 英文 kind 都算同一个失败分类
+        if _fk_norm(fk) not in _fk_keys(e):
             continue
         if cutoff > 0:
             ts = _event_ts(e)
@@ -841,14 +873,15 @@ def _attr_counts(cutoff: float = 0.0) -> dict:
                     continue
                 if not isinstance(r, dict):
                     continue
-                k = r.get("kind") or r.get("fail_kind")
-                if not isinstance(k, str) or not k.strip():
+                _ks = _fk_keys(r)
+                if not _ks:
                     continue
                 if cutoff > 0:
                     ts = _event_ts(r)
                     if ts and ts < cutoff:
                         continue
-                out[k.strip()] += 1
+                for _k in _ks:
+                    out[_k] += 1
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
     return dict(out)
@@ -882,14 +915,21 @@ def fail_kind_counts(days: int = 7, path: str = "") -> dict:
         for e in _load_events(path):
             if not isinstance(e, dict):
                 continue
-            k = e.get("fail_kind")
-            if not isinstance(k, str) or not k.strip():
+            # ⚠️ 这里**只能取 fail_kind 字段**：events 里的 kind 是事件类型
+            #   （step / code / think …），拿它当失败分类会把统计表灌满噪音。
+            _ks = set()
+            for _kk in ("fail_kind", "fail_kind_zh"):
+                _v = _fk_norm(e.get(_kk))
+                if _v:
+                    _ks.add(_v)
+            if not _ks:
                 continue
             if cutoff > 0:
                 ts = _event_ts(e)
                 if ts and ts < cutoff:
                     continue
-            out[k.strip()] += 1
+            for _k in _ks:
+                out[_k] += 1
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
     if not path:
@@ -903,14 +943,19 @@ def fail_kind_counts(days: int = 7, path: str = "") -> dict:
             if not isinstance(r, dict):
                 continue
             ev = r.get("ev") if isinstance(r.get("ev"), dict) else {}
-            k = str(ev.get("fail_kind") or r.get("fail_kind") or "")
-            if not k.strip():
+            _ks = set()
+            for _kk in ("fail_kind", "fail_kind_zh"):
+                _v = _fk_norm(ev.get(_kk) or r.get(_kk))
+                if _v:
+                    _ks.add(_v)
+            if not _ks:
                 continue
             if ev.get("phantom"):
                 # 幽灵事件自己带 fail_kind，但它**不代表真实发生过** ——
                 # 数进去会让闸门自己把自己放行（自证循环）。
                 continue
-            out[k.strip()] += 1
+            for _k in _ks:
+                out[_k] += 1
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
     return {k: int(v) for k, v in out.items() if v > 0}
@@ -1091,7 +1136,20 @@ def propose_patch(fail_kind: str = "", rel: str = "", find: str = "",
             n = -1
     if n < 0:
         try:
-            n = int(fail_kind_counts(days=d, path=path).get(fk) or 0)
+            _cnts = fail_kind_counts(days=d, path=path)
+            # ★ 2026-11-25：聚合表的键已归一（全角括号→半角），取值也必须归一。
+            #   原来直接拿原文 fk 去取 —— 实测「跑分退步（低于上一版）」账本里有
+            #   18 条，这里仍取到 0，整轮迭代被判幽灵修复。
+            n = int(_cnts.get(_fk_norm(fk)) or 0)
+            if n <= 0:
+                # 兜底：老账本里可能存着未归一的写法（大小写/空格差异）。
+                # 只在两边都够长（>=3 字）时做包含比对，避免「model」这种短词乱配。
+                _want = _fk_norm(fk)
+                if len(_want) >= 3:
+                    for _k, _v in _cnts.items():
+                        _k = str(_k or "")
+                        if len(_k) >= 3 and (_want in _k or _k in _want):
+                            n = max(n, int(_v or 0))
         except Exception:                               # noqa: BLE001
             logger.debug("propose_patch 查账本失败", exc_info=True)
             n = 0

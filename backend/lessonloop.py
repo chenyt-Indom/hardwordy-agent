@@ -1491,7 +1491,8 @@ def rsi_sample(force: bool = False, min_gap: float = 60.0,
 
 
 def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0,
-                       append_dense: bool = False, src: str = "") -> dict:
+                       append_dense: bool = False, src: str = "",
+                       replace_only: bool = False) -> dict:
     """append_dense=True：即使距上一条很近也**追加**一个新点（每轮迭代用）。
 
     2026-11-25 用户要求「每次迭代之后折线都要刷新、线也要更新」：
@@ -1522,7 +1523,11 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0,
         #   实测落了 3 组「同秒双点」（12:33:31 / 12:35:02 / 12:35:47），
         #   斜率虽被 rsi_trend 去重救回来，但 total 会虚高。这里让 min_gap
         #   对 append_dense 同样生效：同一轮内的第二次采样直接跳过（下一轮照常追加）。
-        if gap < min_gap:
+        # ★ 2026-11-25：replace_only —— 分数没变时不新增点，只把最后一点的时间
+        #   延后（评分闸门每分钟跑一次，否则每分钟一个同分点把曲线压成直线）。
+        if replace_only:
+            replace_last = True
+        elif gap < min_gap:
             if append_dense:
                 return {"ok": True, "skipped": True, "score": cur.get("score"),
                         "n": len(rows), "same_round": True,
@@ -1583,6 +1588,39 @@ def rsi_sample_iter(min_gap: float = 3.0) -> dict:
     with _RSI_SAMPLE_LOCK:
         return _rsi_sample_locked(force=True, min_gap=min_gap,
                                   append_dense=True, src="iter")
+
+
+def rsi_sample_score(min_gap: float = 3.0) -> dict:
+    """**自动评分闸门**那一轮采样：分数没变就只延后最后一点，不新增同分点。
+
+    为什么单独一条（2026-11-25 用户报「曲线干脆不涨、走平了」）：
+      scoregate 的自动评分每分钟跑一次 commit_round，而 commit_round 原来
+      **无条件追加**一个采样点 —— 实测 23:28–23:41 每 60 秒一个 94.9，
+      十几个完全相同的点把曲线压成一条直线，也分不清哪一段是真迭代。
+      这里改成：分数与各分项都与最后一条相同时，**替换**最后一条（时间延后），
+      点不增加；真变了才追加。迭代轮次仍走 rsi_sample_iter（每轮必追加）。
+    """
+    try:
+        cur = rsi_index()
+        rows = _read_jsonl(_rsi_hist_path())
+        if rows:
+            last = rows[-1] or {}
+            _now_parts = {x["name"]: x["value"] for x in (cur.get("parts") or [])}
+            _same = (last.get("score") == cur.get("score")
+                     and (last.get("parts") or {}) == _now_parts)
+            if _same:
+                with _RSI_SAMPLE_LOCK:
+                    return _rsi_sample_locked(force=True, min_gap=min_gap,
+                                              append_dense=True, src="score",
+                                              replace_only=True)
+    except Exception:                                   # noqa: BLE001
+        logger.debug("rsi_sample_score 判同分失败，按追加处理", exc_info=True)
+    # 分数**真的变了** → 必须落一个点，不能被「3 秒同轮去重」吞掉。
+    # （实测：同一轮里先采样、分数随后变化，间隔不足 3 秒就被判 same_round 跳过，
+    #   那一轮的真实变化在曲线上直接消失。）
+    with _RSI_SAMPLE_LOCK:
+        return _rsi_sample_locked(force=True, min_gap=0.0,
+                                  append_dense=True, src="score")
 
 
 # 节流采样：hint() 每轮对话都会调，但只有距上次超过 gap 秒才真写盘。

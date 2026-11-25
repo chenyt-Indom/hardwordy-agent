@@ -684,7 +684,18 @@ def _maybe_think(reason, focus_user="", source="chat", gap=None, sig=""):
         #   被节流 / 积压 / 冷却挡掉的都不算（和 last_at / 指纹同口径）。
         try:
             from . import evolve_budget as _eb2
-            _eb2.spend("plans", 1, why=reason, manual=(source == "manual"))
+            # ★ 2026-11-25 修（用户报「自动迭代一直不跑」的真实原因之一）：
+            #   原来只要「开跑」就扣一笔计划预算 —— 但「补跑 / 重启后自动续跑」
+            #   跑的是**同一次**反思（先前被节流/冷却挡掉的那次），不是新计划。
+            #   实测 11-25 这天 12 笔额度里有 5 笔是补跑/续跑，于是 12:46 就
+            #   12/12 用光，之后一整天所有自动反思都被预算挡死（skip_log 里
+            #   从 12:46 到 23:43 连续 20+ 条「预算不够」）。
+            _why_txt = str(reason or "")
+            _is_catchup = ("补跑" in _why_txt) or ("自动续跑" in _why_txt)
+            if _is_catchup:
+                logger.info("补跑/续跑不重复扣计划预算：%s", _why_txt[:80])
+            else:
+                _eb2.spend("plans", 1, why=_why_txt, manual=(source == "manual"))
         except Exception:                                # noqa: BLE001
             logger.debug("记计划预算失败（不影响本轮）", exc_info=True)
         # ★ 只在**真正开跑**时记指纹：被节流挡掉的那次不算思考过，

@@ -6922,6 +6922,22 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 _cc["agent_tries"] = int(_ar.get("attempts") or 1)
                 _cc["agent_repairs"] = int(_ar.get("repairs") or 0)
                 _ev("code", **_cc)
+            elif _ar.get("cancelled"):
+                # ★ 2026-11-25（用户报「点终止要等好久，而且这一轮就算失败」）：
+                #   终止是**用户主动叫停**，不是这条动作做错了。原来它走下面的
+                #   失败分支 → 记 failed + 写失败账本，动作成功率被拖低，
+                #   RSI 曲线跟着下跌。这里单独处理：动作退回待批准、**不计成败**。
+                a["status"] = "pending"
+                a["error"] = "上一轮被终止，尚未执行"
+                cancelled = True
+                skipped = len(todo) - _i
+                _ev("step", text="%s 用户终止（不计入成败，动作退回待批准）"
+                    % a.get("id"))
+                try:
+                    save_plans(d)
+                except Exception:                       # noqa: BLE001
+                    logger.debug("终止后退回 pending 写盘失败", exc_info=True)
+                break
             else:
                 _aerr = str(_ar.get("error") or "LLM 直接操作没做成")
                 # 用户要求「回滚，但把它的改动和失败原因存下来给我看」——

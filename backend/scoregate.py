@@ -633,7 +633,7 @@ def gate(force: bool = False, note: str = "",
                                    note=((note or "自动评分闸门")
                                          + ("；评分口径升级，本轮重建基准、不计进退"
                                             if rebased else ""))[:200],
-                                   rebased=rebased) or {}
+                                   rebased=rebased, sample="score") or {}
         except Exception:                               # noqa: BLE001
             logger.debug("scoregate commit_round 失败", exc_info=True)
         jd = res if isinstance(res, dict) else {}

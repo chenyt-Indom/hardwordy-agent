@@ -4286,10 +4286,36 @@ def selfiter_enqueue(body: dict):
     """
     from . import iter_runner as _ir
     b = body or {}
+    pid = str(b.get("id") or b.get("plan_id") or "")
+    src = str(b.get("source") or "manual")
+    # ★ 2026-11-25 修（实测根因，不是推测）：界面上「▶ 执行已批准的」按钮只调
+    #   本接口、**不先调 /approve**。于是计划里动作还是 pending，执行器开工后
+    #   立刻报「这次反思没有已批准的动作」整轮失败 —— 实测 11-24 13:14、
+    #   11-24 17:13、11-24 20:25、11-25 23:09 四轮全是这个原因。
+    #   这里做兜底：来源是 approved 且一条 approved 都没有时，把 **pending**
+    #   那些批准掉（用户点「执行」的语义就是「这些我要跑」）。
+    #   只动 pending：rejected（幽灵被拒）/ dup（重复）/ failed 一律不碰。
+    auto_n = 0
+    if src in ("approved", "manual") and pid:
+        try:
+            from . import self_iterate as _si
+            _d, _p = _si._find_plan(pid)
+            _acts = (_p or {}).get("actions") or []
+            _ap = [a for a in _acts if a.get("status") == "approved"]
+            _pd = [str(a.get("id")) for a in _acts if a.get("status") == "pending"]
+            if not _ap and _pd:
+                _r = _si.approve(pid, action_ids=_pd,
+                                 note="点「执行已批准的」时自动批准待批准动作")
+                auto_n = int((_r or {}).get("approved") or 0)
+                logger.info("enqueue 自动批准 %d 条 pending（计划 %s）", auto_n, pid)
+        except Exception:                               # noqa: BLE001
+            logger.debug("enqueue 自动批准失败（不影响排队）", exc_info=True)
     try:
-        return _ir.submit(str(b.get("id") or b.get("plan_id") or ""),
-                          source=str(b.get("source") or "manual"),
-                          title=str(b.get("title") or ""))
+        out = _ir.submit(pid, source=src,
+                         title=str(b.get("title") or ""))
+        if isinstance(out, dict) and auto_n:
+            out["auto_approved"] = auto_n
+        return out
     except Exception as e:                              # noqa: BLE001
         return {"ok": False, "error": str(e)}
 

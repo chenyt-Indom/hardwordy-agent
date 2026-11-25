@@ -800,18 +800,26 @@ def _step_brief(name, args, res):
     return ""
 
 
+class _Cancelled(Exception):
+    """用户点了终止：用它跳出整个工具循环，不再等模型再跑一轮 finish。
+
+    ★ 2026-11-25 修（用户报「点终止还停不下来，要等好久」）：原来是返回一句
+    「请立刻调用 finish 收尾」交给模型 —— 那等于**再跑一次完整模型调用**，
+    本地模型一次几分钟，实测终止后还要等 297 秒才结束。
+    """
+
+
 def _exec(ctx, name, args):
     """工具总入口：统一记录 + 预算拦截 + 异常兜底。"""
     name = str(name or "")
     args = args if isinstance(args, dict) else {}
-    # 用户点了「终止」→ 立刻让模型收手（旧流程是「当前动作跑完再停」，
-    # 但现在是模型自己在多轮里改代码，等到最后才停等于白改一堆）。
+    # 用户点了「终止」→ 立刻停手（见 _Cancelled 的说明）。
     try:
         if ctx.stop and ctx.stop() and name != "finish":
             ctx.stopped = True
-            res = "⏹ 用户已终止本次迭代。请立刻调用 finish 收尾，不要再改任何文件。"
-            ctx.record(name, args, res)
-            return res
+            raise _Cancelled("用户终止")
+    except _Cancelled:
+        raise
     except Exception:                                       # noqa: BLE001
         logger.debug("终止检查失败", exc_info=True)
     over = ctx.over()
@@ -1113,10 +1121,22 @@ def _run_cloud(ctx, sys_prompt, task_prompt, steps, model, key, on_note=None):
         _buf["ts"] = time.time()
 
     msgs = [{"role": "user", "content": task_prompt}]
-    for kind, txt in chat_stream_with_tools(
-            msgs, model, key, _schemas(), _executor,
-            max_rounds=max(4, steps), temperature=0.25, max_tokens=4096,
-            thinking=True, system_prompt=sys_prompt, guard=_guard):
+    # ★ 2026-11-25：生成器先拿到变量里 —— 终止时要 close() 它才能立刻掐断上游；
+    #   原来写成 `for ... in chat_stream_with_tools(...)`，终止分支里根本没有
+    #   可关闭的对象（引用了不存在的 _gen，会 NameError 被 except 吞掉）。
+    _gen = chat_stream_with_tools(
+        msgs, model, key, _schemas(), _executor,
+        max_rounds=max(4, steps), temperature=0.25, max_tokens=4096,
+        thinking=True, system_prompt=sys_prompt, guard=_guard)
+    for kind, txt in _gen:
+        # 云端也是逐块吐的，每块都看一眼终止，别等整段生成完。
+        if ctx.stop and ctx.stop():
+            ctx.stopped = True
+            try:
+                _gen.close()
+            except Exception:                           # noqa: BLE001
+                pass
+            raise _Cancelled("用户终止（生成中）")
         if kind == "thinking" or kind == "content":
             _buf["t"] += str(txt)
             _flush()
@@ -1193,6 +1213,16 @@ def _run_local(ctx, sys_prompt, task_prompt, steps, model, on_note=None):
         think_acc, content_acc, calls = [], [], []
         try:
             for line in resp.iter_lines():
+                # ★ 2026-11-25：模型还在生成时也能立刻停 —— 每块都问一次。
+                #   原来只在「一次工具调用结束」时才检查，一次生成要几分钟，
+                #   用户点了终止还得干等这一整段。
+                if ctx.stop and ctx.stop():
+                    ctx.stopped = True
+                    try:
+                        resp.close()
+                    except Exception:                   # noqa: BLE001
+                        pass
+                    raise _Cancelled("用户终止（生成中）")
                 if not line:
                     continue
                 if isinstance(line, bytes):
@@ -1218,6 +1248,9 @@ def _run_local(ctx, sys_prompt, task_prompt, steps, model, on_note=None):
                     calls.extend(tc)
                 if (obj or {}).get("done"):
                     break
+        except _Cancelled:
+            # 终止不是「流式失败」：绝不能退回非流式再跑一遍生成
+            raise
         except Exception:                                   # noqa: BLE001
             logger.debug("流式读取中断，退回非流式", exc_info=True)
             _flush(True)
@@ -1227,11 +1260,20 @@ def _run_local(ctx, sys_prompt, task_prompt, steps, model, on_note=None):
         return msg, calls
 
     for _ in range(max(4, steps)):
+        # ★ 2026-11-25：每一轮开始前先看有没有被终止，别再多跑一轮生成。
+        if ctx.stop and ctx.stop():
+            ctx.stopped = True
+            raise _Cancelled("用户终止（轮间）")
         over = ctx.over()
         if over and not ctx.finished:
             msgs.append({"role": "user", "content": "⏰ %s，请立刻调用 finish 收尾。" % over})
         try:
             msg, calls = _chat_once(True)
+        except _Cancelled:
+            # ★ 2026-11-25 实测抓到：这里原来 `except Exception` 会把终止异常
+            #   当成「流式失败」→ 退回非流式**再完整生成一遍**，
+            #   用户点了终止反而要多等一整段。终止必须原样往上抛。
+            raise
         except Exception as e:                              # noqa: BLE001
             # 流式整体失败（比如服务端不支持 stream）→ 退回非流式再试一次
             logger.debug("流式对话失败，退回非流式：%s", e, exc_info=True)
@@ -1639,6 +1681,12 @@ def _run_once(plan, action, ev=None, stop=None, prev_fail="", attempt=0):
             else:
                 _run_local(ctx, _SYS, prompt, _left, model,
                            on_note=lambda s: ctx.emit(s, "think"))
+        except _Cancelled:
+            # ★ 2026-11-25：用户终止 → 立刻结束，不走「模型调用失败」分支，
+            #   也不进外层重试（否则终止后还会自己再跑一轮）。
+            cancelled = True
+            err = ""
+            break
         except Exception as e:                              # noqa: BLE001
             err = "模型调用失败：%s: %s" % (type(e).__name__, e)
             logger.warning("iter_agent 调用失败", exc_info=True)
@@ -1666,7 +1714,11 @@ def _run_once(plan, action, ev=None, stop=None, prev_fail="", attempt=0):
         diff = _diff_text(snap, changed)
 
         ok, why, detail = False, err, {}
-        if not err:
+        # ★ 2026-11-25：已终止就别再跑复核（回归/自检几十秒到几分钟），
+        #   直接进回滚收尾 —— 用户点终止要的是「马上停」。
+        if cancelled:
+            why = why or "用户终止"
+        elif not err:
             ok, why, detail = _final_verify(ctx, snap)
 
         # ⑥ LLM 评审**真实 diff**。
