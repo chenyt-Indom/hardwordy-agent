@@ -1478,7 +1478,8 @@ _RSI_SAMPLE_LOCK = threading.Lock()
 _RSI_MERGE_GAP = 600.0
 
 
-def rsi_sample(force: bool = False, min_gap: float = 60.0) -> dict:
+def rsi_sample(force: bool = False, min_gap: float = 60.0,
+               src: str = "") -> dict:
     """采样一次 RSI 写入历史。同一分钟内重复调用只记一条（防刷爆账本）。
 
     2026-11-23 实测缺陷：不加锁会**并发双写** —— 12:35:32 落了 2 条完全相同的
@@ -1486,11 +1487,11 @@ def rsi_sample(force: bool = False, min_gap: float = 60.0) -> dict:
     斜率/分段形态全被污染。
     """
     with _RSI_SAMPLE_LOCK:
-        return _rsi_sample_locked(force=force, min_gap=min_gap)
+        return _rsi_sample_locked(force=force, min_gap=min_gap, src=src)
 
 
 def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0,
-                       append_dense: bool = False) -> dict:
+                       append_dense: bool = False, src: str = "") -> dict:
     """append_dense=True：即使距上一条很近也**追加**一个新点（每轮迭代用）。
 
     2026-11-25 用户要求「每次迭代之后折线都要刷新、线也要更新」：
@@ -1528,21 +1529,14 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0,
                         "why": "距上次采样不足 %.0f 秒（同轮去重）" % min_gap}
             replace_last = True
         elif append_dense:
-            # ★ 2026-11-25 修（同分平点把时间轴撑密 → 形态被误判成「直线上升」）：
-            #   实测 12:48~12:51 三分钟内落了 5 个 89.9 的平点，其中 4 个来自
-            #   「本轮没有任何成功动作」时的无条件补采 —— 分数根本没变，
-            #   只是点变多了。结果后段斜率被拉平，形态从「③ 斜率递增」
-            #   掉成「② 直线上升」，看起来像退步，其实是**假退化**。
-            #   改法：分数与上一条相同、且距上一条不足 _RSI_MERGE_GAP 秒时，
-            #   **只把最后一点的时间往后延**（线延长到此刻），不新增同分点。
-            #   分数真变了、或隔了很久（真平台期）→ 照常追加，
-            #   所以「每轮迭代后曲线都刷新」这个要求仍然满足。
-            _ls = rows[-1].get("score")
-            _cs = cur.get("score")
-            if (_ls is not None and _cs is not None
-                    and abs(float(_ls) - float(_cs)) < 0.05
-                    and gap < _RSI_MERGE_GAP):
-                replace_last = True
+            # ★ 2026-11-25 二次修（用户：\"每次迭代都必须有更新\"）：
+            #   上一版在同分且 gap<_RSI_MERGE_GAP 时**不新增点**、只延后最后一点，
+            #   结果用户看到的是「迭代跑完了，点数没变、线没动」——
+            #   那确实就是没更新，违背了「每轮迭代后折线都刷新」的原始要求。
+            #   所以这里恢复**无条件追加**：每轮迭代必定落一个新点。
+            #   同分平点污染形态的问题改到 rsi_trend 里解决（分析层折叠）：
+            #   记录层要忠实完整，分析层要抗噪，两者分开，互不牺牲。
+            pass
     try:
         sp = rsi_speed().get("score")
     except Exception:                                   # noqa: BLE001
@@ -1552,6 +1546,10 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0,
            "iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
            "score": cur.get("score"),
            "speed": sp,
+           # ★ 2026-11-25：标明这个点是谁写的 —— iter=每轮迭代收尾（真更新）、
+           #   dialog=对话节流采样、manual=手动/调试。用户问「这次更新为什么
+           #   没变化」时，看 src 就能分清那个点是不是迭代点。
+           "src": src or "",
            "parts": {x["name"]: x["value"] for x in (cur.get("parts") or [])}}
     try:
         if replace_last:
@@ -1583,7 +1581,8 @@ def rsi_sample_iter(min_gap: float = 3.0) -> dict:
     正常迭代一轮几分钟，不会被挡。
     """
     with _RSI_SAMPLE_LOCK:
-        return _rsi_sample_locked(force=True, min_gap=min_gap, append_dense=True)
+        return _rsi_sample_locked(force=True, min_gap=min_gap,
+                                  append_dense=True, src="iter")
 
 
 # 节流采样：hint() 每轮对话都会调，但只有距上次超过 gap 秒才真写盘。
@@ -1616,7 +1615,7 @@ def rsi_sample_throttled(gap: float = 3600.0) -> dict:
         logger.debug("读 rsi_history 判节流失败", exc_info=True)
     _RSI_LAST_SAMPLE["ts"] = now
     try:
-        return rsi_sample(min_gap=gap)
+        return rsi_sample(min_gap=gap, src="dialog")
     except Exception:                                   # noqa: BLE001
         logger.debug("rsi 节流采样失败", exc_info=True)
         return {"ok": False}
@@ -1645,17 +1644,43 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
         else:
             _ded.append((_ts, _r))
     rows = [r for _, r in _ded]
-    pts = [{"ts": r.get("iso") or "",
-            "t": _num_ts(r.get("ts")) or 0.0,
-            "score": float(r.get("score") or 0),
-            "speed": (float(r["speed"])
-                      if isinstance(r.get("speed"), (int, float)) else None)}
-           for r in rows if isinstance(r.get("score"), (int, float))]
+
+    def _mk_pts(rs):
+        return [{"ts": r.get("iso") or "",
+                 "t": _num_ts(r.get("ts")) or 0.0,
+                 "score": float(r.get("score") or 0),
+                 "speed": (float(r["speed"])
+                           if isinstance(r.get("speed"), (int, float)) else None),
+                 "src": r.get("src") or ""}
+                for r in rs if isinstance(r.get("score"), (int, float))]
+
+    # ★ 2026-11-25（每轮必追加后）同分平点折叠 —— **只在分析层做**：
+    #   记录层每轮都落一个点（用户要求「每次都有更新」），
+    #   但连续同分点会把三段斜率拉平、形态被误判成「② 直线上升」。
+    #   这里把每段连续同分压成「首 + 尾」两点：真实时间跨度不变，
+    #   斜率仍是真实值（平就是 0），平点不再稀释后段斜率。
+    _col = []
+    _i = 0
+    while _i < len(rows):
+        _j = _i
+        _s0 = rows[_i].get("score")
+        while (_j + 1 < len(rows) and _s0 is not None
+               and rows[_j + 1].get("score") is not None
+               and abs(float(rows[_j + 1]["score"]) - float(_s0)) < 0.05):
+            _j += 1
+        if _j == _i:
+            _col.append(rows[_i])
+        else:
+            _col.append(rows[_i])      # 段首
+            _col.append(rows[_j])      # 段尾（保住真实时间跨度）
+        _i = _j + 1
+    pts_all = _mk_pts(rows)                              # 显示用：全部真实点
+    pts = _mk_pts(_col if len(_col) >= 4 else rows)      # 计算用：折叠抗噪
     ys = [p["score"] for p in pts]
-    if len(ys) < 4:
-        return {"ok": True, "n": len(ys), "points": pts, "shape": "样本不足",
-                "slope": None, "segs": [],
-                "advice": "继续采样（每次评估收尾会自动记一条）"}
+    if len(pts_all) < 4:
+        return {"ok": True, "n": len(pts_all), "points": pts_all,
+                "shape": "样本不足", "slope": None, "segs": [],
+                "advice": "继续采样（每轮迭代收尾会自动记一条）"}
     sl = _slope_ts(pts) or 0.0
     sd = _stdev(ys) or 0.0
     k = max(1, len(ys) // 3)
@@ -1681,12 +1706,17 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
     #   原来把 t 过滤掉了，前端只能按索引等距铺点 —— 每轮迭代一个点后间隔
     #   从几分钟到几小时不等，按索引画等于把时间轴画假，时间标签会误导。
     #   同时 40 → 60 点：每轮迭代都追加，40 点很快滚满，窗口太短看不出趋势。
-    return {"ok": True, "n": len(ys), "total": len(ys),
-            "points": pts[-60:],
+    # ★ 2026-11-25：points / n / total 用**全部真实点**（记录层，每轮一点），
+    #   斜率与三段形态用折叠后的 pts（分析层）。n_calc 标明参与计算的点数，
+    #   这样前端点数是「真更新了几次」，形态判定又不会被平点带偏。
+    _all_ys = [p["score"] for p in pts_all]
+    return {"ok": True, "n": len(pts_all), "total": len(pts_all),
+            "n_calc": len(ys),
+            "points": pts_all[-60:],
             "slope": round(sl, 3), "stdev": round(sd, 2),
             "segs": segs, "shape": shape,
-            "first": ys[0], "last": ys[-1],
-            "delta": round(ys[-1] - ys[0], 1), "window": window}
+            "first": _all_ys[0], "last": _all_ys[-1],
+            "delta": round(_all_ys[-1] - _all_ys[0], 1), "window": window}
 
 
 # 失败原因归一化表（**顺序即优先级**：护栏拦截最先判，因为它的 detail 里

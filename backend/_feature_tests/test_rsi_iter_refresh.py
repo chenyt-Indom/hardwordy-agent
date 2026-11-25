@@ -85,31 +85,34 @@ def run() -> int:
            "同轮去重" in str(r2.get("why")), str(r2.get("why")))
         ck("跳过的那次不写盘（文件行数不变、mtime 不动）",
            len(rows) == 1 and r2.get("n") == 1, "n=%s" % r2.get("n"))
-        # ★ 2026-11-25 修（同分平点）：分数没变时**合并** —— 只把最后一点的
-        #   时间往后延，不新增同分点。否则密集平点会把三段斜率拉平，
-        #   形态被误判成「② 直线上升」（实测 12:48~12:51 踩过，真的会）。
-        _ts_before = _rows(hist)[0]["ts"]
+        # ★ 2026-11-25 二次修（用户："每次迭代都必须有更新"）：分数没变时也
+        #   **必须追加**一个点 —— 上一版在这里合并（只延后最后一点），用户看到
+        #   的就是「迭代跑完了、点数没变、线没动」，那确实就是没更新。
+        #   同分平点污染形态的问题改在 rsi_trend 里解决（分析层折叠）。
         r3 = LL.rsi_sample_iter(min_gap=0)
         rows = _rows(hist)
-        ck("★ 分数没变时合并（不新增同分点）",
-           bool(r3.get("ok")) and bool(r3.get("merged")) and len(rows) == 1,
+        ck("★ 分数没变时也追加一个点（每次迭代都有更新）",
+           bool(r3.get("ok")) and not r3.get("skipped") and len(rows) == 2,
            "rows=%d r3=%s" % (len(rows), r3))
-        ck("合并时最后一点的时间被往后延（线延到此刻，不是原地不动）",
-           len(rows) == 1 and float(rows[0]["ts"]) > float(_ts_before),
-           "%s → %s" % (_ts_before, rows[0]["ts"]))
-        # 分数**真的变了** → 必须追加（用户要求：每轮迭代后曲线都要刷新）
+        ck("同分追加的点是新点（时间戳与上一条不同，不是覆盖）",
+           len(rows) == 2 and float(rows[1]["ts"]) != float(rows[0]["ts"]),
+           str([r["ts"] for r in rows]))
+        # 分数**真的变了** → 照常追加（用户要求：每轮迭代后曲线都要刷新）
         LL.rsi_index = lambda cache_sec=0: {
             "score": 91.0, "parts": [{"name": "可改", "value": 0.95}]}
         r4 = LL.rsi_sample_iter(min_gap=0)
         rows = _rows(hist)
         ck("★ 分数变了就追加（曲线每轮都刷新）",
-           bool(r4.get("ok")) and not r4.get("merged") and len(rows) == 2,
+           bool(r4.get("ok")) and len(rows) == 3,
            "rows=%d r4=%s" % (len(rows), r4))
         ck("追加的点带 iso 时间（前端要显示时间）",
            all(bool(r.get("iso")) and " " in str(r.get("iso")) for r in rows),
            str([r.get("iso") for r in rows]))
-        ck("两个点时间戳不同（不是同一条被覆盖）",
-           len(rows) == 2 and rows[0]["ts"] != rows[1]["ts"])
+        ck("三个点时间戳互不相同（不是同一条被覆盖）",
+           len(rows) == 3 and len({str(r["ts"]) for r in rows}) == 3)
+        ck("每个点都带 src 来源标记（能分清迭代点 / 对话点）",
+           all(r.get("src") == "iter" for r in rows),
+           str([r.get("src") for r in rows]))
 
         # 对照：老的 force 采样在 min_gap 内仍是替换，行为不许回退
         n0 = len(_rows(hist))
@@ -191,15 +194,15 @@ def run() -> int:
         ck("★ 3 秒内的重复收尾不记账（同轮去重端到端生效）", len(rows3) == 1,
            "rows=%d" % len(rows3))
         # 真实迭代一轮要几分钟，远大于 min_gap；等过窗口再跑。
-        # ★ 2026-11-25 修（同分平点）：分数**没变**时不再新增点（只把最后一点
-        #   的时间往后延），否则密集平点会把三段斜率拉平、形态被误判成②。
+        # ★ 2026-11-25 二次修（用户："每次迭代都必须有更新"）：分数**没变**
+        #   时也必须追加 —— 否则用户看到「迭代跑完、点数没变」就是没更新。
         time.sleep(3.2)
         IT.commit_round(before={"total": 83.0}, after={"total": 84.0},
                         actions=[], note="回归：第三轮（过了 min_gap，但分数没变）")
         rows4 = _rows(os.path.join(tmp2, "rsi_history.jsonl"))
-        ck("★ 分数没变时合并（过了 min_gap 也不堆同分点）", len(rows4) == 1,
+        ck("★ 分数没变时也追加（过了 min_gap 照样落新点）", len(rows4) == 2,
            "rows=%d" % len(rows4))
-        # 分数**真的涨了** → 必须追加，线要往前长
+        # 分数**真的涨了** → 照常追加，线要往前长
         # （先过 3 秒窗口，否则会被「同轮去重」挡住 —— 那是另一条规则）
         time.sleep(3.2)
         LL.rsi_index = lambda cache_sec=0: {"score": 93.0,
@@ -207,7 +210,7 @@ def run() -> int:
         IT.commit_round(before={"total": 84.0}, after={"total": 86.0},
                         actions=[], note="回归：第四轮（分数变了）")
         rows5 = _rows(os.path.join(tmp2, "rsi_history.jsonl"))
-        ck("★ 分数变了就追加 1 个点（线持续往前长）", len(rows5) == 2,
+        ck("★ 分数变了就追加 1 个点（线持续往前长）", len(rows5) == 3,
            "rows=%d" % len(rows5))
         # ★ 2026-11-25 修（对话采样吃掉迭代点）：rsi_sample_throttled 在文件
         #   最新点不足 gap 时必须**跳过**，不能替换掉最后一条真实迭代点
