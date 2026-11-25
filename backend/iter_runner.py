@@ -1067,7 +1067,15 @@ def _worker(item):
         # ★ 2026-11-24：baseline=True —— 动手前先钉住「改动前回归通过数」，
         #   改动后 _verify_once 再跑同一条 quick 回归，证据卡就能给前后对比。
         _round_begin("task:%s" % str(item.get("title") or plan_id or "")[:60],
-                     baseline=True)
+                     baseline=True, should_cancel=should_cancel)
+        # ★ 2026-11-26 实测：用户在这段基线回归期间点了终止（回归要跑几十秒），
+        #   原来照样往下走「读取计划 → 前置校验（全项目扫描 90 秒）」，
+        #   终止后还要再等两分半。这里开工前最后看一眼，已终止就直接收尾。
+        if should_cancel():
+            _emit(tid, "status", text="已终止（开工前被终止，未执行任何动作）",
+                  state="cancelled", _force_save=True)
+            _finish(tid, "cancelled", 0, 0, 0, [], "用户手动终止（开工前）")
+            return
         _stage("queued", "已提交执行，等待开始")
         _emit(tid, "step", text="读取计划并确定要执行的动作…")
         # 信任模式：先把 pending 全批准（高风险也批，但会在结果里点出来）
@@ -1374,15 +1382,25 @@ def _worker(item):
                              "、".join(_over_cap[:4])
                              + ("…" if len(_over_cap) > 4 else "")))
         _ttl = _cur_title or str(item.get("title") or "") or "未命名功能"
-        _emit_closeout(
-            tid, title=_ttl, plan_id=plan_id,
-            header="**本轮迭代收尾**：%s（成功 %d 条，失败 %d 条%s）" % (
-                _ttl, ok_n, fail_n, "，跳过 %d 条" % skip_n if skip_n else ""),
-            problems=[err_all] if err_all else [],
-            extra=_extra,
-            # 只有真改了文件才值得当场跑一遍回归（约 10 秒）；没改动的一轮
-            # 就如实记「本轮没跑过回归」→ 收尾照样判未闭环，不拿旧数字充数。
-            allow_run=bool(changed))
+        if cancelled:
+            # ★ 2026-11-26 实测（真实复现）：终止后这段收尾会拉起 RSI 采样，
+            #   而它内部要算分/跑静态扫描 —— 实测从点终止到真正结束卡了 4 分钟。
+            #   用户点终止要的是「马上停」，不是「等它算完分再停」。
+            #   所以终止走极简收尾：一条报告 + 直接结束，回归/评分留给下一轮。
+            _emit(tid, "report",
+                  text="**本轮已终止**：未跑完的动作保持待批准；"
+                       "收尾回归与评分本轮跳过（不影响下一轮正常采样）。",
+                  title=_ttl)
+        else:
+            _emit_closeout(
+                tid, title=_ttl, plan_id=plan_id,
+                header="**本轮迭代收尾**：%s（成功 %d 条，失败 %d 条%s）" % (
+                    _ttl, ok_n, fail_n, "，跳过 %d 条" % skip_n if skip_n else ""),
+                problems=[err_all] if err_all else [],
+                extra=_extra,
+                # 只有真改了文件才值得当场跑一遍回归（约 10 秒）；没改动的一轮
+                # 就如实记「本轮没跑过回归」→ 收尾照样判未闭环，不拿旧数字充数。
+                allow_run=bool(changed))
         _finish(tid, "cancelled" if cancelled else ("done" if ok_n else "failed"),
                 ok_n, fail_n, skip_n, changed,
                 _cancel_reason or err_all)
@@ -1814,22 +1832,71 @@ def _regress_brief(rec):
             "ok": bool(rec.get("ok")) and failed == 0}
 
 
-def _run_regress_baseline(where=""):
+def _run_with_cancel(fn, should_cancel=None, poll=0.4):
+    """跑一个**不可中断**的同步长操作（quick 回归 / 全项目静态扫描），同时盯着终止标志。
+
+    ★ 2026-11-26 用户实测报「点了终止还要等两分半」：
+      `_run_regress_baseline`（quick 回归约 50 秒）和 `execute_approved` 里的
+      `code_audit.audit()`（全项目扫描约 90 秒）都是同步阻塞调用，中间没有任何
+      检查点 —— 终止标志早就置上了，却没人看，只能干等它跑完。
+      这里把长操作丢进后台线程，主线程每 poll 秒看一眼：一旦用户点了终止就
+      **立刻放弃等待**（线程是 daemon，跑完自己结束，不拖住收尾）。
+    fn 抛异常时原样抛给调用方（调用方本来就有兜底）。
+    """
+    if not should_cancel:
+        return fn()
+    try:
+        if should_cancel():
+            return None
+    except Exception:                                   # noqa: BLE001
+        pass
+    box = {}
+    done = threading.Event()
+
+    def _go():
+        try:
+            box["v"] = fn()
+        except Exception as e:                          # noqa: BLE001
+            box["e"] = e
+        finally:
+            done.set()
+
+    th = threading.Thread(target=_go, daemon=True, name="iter-longop")
+    th.start()
+    while not done.wait(poll):
+        try:
+            if should_cancel():
+                logger.info("终止信号：放弃等待长操作（回归/静态扫描），直接收尾")
+                return None
+        except Exception:                               # noqa: BLE001
+            pass
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
+def _run_regress_baseline(where="", should_cancel=None):
     """改动**前**跑一次 quick 回归，作为「改动前通过数」的基线（跑不成返回 {}）。
 
     复用现成的回归执行器（regress.run_disk：子进程里从磁盘重新 import，
     自带 cwd=项目根），不另造一套尺子。跑不成只记日志，绝不抛异常 ——
     基线拿不到就不出对比结论，但不能因此拦住迭代。
     """
-    try:
+    def _go():
         from . import regress as _rg
         runner = getattr(_rg, "run_disk", None) or _rg.run
         try:
-            rr = runner(scope="quick", timeout=300)
+            return runner(scope="quick", timeout=300)
         except TypeError:                                # 老签名兜底（没 timeout）
-            rr = runner(scope="quick")
+            return runner(scope="quick")
+
+    try:
+        rr = _run_with_cancel(_go, should_cancel)
     except Exception as e:                               # noqa: BLE001
         logger.warning("改动前回归基线没跑成：%s: %s", type(e).__name__, e)
+        return {}
+    if rr is None:                                       # 用户已终止 → 不等基线了
+        logger.info("用户已终止：跳过改动前回归基线（%s）", where or "-")
         return {}
     b = _regress_brief(rr)
     if not b:
@@ -1996,7 +2063,7 @@ def _record_regress(rr, tid="", where="verify"):
     return rec
 
 
-def _round_begin(where="", baseline=False, keep_base=False):
+def _round_begin(where="", baseline=False, keep_base=False, should_cancel=None):
     """标记「新一轮开始」：之前记的回归结果不再算本轮的证据。
 
     必须在新一轮动手之前调用，否则上一轮跑过的回归会被当成这一轮的通过率。
@@ -2025,7 +2092,7 @@ def _round_begin(where="", baseline=False, keep_base=False):
         except (TypeError, ValueError):
             base = {}
     if not base and baseline:
-        base = _run_regress_baseline(where=where)
+        base = _run_regress_baseline(where=where, should_cancel=should_cancel) or {}
     if keep_base and old_base:
         base = old_base
     with _LOCK:

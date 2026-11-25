@@ -6146,7 +6146,45 @@ def _fix_quality(action, patches):
     return reasons
 
 
-def _precheck_actions(actions):
+def _run_cancellable(fn, should_cancel=None, poll=0.4):
+    """同步长操作 + 终止检查（与 iter_runner._run_with_cancel 同一套做法）。
+
+    ★ 2026-11-26：`code_audit.audit()` 是全项目静态扫描（约 90 秒），同步阻塞、
+      中途不看终止标志 —— 用户点了终止还得等它扫完。这里丢后台线程，
+      主线程每 poll 秒看一眼，终止就立刻返回 None（表示「不等了」）。
+    """
+    if not should_cancel:
+        return fn()
+    try:
+        if should_cancel():
+            return None
+    except Exception:                                   # noqa: BLE001
+        pass
+    import threading as _th
+    box, done = {}, _th.Event()
+
+    def _go():
+        try:
+            box["v"] = fn()
+        except Exception as e:                          # noqa: BLE001
+            box["e"] = e
+        finally:
+            done.set()
+
+    _th.Thread(target=_go, daemon=True, name="selfiter-longop").start()
+    while not done.wait(poll):
+        try:
+            if should_cancel():
+                logger.info("终止信号：放弃等待静态扫描，直接收尾")
+                return None
+        except Exception:                               # noqa: BLE001
+            pass
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
+def _precheck_actions(actions, should_cancel=None):
     """动手前的最后一道复核：确认动作针对的问题**现在仍然存在**。
 
     用户要求「修之前一定要再次或多次检验」。复核层在建动作前已经跑了四轮，
@@ -6159,7 +6197,9 @@ def _precheck_actions(actions):
     """
     from . import code_audit as CA
     try:
-        res = CA.audit()
+        res = _run_cancellable(CA.audit, should_cancel)
+        if res is None:                                 # 用户已终止 → 不等扫描结果
+            return {}, "用户已终止：跳过执行前复核", 0
     except Exception as e:                              # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
         # ⚠️ 必须返回三元组：调用方是 `precheck, note, base = ...`。
@@ -6594,8 +6634,15 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     _force = set(str(x) for x in (force or []))
     _force |= set(str(x) for x in (plan.get("_force") or []))
 
+    # ★ 2026-11-26 用户实测报「终止后还要等两分半」：终止标志早置了，可下面
+    #   `_precheck_actions` 要跑一遍全项目静态扫描（约 90 秒），中间没有检查点。
+    #   这里先看一眼，已终止就直接收尾，连扫描都不跑。
+    if _stop():
+        return _finish({"ok": True, "cancelled": True, "done": 0, "skipped": 0,
+                        "results": [],
+                        "error": "用户手动终止（未开始执行动作）"})
     # 动手前最后一道复核：确认这些问题现在还真的存在
-    precheck, _pre_note, _base = _precheck_actions(todo)
+    precheck, _pre_note, _base = _precheck_actions(todo, should_cancel=_stop)
 
     # ★ 2026-11-17 用户要求：拒绝「幽灵修复」—— 按 fail_kind 统计近 7 天
     #   真实出现次数，计数为 0 说明这个失败根本没发生过，属于凭空捏的，
