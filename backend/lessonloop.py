@@ -1710,11 +1710,85 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
     #   斜率与三段形态用折叠后的 pts（分析层）。n_calc 标明参与计算的点数，
     #   这样前端点数是「真更新了几次」，形态判定又不会被平点带偏。
     _all_ys = [p["score"] for p in pts_all]
+
+    # ★ 2026-11-25（用户要求「标签要标明口径」）：
+    #   全历史口径只能说明「两天整体在不在加速」。实测：全 54 点判 ③ 斜率递增，
+    #   但换成最近 40 点 / 最近 6 小时，斜率是 0 甚至负的 —— 只给一个 shape，
+    #   读的人会当成「现在还在加速」。所以这里再算一份**最近窗口**口径，
+    #   两个口径一起返回，由前端并列显示，谁也不覆盖谁。
+    def _fold(rs):
+        """连续同分压成「段首 + 段尾」两点（与上面 _col 同一规则）。
+
+        为什么要单独抽出来：窗口过滤必须在**原始点**上做、再折叠。
+        直接切全局折叠结果会漏点 —— 实测 6 小时内 10 个真实点，
+        全局折叠后只剩 3 点（89.9 段的首在窗口外），于是被误判成
+        「样本不足」退回全历史，窗口口径形同失效。
+        """
+        out = []
+        i3 = 0
+        while i3 < len(rs):
+            j3 = i3
+            s3 = rs[i3].get("score")
+            while (j3 + 1 < len(rs) and s3 is not None
+                   and rs[j3 + 1].get("score") is not None
+                   and abs(float(rs[j3 + 1]["score"]) - float(s3)) < 0.05):
+                j3 += 1
+            if j3 == i3:
+                out.append(rs[i3])
+            else:
+                out.append(rs[i3])
+                out.append(rs[j3])
+            i3 = j3 + 1
+        return out
+
+    def _shape_of(sub):
+        """对给定点列判形态，返回 (斜率, 形态, 三段斜率)。规则与全历史一致。"""
+        ys2 = [p["score"] for p in sub]
+        if len(ys2) < 4:
+            return None, None, []
+        k2 = max(1, len(ys2) // 3)
+        sg2 = []
+        for i2 in range(3):
+            b0 = i2 * k2 if i2 < 2 else 2 * k2
+            b1 = (i2 + 1) * k2 if i2 < 2 else len(ys2)
+            sg2.append(round(_slope_ts(sub[b0:b1]) or 0.0, 3))
+        sl2 = _slope_ts(sub) or 0.0
+        if sg2[0] < sg2[1] < sg2[2] and sg2[0] > 0:
+            sh2 = "③ 斜率递增（RSI）"
+        elif sl2 > 0.05:
+            sh2 = "② 直线上升"
+        elif sl2 < -0.05:
+            sh2 = "④ 锯齿下滑"
+        else:
+            sh2 = "① 平台（原地跑）"
+        return round(sl2, 3), sh2, sg2
+
+    # 窗口口径：**优先固定最近 6 小时**（「现在还在不在加速」只能看这个）。
+    # 原来按「最近 1/3 点数」取，跨度会随采样密度漂移 —— 实测漂到 17 小时，
+    # 给出 +0.794，而最近 6 小时实际是 +0.01，等于答错了问题。
+    # 6 小时内不足 4 点时退回最近 1/3 点（数据稀疏也得给个数，并如实标跨度）。
+    _RECENT_H = 6.0
+    _t_end = _num_ts(rows[-1].get("ts")) if rows else 0.0
+    _rows_win = [r for r in rows
+                 if _t_end and (_t_end - (_num_ts(r.get("ts")) or 0.0))
+                 <= _RECENT_H * 3600.0]
+    _recent = _mk_pts(_fold(_rows_win)) if _rows_win else []
+    if len(_recent) < 4:
+        _recent = pts[-max(4, len(pts) // 3):] if len(pts) >= 4 else []
+    _r_slope, _r_shape, _r_segs = _shape_of(_recent)
+    _r_hours = 0.0
+    if len(_recent) >= 2:
+        _r_hours = round(((_recent[-1].get("t") or 0.0)
+                          - (_recent[0].get("t") or 0.0)) / 3600.0, 2)
     return {"ok": True, "n": len(pts_all), "total": len(pts_all),
             "n_calc": len(ys),
             "points": pts_all[-60:],
             "slope": round(sl, 3), "stdev": round(sd, 2),
             "segs": segs, "shape": shape,
+            # 最近窗口口径（与全历史并列，前端两个都显示）
+            "shape_recent": _r_shape, "slope_recent": _r_slope,
+            "recent_segs": _r_segs, "recent_n": len(_recent),
+            "recent_hours": _r_hours,
             "first": _all_ys[0], "last": _all_ys[-1],
             "delta": round(_all_ys[-1] - _all_ys[0], 1), "window": window}
 

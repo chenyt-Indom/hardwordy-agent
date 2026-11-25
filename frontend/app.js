@@ -17543,6 +17543,21 @@
       n + ' 条 · ' + esc(t) + ' · ' + (li.chars || 0) + ' 字</div>';
   }
 
+  // 形态标签：**全历史**与**最近窗口**两个口径并列显示。
+  // 为什么要两个（2026-11-25 实测）：全 54 点判「③ 斜率递增」，但换到最近
+  // 6 小时斜率是 +0.01 —— 只显示一个，会让人误以为「现在还在加速」。
+  function trendLine(t) {
+    if (!t || !t.shape) return "";
+    const sgn = function (v) { return (v > 0 ? "+" : "") + v; };
+    let s = "📈 全历史：" + t.shape;
+    if (t.slope != null) s += "（" + sgn(t.slope) + " 分/时）";
+    if (t.shape_recent) {
+      s += " ｜ 最近 " + (t.recent_hours || 0).toFixed(1) + "h：" + t.shape_recent;
+      if (t.slope_recent != null) s += "（" + sgn(t.slope_recent) + " 分/时）";
+    }
+    return '<div class="iter-rsi-sp">' + esc(s) + "</div>";
+  }
+
   function rsiPaint(d) {
     const box = document.getElementById("iter-rsi");
     if (!box) return;
@@ -17573,6 +17588,7 @@
       rsiSvgLine(pts, "score", "#6ea8fe") + rsiSvgLine(pts, "speed", "#7bd88f") +
       rsiTimeAxis(pts) + "</svg>" +
       '<div class="iter-rsi-legend"><i class="c1"></i>综合指数<i class="c2"></i>加速指数</div>' +
+      trendLine(d.trend) +
       '<div class="iter-rsi-line">' + esc(d.line || "") + "</div>" +
       '<div class="iter-rsi-bars">' + bars + "</div>" +
       (spTxt ? '<div class="iter-rsi-sp">' + spTxt + "</div>" : "") +
