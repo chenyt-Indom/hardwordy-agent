@@ -1155,6 +1155,18 @@ def _pick_plan(disk_p, mem_p):
                 and str(a.get("status") or "") not in _PLAN_TERMINAL):
             acts.append(o)
             changed = True
+        elif (o is not None
+                and str(o.get("status") or "") == "approved"
+                and str(a.get("status") or "") == "pending"):
+            # ★ 2026-11-26 修「点过批准却报没有已批准的动作」：
+            #   approved 只能由人工 approve() / 自动批准写出来，pending 是动作的
+            #   初始值。执行器手里那份旧快照永远是 pending，一旦它的计划级 _upd
+            #   因为别的原因（终止标记、回滚、自动批准）被刷新成「更新」，整份
+            #   旧快照就会赢，把磁盘上刚落盘的批准盖回 pending —— 任务轮到时只剩
+            #   一句「还有 N 条是待批准」，白排一次队。
+            #   动作级兜底：一边 approved、另一边 pending 时，**永远取 approved**。
+            acts.append(o)
+            changed = True
         else:
             acts.append(a)
     if not changed:
@@ -3718,6 +3730,44 @@ def _user_profile_brief(max_chars: int = 1400) -> str:
     )
 
 
+def _real_fail_kinds_block(days=7, top=25):
+    """真实失败分类清单（近 N 天，带真实计数）—— 直接贴进反思提示词。
+
+    ★ 2026-11-26 修「幽灵修复把整轮迭代判死」的**根因**（不是再拦一次）：
+      提示词里从来没给过 fail_kind 的取值来源，模型只能自己编一个分类名；
+      而提案闸门是按账本计数判定的，编出来的名字计数必然为 0 → 整轮动作全被判
+      幽灵、整轮 failed（11-23 16:40:53、11-25 03:45:33、11-25 05:46:48 三条都是）。
+      光加闸门是治症状，**给清单**才治本：模型照着清单选，就没得编。
+    取不到账本时返回空串（调用方不加这一段），绝不编造分类。
+    """
+    try:
+        from . import actlog as _AL
+        cnts = _AL.fail_kind_counts(days=days) or {}
+    except Exception:                                   # noqa: BLE001
+        logger.debug("取真实失败分类清单失败（本轮不加这段）", exc_info=True)
+        return ""
+    items = []
+    for _k, _v in (cnts or {}).items():
+        _k = str(_k or "").strip()
+        try:
+            _v = int(_v or 0)
+        except (TypeError, ValueError):
+            _v = 0
+        if _k and _v > 0:
+            items.append((_k, _v))
+    if not items:
+        return ""
+    items.sort(key=lambda x: (-x[1], x[0]))
+    lines = ["- `%s`：近 %d 天 %d 次" % (k, days, v) for k, v in items[:top]]
+    return ("\n\n## 🧭 真实失败分类清单（近 %d 天，账本原样统计，共 %d 类）\n%s\n"
+            "⚠️ 上面每一行都是**账本里真实出现过的失败分类**，后面的数字就是真实次数。\n"
+            "   actions 里要填 `fail_kind` 时**只能原样复制**这里的名字（一个字都别改）；\n"
+            "   清单里没有的，说明这件事近 %d 天没发生过 —— 那条动作要么是新增功能 / "
+            "体验优化（fail_kind 留空，允许），要么就是在编造一个不存在的失败"
+            "（会被闸门判幽灵、整轮白跑）。\n"
+            % (days, len(items), "\n".join(lines), days))
+
+
 def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief="",
                           gap="", task_brief=""):
     sig_lines = []
@@ -3931,8 +3981,16 @@ def _build_reflect_prompt(signals, tech, journal, focus="", exp="", paper_brief=
   "questions": [{"q":"想问用户的一句话","why":"为什么这个信息会改变做法","options":["选项1","选项2"]}],
   "tech_takeaways": [{"title":"技术名","source":"来源","url":"链接","takeaway":"一句话要点","applicable":"对本项目有没有用，怎么用"}],
   "fail_lessons": [{"kind":"对应归因表里的失败类型（中文名，如「改动锚点没命中」）","count":3,"root_cause":"为什么这一类会反复发生（讲机制，不复述错误文本）","fix":"具体改哪个文件哪一行、换成什么做法","verify":"怎么验证这次真修好了（可执行判据）","will_fix":true}],
-  "actions": [{"title":"短标题","why":"为什么要动这个（原因 + 证据，1~2 句）","detail":"解决方案：具体改哪个文件、怎么改、改完怎么验证","risk":"low|mid|high","files":["backend/xxx.py"]}]
+  "actions": [{"title":"短标题","why":"为什么要动这个（原因 + 证据，1~2 句）","detail":"解决方案：具体改哪个文件、怎么改、改完怎么验证","risk":"low|mid|high","files":["backend/xxx.py"],"fail_kind":"可选：只能从下方【真实失败分类清单】里原样复制，清单里没有就留空"}]
 }
+
+⚠️ `actions[].fail_kind` 是**证据字段**，系统会拿它去查真实失败账本：
+   · 只有「针对某个已发生的失败做修复」时才填，并且**必须原样复制**清单里的分类名
+     （一个字都不能改，不要自己换说法、不要翻译、不要加形容词）；
+   · 清单里没有对应分类的（新增功能、体验优化、预防性加固），**留空或直接不写** ——
+     留空是允许的，不会被拦；
+   · 填了清单里没有的名字 → 提案会被判成「幽灵修复」直接拒绝，这一轮就白跑。
+     ⚠️ 这是最容易犯的错：把「我认为可能发生的问题」当成「已发生的失败」写进去。
 
 ⚠️ why 和 detail 会**原样显示在【待批准】卡片里给用户看**（信任模式关闭时，用户就是
 靠这两段判断该不该批），所以：
@@ -4436,6 +4494,17 @@ def _reflect_impl(trigger="manual", use_web=True, focus="", auto_execute=None,
     prompt = _build_reflect_prompt(sig, tech, journal, focus=focus,
                                    exp=exp_txt, paper_brief=paper_brief,
                                    gap=gap_txt, task_brief=task_brief)
+    # ★ 2026-11-26：把「真实失败分类清单」贴进提示词（治幽灵修复的根因）。
+    #   放在主 prompt 之后、创意块之前 —— 模型读字段说明时刚好能对上这一段。
+    try:
+        _fk_block = _real_fail_kinds_block(days=7)
+        if _fk_block:
+            prompt += _fk_block
+            paper_meta["real_fail_kinds"] = _fk_block.count("\n- ")
+        else:
+            paper_meta["real_fail_kinds"] = 0
+    except Exception:                                   # noqa: BLE001
+        logger.debug("注入真实失败分类清单失败", exc_info=True)
     # ★ 2026-11-16：注入「创意种子」。主 prompt 里全是痛点和失败数据，模型只会
     #   想修补；这里塞进一条独立通道想出来的、不带痛点偏见的新点子，并要求采纳。
     try:
@@ -6621,6 +6690,27 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
     todo = [a for a in (plan.get("actions") or []) if a.get("status") == "approved"]
+    if not todo:
+        # ★ 2026-11-26 修「点过批准却报没有已批准的动作」（11-25 23:09:12 那条）：
+        #   上面那份 plan 是**进入函数那一刻**读的快照。如果批准是在这之后（哪怕
+        #   只晚 0.2 秒，比如用户刚点完批准、队列立刻开工）落盘的，这份快照里
+        #   就永远看不到 approved。原来直接判失败 —— 一次人工批准被白白吃掉。
+        #   所以这里**强制从磁盘重读一次**：磁盘上真有 approved 就用它继续跑。
+        try:
+            _d2, _p2 = _find_plan(pid)
+            _t2 = [a for a in ((_p2 or {}).get("actions") or [])
+                   if isinstance(a, dict) and a.get("status") == "approved"]
+            if _t2:
+                logger.warning("执行时快照里没有已批准动作，但磁盘上有 %d 条 —— "
+                               "已改用磁盘最新版本继续：%s", len(_t2), pid)
+                d, plan, todo = _d2, _p2, _t2
+                try:
+                    _ev("step", text="执行器读到的是旧快照，已从磁盘重读：%d 条已批准"
+                        % len(_t2))
+                except Exception:                       # noqa: BLE001
+                    logger.debug("silent-except", exc_info=True)
+        except Exception:                               # noqa: BLE001
+            logger.debug("执行前重读计划失败（按原快照继续）", exc_info=True)
     if not todo:
         # ★ 2026-11-20：原来只回一句「没有已批准的动作」，用户完全看不出为什么
         #   明明点过批准却跑不了。把待批准条数一并说清，指向可操作的动作。
@@ -9853,6 +9943,10 @@ def health_snapshot():
         "last_round_trigger": "",
         "last_round_trigger_zh": "",
         "phantom_fix_count": 0,
+        # 近 7 天窗口（level 用它判定「现在」是否正常；累计值保留不删）
+        "phantom_fix_count_7d": 0,
+        "circuit_breaks_7d": 0,
+        "window_days": 7,
         # ---- 辅助字段（自检 / 展示用）----
         "total": 0,
         "attempts": 0,
@@ -9908,7 +10002,66 @@ def health_snapshot():
                 "has_data": bool(attempts > 0)})
 
     # ---- 2) 幽灵修复计数：actlog 的 phantom 标记 + 计划里被拒的动作，按 (计划,动作) 去重
-    phantom = 0
+    # ★ 2026-11-26：原来只有一个「累计」数，于是半年前被拦下的 5 条提案会**永远**
+    #   把健康度钉在 bad 上 —— 修好了也看不出来。这里同时算「近 7 天」窗口：
+    #   · phantom_fix_count     累计（历史事实，不删不改，保留可追溯）
+    #   · phantom_fix_count_7d  近 7 天（当前状态，level 用它判定）
+    #   时间戳解析不出来的行只进累计、不进窗口 —— 宁可少算，不粉饰。
+    _win_days = 7
+    _win_cut = time.time() - _win_days * 86400.0
+
+    def _ts_recent(_v):
+        _s = str(_v or "")[:19]
+        if not _s:
+            return False
+        try:
+            return time.mktime(time.strptime(_s, "%Y-%m-%d %H:%M:%S")) >= _win_cut
+        except Exception:                               # noqa: BLE001
+            return False
+
+    # ★ 2026-11-26 二次复核（查「体系自评 bad」时发现的**统计口径错误**）：
+    #   计划里被标 phantom 的动作其实混了两种东西：
+    #     ① 提案闸门判的「幽灵修复」—— 声称修某个 fail_kind，但账本计数为 0；
+    #     ② 执行阶段被拒的（LLM 评审误伤、失败归因 fail_kind=model 之类）。
+    #   ② 根本不是「针对不存在的失败动手」，算进幽灵修复是口径错。
+    #   而 ① 里还有**历史误判**：11-25 03:44「模型输出不可用」、05:46
+    #   「跑分退步（低于上一版）」当时被判 0 次，其实账本里有 5 次 / 18 次 ——
+    #   全角括号的归一化问题在 11-25 13:15 已修，但这两条 phantom 记录还留着。
+    #   所以这里做一次**只读复核**：该 fail_kind 现在能在近 N 天账本里查到
+    #   计数 > 0 的，说明它不是凭空编的，不算幽灵修复（单列 recheck 字段可追溯）。
+    #   ⚠️ 这**不是**放宽闸门：提案/执行时该怎么拦还怎么拦，只是统计上不再把
+    #   「当时口径没对上」永久记成「编造」。
+    try:
+        from . import actlog as _ALh
+        _cnts7 = _ALh.fail_kind_counts(days=_win_days) or {}
+        _fk_norm_fn = getattr(_ALh, "_fk_norm", None)
+        if not callable(_fk_norm_fn):
+            _fk_norm_fn = lambda _x: str(_x or "").strip()      # noqa: E731
+    except Exception:                                   # noqa: BLE001
+        _cnts7, _fk_norm_fn = {}, (lambda _x: str(_x or "").strip())   # noqa: E731
+
+    def _counted(fk):
+        """这个 fail_kind 现在在账本里查得到真实计数吗？（只读，不写 phantom）"""
+        _k = _fk_norm_fn(str(fk or ""))
+        if not _k:
+            return False
+        try:
+            if int(_cnts7.get(_k) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        if len(_k) >= 3:
+            for _kk, _vv in (_cnts7 or {}).items():
+                _kk = str(_kk or "")
+                if len(_kk) >= 3 and (_k in _kk or _kk in _k):
+                    try:
+                        if int(_vv or 0) > 0:
+                            return True
+                    except (TypeError, ValueError):
+                        continue
+        return False
+
+    _cand = []
     _seen = set()
     try:
         for row in list_actlog(500):
@@ -9919,7 +10072,7 @@ def health_snapshot():
             if key in _seen:
                 continue
             _seen.add(key)
-            phantom += 1
+            _cand.append((key, row.get("ts"), row.get("fail_kind")))
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
     try:
@@ -9934,10 +10087,40 @@ def health_snapshot():
                 if key in _seen:
                     continue
                 _seen.add(key)
-                phantom += 1
+                _pm = a.get("proposal_meta") if isinstance(a.get("proposal_meta"), dict) else {}
+                _cand.append((key,
+                              a.get("reviewed") or p.get("ts") or p.get("_upd"),
+                              a.get("fail_kind") or _pm.get("fail_kind")))
     except Exception:                                   # noqa: BLE001
         logger.debug("silent-except", exc_info=True)
+
+    phantom = 0
+    phantom_7d = 0
+    phantom_cleared = 0
+    for _key, _ts, _fk in _cand:
+        if _fk and _counted(_fk):
+            phantom_cleared += 1        # 现在能查到真实计数 → 不是编造，不计入
+            continue
+        phantom += 1
+        if _ts_recent(_ts):
+            phantom_7d += 1
     out["phantom_fix_count"] = max(0, int(phantom))
+    out["phantom_fix_count_7d"] = max(0, int(phantom_7d))
+    out["phantom_recheck_cleared"] = int(phantom_cleared)
+    out["window_days"] = _win_days
+    # 熔断也分「累计 / 近 7 天」：累计的 10 次是历史，不代表现在还在熔断
+    breaks_7d = 0
+    try:
+        for row in list_actlog(500):
+            if not isinstance(row, dict):
+                continue
+            if "熔断" not in str(row.get("detail") or ""):
+                continue
+            if _ts_recent(row.get("ts")):
+                breaks_7d += 1
+    except Exception:                                   # noqa: BLE001
+        logger.debug("silent-except", exc_info=True)
+    out["circuit_breaks_7d"] = max(0, int(breaks_7d))
 
     # ---- 3) 最近一轮的触发名：优先计划（持久化，重启不丢），退回进程内运行状态
     trig, ts = "", ""
@@ -9973,16 +10156,19 @@ def health_snapshot():
     if not out["has_data"]:
         out["level"] = "unknown"
         out["hint"] = "还没有自动改动的运行记录，跑一轮之后这里才有数"
-    elif rate >= 0.8 and phantom == 0 and breaks == 0:
+    elif rate >= 0.8 and phantom_7d == 0 and breaks_7d == 0:
         out["level"] = "good"
-        out["hint"] = "自迭代运转正常：成功率高、没有幽灵修复"
-    elif rate < 0.6 or phantom >= 3:
+        out["hint"] = ("自迭代运转正常：成功率 %d%%，近 %d 天没有幽灵修复、没有熔断"
+                       % (round(rate * 100), _win_days))
+    elif rate < 0.6 or phantom_7d >= 3:
         out["level"] = "bad"
-        out["hint"] = ("成功率偏低或幽灵修复偏多 —— 先拆小改动、补可验证断言，"
-                       "别针对没发生过的失败动手")
+        out["hint"] = ("近 %d 天成功率偏低或幽灵修复偏多 —— 先拆小改动、补可验证断言，"
+                       "别针对没发生过的失败动手" % _win_days)
     else:
         out["level"] = "warn"
-        out["hint"] = "能跑，但有回滚/熔断/幽灵修复，值得盯一眼"
+        out["hint"] = ("能跑，但近 %d 天有回滚/熔断/幽灵修复（累计：回滚 %d、熔断 %d、"
+                       "幽灵 %d），值得盯一眼"
+                       % (_win_days, rollbacks, breaks, phantom))
     return out
 
 

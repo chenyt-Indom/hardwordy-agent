@@ -113,13 +113,17 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
 
   var LABEL = {
     running: "在跑", waiting: "排队", done: "完成", verified: "已验证",
-    failed: "失败", cancelled: "已终止", error: "异常"
+    failed: "失败", cancelled: "已终止", error: "异常",
+    // ★ 2026-11-26：blocked = 本轮被前置拦截（提案缺证据 / 动作还没批准），
+    //   它**不是执行失败**，单独给个标签，别再显示成红卡「失败」。
+    blocked: "已拦截"
   };
   function badgeCls(st) {
     if (st === "running") { return "ij-badge run"; }
     if (st === "failed" || st === "error") { return "ij-badge fail"; }
     if (st === "done" || st === "verified") { return "ij-badge ok"; }
     if (st === "waiting") { return "ij-badge wait"; }
+    if (st === "blocked") { return "ij-badge wait"; }
     return "ij-badge";
   }
 
@@ -269,9 +273,11 @@ var bench = null;           // 施工单 8.5：尺子（项目外固定基准）
 
     // 未完成 / 未验证的给一个「拉起」按钮
     var stx = String(t.state || "");
-    if (stx === "failed" || stx === "error" || stx === "cancelled") {
+    if (stx === "failed" || stx === "error" || stx === "cancelled"
+        || stx === "blocked") {
       box.appendChild(reviveBtn({
-        kind: (stx === "cancelled" ? "cancelled" : "failed"),
+        kind: (stx === "cancelled" ? "cancelled"
+               : (stx === "blocked" ? "blocked" : "failed")),
         tid: t.tid, plan_id: t.plan_id, title: t.title
       }));
     }

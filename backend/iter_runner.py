@@ -1401,7 +1401,23 @@ def _worker(item):
                 # 只有真改了文件才值得当场跑一遍回归（约 10 秒）；没改动的一轮
                 # 就如实记「本轮没跑过回归」→ 收尾照样判未闭环，不拿旧数字充数。
                 allow_run=bool(changed))
-        _finish(tid, "cancelled" if cancelled else ("done" if ok_n else "failed"),
+        # ★ 2026-11-26 修「体系自评 bad、最近 20 轮 0 条 done」的两个来源：
+        #   原来只要 ok_n==0 就记 failed，于是两类**根本没动手**的情况也被算成失败：
+        #     ① 本轮提案全被幽灵闸门拒（近 7 天无真实失败记录）—— 闸门按设计工作；
+        #     ② 计划里没有已批准的动作 —— 在等人批准，不是故障。
+        #   它们混进历史后，用户看到的是一条条红卡「失败」，实际系统一点没坏。
+        #   这里单独记 blocked（拦截），语义是「本轮没执行，但不是执行出错」。
+        _blk = _blocked_kind(err_all, ok_n, cancelled)
+        if _blk:
+            try:
+                _stage("blocked", "本轮已拦截（%s）：%s" % (
+                    "提案缺真实失败证据" if _blk == "phantom" else "动作还在等批准",
+                    str(err_all or "")[:120]))
+            except Exception:                           # noqa: BLE001
+                logger.debug("写拦截阶段失败（不影响收尾）", exc_info=True)
+        _final_state = ("cancelled" if cancelled
+                        else ("done" if ok_n else ("blocked" if _blk else "failed")))
+        _finish(tid, _final_state,
                 ok_n, fail_n, skip_n, changed,
                 _cancel_reason or err_all)
     except Exception as e:                              # noqa: BLE001
@@ -1452,6 +1468,30 @@ def _worker(item):
                               tid=tid)
         else:
             _next()
+
+
+def _blocked_kind(err_all="", ok_n=0, cancelled=False):
+    """这一轮「没成功任何动作」到底是**执行失败**还是**前置拦截**？
+
+    ★ 2026-11-26 修（用户报「体系自评 bad、最近 20 轮 0 条 done」）：
+      原来只要 ok_n==0 就记 failed，于是两类根本没动手的情况也被算成失败 ——
+        ① 提案全被幽灵闸门拒（近 7 天无真实失败记录）→ 闸门按设计工作；
+        ② 计划里没有已批准的动作 → 在等人批准，不是故障。
+      历史里因此堆了 9 条红卡「失败」，用户每次看到都以为系统坏了。
+    返回：
+      "phantom"      提案全被幽灵闸门拒
+      "no_approved"  没有已批准/可执行的动作
+      ""             不是拦截（真空跑或真失败，交给原来的判定）
+    判定只看错误文本里的**明确措辞**，不做模糊猜测。
+    """
+    if ok_n or cancelled:
+        return ""
+    e = str(err_all or "")
+    if "幽灵修复" in e:
+        return "phantom"
+    if "没有已批准的动作" in e or "没有可执行的动作" in e:
+        return "no_approved"
+    return ""
 
 
 def _finish(tid, state, ok_n, fail_n, skip_n, changed, err):
@@ -3763,7 +3803,9 @@ def revive_candidates(limit=40):
     seen_plan = set()
     for h in hist:
         st = str(h.get("state") or "")
-        if st not in ("failed", "error", "cancelled"):
+        # ★ 2026-11-26：blocked（前置拦截）也要进候选 —— 它多半是「动作还在等批准」，
+        #   批准完就能接着跑；不列出来用户根本找不到该去点哪一条。
+        if st not in ("failed", "error", "cancelled", "blocked"):
             continue
         pid = str(h.get("plan_id") or "")
         if pid and pid in seen_plan:
@@ -3771,9 +3813,11 @@ def revive_candidates(limit=40):
         if pid:
             seen_plan.add(pid)
         out.append({
-            "kind": "failed" if st in ("failed", "error") else "cancelled",
+            "kind": ("failed" if st in ("failed", "error")
+                     else ("cancelled" if st == "cancelled" else "blocked")),
             "kind_text": {"failed": "执行失败", "error": "异常中断",
-                          "cancelled": "被终止"}.get(st, st),
+                          "cancelled": "被终止",
+                          "blocked": "已拦截（未执行）"}.get(st, st),
             "tid": str(h.get("tid") or ""),
             "plan_id": pid,
             "title": _title_of(pid, h.get("title")),
