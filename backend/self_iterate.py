@@ -6528,6 +6528,50 @@ def _iter_snapshot(plan, pid, ev=None):
     return ""
 
 
+# ---- 探针目录约定：data/probes/（教训「跑分退步（低于上一版）」）----
+# 教训原文要求：「静态扫描对 basename 以 _tmp_ / _probe_ 开头的文件一律跳过，
+# 探针目录约定改到 data/probes/」。
+#
+# 为什么必须换目录（实测代价）：探针/调试脚本原来就地丢在 backend/ 根目录，
+# 那是**源码目录** —— 静态扫描、引用计数、改动清单都会把它算进去，
+# 每条残留探针永久压 0.5 分（实测 3 个手搓探针把总分钉在 193.05），
+# 而且「本轮改了哪些文件」里会混进一堆临时脚本，人看不出真正改了什么。
+# 现在统一落到 <数据目录>/probes（默认 data/probes/）：不在源码树下，
+# 也不会被 backend/**/*.py 的扫描（code_audit._py_files / regress 的导入检查）看到。
+_PROBE_SUBDIR = "probes"
+
+
+def probe_dir(create=False) -> Path:
+    """探针 / 调试脚本的**约定目录**：`<数据目录>/probes`（默认 `data/probes/`）。
+
+    走 `config.data("data")` 而不是硬编码项目根：设了 MM_DATA_DIR（Docker /
+    便携包换目录）时探针要跟着用户数据走，别写回只读的源码目录。
+
+    ⚠️ 默认**不创建**目录：清理逻辑、静态扫描这类「只是看一眼」的地方不该因为
+    读一次路径就在用户数据目录里凭空造出空文件夹。真要落盘时传 create=True。
+    """
+    d = Path(_config.data("data")) / _PROBE_SUBDIR
+    if create:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.warning("创建探针目录失败：%s", d, exc_info=True)
+    return d
+
+
+def probe_path(name: str) -> Path:
+    """按约定目录取一个探针文件的路径（父目录会建好）。
+
+    用法（模型/工具想写临时探针时）：
+        p = self_iterate.probe_path("check_x.py")   # → data/probes/check_x.py
+    只取 basename：别让调用方的相对路径把探针又带回 backend/ 里去。
+    """
+    n = os.path.basename(str(name or "").strip().replace("\\", "/"))
+    if not n:
+        n = "probe_%d.py" % os.getpid()
+    return probe_dir(create=True) / n
+
+
 # ---- 本轮临时脚本自动清理（2026-11-24 用户要求）----
 # 用户原话要点：「改动流程末尾自动清理本轮 _tmp_*.py」—— 记下本轮开始时间，
 # 收尾时把 backend/ 下**本轮新产生**的临时/探针脚本删掉，删除记录写进 actlog。
@@ -6540,31 +6584,51 @@ _ROUND_SCRATCH_PREFIXES = ("_tmp_", "_probe_")
 def _round_scratch_files(started, backend_dir=None):
     """列出「本轮新产生」的临时脚本：mtime 晚于 started 且 basename 是 _tmp_/_probe_ 的 .py。
 
-    只扫 backend/ **这一层**（不递归）：`backend/_feature_tests/` 下也有 _tmp_/_probe_
-    夹具（如 test_anchor_diagnose.py 的 _tmp_anchor_demo_<pid>.py、_probe_audit_now.py），
-    那是**别的用例正在用**的文件，递归删会把并行回归/正在跑的断言打坏；而模型和探针
-    实际都把自己的临时脚本落在 backend/ 根目录，这一层就够了。
+    只扫两处**这一层**（不递归）：
+      · backend/ 根目录 —— 历史探针的落点，模型/工具还会往那儿丢；
+      · 探针约定目录 data/probes/（见 probe_dir）—— 新约定下的正规落点。
+    为什么不递归：`backend/_feature_tests/` 下也有 _tmp_/_probe_ 夹具
+    （如 test_anchor_diagnose.py 的 _tmp_anchor_demo_<pid>.py、_probe_audit_now.py），
+    那是**别的用例正在用**的文件，递归删会把并行回归/正在跑的断言打坏。
     """
     out = []
     try:
         started = float(started or 0.0)
     except (TypeError, ValueError):
         started = 0.0
+    dirs = []
     try:
-        d = Path(backend_dir) if backend_dir else (_ROOT / "backend")
-        cand = sorted(d.glob("*.py"))
+        dirs.append(Path(backend_dir) if backend_dir else (_ROOT / "backend"))
     except Exception:                                   # noqa: BLE001
         logger.warning("扫描本轮临时脚本失败", exc_info=True)
-        return out
-    for p in cand:
-        if not p.name.startswith(_ROUND_SCRATCH_PREFIXES):
-            continue
+    try:
+        # 探针目录可能还不存在（没人写过探针）—— probe_dir 不创建，这里只读
+        dirs.append(probe_dir())
+    except Exception:                                   # noqa: BLE001
+        logger.debug("取探针目录失败，本轮只扫 backend/", exc_info=True)
+    seen = set()
+    for d in dirs:
         try:
-            # 严格「晚于」本轮开始时间：本轮之前就存在的探针一律不碰
-            if p.stat().st_mtime > started:
-                out.append(p)
-        except OSError:
+            cand = sorted(d.glob("*.py"))
+        except Exception:                               # noqa: BLE001
+            logger.warning("扫描本轮临时脚本失败：%s", d, exc_info=True)
             continue
+        for p in cand:
+            if not p.name.startswith(_ROUND_SCRATCH_PREFIXES):
+                continue
+            try:
+                key = str(p.resolve())
+            except OSError:
+                key = str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                # 严格「晚于」本轮开始时间：本轮之前就存在的探针一律不碰
+                if p.stat().st_mtime > started:
+                    out.append(p)
+            except OSError:
+                continue
     return out
 
 
@@ -6610,6 +6674,137 @@ def _cleanup_round_scratch(started, backend_dir=None):
                      "window_start": float(started or 0.0)})
         except Exception:                               # noqa: BLE001
             logger.warning("清理记录写 actlog 失败", exc_info=True)
+    return out
+
+
+# ---- 收尾强制回归闸门（教训「跑分退步（低于上一版）」）----
+# 教训原文：「self_iterate.py 返回完成前强制调用 regress.run_all()，
+# 新增失败 > 0 则拒绝标记完成并把失败用例名写进返回体」。
+#
+# 为什么单条动作的 quick 回归不够（实测代价）：quick 只看快用例，一条动作过了
+# 就标 done；多动作叠加、或收尾那一下动到别处（典型：为了「顺手存个套路」改了
+# main.py 的 _clip_reply），失败要到**下一轮**才被发现 —— 那时已经算「完成」，
+# 退步就被记进了版本历史。所以收尾必须再跑一遍**全量**（scope=full），
+# 并且只认**新增**失败（改动前就红的用例与本轮无关，见 7204 行那段基线说明）。
+_REGRESS_PLACEHOLDER = "regress"
+
+
+def _regress_run_all(scope="full", timeout=600):
+    """强制跑一遍**全部**回归用例，返回 regress 结果字典。
+
+    两条硬要求：
+      · 走**子进程**（regress.run_disk）：进程内 import 的还是改动前的旧模块，
+        在进程里跑等于在测旧代码（regress.run_disk 的注释里有实测记录）；
+      · 有 `regress.run_all()` 就用它（全量口径的官方入口），没有就退到
+        `run_disk(scope=...)` —— 现版本 regress.py 只提供后两者。
+    """
+    from . import regress as _RG
+    _ra = getattr(_RG, "run_all", None)
+    if callable(_ra):
+        try:
+            _r = _ra()
+            if isinstance(_r, dict):
+                return _r
+            logger.warning("regress.run_all() 返回值不是 dict：%r", type(_r))
+        except Exception:                               # noqa: BLE001
+            logger.warning("regress.run_all() 失败，退回 run_disk", exc_info=True)
+    return _RG.run_disk(scope=scope, timeout=timeout)
+
+
+def regress_completion_gate(baseline=None, scope="full", runner=None):
+    """「标记完成」前的强制回归闸门：只把**新增**失败算账。
+
+    参数：
+      baseline  改动前就已经红的用例名（可迭代）。None = 没有基线信息，
+                此时**全部失败都算新增**（宁可拦住，也不要把退步当完成）。
+      scope     回归口径，默认 full（= 全部用例，含全量自检与全模块导入）。
+      runner    可注入的回归执行器（断言里换成假的，返回同构 dict）。
+                默认 `_regress_run_all`。
+
+    返回（这个 dict 会被原样写进执行结果的 out["regress_gate"]）：
+      {
+        "ok": bool,               # False = 不许标记完成
+        "ran": bool,              # 回归是否真的跑起来了
+        "new_failures": [名字…],  # 新增失败的用例名（写进返回体给模型/用户看）
+        "all_failures": […], "known_failures": […],
+        "baseline": "measured"/"none",
+        "total"/"passed"/"failed"/"seconds", "why": 一句话原因
+      }
+    """
+    t0 = time.time()
+    if runner is None:
+        runner = _regress_run_all
+    base = None
+    if baseline is not None:
+        try:
+            base = {str(x) for x in baseline}
+        except TypeError:
+            base = None
+    out = {"ok": True, "ran": False, "scope": scope,
+           "new_failures": [], "all_failures": [], "known_failures": [],
+           "baseline": "measured" if base is not None else "none",
+           "total": 0, "passed": 0, "failed": 0, "seconds": 0.0,
+           "why": "没有新增失败"}
+    try:
+        try:
+            r = runner(scope=scope)
+        except TypeError:                               # 注入的执行器可能不吃参数
+            r = runner()
+    except Exception as e:                              # noqa: BLE001
+        # 跑不起来 ≠ 通过：无法确认没退步时，宁可拦住「完成」也别放过去。
+        out.update({"ok": False, "seconds": round(time.time() - t0, 2),
+                    "why": ("收尾回归跑不起来（%s: %s），无法确认没退步，不予标记完成"
+                            % (type(e).__name__, e))})
+        return out
+    if not isinstance(r, dict):
+        out.update({"ok": False, "seconds": round(time.time() - t0, 2),
+                    "why": "收尾回归返回了看不懂的结果（%s），不予标记完成"
+                           % type(r).__name__})
+        return out
+
+    fails = []
+    for x in (r.get("failed_items") or []):
+        if isinstance(x, dict):
+            nm = str(x.get("name") or "").strip()
+            if nm:
+                fails.append(nm)
+        elif x:
+            fails.append(str(x))
+    fails = list(dict.fromkeys(fails))
+
+    def _int(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    out.update({
+        "total": _int(r.get("total")),
+        "passed": _int(r.get("passed")),
+        "failed": _int(r.get("failed")),
+        "all_failures": fails,
+        "seconds": round(time.time() - t0, 2),
+    })
+    # 整跑没起来：run_disk / run() 会返回一条 name="regress" 的占位失败项
+    # （子进程超时、另一个回归正在跑、结果解析失败……都不是「用例失败」）。
+    if fails and set(fails) == {_REGRESS_PLACEHOLDER}:
+        out.update({"ok": False, "ran": False,
+                    "why": "收尾回归没跑起来（%s），无法确认没退步，不予标记完成"
+                           % str((r.get("summary") or "无输出"))[:160]})
+        return out
+    if base is not None:
+        new_fails = [n for n in fails if n not in base]
+        known = [n for n in fails if n in base]
+    else:
+        new_fails, known = list(fails), []
+    out.update({"ran": True, "new_failures": new_fails, "known_failures": known})
+    if new_fails:
+        out.update({"ok": False,
+                    "why": "收尾回归新增失败 %d 条（改动前这些是过的，说明改坏了）：%s"
+                           % (len(new_fails), "；".join(new_fails[:5]))})
+    elif fails:
+        out["why"] = ("收尾回归通过，另有 %d 条改动前就红的用例（与本轮无关）"
+                      % len(fails))
     return out
 
 
@@ -6868,6 +7063,10 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
     results = []
     cancelled = False
     skipped = 0
+    # ★ 收尾强制回归闸门用的**基线**：第一条动作动手前量到的「本来就红的用例」。
+    #   取第一条动作的基线（那时还没改任何东西）＝本轮改动前的状态，正是
+    #   「新增失败」该比的对象。拿不到就保持 None（闸门按「全部失败都算新增」判）。
+    _gate_base = None
     # ★ 2026-11-17 用户要求「让时间线卡片有终点」：
     #   最终复核分支要显式写 verify_pass / verify_fail 事件，
     #   失败时附回滚原因，前端时间线卡片才能收尾（不再永远转圈）。
@@ -7223,6 +7422,9 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 if not any(str(x.get("name")) == "regress" for x in _bf):
                     _base_fails = {str(x.get("name")) for x in _bf}
                     _base_ok = True
+                    # 收尾闸门的基线：只认**本轮第一次**量到的那份（改动前状态）
+                    if _gate_base is None:
+                        _gate_base = {"ok": True, "names": set(_base_fails)}
                 else:
                     logger.warning("基线回归不可用（超时或崩溃），本轮不做新增失败判定")
             except Exception:                           # noqa: BLE001
@@ -7469,6 +7671,71 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
            "precheck": _precheck,
            "need_restart": ok_n > 0}
 
+    # ---------------- 收尾强制回归闸门：返回「完成」之前必须跑一遍全量 ----------------
+    # 教训「跑分退步（低于上一版）」：单条动作的 quick 回归过了就标 done，等于允许
+    # 「最后一步把别处改坏」蒙过去 —— 退步要到下一轮才被发现，那时已经记成完成。
+    # 这里在**返回完成之前**强制跑一遍全量回归，只认新增失败：
+    #   新增失败 > 0 → 拒绝标记完成（done 的动作退回待复核），
+    #   失败用例名写进 out["failed_cases"]，模型/界面都能看见具体是哪几条红了。
+    _gate = {"ok": True, "skipped": True, "why": "本轮没有成功改动，不需要收尾回归"}
+    if ok_n > 0 and not cancelled:
+        try:
+            _rs = load_settings()
+            if not _rs.get("regress_after_change", True):
+                _gate = {"ok": True, "skipped": True,
+                         "why": "regress_after_change 关着（收尾回归闸门一并跳过）"}
+            else:
+                _gate = regress_completion_gate(
+                    None if _gate_base is None else _gate_base.get("names"),
+                    scope="full")
+        except Exception as _e:                         # noqa: BLE001
+            # 闸门自身出错不能静默：宁可拦住「完成」，也别让它悄悄跳过
+            logger.warning("收尾回归闸门异常", exc_info=True)
+            _gate = {"ok": False, "ran": False, "new_failures": [],
+                     "why": "收尾回归闸门异常（%s: %s），无法确认没退步，不予标记完成"
+                            % (type(_e).__name__, _e)}
+        out["regress_gate"] = _gate
+        if _gate.get("skipped"):
+            try:
+                _ev("step", text="收尾回归闸门跳过：%s" % str(_gate.get("why") or "")[:120])
+            except Exception:                           # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+        elif not _gate.get("ok"):
+            _ncases = list(_gate.get("new_failures") or [])
+            out["ok"] = False
+            out["refused_complete"] = True
+            out["failed_cases"] = _ncases
+            out["error"] = str(_gate.get("why") or "")[:400]
+            # 「拒绝标记完成」必须是**真的**：本轮算成功的动作不许留在 done，
+            # 退回 need_review（待复核），界面统计里立刻能看出这轮没闭环。
+            _done_ids = {str(r.get("id")) for r in results if r.get("ok")}
+            _refused = []
+            for _a3 in (plan.get("actions") or []):
+                if str(_a3.get("id")) in _done_ids and _a3.get("status") == "done":
+                    _a3["status"] = "need_review"
+                    _a3["error"] = out["error"]
+                    _a3["regression_gate"] = {"failed_cases": _ncases}
+                    _refused.append(str(_a3.get("id")))
+            out["refused_actions"] = _refused
+            plan["_upd"] = time.time()
+            try:
+                save_plans(d)
+            except Exception:                           # noqa: BLE001
+                logger.debug("回写待复核状态失败", exc_info=True)
+            try:
+                _ev("verify_fail", action_id=",".join(_refused),
+                    reason=out["error"], files=_ncases)
+                _ev("step", text="⛔ 收尾回归没通过，拒绝标记完成：%s"
+                    % "；".join(_ncases[:3]))
+            except Exception:                           # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+        else:
+            try:
+                _ev("step", text="收尾回归通过（全量 %s 条，新增失败 0）"
+                    % (_gate.get("total") or 0))
+            except Exception:                           # noqa: BLE001
+                logger.debug("silent-except", exc_info=True)
+
     # 用户要求：每次代码被改完就自动跑一次自检。
     # ⚠️ create_plan=False —— 否则自检又会建计划、又会被信任模式执行，
     #    变成「自检→改→自检→改」的死循环。
@@ -7666,6 +7933,10 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
             #   用户发起（manual）→ **绝不自动重启**，只把「待重启生效」写进
             #   状态，由他点「立即重启」。
             _auto_why = _origin_auto_restart_ok(origin)
+            if out.get("refused_complete"):
+                # 收尾回归没通过 → 不许重启把没验过的代码生效（见上面收尾闸门）
+                _auto_why = {"ok": False,
+                             "why": "收尾回归新增失败，未算完成，暂不自动重启"}
             if ((not _vd.get("should_rollback")) and ok_n > 0 and _auto_why["ok"]):
                 try:
                     out["loop"]["auto_restart"] = _schedule_auto_restart(pid)
@@ -7831,6 +8102,14 @@ def execute_approved(pid, on_event=None, should_cancel=None, _depth=0, force=Non
                 _state, _badge = "failed", "已回滚"
                 _title = "任务结束 · 本轮改动已回滚"
                 _why = "评分退步，已回滚：%s" % str(_rb2.get("reason") or "")[:200]
+            elif out.get("refused_complete"):
+                # ★ 教训「跑分退步（低于上一版）」：动作都做完了，但收尾全量回归
+                #   出现**新增失败** —— 这轮不算完成，卡片必须红，并点名是哪几条。
+                _state, _badge = "failed", "迭代失败 · 回归新增失败"
+                _title = "任务结束 · 收尾回归没通过，不算完成"
+                _why = "新增失败 %d 条：%s" % (
+                    len(out.get("failed_cases") or []),
+                    "、".join(list(out.get("failed_cases") or [])[:3]) or "（见回归明细）")
             elif _done2 > 0 and _bad2 == 0:
                 _state, _badge = "verified", "已完成"
                 _title = "任务结束 · 本轮迭代已完成"
