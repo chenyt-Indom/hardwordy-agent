@@ -17587,8 +17587,11 @@
       '<div class="iter-rsi-top">综合 <b>' + (ix.score == null ? "—" : ix.score) +
       '</b> ｜ 加速 <b>' + (sp.score == null ? "—" : sp.score) + '</b> ｜ 采样 ' +
       ((d.trend && d.trend.total) || pts.length) + ' 点' +
-      (d.trend && d.trend.shown && d.trend.shown < (d.trend.total || 0)
-        ? '（图上最近 ' + d.trend.shown + '）' : '') +
+      (d.trend && d.trend.shown < ((d.trend && d.trend.total) || 0)
+        ? '（图上最近 ' + d.trend.shown + ' 点' +
+          (d.trend.show_raw && d.trend.show_raw > d.trend.shown
+            ? '，同分合并自 ' + d.trend.show_raw + ' 次采样' : '') + '）'
+        : '') +
       (lastTs ? ' ｜ 最新 ' + esc(lastTs.slice(11, 16)) : "") + '</div>' +
       '<svg viewBox="0 0 620 132" class="iter-rsi-svg">' + grid +
       rsiSvgLine(pts, "score", "#6ea8fe") + rsiSvgLine(pts, "speed", "#7bd88f") +

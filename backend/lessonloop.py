@@ -1691,14 +1691,22 @@ def rsi_trend(limit: int = 120, window: int = 5, show: int = 60) -> dict:
     #   原来按索引算 = 假设采样等距，而实测正常 1 小时一次、调试时 12 分钟 8 次，
     #   密集点会把斜率压成接近 0，曲线失真。
     #   这里只保留「同一秒内的重复写入」去重（并发双写的老问题），不动正常采样点。
-    _ded = []
-    for _r in rows:
-        _ts = _num_ts(_r.get("ts"))
-        if _ded and _ts and _ded[-1][0] and abs(_ts - _ded[-1][0]) < 1.0:
-            _ded[-1] = (_ts, _r)
-        else:
-            _ded.append((_ts, _r))
-    rows = [r for _, r in _ded]
+    def _dedup(rs):
+        """同一秒内的重复写入去重（并发双写的老问题），不动正常采样点。
+
+        抽成函数是为了**显示窗口也能用同一规则** —— 显示层改为独立取行后，
+        若不去重，并发双写会在图上画出两个同秒重复点。
+        """
+        _d2 = []
+        for _r in rs:
+            _ts = _num_ts(_r.get("ts"))
+            if _d2 and _ts and _d2[-1][0] and abs(_ts - _d2[-1][0]) < 1.0:
+                _d2[-1] = (_ts, _r)
+            else:
+                _d2.append((_ts, _r))
+        return [r for _, r in _d2]
+
+    rows = _dedup(rows)
 
     def _mk_pts(rs):
         return [{"ts": r.get("iso") or "",
@@ -1846,11 +1854,32 @@ def rsi_trend(limit: int = 120, window: int = 5, show: int = 60) -> dict:
     #   60 这个默认值是有意的：点太密（>60）时圆点与悬停提示会挤成一团，
     #   所以不因为「历史有 113 点」就硬画 113 个。
     _show_n = max(10, min(200, int(show or 60)))
+    # ★ 2026-11-27（用户确认「可以」后改）：显示层也折叠。
+    #   原来只有分析层折叠（抗噪），显示层给全部原始点 —— 实测 60 个显示点里
+    #   44 个（75%）与上一点同分，图上是一大片平段，而 shape 标签却写
+    #   「② 直线上升」（那是折叠后算的），两个口径自相矛盾，看着就像曲线不涨。
+    #   现在显示层同样压成「段首 + 段尾」：点数下降、真实时间跨度不变、
+    #   平段合并成一条能看出坡度的线，图上形状与标签口径一致。
+    #   ⚠️ 顺序不能反：必须**先切显示窗口、再折叠**。
+    #   若先全局折叠再取尾部，窗口开头的那个「段首」会落在窗口外被切掉，
+    #   图从段中间开始、时间轴少一截 —— 与 _fold 注释里记录的 recent 窗口
+    #   同源 bug，这里不能再犯一次。
+    # ⚠️ 显示窗口**独立取行**，不再从分析窗口 rows 里切：
+    #   否则 show=200 会被 limit=120 静默截成 120 点 —— 与上一轮修的
+    #   「limit 被无声忽略」完全同类，不能在这里再留一个。
+    #   去重用与分析层同一个 _dedup，保证同秒并发双写不会画出重复点。
+    _show_rows = _dedup(_rows_all[-_show_n:])
+    _show_pts = _mk_pts(_fold(_show_rows)) if _show_rows else []
+    # 折叠后不足 4 点就画不出形状（前端连线 + 时间轴都要 ≥2，形态要 ≥4），
+    # 这种极端情况退回原始点：宁可图密一点，也不能给个空图。
+    if len(_show_pts) < 4:
+        _show_pts = pts_all[-_show_n:]
     return {"ok": True, "n": len(pts_all), "total": _n_all,
             "n_window": len(pts_all),
-            "shown": min(len(pts_all), _show_n),
+            "shown": len(_show_pts),
+            "show_raw": len(_show_rows),
             "n_calc": len(ys),
-            "points": pts_all[-_show_n:],
+            "points": _show_pts,
             "slope": round(sl, 3), "stdev": round(sd, 2),
             "segs": segs, "shape": shape,
             # 最近窗口口径（与全历史并列，前端两个都显示）
