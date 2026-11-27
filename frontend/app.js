@@ -17487,7 +17487,8 @@
     const t0 = tv.length ? Math.min.apply(null, tv) : 0;
     const t1 = tv.length ? Math.max.apply(null, tv) : 0;
     const span = t1 - t0;
-    // 后端最多返回 60 点，这里就画满 60 个点：每轮迭代都会新增一个点，
+    // 点数由后端 limit 决定（默认请求 120，2026-11-27 起 limit 真正生效；
+    // 原来硬编码 60，前端要 120 也只拿 60）。每轮迭代都会新增一个点，
     // 用户要「看到新的数据以及时间」—— 只有画出来才能悬停看具体时刻。
     const dot = n <= 60;
     let d = "", marks = "", on = false;
@@ -17586,6 +17587,8 @@
       '<div class="iter-rsi-top">综合 <b>' + (ix.score == null ? "—" : ix.score) +
       '</b> ｜ 加速 <b>' + (sp.score == null ? "—" : sp.score) + '</b> ｜ 采样 ' +
       ((d.trend && d.trend.total) || pts.length) + ' 点' +
+      (d.trend && d.trend.shown && d.trend.shown < (d.trend.total || 0)
+        ? '（图上最近 ' + d.trend.shown + '）' : '') +
       (lastTs ? ' ｜ 最新 ' + esc(lastTs.slice(11, 16)) : "") + '</div>' +
       '<svg viewBox="0 0 620 132" class="iter-rsi-svg">' + grid +
       rsiSvgLine(pts, "score", "#6ea8fe") + rsiSvgLine(pts, "speed", "#7bd88f") +
@@ -17601,7 +17604,7 @@
   // 只拉曲线、不动加速开关（避免轮询把用户正在点的开关重绘掉）。
   function rsiFetch() {
     if (!document.getElementById("iter-rsi")) return;
-    fetch("/api/selfiter/rsi?limit=120")
+    fetch("/api/selfiter/rsi?limit=120&show=60")
       .then(function (r) { return r.json(); })
       .then(rsiPaint)
       .catch(function () {

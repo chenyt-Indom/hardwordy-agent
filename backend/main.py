@@ -4930,7 +4930,7 @@ def selfiter_loop_score(body: dict = None):
 
 
 @app.get("/api/selfiter/rsi")
-def selfiter_rsi(limit: int = 120):
+def selfiter_rsi(limit: int = 120, show: int = 60):
     """RSI 看板：综合指数 + 加速指数 + 历史序列 + 趋势形态 + 最弱项。
 
     用户 2026-11-23 要求「前端增加图表可视化，我要肉眼可见的数据以及图表」——
@@ -4942,7 +4942,7 @@ def selfiter_rsi(limit: int = 120):
     for key, fn in (
         ("index", lambda: _ll.rsi_index(cache_sec=0)),
         ("speed", lambda: _ll.rsi_speed()),
-        ("trend", lambda: _ll.rsi_trend(limit=limit)),
+        ("trend", lambda: _ll.rsi_trend(limit=limit, show=show)),
         ("weakest", lambda: _ll.rsi_weakest()),
         ("lessons", lambda: _ll.audit()),
         # 2026-11-24：让教训「能被看见」—— 最近一次真正注入进上下文的教训

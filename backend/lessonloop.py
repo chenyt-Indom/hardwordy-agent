@@ -1471,11 +1471,11 @@ def rsi_speed(days: float = 7.0, target_per_day: float = 20.0) -> dict:
 
 
 _RSI_SAMPLE_LOCK = threading.Lock()
-# ★ 2026-11-25：同分合并窗口（秒）。分数与上一条相同、且间隔小于它时，
-#   只把最后一点的时间往后延，不新增同分点 —— 否则密集平点会把
-#   三段斜率拉平，形态被误判成「② 直线上升」（实测 12:48~12:51 踩过）。
-#   分数真的变了就照常追加，所以曲线仍然每轮刷新。
-_RSI_MERGE_GAP = 600.0
+# 注：这里原来有个 _RSI_MERGE_GAP = 600.0（「同分合并窗口」），但 append_dense
+#   分支在 2026-11-25 已改成**无条件追加**（每轮迭代必须落一个新点），
+#   此后它再没有任何引用 —— 2026-11-27 删除。
+#   留着的话，注释说「同分只延后、不新增」，实现却是「必追加」，读代码的人
+#   会按错的规则去理解曲线为什么有平点，属于自相矛盾的说明。
 
 
 def rsi_sample(force: bool = False, min_gap: float = 60.0,
@@ -1500,6 +1500,13 @@ def _rsi_sample_locked(force: bool = False, min_gap: float = 60.0,
     防密集点污染等距斜率）。现在斜率已按真实时间算（_slope_ts），
     追加不会压平趋势，所以给「每轮迭代」单独开一条追加的路。
     """
+    # ★ 2026-11-27 修（缓存旧值被写进曲线）：rsi_index() 默认 cache_sec=60，
+    #   而评分闸门每分钟就调一次 —— 采样时拿到的是**最多 60 秒前的分数**，
+    #   于是「这一轮迭代把分数从 97.6 修到 98.0」落进历史的却是 97.6，
+    #   曲线要等下一轮才反映真实变化。采样是记录层，必须记**此刻**的真值。
+    #   用「先清缓存再算」而不是传 cache_sec=0：调用签名不变，测试里
+    #   用无参 lambda 替换 rsi_index 的老写法不会被弄坏。
+    _RSI_CACHE.update({"ts": 0.0, "val": None})
     cur = rsi_index()
     p = _rsi_hist_path()
     rows = _read_jsonl(p)
@@ -1601,6 +1608,11 @@ def rsi_sample_score(min_gap: float = 3.0) -> dict:
       点不增加；真变了才追加。迭代轮次仍走 rsi_sample_iter（每轮必追加）。
     """
     try:
+        # ★ 2026-11-27 修（同分误判 = 曲线不涨的根因之一）：这里必须用真值。
+        #   原来走 60 秒缓存，缓存里的分数与上一点相同时会被判「没变」→
+        #   走 replace_only 只延后最后一点、不新增点，用户看到的就是
+        #   「迭代跑完了，点数没变、线没动」。这正是 2026-11-25 报过的现象。
+        _RSI_CACHE.update({"ts": 0.0, "val": None})
         cur = rsi_index()
         rows = _read_jsonl(_rsi_hist_path())
         if rows:
@@ -1659,7 +1671,7 @@ def rsi_sample_throttled(gap: float = 3600.0) -> dict:
         return {"ok": False}
 
 
-def rsi_trend(limit: int = 120, window: int = 5) -> dict:
+def rsi_trend(limit: int = 120, window: int = 5, show: int = 60) -> dict:
     """RSI 历史序列的趋势形态（判断有没有 RSI 那种斜率递增）。
 
     判定用**三段斜率**而不是只看整体斜率：
@@ -1669,7 +1681,12 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
       |整体| ≤ 0.05 → 平台（原地跑）；
       整体 < -0.05 → 下滑。
     """
-    rows = _read_jsonl(_rsi_hist_path())[-max(10, limit):]
+    # ★ 2026-11-27：total 原来 = len(pts_all) = **本次窗口内**的点数，
+    #   但界面把它当「一共采样了多少点」显示。历史超过 limit 时会报小，
+    #   与真实账本行数不符。这里单独留一份全库点数。
+    _rows_all = _read_jsonl(_rsi_hist_path())
+    _n_all = len(_rows_all)
+    rows = _rows_all[-max(10, limit):]
     # ★ 2026-11-24 修（统计污染）：斜率改成**按真实时间**算（见 _slope_ts）。
     #   原来按索引算 = 假设采样等距，而实测正常 1 小时一次、调试时 12 分钟 8 次，
     #   密集点会把斜率压成接近 0，曲线失真。
@@ -1716,7 +1733,9 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
     pts = _mk_pts(_col if len(_col) >= 4 else rows)      # 计算用：折叠抗噪
     ys = [p["score"] for p in pts]
     if len(pts_all) < 4:
-        return {"ok": True, "n": len(pts_all), "points": pts_all,
+        return {"ok": True, "n": len(pts_all), "total": _n_all,
+                "n_window": len(pts_all), "shown": len(pts_all),
+                "points": pts_all,
                 "shape": "样本不足", "slope": None, "segs": [],
                 "advice": "继续采样（每轮迭代收尾会自动记一条）"}
     sl = _slope_ts(pts) or 0.0
@@ -1818,9 +1837,20 @@ def rsi_trend(limit: int = 120, window: int = 5) -> dict:
     if len(_recent) >= 2:
         _r_hours = round(((_recent[-1].get("t") or 0.0)
                           - (_recent[0].get("t") or 0.0)) / 3600.0, 2)
-    return {"ok": True, "n": len(pts_all), "total": len(pts_all),
+    # ★ 2026-11-27 修（两个「窗口」被混成一个参数）：
+    #   limit 是**分析窗口**（读多少行算形态，默认 120），
+    #   show 是**显示窗口**（图上画多少点，默认 60，上限 200）。
+    #   原来显示层硬编码 [-60:]，无论传什么都只给 60 点 —— 前端传 limit=120
+    #   会被无声忽略，而 n/total 又报全量，界面写「采样 113 点」、图上 60 个点，
+    #   自相矛盾。现在两者分开：分析看长窗口、显示按 show 截断，且如实返回 shown。
+    #   60 这个默认值是有意的：点太密（>60）时圆点与悬停提示会挤成一团，
+    #   所以不因为「历史有 113 点」就硬画 113 个。
+    _show_n = max(10, min(200, int(show or 60)))
+    return {"ok": True, "n": len(pts_all), "total": _n_all,
+            "n_window": len(pts_all),
+            "shown": min(len(pts_all), _show_n),
             "n_calc": len(ys),
-            "points": pts_all[-60:],
+            "points": pts_all[-_show_n:],
             "slope": round(sl, 3), "stdev": round(sd, 2),
             "segs": segs, "shape": shape,
             # 最近窗口口径（与全历史并列，前端两个都显示）
