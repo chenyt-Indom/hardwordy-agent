@@ -633,6 +633,38 @@ def _lesson_fixed_rows():
             "note": "按累计已修复教训计分（转 fixed 就保持，复发自动倒扣）"}
 
 
+_REGRESS_ABILITY_KEYS = ("regress_pass", "fix_landed", "fix_regressed")
+
+
+def _carried_regress_rows():
+    """回归没跑起来时，沿用上一版「回归派生」的能力项（并标 carried）。
+
+    ★ 2026-11-27 实测事故（用户看到曲线右端垂直掉到 0 才发现的）：
+      11:10 那次后台评分里 regress_part() 返回 None（回归子进程没跑起来），
+      ability 里 regress_pass(103×1.0) 与 fix_landed(15×3.0) 两项**直接消失**，
+      total 从 280.21 掉到 132.29 —— 账本据此记了一笔 -147.92 的假退步。
+
+    口径：「回归这次没量到」≠「回归变差了」。没量到就把上一版实测值沿用，
+    并标 carried，让面板/日志能看出这两项不是本轮测的。
+    """
+    try:
+        with open(os.path.join(_data_dir(), "last_score.json"),
+                  encoding="utf-8") as fh:
+            j = json.load(fh)
+    except Exception:                                   # noqa: BLE001
+        return []
+    out = []
+    for r in (j.get("ability_rows") or []):
+        if not isinstance(r, dict) or r.get("key") not in _REGRESS_ABILITY_KEYS:
+            continue
+        c = dict(r)
+        c["carried"] = True
+        _n = str(c.get("note") or "")
+        c["note"] = (_n + "｜本轮回归未跑起来，沿用上一版实测值").lstrip("｜")
+        out.append(c)
+    return out
+
+
 def ability_part(rg=None, fn=None):
     """能力跑分（**无上限**）—— 只累加「真实被验证到」的能力。
 
@@ -642,11 +674,16 @@ def ability_part(rg=None, fn=None):
     rg = rg if isinstance(rg, dict) else {}
     fn = fn if isinstance(fn, dict) else {}
     rows = []
+    _carried = []
     if rg:
         n = int(rg.get("passed") or 0)
         rows.append({"key": "regress_pass", "label": "回归用例通过",
                      "count": n, "unit": ABILITY_PER_TEST,
                      "score": round(n * ABILITY_PER_TEST, 2)})
+    else:
+        # 回归没跑起来 → 沿用上一版实测的回归派生项（不当作 0，也不当作退步）
+        _carried = _carried_regress_rows()
+        rows.extend(_carried)
     smoke = [s for s in (fn.get("smoke") or []) if isinstance(s, dict)]
     if smoke:
         n = sum(1 for s in smoke if s.get("ok"))
@@ -676,6 +713,8 @@ def ability_part(rg=None, fn=None):
     return {
         "score": round(sum(float(r["score"]) for r in rows), 2),
         "max": None, "unbounded": True, "rows": rows,
+        "carried_regress": bool(_carried),
+        "carried_keys": [str(r.get("key") or "") for r in _carried],
         "note": ("无上限：存量项随被验证到的能力累加（删测试/端点会掉分）；"
                  "增量项 fix_landed / lesson_fixed 只在真实修好时计分，复发倒扣"),
     }
@@ -764,6 +803,36 @@ def score(full=True):
 
 
 # ---------------------------------------------------------------- 进退判定
+def _score_sig(s):
+    """一份评分的唯一指纹（用它的测量时刻）。
+
+    ★ 2026-11-27：用来防「同一份评分被记两次账」。同一份 now 对象被闸门复用
+      （scoregate._auto_state["full"]）时 iso 完全相同，据此可稳定识别。
+    """
+    if not isinstance(s, dict):
+        return ""
+    v = s.get("iso")
+    if not v:
+        v = s.get("ts")
+    return ("iso:%s" % v) if isinstance(v, str) and v else (
+        ("ts:%.3f" % float(v)) if isinstance(v, (int, float)) else "")
+
+
+def _score_scope(s):
+    """这份评分**量到了哪几项**（static / regress / func）。
+
+    ★ 2026-11-27 实测事故：一次 regress 没跑起来的评分（scope 少了 regress）
+      与完整评分相比，total 天然少 148 分。跨口径相减得出的「退步」是假的，
+      所以 judge() 先比口径，口径不同就不判进退。
+    """
+    got = []
+    for k in ("static", "regress", "func"):
+        v = (s or {}).get(k)
+        if isinstance(v, dict) and v.get("score") is not None:
+            got.append(k)
+    return tuple(got)
+
+
 def judge(before, after):
     """比较改动前后两次评分，给出「进步/退步/持平」和进退多少。
 
@@ -775,6 +844,16 @@ def judge(before, after):
         return {"verdict": "unknown", "delta": None, "pct": None,
                 "before": b, "after": a,
                 "note": "有一次评分拿不到，无法判断进退（不回滚，仅记录）"}
+    # ★ 2026-11-27：先比口径。一边量到 regress、另一边没量到（回归子进程失败），
+    #   两者相减的差额全是「没量到」造成的，不是能力变化 → 不判进退。
+    _sb, _sa = _score_scope(before), _score_scope(after)
+    if _sb != _sa:
+        return {"verdict": "incomparable", "delta": None, "pct": None,
+                "before": b, "after": a, "per_part": {},
+                "scope_before": list(_sb), "scope_after": list(_sa),
+                "should_rollback": False,
+                "note": ("两次评分的口径不同（%s → %s），差额不可比，本轮不计进退"
+                         % ("+".join(_sb) or "空", "+".join(_sa) or "空"))}
     delta = round(float(a) - float(b), 2)
     pct = round(delta / float(b) * 100.0, 2) if b else None
     verdict = "improved" if delta > 0 else ("regressed" if delta < 0 else "flat")
@@ -1312,6 +1391,10 @@ def read_ledger_series(limit=120):
                     continue
                 if not isinstance(r, dict) or r.get("kind") != "score_round":
                     continue
+                # ★ 2026-11-27：作废轮（口径不一致 / 重复记账）不画进曲线，
+                #   否则图上会留一个永远解释不清的垂直掉坑。
+                if r.get("void"):
+                    continue
                 v = r.get("ledger")
                 if v is None:
                     v = r.get("cum")
@@ -1338,6 +1421,19 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
     d = load_ledger()
     delta = v.get("delta")
     cum_before = round(float(d.get("cum") or 0.0), 2)
+    # ★ 2026-11-27 实测事故：同一份评分被记了**两次**账。
+    #   11:10:18 后台自动评分发现退步 → 记 -147.92；11:10:52「自动修复后重评」
+    #   复用了**同一份** now（iso 完全相同）→ 又记一遍，累计分被扣成 -200.13。
+    #   同一份测量只能算一次，这里按 after 的指纹去重（不复用就不受影响）。
+    _sig = _score_sig(after)
+    _dup = None
+    if (delta is not None and _sig
+            and _sig == str(d.get("last_committed_sig") or "")):
+        _dup = round(float(delta), 2)
+        delta = 0.0
+        v = dict(v)
+        v["verdict"] = "duplicate"
+        v["note"] = "同一份评分已记过账（%+.2f），本轮不重复累加" % _dup
     if delta is None:
         cum = cum_before
         verdict = "unknown"
@@ -1412,7 +1508,10 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
             pass
         ex["summary"] = rec["explain"].get("summary") if isinstance(rec.get("explain"), dict) else _gn
     d["cum"] = cum
-    d["rounds"] = int(d.get("rounds") or 0) + 1
+    # 重复记账的那一轮不是新一轮，计数不能涨
+    d["rounds"] = int(d.get("rounds") or 0) + (0 if _dup is not None else 1)
+    if _sig and _dup is None:
+        d["last_committed_sig"] = _sig
     d["last"] = rec
     evs = list(d.get("events") or [])
     evs.append({"iso": rec["iso"], "cum": cum, "delta": delta,
@@ -1432,6 +1531,7 @@ def commit_round(before=None, after=None, actions=None, rollback=None,
                 ("%+.2f" % float(delta)) if delta is not None else "?",
                 {"improved": "进步", "regressed": "退步",
                  "flat": "持平",
+                 "duplicate": "重复评分，不累加", "incomparable": "口径不一致，不计进退",
                  "grind": "账本涨但尺子没涨（不算进步）"}.get(verdict, "未知"),
                 (" 计划 " + str(pid)) if pid else "")]
     lines.append("    原因：" + ex["summary"])

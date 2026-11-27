@@ -537,8 +537,14 @@ _FEATURE_RUNNER = (
     "if callable(fn):\n"
     "    r=fn()\n"
     "    sys.exit(r if isinstance(r,int) and not isinstance(r,bool) else 0)\n"
-    "sys.argv=[path]\n"
-    "runpy.run_path(path,run_name='__main__')\n"
+    # ★ 2026-11-27 修（实测：test_blocked_and_approval_20261126 在回归里 5 条假失败，
+    #   单独跑却全过）：没有 `if __name__` 守卫的文件**本身就是脚本**，
+    #   exec_module 那一步已经把它跑完了；再 runpy 一次就是**跑第二遍** ——
+    #   第二遍时批准/归因等状态已被消耗，于是出现「approved=0」「清单为空」这种假失败。
+    #   有守卫的文件则相反：exec_module 只会定义、不会触发，必须靠 runpy 跑一次。
+    "if 'if __name__' in open(path,encoding='utf-8',errors='replace').read():\n"
+    "    sys.argv=[path]\n"
+    "    runpy.run_path(path,run_name='__main__')\n"
     "sys.exit(0)\n"
 )
 
