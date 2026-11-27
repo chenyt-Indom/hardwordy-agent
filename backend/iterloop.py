@@ -1035,7 +1035,19 @@ def read_bench_last():
             lines = [ln for ln in fh if ln.strip()]
         if not lines:
             return None
-        rec = json.loads(lines[-1])
+        # HB-SPEC-002 第 2 章：void 不进分母，也不该被当成「最近一次成绩」。
+        # 取最后一条非 void 的记录；全是 void 就返回 None（界面显示 —）。
+        rec = None
+        for ln in reversed(lines):
+            try:
+                cand = json.loads(ln)
+            except Exception:                            # noqa: BLE001
+                continue
+            if isinstance(cand, dict) and cand.get("verdict") != "void":
+                rec = cand
+                break
+        if rec is None:
+            return None
         # bench.py 写的是 iso 字符串，没有 ts —— 两种都认，别算出离谱的年龄
         ts = rec.get("ts")
         if ts is None:
@@ -1069,6 +1081,8 @@ def read_bench_series(limit=120):
                     continue
                 if not isinstance(r, dict):
                     continue
+                if r.get("verdict") == "void":
+                    continue          # void 不进分母，也不画点
                 out.append({"iso": str(r.get("iso") or ""),
                             "pass": r.get("pass"), "total": r.get("total"),
                             "pct": r.get("pct")})
@@ -1090,7 +1104,8 @@ def _bench_rows():
                     r = json.loads(ln)
                 except Exception:                        # noqa: BLE001
                     continue
-                if isinstance(r, dict) and r.get("pct") is not None:
+                if isinstance(r, dict) and r.get("pct") is not None \
+                        and r.get("verdict") != "void":
                     out.append(r)
     except Exception:                                    # noqa: BLE001
         return []

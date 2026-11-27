@@ -19,13 +19,14 @@
 
 ## 下载
 
-最新版是 **源码版 2026.11.26b**：源码树 + 便携 Python 3.14.4 + 随包模型（含 bge 向量模型 91 MB），
-解压双击 `一键启动.bat`，**不装 Python、不配环境**。
+**当前唯一有下载包的已发布版本：源码版 2026.11.21b**（GitHub Release，三卷）。
+开发机代码已到 2026.11.26b，但**尚未发布** —— 没有对应的 Release 包，也没有下载链接；
+要最新代码请用 `git clone`（见下方「快速开始」）。
 
 | 版本 | 体积 | 从哪拿 |
 |---|---|---|
-| **源码版 2026.11.26b（最新）** | 4.10 GB | **网盘整包**（一个文件，不用合并；地址见 Release 说明或 Discussions 置顶） |
-| [源码版 2026.11.21b](https://github.com/chenyt-Indom/hardwordy-agent/releases/tag/v2026.11.21b) | 4.10 GB（三卷） | GitHub Release 直接下 —— 单文件上限 2 GB，所以切三卷 |
+| [源码版 2026.11.21b（已发布）](https://github.com/chenyt-Indom/hardwordy-agent/releases/tag/v2026.11.21b) | 4.10 GB（三卷） | GitHub Release 直接下 —— 单文件上限 2 GB，所以切三卷 |
+| 源码版 2026.11.26b（开发中，未发布） | — | 暂无下载包；`git clone --depth 1` 拿源码 |
 | 源码 | — | 见下方「快速开始」；`git clone --depth 1` 即可，不必下 4 GB |
 
 从 GitHub 下的三卷，放同一目录后合并（把版本号换成你下的那个）：
